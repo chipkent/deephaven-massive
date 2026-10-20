@@ -10,10 +10,10 @@ the filtered batches into a single Deephaven `Table`.
 
 from __future__ import annotations
 
+import gzip
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
-import gzip
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 import pyarrow as pa
@@ -37,6 +37,7 @@ from deephaven_massive.schemas.market import (
 
 if TYPE_CHECKING:
     from deephaven.table import Table
+
     from deephaven_massive.session import MassiveSession
 
 DATASET_PREFIX_BY_DOMAIN: dict[str, str] = {
@@ -227,7 +228,7 @@ class FlatFilesClient:
             aws_secret_access_key=self.session.config.s3_secret_access_key,
         )
         resp = s3.get_object(Bucket=bucket, Key=key)
-        return resp["Body"]  # type: ignore[no-any-return]
+        return resp["Body"]
 
     @staticmethod
     def build_s3_key(dataset: str, target_date: date) -> str:
@@ -260,7 +261,7 @@ class FlatFilesClient:
         head = raw_stream.read(2)
         prep = _PrependReader(head, raw_stream)
         csv_stream: Any = (
-            gzip.GzipFile(fileobj=prep, mode="rb")  # type: ignore[arg-type]
+            gzip.GzipFile(fileobj=prep, mode="rb")  # type: ignore[call-overload]
             if head == b"\x1f\x8b"
             else prep
         )
@@ -276,20 +277,13 @@ class FlatFilesClient:
         for batch in reader:
             if value_set is not None:
                 sym_col = next(
-                    (
-                        c
-                        for c in ("ticker", "sym", "Symbol", "pair")
-                        if c in batch.schema.names
-                    ),
+                    (c for c in ("ticker", "sym", "Symbol", "pair") if c in batch.schema.names),
                     batch.schema.names[0],
                 )
                 mask = pc.is_in(batch[sym_col], value_set=value_set)
                 batch = batch.filter(mask)
 
-            if (
-                remaining_limit is not None
-                and day_rows + batch.num_rows > remaining_limit
-            ):
+            if remaining_limit is not None and day_rows + batch.num_rows > remaining_limit:
                 batch = batch.slice(0, remaining_limit - day_rows)
 
             if batch.num_rows > 0:
@@ -297,9 +291,7 @@ class FlatFilesClient:
                 if bar_span_ns is not None:
                     for r in raw_rows:
                         r.setdefault("_span_ns", bar_span_ns)
-                rb = rows_to_record_batch(
-                    raw_rows, resolved_schema, normalizer
-                )
+                rb = rows_to_record_batch(raw_rows, resolved_schema, normalizer)
                 day_batches.append(rb)
                 day_rows += len(raw_rows)
 
@@ -364,20 +356,14 @@ class FlatFilesClient:
             ValueError: If S3 credentials are not configured or date bounds are
                 missing/invalid.
         """
-        if (
-            "/" not in dataset
-            and isinstance(start, str)
-            and not start.strip()[:4].isdigit()
-        ):
+        if "/" not in dataset and isinstance(start, str) and not start.strip()[:4].isdigit():
             dataset = f"{dataset.strip('/')}/{start.strip('/')}"
             start = end
             end = end_pos
         elif table_type is not None and "/" not in dataset:
             dataset = f"{dataset.strip('/')}/{table_type.strip('/')}"
 
-        resolved_schema, resolved_domain = _infer_schema_and_domain(
-            dataset, schema_spec, domain
-        )
+        resolved_schema, resolved_domain = _infer_schema_and_domain(dataset, schema_spec, domain)
         normalizer = SymbolNormalizer(resolved_domain)
 
         effective_start = start if start is not None else start_date
@@ -429,11 +415,7 @@ class FlatFilesClient:
         else:
             total_rows = 0
             for d in dates:
-                rem = (
-                    (effective_limit - total_rows)
-                    if effective_limit is not None
-                    else None
-                )
+                rem = (effective_limit - total_rows) if effective_limit is not None else None
                 day_b = self._read_day_batches(
                     dataset,
                     d,

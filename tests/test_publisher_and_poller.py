@@ -20,9 +20,7 @@ def test_row_timestamp_ns_extraction() -> None:
     assert _row_timestamp_ns({"WindowStart": "2025-01-02"}) == 1735776000000000000
     assert _row_timestamp_ns({"LastUpdated": 1700000000000}) == 1700000000000000000
     assert (
-        _row_timestamp_ns(
-            {"Timestamp": "not-a-timestamp", "WindowStart": 1700000000000000000}
-        )
+        _row_timestamp_ns({"Timestamp": "not-a-timestamp", "WindowStart": 1700000000000000000})
         == 1700000000000000000
     )
     assert _row_timestamp_ns({"Symbol": "AAPL"}) is None
@@ -161,9 +159,7 @@ def test_publisher_default_exec_ctx_and_unnormalized_symbols(dh_exec_ctx: Any) -
             allowed_symbols=["aapl"],
         )
         _ = pub.user_blink_table
-        pub.enqueue(
-            [{"sym": "AAPL", "bp": 149.9, "ap": 150.1, "t": 1700000000000000000}]
-        )
+        pub.enqueue([{"sym": "AAPL", "bp": 149.9, "ap": 150.1, "t": 1700000000000000000}])
         assert pub.flush_now() == 1
 
 
@@ -255,10 +251,7 @@ def test_publisher_seed_cutover_bars_quotes_and_keyless_schemas(
         ]
     )
     assert (
-        bar_pub.complete_seeding(
-            [{"sym": "AAPL", "o": 150.0, "c": 151.0, "s": 2000000000000}]
-        )
-        == 3
+        bar_pub.complete_seeding([{"sym": "AAPL", "o": 150.0, "c": 151.0, "s": 2000000000000}]) == 3
     )
     assert bar_pub.is_seeded is True
 
@@ -317,9 +310,7 @@ def test_publisher_seed_cutover_bars_quotes_and_keyless_schemas(
     keyless_pub.begin_seeding()
     keyless_pub.enqueue([{"sym": "AAPL", "o": 151.0, "c": 152.0, "s": 2060000000000}])
     assert (
-        keyless_pub.complete_seeding(
-            [{"sym": "AAPL", "o": 150.0, "c": 151.0, "s": 2000000000000}]
-        )
+        keyless_pub.complete_seeding([{"sym": "AAPL", "o": 150.0, "c": 151.0, "s": 2000000000000}])
         == 2
     )
 
@@ -330,7 +321,7 @@ def test_snapshot_poller_validation_errors(dh_exec_ctx: Any) -> None:
         SnapshotPoller(
             "bad_mode",
             QUOTES_SCHEMA,
-            lambda: [],
+            list,
             mode="invalid",
             exec_ctx=dh_exec_ctx,
         )
@@ -339,7 +330,7 @@ def test_snapshot_poller_validation_errors(dh_exec_ctx: Any) -> None:
         SnapshotPoller(
             "bad_interval",
             QUOTES_SCHEMA,
-            lambda: [],
+            list,
             interval_s=0,
             exec_ctx=dh_exec_ctx,
         )

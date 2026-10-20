@@ -9,10 +9,10 @@ batches directly to registered `MicroBatchPublisher` instances.
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
 import json
 import threading
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from deephaven_massive.config import MassiveConfig, MassiveEntitlementError
@@ -108,18 +108,14 @@ class WebSocketMultiplexer:
                 ready.set()
                 loop.run_forever()
 
-            thread = threading.Thread(
-                target=_run, name="massive-ws-event-loop", daemon=True
-            )
+            thread = threading.Thread(target=_run, name="massive-ws-event-loop", daemon=True)
             thread.start()
             ready.wait(timeout=2.0)
             self._loop = loop
             self._loop_thread = thread
             return loop
 
-    def call_soon_threadsafe(
-        self, callback: Callable[..., Any], *args: Any
-    ) -> None:
+    def call_soon_threadsafe(self, callback: Callable[..., Any], *args: Any) -> None:
         """Schedule a non-blocking callback on the multiplexer's background event loop thread.
 
         Args:
@@ -158,18 +154,12 @@ class WebSocketMultiplexer:
             task.cancel()
         loop.stop()
 
-    def _emit_action(
-        self, state: _EndpointState, action: str, params: str
-    ) -> dict[str, Any]:
+    def _emit_action(self, state: _EndpointState, action: str, params: str) -> dict[str, Any]:
         payload = {"action": action, "params": params}
         state.outbox.append(payload)
         if self._send_hook is not None:
             self._send_hook(state.ws_url, payload)
-        elif (
-            state.authenticated
-            and state.active_ws is not None
-            and self._loop is not None
-        ):
+        elif state.authenticated and state.active_ws is not None and self._loop is not None:
             ws_ref = state.active_ws
             msg_str = json.dumps(payload)
             self._loop.call_soon_threadsafe(self._schedule_send, ws_ref, msg_str)
@@ -192,9 +182,7 @@ class WebSocketMultiplexer:
         while not self._closed:
             with self._lock:
                 state = self._get_endpoint(ws_url)
-                has_topics = any(
-                    c > 0 for c in state.topic_ref_counts.values()
-                )
+                has_topics = any(c > 0 for c in state.topic_ref_counts.values())
                 if not has_topics:
                     state.connecting = False
                     return
@@ -205,11 +193,7 @@ class WebSocketMultiplexer:
                         state = self._get_endpoint(ws_url)
                         state.active_ws = ws
                         state.authenticated = False
-                    await ws.send(
-                        json.dumps(
-                            {"action": "auth", "params": self.config.api_key}
-                        )
-                    )
+                    await ws.send(json.dumps({"action": "auth", "params": self.config.api_key}))
                     async for raw_msg in ws:
                         self.handle_raw_message(ws_url, raw_msg)
             except MassiveEntitlementError:
@@ -313,9 +297,7 @@ class WebSocketMultiplexer:
                     if cnt > 0 and "." in t and not t.endswith("*")
                 }
                 new_contracts = {
-                    t.split(".", 1)[1]
-                    for t in topic_list
-                    if "." in t and not t.endswith("*")
+                    t.split(".", 1)[1] for t in topic_list if "." in t and not t.endswith("*")
                 }
                 total_contracts = len(active_contracts | new_contracts)
                 if total_contracts > MAX_OPTION_CONTRACTS:
@@ -371,9 +353,7 @@ class WebSocketMultiplexer:
                 return []
 
             pub_set = (
-                state.publisher_topics.get((channel, publisher))
-                if publisher is not None
-                else None
+                state.publisher_topics.get((channel, publisher)) if publisher is not None else None
             )
 
             fully_unsubscribed: list[str] = []
@@ -434,9 +414,7 @@ class WebSocketMultiplexer:
                         "ActiveTopicCount": len(active),
                         "ActiveTopics": ",".join(active),
                         "LastError": (
-                            str(state.last_error)
-                            if state.last_error is not None
-                            else None
+                            str(state.last_error) if state.last_error is not None else None
                         ),
                     }
                 )
@@ -491,10 +469,7 @@ class WebSocketMultiplexer:
             MassiveEntitlementError: If a `"status"` event reports an authentication or
                 entitlement failure (`auth_failed`, `not_authorized`).
         """
-        if isinstance(raw_payload, (str, bytes)):
-            parsed = json.loads(raw_payload)
-        else:
-            parsed = raw_payload
+        parsed = json.loads(raw_payload) if isinstance(raw_payload, (str, bytes)) else raw_payload
 
         events: list[Mapping[str, Any]]
         if isinstance(parsed, Mapping):
@@ -516,21 +491,13 @@ class WebSocketMultiplexer:
                     with self._lock:
                         state = self._get_endpoint(ws_url)
                         state.authenticated = True
-                        active = sorted(
-                            t for t, c in state.topic_ref_counts.items() if c > 0
-                        )
-                        if (
-                            active
-                            and state.active_ws is not None
-                            and self._loop is not None
-                        ):
+                        active = sorted(t for t, c in state.topic_ref_counts.items() if c > 0)
+                        if active and state.active_ws is not None and self._loop is not None:
                             ws_ref = state.active_ws
                             sub_msg = json.dumps(
                                 {"action": "subscribe", "params": ",".join(active)}
                             )
-                            self._loop.call_soon_threadsafe(
-                                self._schedule_send, ws_ref, sub_msg
-                            )
+                            self._loop.call_soon_threadsafe(self._schedule_send, ws_ref, sub_msg)
                 elif status_val in ("auth_failed", "error", "not_authorized") and (
                     "auth" in status_val
                     or "not authorized" in msg_val.lower()
@@ -548,10 +515,10 @@ class WebSocketMultiplexer:
         total_enqueued = 0
         for ev_type, rows in grouped.items():
             with self._lock:
-                state = self._endpoints.get(ws_url)
+                ep_state = self._endpoints.get(ws_url)
                 pubs = (
-                    list(state.channel_publishers.get(ev_type, ()))
-                    if state is not None
+                    list(ep_state.channel_publishers.get(ev_type, ()))
+                    if ep_state is not None
                     else []
                 )
             for pub in pubs:
@@ -563,11 +530,7 @@ class WebSocketMultiplexer:
         """Shut down all WebSocket subscriptions and stop the background event loop thread."""
         with self._lock:
             self._closed = True
-            tasks = [
-                st.conn_task
-                for st in self._endpoints.values()
-                if st.conn_task is not None
-            ]
+            tasks = [st.conn_task for st in self._endpoints.values() if st.conn_task is not None]
             self._endpoints.clear()
             loop = self._loop
             thread = self._loop_thread

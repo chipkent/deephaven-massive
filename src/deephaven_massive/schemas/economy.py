@@ -56,9 +56,7 @@ def normalize_funding_conditions(
             "FedFundsTargetHigh": _first_present(
                 row, "FedFundsTargetHigh", "fed_funds_target_high", "target_range_upper"
             ),
-            "Iorb": _first_present(
-                row, "Iorb", "iorb", "interest_on_reserve_balances"
-            ),
+            "Iorb": _first_present(row, "Iorb", "iorb", "interest_on_reserve_balances"),
             "Sofr": _first_present(row, "Sofr", "sofr"),
             "Sofr1stPercentile": _first_present(
                 row, "Sofr1stPercentile", "sofr_1st_percentile", "sofr_p1"
@@ -175,9 +173,7 @@ def normalize_inflation(
         "Date": _first_present(row, "Date", "date"),
         "Cpi": _first_present(row, "Cpi", "cpi"),
         "CpiCore": _first_present(row, "CpiCore", "cpi_core"),
-        "CpiYearOverYear": _first_present(
-            row, "CpiYearOverYear", "cpi_year_over_year"
-        ),
+        "CpiYearOverYear": _first_present(row, "CpiYearOverYear", "cpi_year_over_year"),
         "Pce": _first_present(row, "Pce", "pce"),
         "PceCore": _first_present(row, "PceCore", "pce_core"),
         "PceSpending": _first_present(row, "PceSpending", "pce_spending"),
@@ -207,9 +203,7 @@ def normalize_inflation_expectations(
         "Date": _first_present(row, "Date", "date"),
         "Market5Year": _first_present(row, "Market5Year", "market_5_year"),
         "Market10Year": _first_present(row, "Market10Year", "market_10_year"),
-        "ForwardYears5To10": _first_present(
-            row, "ForwardYears5To10", "forward_years_5_to_10"
-        ),
+        "ForwardYears5To10": _first_present(row, "ForwardYears5To10", "forward_years_5_to_10"),
         "Model1Year": _first_present(row, "Model1Year", "model_1_year"),
         "Model5Year": _first_present(row, "Model5Year", "model_5_year"),
         "Model10Year": _first_present(row, "Model10Year", "model_10_year"),
@@ -237,15 +231,11 @@ def normalize_labor_market(
     """
     return {
         "Date": _first_present(row, "Date", "date"),
-        "UnemploymentRate": _first_present(
-            row, "UnemploymentRate", "unemployment_rate"
-        ),
+        "UnemploymentRate": _first_present(row, "UnemploymentRate", "unemployment_rate"),
         "LaborForceParticipationRate": _first_present(
             row, "LaborForceParticipationRate", "labor_force_participation_rate"
         ),
-        "AvgHourlyEarnings": _first_present(
-            row, "AvgHourlyEarnings", "avg_hourly_earnings"
-        ),
+        "AvgHourlyEarnings": _first_present(row, "AvgHourlyEarnings", "avg_hourly_earnings"),
         "JobOpenings": _first_present(row, "JobOpenings", "job_openings"),
     }
 

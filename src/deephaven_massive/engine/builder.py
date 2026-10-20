@@ -9,6 +9,7 @@ users chain one of seven terminal verbs onto the builder to materialize a Deepha
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from deephaven_massive.engine.arrow_bridge import (
@@ -25,6 +26,7 @@ from deephaven_massive.engine.watchlist import ReactiveWatchlistController
 if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+
     from deephaven_massive.engine.symbols import SymbolNormalizer
     from deephaven_massive.engine.ws_multiplexer import WebSocketMultiplexer
 
@@ -91,8 +93,7 @@ class FeedBuilder:
         max_batch_size: int = 10_000,
         auto_flush: bool = True,
         on_register_lifecycle: Callable[[FeedBuilder], None] | None = None,
-        stream_registry: dict[tuple[str, str, tuple[str, ...]], MicroBatchPublisher]
-        | None = None,
+        stream_registry: dict[tuple[str, str, tuple[str, ...]], MicroBatchPublisher] | None = None,
     ) -> None:
         """Initialize a `FeedBuilder`.
 
@@ -162,9 +163,7 @@ class FeedBuilder:
         """Return the active `ReactiveWatchlistController` if streaming a table watchlist, else `None`."""
         return self._watchlist_controller
 
-    def normalize_symbols(
-        self, symbols: str | Iterable[str] | Table | None
-    ) -> list[str]:
+    def normalize_symbols(self, symbols: str | Iterable[str] | Table | None) -> list[str]:
         """Normalize `symbols` using this builder's `SymbolNormalizer` (or active watchlist symbols).
 
         Args:
@@ -200,11 +199,7 @@ class FeedBuilder:
         Callable[[], None],
     ]:
         """Initialize or reuse the `MicroBatchPublisher` and prepare the startup seed finalizer."""
-        if (
-            self.ws_url is None
-            or self.ws_channel is None
-            or self.ws_multiplexer is None
-        ):
+        if self.ws_url is None or self.ws_channel is None or self.ws_multiplexer is None:
             raise NotImplementedError(
                 f"Feed '{self.name}' does not support WebSocket streaming. "
                 "Use .snapshot(), .poll(), or .historical() instead."
@@ -250,10 +245,7 @@ class FeedBuilder:
         else:
             canon_syms = self._canonical_symbol_list()
             if self.symbol_normalizer is not None:
-                topics = [
-                    self.symbol_normalizer.ws_topic(self.ws_channel, s)
-                    for s in canon_syms
-                ]
+                topics = [self.symbol_normalizer.ws_topic(self.ws_channel, s) for s in canon_syms]
             else:
                 topics = [f"{self.ws_channel}.{s}" for s in canon_syms]
             self._static_topics = topics
@@ -261,9 +253,7 @@ class FeedBuilder:
             self._stream_key = stream_key
 
             existing_pub = self._publisher or (
-                self._stream_registry.get(stream_key)
-                if self._stream_registry is not None
-                else None
+                self._stream_registry.get(stream_key) if self._stream_registry is not None else None
             )
             if existing_pub is not None:
                 pub = existing_pub
@@ -278,11 +268,7 @@ class FeedBuilder:
                         extra_rows = self.seed_rows_fn(canon_syms, seed_since)
                         pub.enqueue(extra_rows)
                         pub.flush_now()
-                    elif (
-                        seed
-                        and self.seed_fn is not None
-                        and not pub.has_snapshot_seed
-                    ):
+                    elif seed and self.seed_fn is not None and not pub.has_snapshot_seed:
                         pub.mark_snapshot_seeded()
                         snap_rows = self.seed_fn(canon_syms)
                         pub.enqueue(snap_rows)
@@ -308,9 +294,7 @@ class FeedBuilder:
                 pub.set_allowed_symbols(canon_syms)
 
                 pub.begin_seeding()
-                self.ws_multiplexer.subscribe(
-                    self.ws_url, self.ws_channel, topics, pub
-                )
+                self.ws_multiplexer.subscribe(self.ws_url, self.ws_channel, topics, pub)
                 seed_fn_ref = self.seed_fn if effective_seed else None
                 seed_rows_fn_ref = (
                     self.seed_rows_fn
@@ -374,11 +358,7 @@ class FeedBuilder:
             key_cols = [by] if isinstance(by, str) else list(by)
 
         pub, watchlist_ctrl, finalize_seed = self._setup_streaming(seed=seed)
-        effective_keys = (
-            list(key_cols)
-            if key_cols is not None
-            else list(self.schema_spec.key_cols)
-        )
+        effective_keys = list(key_cols) if key_cols is not None else list(self.schema_spec.key_cols)
 
         def _build() -> Table:
             base = (
@@ -419,9 +399,7 @@ class FeedBuilder:
         from deephaven import ring_table
         from deephaven.stream import blink_to_append_only
 
-        pub, watchlist_ctrl, finalize_seed = self._setup_streaming(
-            seed=seed, seed_since=seed_since
-        )
+        pub, watchlist_ctrl, finalize_seed = self._setup_streaming(seed=seed, seed_since=seed_since)
         col_names = set(self.schema_spec.arrow_schema.names)
         if "Timestamp" in col_names:
             ts_expr = "Timestamp >= SubscribedAt || __ReceivedAt >= SubscribedAt"
@@ -478,9 +456,7 @@ class FeedBuilder:
         Raises:
             NotImplementedError: If this feed does not support WebSocket streaming.
         """
-        return self._build_history_or_ring(
-            seed=seed, seed_since=seed_since, capacity=None
-        )
+        return self._build_history_or_ring(seed=seed, seed_since=seed_since, capacity=None)
 
     def ring(self, capacity: int = 100_000, *, seed: bool = False) -> Table:
         """Return a bounded live history table retaining the most recent `capacity` rows (`ring_table`).
@@ -498,9 +474,7 @@ class FeedBuilder:
         """
         if capacity <= 0:
             raise ValueError("capacity must be > 0")
-        return self._build_history_or_ring(
-            seed=seed, seed_since=None, capacity=capacity
-        )
+        return self._build_history_or_ring(seed=seed, seed_since=None, capacity=capacity)
 
     def blink(self) -> Table:
         """Return the raw stateless single-cycle Deephaven blink table.
@@ -531,7 +505,7 @@ class FeedBuilder:
         fetch = self.snapshot_fn
         if fetch is None and self.seed_fn is not None:
             canon_syms = self._canonical_symbol_list()
-            fetch = lambda: self.seed_fn(canon_syms)  # type: ignore[misc]
+            fetch = partial(self.seed_fn, canon_syms)
         if fetch is None:
             raise NotImplementedError(
                 f"Feed '{self.name}' does not support .snapshot(). Use .historical() or .latest()."
@@ -541,9 +515,7 @@ class FeedBuilder:
         if not rows:
             pa_tbl = record_batches_to_arrow_table([], self.schema_spec)
         else:
-            rb = rows_to_record_batch(
-                rows, self.schema_spec, self.symbol_normalizer
-            )
+            rb = rows_to_record_batch(rows, self.schema_spec, self.symbol_normalizer)
             pa_tbl = record_batches_to_arrow_table([rb], self.schema_spec)
         return arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
 
@@ -578,11 +550,9 @@ class FeedBuilder:
         fetch = self.snapshot_fn
         if fetch is None and self.seed_fn is not None:
             canon_syms = self._canonical_symbol_list()
-            fetch = lambda: self.seed_fn(canon_syms)  # type: ignore[misc]
+            fetch = partial(self.seed_fn, canon_syms)
         if fetch is None:
-            raise NotImplementedError(
-                f"Feed '{self.name}' does not support .poll()."
-            )
+            raise NotImplementedError(f"Feed '{self.name}' does not support .poll().")
 
         poller = SnapshotPoller(
             name=self.name,
@@ -634,16 +604,14 @@ class FeedBuilder:
             ValueError: If `source` is invalid or required parameters are missing.
         """
         if self.historical_fn is not None:
-            return self.historical_fn(
-                start=start, end=end, limit=limit, source=source
-            )
-        if start is None and end is None and (
-            self.snapshot_fn is not None or self.seed_fn is not None
+            return self.historical_fn(start=start, end=end, limit=limit, source=source)
+        if (
+            start is None
+            and end is None
+            and (self.snapshot_fn is not None or self.seed_fn is not None)
         ):
             return self.snapshot()
-        raise NotImplementedError(
-            f"Feed '{self.name}' does not support .historical(start, end)."
-        )
+        raise NotImplementedError(f"Feed '{self.name}' does not support .historical(start, end).")
 
     def stop(self) -> None:
         """Stop all background publishers, pollers, and watchlist listeners associated with this builder."""
@@ -656,10 +624,7 @@ class FeedBuilder:
         if pub is not None and self._acquired_publisher:
             self._acquired_publisher = False
             if pub.release_consumer() == 0:
-                if (
-                    self._stream_registry is not None
-                    and self._stream_key is not None
-                ):
+                if self._stream_registry is not None and self._stream_key is not None:
                     self._stream_registry.pop(self._stream_key, None)
                 if (
                     self._static_topics

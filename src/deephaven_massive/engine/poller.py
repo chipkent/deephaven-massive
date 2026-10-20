@@ -7,8 +7,8 @@ eviction semantics (`"replace"`, `"upsert"`, or `"append"`).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
 import threading
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -23,6 +23,7 @@ from deephaven_massive.engine.arrow_bridge import (
 if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+
     from deephaven_massive.engine.symbols import SymbolNormalizer
 
 VALID_POLL_MODES: frozenset[str] = frozenset({"replace", "upsert", "append"})
@@ -112,29 +113,21 @@ class SnapshotPoller:
         def _build_tables() -> tuple[Table, Any, Table]:
             blink_tbl, dh_pub = table_publisher(name, col_defs)
             if self.mode == "replace":
-                replace_keys = (
-                    list(self.key_cols) if self.key_cols else ["__RowIdx"]
-                )
+                replace_keys = list(self.key_cols) if self.key_cols else ["__RowIdx"]
                 raw_keyed = blink_tbl.last_by(replace_keys)
                 current_epoch = blink_tbl.view(["__PollId"]).last_by()
                 out_tbl = (
-                    raw_keyed.natural_join(
-                        current_epoch, on=[], joins=["CurrentPollId = __PollId"]
-                    )
+                    raw_keyed.natural_join(current_epoch, on=[], joins=["CurrentPollId = __PollId"])
                     .where("__PollId == CurrentPollId")
                     .drop_columns(["__PollId", "__RowIdx", "CurrentPollId"])
                 )
             elif self.mode == "upsert":
                 stripped = blink_tbl.drop_columns(["__PollId", "__RowIdx"])
                 out_tbl = (
-                    stripped.last_by(list(self.key_cols))
-                    if self.key_cols
-                    else stripped.last_by()
+                    stripped.last_by(list(self.key_cols)) if self.key_cols else stripped.last_by()
                 )
             else:
-                out_tbl = blink_to_append_only(
-                    blink_tbl.drop_columns(["__PollId", "__RowIdx"])
-                )
+                out_tbl = blink_to_append_only(blink_tbl.drop_columns(["__PollId", "__RowIdx"]))
             return blink_tbl, dh_pub, out_tbl
 
         with exec_ctx_scope(self._exec_ctx):

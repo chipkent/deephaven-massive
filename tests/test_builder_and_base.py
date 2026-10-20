@@ -32,31 +32,24 @@ def test_format_date_param_and_extract_rows_from_payload() -> None:
     """Verify format_date_param and extract_rows_from_payload normalize all Massive REST envelope shapes."""
     assert format_date_param(None) is None
     assert format_date_param(date(2025, 1, 2)) == "2025-01-02"
-    assert format_date_param(
-        datetime(2025, 1, 2, 12, 0, tzinfo=timezone.utc)
-    ).startswith("2025-01-02T12:00:00")
+    dt_str = format_date_param(datetime(2025, 1, 2, 12, 0, tzinfo=timezone.utc))
+    assert dt_str is not None and dt_str.startswith("2025-01-02T12:00:00")
     assert format_date_param(1700000000000) == "1700000000000"
 
     assert extract_rows_from_payload(None) == []
-    assert extract_rows_from_payload("not-a-dict") == []  # type: ignore[arg-type]
+    assert extract_rows_from_payload("not-a-dict") == []
     assert extract_rows_from_payload([{"a": 1}, "not-a-dict"]) == [{"a": 1}]
     assert extract_rows_from_payload({"results": 123}) == []
     assert extract_rows_from_payload({"results": {"values": [{"value": 50.0}]}}) == [
         {"value": 50.0}
     ]
-    assert extract_rows_from_payload({"results": {"ticker": "AAPL"}}) == [
-        {"ticker": "AAPL"}
-    ]
-    assert extract_rows_from_payload({"tickers": [{"ticker": "MSFT"}]}) == [
-        {"ticker": "MSFT"}
-    ]
+    assert extract_rows_from_payload({"results": {"ticker": "AAPL"}}) == [{"ticker": "AAPL"}]
+    assert extract_rows_from_payload({"tickers": [{"ticker": "MSFT"}]}) == [{"ticker": "MSFT"}]
     assert extract_rows_from_payload({"last": {"ask": 1.1}, "symbol": "EUR/USD"}) == [
         {"ask": 1.1, "symbol": "EUR/USD"}
     ]
     assert extract_rows_from_payload({"last": {"ask": 1.1}}) == [{"ask": 1.1}]
-    assert extract_rows_from_payload({"ticker": {"ticker": "NVDA"}}) == [
-        {"ticker": "NVDA"}
-    ]
+    assert extract_rows_from_payload({"ticker": {"ticker": "NVDA"}}) == [{"ticker": "NVDA"}]
     assert extract_rows_from_payload({"status": "OK"}) == []
     assert extract_rows_from_payload(
         {"status": "open", "serverTime": "2025-01-02T14:30:00Z"},
@@ -107,12 +100,15 @@ def test_normalize_filter_params_operators_and_tickers() -> None:
         tickers=["spy", "qqq"],
         ticker_param="composite_ticker",
     ) == {"composite_ticker": "SPY,QQQ"}
-    assert normalize_filter_params(
-        None,
-        None,
-        symbol="aapl",
-        tickers=[],
-    ) == {}
+    assert (
+        normalize_filter_params(
+            None,
+            None,
+            symbol="aapl",
+            tickers=[],
+        )
+        == {}
+    )
 
 
 def test_base_domain_client_rest_pagination_and_chunked_tables(
@@ -249,15 +245,10 @@ def test_base_domain_client_should_use_flat_files_routing(mock_session: Any) -> 
     with pytest.raises(ValueError, match="not supported for this feed"):
         base.should_use_flat_files("flat_files", ["AAPL"], None)
 
-    assert (
-        base.should_use_flat_files("flat_files", ["AAPL"], "us_stocks_sip/trades_v1")
-        is True
-    )
+    assert base.should_use_flat_files("flat_files", ["AAPL"], "us_stocks_sip/trades_v1") is True
     assert base.should_use_flat_files("auto", ["*"], "us_stocks_sip/trades_v1") is True
     assert (
-        base.should_use_flat_files(
-            "auto", ["AAPL", "MSFT", "NVDA"], "us_stocks_sip/trades_v1"
-        )
+        base.should_use_flat_files("auto", ["AAPL", "MSFT", "NVDA"], "us_stocks_sip/trades_v1")
         is True
     )
     assert (
@@ -269,21 +260,14 @@ def test_base_domain_client_should_use_flat_files_routing(mock_session: Any) -> 
         )
         is False
     )
-    assert (
-        base.should_use_flat_files("auto", ["AAPL"], "us_stocks_sip/trades_v1") is False
-    )
+    assert base.should_use_flat_files("auto", ["AAPL"], "us_stocks_sip/trades_v1") is False
 
     sess_no_s3 = mock_session(s3_access_key_id=None, s3_secret_access_key=None)
     base_no_s3 = BaseDomainClient(sess_no_s3, domain="stocks")
     assert base_no_s3.canonical_symbols("aapl") == ["AAPL"]
-    assert (
-        base_no_s3.should_use_flat_files("auto", ["*"], "us_stocks_sip/trades_v1")
-        is False
-    )
+    assert base_no_s3.should_use_flat_files("auto", ["*"], "us_stocks_sip/trades_v1") is False
     with pytest.raises(ValueError, match="S3 credentials"):
-        base_no_s3.should_use_flat_files(
-            "flat_files", ["AAPL"], "us_stocks_sip/trades_v1"
-        )
+        base_no_s3.should_use_flat_files("flat_files", ["AAPL"], "us_stocks_sip/trades_v1")
 
 
 def test_feed_builder_capability_guards_and_validation(dh_exec_ctx: Any) -> None:
@@ -305,15 +289,13 @@ def test_feed_builder_capability_guards_and_validation(dh_exec_ctx: Any) -> None
         schema_spec=TREASURY_YIELDS_SCHEMA,
         exec_ctx=dh_exec_ctx,
     )
-    with pytest.raises(
-        NotImplementedError, match="does not support WebSocket streaming"
-    ):
+    with pytest.raises(NotImplementedError, match="does not support WebSocket streaming"):
         rest_only.latest()
-    with pytest.raises(NotImplementedError, match="does not support .snapshot()"):
+    with pytest.raises(NotImplementedError, match=r"does not support \.snapshot\(\)"):
         rest_only.snapshot()
-    with pytest.raises(NotImplementedError, match="does not support .poll()"):
+    with pytest.raises(NotImplementedError, match=r"does not support \.poll\(\)"):
         rest_only.poll()
-    with pytest.raises(NotImplementedError, match="does not support .historical"):
+    with pytest.raises(NotImplementedError, match=r"does not support \.historical"):
         rest_only.historical(start="2025-01-01")
     with pytest.raises(ValueError, match="capacity must be > 0"):
         rest_only.ring(0)
@@ -366,7 +348,7 @@ def test_feed_builder_delivery_modes_and_fallback_seeding(
         name="empty_snap",
         schema_spec=TRADES_SCHEMA,
         exec_ctx=dh_exec_ctx,
-        snapshot_fn=lambda: [],
+        snapshot_fn=list,
     )
     assert len(dh_to_pylist(fb_empty.snapshot())) == 0
 
@@ -389,9 +371,7 @@ def test_feed_builder_reactive_watchlist_delivery_modes(
     with exec_ctx_scope(dh_exec_ctx):
         wl_tbl = input_table(col_defs={"Symbol": dht.string}, key_cols=["Symbol"])
         wl_tbl.add(
-            arrow_to_deephaven_table(
-                pa.Table.from_pydict({"Symbol": ["AAPL"]}), dh_exec_ctx
-            )
+            arrow_to_deephaven_table(pa.Table.from_pydict({"Symbol": ["AAPL"]}), dh_exec_ctx)
         )
 
     fb_wl_trades = sess.stocks.trades(wl_tbl)
@@ -412,9 +392,7 @@ def test_feed_builder_reactive_watchlist_delivery_modes(
 
     no_ts_spec = SchemaSpec(
         name="no_ts_spec",
-        arrow_schema=pa.schema(
-            [pa.field("Symbol", pa.string()), pa.field("Val", pa.float64())]
-        ),
+        arrow_schema=pa.schema([pa.field("Symbol", pa.string()), pa.field("Val", pa.float64())]),
         normalizer=lambda r, n: {"Symbol": "AAPL", "Val": 1.0},
         key_cols=("Symbol",),
     )
@@ -475,21 +453,14 @@ def test_feed_builder_stream_registry_sharing_and_backfill(mock_session: Any) ->
     assert fb_auto_seed.publisher is fb_auto_reused.publisher
 
     fb_auto_seed.stop()
-    assert "T.AAPL" in sess_auto.ws_multiplexer.active_topics(
-        "wss://socket.massive.com/stocks"
-    )
+    assert "T.AAPL" in sess_auto.ws_multiplexer.active_topics("wss://socket.massive.com/stocks")
     fb_auto_reused.stop()
-    assert "T.AAPL" not in sess_auto.ws_multiplexer.active_topics(
-        "wss://socket.massive.com/stocks"
-    )
+    assert "T.AAPL" not in sess_auto.ws_multiplexer.active_topics("wss://socket.massive.com/stocks")
 
     sess = mock_session(auto_flush=False)
     fb_unseeded = sess.stocks.trades("NVDA")
     _ = fb_unseeded.blink()
-    assert (
-        fb_unseeded.publisher is not None
-        and not fb_unseeded.publisher.has_snapshot_seed
-    )
+    assert fb_unseeded.publisher is not None and not fb_unseeded.publisher.has_snapshot_seed
     fb_seed_later = sess.stocks.trades("NVDA")
     _ = fb_seed_later.latest(seed=True)
     assert fb_unseeded.publisher.has_snapshot_seed is True

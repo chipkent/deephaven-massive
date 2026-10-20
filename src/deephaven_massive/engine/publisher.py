@@ -9,9 +9,9 @@ REST snapshots to live WebSocket ticks without dropping or duplicating events.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
 import threading
 import time
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -28,6 +28,7 @@ from deephaven_massive.engine.arrow_bridge import (
 if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+
     from deephaven_massive.engine.symbols import SymbolNormalizer
 
 
@@ -91,9 +92,7 @@ class MicroBatchPublisher:
         self.flush_interval_ms = flush_interval_ms
         self.max_batch_size = max_batch_size
 
-        self.full_schema = schema_spec.with_extra_fields(
-            [pa.field("__ReceivedAt", UTC_NS_TYPE)]
-        )
+        self.full_schema = schema_spec.with_extra_fields([pa.field("__ReceivedAt", UTC_NS_TYPE)])
 
         self._lock = threading.Lock()
         self._publish_lock = threading.Lock()
@@ -211,11 +210,7 @@ class MicroBatchPublisher:
     def allowed_symbols(self) -> frozenset[str] | None:
         """Return an immutable snapshot of currently allowed symbols, or `None` if unfiltered."""
         with self._lock:
-            return (
-                frozenset(self._allowed_symbols)
-                if self._allowed_symbols is not None
-                else None
-            )
+            return frozenset(self._allowed_symbols) if self._allowed_symbols is not None else None
 
     def begin_seeding(self) -> None:
         """Enter startup seeding mode so incoming WebSocket rows are buffered until `complete_seeding`."""
@@ -249,11 +244,7 @@ class MicroBatchPublisher:
         for raw in seed_rows:
             nr = dict(self.schema_spec.normalizer(raw, self.symbol_normalizer))
             ts_ns = _row_timestamp_ns(nr)
-            if (
-                min_seed_ts_ns is not None
-                and ts_ns is not None
-                and ts_ns < min_seed_ts_ns
-            ):
+            if min_seed_ts_ns is not None and ts_ns is not None and ts_ns < min_seed_ts_ns:
                 continue
             nr["__ReceivedAt"] = now_ns
             sym = nr.get("Symbol")
@@ -261,9 +252,7 @@ class MicroBatchPublisher:
                 seen_trade_ids.add((sym, str(nr["TradeId"])))
             if self.schema_spec.key_cols:
                 key_tuple = tuple(nr.get(k) for k in self.schema_spec.key_cols)
-                seen_event_sigs.add(
-                    (key_tuple, ts_ns, nr.get("TradeId"), nr.get("SequenceNumber"))
-                )
+                seen_event_sigs.add((key_tuple, ts_ns, nr.get("TradeId"), nr.get("SequenceNumber")))
             if ts_ns is not None:
                 prev_max = max_ts_by_symbol.get(sym)
                 if prev_max is None or ts_ns > prev_max:
@@ -279,9 +268,12 @@ class MicroBatchPublisher:
             deduped_ws: list[dict[str, Any]] = []
             for ws_row in buffered:
                 sym = ws_row.get("Symbol")
-                if has_trade_id and ws_row.get("TradeId") is not None:
-                    if (sym, str(ws_row["TradeId"])) in seen_trade_ids:
-                        continue
+                if (
+                    has_trade_id
+                    and ws_row.get("TradeId") is not None
+                    and (sym, str(ws_row["TradeId"])) in seen_trade_ids
+                ):
+                    continue
                 ws_ts = _row_timestamp_ns(ws_row)
                 max_seed_ts = max_ts_by_symbol.get(sym)
                 if ws_ts is not None and max_seed_ts is not None and ws_ts < max_seed_ts:
@@ -329,11 +321,7 @@ class MicroBatchPublisher:
         accepted: list[dict[str, Any]] = []
 
         with self._lock:
-            allowed = (
-                set(self._allowed_symbols)
-                if self._allowed_symbols is not None
-                else None
-            )
+            allowed = set(self._allowed_symbols) if self._allowed_symbols is not None else None
 
         for raw in rows:
             nr = (
@@ -359,9 +347,7 @@ class MicroBatchPublisher:
             else:
                 self._buffer.extend(accepted)
                 should_flush = len(self._buffer) >= self.max_batch_size
-                thread_alive = (
-                    self._flush_thread is not None and self._flush_thread.is_alive()
-                )
+                thread_alive = self._flush_thread is not None and self._flush_thread.is_alive()
 
         if should_flush:
             if thread_alive:

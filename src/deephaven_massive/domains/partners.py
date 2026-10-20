@@ -44,7 +44,6 @@ from deephaven_massive.schemas.partners import (
 )
 
 if TYPE_CHECKING:
-    from deephaven.table import Table
     from deephaven_massive.session import MassiveSession
 
 
@@ -243,9 +242,7 @@ class BenzingaClient(_PartnerSubClient):
             date_param="published",
         )
 
-    def analysts(
-        self, analyst_id: str | None = None, **filters: Any
-    ) -> FeedBuilder:
+    def analysts(self, analyst_id: str | None = None, **filters: Any) -> FeedBuilder:
         """Configure a Benzinga wall-street analyst directory and performance metrics feed (`/benzinga/v1/analysts`).
 
         Args:
@@ -264,9 +261,7 @@ class BenzingaClient(_PartnerSubClient):
             filters=filters,
         )
 
-    def firms(
-        self, firm_id: str | None = None, **filters: Any
-    ) -> FeedBuilder:
+    def firms(self, firm_id: str | None = None, **filters: Any) -> FeedBuilder:
         """Configure a Benzinga research firm directory feed (`/benzinga/v1/firms`).
 
         Args:

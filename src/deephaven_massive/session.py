@@ -9,10 +9,10 @@ and nine specialized domain sub-clients (`stocks`, `options`, `futures`, `indice
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
 import json
 import threading
 import time
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, BinaryIO
 from urllib.parse import urlencode
 
@@ -35,6 +35,7 @@ from deephaven_massive.engine.ws_multiplexer import WebSocketMultiplexer
 if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+
     from deephaven_massive.engine.builder import FeedBuilder
     from deephaven_massive.engine.publisher import MicroBatchPublisher
 
@@ -204,9 +205,7 @@ class MassiveSession:
             ws_connector=ws_connector,
         )
         self._active_builders: list[FeedBuilder] = []
-        self._stream_registry: dict[
-            tuple[str, str, tuple[str, ...]], MicroBatchPublisher
-        ] = {}
+        self._stream_registry: dict[tuple[str, str, tuple[str, ...]], MicroBatchPublisher] = {}
 
         self.stocks = StocksClient(self)
         self.options = OptionsClient(self)
@@ -253,7 +252,12 @@ class MassiveSession:
             to_stop: list[FeedBuilder] = []
             for builder in list(self._active_builders):
                 if target is not None:
-                    if builder is target or builder.name == target or builder.ws_channel == target or builder.ws_url == target:
+                    if (
+                        builder is target
+                        or builder.name == target
+                        or builder.ws_channel == target
+                        or builder.ws_url == target
+                    ):
                         to_stop.append(builder)
                     continue
                 if ws_channel is not None and builder.ws_channel != ws_channel:
@@ -294,11 +298,7 @@ class MassiveSession:
             ]
         )
         rows = self.ws_multiplexer.endpoint_snapshots()
-        pa_tbl = (
-            pa.Table.from_pylist(rows, schema=schema)
-            if rows
-            else schema.empty_table()
-        )
+        pa_tbl = pa.Table.from_pylist(rows, schema=schema) if rows else schema.empty_table()
         return arrow_to_deephaven_table(pa_tbl, self.exec_ctx)
 
     def stats(self) -> Table:
@@ -343,31 +343,19 @@ class MassiveSession:
                     "RowsPublished": rows_pub,
                 }
             )
-        pa_tbl = (
-            pa.Table.from_pylist(rows, schema=schema)
-            if rows
-            else schema.empty_table()
-        )
+        pa_tbl = pa.Table.from_pylist(rows, schema=schema) if rows else schema.empty_table()
         return arrow_to_deephaven_table(pa_tbl, self.exec_ctx)
 
-    def _build_url(
-        self, path_or_url: str, params: Mapping[str, Any] | None
-    ) -> str:
+    def _build_url(self, path_or_url: str, params: Mapping[str, Any] | None) -> str:
         """Resolve a relative REST path or full URL and append non-null query parameters."""
         if path_or_url.startswith(("http://", "https://")):
             url = path_or_url
         else:
-            clean_path = (
-                path_or_url
-                if path_or_url.startswith("/")
-                else f"/{path_or_url}"
-            )
+            clean_path = path_or_url if path_or_url.startswith("/") else f"/{path_or_url}"
             url = f"{self.config.rest_base_url}{clean_path}"
 
         if params:
-            clean_params = {
-                k: v for k, v in params.items() if v is not None
-            }
+            clean_params = {k: v for k, v in params.items() if v is not None}
             if clean_params:
                 sep = "&" if "?" in url else "?"
                 url = f"{url}{sep}{urlencode(clean_params)}"

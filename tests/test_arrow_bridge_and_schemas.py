@@ -279,17 +279,13 @@ def test_market_schemas_normalization_and_fallbacks() -> None:
         == "AAPL"
     )
     assert (
-        TRADES_SCHEMA.normalizer(
-            {"ticker": "AAPL", "last_trade": {"p": 151.0}}, None
-        )["Price"]
+        TRADES_SCHEMA.normalizer({"ticker": "AAPL", "last_trade": {"p": 151.0}}, None)["Price"]
         == 151.0
     )
     assert TRADES_SCHEMA.normalizer({"ticker": "   "}, stocks_norm)["Symbol"] is None
 
     assert (
-        QUOTES_SCHEMA.normalizer({"p": "EUR/USD", "a": 1.1, "b": 1.09}, forex_norm)[
-            "Symbol"
-        ]
+        QUOTES_SCHEMA.normalizer({"p": "EUR/USD", "a": 1.1, "b": 1.09}, forex_norm)["Symbol"]
         == "EUR/USD"
     )
     assert (
@@ -355,9 +351,7 @@ def test_market_schemas_normalization_and_fallbacks() -> None:
         == 1700000300000000000
     )
     assert (
-        BARS_SCHEMA.normalizer({"T": "AAPL", "o": 100, "c": 105}, stocks_norm)[
-            "EndTimestamp"
-        ]
+        BARS_SCHEMA.normalizer({"T": "AAPL", "o": 100, "c": 105}, stocks_norm)["EndTimestamp"]
         is None
     )
     assert (
@@ -388,22 +382,19 @@ def test_market_schemas_normalization_and_fallbacks() -> None:
         == 160.0
     )
     assert (
-        IMBALANCES_SCHEMA.normalizer(
-            {"T": "AAPL", "p": 150, "i": 500, "b": 100.0}, stocks_norm
-        )["ImbalanceShares"]
+        IMBALANCES_SCHEMA.normalizer({"T": "AAPL", "p": 150, "i": 500, "b": 100.0}, stocks_norm)[
+            "ImbalanceShares"
+        ]
         == 500
     )
     assert (
-        FMV_SCHEMA.normalizer(
-            {"sym": "AAPL", "fmv": 150.25, "t": 1700000000000}, stocks_norm
-        )["FairMarketValue"]
+        FMV_SCHEMA.normalizer({"sym": "AAPL", "fmv": 150.25, "t": 1700000000000}, stocks_norm)[
+            "FairMarketValue"
+        ]
         == 150.25
     )
 
-    assert (
-        INDEX_VALUES_SCHEMA.normalizer({"T": "I:SPX", "val": 5000.0}, None)["Value"]
-        == 5000.0
-    )
+    assert INDEX_VALUES_SCHEMA.normalizer({"T": "I:SPX", "val": 5000.0}, None)["Value"] == 5000.0
     assert (
         STOCK_SNAPSHOT_SCHEMA.normalizer(
             {
@@ -571,9 +562,7 @@ def test_reference_schemas_normalization() -> None:
         "exchanges": {"nyse": "open", "nasdaq": "open", "otc": "closed"},
         "currencies": {"fx": "open", "crypto": "open"},
         "indicesGroups": {"s_and_p": "open", "dow_jones": "open", "nasdaq": "open"},
-        "financials": {
-            "income_statement": {"revenues": {"value": 1000.0, "unit": "USD"}}
-        },
+        "financials": {"income_statement": {"revenues": {"value": 1000.0, "unit": "USD"}}},
     }
 
     details = TICKER_DETAILS_SCHEMA.normalizer(sample_row, stocks_norm)
@@ -688,6 +677,4 @@ def test_partner_schemas_normalization() -> None:
 
     assert BENZINGA_RATINGS_SCHEMA.normalizer({"ticker": "   "}, None)["Symbol"] is None
     assert BENZINGA_RATINGS_SCHEMA.normalizer({}, None)["Symbol"] is None
-    assert (
-        BENZINGA_RATINGS_SCHEMA.normalizer({"ticker": "aapl"}, None)["Symbol"] == "AAPL"
-    )
+    assert BENZINGA_RATINGS_SCHEMA.normalizer({"ticker": "aapl"}, None)["Symbol"] == "AAPL"

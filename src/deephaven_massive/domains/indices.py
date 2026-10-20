@@ -33,6 +33,7 @@ from deephaven_massive.schemas.reference import (
 
 if TYPE_CHECKING:
     from deephaven.table import Table
+
     from deephaven_massive.session import MassiveSession
 
 
@@ -71,9 +72,7 @@ class IndicesClient(BaseDomainClient):
                 self.symbol_normalizer.rest_ticker(s)  # type: ignore[union-attr]
                 for s in symbols
             )
-        return self.fetch_rest_rows(
-            "/v3/snapshot/indices", params, extra_fields=extra_fields
-        )
+        return self.fetch_rest_rows("/v3/snapshot/indices", params, extra_fields=extra_fields)
 
     def values(
         self,
@@ -102,9 +101,7 @@ class IndicesClient(BaseDomainClient):
         """
         ws_url = self.session.config.resolve_ws_url("indices", feed_override=feed)
 
-        def _rest_path(
-            sym: str, start: Any, end: Any
-        ) -> tuple[str, dict[str, Any]]:
+        def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             return "/v3/snapshot/indices", {"ticker.any_of": sym}
 
         return self.build_feed(
@@ -115,18 +112,18 @@ class IndicesClient(BaseDomainClient):
             symbols=symbols,
             symbol_col=symbol_col,
             seed_fn=self._fetch_indices_snapshots,
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
-                syms, since, _rest_path
-            ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
-                symbols,
-                INDEX_VALUES_SCHEMA,
-                "us_indices/values_v1",
-                _rest_path,
-                start=start,
-                end=end,
-                limit=limit,
-                source=source,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(syms, since, _rest_path),
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": (
+                self.fetch_multi_symbol_historical(
+                    symbols,
+                    INDEX_VALUES_SCHEMA,
+                    "us_indices/values_v1",
+                    _rest_path,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    source=source,
+                )
             ),
         )
 
@@ -173,9 +170,7 @@ class IndicesClient(BaseDomainClient):
         elif multiplier == 1 and clean_span == "day":
             s3_ds = "us_indices/day_aggs_v1"
 
-        def _rest_path(
-            sym: str, start: Any, end: Any
-        ) -> tuple[str, dict[str, Any]]:
+        def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             s_str = format_date_param(start) or "1970-01-01"
             e_str = format_date_param(end) or s_str
             return (
@@ -191,7 +186,7 @@ class IndicesClient(BaseDomainClient):
             ws_channel=ws_channel,
             symbols=symbols,
             symbol_col=symbol_col,
-            seed_fn=lambda syms=None: self._fetch_indices_snapshots(
+            seed_fn=lambda syms: self._fetch_indices_snapshots(
                 syms, extra_fields={"_span_ns": span_ns}
             ),
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
@@ -200,21 +195,21 @@ class IndicesClient(BaseDomainClient):
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
-                symbols,
-                BARS_SCHEMA,
-                s3_ds,
-                _rest_path,
-                start=start,
-                end=end,
-                limit=limit,
-                source=source,
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": (
+                self.fetch_multi_symbol_historical(
+                    symbols,
+                    BARS_SCHEMA,
+                    s3_ds,
+                    _rest_path,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    source=source,
+                )
             ),
         )
 
-    def snapshots(
-        self, symbols: str | Iterable[str] | None = None
-    ) -> FeedBuilder:
+    def snapshots(self, symbols: str | Iterable[str] | None = None) -> FeedBuilder:
         """Configure a Market Index snapshots feed (`/v3/snapshot/indices`).
 
         Args:
@@ -255,9 +250,7 @@ class IndicesClient(BaseDomainClient):
 
     previous_day_bar = previous_close
 
-    def daily_open_close(
-        self, symbol: str, target_date: str | date | datetime
-    ) -> FeedBuilder:
+    def daily_open_close(self, symbol: str, target_date: str | date | datetime) -> FeedBuilder:
         """Configure a feed for an Index's daily open/close summary on `target_date` (`/v1/open-close/{indicesTicker}/{date}`).
 
         Args:
@@ -310,9 +303,7 @@ class IndicesClient(BaseDomainClient):
         return self.build_feed(
             name="indices_tickers",
             schema_spec=TICKERS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows(
-                "/v3/reference/tickers", params
-            ),
+            snapshot_fn=lambda: self.fetch_rest_rows("/v3/reference/tickers", params),
         )
 
     def market_holidays(self) -> FeedBuilder:
@@ -325,9 +316,7 @@ class IndicesClient(BaseDomainClient):
         return self.build_feed(
             name="indices_market_holidays",
             schema_spec=HOLIDAYS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows(
-                "/v1/marketstatus/upcoming"
-            ),
+            snapshot_fn=lambda: self.fetch_rest_rows("/v1/marketstatus/upcoming"),
         )
 
     holidays = market_holidays

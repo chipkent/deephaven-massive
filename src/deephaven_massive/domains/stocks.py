@@ -66,6 +66,7 @@ from deephaven_massive.schemas.reference import (
 
 if TYPE_CHECKING:
     from deephaven.table import Table
+
     from deephaven_massive.session import MassiveSession
 
 
@@ -139,9 +140,7 @@ class StocksClient(BaseDomainClient):
         """
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
 
-        def _rest_path(
-            sym: str, start: Any, end: Any
-        ) -> tuple[str, dict[str, Any]]:
+        def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             ticker = self.symbol_normalizer.rest_ticker(sym)  # type: ignore[union-attr]
             return f"/v3/trades/{ticker}", {
                 "timestamp.gte": format_date_param(start),
@@ -156,18 +155,18 @@ class StocksClient(BaseDomainClient):
             symbols=symbols,
             symbol_col=symbol_col,
             seed_fn=self._fetch_stock_snapshots,
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
-                syms, since, _rest_path
-            ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
-                symbols,
-                TRADES_SCHEMA,
-                "us_stocks_sip/trades_v1",
-                _rest_path,
-                start=start,
-                end=end,
-                limit=limit,
-                source=source,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(syms, since, _rest_path),
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": (
+                self.fetch_multi_symbol_historical(
+                    symbols,
+                    TRADES_SCHEMA,
+                    "us_stocks_sip/trades_v1",
+                    _rest_path,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    source=source,
+                )
             ),
         )
 
@@ -197,9 +196,7 @@ class StocksClient(BaseDomainClient):
         """
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
 
-        def _rest_path(
-            sym: str, start: Any, end: Any
-        ) -> tuple[str, dict[str, Any]]:
+        def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             ticker = self.symbol_normalizer.rest_ticker(sym)  # type: ignore[union-attr]
             return f"/v3/quotes/{ticker}", {
                 "timestamp.gte": format_date_param(start),
@@ -214,18 +211,18 @@ class StocksClient(BaseDomainClient):
             symbols=symbols,
             symbol_col=symbol_col,
             seed_fn=self._fetch_stock_snapshots,
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
-                syms, since, _rest_path
-            ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
-                symbols,
-                QUOTES_SCHEMA,
-                "us_stocks_sip/quotes_v1",
-                _rest_path,
-                start=start,
-                end=end,
-                limit=limit,
-                source=source,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(syms, since, _rest_path),
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": (
+                self.fetch_multi_symbol_historical(
+                    symbols,
+                    QUOTES_SCHEMA,
+                    "us_stocks_sip/quotes_v1",
+                    _rest_path,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    source=source,
+                )
             ),
         )
 
@@ -274,9 +271,7 @@ class StocksClient(BaseDomainClient):
         elif multiplier == 1 and clean_span == "day":
             s3_ds = "us_stocks_sip/day_aggs_v1"
 
-        def _rest_path(
-            sym: str, start: Any, end: Any
-        ) -> tuple[str, dict[str, Any]]:
+        def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             ticker = self.symbol_normalizer.rest_ticker(sym)  # type: ignore[union-attr]
             s_str = format_date_param(start) or "1970-01-01"
             e_str = format_date_param(end) or s_str
@@ -302,16 +297,18 @@ class StocksClient(BaseDomainClient):
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
-                symbols,
-                BARS_SCHEMA,
-                s3_ds,
-                _rest_path,
-                start=start,
-                end=end,
-                limit=limit,
-                source=source,
-                adjusted=adjusted,
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": (
+                self.fetch_multi_symbol_historical(
+                    symbols,
+                    BARS_SCHEMA,
+                    s3_ds,
+                    _rest_path,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    source=source,
+                    adjusted=adjusted,
+                )
             ),
         )
 
@@ -395,9 +392,7 @@ class StocksClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.latest()`,
             `.history()`, `.ring()`, and `.blink()` with `FMV_SCHEMA`.
         """
-        ws_url = self.session.config.resolve_ws_url(
-            "stocks", feed_override=feed, is_fmv=True
-        )
+        ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed, is_fmv=True)
         return self.build_feed(
             name="stocks_fmv",
             schema_spec=FMV_SCHEMA,
@@ -446,9 +441,7 @@ class StocksClient(BaseDomainClient):
                 )
             if canon_syms and "*" not in canon_syms:
                 params["tickers"] = ",".join(canon_syms)
-            return self.fetch_rest_rows(
-                "/v2/snapshot/locale/us/markets/stocks/tickers", params
-            )
+            return self.fetch_rest_rows("/v2/snapshot/locale/us/markets/stocks/tickers", params)
 
         return self.build_feed(
             name="stocks_snapshots",
@@ -457,9 +450,7 @@ class StocksClient(BaseDomainClient):
             snapshot_fn=_fetch,
         )
 
-    def top_movers(
-        self, direction: str = "gainers", *, include_otc: bool = False
-    ) -> FeedBuilder:
+    def top_movers(self, direction: str = "gainers", *, include_otc: bool = False) -> FeedBuilder:
         """Configure a top US Stock market movers feed (`/v2/snapshot/locale/us/markets/stocks/{direction}`).
 
         Args:
@@ -529,9 +520,7 @@ class StocksClient(BaseDomainClient):
             ),
         )
 
-    def previous_close(
-        self, symbol: str, *, adjusted: bool = True
-    ) -> FeedBuilder:
+    def previous_close(self, symbol: str, *, adjusted: bool = True) -> FeedBuilder:
         """Configure a feed for a US Stock's previous trading day OHLCV bar (`/v2/aggs/ticker/{ticker}/prev`).
 
         Args:
@@ -621,9 +610,7 @@ class StocksClient(BaseDomainClient):
             "series_type": series_type,
             "adjusted": str(adjusted).lower(),
         }
-        return self._indicator_feed(
-            "SMA", symbol, params, window, timespan, series_type
-        )
+        return self._indicator_feed("SMA", symbol, params, window, timespan, series_type)
 
     def ema(
         self,
@@ -655,9 +642,7 @@ class StocksClient(BaseDomainClient):
             "series_type": series_type,
             "adjusted": str(adjusted).lower(),
         }
-        return self._indicator_feed(
-            "EMA", symbol, params, window, timespan, series_type
-        )
+        return self._indicator_feed("EMA", symbol, params, window, timespan, series_type)
 
     def macd(
         self,
@@ -695,9 +680,7 @@ class StocksClient(BaseDomainClient):
             "series_type": series_type,
             "adjusted": str(adjusted).lower(),
         }
-        return self._indicator_feed(
-            "MACD", symbol, params, short_window, timespan, series_type
-        )
+        return self._indicator_feed("MACD", symbol, params, short_window, timespan, series_type)
 
     def rsi(
         self,
@@ -729,9 +712,7 @@ class StocksClient(BaseDomainClient):
             "series_type": series_type,
             "adjusted": str(adjusted).lower(),
         }
-        return self._indicator_feed(
-            "RSI", symbol, params, window, timespan, series_type
-        )
+        return self._indicator_feed("RSI", symbol, params, window, timespan, series_type)
 
     def short_interest(
         self,
@@ -1136,24 +1117,10 @@ class StocksClient(BaseDomainClient):
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
 
         def _fetch() -> list[dict[str, Any]]:
-            payload = self.session.request_json(
-                f"/vX/reference/tickers/{canon}/events"
-            )
-            results = (
-                payload.get("results", {})
-                if isinstance(payload, Mapping)
-                else {}
-            )
-            events = (
-                results.get("events", [])
-                if isinstance(results, Mapping)
-                else []
-            )
-            return [
-                {**ev, "Symbol": canon}
-                for ev in events
-                if isinstance(ev, Mapping)
-            ]
+            payload = self.session.request_json(f"/vX/reference/tickers/{canon}/events")
+            results = payload.get("results", {}) if isinstance(payload, Mapping) else {}
+            events = results.get("events", []) if isinstance(results, Mapping) else []
+            return [{**ev, "Symbol": canon} for ev in events if isinstance(ev, Mapping)]
 
         return self.build_feed(
             name=f"stocks_ticker_events_{canon}",

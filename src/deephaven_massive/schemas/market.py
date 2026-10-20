@@ -2,7 +2,7 @@
 
 This module defines the canonical PyArrow schemas (`SchemaSpec`) and row
 normalizers for high-frequency and historical market data across all asset
-classes—including trades, NBBO quotes, OHLCV aggregate bars, Limit Up–Limit Down
+classes—including trades, NBBO quotes, OHLCV aggregate bars, Limit Up-Limit Down
 (LULD) bands, net order imbalances (NOI), Fair Market Value (FMV), index values,
 cross-asset snapshots, daily summaries, currency conversions, and technical
 indicators.
@@ -54,6 +54,12 @@ def _first_present(row: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
+def _submap(row: Mapping[str, Any], *keys: str) -> Mapping[str, Any]:
+    """Return the first nested ``Mapping`` found in ``row`` across ``keys``, or ``{}``."""
+    val = _first_present(row, *keys)
+    return val if isinstance(val, Mapping) else {}
+
+
 def _norm_symbol(
     row: Mapping[str, Any],
     norm: SymbolNormalizer | None,
@@ -80,9 +86,7 @@ def _norm_symbol(
     return norm.canonical(s) if norm is not None else s.upper()
 
 
-def normalize_trade(
-    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
-) -> dict[str, Any]:
+def normalize_trade(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a WebSocket, REST, Snapshot, or S3 Flat File trade row.
 
     Extracts trade execution price, size, exchange ID, condition codes, sequence
@@ -124,9 +128,7 @@ def normalize_trade(
     }
 
 
-def normalize_quote(
-    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
-) -> dict[str, Any]:
+def normalize_quote(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a WebSocket, REST, Snapshot, or S3 Flat File quote row.
 
     Extracts top-of-book bid/ask prices, sizes, exchange IDs, condition and
@@ -214,9 +216,7 @@ def compute_bar_span_ns(multiplier: int = 1, timespan: str = "minute") -> int:
     return int(multiplier) * unit_ns
 
 
-def normalize_bar(
-    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
-) -> dict[str, Any]:
+def normalize_bar(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a WebSocket, REST aggregate, Snapshot, or S3 Flat File OHLCV bar row.
 
     Unifies bar start and end timestamps (`Timestamp` and `EndTimestamp`),
@@ -265,19 +265,15 @@ def normalize_bar(
         "Close": _first_present(src, "Close", "c", "close"),
         "Volume": _first_present(src, "Volume", "v", "volume"),
         "Vwap": _first_present(src, "Vwap", "vw", "vwap"),
-        "AccumulatedVolume": _first_present(
-            src, "AccumulatedVolume", "av", "accumulated_volume"
-        ),
+        "AccumulatedVolume": _first_present(src, "AccumulatedVolume", "av", "accumulated_volume"),
         "OfficialOpen": _first_present(src, "OfficialOpen", "op", "official_open"),
         "Transactions": _first_present(src, "Transactions", "n", "z", "transactions"),
         "IsOtc": _first_present(src, "IsOtc", "otc", "is_otc"),
     }
 
 
-def normalize_luld(
-    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
-) -> dict[str, Any]:
-    """Normalize a Limit Up–Limit Down (``LULD.*``) price band event.
+def normalize_luld(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
+    """Normalize a Limit Up-Limit Down (``LULD.*``) price band event.
 
     Args:
         row: Raw LULD WebSocket event dictionary.
@@ -315,9 +311,7 @@ def normalize_imbalance(
         "AuctionTime": _first_present(row, "AuctionTime", "at", "auction_time"),
         "AuctionType": _first_present(row, "AuctionType", "a", "auction_type"),
         "PairedShares": _first_present(row, "PairedShares", "p", "paired_shares"),
-        "ImbalanceShares": _first_present(
-            row, "ImbalanceShares", "i", "imbalance_shares"
-        ),
+        "ImbalanceShares": _first_present(row, "ImbalanceShares", "i", "imbalance_shares"),
         "ReferencePrice": _first_present(row, "ReferencePrice", "b", "reference_price"),
         "IndicativeMatchPrice": _first_present(
             row, "IndicativeMatchPrice", "im", "indicative_match_price"
@@ -329,9 +323,7 @@ def normalize_imbalance(
     }
 
 
-def normalize_fmv(
-    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
-) -> dict[str, Any]:
+def normalize_fmv(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a Fair Market Value (``FMV.*``) real-time pricing event.
 
     Args:
@@ -385,44 +377,60 @@ def normalize_stock_snapshot(
         dict[str, Any]: Normalized row dictionary matching
         ``STOCK_SNAPSHOT_SCHEMA``.
     """
-    day = row.get("day") if isinstance(row.get("day"), Mapping) else {}
-    prev = row.get("prevDay") or row.get("prev_day")
-    prev_map = prev if isinstance(prev, Mapping) else {}
-    lt = row.get("lastTrade") or row.get("last_trade")
-    lt_map = lt if isinstance(lt, Mapping) else {}
-    lq = row.get("lastQuote") or row.get("last_quote")
-    lq_map = lq if isinstance(lq, Mapping) else {}
-    min_bar = row.get("min") if isinstance(row.get("min"), Mapping) else {}
-    sess = row.get("session") if isinstance(row.get("session"), Mapping) else {}
+    day = _submap(row, "day")
+    prev_map = _submap(row, "prevDay", "prev_day")
+    lt_map = _submap(row, "lastTrade", "last_trade")
+    lq_map = _submap(row, "lastQuote", "last_quote")
+    min_bar = _submap(row, "min")
+    sess = _submap(row, "session")
 
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker", "sym", "T"),
-        "Timestamp": _first_present(
-            row, "Timestamp", "updated", "last_updated"
-        )
+        "Timestamp": _first_present(row, "Timestamp", "updated", "last_updated")
         or _first_present(lt_map, "t", "sip_timestamp")
         or _first_present(lq_map, "t", "sip_timestamp"),
-        "DayOpen": _first_present(row, "DayOpen") or _first_present(day, "o", "open") or _first_present(sess, "open"),
-        "DayHigh": _first_present(row, "DayHigh") or _first_present(day, "h", "high") or _first_present(sess, "high"),
-        "DayLow": _first_present(row, "DayLow") or _first_present(day, "l", "low") or _first_present(sess, "low"),
-        "DayClose": _first_present(row, "DayClose") or _first_present(day, "c", "close") or _first_present(sess, "close") or _first_present(row, "value"),
-        "DayVolume": _first_present(row, "DayVolume") or _first_present(day, "v", "volume") or _first_present(sess, "volume"),
+        "DayOpen": _first_present(row, "DayOpen")
+        or _first_present(day, "o", "open")
+        or _first_present(sess, "open"),
+        "DayHigh": _first_present(row, "DayHigh")
+        or _first_present(day, "h", "high")
+        or _first_present(sess, "high"),
+        "DayLow": _first_present(row, "DayLow")
+        or _first_present(day, "l", "low")
+        or _first_present(sess, "low"),
+        "DayClose": _first_present(row, "DayClose")
+        or _first_present(day, "c", "close")
+        or _first_present(sess, "close")
+        or _first_present(row, "value"),
+        "DayVolume": _first_present(row, "DayVolume")
+        or _first_present(day, "v", "volume")
+        or _first_present(sess, "volume"),
         "DayVwap": _first_present(row, "DayVwap") or _first_present(day, "vw", "vwap"),
-        "PrevDayClose": _first_present(row, "PrevDayClose") or _first_present(prev_map, "c", "close") or _first_present(sess, "previous_close"),
-        "PrevDayVolume": _first_present(row, "PrevDayVolume") or _first_present(prev_map, "v", "volume"),
-        "Change": _first_present(row, "Change", "todaysChange", "todays_change") or _first_present(sess, "change"),
+        "PrevDayClose": _first_present(row, "PrevDayClose")
+        or _first_present(prev_map, "c", "close")
+        or _first_present(sess, "previous_close"),
+        "PrevDayVolume": _first_present(row, "PrevDayVolume")
+        or _first_present(prev_map, "v", "volume"),
+        "Change": _first_present(row, "Change", "todaysChange", "todays_change")
+        or _first_present(sess, "change"),
         "ChangePercent": _first_present(
             row, "ChangePercent", "todaysChangePerc", "todays_change_perc"
         )
         or _first_present(sess, "change_percent"),
-        "LastTradePrice": _first_present(row, "LastTradePrice") or _first_present(lt_map, "p", "price"),
-        "LastTradeSize": _first_present(row, "LastTradeSize") or _first_present(lt_map, "s", "size"),
-        "LastTradeTimestamp": _first_present(row, "LastTradeTimestamp") or _first_present(lt_map, "t", "sip_timestamp", "participant_timestamp"),
-        "BidPrice": _first_present(row, "BidPrice") or _first_present(lq_map, "p", "bp", "bid", "bid_price"),
+        "LastTradePrice": _first_present(row, "LastTradePrice")
+        or _first_present(lt_map, "p", "price"),
+        "LastTradeSize": _first_present(row, "LastTradeSize")
+        or _first_present(lt_map, "s", "size"),
+        "LastTradeTimestamp": _first_present(row, "LastTradeTimestamp")
+        or _first_present(lt_map, "t", "sip_timestamp", "participant_timestamp"),
+        "BidPrice": _first_present(row, "BidPrice")
+        or _first_present(lq_map, "p", "bp", "bid", "bid_price"),
         "BidSize": _first_present(row, "BidSize") or _first_present(lq_map, "s", "bs", "bid_size"),
-        "AskPrice": _first_present(row, "AskPrice") or _first_present(lq_map, "P", "ap", "ask", "ask_price"),
+        "AskPrice": _first_present(row, "AskPrice")
+        or _first_present(lq_map, "P", "ap", "ask", "ask_price"),
         "AskSize": _first_present(row, "AskSize") or _first_present(lq_map, "S", "as", "ask_size"),
-        "QuoteTimestamp": _first_present(row, "QuoteTimestamp") or _first_present(lq_map, "t", "sip_timestamp", "last_updated"),
+        "QuoteTimestamp": _first_present(row, "QuoteTimestamp")
+        or _first_present(lq_map, "t", "sip_timestamp", "last_updated"),
         "MinOpen": _first_present(row, "MinOpen") or _first_present(min_bar, "o", "open"),
         "MinHigh": _first_present(row, "MinHigh") or _first_present(min_bar, "h", "high"),
         "MinLow": _first_present(row, "MinLow") or _first_present(min_bar, "l", "low"),
@@ -450,29 +458,34 @@ def normalize_option_chain_snapshot(
         dict[str, Any]: Normalized row dictionary matching
         ``OPTION_CHAIN_SCHEMA``.
     """
-    details = row.get("details") if isinstance(row.get("details"), Mapping) else {}
-    greeks = row.get("greeks") if isinstance(row.get("greeks"), Mapping) else {}
-    underlying = (
-        row.get("underlying_asset")
-        if isinstance(row.get("underlying_asset"), Mapping)
-        else {}
-    )
-    day = row.get("day") if isinstance(row.get("day"), Mapping) else {}
-    lq = row.get("last_quote") if isinstance(row.get("last_quote"), Mapping) else {}
-    lt = row.get("last_trade") if isinstance(row.get("last_trade"), Mapping) else {}
+    details = _submap(row, "details")
+    greeks = _submap(row, "greeks")
+    underlying = _submap(row, "underlying_asset")
+    day = _submap(row, "day")
+    lq = _submap(row, "last_quote")
+    lt = _submap(row, "last_trade")
 
     raw_sym = _first_present(row, "Symbol", "ticker") or _first_present(details, "ticker")
-    sym = norm.canonical(str(raw_sym)) if (raw_sym and norm) else (str(raw_sym) if raw_sym else None)
+    sym = (
+        norm.canonical(str(raw_sym)) if (raw_sym and norm) else (str(raw_sym) if raw_sym else None)
+    )
 
     return {
         "Symbol": sym,
-        "UnderlyingSymbol": _first_present(row, "UnderlyingSymbol") or _first_present(underlying, "ticker"),
-        "UnderlyingPrice": _first_present(row, "UnderlyingPrice") or _first_present(underlying, "price", "value"),
-        "ExpirationDate": _first_present(row, "ExpirationDate") or _first_present(details, "expiration_date"),
-        "StrikePrice": _first_present(row, "StrikePrice") or _first_present(details, "strike_price"),
-        "ContractType": _first_present(row, "ContractType") or _first_present(details, "contract_type"),
-        "ExerciseStyle": _first_present(row, "ExerciseStyle") or _first_present(details, "exercise_style"),
-        "SharesPerContract": _first_present(row, "SharesPerContract") or _first_present(details, "shares_per_contract"),
+        "UnderlyingSymbol": _first_present(row, "UnderlyingSymbol")
+        or _first_present(underlying, "ticker"),
+        "UnderlyingPrice": _first_present(row, "UnderlyingPrice")
+        or _first_present(underlying, "price", "value"),
+        "ExpirationDate": _first_present(row, "ExpirationDate")
+        or _first_present(details, "expiration_date"),
+        "StrikePrice": _first_present(row, "StrikePrice")
+        or _first_present(details, "strike_price"),
+        "ContractType": _first_present(row, "ContractType")
+        or _first_present(details, "contract_type"),
+        "ExerciseStyle": _first_present(row, "ExerciseStyle")
+        or _first_present(details, "exercise_style"),
+        "SharesPerContract": _first_present(row, "SharesPerContract")
+        or _first_present(details, "shares_per_contract"),
         "BreakEvenPrice": _first_present(row, "BreakEvenPrice", "break_even_price"),
         "ImpliedVolatility": _first_present(row, "ImpliedVolatility", "implied_volatility"),
         "OpenInterest": _first_present(row, "OpenInterest", "open_interest"),
@@ -485,19 +498,23 @@ def normalize_option_chain_snapshot(
         "AskPrice": _first_present(row, "AskPrice") or _first_present(lq, "ask", "ask_price"),
         "AskSize": _first_present(row, "AskSize") or _first_present(lq, "ask_size"),
         "Midpoint": _first_present(row, "Midpoint") or _first_present(lq, "midpoint"),
-        "QuoteTimestamp": _first_present(row, "QuoteTimestamp") or _first_present(lq, "last_updated", "sip_timestamp"),
+        "QuoteTimestamp": _first_present(row, "QuoteTimestamp")
+        or _first_present(lq, "last_updated", "sip_timestamp"),
         "LastTradePrice": _first_present(row, "LastTradePrice") or _first_present(lt, "price"),
         "LastTradeSize": _first_present(row, "LastTradeSize") or _first_present(lt, "size"),
-        "LastTradeTimestamp": _first_present(row, "LastTradeTimestamp") or _first_present(lt, "sip_timestamp"),
+        "LastTradeTimestamp": _first_present(row, "LastTradeTimestamp")
+        or _first_present(lt, "sip_timestamp"),
         "DayOpen": _first_present(row, "DayOpen") or _first_present(day, "open", "o"),
         "DayHigh": _first_present(row, "DayHigh") or _first_present(day, "high", "h"),
         "DayLow": _first_present(row, "DayLow") or _first_present(day, "low", "l"),
         "DayClose": _first_present(row, "DayClose") or _first_present(day, "close", "c"),
         "DayVolume": _first_present(row, "DayVolume") or _first_present(day, "volume", "v"),
         "DayVwap": _first_present(row, "DayVwap") or _first_present(day, "vwap", "vw"),
-        "PrevDayClose": _first_present(row, "PrevDayClose") or _first_present(day, "previous_close"),
+        "PrevDayClose": _first_present(row, "PrevDayClose")
+        or _first_present(day, "previous_close"),
         "Change": _first_present(row, "Change") or _first_present(day, "change"),
-        "ChangePercent": _first_present(row, "ChangePercent") or _first_present(day, "change_percent"),
+        "ChangePercent": _first_present(row, "ChangePercent")
+        or _first_present(day, "change_percent"),
         "FairMarketValue": _first_present(row, "FairMarketValue", "fmv"),
     }
 
@@ -519,33 +536,50 @@ def normalize_futures_snapshot(
         dict[str, Any]: Normalized row dictionary matching
         ``FUTURES_SNAPSHOT_SCHEMA``.
     """
-    details = row.get("details") if isinstance(row.get("details"), Mapping) else {}
-    lt = row.get("last_trade") if isinstance(row.get("last_trade"), Mapping) else {}
-    lq = row.get("last_quote") if isinstance(row.get("last_quote"), Mapping) else {}
-    sess = row.get("session") if isinstance(row.get("session"), Mapping) else {}
-    min_bar = row.get("last_minute") if isinstance(row.get("last_minute"), Mapping) else {}
+    details = _submap(row, "details")
+    lt = _submap(row, "last_trade")
+    lq = _submap(row, "last_quote")
+    sess = _submap(row, "session")
+    min_bar = _submap(row, "last_minute")
 
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
-        "ProductCode": _first_present(row, "ProductCode", "product_code") or _first_present(details, "product_code"),
+        "ProductCode": _first_present(row, "ProductCode", "product_code")
+        or _first_present(details, "product_code"),
         "Name": _first_present(row, "Name", "name") or _first_present(details, "name"),
-        "Timestamp": _first_present(row, "Timestamp", "last_updated") or _first_present(lt, "timestamp") or _first_present(lq, "timestamp"),
+        "Timestamp": _first_present(row, "Timestamp", "last_updated")
+        or _first_present(lt, "timestamp")
+        or _first_present(lq, "timestamp"),
         "LastTradePrice": _first_present(row, "LastTradePrice") or _first_present(lt, "price"),
         "LastTradeSize": _first_present(row, "LastTradeSize") or _first_present(lt, "size"),
         "BidPrice": _first_present(row, "BidPrice") or _first_present(lq, "bid", "bid_price"),
         "BidSize": _first_present(row, "BidSize") or _first_present(lq, "bid_size"),
         "AskPrice": _first_present(row, "AskPrice") or _first_present(lq, "ask", "ask_price"),
         "AskSize": _first_present(row, "AskSize") or _first_present(lq, "ask_size"),
-        "SessionOpen": _first_present(row, "SessionOpen") or _first_present(sess, "open") or _first_present(min_bar, "open"),
-        "SessionHigh": _first_present(row, "SessionHigh") or _first_present(sess, "high") or _first_present(min_bar, "high"),
-        "SessionLow": _first_present(row, "SessionLow") or _first_present(sess, "low") or _first_present(min_bar, "low"),
-        "SessionClose": _first_present(row, "SessionClose") or _first_present(sess, "close") or _first_present(min_bar, "close"),
-        "SessionVolume": _first_present(row, "SessionVolume") or _first_present(sess, "volume") or _first_present(min_bar, "volume"),
-        "SettlementPrice": _first_present(row, "SettlementPrice") or _first_present(sess, "settlement_price"),
-        "PreviousSettlement": _first_present(row, "PreviousSettlement") or _first_present(sess, "previous_settlement"),
+        "SessionOpen": _first_present(row, "SessionOpen")
+        or _first_present(sess, "open")
+        or _first_present(min_bar, "open"),
+        "SessionHigh": _first_present(row, "SessionHigh")
+        or _first_present(sess, "high")
+        or _first_present(min_bar, "high"),
+        "SessionLow": _first_present(row, "SessionLow")
+        or _first_present(sess, "low")
+        or _first_present(min_bar, "low"),
+        "SessionClose": _first_present(row, "SessionClose")
+        or _first_present(sess, "close")
+        or _first_present(min_bar, "close"),
+        "SessionVolume": _first_present(row, "SessionVolume")
+        or _first_present(sess, "volume")
+        or _first_present(min_bar, "volume"),
+        "SettlementPrice": _first_present(row, "SettlementPrice")
+        or _first_present(sess, "settlement_price"),
+        "PreviousSettlement": _first_present(row, "PreviousSettlement")
+        or _first_present(sess, "previous_settlement"),
         "Change": _first_present(row, "Change") or _first_present(sess, "change"),
-        "ChangePercent": _first_present(row, "ChangePercent") or _first_present(sess, "change_percent"),
-        "OpenInterest": _first_present(row, "OpenInterest") or _first_present(details, "open_interest"),
+        "ChangePercent": _first_present(row, "ChangePercent")
+        or _first_present(sess, "change_percent"),
+        "OpenInterest": _first_present(row, "OpenInterest")
+        or _first_present(details, "open_interest"),
     }
 
 
@@ -591,7 +625,7 @@ def normalize_currency_conversion(
         dict[str, Any]: Normalized row dictionary matching
         ``CURRENCY_CONVERSION_SCHEMA``.
     """
-    last_q = row.get("last") if isinstance(row.get("last"), Mapping) else {}
+    last_q = _submap(row, "last")
     from_curr = _first_present(row, "FromCurrency", "from")
     to_curr = _first_present(row, "ToCurrency", "to")
     raw_sym = _first_present(row, "Symbol", "symbol") or (

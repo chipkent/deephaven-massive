@@ -130,11 +130,11 @@ class SymbolNormalizer:
         if self.domain == "indices":
             return raw if raw.startswith("I:") else f"I:{raw}"
         if self.domain == "forex":
-            stripped = raw[2:] if raw.startswith("C:") else raw
+            stripped = raw.removeprefix("C:")
             base, quote = _split_currency_pair(stripped)
             return f"{base}/{quote}"
         # self.domain == "crypto"
-        stripped = raw[2:] if raw.startswith("X:") else raw
+        stripped = raw.removeprefix("X:")
         base, quote = _split_currency_pair(stripped)
         return f"{base}-{quote}"
 

@@ -32,7 +32,7 @@ from deephaven_massive.engine.arrow_bridge import (
     SchemaSpec,
     flatten_dict,
 )
-from deephaven_massive.schemas.market import _first_present, _norm_symbol
+from deephaven_massive.schemas.market import _first_present, _norm_symbol, _submap
 
 if TYPE_CHECKING:
     from deephaven_massive.engine.symbols import SymbolNormalizer
@@ -84,13 +84,9 @@ def normalize_short_volume(
             "Date": _first_present(row, "Date", "date"),
             "ShortVolume": _first_present(row, "ShortVolume", "short_volume"),
             "TotalVolume": _first_present(row, "TotalVolume", "total_volume"),
-            "ShortVolumeRatio": _first_present(
-                row, "ShortVolumeRatio", "short_volume_ratio"
-            ),
+            "ShortVolumeRatio": _first_present(row, "ShortVolumeRatio", "short_volume_ratio"),
             "ExemptVolume": _first_present(row, "ExemptVolume", "exempt_volume"),
-            "NonExemptVolume": _first_present(
-                row, "NonExemptVolume", "non_exempt_volume"
-            ),
+            "NonExemptVolume": _first_present(row, "NonExemptVolume", "non_exempt_volume"),
             "NasdaqCarteretShortVolume": _first_present(
                 row,
                 "NasdaqCarteretShortVolume",
@@ -101,9 +97,7 @@ def normalize_short_volume(
                 "NasdaqChicagoShortVolume",
                 "nasdaq_chicago_short_volume",
             ),
-            "NyseShortVolume": _first_present(
-                row, "NyseShortVolume", "nyse_short_volume"
-            ),
+            "NyseShortVolume": _first_present(row, "NyseShortVolume", "nyse_short_volume"),
             "ArcaShortVolume": _first_present(
                 row, "ArcaShortVolume", "adf_short_volume", "arca_short_volume"
             ),
@@ -128,9 +122,7 @@ def normalize_share_float(
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "EffectiveDate": _first_present(row, "EffectiveDate", "effective_date", "date"),
         "FreeFloat": _first_present(row, "FreeFloat", "free_float"),
-        "FreeFloatPercent": _first_present(
-            row, "FreeFloatPercent", "free_float_percent"
-        ),
+        "FreeFloatPercent": _first_present(row, "FreeFloatPercent", "free_float_percent"),
         "OutstandingShares": _first_present(
             row, "OutstandingShares", "outstanding_shares", "share_class_shares_outstanding"
         ),
@@ -158,7 +150,7 @@ def normalize_financial_statement(
         ``FINANCIAL_STATEMENT_SCHEMA``.
     """
     flat = flatten_dict(row)
-    fin = row.get("financials") if isinstance(row.get("financials"), Mapping) else {}
+    fin = _submap(row, "financials")
     for section in fin.values():
         flat.update(flatten_dict(section) if isinstance(section, Mapping) else {})
 
@@ -168,7 +160,11 @@ def normalize_financial_statement(
         if isinstance(tickers_val, list) and tickers_val
         else _first_present(row, "Symbol", "ticker")
     )
-    sym = norm.canonical(str(first_ticker)) if (first_ticker and norm) else (str(first_ticker) if first_ticker else None)
+    sym = (
+        norm.canonical(str(first_ticker))
+        if (first_ticker and norm)
+        else (str(first_ticker) if first_ticker else None)
+    )
 
     flat.update(
         {
@@ -176,9 +172,7 @@ def normalize_financial_statement(
             "Cik": _first_present(row, "Cik", "cik"),
             "CompanyName": _first_present(row, "CompanyName", "company_name"),
             "FilingDate": _first_present(row, "FilingDate", "filing_date"),
-            "PeriodEnd": _first_present(
-                row, "PeriodEnd", "period_of_report_date", "end_date"
-            ),
+            "PeriodEnd": _first_present(row, "PeriodEnd", "period_of_report_date", "end_date"),
             "FiscalPeriod": _first_present(row, "FiscalPeriod", "fiscal_period"),
             "FiscalYear": _first_present(row, "FiscalYear", "fiscal_year"),
             "Timeframe": _first_present(row, "Timeframe", "timeframe"),
@@ -186,17 +180,11 @@ def normalize_financial_statement(
             "NetIncome": _first_present(
                 flat, "NetIncome", "NetIncomeLoss", "ConsolidatedNetIncomeLoss"
             ),
-            "OperatingIncome": _first_present(
-                flat, "OperatingIncome", "OperatingIncomeLoss"
-            ),
-            "DilutedEps": _first_present(
-                flat, "DilutedEps", "DilutedEarningsPerShare"
-            ),
+            "OperatingIncome": _first_present(flat, "OperatingIncome", "OperatingIncomeLoss"),
+            "DilutedEps": _first_present(flat, "DilutedEps", "DilutedEarningsPerShare"),
             "TotalAssets": _first_present(flat, "TotalAssets", "Assets"),
             "TotalLiabilities": _first_present(flat, "TotalLiabilities", "Liabilities"),
-            "TotalEquity": _first_present(
-                flat, "TotalEquity", "Equity", "StockholdersEquity"
-            ),
+            "TotalEquity": _first_present(flat, "TotalEquity", "Equity", "StockholdersEquity"),
             "CashAndEquivalents": _first_present(
                 flat, "CashAndEquivalents", "CashAndCashEquivalentsAtCarryingValue"
             ),
@@ -205,9 +193,7 @@ def normalize_financial_statement(
                 "OperatingCashFlow",
                 "NetCashFlowFromOperatingActivities",
             ),
-            "CapitalExpenditure": _first_present(
-                flat, "CapitalExpenditure", "CapitalExpenditures"
-            ),
+            "CapitalExpenditure": _first_present(flat, "CapitalExpenditure", "CapitalExpenditures"),
             "FreeCashFlow": _first_present(flat, "FreeCashFlow"),
         }
     )
@@ -234,25 +220,15 @@ def normalize_ratios(
             "PriceToEarnings": _first_present(
                 row, "PriceToEarnings", "price_to_earnings", "pe_ratio"
             ),
-            "PriceToBook": _first_present(
-                row, "PriceToBook", "price_to_book", "pb_ratio"
-            ),
-            "PriceToSales": _first_present(
-                row, "PriceToSales", "price_to_sales", "ps_ratio"
-            ),
+            "PriceToBook": _first_present(row, "PriceToBook", "price_to_book", "pb_ratio"),
+            "PriceToSales": _first_present(row, "PriceToSales", "price_to_sales", "ps_ratio"),
             "PriceToFreeCashFlow": _first_present(
                 row, "PriceToFreeCashFlow", "price_to_free_cash_flow", "pfcf_ratio"
             ),
-            "EnterpriseValue": _first_present(
-                row, "EnterpriseValue", "enterprise_value", "ev"
-            ),
+            "EnterpriseValue": _first_present(row, "EnterpriseValue", "enterprise_value", "ev"),
             "EvToEbitda": _first_present(row, "EvToEbitda", "ev_to_ebitda"),
-            "ReturnOnEquity": _first_present(
-                row, "ReturnOnEquity", "return_on_equity", "roe"
-            ),
-            "ReturnOnAssets": _first_present(
-                row, "ReturnOnAssets", "return_on_assets", "roa"
-            ),
+            "ReturnOnEquity": _first_present(row, "ReturnOnEquity", "return_on_equity", "roe"),
+            "ReturnOnAssets": _first_present(row, "ReturnOnAssets", "return_on_assets", "roa"),
             "CurrentRatio": _first_present(row, "CurrentRatio", "current_ratio"),
             "QuickRatio": _first_present(row, "QuickRatio", "quick_ratio"),
             "DebtToEquity": _first_present(row, "DebtToEquity", "debt_to_equity"),
@@ -287,9 +263,7 @@ def normalize_dividend(
     }
 
 
-def normalize_split(
-    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
-) -> dict[str, Any]:
+def normalize_split(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a forward or reverse stock split row.
 
     Args:
@@ -307,9 +281,7 @@ def normalize_split(
     }
 
 
-def normalize_ipo(
-    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
-) -> dict[str, Any]:
+def normalize_ipo(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a ``/vX/reference/ipos`` initial public offering event row.
 
     Args:
@@ -325,12 +297,8 @@ def normalize_ipo(
         "ListingDate": _first_present(row, "ListingDate", "listing_date"),
         "IpoStatus": _first_present(row, "IpoStatus", "ipo_status"),
         "FinalIssuePrice": _first_present(row, "FinalIssuePrice", "final_issue_price"),
-        "LowestOfferPrice": _first_present(
-            row, "LowestOfferPrice", "lowest_offer_price"
-        ),
-        "HighestOfferPrice": _first_present(
-            row, "HighestOfferPrice", "highest_offer_price"
-        ),
+        "LowestOfferPrice": _first_present(row, "LowestOfferPrice", "lowest_offer_price"),
+        "HighestOfferPrice": _first_present(row, "HighestOfferPrice", "highest_offer_price"),
         "SharesOffered": _first_present(
             row, "SharesOffered", "total_shares_offered", "shares_outstanding"
         ),
@@ -360,9 +328,7 @@ def normalize_ticker(
         "PrimaryExchange": _first_present(row, "PrimaryExchange", "primary_exchange"),
         "Type": _first_present(row, "Type", "type"),
         "Active": _first_present(row, "Active", "active"),
-        "CurrencyName": _first_present(
-            row, "CurrencyName", "currency_name", "currency_symbol"
-        ),
+        "CurrencyName": _first_present(row, "CurrencyName", "currency_name", "currency_symbol"),
         "Cik": _first_present(row, "Cik", "cik"),
         "CompositeFigi": _first_present(row, "CompositeFigi", "composite_figi"),
         "ShareClassFigi": _first_present(row, "ShareClassFigi", "share_class_figi"),
@@ -384,7 +350,7 @@ def normalize_ticker_details(
         dict[str, Any]: Normalized row dictionary matching
         ``TICKER_DETAILS_SCHEMA``.
     """
-    addr = row.get("address") if isinstance(row.get("address"), Mapping) else {}
+    addr = _submap(row, "address")
     flat = flatten_dict(row)
     flat.update(
         {
@@ -392,9 +358,7 @@ def normalize_ticker_details(
             "Name": _first_present(row, "Name", "name"),
             "Market": _first_present(row, "Market", "market"),
             "Locale": _first_present(row, "Locale", "locale"),
-            "PrimaryExchange": _first_present(
-                row, "PrimaryExchange", "primary_exchange"
-            ),
+            "PrimaryExchange": _first_present(row, "PrimaryExchange", "primary_exchange"),
             "Type": _first_present(row, "Type", "type"),
             "Active": _first_present(row, "Active", "active"),
             "CurrencyName": _first_present(row, "CurrencyName", "currency_name"),
@@ -405,13 +369,10 @@ def normalize_ticker_details(
             "Address1": _first_present(row, "Address1") or _first_present(addr, "address1"),
             "City": _first_present(row, "City") or _first_present(addr, "city"),
             "State": _first_present(row, "State") or _first_present(addr, "state"),
-            "PostalCode": _first_present(row, "PostalCode")
-            or _first_present(addr, "postal_code"),
+            "PostalCode": _first_present(row, "PostalCode") or _first_present(addr, "postal_code"),
             "Description": _first_present(row, "Description", "description"),
             "SicCode": _first_present(row, "SicCode", "sic_code"),
-            "SicDescription": _first_present(
-                row, "SicDescription", "sic_description"
-            ),
+            "SicDescription": _first_present(row, "SicDescription", "sic_description"),
             "HomepageUrl": _first_present(row, "HomepageUrl", "homepage_url"),
             "TotalEmployees": _first_present(row, "TotalEmployees", "total_employees"),
             "ListDate": _first_present(row, "ListDate", "list_date"),
@@ -438,7 +399,7 @@ def normalize_ticker_event(
         dict[str, Any]: Normalized row dictionary matching
         ``TICKER_EVENTS_SCHEMA``.
     """
-    tc = row.get("ticker_change") if isinstance(row.get("ticker_change"), Mapping) else {}
+    tc = _submap(row, "ticker_change")
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "EventType": _first_present(row, "EventType", "type"),
@@ -504,16 +465,12 @@ def normalize_option_contract(
     """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
-        "UnderlyingSymbol": _first_present(
-            row, "UnderlyingSymbol", "underlying_ticker"
-        ),
+        "UnderlyingSymbol": _first_present(row, "UnderlyingSymbol", "underlying_ticker"),
         "ContractType": _first_present(row, "ContractType", "contract_type"),
         "ExerciseStyle": _first_present(row, "ExerciseStyle", "exercise_style"),
         "ExpirationDate": _first_present(row, "ExpirationDate", "expiration_date"),
         "StrikePrice": _first_present(row, "StrikePrice", "strike_price"),
-        "SharesPerContract": _first_present(
-            row, "SharesPerContract", "shares_per_contract"
-        ),
+        "SharesPerContract": _first_present(row, "SharesPerContract", "shares_per_contract"),
         "PrimaryExchange": _first_present(row, "PrimaryExchange", "primary_exchange"),
         "Cfi": _first_present(row, "Cfi", "cfi"),
     }
@@ -568,9 +525,7 @@ def normalize_futures_product(
         "AssetClass": _first_present(row, "AssetClass", "asset_class"),
         "SubAssetClass": _first_present(row, "SubAssetClass", "sub_asset_class"),
         "UnitOfMeasure": _first_present(row, "UnitOfMeasure", "unit_of_measure"),
-        "SettlementMethod": _first_present(
-            row, "SettlementMethod", "settlement_method"
-        ),
+        "SettlementMethod": _first_present(row, "SettlementMethod", "settlement_method"),
         "SettlementType": _first_present(row, "SettlementType", "settlement_type"),
         "PriceQuotation": _first_present(row, "PriceQuotation", "price_quotation"),
     }
@@ -618,18 +573,12 @@ def normalize_sec_filing(
         {
             "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
             "Cik": _first_present(row, "Cik", "cik"),
-            "AccessionNumber": _first_present(
-                row, "AccessionNumber", "accession_number"
-            ),
+            "AccessionNumber": _first_present(row, "AccessionNumber", "accession_number"),
             "FormType": _first_present(row, "FormType", "form_type", "type"),
             "FilingDate": _first_present(row, "FilingDate", "filing_date"),
-            "ReportDate": _first_present(
-                row, "ReportDate", "report_date", "period_end"
-            ),
+            "ReportDate": _first_present(row, "ReportDate", "report_date", "period_end"),
             "FilingUrl": _first_present(row, "FilingUrl", "filing_url", "url"),
-            "Section": _first_present(
-                row, "Section", "section", "category", "taxonomy"
-            ),
+            "Section": _first_present(row, "Section", "section", "category", "taxonomy"),
             "Title": _first_present(row, "Title", "title", "item", "topic"),
             "Text": _first_present(row, "Text", "text", "content", "description"),
         }
@@ -653,23 +602,17 @@ def normalize_sec_13f(
     flat.update(
         {
             "Cik": _first_present(row, "Cik", "cik"),
-            "FilerName": _first_present(
-                row, "FilerName", "filer_name", "company_name"
-            ),
+            "FilerName": _first_present(row, "FilerName", "filer_name", "company_name"),
             "PeriodOfReport": _first_present(
                 row, "PeriodOfReport", "period_of_report", "report_date"
             ),
             "FilingDate": _first_present(row, "FilingDate", "filing_date"),
             "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
-            "SecurityName": _first_present(
-                row, "SecurityName", "security_name", "name_of_issuer"
-            ),
+            "SecurityName": _first_present(row, "SecurityName", "security_name", "name_of_issuer"),
             "Cusip": _first_present(row, "Cusip", "cusip"),
             "Value": _first_present(row, "Value", "value"),
             "Shares": _first_present(row, "Shares", "shares", "ssh_prnamt"),
-            "Discretion": _first_present(
-                row, "Discretion", "investment_discretion", "discretion"
-            ),
+            "Discretion": _first_present(row, "Discretion", "investment_discretion", "discretion"),
             "PutCall": _first_present(row, "PutCall", "put_call"),
         }
     )
@@ -697,23 +640,13 @@ def normalize_sec_insider(
             "InsiderName": _first_present(
                 row, "InsiderName", "insider_name", "reporting_owner_name"
             ),
-            "InsiderTitle": _first_present(
-                row, "InsiderTitle", "insider_title", "officer_title"
-            ),
-            "AccessionNumber": _first_present(
-                row, "AccessionNumber", "accession_number"
-            ),
+            "InsiderTitle": _first_present(row, "InsiderTitle", "insider_title", "officer_title"),
+            "AccessionNumber": _first_present(row, "AccessionNumber", "accession_number"),
             "FormType": _first_present(row, "FormType", "form_type"),
             "FilingDate": _first_present(row, "FilingDate", "filing_date"),
-            "TransactionDate": _first_present(
-                row, "TransactionDate", "transaction_date"
-            ),
-            "TransactionCode": _first_present(
-                row, "TransactionCode", "transaction_code"
-            ),
-            "Shares": _first_present(
-                row, "Shares", "shares", "transaction_shares", "shares_owned"
-            ),
+            "TransactionDate": _first_present(row, "TransactionDate", "transaction_date"),
+            "TransactionCode": _first_present(row, "TransactionCode", "transaction_code"),
+            "Shares": _first_present(row, "Shares", "shares", "transaction_shares", "shares_owned"),
             "PricePerShare": _first_present(
                 row, "PricePerShare", "price_per_share", "transaction_price_per_share"
             ),
@@ -725,9 +658,7 @@ def normalize_sec_insider(
     return flat
 
 
-def normalize_news(
-    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
-) -> dict[str, Any]:
+def normalize_news(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a ``/v2/reference/news`` article row with publisher and sentiment insights.
 
     Args:
@@ -738,9 +669,10 @@ def normalize_news(
     Returns:
         dict[str, Any]: Normalized row dictionary matching ``NEWS_SCHEMA``.
     """
-    pub = row.get("publisher") if isinstance(row.get("publisher"), Mapping) else {}
-    insights = row.get("insights") if isinstance(row.get("insights"), list) else []
-    first_insight = (
+    pub = _submap(row, "publisher")
+    insights_raw = row.get("insights")
+    insights = insights_raw if isinstance(insights_raw, list) else []
+    first_insight: Mapping[str, Any] = (
         insights[0] if insights and isinstance(insights[0], Mapping) else {}
     )
     return {
@@ -753,8 +685,7 @@ def normalize_news(
         "Symbols": _first_present(row, "Symbols", "tickers"),
         "Description": _first_present(row, "Description", "description"),
         "Keywords": _first_present(row, "Keywords", "keywords"),
-        "Sentiment": _first_present(row, "Sentiment")
-        or _first_present(first_insight, "sentiment"),
+        "Sentiment": _first_present(row, "Sentiment") or _first_present(first_insight, "sentiment"),
         "SentimentReasoning": _first_present(row, "SentimentReasoning")
         or _first_present(first_insight, "sentiment_reasoning"),
     }
@@ -848,10 +779,8 @@ def normalize_market_status(
         dict[str, Any]: Normalized row dictionary matching
         ``MARKET_STATUS_SCHEMA``.
     """
-    exchanges = row.get("exchanges") if isinstance(row.get("exchanges"), Mapping) else {}
-    currencies = (
-        row.get("currencies") if isinstance(row.get("currencies"), Mapping) else {}
-    )
+    exchanges = _submap(row, "exchanges")
+    currencies = _submap(row, "currencies")
     return {
         "ServerTime": _first_present(row, "ServerTime", "serverTime", "server_time"),
         "Market": _first_present(row, "Market", "market"),

@@ -58,9 +58,7 @@ def _hybrid_partner_normalizer(
         A ``RowNormalizer`` function compatible with ``rows_to_arrow_table``.
     """
 
-    def _norm(
-        row: Mapping[str, Any], norm: SymbolNormalizer | None = None
-    ) -> dict[str, Any]:
+    def _norm(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
         flat = flatten_dict(row)
         for col_name, candidate_keys in anchor_Extractors.items():
             if col_name == "Symbol":
@@ -106,7 +104,12 @@ BENZINGA_RATINGS_SCHEMA = SchemaSpec(
             "RatingCurrent": ("RatingCurrent", "rating_current", "rating"),
             "RatingPrior": ("RatingPrior", "rating_prior", "previous_rating"),
             "PriceTargetAction": ("PriceTargetAction", "price_target_action", "action_pt"),
-            "PriceTargetCurrent": ("PriceTargetCurrent", "price_target_current", "pt_current", "price_target"),
+            "PriceTargetCurrent": (
+                "PriceTargetCurrent",
+                "price_target_current",
+                "pt_current",
+                "price_target",
+            ),
             "PriceTargetPrior": ("PriceTargetPrior", "price_target_prior", "pt_prior"),
             "Currency": ("Currency", "currency"),
         }
@@ -148,7 +151,12 @@ BENZINGA_EARNINGS_SCHEMA = SchemaSpec(
             "EpsSurprise": ("EpsSurprise", "eps_surprise"),
             "EpsSurprisePercent": ("EpsSurprisePercent", "eps_surprise_percent"),
             "RevenueActual": ("RevenueActual", "actual_revenue", "revenue_actual", "revenue"),
-            "RevenueEstimate": ("RevenueEstimate", "estimated_revenue", "revenue_estimate", "revenue_est"),
+            "RevenueEstimate": (
+                "RevenueEstimate",
+                "estimated_revenue",
+                "revenue_estimate",
+                "revenue_est",
+            ),
             "RevenueSurprise": ("RevenueSurprise", "revenue_surprise"),
             "RevenueSurprisePercent": ("RevenueSurprisePercent", "revenue_surprise_percent"),
         }
@@ -186,9 +194,21 @@ BENZINGA_GUIDANCE_SCHEMA = SchemaSpec(
             "EpsGuidanceMin": ("EpsGuidanceMin", "eps_guidance_min", "min_eps_guidance"),
             "EpsGuidanceMax": ("EpsGuidanceMax", "eps_guidance_max", "max_eps_guidance"),
             "EpsGuidanceEst": ("EpsGuidanceEst", "eps_guidance_est", "est_eps_guidance"),
-            "RevenueGuidanceMin": ("RevenueGuidanceMin", "revenue_guidance_min", "min_revenue_guidance"),
-            "RevenueGuidanceMax": ("RevenueGuidanceMax", "revenue_guidance_max", "max_revenue_guidance"),
-            "RevenueGuidanceEst": ("RevenueGuidanceEst", "revenue_guidance_est", "est_revenue_guidance"),
+            "RevenueGuidanceMin": (
+                "RevenueGuidanceMin",
+                "revenue_guidance_min",
+                "min_revenue_guidance",
+            ),
+            "RevenueGuidanceMax": (
+                "RevenueGuidanceMax",
+                "revenue_guidance_max",
+                "max_revenue_guidance",
+            ),
+            "RevenueGuidanceEst": (
+                "RevenueGuidanceEst",
+                "revenue_guidance_est",
+                "est_revenue_guidance",
+            ),
         }
     ),
     allow_dynamic_columns=True,
@@ -218,7 +238,11 @@ BENZINGA_CONSENSUS_SCHEMA = SchemaSpec(
         {
             "Symbol": ("Symbol", "ticker", "symbol"),
             "ConsensusRating": ("ConsensusRating", "consensus_rating"),
-            "ConsensusRatingValue": ("ConsensusRatingValue", "consensus_rating_val", "consensus_rating_value"),
+            "ConsensusRatingValue": (
+                "ConsensusRatingValue",
+                "consensus_rating_val",
+                "consensus_rating_value",
+            ),
             "ConsensusPriceTarget": ("ConsensusPriceTarget", "consensus_price_target"),
             "HighPriceTarget": ("HighPriceTarget", "high_price_target"),
             "LowPriceTarget": ("LowPriceTarget", "low_price_target"),

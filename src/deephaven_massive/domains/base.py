@@ -43,6 +43,7 @@ from deephaven_massive.schemas.market import (
 
 if TYPE_CHECKING:
     from deephaven.table import Table
+
     from deephaven_massive.session import MassiveSession
 
 VALID_HISTORICAL_SOURCES: frozenset[str] = frozenset({"auto", "rest", "flat_files"})
@@ -157,11 +158,7 @@ def normalize_filter_params(
                 out[k] = format_date_param(v) if isinstance(v, (date, datetime)) else v
 
     def _norm_sym(s: str) -> str:
-        return (
-            normalizer.rest_ticker(s)
-            if normalizer is not None
-            else s.strip().upper()
-        )
+        return normalizer.rest_ticker(s) if normalizer is not None else s.strip().upper()
 
     if tickers is not None:
         if isinstance(tickers, str):
@@ -171,11 +168,7 @@ def normalize_filter_params(
         if len(t_list) == 1 and symbol is None:
             out[ticker_param] = t_list[0]
         elif len(t_list) > 1:
-            key = (
-                f"{ticker_param}.any_of"
-                if ticker_param in ("ticker", "cik")
-                else ticker_param
-            )
+            key = f"{ticker_param}.any_of" if ticker_param in ("ticker", "cik") else ticker_param
             out[key] = ",".join(t_list)
     elif symbol is not None:
         out[ticker_param] = _norm_sym(symbol)
@@ -258,8 +251,7 @@ def extract_rows_from_payload(
             continue
         d = dict(item)
         if inject_symbol is not None and not any(
-            k in d and d[k] is not None
-            for k in ("Symbol", "sym", "ticker", "T", "S", "pair")
+            k in d and d[k] is not None for k in ("Symbol", "sym", "ticker", "T", "S", "pair")
         ):
             d["Symbol"] = inject_symbol
         if extra_fields:
@@ -295,13 +287,9 @@ class BaseDomainClient:
         """
         self.session = session
         self.domain = domain
-        self.symbol_normalizer = (
-            SymbolNormalizer(domain) if domain is not None else None
-        )
+        self.symbol_normalizer = SymbolNormalizer(domain) if domain is not None else None
 
-    def canonical_symbols(
-        self, symbols: str | Iterable[str] | None
-    ) -> list[str]:
+    def canonical_symbols(self, symbols: str | Iterable[str] | None) -> list[str]:
         """Normalize ``symbols`` into a deduplicated list of canonical symbols.
 
         Args:
@@ -348,9 +336,7 @@ class BaseDomainClient:
         resolved_extra = _resolve_bar_extra_fields(path, params, extra_fields)
         next_path: str | None = path
         next_params: dict[str, Any] | None = (
-            {k: v for k, v in params.items() if v is not None}
-            if params
-            else {}
+            {k: v for k, v in params.items() if v is not None} if params else {}
         )
         if limit is not None and next_params is not None and "limit" not in next_params:
             next_params["limit"] = min(limit, 50_000)
@@ -366,9 +352,7 @@ class BaseDomainClient:
             if limit is not None and len(collected) >= limit:
                 return collected[:limit]
 
-            next_url = (
-                payload.get("next_url") if isinstance(payload, Mapping) else None
-            )
+            next_url = payload.get("next_url") if isinstance(payload, Mapping) else None
             if next_url and isinstance(next_url, str):
                 next_path = next_url
                 next_params = None
@@ -410,9 +394,7 @@ class BaseDomainClient:
 
         next_path: str | None = path
         next_params: dict[str, Any] | None = (
-            {k: v for k, v in params.items() if v is not None}
-            if params
-            else {}
+            {k: v for k, v in params.items() if v is not None} if params else {}
         )
         if limit is not None and next_params is not None and "limit" not in next_params:
             next_params["limit"] = min(limit, chunk_size)
@@ -433,18 +415,12 @@ class BaseDomainClient:
             while len(buffer) >= chunk_size:
                 chunk = buffer[:chunk_size]
                 buffer = buffer[chunk_size:]
-                batches.append(
-                    rows_to_record_batch(
-                        chunk, schema_spec, self.symbol_normalizer
-                    )
-                )
+                batches.append(rows_to_record_batch(chunk, schema_spec, self.symbol_normalizer))
 
             if limit is not None and total_rows >= limit:
                 break
 
-            next_url = (
-                payload.get("next_url") if isinstance(payload, Mapping) else None
-            )
+            next_url = payload.get("next_url") if isinstance(payload, Mapping) else None
             if next_url and isinstance(next_url, str):
                 next_path = next_url
                 next_params = None
@@ -452,11 +428,7 @@ class BaseDomainClient:
                 next_path = None
 
         if buffer:
-            batches.append(
-                rows_to_record_batch(
-                    buffer, schema_spec, self.symbol_normalizer
-                )
-            )
+            batches.append(rows_to_record_batch(buffer, schema_spec, self.symbol_normalizer))
 
         pa_tbl = record_batches_to_arrow_table(batches, schema_spec)
         return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
@@ -561,9 +533,7 @@ class BaseDomainClient:
             if hasattr(symbols, "j_table") or hasattr(symbols, "column_names")
             else self.canonical_symbols(symbols)
         )
-        if self.should_use_flat_files(
-            source, canon_syms, s3_dataset, adjusted=adjusted
-        ):
+        if self.should_use_flat_files(source, canon_syms, s3_dataset, adjusted=adjusted):
             assert s3_dataset is not None
             return self.session.flat_files.load(
                 s3_dataset,
@@ -596,6 +566,7 @@ class BaseDomainClient:
         total_rows = 0
 
         if limit is None:
+
             def _fetch_one(sym: str) -> list[dict[str, Any]]:
                 path, params = rest_path_fn(sym, start, end)
                 return self.fetch_rest_rows(path, params, inject_symbol=sym)
@@ -607,37 +578,23 @@ class BaseDomainClient:
                 while len(buffer) >= chunk_size:
                     chunk = buffer[:chunk_size]
                     buffer = buffer[chunk_size:]
-                    batches.append(
-                        rows_to_record_batch(
-                            chunk, schema_spec, self.symbol_normalizer
-                        )
-                    )
+                    batches.append(rows_to_record_batch(chunk, schema_spec, self.symbol_normalizer))
         else:
             for sym in target_syms:
                 rem = limit - total_rows
                 path, params = rest_path_fn(sym, start, end)
-                rows = self.fetch_rest_rows(
-                    path, params, limit=rem, inject_symbol=sym
-                )
+                rows = self.fetch_rest_rows(path, params, limit=rem, inject_symbol=sym)
                 buffer.extend(rows)
                 total_rows += len(rows)
                 while len(buffer) >= chunk_size:
                     chunk = buffer[:chunk_size]
                     buffer = buffer[chunk_size:]
-                    batches.append(
-                        rows_to_record_batch(
-                            chunk, schema_spec, self.symbol_normalizer
-                        )
-                    )
+                    batches.append(rows_to_record_batch(chunk, schema_spec, self.symbol_normalizer))
                 if total_rows >= limit:
                     break
 
         if buffer:
-            batches.append(
-                rows_to_record_batch(
-                    buffer, schema_spec, self.symbol_normalizer
-                )
-            )
+            batches.append(rows_to_record_batch(buffer, schema_spec, self.symbol_normalizer))
         pa_tbl = record_batches_to_arrow_table(batches, schema_spec)
         return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
@@ -651,8 +608,7 @@ class BaseDomainClient:
         symbols: Any = None,
         symbol_col: str = "Symbol",
         seed_fn: Callable[[list[str]], Sequence[Mapping[str, Any]]] | None = None,
-        seed_rows_fn: Callable[[list[str], Any], Sequence[Mapping[str, Any]]]
-        | None = None,
+        seed_rows_fn: Callable[[list[str], Any], Sequence[Mapping[str, Any]]] | None = None,
         snapshot_fn: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
         historical_fn: Callable[..., Table] | None = None,
     ) -> FeedBuilder:

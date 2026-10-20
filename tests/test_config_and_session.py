@@ -64,18 +64,12 @@ def test_config_resolve_ws_url_tiers_fmv_and_venues() -> None:
         cfg.resolve_ws_url("options", feed_override="delayed")
         == "wss://delayed.massive.com/options"
     )
-    assert (
-        cfg.resolve_ws_url("stocks", is_fmv=True)
-        == "wss://business.massive.com/stocks"
-    )
+    assert cfg.resolve_ws_url("stocks", is_fmv=True) == "wss://business.massive.com/stocks"
     assert (
         cfg.resolve_ws_url("stocks", feed_override="delayed", is_fmv=True)
         == "wss://delayed-business.massive.com/stocks"
     )
-    assert (
-        cfg.resolve_ws_url("futures", venue="cme")
-        == "wss://socket.massive.com/futures/cme"
-    )
+    assert cfg.resolve_ws_url("futures", venue="cme") == "wss://socket.massive.com/futures/cme"
     assert (
         cfg.resolve_ws_url("stocks", feed_override="custom.host.example.com")
         == "wss://custom.host.example.com/stocks"

@@ -18,43 +18,41 @@ def _recorded_urls(sess: Any) -> list[str]:
 
 def test_stocks_streaming_historical_and_bars(mock_session: Any) -> None:
     """Verify StocksClient trades, quotes, bars, LULD, imbalances, and FMV feeds across streaming, REST, and S3."""
-    csv_text = "ticker,price,size,id,sip_timestamp,conditions\nAAPL,150.0,100,T1,1700000000000000000,[]\n"
+    csv_text = (
+        "ticker,price,size,id,sip_timestamp,conditions\nAAPL,150.0,100,T1,1700000000000000000,[]\n"
+    )
     sess = mock_session(s3_opener=lambda b, k: make_csv_gz_stream(csv_text))
     st = sess.stocks
 
     fb_seeded = st.trades(["AAPL"])
     t_seeded = fb_seeded.latest(seed=True)
-    assert t_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.is_seeded
+    assert (
+        t_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.is_seeded
+    )
 
     fb_star = st.trades("*")
     t_star = fb_star.latest(seed=True)
-    assert t_star is not None and fb_star.publisher is not None and fb_star.publisher.rows_published == 1
+    assert (
+        t_star is not None
+        and fb_star.publisher is not None
+        and fb_star.publisher.rows_published == 1
+    )
 
     assert (
-        len(
-            dh_to_pylist(
-                st.trades("AAPL").historical("2025-01-01", "2025-01-02", source="rest")
-            )
-        )
+        len(dh_to_pylist(st.trades("AAPL").historical("2025-01-01", "2025-01-02", source="rest")))
         == 1
     )
     assert (
         len(
             dh_to_pylist(
-                st.trades(["AAPL", "MSFT"]).historical(
-                    "2025-01-01", "2025-01-02", source="rest"
-                )
+                st.trades(["AAPL", "MSFT"]).historical("2025-01-01", "2025-01-02", source="rest")
             )
         )
         == 2
     )
     assert (
         len(
-            dh_to_pylist(
-                st.trades("*").historical(
-                    "2025-01-01", "2025-01-01", source="flat_files"
-                )
-            )
+            dh_to_pylist(st.trades("*").historical("2025-01-01", "2025-01-01", source="flat_files"))
         )
         == 1
     )
@@ -62,17 +60,10 @@ def test_stocks_streaming_historical_and_bars(mock_session: Any) -> None:
         st.trades("*").historical("2025-01-01", "2025-01-02", source="rest")
 
     assert (
-        len(
-            dh_to_pylist(
-                st.quotes("AAPL").historical("2025-01-01", "2025-01-02", source="rest")
-            )
-        )
+        len(dh_to_pylist(st.quotes("AAPL").historical("2025-01-01", "2025-01-02", source="rest")))
         == 1
     )
-    assert (
-        len(dh_to_pylist(st.bars("AAPL", multiplier=1, timespan="minute").snapshot()))
-        == 1
-    )
+    assert len(dh_to_pylist(st.bars("AAPL", multiplier=1, timespan="minute").snapshot())) == 1
     assert (
         len(
             dh_to_pylist(
@@ -123,9 +114,7 @@ def test_stocks_snapshots_summaries_and_indicators(mock_session: Any) -> None:
     assert len(dh_to_pylist(st.previous_close("AAPL").snapshot())) == 1
     assert len(dh_to_pylist(st.previous_day_bar("AAPL").snapshot())) == 1
     assert len(dh_to_pylist(st.daily_open_close("AAPL", "2025-01-02").snapshot())) == 1
-    assert (
-        len(dh_to_pylist(st.daily_ticker_summary("AAPL", "2025-01-02").snapshot())) == 1
-    )
+    assert len(dh_to_pylist(st.daily_ticker_summary("AAPL", "2025-01-02").snapshot())) == 1
 
     assert len(dh_to_pylist(st.sma("AAPL").snapshot())) == 1
     assert len(dh_to_pylist(st.sma("AAPL").historical("2025-01-01", "2025-01-02"))) == 1
@@ -145,6 +134,7 @@ def test_stocks_fundamentals_corporate_actions_and_reference(
     mock_session: Any,
 ) -> None:
     """Verify StocksClient fundamentals, corporate actions, and reference endpoints."""
+
     def _http(
         url: str, params: Mapping[str, Any] | None, headers: Mapping[str, str]
     ) -> tuple[int, Any]:
@@ -285,32 +275,25 @@ def test_options_domain_all_feeds(mock_session: Any) -> None:
 
     fb_star = opt.trades("*")
     t_star = fb_star.latest(seed=True)
-    assert t_star is not None and fb_star.publisher is not None and fb_star.publisher.rows_published == 0
+    assert (
+        t_star is not None
+        and fb_star.publisher is not None
+        and fb_star.publisher.rows_published == 0
+    )
 
     assert (
-        len(
-            dh_to_pylist(
-                opt.trades(c1).historical("2025-01-01", "2025-01-02", source="rest")
-            )
-        )
-        == 1
+        len(dh_to_pylist(opt.trades(c1).historical("2025-01-01", "2025-01-02", source="rest"))) == 1
     )
     assert (
         len(
-            dh_to_pylist(
-                opt.trades([c1, c2]).historical(
-                    "2025-01-01", "2025-01-02", source="rest"
-                )
-            )
+            dh_to_pylist(opt.trades([c1, c2]).historical("2025-01-01", "2025-01-02", source="rest"))
         )
         == 2
     )
     assert (
         len(
             dh_to_pylist(
-                opt.trades("*").historical(
-                    "2025-01-01", "2025-01-01", source="flat_files"
-                )
+                opt.trades("*").historical("2025-01-01", "2025-01-01", source="flat_files")
             )
         )
         == 1
@@ -319,16 +302,9 @@ def test_options_domain_all_feeds(mock_session: Any) -> None:
         opt.trades("*").historical("2025-01-01", "2025-01-02", source="rest")
 
     assert (
-        len(
-            dh_to_pylist(
-                opt.quotes(c1).historical("2025-01-01", "2025-01-02", source="rest")
-            )
-        )
-        == 1
+        len(dh_to_pylist(opt.quotes(c1).historical("2025-01-01", "2025-01-02", source="rest"))) == 1
     )
-    assert (
-        len(dh_to_pylist(opt.bars(c1, multiplier=1, timespan="minute").snapshot())) == 1
-    )
+    assert len(dh_to_pylist(opt.bars(c1, multiplier=1, timespan="minute").snapshot())) == 1
     assert (
         len(
             dh_to_pylist(
@@ -351,16 +327,11 @@ def test_options_domain_all_feeds(mock_session: Any) -> None:
     )
     assert opt.bars(c1, multiplier=1, timespan="second").blink() is not None
     assert opt.fmv(c1).blink() is not None
-    assert (
-        len(dh_to_pylist(opt.chain_snapshot("AAPL", strike_price=150.0).snapshot()))
-        == 1
-    )
+    assert len(dh_to_pylist(opt.chain_snapshot("AAPL", strike_price=150.0).snapshot())) == 1
     assert len(dh_to_pylist(opt.chain("AAPL").snapshot())) == 1
     assert len(dh_to_pylist(opt.contract_snapshot("AAPL", c1).snapshot())) == 1
     assert len(dh_to_pylist(opt.contracts("AAPL").snapshot())) == 1
-    assert (
-        len(dh_to_pylist(opt.contracts().historical("2025-01-01", "2025-12-31"))) == 1
-    )
+    assert len(dh_to_pylist(opt.contracts().historical("2025-01-01", "2025-12-31"))) == 1
     assert len(dh_to_pylist(opt.contract_details(c1).snapshot())) == 1
     assert len(dh_to_pylist(opt.previous_close(c1).snapshot())) == 1
     assert len(dh_to_pylist(opt.daily_open_close(c1, "2025-01-02").snapshot())) == 1
@@ -379,28 +350,26 @@ def test_options_domain_all_feeds(mock_session: Any) -> None:
 
 def test_futures_domain_all_feeds(mock_session: Any) -> None:
     """Verify FuturesClient venue routing, trades, quotes, session bars, contracts, products, and schedules."""
-    csv_text = "ticker,price,size,id,sip_timestamp,conditions\nESH5,5000.0,1,T1,1700000000000000000,[]\n"
+    csv_text = (
+        "ticker,price,size,id,sip_timestamp,conditions\nESH5,5000.0,1,T1,1700000000000000000,[]\n"
+    )
     sess = mock_session(s3_opener=lambda b, k: make_csv_gz_stream(csv_text))
     fut = sess.futures
 
     fb_seeded = fut.trades("ESH5", venue="cme")
     f_seeded = fb_seeded.latest(seed=True)
-    assert f_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.is_seeded
+    assert (
+        f_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.is_seeded
+    )
 
     assert (
-        len(
-            dh_to_pylist(
-                fut.trades("ESH5").historical("2025-01-01", "2025-01-02", source="rest")
-            )
-        )
+        len(dh_to_pylist(fut.trades("ESH5").historical("2025-01-01", "2025-01-02", source="rest")))
         == 1
     )
     assert (
         len(
             dh_to_pylist(
-                fut.trades(["ESH5", "NQH5"]).historical(
-                    "2025-01-01", "2025-01-02", source="rest"
-                )
+                fut.trades(["ESH5", "NQH5"]).historical("2025-01-01", "2025-01-02", source="rest")
             )
         )
         == 2
@@ -408,9 +377,7 @@ def test_futures_domain_all_feeds(mock_session: Any) -> None:
     assert (
         len(
             dh_to_pylist(
-                fut.trades("*").historical(
-                    "2025-01-01", "2025-01-01", source="flat_files"
-                )
+                fut.trades("*").historical("2025-01-01", "2025-01-01", source="flat_files")
             )
         )
         == 1
@@ -419,17 +386,10 @@ def test_futures_domain_all_feeds(mock_session: Any) -> None:
         fut.trades("*").historical("2025-01-01", "2025-01-02", source="rest")
 
     assert (
-        len(
-            dh_to_pylist(
-                fut.quotes("ESH5").historical("2025-01-01", "2025-01-02", source="rest")
-            )
-        )
+        len(dh_to_pylist(fut.quotes("ESH5").historical("2025-01-01", "2025-01-02", source="rest")))
         == 1
     )
-    assert (
-        len(dh_to_pylist(fut.bars("ESH5", multiplier=1, timespan="minute").snapshot()))
-        == 1
-    )
+    assert len(dh_to_pylist(fut.bars("ESH5", multiplier=1, timespan="minute").snapshot())) == 1
     assert (
         len(
             dh_to_pylist(
@@ -485,24 +445,18 @@ def test_indices_domain_all_feeds(mock_session: Any) -> None:
 
     fb_seeded = idx.values("I:SPX")
     v_seeded = fb_seeded.latest(seed=True)
-    assert v_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.is_seeded
+    assert (
+        v_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.is_seeded
+    )
 
     assert (
-        len(
-            dh_to_pylist(
-                idx.values("I:SPX").historical(
-                    "2025-01-01", "2025-01-02", source="rest"
-                )
-            )
-        )
+        len(dh_to_pylist(idx.values("I:SPX").historical("2025-01-01", "2025-01-02", source="rest")))
         == 1
     )
     assert (
         len(
             dh_to_pylist(
-                idx.values(["I:SPX", "I:NDX"]).historical(
-                    "2025-01-01", "2025-01-02", source="rest"
-                )
+                idx.values(["I:SPX", "I:NDX"]).historical("2025-01-01", "2025-01-02", source="rest")
             )
         )
         == 2
@@ -510,9 +464,7 @@ def test_indices_domain_all_feeds(mock_session: Any) -> None:
     assert (
         len(
             dh_to_pylist(
-                idx.values("*").historical(
-                    "2025-01-01", "2025-01-01", source="flat_files"
-                )
+                idx.values("*").historical("2025-01-01", "2025-01-01", source="flat_files")
             )
         )
         == 1
@@ -520,12 +472,7 @@ def test_indices_domain_all_feeds(mock_session: Any) -> None:
     with pytest.raises(ValueError, match="Specific index symbol"):
         idx.values("*").historical("2025-01-01", "2025-01-02", source="rest")
 
-    assert (
-        len(
-            dh_to_pylist(idx.bars("I:SPX", multiplier=1, timespan="minute").snapshot())
-        )
-        == 1
-    )
+    assert len(dh_to_pylist(idx.bars("I:SPX", multiplier=1, timespan="minute").snapshot())) == 1
     assert (
         len(
             dh_to_pylist(
@@ -567,21 +514,23 @@ def test_indices_domain_all_feeds(mock_session: Any) -> None:
 
 def test_forex_domain_all_feeds(mock_session: Any) -> None:
     """Verify ForexClient quotes, bars, FMV, snapshots, currency conversion, and technical indicators."""
-    csv_text = "ticker,ask_price,bid_price,participant_timestamp\nEUR/USD,1.10,1.09,1700000000000000000\n"
+    csv_text = (
+        "ticker,ask_price,bid_price,participant_timestamp\nEUR/USD,1.10,1.09,1700000000000000000\n"
+    )
     sess = mock_session(s3_opener=lambda b, k: make_csv_gz_stream(csv_text))
     fx = sess.forex
 
     fb_seeded = fx.quotes("EUR/USD")
     fx_seeded = fb_seeded.latest(seed=True)
-    assert fx_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.rows_published == 1
+    assert (
+        fx_seeded is not None
+        and fb_seeded.publisher is not None
+        and fb_seeded.publisher.rows_published == 1
+    )
 
     assert (
         len(
-            dh_to_pylist(
-                fx.quotes("EUR/USD").historical(
-                    "2025-01-01", "2025-01-02", source="rest"
-                )
-            )
+            dh_to_pylist(fx.quotes("EUR/USD").historical("2025-01-01", "2025-01-02", source="rest"))
         )
         == 1
     )
@@ -597,23 +546,14 @@ def test_forex_domain_all_feeds(mock_session: Any) -> None:
     )
     assert (
         len(
-            dh_to_pylist(
-                fx.quotes("*").historical(
-                    "2025-01-01", "2025-01-01", source="flat_files"
-                )
-            )
+            dh_to_pylist(fx.quotes("*").historical("2025-01-01", "2025-01-01", source="flat_files"))
         )
         == 1
     )
     with pytest.raises(ValueError, match="Specific currency pair"):
         fx.quotes("*").historical("2025-01-01", "2025-01-02", source="rest")
 
-    assert (
-        len(
-            dh_to_pylist(fx.bars("EUR/USD", multiplier=1, timespan="minute").snapshot())
-        )
-        == 1
-    )
+    assert len(dh_to_pylist(fx.bars("EUR/USD", multiplier=1, timespan="minute").snapshot())) == 1
     assert (
         len(
             dh_to_pylist(
@@ -646,18 +586,14 @@ def test_forex_domain_all_feeds(mock_session: Any) -> None:
     assert len(dh_to_pylist(fx.last_quote("EUR/USD").snapshot())) == 1
     assert len(dh_to_pylist(fx.daily_market_summary("2025-01-02").snapshot())) == 1
     assert len(dh_to_pylist(fx.previous_close("EUR/USD").snapshot())) == 1
-    assert (
-        len(dh_to_pylist(fx.daily_open_close("EUR/USD", "2025-01-02").snapshot())) == 1
-    )
+    assert len(dh_to_pylist(fx.daily_open_close("EUR/USD", "2025-01-02").snapshot())) == 1
     assert len(dh_to_pylist(fx.convert("EUR", "USD").snapshot())) == 1
     assert len(dh_to_pylist(fx.tickers().snapshot())) == 1
     assert len(dh_to_pylist(fx.exchanges().snapshot())) == 1
     assert len(dh_to_pylist(fx.market_holidays().snapshot())) == 1
     assert len(dh_to_pylist(fx.market_status().snapshot())) == 1
     assert len(dh_to_pylist(fx.sma("EUR/USD").snapshot())) == 1
-    assert (
-        len(dh_to_pylist(fx.sma("EUR/USD").historical("2025-01-01", "2025-01-02"))) == 1
-    )
+    assert len(dh_to_pylist(fx.sma("EUR/USD").historical("2025-01-01", "2025-01-02"))) == 1
     assert len(dh_to_pylist(fx.ema("EUR/USD").snapshot())) == 1
     assert len(dh_to_pylist(fx.macd("EUR/USD").snapshot())) == 1
     assert len(dh_to_pylist(fx.rsi("EUR/USD").snapshot())) == 1
@@ -676,15 +612,13 @@ def test_crypto_domain_all_feeds(mock_session: Any) -> None:
 
     fb_seeded = cr.trades("BTC-USD")
     cr_seeded = fb_seeded.latest(seed=True)
-    assert cr_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.is_seeded
+    assert (
+        cr_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.is_seeded
+    )
 
     assert (
         len(
-            dh_to_pylist(
-                cr.trades("BTC-USD").historical(
-                    "2025-01-01", "2025-01-02", source="rest"
-                )
-            )
+            dh_to_pylist(cr.trades("BTC-USD").historical("2025-01-01", "2025-01-02", source="rest"))
         )
         == 1
     )
@@ -700,11 +634,7 @@ def test_crypto_domain_all_feeds(mock_session: Any) -> None:
     )
     assert (
         len(
-            dh_to_pylist(
-                cr.trades("*").historical(
-                    "2025-01-01", "2025-01-01", source="flat_files"
-                )
-            )
+            dh_to_pylist(cr.trades("*").historical("2025-01-01", "2025-01-01", source="flat_files"))
         )
         == 1
     )
@@ -712,12 +642,7 @@ def test_crypto_domain_all_feeds(mock_session: Any) -> None:
         cr.trades("*").historical("2025-01-01", "2025-01-02", source="rest")
 
     assert cr.quotes("BTC-USD").blink() is not None
-    assert (
-        len(
-            dh_to_pylist(cr.bars("BTC-USD", multiplier=1, timespan="minute").snapshot())
-        )
-        == 1
-    )
+    assert len(dh_to_pylist(cr.bars("BTC-USD", multiplier=1, timespan="minute").snapshot())) == 1
     assert (
         len(
             dh_to_pylist(
@@ -750,18 +675,14 @@ def test_crypto_domain_all_feeds(mock_session: Any) -> None:
     assert len(dh_to_pylist(cr.last_trade("BTC-USD").snapshot())) == 1
     assert len(dh_to_pylist(cr.daily_market_summary("2025-01-02").snapshot())) == 1
     assert len(dh_to_pylist(cr.previous_close("BTC-USD").snapshot())) == 1
-    assert (
-        len(dh_to_pylist(cr.daily_open_close("BTC-USD", "2025-01-02").snapshot())) == 1
-    )
+    assert len(dh_to_pylist(cr.daily_open_close("BTC-USD", "2025-01-02").snapshot())) == 1
     assert len(dh_to_pylist(cr.tickers().snapshot())) == 1
     assert len(dh_to_pylist(cr.conditions().snapshot())) == 1
     assert len(dh_to_pylist(cr.exchanges().snapshot())) == 1
     assert len(dh_to_pylist(cr.market_holidays().snapshot())) == 1
     assert len(dh_to_pylist(cr.market_status().snapshot())) == 1
     assert len(dh_to_pylist(cr.sma("BTC-USD").snapshot())) == 1
-    assert (
-        len(dh_to_pylist(cr.sma("BTC-USD").historical("2025-01-01", "2025-01-02"))) == 1
-    )
+    assert len(dh_to_pylist(cr.sma("BTC-USD").historical("2025-01-01", "2025-01-02"))) == 1
     assert len(dh_to_pylist(cr.ema("BTC-USD").snapshot())) == 1
     assert len(dh_to_pylist(cr.macd("BTC-USD").snapshot())) == 1
     assert len(dh_to_pylist(cr.rsi("BTC-USD").snapshot())) == 1

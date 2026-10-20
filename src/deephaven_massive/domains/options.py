@@ -36,6 +36,7 @@ from deephaven_massive.schemas.reference import (
 
 if TYPE_CHECKING:
     from deephaven.table import Table
+
     from deephaven_massive.session import MassiveSession
 
 
@@ -50,7 +51,7 @@ def _extract_option_underlying(sym: str) -> str | None:
         str | None: Leading alphabetic underlying ticker (e.g., `"AAPL"`), or
         `None` if no valid root prefix followed by an expiration digit exists.
     """
-    body = sym[2:] if sym.startswith("O:") else sym
+    body = sym.removeprefix("O:")
     alpha: list[str] = []
     for ch in body:
         if ch.isalpha():
@@ -145,9 +146,7 @@ class OptionsClient(BaseDomainClient):
         """
         ws_url = self.session.config.resolve_ws_url("options", feed_override=feed)
 
-        def _rest_path(
-            sym: str, start: Any, end: Any
-        ) -> tuple[str, dict[str, Any]]:
+        def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             return f"/v3/trades/{sym}", {
                 "timestamp.gte": format_date_param(start),
                 "timestamp.lte": format_date_param(end),
@@ -161,18 +160,18 @@ class OptionsClient(BaseDomainClient):
             symbols=contracts,
             symbol_col=symbol_col,
             seed_fn=self._fetch_option_seed,
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
-                syms, since, _rest_path
-            ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
-                contracts,
-                TRADES_SCHEMA,
-                "us_options_opra/trades_v1",
-                _rest_path,
-                start=start,
-                end=end,
-                limit=limit,
-                source=source,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(syms, since, _rest_path),
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": (
+                self.fetch_multi_symbol_historical(
+                    contracts,
+                    TRADES_SCHEMA,
+                    "us_options_opra/trades_v1",
+                    _rest_path,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    source=source,
+                )
             ),
         )
 
@@ -203,9 +202,7 @@ class OptionsClient(BaseDomainClient):
         """
         ws_url = self.session.config.resolve_ws_url("options", feed_override=feed)
 
-        def _rest_path(
-            sym: str, start: Any, end: Any
-        ) -> tuple[str, dict[str, Any]]:
+        def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             return f"/v3/quotes/{sym}", {
                 "timestamp.gte": format_date_param(start),
                 "timestamp.lte": format_date_param(end),
@@ -219,18 +216,18 @@ class OptionsClient(BaseDomainClient):
             symbols=contracts,
             symbol_col=symbol_col,
             seed_fn=self._fetch_option_seed,
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
-                syms, since, _rest_path
-            ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
-                contracts,
-                QUOTES_SCHEMA,
-                "us_options_opra/quotes_v1",
-                _rest_path,
-                start=start,
-                end=end,
-                limit=limit,
-                source=source,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(syms, since, _rest_path),
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": (
+                self.fetch_multi_symbol_historical(
+                    contracts,
+                    QUOTES_SCHEMA,
+                    "us_options_opra/quotes_v1",
+                    _rest_path,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    source=source,
+                )
             ),
         )
 
@@ -279,9 +276,7 @@ class OptionsClient(BaseDomainClient):
         elif multiplier == 1 and clean_span == "day":
             s3_ds = "us_options_opra/day_aggs_v1"
 
-        def _rest_path(
-            sym: str, start: Any, end: Any
-        ) -> tuple[str, dict[str, Any]]:
+        def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             s_str = format_date_param(start) or "1970-01-01"
             e_str = format_date_param(end) or s_str
             return (
@@ -297,25 +292,25 @@ class OptionsClient(BaseDomainClient):
             ws_channel=ws_channel,
             symbols=contracts,
             symbol_col=symbol_col,
-            seed_fn=lambda syms: self._fetch_option_seed(
-                syms, extra_fields={"_span_ns": span_ns}
-            ),
+            seed_fn=lambda syms: self._fetch_option_seed(syms, extra_fields={"_span_ns": span_ns}),
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
                 syms,
                 since,
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
-                contracts,
-                BARS_SCHEMA,
-                s3_ds,
-                _rest_path,
-                start=start,
-                end=end,
-                limit=limit,
-                source=source,
-                adjusted=adjusted,
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": (
+                self.fetch_multi_symbol_historical(
+                    contracts,
+                    BARS_SCHEMA,
+                    s3_ds,
+                    _rest_path,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    source=source,
+                    adjusted=adjusted,
+                )
             ),
         )
 
@@ -339,9 +334,7 @@ class OptionsClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.latest()`,
             `.history()`, `.ring()`, and `.blink()` with `FMV_SCHEMA`.
         """
-        ws_url = self.session.config.resolve_ws_url(
-            "options", feed_override=feed, is_fmv=True
-        )
+        ws_url = self.session.config.resolve_ws_url("options", feed_override=feed, is_fmv=True)
         return self.build_feed(
             name="options_fmv",
             schema_spec=FMV_SCHEMA,
@@ -402,9 +395,7 @@ class OptionsClient(BaseDomainClient):
 
     chain = chain_snapshot
 
-    def contract_snapshot(
-        self, underlying: str, contract: str
-    ) -> FeedBuilder:
+    def contract_snapshot(self, underlying: str, contract: str) -> FeedBuilder:
         """Configure a single-contract option snapshot feed (`/v3/snapshot/options/{underlyingAsset}/{optionContract}`).
 
         Args:
@@ -456,9 +447,7 @@ class OptionsClient(BaseDomainClient):
             "/v3/reference/options/contracts",
             OPTION_CONTRACTS_SCHEMA,
             {
-                "underlying_ticker": underlying.strip().upper()
-                if underlying
-                else None,
+                "underlying_ticker": underlying.strip().upper() if underlying else None,
                 "expiration_date": expiration_date,
                 "contract_type": contract_type,
                 "expired": str(not active).lower(),
@@ -488,9 +477,7 @@ class OptionsClient(BaseDomainClient):
             ),
         )
 
-    def previous_close(
-        self, contract: str, *, adjusted: bool = True
-    ) -> FeedBuilder:
+    def previous_close(self, contract: str, *, adjusted: bool = True) -> FeedBuilder:
         """Configure a feed for an option contract's previous trading day OHLCV bar (`/v2/aggs/ticker/{optionsTicker}/prev`).
 
         Args:

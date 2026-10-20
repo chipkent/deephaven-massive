@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: deephaven-massive-pre-commit
+        name: Ruff + Mypy + Pytest (100% Coverage)
+        entry: ./scripts/pre-commit.sh
+        language: system
+        pass_filenames: false
+        always_run: true

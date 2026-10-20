@@ -126,18 +126,8 @@ def test_ws_multiplexer_raw_message_dispatch_and_entitlement_error(
     assert enq_json == 1
     assert pub.flush_now() == 1
 
-    assert (
-        mux.handle_raw_message(
-            ws_url, {"ev": "T", "sym": "NVDA", "p": 910.0, "s": 10}
-        )
-        == 1
-    )
-    assert (
-        mux.handle_raw_message(
-            "wss://unregistered", {"ev": "T", "sym": "AAPL", "p": 1.0}
-        )
-        == 0
-    )
+    assert mux.handle_raw_message(ws_url, {"ev": "T", "sym": "NVDA", "p": 910.0, "s": 10}) == 1
+    assert mux.handle_raw_message("wss://unregistered", {"ev": "T", "sym": "AAPL", "p": 1.0}) == 0
     assert mux.handle_raw_message(ws_url, 12345) == 0  # type: ignore[arg-type]
 
     with pytest.raises(MassiveEntitlementError, match="WebSocket entitlement error"):
@@ -176,9 +166,7 @@ def test_ws_multiplexer_options_1000_contract_limit() -> None:
     opt_url = "wss://socket.massive.com/options"
 
     mux.subscribe(opt_url, "T", ["T.O:*"])
-    topics_1000 = [
-        f"T.O:AAPL250117C{i:08d}" for i in range(1, MAX_OPTION_CONTRACTS + 1)
-    ]
+    topics_1000 = [f"T.O:AAPL250117C{i:08d}" for i in range(1, MAX_OPTION_CONTRACTS + 1)]
     mux.subscribe(opt_url, "T", topics_1000)
 
     with pytest.raises(ValueError, match="1000-contract subscription limit"):
@@ -289,9 +277,7 @@ def test_ws_multiplexer_live_connector_and_reconnect_recovery(
         attempts += 1
         if attempts == 1:
             return _FakeWS("transient_fail", ws_sent)
-        return _FakeWS(
-            "normal", ws_sent, auth_ok_event, post_sub_event, unsub_done_event
-        )
+        return _FakeWS("normal", ws_sent, auth_ok_event, post_sub_event, unsub_done_event)
 
     cfg = MassiveConfig(api_key="live-key")
     mux = WebSocketMultiplexer(cfg, ws_connector=_connector, reconnect_delay_s=0.01)
@@ -314,12 +300,8 @@ def test_ws_multiplexer_live_connector_and_reconnect_recovery(
         time.sleep(0.01)
 
     assert any(m.get("action") == "auth" for m in ws_sent)
-    assert any(
-        m.get("action") == "subscribe" and m.get("params") == "T.AAPL" for m in ws_sent
-    )
-    assert any(
-        m.get("action") == "subscribe" and m.get("params") == "T.MSFT" for m in ws_sent
-    )
+    assert any(m.get("action") == "subscribe" and m.get("params") == "T.AAPL" for m in ws_sent)
+    assert any(m.get("action") == "subscribe" and m.get("params") == "T.MSFT" for m in ws_sent)
     assert any(m.get("action") == "unsubscribe" for m in ws_sent)
     assert pub.flush_now() == 1
     mux.close()

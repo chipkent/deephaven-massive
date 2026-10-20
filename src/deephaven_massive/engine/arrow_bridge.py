@@ -8,11 +8,11 @@ tables via `deephaven.arrow.to_table` inside a captured `ExecutionContext`.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
+import re
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-import re
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -20,6 +20,7 @@ import pyarrow as pa
 if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+
     from deephaven_massive.engine.symbols import SymbolNormalizer
 
 UTC_NS_TYPE = pa.timestamp("ns", tz="UTC")
@@ -90,12 +91,12 @@ def to_utc_ns(val: Any) -> int | None:
     if isinstance(val, float):
         if val <= 0.0:
             return None
-        abs_v = abs(val)
-        if abs_v >= 1e17:
+        abs_f = abs(val)
+        if abs_f >= 1e17:
             return int(val)
-        if abs_v >= 1e14:
+        if abs_f >= 1e14:
             return int(val * 1_000)
-        if abs_v >= 1e11:
+        if abs_f >= 1e11:
             return int(val * 1_000_000)
         return int(val * 1_000_000_000)
     if isinstance(val, datetime):
@@ -288,9 +289,7 @@ def parse_str_list(val: Any) -> list[str] | None:
     return [str(val)]
 
 
-def flatten_dict(
-    data: Mapping[str, Any], prefix: str = ""
-) -> dict[str, Any]:
+def flatten_dict(data: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
     """Flatten nested JSON dictionaries (including financial statement `{value, unit}` objects) into `PascalCase` keys.
 
     Args:
@@ -433,7 +432,7 @@ def rows_to_record_batch(
         dynamic_keys: list[str] = []
         seen_dyn: set[str] = set()
         for r in normalized_rows:
-            for k in r.keys():
+            for k in r:
                 if k not in known_names and not k.startswith("__") and k not in seen_dyn:
                     seen_dyn.add(k)
                     dynamic_keys.append(k)
@@ -476,9 +475,7 @@ def record_batches_to_arrow_table(
         A consolidated `pyarrow.Table`.
     """
     base_schema = (
-        schema_spec.with_extra_fields(extra_fields)
-        if extra_fields
-        else schema_spec.arrow_schema
+        schema_spec.with_extra_fields(extra_fields) if extra_fields else schema_spec.arrow_schema
     )
     if not batches:
         return base_schema.empty_table()

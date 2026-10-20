@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 import atexit
 import gzip
 import io
 import os
 import sys
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, BinaryIO
 
 import pytest
@@ -28,9 +28,7 @@ def _final_jvm_exit() -> None:
 
 
 @pytest.hookimpl(trylast=True)
-def pytest_terminal_summary(
-    terminalreporter: Any, exitstatus: int, config: Any
-) -> None:
+def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: Any) -> None:
     """Record the final session exitstatus after pytest-cov evaluates --cov-fail-under.
 
     Args:
@@ -73,7 +71,7 @@ def dh_to_pydict(table: Any) -> dict[str, list[Any]]:
     from deephaven import arrow as dh_arrow
 
     pa_tbl = dh_arrow.to_arrow(table)
-    return pa_tbl.to_pydict()  # type: ignore[no-any-return]
+    return pa_tbl.to_pydict()
 
 
 def dh_to_pylist(table: Any) -> list[dict[str, Any]]:
@@ -88,7 +86,7 @@ def dh_to_pylist(table: Any) -> list[dict[str, Any]]:
     from deephaven import arrow as dh_arrow
 
     pa_tbl = dh_arrow.to_arrow(table)
-    return pa_tbl.to_pylist()  # type: ignore[no-any-return]
+    return pa_tbl.to_pylist()
 
 
 def make_csv_gz_stream(csv_text: str) -> BinaryIO:
@@ -105,7 +103,7 @@ def make_csv_gz_stream(csv_text: str) -> BinaryIO:
 
 
 @pytest.fixture()
-def mock_session(dh_exec_ctx: Any) -> Callable[..., MassiveSession]:
+def mock_session(dh_exec_ctx: Any) -> Iterator[Callable[..., MassiveSession]]:
     """Factory fixture returning a configured MassiveSession with injectable HTTP and S3 handlers.
 
     Every created session also exposes `sess.recorded_requests`, a list of

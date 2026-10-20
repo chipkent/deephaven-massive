@@ -123,9 +123,7 @@ class MassiveConfig:
                 `flush_interval_ms <= 0`, `max_batch_size <= 0`, or `max_retries < 0`.
         """
         resolved_key = (
-            api_key
-            or os.environ.get("MASSIVE_API_KEY")
-            or os.environ.get("POLYGON_API_KEY")
+            api_key or os.environ.get("MASSIVE_API_KEY") or os.environ.get("POLYGON_API_KEY")
         )
         if not resolved_key or not resolved_key.strip():
             raise ValueError(
@@ -133,9 +131,7 @@ class MassiveConfig:
             )
 
         resolved_s3_key = s3_access_key_id or os.environ.get("MASSIVE_S3_ACCESS_KEY_ID")
-        resolved_s3_secret = s3_secret_access_key or os.environ.get(
-            "MASSIVE_S3_SECRET_ACCESS_KEY"
-        )
+        resolved_s3_secret = s3_secret_access_key or os.environ.get("MASSIVE_S3_SECRET_ACCESS_KEY")
 
         if flush_interval_ms <= 0:
             raise ValueError("flush_interval_ms must be > 0")
@@ -149,9 +145,7 @@ class MassiveConfig:
             feed=feed.strip().lower(),
             rest_base_url=rest_base_url.rstrip("/"),
             s3_access_key_id=resolved_s3_key.strip() if resolved_s3_key else None,
-            s3_secret_access_key=(
-                resolved_s3_secret.strip() if resolved_s3_secret else None
-            ),
+            s3_secret_access_key=(resolved_s3_secret.strip() if resolved_s3_secret else None),
             s3_endpoint_url=s3_endpoint_url.rstrip("/"),
             s3_bucket=s3_bucket.strip(),
             flush_interval_ms=flush_interval_ms,

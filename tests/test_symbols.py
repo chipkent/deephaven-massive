@@ -36,9 +36,7 @@ def test_symbol_normalizer_rejects_unsupported_domain() -> None:
         ("crypto", "X:*", "*"),
     ],
 )
-def test_symbol_normalizer_canonical_formatting(
-    domain: str, raw: str, expected: str
-) -> None:
+def test_symbol_normalizer_canonical_formatting(domain: str, raw: str, expected: str) -> None:
     """Verify canonical symbol formatting across all 6 market domains and wildcard inputs."""
     normalizer = SymbolNormalizer(domain)
     assert normalizer.canonical(raw) == expected
@@ -58,9 +56,7 @@ def test_symbol_normalizer_canonical_formatting(
         ("crypto", "X:*", "*"),
     ],
 )
-def test_symbol_normalizer_rest_ticker_formatting(
-    domain: str, raw: str, expected: str
-) -> None:
+def test_symbol_normalizer_rest_ticker_formatting(domain: str, raw: str, expected: str) -> None:
     """Verify REST path ticker formatting strips separators and applies domain prefixes."""
     normalizer = SymbolNormalizer(domain)
     assert normalizer.rest_ticker(raw) == expected

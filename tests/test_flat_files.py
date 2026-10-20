@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
 import io
+from datetime import date, datetime
 from typing import Any
 
 import pytest
 
 from deephaven_massive.domains.flat_files import (
     FlatFilesClient,
-    _PrependReader,
     _date_range,
     _infer_schema_and_domain,
     _parse_date,
+    _PrependReader,
 )
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
@@ -68,9 +68,7 @@ def test_flat_files_infer_schema_and_dataset_for(mock_session: Any) -> None:
     )
 
     sess = mock_session()
-    assert (
-        sess.flat_files.dataset_for("stocks", "trades_v1") == "us_stocks_sip/trades_v1"
-    )
+    assert sess.flat_files.dataset_for("stocks", "trades_v1") == "us_stocks_sip/trades_v1"
     with pytest.raises(ValueError, match="Unsupported S3 flat-file domain"):
         sess.flat_files.dataset_for("unknown_domain", "trades_v1")
 
@@ -195,9 +193,7 @@ def test_flat_files_boto3_client_and_credentials_validation(
     tbl_boto = sess_boto.flat_files.load("us_stocks_sip/trades_v1", date="2025-01-03")
     assert len(dh_to_pylist(tbl_boto)) == 2
 
-    tbl_star = sess_boto.flat_files.load(
-        "us_stocks_sip/trades_v1", date="2025-01-03", symbols="*"
-    )
+    tbl_star = sess_boto.flat_files.load("us_stocks_sip/trades_v1", date="2025-01-03", symbols="*")
     assert len(dh_to_pylist(tbl_star)) == 2
 
 

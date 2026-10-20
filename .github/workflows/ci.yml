@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-typecheck:
+    name: Lint (Ruff) & Typecheck (Mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+      - name: Run Ruff Linter
+        run: uv run ruff check src tests
+      - name: Run Ruff Formatter Check
+        run: uv run ruff format --check src tests
+      - name: Run Mypy Type Checker
+        run: uv run mypy src tests
+
+  test-and-coverage:
+    name: Unit Tests & 100% Coverage
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17 (required for embedded Deephaven Server)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
+      - name: Run Pytest with 100% Statement & Branch Coverage
+        run: |
+          uv run pytest \
+            --cov=deephaven_massive \
+            --cov-branch \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=100
+      - name: Upload Coverage XML Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: coverage.xml
+
+  build:
+    name: Build Package (Wheel & SDist)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build Wheel and SDist
+        run: uv build
+      - name: Upload Built Distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

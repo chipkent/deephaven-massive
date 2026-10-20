@@ -9,10 +9,11 @@ removed symbols from `.latest()`, `.history()`, and `.ring()` tables.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+import contextlib
 import threading
 import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -26,6 +27,7 @@ from deephaven_massive.engine.arrow_bridge import (
 if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+
     from deephaven_massive.engine.publisher import MicroBatchPublisher
     from deephaven_massive.engine.symbols import SymbolNormalizer
     from deephaven_massive.engine.ws_multiplexer import WebSocketMultiplexer
@@ -186,9 +188,7 @@ class ReactiveWatchlistController:
 
         self._executor.submit(self._apply_diff_safe, to_add, to_remove)
 
-    def _apply_diff_safe(
-        self, to_add: Iterable[str], to_remove: Iterable[str]
-    ) -> None:
+    def _apply_diff_safe(self, to_add: Iterable[str], to_remove: Iterable[str]) -> None:
         """Execute `apply_diff` on the worker thread and notify `wait_idle` callers."""
         try:
             self.apply_diff(to_add, to_remove)
@@ -227,9 +227,7 @@ class ReactiveWatchlistController:
             # 1. Handle removals first: disable in publisher -> unsubscribe WS -> delete from active_subs
             if net_rem:
                 self.publisher.disable_symbols(net_rem)
-                rem_topics = [
-                    self.symbol_normalizer.ws_topic(self.channel, s) for s in net_rem
-                ]
+                rem_topics = [self.symbol_normalizer.ws_topic(self.channel, s) for s in net_rem]
                 self.ws_multiplexer.unsubscribe(
                     self.ws_url, self.channel, rem_topics, self.publisher
                 )
@@ -261,9 +259,7 @@ class ReactiveWatchlistController:
                     self._active_subs.add(add_dh)
 
                 self.publisher.enable_symbols(net_add)
-                add_topics = [
-                    self.symbol_normalizer.ws_topic(self.channel, s) for s in net_add
-                ]
+                add_topics = [self.symbol_normalizer.ws_topic(self.channel, s) for s in net_add]
                 if self.seed_fn is not None:
                     self.publisher.begin_seeding()
                     seed_rows: Sequence[Mapping[str, Any]] = ()
@@ -301,10 +297,8 @@ class ReactiveWatchlistController:
     def stop(self) -> None:
         """Stop listening to the watchlist table and unsubscribe all active symbols."""
         if self._listener_handle is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._listener_handle.stop()
-            except Exception:  # pragma: no cover
-                pass
             self._listener_handle = None
 
         with self._op_lock:
@@ -316,6 +310,4 @@ class ReactiveWatchlistController:
                 self.apply_diff((), current, _from_stop=True)
 
         self._executor.shutdown(wait=False)
-        self.ws_multiplexer.unregister_publisher(
-            self.ws_url, self.channel, self.publisher
-        )
+        self.ws_multiplexer.unregister_publisher(self.ws_url, self.channel, self.publisher)
