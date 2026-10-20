@@ -21,6 +21,7 @@ from deephaven_massive.engine.watchlist import ReactiveWatchlistController
 from deephaven_massive.engine.ws_multiplexer import (
     MAX_OPTION_CONTRACTS,
     WebSocketMultiplexer,
+    _default_ws_connector,
 )
 from deephaven_massive.schemas.market import TRADES_SCHEMA
 from tests.conftest import dh_to_pydict
@@ -90,6 +91,7 @@ def test_ws_multiplexer_ref_counting_and_dispatch(dh_exec_ctx: Any) -> None:
         json.dumps(
             [
                 {"ev": "status", "status": "connected", "message": "Connected"},
+                {"ev": "status", "status": "auth_success", "message": "Authenticated"},
                 {"no_ev": True},
                 {"ev": "T", "sym": "MSFT", "p": 310.0, "s": 50, "t": 1700000000000000000},
             ]
@@ -129,7 +131,7 @@ def test_ws_multiplexer_ref_counting_and_dispatch(dh_exec_ctx: Any) -> None:
 
 def test_ws_multiplexer_options_1000_contract_cap() -> None:
     cfg = MassiveConfig(api_key="ws-secret")
-    mux = WebSocketMultiplexer(cfg)
+    mux = WebSocketMultiplexer(cfg, send_hook=lambda _u, _p: None)
     opt_url = "wss://socket.massive.com/options"
 
     # Wildcard does not count toward 1000-contract limit
@@ -146,12 +148,142 @@ def test_ws_multiplexer_options_1000_contract_cap() -> None:
     mux.close()
 
 
+def test_ws_multiplexer_live_connector_and_reconnect_lifecycle(
+    dh_exec_ctx: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import websockets
+
+    monkeypatch.setattr(websockets, "connect", lambda url: f"connected:{url}")
+    assert _default_ws_connector("wss://example.com") == "connected:wss://example.com"
+
+    ws_url = "wss://socket.massive.com/stocks"
+    norm = SymbolNormalizer("stocks")
+    pub = MicroBatchPublisher("live_ws_pub", TRADES_SCHEMA, norm, dh_exec_ctx)
+
+    ws_sent: list[dict[str, Any]] = []
+    auth_ok_event = threading.Event()
+    post_sub_event = threading.Event()
+    unsub_done_event = threading.Event()
+    attempts = 0
+
+    class _FakeWS:
+        def __init__(self, mode: str) -> None:
+            self.mode = mode
+            self._step = 0
+
+        async def __aenter__(self) -> _FakeWS:
+            if self.mode == "transient_fail":
+                raise OSError("transient connection drop")
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        async def send(self, msg: str) -> None:
+            payload = json.loads(msg)
+            ws_sent.append(payload)
+            if payload.get("action") == "subscribe" and "T.MSFT" in payload.get("params", ""):
+                post_sub_event.set()
+
+        def __aiter__(self) -> _FakeWS:
+            return self
+
+        async def __anext__(self) -> str:
+            self._step += 1
+            if self.mode == "entitlement_fail":
+                if self._step == 1:
+                    return json.dumps(
+                        [{"ev": "status", "status": "auth_failed", "message": "Not authorized"}]
+                    )
+                raise StopAsyncIteration
+            if self._step == 1:
+                return json.dumps([{"ev": "status", "status": "auth_success"}])
+            if self._step == 2:
+                auth_ok_event.set()
+                return json.dumps(
+                    [{"ev": "T", "sym": "AAPL", "p": 155.0, "s": 10, "t": 1700000000000000000}]
+                )
+            if self._step == 3:
+                for _ in range(100):
+                    if unsub_done_event.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                raise StopAsyncIteration
+            raise StopAsyncIteration
+
+    def _connector(_url: str) -> _FakeWS:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return _FakeWS("transient_fail")
+        return _FakeWS("normal")
+
+    cfg = MassiveConfig(api_key="live-key")
+    mux = WebSocketMultiplexer(
+        cfg, ws_connector=_connector, reconnect_delay_s=0.01
+    )
+
+    # First subscribe starts _run_connection on background loop
+    mux.subscribe(ws_url, "T", ["T.AAPL"], pub)
+    # Calling _ensure_connection while already connecting is a no-op
+    mux._ensure_connection(ws_url)
+
+    assert auth_ok_event.wait(timeout=3.0)
+    # Now authenticated: subscribing a second topic sends post-auth frame directly over active_ws
+    mux.subscribe(ws_url, "T", ["T.MSFT"], pub)
+    assert post_sub_event.wait(timeout=3.0)
+
+    # Unsubscribe all topics so next loop iteration sees has_topics == False and exits
+    mux.unsubscribe(ws_url, "T", ["T.AAPL", "T.MSFT"], pub)
+    unsub_done_event.set()
+
+    for _ in range(100):
+        with mux._lock:
+            st = mux._endpoints.get(ws_url)
+            if st is not None and not st.connecting:
+                break
+        time.sleep(0.01)
+
+    assert any(m.get("action") == "auth" for m in ws_sent)
+    assert any(m.get("action") == "subscribe" and m.get("params") == "T.AAPL" for m in ws_sent)
+    assert any(m.get("action") == "subscribe" and m.get("params") == "T.MSFT" for m in ws_sent)
+    assert any(m.get("action") == "unsubscribe" for m in ws_sent)
+    assert pub.flush_now() == 1
+    mux.close()
+
+    # Also test entitlement failure aborting _run_connection without infinite retry
+    mux_ent = WebSocketMultiplexer(
+        cfg,
+        ws_connector=lambda _u: _FakeWS("entitlement_fail"),
+        reconnect_delay_s=0.01,
+    )
+    mux_ent.subscribe(ws_url, "T", ["T.AAPL"], pub)
+    for _ in range(100):
+        with mux_ent._lock:
+            st_ent = mux_ent._endpoints.get(ws_url)
+            if st_ent is not None and isinstance(st_ent.last_error, MassiveEntitlementError) and not st_ent.connecting:
+                break
+        time.sleep(0.01)
+    assert isinstance(mux_ent._endpoints[ws_url].last_error, MassiveEntitlementError)
+    mux_ent.close()
+
+    # Also test _run_connection exiting when self._closed becomes True during reconnect backoff
+    closed_mux = WebSocketMultiplexer(
+        cfg,
+        ws_connector=lambda _u: _FakeWS("transient_fail"),
+        reconnect_delay_s=0.01,
+    )
+    closed_mux._closed = True
+    asyncio.run(closed_mux._run_connection(ws_url))
+
+
 def test_reactive_watchlist_controller_lifecycle(dh_exec_ctx: Any) -> None:
     from deephaven import dtypes as dht
     from deephaven import input_table
 
     cfg = MassiveConfig(api_key="ws-secret")
-    mux = WebSocketMultiplexer(cfg)
+    mux = WebSocketMultiplexer(cfg, send_hook=lambda _u, _p: None)
     ws_url = "wss://socket.massive.com/stocks"
     norm = SymbolNormalizer("stocks")
     pub = MicroBatchPublisher("wl_pub", TRADES_SCHEMA, norm, dh_exec_ctx)
@@ -246,6 +378,7 @@ def test_reactive_watchlist_controller_lifecycle(dh_exec_ctx: Any) -> None:
     # Stop controller -> unsubscribes all remaining active symbols
     ctrl.stop()
     ctrl.stop()  # idempotent second stop
+    ctrl.apply_diff(["GOOG"], [])  # ignored after stop()
     assert ctrl.active_symbols == frozenset()
     assert mux.active_topics(ws_url) == frozenset()
 

@@ -70,6 +70,7 @@ class MicroBatchPublisher:
         )
 
         self._lock = threading.Lock()
+        self._publish_lock = threading.Lock()
         self._allowed_symbols: set[str] | None = None
         if allowed_symbols is not None:
             self.set_allowed_symbols(allowed_symbols)
@@ -142,9 +143,15 @@ class MicroBatchPublisher:
         with self._lock:
             self._seeding = True
 
-    def complete_seeding(self, seed_rows: Sequence[Mapping[str, Any]]) -> int:
+    def complete_seeding(
+        self,
+        seed_rows: Sequence[Mapping[str, Any]],
+        *,
+        seed_since: Any = None,
+    ) -> int:
         """Deduplicate buffered WebSocket rows against `seed_rows` and flush both to Deephaven."""
         now_ns = time.time_ns()
+        min_seed_ts_ns = to_utc_ns(seed_since) if seed_since is not None else None
         norm_seeds: list[dict[str, Any]] = []
         seen_trade_ids: set[tuple[str | None, str]] = set()
         seen_keys: set[tuple[Any, ...]] = set()
@@ -153,6 +160,13 @@ class MicroBatchPublisher:
 
         for raw in seed_rows:
             nr = dict(self.schema_spec.normalizer(raw, self.symbol_normalizer))
+            ts_ns = _row_timestamp_ns(nr)
+            if (
+                min_seed_ts_ns is not None
+                and ts_ns is not None
+                and ts_ns < min_seed_ts_ns
+            ):
+                continue
             nr["__ReceivedAt"] = now_ns
             sym = nr.get("Symbol")
             if has_trade_id and nr.get("TradeId") is not None:
@@ -160,7 +174,6 @@ class MicroBatchPublisher:
             if self.schema_spec.key_cols:
                 key_tuple = tuple(nr.get(k) for k in self.schema_spec.key_cols)
                 seen_keys.add(key_tuple)
-            ts_ns = _row_timestamp_ns(nr)
             if ts_ns is not None:
                 prev_max = max_ts_by_symbol.get(sym)
                 if prev_max is None or ts_ns > prev_max:
@@ -247,28 +260,29 @@ class MicroBatchPublisher:
         return len(accepted)
 
     def flush_now(self) -> int:
-        """Atomically drain the micro-batch buffer and publish a RecordBatch to Deephaven."""
-        with self._lock:
-            if not self._buffer:
-                return 0
-            batch_rows = self._buffer
-            self._buffer = []
+        """Atomically drain the micro-batch buffer and publish a RecordBatch to Deephaven in strict FIFO order."""
+        with self._publish_lock:
+            with self._lock:
+                if self._seeding or not self._buffer:
+                    return 0
+                batch_rows = self._buffer
+                self._buffer = []
 
-        received_vals = [r.get("__ReceivedAt") for r in batch_rows]
-        rb = rows_to_record_batch(
-            batch_rows,
-            self.schema_spec,
-            self.symbol_normalizer,
-            extra_columns={"__ReceivedAt": (UTC_NS_TYPE, received_vals)},
-            already_normalized=True,
-        )
-        pa_tbl = pa.Table.from_batches([rb])
-        dh_tbl = arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
+            received_vals = [r.get("__ReceivedAt") for r in batch_rows]
+            rb = rows_to_record_batch(
+                batch_rows,
+                self.schema_spec,
+                self.symbol_normalizer,
+                extra_columns={"__ReceivedAt": (UTC_NS_TYPE, received_vals)},
+                already_normalized=True,
+            )
+            pa_tbl = pa.Table.from_batches([rb])
+            dh_tbl = arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
 
-        with exec_ctx_scope(self._exec_ctx):
-            self._dh_publisher.add(dh_tbl)
+            with exec_ctx_scope(self._exec_ctx):
+                self._dh_publisher.add(dh_tbl)
 
-        return len(batch_rows)
+            return len(batch_rows)
 
     def start(self) -> None:
         """Start the background periodic flush thread."""
@@ -296,4 +310,6 @@ class MicroBatchPublisher:
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
         self._flush_thread = None
+        with self._lock:
+            self._seeding = False
         self.flush_now()

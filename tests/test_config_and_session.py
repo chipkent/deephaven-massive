@@ -124,6 +124,7 @@ def test_session_request_json_and_retries() -> None:
         api_key="test-key",
         max_retries=2,
         http_handler=_handler,
+        ws_send_hook=lambda _u, _p: None,
         sleep_fn=sleeps.append,
     ) as sess:
         res = sess.request_json("v3/trades/AAPL", {"limit": 10, "empty": None})
@@ -134,10 +135,22 @@ def test_session_request_json_and_retries() -> None:
         res_all_none = sess.request_json("/v3/trades/AAPL", {"empty": None})
         assert res_all_none["status"] == "OK"
 
-        # Duplicate register_builder is idempotent
+        # Duplicate register_builder is idempotent; test stop_stream filtering
         b = sess.stocks.trades("AAPL")
+        b2 = sess.stocks.quotes(["MSFT", "NVDA"])
         sess.register_builder(b)
         sess.register_builder(b)
+        sess.register_builder(b2)
+        assert sess.stop_stream("nonexistent") == 0
+        assert sess.stop_stream(ws_channel="AM") == 0
+        assert sess.stop_stream(symbols="GOOG") == 0
+        assert sess.stop_stream(symbols=["GOOG"]) == 0
+        assert sess.stop_stream(ws_channel="Q", symbols=["MSFT"]) == 1
+        assert sess.stop_stream(b) == 1
+        sess.register_builder(b)
+        assert sess.stop_stream(symbols="AAPL") == 1
+        sess.register_builder(b)
+        assert sess.stop_stream() == 1
 
         # Full URL with existing query string
         res2 = sess.request_json(

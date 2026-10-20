@@ -255,6 +255,10 @@ def test_all_market_economy_reference_partner_schemas() -> None:
     assert QUOTES_SCHEMA.normalizer({"last_quote": {"Symbol": "AAPL", "P": 151.0, "p": 150.0}}, stocks_norm)["Symbol"] == "AAPL"
 
     assert BARS_SCHEMA.normalizer({"T": "AAPL", "o": 100, "h": 110, "l": 99, "c": 105, "v": 1000, "t": 1700000000000}, stocks_norm)["Close"] == 105
+    assert BARS_SCHEMA.normalizer({"T": "AAPL", "o": 100, "c": 105, "s": 1700000000000, "e": 1700000060000}, stocks_norm)["EndTimestamp"] == 1700000060000000000
+    assert BARS_SCHEMA.normalizer({"T": "AAPL", "o": 100, "c": 105, "t": 1700000000000, "_span_ns": 60_000_000_000}, stocks_norm)["EndTimestamp"] == 1700000060000000000
+    assert BARS_SCHEMA.normalizer({"T": "AAPL", "o": 100, "c": 105, "t": 1700000000000, "timespan": "minute", "multiplier": 5}, stocks_norm)["EndTimestamp"] == 1700000300000000000
+    assert BARS_SCHEMA.normalizer({"T": "AAPL", "o": 100, "c": 105}, stocks_norm)["EndTimestamp"] is None
     assert BARS_SCHEMA.normalizer({"ticker": "AAPL", "day": {"o": 100, "c": 105}, "min": {"t": 1700000000000, "av": 5000}}, stocks_norm)["AccumulatedVolume"] == 5000
 
     assert LULD_SCHEMA.normalizer({"T": "AAPL", "h": 160.0, "l": 140.0, "i": [1], "z": 3, "t": 1700000000000, "q": 10}, stocks_norm)["HighPrice"] == 160.0

@@ -111,6 +111,33 @@ def normalize_quote(
     }
 
 
+TIMESPAN_NS: dict[str, int] = {
+    "second": 1_000_000_000,
+    "sec": 1_000_000_000,
+    "s": 1_000_000_000,
+    "minute": 60_000_000_000,
+    "min": 60_000_000_000,
+    "m": 60_000_000_000,
+    "hour": 3_600_000_000_000,
+    "hr": 3_600_000_000_000,
+    "h": 3_600_000_000_000,
+    "day": 86_400_000_000_000,
+    "d": 86_400_000_000_000,
+    "session": 86_400_000_000_000,
+    "week": 7 * 86_400_000_000_000,
+    "w": 7 * 86_400_000_000_000,
+    "month": 30 * 86_400_000_000_000,
+    "quarter": 90 * 86_400_000_000_000,
+    "year": 365 * 86_400_000_000_000,
+}
+
+
+def compute_bar_span_ns(multiplier: int = 1, timespan: str = "minute") -> int:
+    """Compute the bar duration in nanoseconds from `multiplier` and `timespan`."""
+    unit_ns = TIMESPAN_NS.get(timespan.strip().lower(), 60_000_000_000)
+    return int(multiplier) * unit_ns
+
+
 def normalize_bar(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
@@ -123,11 +150,22 @@ def normalize_bar(
     )
     sym = _norm_symbol(row, norm, "Symbol", "sym", "pair", "ticker", "T")
     start_raw = _first_present(
-        src, "Timestamp", "s", "t", "window_start", "timestamp", "date"
+        src, "WindowStart", "Timestamp", "window_start", "t", "s", "timestamp", "date"
     )
     end_raw = _first_present(src, "EndTimestamp", "e", "end_timestamp")
     start_ns = to_utc_ns(start_raw)
-    end_ns = to_utc_ns(end_raw) if end_raw is not None else start_ns
+    if end_raw is not None:
+        end_ns = to_utc_ns(end_raw)
+    elif start_ns is not None:
+        span_ns = _first_present(row, "_span_ns", "span_ns")
+        if span_ns is None and ("timespan" in row or "multiplier" in row):
+            span_ns = compute_bar_span_ns(
+                int(row.get("multiplier", 1)),
+                str(row.get("timespan", "minute")),
+            )
+        end_ns = start_ns + int(span_ns) if span_ns is not None else start_ns
+    else:
+        end_ns = None
     return {
         "Symbol": sym,
         "Timestamp": start_ns,

@@ -16,12 +16,35 @@ from deephaven_massive.engine.arrow_bridge import (
 )
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.engine.symbols import SymbolNormalizer
+from deephaven_massive.schemas.market import compute_bar_span_ns
 
 if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven_massive.session import MassiveSession
 
 VALID_HISTORICAL_SOURCES: frozenset[str] = frozenset({"auto", "rest", "flat_files"})
+
+
+def _resolve_bar_extra_fields(
+    path: str,
+    params: Mapping[str, Any] | None,
+    extra_fields: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """Attach `_span_ns` for aggregate bar REST requests when `path` or `params` encode a bar span."""
+    span_ns: int | None = None
+    if "/range/" in path:
+        parts = path.split("/range/", 1)[1].split("/")
+        span_ns = compute_bar_span_ns(int(parts[0]), parts[1])
+    elif path.endswith("/prev"):
+        span_ns = compute_bar_span_ns(1, "day")
+    elif params and "resolution" in params:
+        mult_s, span_s = str(params["resolution"]).split("_", 1)
+        span_ns = compute_bar_span_ns(int(mult_s), span_s)
+    if span_ns is None:
+        return extra_fields
+    merged = dict(extra_fields or {})
+    merged.setdefault("_span_ns", span_ns)
+    return merged
 
 
 def format_date_param(val: str | date | datetime | int | None) -> str | None:
@@ -126,6 +149,7 @@ class BaseDomainClient:
     ) -> list[dict[str, Any]]:
         """Fetch and paginate REST JSON results into a list of row dicts."""
         collected: list[dict[str, Any]] = []
+        resolved_extra = _resolve_bar_extra_fields(path, params, extra_fields)
         next_path: str | None = path
         next_params: dict[str, Any] | None = (
             {k: v for k, v in params.items() if v is not None}
@@ -140,7 +164,7 @@ class BaseDomainClient:
             page_rows = extract_rows_from_payload(
                 payload,
                 inject_symbol=inject_symbol,
-                extra_fields=extra_fields,
+                extra_fields=resolved_extra,
             )
             collected.extend(page_rows)
             if limit is not None and len(collected) >= limit:
@@ -172,6 +196,7 @@ class BaseDomainClient:
         batches: list[pa.RecordBatch] = []
         buffer: list[dict[str, Any]] = []
         total_rows = 0
+        resolved_extra = _resolve_bar_extra_fields(path, params, extra_fields)
 
         next_path: str | None = path
         next_params: dict[str, Any] | None = (
@@ -187,7 +212,7 @@ class BaseDomainClient:
             page_rows = extract_rows_from_payload(
                 payload,
                 inject_symbol=inject_symbol,
-                extra_fields=extra_fields,
+                extra_fields=resolved_extra,
             )
             if limit is not None and total_rows + len(page_rows) > limit:
                 page_rows = page_rows[: limit - total_rows]

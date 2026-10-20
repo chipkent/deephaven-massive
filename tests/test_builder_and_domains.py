@@ -17,6 +17,7 @@ from deephaven_massive.domains.base import (
 )
 from deephaven_massive.domains.flat_files import (
     FlatFilesClient,
+    _PrependReader,
     _date_range,
     _infer_schema_and_domain,
     _parse_date,
@@ -151,6 +152,11 @@ def test_flat_files_client_and_helpers(
     assert _parse_date(date(2025, 1, 2)) == date(2025, 1, 2)
     assert _parse_date("2025-01-02") == date(2025, 1, 2)
 
+    prep_test = _PrependReader(b"ab", io.BytesIO(b"cdef"))
+    assert prep_test.readable() is True
+    assert prep_test.read(4) == b"abcd"
+    assert prep_test.read() == b"ef"
+
     assert _date_range(None, None, single_date="2025-01-02") == [date(2025, 1, 2)]
     with pytest.raises(ValueError, match="Either `date` or `start`"):
         _date_range(None, None)
@@ -242,9 +248,15 @@ def test_flat_files_client_and_helpers(
 
     import boto3
 
+    csv_6char = (
+        "ticker,price,size,id,sip_timestamp,conditions\n"
+        "EURUSD,151.00,50,T4,1700000000000000003,[]\n"
+        "EURUSD,152.00,50,T5,1700000000000000004,[]\n"
+    )
+
     class _FakeS3Client:
         def get_object(self, Bucket: str, Key: str) -> dict[str, Any]:
-            return {"Body": make_csv_gz_stream(csv_day3)}
+            return {"Body": make_csv_gz_stream(csv_6char)}
 
     monkeypatch.setattr(boto3, "client", lambda *a, **kw: _FakeS3Client())
     sess_boto = mock_session(s3_opener=None)
@@ -254,6 +266,34 @@ def test_flat_files_client_and_helpers(
         "us_stocks_sip/trades_v1", date="2025-01-03", symbols="*"
     )
     assert len(dh_to_pylist(tbl_star)) == 2
+
+    # Test start_date / end_date / max_rows aliases and all 16 convenience methods
+    ff = sess_boto.flat_files
+    for conv_tbl in (
+        ff.stocks_trades(start_date="2025-01-03", end_date="2025-01-03", max_rows=1),
+        ff.stocks_quotes(date="2025-01-03"),
+        ff.stocks_bars(date="2025-01-03", timespan="minute"),
+        ff.stocks_bars(date="2025-01-03", timespan="day"),
+        ff.options_trades(date="2025-01-03"),
+        ff.options_quotes(date="2025-01-03"),
+        ff.options_bars(date="2025-01-03", timespan="minute"),
+        ff.options_bars(date="2025-01-03", timespan="day"),
+        ff.futures_trades(date="2025-01-03"),
+        ff.futures_quotes(date="2025-01-03"),
+        ff.futures_bars(date="2025-01-03", timespan="minute"),
+        ff.futures_bars(date="2025-01-03", timespan="day"),
+        ff.futures_session_bars(date="2025-01-03"),
+        ff.indices_values(date="2025-01-03"),
+        ff.indices_bars(date="2025-01-03", timespan="minute"),
+        ff.indices_bars(date="2025-01-03", timespan="day"),
+        ff.forex_quotes(date="2025-01-03"),
+        ff.forex_bars(date="2025-01-03", timespan="minute"),
+        ff.forex_bars(date="2025-01-03", timespan="day"),
+        ff.crypto_trades(date="2025-01-03"),
+        ff.crypto_bars(date="2025-01-03", timespan="minute"),
+        ff.crypto_bars(date="2025-01-03", timespan="day"),
+    ):
+        assert len(dh_to_pylist(conv_tbl)) >= 1
 
 
 def test_feed_builder_terminal_methods_and_edge_cases(
@@ -313,8 +353,10 @@ def test_feed_builder_terminal_methods_and_edge_cases(
         latest_raw = fb_raw.latest(key_cols=(), seed=True)
         latest_raw.await_update()
         assert len(dh_to_pylist(latest_raw)) == 1
+        latest_by = fb_raw.latest(by=["Date"], seed=False)
+        assert latest_by is not None
 
-        hist_raw = fb_raw.history(seed=False)
+        hist_raw = fb_raw.history(seed_since="2025-01-01", seed=True)
         ring_raw = fb_raw.ring(capacity=10, seed=False)
         blink_raw = fb_raw.blink()
         assert hist_raw is not None and ring_raw is not None and blink_raw is not None
@@ -399,7 +441,11 @@ def test_feed_builder_terminal_methods_and_edge_cases(
     fb_wl_win.watchlist_controller.wait_idle(timeout=5.0)
     fb_wl_win.stop()
 
-    # Also test ring() and poll() with exec_ctx and on_register_lifecycle
+    # Also test ring() and poll() with exec_ctx and on_register_lifecycle, plus auto_flush=True seed
+    sess_auto = mock_session(auto_flush=True)
+    fb_auto_seed = sess_auto.stocks.trades("AAPL")
+    _ = fb_auto_seed.latest(seed=True)
+    fb_auto_seed.stop()
     ring_ctx = sess.stocks.trades("AAPL").ring(capacity=5, seed=False)
     assert ring_ctx is not None
     poll_fb = sess.stocks.snapshots("AAPL")

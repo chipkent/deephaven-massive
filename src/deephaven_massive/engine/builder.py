@@ -36,7 +36,7 @@ class FeedBuilder:
     Terminal methods:
     - :meth:`latest`: Live updating current-state table (`last_by(key_cols)`), optionally seeded via REST.
     - :meth:`history`: Live updating in-memory append-only history table (`blink_to_append_only`).
-    - :meth:`ring`: Bounded live history table retaining the most recent `capacity` rows (`.tail(capacity)`).
+    - :meth:`ring`: Bounded live history table retaining the most recent `capacity` rows (`ring_table`).
     - :meth:`blink`: Raw stateless single-cycle Deephaven blink table.
     - :meth:`snapshot`: One-shot static point-in-time Deephaven table fetched via REST.
     - :meth:`poll`: Periodic background REST poller with ``mode="replace" | "upsert" | "append"``.
@@ -110,7 +110,7 @@ class FeedBuilder:
         return [str(s).strip().upper() for s in self.symbols]  # type: ignore[union-attr]
 
     def _setup_streaming(
-        self, *, seed: bool
+        self, *, seed: bool, seed_since: Any = None
     ) -> tuple[
         MicroBatchPublisher,
         ReactiveWatchlistController | None,
@@ -126,6 +126,7 @@ class FeedBuilder:
                 "Use .snapshot(), .poll(), or .historical() instead."
             )
 
+        effective_seed = bool(seed or seed_since is not None)
         pub = MicroBatchPublisher(
             name=self.name,
             schema_spec=self.schema_spec,
@@ -137,7 +138,12 @@ class FeedBuilder:
         self._publisher = pub
 
         watchlist_ctrl: ReactiveWatchlistController | None = None
-        finalize_seed: Callable[[], None] = lambda: None
+
+        def _default_finalize() -> None:
+            if self.auto_flush:
+                pub.start()
+
+        finalize_seed: Callable[[], None] = _default_finalize
 
         if _is_deephaven_table(self.symbols):
             assert self.symbol_normalizer is not None
@@ -150,7 +156,7 @@ class FeedBuilder:
                 symbol_normalizer=self.symbol_normalizer,
                 symbol_col=self.symbol_col,
                 exec_ctx=self._exec_ctx,
-                seed_fn=self.seed_fn if seed else None,
+                seed_fn=self.seed_fn if effective_seed else None,
             )
             self._watchlist_controller = watchlist_ctrl
         else:
@@ -165,7 +171,7 @@ class FeedBuilder:
                 topics = [f"{self.ws_channel}.{s}" for s in canon_syms]
             self._static_topics = topics
 
-            if seed and self.seed_fn is not None:
+            if effective_seed and self.seed_fn is not None:
                 pub.begin_seeding()
                 self.ws_multiplexer.subscribe(
                     self.ws_url, self.ws_channel, topics, pub
@@ -174,16 +180,15 @@ class FeedBuilder:
 
                 def _do_seed() -> None:
                     seed_rows = seed_fn_ref(canon_syms)
-                    pub.complete_seeding(seed_rows)
+                    pub.complete_seeding(seed_rows, seed_since=seed_since)
+                    if self.auto_flush:
+                        pub.start()
 
                 finalize_seed = _do_seed
             else:
                 self.ws_multiplexer.subscribe(
                     self.ws_url, self.ws_channel, topics, pub
                 )
-
-        if self.auto_flush:
-            pub.start()
 
         if self._on_register_lifecycle is not None:
             self._on_register_lifecycle(self)
@@ -194,9 +199,13 @@ class FeedBuilder:
         self,
         key_cols: Sequence[str] | None = None,
         *,
+        by: str | Sequence[str] | None = None,
         seed: bool = True,
     ) -> Table:
         """Return a live updating current-state table (`last_by(key_cols)`), seeded before streaming."""
+        if by is not None and key_cols is None:
+            key_cols = [by] if isinstance(by, str) else list(by)
+
         pub, watchlist_ctrl, finalize_seed = self._setup_streaming(seed=seed)
         effective_keys = (
             list(key_cols)
@@ -206,32 +215,45 @@ class FeedBuilder:
 
         def _build() -> Table:
             base = (
-                pub.user_blink_table.last_by(effective_keys)
+                pub.blink_table.last_by(effective_keys)
                 if effective_keys
-                else pub.user_blink_table.last_by()
+                else pub.blink_table.last_by()
             )
             if watchlist_ctrl is not None:
-                base = (
+                return (
                     base.natural_join(
                         watchlist_ctrl.active_subs_table,
                         on=["Symbol"],
                         joins=["SubscribedAt"],
                     )
-                    .where("!isNull(SubscribedAt)")
-                    .drop_columns(["SubscribedAt"])
+                    .where(
+                        [
+                            "!isNull(SubscribedAt)",
+                            "__ReceivedAt >= SubscribedAt",
+                        ]
+                    )
+                    .drop_columns(["SubscribedAt", "__ReceivedAt"])
                 )
-            return base
+            return base.drop_columns(["__ReceivedAt"])
 
         with exec_ctx_scope(self._exec_ctx):
             tbl = _build()
         finalize_seed()
         return tbl
 
-    def history(self, *, seed: bool = False) -> Table:
-        """Return a live updating append-only history table (`blink_to_append_only`)."""
+    def _build_history_or_ring(
+        self,
+        *,
+        seed: bool = False,
+        seed_since: Any = None,
+        capacity: int | None = None,
+    ) -> Table:
+        from deephaven import ring_table
         from deephaven.stream import blink_to_append_only
 
-        pub, watchlist_ctrl, finalize_seed = self._setup_streaming(seed=seed)
+        pub, watchlist_ctrl, finalize_seed = self._setup_streaming(
+            seed=seed, seed_since=seed_since
+        )
         col_names = set(self.schema_spec.arrow_schema.names)
         if "Timestamp" in col_names:
             ts_expr = "Timestamp >= SubscribedAt || __ReceivedAt >= SubscribedAt"
@@ -241,35 +263,51 @@ class FeedBuilder:
             ts_expr = "__ReceivedAt >= SubscribedAt"
 
         def _build() -> Table:
-            append_tbl = blink_to_append_only(pub.blink_table)
+            stream_tbl = (
+                ring_table(pub.blink_table, capacity)
+                if capacity is not None
+                else blink_to_append_only(pub.blink_table)
+            )
             if watchlist_ctrl is not None:
                 return (
-                    append_tbl.natural_join(
+                    stream_tbl.natural_join(
                         watchlist_ctrl.active_subs_table,
                         on=["Symbol"],
                         joins=["SubscribedAt"],
                     )
-                    .where(f"!isNull(SubscribedAt) && ({ts_expr})")
+                    .where(["!isNull(SubscribedAt)", ts_expr])
                     .drop_columns(["SubscribedAt", "__ReceivedAt"])
                 )
-            return append_tbl.drop_columns(["__ReceivedAt"])
+            return stream_tbl.drop_columns(["__ReceivedAt"])
 
         with exec_ctx_scope(self._exec_ctx):
             tbl = _build()
         finalize_seed()
         return tbl
 
+    def history(
+        self,
+        seed_since: Any = None,
+        *,
+        seed: bool = False,
+    ) -> Table:
+        """Return a live updating append-only history table (`blink_to_append_only`)."""
+        return self._build_history_or_ring(
+            seed=seed, seed_since=seed_since, capacity=None
+        )
+
     def ring(self, capacity: int = 100_000, *, seed: bool = False) -> Table:
-        """Return a bounded live history table retaining the most recent `capacity` rows."""
+        """Return a bounded live history table retaining the most recent `capacity` rows (`ring_table`)."""
         if capacity <= 0:
             raise ValueError("capacity must be > 0")
-        hist = self.history(seed=seed)
-        with exec_ctx_scope(self._exec_ctx):
-            return hist.tail(capacity)
+        return self._build_history_or_ring(
+            seed=seed, seed_since=None, capacity=capacity
+        )
 
     def blink(self) -> Table:
         """Return the raw stateless single-cycle Deephaven blink table."""
-        pub, _, _ = self._setup_streaming(seed=False)
+        pub, _, finalize_seed = self._setup_streaming(seed=False)
+        finalize_seed()
         return pub.user_blink_table
 
     def snapshot(self) -> Table:

@@ -51,10 +51,10 @@ class EconomyClient(BaseDomainClient):
         )
 
     def funding_conditions(self) -> FeedBuilder:
-        """SOFR, EFFR, OBFR, TGCR, BGCR, and Fed Funds target range (`/fed/v1/funding`)."""
+        """SOFR, EFFR, OBFR, TGCR, BGCR, and Fed Funds target range (`/fed/v1/funding-conditions`)."""
         return self._econ_feed(
             "economy_funding_conditions",
-            "/fed/v1/funding",
+            "/fed/v1/funding-conditions",
             FUNDING_CONDITIONS_SCHEMA,
         )
 

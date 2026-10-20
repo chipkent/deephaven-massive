@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -76,9 +77,14 @@ class ReactiveWatchlistController:
         self.seed_fn = seed_fn
 
         self._lock = threading.Lock()
+        self._op_lock = threading.RLock()
+        self._stopped = False
         self._active_symbols: set[str] = set()
         self._pending_ops = 0
         self._idle_Condition = threading.Condition()
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f"massive-watchlist-{self.channel}"
+        )
 
         # Initialize publisher with empty allowed set so only watchlist symbols pass through
         self.publisher.set_allowed_symbols(())
@@ -136,9 +142,7 @@ class ReactiveWatchlistController:
         with self._idle_Condition:
             self._pending_ops += 1
 
-        self.ws_multiplexer.call_soon_threadsafe(
-            self._apply_diff_safe, to_add, to_remove
-        )
+        self._executor.submit(self._apply_diff_safe, to_add, to_remove)
 
     def _apply_diff_safe(
         self, to_add: Iterable[str], to_remove: Iterable[str]
@@ -151,65 +155,73 @@ class ReactiveWatchlistController:
                 self._idle_Condition.notify_all()
 
     def apply_diff(
-        self, to_add: Iterable[str], to_remove: Iterable[str]
+        self,
+        to_add: Iterable[str],
+        to_remove: Iterable[str],
+        *,
+        _from_stop: bool = False,
     ) -> None:
-        """Apply symbol additions and removals with strict ordering across `active_subs`, publisher, and WS."""
+        """Apply symbol additions and removals with strict serialized ordering across `active_subs`, publisher, and WS."""
         add_set = {self.symbol_normalizer.canonical(s) for s in to_add if s}
         rem_set = {self.symbol_normalizer.canonical(s) for s in to_remove if s} - add_set
 
-        with self._lock:
-            net_add = sorted(add_set - self._active_symbols)
-            net_rem = sorted(rem_set & self._active_symbols)
-            self._active_symbols.update(net_add)
-            self._active_symbols.difference_update(net_rem)
+        with self._op_lock:
+            if self._stopped and not _from_stop:
+                return
 
-        # 1. Handle removals first: disable in publisher -> unsubscribe WS -> delete from active_subs
-        if net_rem:
-            self.publisher.disable_symbols(net_rem)
-            rem_topics = [
-                self.symbol_normalizer.ws_topic(self.channel, s) for s in net_rem
-            ]
-            self.ws_multiplexer.unsubscribe(self.ws_url, self.channel, rem_topics)
+            with self._lock:
+                net_add = sorted(add_set - self._active_symbols)
+                net_rem = sorted(rem_set & self._active_symbols)
+                self._active_symbols.update(net_add)
+                self._active_symbols.difference_update(net_rem)
 
-            del_batch = pa.RecordBatch.from_arrays(
-                [pa.array(net_rem, type=pa.string())],
-                schema=_ACTIVE_SUBS_KEY_SCHEMA,
-            )
-            del_dh = arrow_to_deephaven_table(
-                pa.Table.from_batches([del_batch]), self._exec_ctx
-            )
-            with exec_ctx_scope(self._exec_ctx):
-                self._active_subs.delete(del_dh)
+            # 1. Handle removals first: disable in publisher -> unsubscribe WS -> delete from active_subs
+            if net_rem:
+                self.publisher.disable_symbols(net_rem)
+                rem_topics = [
+                    self.symbol_normalizer.ws_topic(self.channel, s) for s in net_rem
+                ]
+                self.ws_multiplexer.unsubscribe(self.ws_url, self.channel, rem_topics)
 
-        # 2. Handle additions: write (Symbol, SubscribedAt) to active_subs -> enable in publisher -> subscribe WS -> seed
-        if net_add:
-            sub_ts = time.time_ns()
-            add_batch = pa.RecordBatch.from_arrays(
-                [
-                    pa.array(net_add, type=pa.string()),
-                    pa.array([sub_ts] * len(net_add), type=UTC_NS_TYPE),
-                ],
-                schema=_ACTIVE_SUBS_ARROW_SCHEMA,
-            )
-            add_dh = arrow_to_deephaven_table(
-                pa.Table.from_batches([add_batch]), self._exec_ctx
-            )
-            with exec_ctx_scope(self._exec_ctx):
-                self._active_subs.add(add_dh)
+                del_batch = pa.RecordBatch.from_arrays(
+                    [pa.array(net_rem, type=pa.string())],
+                    schema=_ACTIVE_SUBS_KEY_SCHEMA,
+                )
+                del_dh = arrow_to_deephaven_table(
+                    pa.Table.from_batches([del_batch]), self._exec_ctx
+                )
+                with exec_ctx_scope(self._exec_ctx):
+                    self._active_subs.delete(del_dh)
 
-            self.publisher.enable_symbols(net_add)
-            add_topics = [
-                self.symbol_normalizer.ws_topic(self.channel, s) for s in net_add
-            ]
-            self.ws_multiplexer.subscribe(
-                self.ws_url, self.channel, add_topics, self.publisher
-            )
+            # 2. Handle additions: write (Symbol, SubscribedAt) to active_subs -> enable in publisher -> subscribe WS -> seed
+            if net_add:
+                sub_ts = time.time_ns()
+                add_batch = pa.RecordBatch.from_arrays(
+                    [
+                        pa.array(net_add, type=pa.string()),
+                        pa.array([sub_ts] * len(net_add), type=UTC_NS_TYPE),
+                    ],
+                    schema=_ACTIVE_SUBS_ARROW_SCHEMA,
+                )
+                add_dh = arrow_to_deephaven_table(
+                    pa.Table.from_batches([add_batch]), self._exec_ctx
+                )
+                with exec_ctx_scope(self._exec_ctx):
+                    self._active_subs.add(add_dh)
 
-            if self.seed_fn is not None:
-                seed_rows = self.seed_fn(net_add)
-                if seed_rows:
-                    self.publisher.enqueue(seed_rows)
-                    self.publisher.flush_now()
+                self.publisher.enable_symbols(net_add)
+                add_topics = [
+                    self.symbol_normalizer.ws_topic(self.channel, s) for s in net_add
+                ]
+                self.ws_multiplexer.subscribe(
+                    self.ws_url, self.channel, add_topics, self.publisher
+                )
+
+                if self.seed_fn is not None:
+                    seed_rows = self.seed_fn(net_add)
+                    if seed_rows:
+                        self.publisher.enqueue(seed_rows)
+                        self.publisher.flush_now()
 
     def wait_idle(self, timeout: float = 5.0) -> bool:
         """Block until all scheduled watchlist diff operations have completed."""
@@ -231,11 +243,15 @@ class ReactiveWatchlistController:
                 pass
             self._listener_handle = None
 
-        with self._lock:
-            current = sorted(self._active_symbols)
+        with self._op_lock:
+            self._stopped = True
+            with self._lock:
+                current = sorted(self._active_symbols)
 
-        if current:
-            self.apply_diff((), current)
+            if current:
+                self.apply_diff((), current, _from_stop=True)
+
+        self._executor.shutdown(wait=False)
         self.ws_multiplexer.unregister_publisher(
             self.ws_url, self.channel, self.publisher
         )

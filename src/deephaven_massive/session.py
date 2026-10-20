@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 import json
+import threading
 import time
 from typing import TYPE_CHECKING, Any, BinaryIO
 from urllib.parse import urlencode
@@ -85,6 +86,7 @@ class MassiveSession:
         ]
         | None = None,
         ws_send_hook: Callable[[str, dict[str, Any]], None] | None = None,
+        ws_connector: Callable[[str], Any] | None = None,
         s3_opener: Callable[[str, str], BinaryIO] | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -106,13 +108,16 @@ class MassiveSession:
         self._http_handler = http_handler
         self._sleep_fn = sleep_fn
         self._http_pool = urllib3.PoolManager()
+        self._lock = threading.RLock()
 
         self.exec_ctx = ensure_deephaven_server(
             auto_start=self.config.auto_start_server,
             port=server_port,
         )
         self.ws_multiplexer = WebSocketMultiplexer(
-            self.config, send_hook=ws_send_hook
+            self.config,
+            send_hook=ws_send_hook,
+            ws_connector=ws_connector,
         )
         self._active_builders: list[FeedBuilder] = []
 
@@ -128,8 +133,41 @@ class MassiveSession:
 
     def register_builder(self, builder: FeedBuilder) -> None:
         """Track an active :class:`FeedBuilder` for cleanup on :meth:`close`."""
-        if builder not in self._active_builders:
-            self._active_builders.append(builder)
+        with self._lock:
+            if builder not in self._active_builders:
+                self._active_builders.append(builder)
+
+    def stop_stream(
+        self,
+        target: FeedBuilder | str | None = None,
+        *,
+        ws_channel: str | None = None,
+        symbols: str | Iterable[str] | None = None,
+    ) -> int:
+        """Stop and unregister active streaming/polling :class:`FeedBuilder` instances matching criteria."""
+        with self._lock:
+            to_stop: list[FeedBuilder] = []
+            for builder in list(self._active_builders):
+                if target is not None:
+                    if builder is target or builder.name == target or builder.ws_channel == target or builder.ws_url == target:
+                        to_stop.append(builder)
+                    continue
+                if ws_channel is not None and builder.ws_channel != ws_channel:
+                    continue
+                if symbols is not None:
+                    target_syms = (
+                        {symbols.strip().upper()}
+                        if isinstance(symbols, str)
+                        else {str(s).strip().upper() for s in symbols}
+                    )
+                    if not (set(builder._canonical_symbol_list()) & target_syms):
+                        continue
+                to_stop.append(builder)
+
+            for builder in to_stop:
+                builder.stop()
+                self._active_builders.remove(builder)
+            return len(to_stop)
 
     def _build_url(
         self, path_or_url: str, params: Mapping[str, Any] | None
@@ -207,9 +245,11 @@ class MassiveSession:
 
     def close(self) -> None:
         """Stop all active streaming publishers, pollers, watchlist controllers, and WebSocket connections."""
-        for builder in list(self._active_builders):
+        with self._lock:
+            builders = list(self._active_builders)
+            self._active_builders.clear()
+        for builder in builders:
             builder.stop()
-        self._active_builders.clear()
         self.ws_multiplexer.close()
 
     def __enter__(self) -> MassiveSession:

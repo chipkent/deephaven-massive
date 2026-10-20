@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta
 import gzip
-import io
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.csv as pa_csv
 
 from deephaven_massive.engine.arrow_bridge import (
@@ -23,6 +23,7 @@ from deephaven_massive.schemas.market import (
     INDEX_VALUES_SCHEMA,
     QUOTES_SCHEMA,
     TRADES_SCHEMA,
+    compute_bar_span_ns,
 )
 
 if TYPE_CHECKING:
@@ -95,6 +96,26 @@ def _infer_schema_and_domain(
     return BARS_SCHEMA, inferred_domain
 
 
+class _PrependReader:
+    """Minimal stream wrapper that prepends peeked magic bytes before delegating to `stream`."""
+
+    closed = False
+
+    def __init__(self, prefix: bytes, stream: BinaryIO) -> None:
+        self._prefix = prefix
+        self._stream = stream
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        if self._prefix:
+            out = self._prefix + self._stream.read(max(0, size - len(self._prefix)))
+            self._prefix = b""
+            return out
+        return self._stream.read(size)
+
+
 class FlatFilesClient:
     """Streams Massive S3 Flat Files (`.csv.gz`) into Deephaven tables with predicate pushdown."""
 
@@ -139,10 +160,13 @@ class FlatFilesClient:
         end: str | date | datetime | None = None,
         *,
         date: str | date | datetime | None = None,
+        start_date: str | date | datetime | None = None,
+        end_date: str | date | datetime | None = None,
         symbols: str | Iterable[str] | None = None,
         schema_spec: SchemaSpec | None = None,
         domain: str | None = None,
         limit: int | None = None,
+        max_rows: int | None = None,
     ) -> Table:
         """Stream one or more daily `.csv.gz` S3 Flat Files into a single Deephaven Table."""
         resolved_schema, resolved_domain = _infer_schema_and_domain(
@@ -150,68 +174,85 @@ class FlatFilesClient:
         )
         normalizer = SymbolNormalizer(resolved_domain)
 
-        allowed_canon: set[str] | None = None
-        allowed_raw: set[str] | None = None
+        effective_start = start if start is not None else start_date
+        effective_end = end if end is not None else end_date
+        effective_limit = limit if limit is not None else max_rows
+
+        value_set: pa.Array | None = None
         if symbols is not None:
             canon_list = normalizer.canonical_list(symbols)
             if "*" not in canon_list:
-                allowed_canon = set(canon_list)
-                allowed_raw = set(canon_list) | {
-                    normalizer.rest_ticker(s) for s in canon_list
-                }
+                allowed_raw: set[str] = set()
+                for s in canon_list:
+                    allowed_raw.add(s)
+                    allowed_raw.add(normalizer.rest_ticker(s))
+                    allowed_raw.add(s.removeprefix("O:").removeprefix("I:"))
+                    allowed_raw.add(s.replace("/", "").replace("-", ""))
+                value_set = pa.array(sorted(allowed_raw), type=pa.string())
 
-        dates = _date_range(start, end, single_date=date)
+        bar_span_ns: int | None = None
+        if resolved_schema.name == "Bars":
+            bar_span_ns = (
+                compute_bar_span_ns(1, "day")
+                if ("day_aggs" in dataset or "session_aggs" in dataset)
+                else compute_bar_span_ns(1, "minute")
+            )
+
+        dates = _date_range(effective_start, effective_end, single_date=date)
         batches: list[pa.RecordBatch] = []
         total_rows = 0
 
         for d in dates:
             key = self.build_s3_key(dataset, d)
             raw_stream = self._open_s3_object(self.session.config.s3_bucket, key)
-            raw_bytes = raw_stream.read()
-            if raw_bytes[:2] == b"\x1f\x8b":
-                csv_bytes = gzip.decompress(raw_bytes)
-            else:
-                csv_bytes = raw_bytes
+            head = raw_stream.read(2)
+            prep = _PrependReader(head, raw_stream)
+            csv_stream: Any = (
+                gzip.GzipFile(fileobj=prep, mode="rb")  # type: ignore[arg-type]
+                if head == b"\x1f\x8b"
+                else prep
+            )
 
-            if not csv_bytes.strip():
-                continue
-
-            csv_table = pa_csv.read_csv(
-                io.BytesIO(csv_bytes),
+            reader = pa_csv.open_csv(
+                csv_stream,
+                read_options=pa_csv.ReadOptions(block_size=16 * 1024 * 1024),
                 convert_options=pa_csv.ConvertOptions(strings_can_be_null=True),
             )
-            raw_rows = csv_table.to_pylist()
 
-            # Predicate pushdown on ticker/symbol BEFORE normalizing Conditions/Indicators arrays
-            if allowed_raw is not None:
-                filtered_rows: list[dict[str, Any]] = []
-                for r in raw_rows:
-                    raw_sym = (
-                        r.get("ticker")
-                        or r.get("sym")
-                        or r.get("Symbol")
-                        or r.get("pair")
+            for batch in reader:
+                if value_set is not None:
+                    sym_col = next(
+                        (
+                            c
+                            for c in ("ticker", "sym", "Symbol", "pair")
+                            if c in batch.schema.names
+                        ),
+                        batch.schema.names[0],
                     )
-                    if raw_sym is None:
-                        continue
-                    s_str = str(raw_sym).strip()
-                    if s_str in allowed_raw or normalizer.canonical(s_str) in (
-                        allowed_canon or set()
-                    ):
-                        filtered_rows.append(r)
-                raw_rows = filtered_rows
+                    mask = pc.is_in(batch[sym_col], value_set=value_set)
+                    batch = batch.filter(mask)
 
-            if limit is not None and total_rows + len(raw_rows) > limit:
-                raw_rows = raw_rows[: limit - total_rows]
+                if (
+                    effective_limit is not None
+                    and total_rows + batch.num_rows > effective_limit
+                ):
+                    batch = batch.slice(0, effective_limit - total_rows)
 
-            if raw_rows:
-                rb = rows_to_record_batch(
-                    raw_rows, resolved_schema, normalizer
-                )
-                batches.append(rb)
-                total_rows += len(raw_rows)
+                if batch.num_rows > 0:
+                    raw_rows = batch.to_pylist()
+                    if bar_span_ns is not None:
+                        for r in raw_rows:
+                            r.setdefault("_span_ns", bar_span_ns)
+                    rb = rows_to_record_batch(
+                        raw_rows, resolved_schema, normalizer
+                    )
+                    batches.append(rb)
+                    total_rows += len(raw_rows)
 
-            if limit is not None and total_rows >= limit:
+                if effective_limit is not None and total_rows >= effective_limit:
+                    break
+
+            if effective_limit is not None and total_rows >= effective_limit:
                 break
 
         pa_tbl = record_batches_to_arrow_table(batches, resolved_schema)
@@ -223,3 +264,85 @@ class FlatFilesClient:
         if prefix is None:
             raise ValueError(f"Unsupported S3 flat-file domain '{domain}'.")
         return f"{prefix}/{feed_kind}"
+
+    def stocks_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load US Stocks SIP trades (`us_stocks_sip/trades_v1`) from S3 Flat Files."""
+        return self.load("us_stocks_sip/trades_v1", start, end, domain="stocks", **kwargs)
+
+    def stocks_quotes(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load US Stocks SIP quotes (`us_stocks_sip/quotes_v1`) from S3 Flat Files."""
+        return self.load("us_stocks_sip/quotes_v1", start, end, domain="stocks", **kwargs)
+
+    def stocks_bars(
+        self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
+    ) -> Table:
+        """Load US Stocks SIP bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        ds = "us_stocks_sip/day_aggs_v1" if timespan.strip().lower() == "day" else "us_stocks_sip/minute_aggs_v1"
+        return self.load(ds, start, end, domain="stocks", **kwargs)
+
+    def options_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load US Options OPRA trades (`us_options_opra/trades_v1`) from S3 Flat Files."""
+        return self.load("us_options_opra/trades_v1", start, end, domain="options", **kwargs)
+
+    def options_quotes(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load US Options OPRA quotes (`us_options_opra/quotes_v1`) from S3 Flat Files."""
+        return self.load("us_options_opra/quotes_v1", start, end, domain="options", **kwargs)
+
+    def options_bars(
+        self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
+    ) -> Table:
+        """Load US Options OPRA bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        ds = "us_options_opra/day_aggs_v1" if timespan.strip().lower() == "day" else "us_options_opra/minute_aggs_v1"
+        return self.load(ds, start, end, domain="options", **kwargs)
+
+    def futures_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load US Futures trades (`us_futures/trades_v1`) from S3 Flat Files."""
+        return self.load("us_futures/trades_v1", start, end, domain="futures", **kwargs)
+
+    def futures_quotes(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load US Futures quotes (`us_futures/quotes_v1`) from S3 Flat Files."""
+        return self.load("us_futures/quotes_v1", start, end, domain="futures", **kwargs)
+
+    def futures_bars(
+        self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
+    ) -> Table:
+        """Load US Futures bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        ds = "us_futures/day_aggs_v1" if timespan.strip().lower() == "day" else "us_futures/minute_aggs_v1"
+        return self.load(ds, start, end, domain="futures", **kwargs)
+
+    def futures_session_bars(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load US Futures session bars (`us_futures/session_aggs_v1`) from S3 Flat Files."""
+        return self.load("us_futures/session_aggs_v1", start, end, domain="futures", **kwargs)
+
+    def indices_values(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load US Indices values (`us_indices/values_v1`) from S3 Flat Files."""
+        return self.load("us_indices/values_v1", start, end, domain="indices", **kwargs)
+
+    def indices_bars(
+        self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
+    ) -> Table:
+        """Load US Indices bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        ds = "us_indices/day_aggs_v1" if timespan.strip().lower() == "day" else "us_indices/minute_aggs_v1"
+        return self.load(ds, start, end, domain="indices", **kwargs)
+
+    def forex_quotes(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load Global Forex quotes (`global_forex/quotes_v1`) from S3 Flat Files."""
+        return self.load("global_forex/quotes_v1", start, end, domain="forex", **kwargs)
+
+    def forex_bars(
+        self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
+    ) -> Table:
+        """Load Global Forex bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        ds = "global_forex/day_aggs_v1" if timespan.strip().lower() == "day" else "global_forex/minute_aggs_v1"
+        return self.load(ds, start, end, domain="forex", **kwargs)
+
+    def crypto_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
+        """Load Global Crypto trades (`global_crypto/trades_v1`) from S3 Flat Files."""
+        return self.load("global_crypto/trades_v1", start, end, domain="crypto", **kwargs)
+
+    def crypto_bars(
+        self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
+    ) -> Table:
+        """Load Global Crypto bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        ds = "global_crypto/day_aggs_v1" if timespan.strip().lower() == "day" else "global_crypto/minute_aggs_v1"
+        return self.load(ds, start, end, domain="crypto", **kwargs)

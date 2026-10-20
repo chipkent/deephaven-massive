@@ -17,6 +17,13 @@ if TYPE_CHECKING:
 MAX_OPTION_CONTRACTS = 1000
 
 
+def _default_ws_connector(ws_url: str) -> Any:
+    """Open a live WebSocket connection using the `websockets` package."""
+    import websockets
+
+    return websockets.connect(ws_url)
+
+
 class _EndpointState:
     """Internal per-URL state tracking ref-counted topics and channel publishers."""
 
@@ -26,6 +33,9 @@ class _EndpointState:
         self.channel_publishers: dict[str, list[MicroBatchPublisher]] = defaultdict(list)
         self.outbox: list[dict[str, Any]] = []
         self.last_error: Exception | None = None
+        self.active_ws: Any = None
+        self.authenticated: bool = False
+        self.connecting: bool = False
 
 
 class WebSocketMultiplexer:
@@ -36,9 +46,13 @@ class WebSocketMultiplexer:
         config: MassiveConfig,
         *,
         send_hook: Callable[[str, dict[str, Any]], None] | None = None,
+        ws_connector: Callable[[str], Any] | None = None,
+        reconnect_delay_s: float = 0.5,
     ) -> None:
         self.config = config
         self._send_hook = send_hook
+        self._ws_connector = ws_connector
+        self._reconnect_delay_s = reconnect_delay_s
         self._lock = threading.Lock()
         self._endpoints: dict[str, _EndpointState] = {}
 
@@ -89,7 +103,71 @@ class WebSocketMultiplexer:
         state.outbox.append(payload)
         if self._send_hook is not None:
             self._send_hook(state.ws_url, payload)
+        elif (
+            state.authenticated
+            and state.active_ws is not None
+            and self._loop is not None
+        ):
+            ws_ref = state.active_ws
+            msg_str = json.dumps(payload)
+            self._loop.call_soon_threadsafe(
+                self._loop.create_task, ws_ref.send(msg_str)
+            )
         return payload
+
+    def _ensure_connection(self, ws_url: str) -> None:
+        """Ensure an active background WebSocket connection loop is running for `ws_url`."""
+        with self._lock:
+            state = self._get_endpoint(ws_url)
+            if state.connecting or self._closed:
+                return
+            state.connecting = True
+
+        loop = self._ensure_loop()
+        loop.call_soon_threadsafe(
+            loop.create_task, self._run_connection(ws_url)
+        )
+
+    async def _run_connection(self, ws_url: str) -> None:
+        """Maintain a live WebSocket connection for `ws_url` with auth handshake and reconnect backoff."""
+        connector = self._ws_connector or _default_ws_connector
+        while not self._closed:
+            with self._lock:
+                state = self._get_endpoint(ws_url)
+                has_topics = any(
+                    c > 0 for c in state.topic_ref_counts.values()
+                )
+                if not has_topics:
+                    state.connecting = False
+                    return
+
+            try:
+                async with connector(ws_url) as ws:
+                    with self._lock:
+                        state = self._get_endpoint(ws_url)
+                        state.active_ws = ws
+                        state.authenticated = False
+                    await ws.send(
+                        json.dumps(
+                            {"action": "auth", "params": self.config.api_key}
+                        )
+                    )
+                    async for raw_msg in ws:
+                        self.handle_raw_message(ws_url, raw_msg)
+            except MassiveEntitlementError:
+                with self._lock:
+                    state = self._get_endpoint(ws_url)
+                    state.active_ws = None
+                    state.authenticated = False
+                    state.connecting = False
+                return
+            except Exception as exc:
+                with self._lock:
+                    state = self._get_endpoint(ws_url)
+                    state.last_error = exc
+                    state.active_ws = None
+                    state.authenticated = False
+                await asyncio.sleep(self._reconnect_delay_s)
 
     def register_publisher(
         self,
@@ -166,7 +244,10 @@ class WebSocketMultiplexer:
             if newly_subscribed:
                 self._emit_action(state, "subscribe", ",".join(newly_subscribed))
 
-            return newly_subscribed
+        if self._send_hook is None and newly_subscribed:
+            self._ensure_connection(ws_url)
+
+        return newly_subscribed
 
     def unsubscribe(
         self,
@@ -258,7 +339,26 @@ class WebSocketMultiplexer:
             if ev_type == "status":
                 status_val = str(ev_obj.get("status", "")).lower()
                 msg_val = str(ev_obj.get("message", ""))
-                if status_val in ("auth_failed", "error", "not_authorized") and (
+                if status_val == "auth_success":
+                    with self._lock:
+                        state = self._get_endpoint(ws_url)
+                        state.authenticated = True
+                        active = sorted(
+                            t for t, c in state.topic_ref_counts.items() if c > 0
+                        )
+                        if (
+                            active
+                            and state.active_ws is not None
+                            and self._loop is not None
+                        ):
+                            ws_ref = state.active_ws
+                            sub_msg = json.dumps(
+                                {"action": "subscribe", "params": ",".join(active)}
+                            )
+                            self._loop.call_soon_threadsafe(
+                                self._loop.create_task, ws_ref.send(sub_msg)
+                            )
+                elif status_val in ("auth_failed", "error", "not_authorized") and (
                     "auth" in status_val
                     or "not authorized" in msg_val.lower()
                     or "entitled" in msg_val.lower()

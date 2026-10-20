@@ -107,6 +107,7 @@ def mock_session(dh_exec_ctx: Any) -> Callable[..., MassiveSession]:
             auto_flush=auto_flush,
             http_handler=http_handler or _default_http,
             s3_opener=s3_opener,
+            ws_send_hook=lambda _u, _p: None,
             sleep_fn=lambda _: None,
         )
         created.append(sess)

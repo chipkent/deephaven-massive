@@ -67,10 +67,14 @@ class SnapshotPoller:
         self._exec_ctx = exec_ctx
 
         self.full_schema = schema_spec.with_extra_fields(
-            [pa.field("__PollId", pa.int64())]
+            [
+                pa.field("__PollId", pa.int64()),
+                pa.field("__RowIdx", pa.int64()),
+            ]
         )
         self._poll_id = 0
         self._lock = threading.Lock()
+        self._poll_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._poll_thread: threading.Thread | None = None
 
@@ -80,28 +84,29 @@ class SnapshotPoller:
         def _build_tables() -> tuple[Table, Any, Table]:
             blink_tbl, dh_pub = table_publisher(name, col_defs)
             if self.mode == "replace":
-                raw_keyed = (
-                    blink_tbl.last_by(list(self.key_cols))
-                    if self.key_cols
-                    else blink_tbl
+                replace_keys = (
+                    list(self.key_cols) if self.key_cols else ["__RowIdx"]
                 )
+                raw_keyed = blink_tbl.last_by(replace_keys)
                 current_epoch = blink_tbl.view(["__PollId"]).last_by()
                 out_tbl = (
                     raw_keyed.natural_join(
                         current_epoch, on=[], joins=["CurrentPollId = __PollId"]
                     )
                     .where("__PollId == CurrentPollId")
-                    .drop_columns(["__PollId", "CurrentPollId"])
+                    .drop_columns(["__PollId", "__RowIdx", "CurrentPollId"])
                 )
             elif self.mode == "upsert":
-                stripped = blink_tbl.drop_columns(["__PollId"])
+                stripped = blink_tbl.drop_columns(["__PollId", "__RowIdx"])
                 out_tbl = (
                     stripped.last_by(list(self.key_cols))
                     if self.key_cols
                     else stripped.last_by()
                 )
             else:
-                out_tbl = blink_to_append_only(blink_tbl.drop_columns(["__PollId"]))
+                out_tbl = blink_to_append_only(
+                    blink_tbl.drop_columns(["__PollId", "__RowIdx"])
+                )
             return blink_tbl, dh_pub, out_tbl
 
         with exec_ctx_scope(self._exec_ctx):
@@ -119,28 +124,33 @@ class SnapshotPoller:
             return self._poll_id
 
     def poll_once(self) -> int:
-        """Execute a single synchronous poll fetch and publish the resulting batch to Deephaven."""
-        rows = self.fetch_fn()
-        with self._lock:
-            self._poll_id += 1
-            epoch = self._poll_id
+        """Execute a single synchronous poll fetch and publish the resulting batch to Deephaven in monotonic epoch order."""
+        with self._poll_lock:
+            rows = self.fetch_fn()
+            with self._lock:
+                self._poll_id += 1
+                epoch = self._poll_id
 
-        if not rows:
-            return 0
+            if not rows:
+                return 0
 
-        rb = rows_to_record_batch(
-            rows,
-            self.schema_spec,
-            self.symbol_normalizer,
-            extra_columns={"__PollId": (pa.int64(), epoch)},
-        )
-        pa_tbl = pa.Table.from_batches([rb])
-        dh_tbl = arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
+            row_indices = list(range(len(rows)))
+            rb = rows_to_record_batch(
+                rows,
+                self.schema_spec,
+                self.symbol_normalizer,
+                extra_columns={
+                    "__PollId": (pa.int64(), epoch),
+                    "__RowIdx": (pa.int64(), row_indices),
+                },
+            )
+            pa_tbl = pa.Table.from_batches([rb])
+            dh_tbl = arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
 
-        with exec_ctx_scope(self._exec_ctx):
-            self._dh_publisher.add(dh_tbl)
+            with exec_ctx_scope(self._exec_ctx):
+                self._dh_publisher.add(dh_tbl)
 
-        return len(rows)
+            return len(rows)
 
     def start(self, *, initial_poll: bool = True) -> None:
         """Perform an optional initial poll and start the background polling loop."""

@@ -136,6 +136,8 @@ def test_publisher_seed_cutover_deduplication(dh_exec_ctx: Any) -> None:
         hist = blink_to_append_only(pub.user_blink_table)
 
     pub.begin_seeding()
+    # flush_now() while seeding is active returns 0 without flushing premature WS rows
+    assert pub.flush_now() == 0
     # Enqueue WS events while seeding is active:
     # 1. Duplicate TradeId ("T100") -> should be dropped
     # 2. Older timestamp than seed (t=1000 < seed t=2000) -> should be dropped
@@ -161,6 +163,23 @@ def test_publisher_seed_cutover_deduplication(dh_exec_ctx: Any) -> None:
     rows = dh_to_pylist(hist)
     trade_ids = [r["TradeId"] for r in rows if r["Symbol"] == "AAPL"]
     assert trade_ids == ["T098", "T100", "T097", "T102"]
+
+    # Test seed_since filtering in complete_seeding (drops seed and WS rows older than cutoff)
+    pub.begin_seeding()
+    pub.enqueue(
+        [
+            {"sym": "NVDA", "p": 890.0, "s": 5, "i": "N0", "t": 1000000000000000000},
+            {"sym": "NVDA", "p": 910.0, "s": 5, "i": "N2", "t": 3000000000000000000},
+        ]
+    )
+    flushed_since = pub.complete_seeding(
+        [
+            {"sym": "NVDA", "p": 880.0, "s": 5, "i": "N_OLD", "t": 1500000000000000000},
+            {"sym": "NVDA", "p": 900.0, "s": 5, "i": "N1", "t": 2500000000000000000},
+        ],
+        seed_since=2000000000000000000,
+    )
+    assert flushed_since == 2  # N1 (seed >= 2e18) and N2 (ws > 2.5e18)
 
     # Also test key_cols deduplication on BARS_SCHEMA (no TradeId column) and keyless schema
     bar_pub = MicroBatchPublisher(
