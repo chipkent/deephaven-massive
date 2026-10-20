@@ -31,11 +31,13 @@ class _EndpointState:
         self.ws_url = ws_url
         self.topic_ref_counts: dict[str, int] = defaultdict(int)
         self.channel_publishers: dict[str, list[MicroBatchPublisher]] = defaultdict(list)
+        self.publisher_topics: dict[tuple[str, MicroBatchPublisher], set[str]] = defaultdict(set)
         self.outbox: list[dict[str, Any]] = []
         self.last_error: Exception | None = None
         self.active_ws: Any = None
         self.authenticated: bool = False
         self.connecting: bool = False
+        self.conn_task: asyncio.Task[None] | None = None
 
 
 class WebSocketMultiplexer:
@@ -96,6 +98,27 @@ class WebSocketMultiplexer:
             self._endpoints[ws_url] = state
         return state
 
+    @staticmethod
+    def _schedule_send(ws_ref: Any, msg_str: str) -> None:
+        """Create and schedule a WebSocket send task inside the running event loop thread."""
+        asyncio.get_running_loop().create_task(ws_ref.send(msg_str))
+
+    def _start_connection_task(self, ws_url: str) -> None:
+        """Create and track the background connection task inside the running event loop thread."""
+        task = asyncio.get_running_loop().create_task(self._run_connection(ws_url))
+        with self._lock:
+            self._get_endpoint(ws_url).conn_task = task
+
+    @staticmethod
+    def _stop_loop(
+        loop: asyncio.AbstractEventLoop,
+        tasks: list[asyncio.Task[None]],
+    ) -> None:
+        """Cancel any active connection tasks and stop the event loop on the loop thread."""
+        for task in tasks:
+            task.cancel()
+        loop.stop()
+
     def _emit_action(
         self, state: _EndpointState, action: str, params: str
     ) -> dict[str, Any]:
@@ -110,9 +133,7 @@ class WebSocketMultiplexer:
         ):
             ws_ref = state.active_ws
             msg_str = json.dumps(payload)
-            self._loop.call_soon_threadsafe(
-                self._loop.create_task, ws_ref.send(msg_str)
-            )
+            self._loop.call_soon_threadsafe(self._schedule_send, ws_ref, msg_str)
         return payload
 
     def _ensure_connection(self, ws_url: str) -> None:
@@ -124,9 +145,7 @@ class WebSocketMultiplexer:
             state.connecting = True
 
         loop = self._ensure_loop()
-        loop.call_soon_threadsafe(
-            loop.create_task, self._run_connection(ws_url)
-        )
+        loop.call_soon_threadsafe(self._start_connection_task, ws_url)
 
     async def _run_connection(self, ws_url: str) -> None:
         """Maintain a live WebSocket connection for `ws_url` with auth handshake and reconnect backoff."""
@@ -188,13 +207,17 @@ class WebSocketMultiplexer:
         channel: str,
         publisher: MicroBatchPublisher,
     ) -> None:
-        """Remove a :class:`MicroBatchPublisher` from `(ws_url, channel)`."""
+        """Remove a :class:`MicroBatchPublisher` from `(ws_url, channel)` and release its topic references."""
         with self._lock:
             state = self._endpoints.get(ws_url)
-            if state is not None and channel in state.channel_publishers:
-                pubs = state.channel_publishers[channel]
-                if publisher in pubs:
-                    pubs.remove(publisher)
+            if state is None:
+                return
+            rem_topics = list(state.publisher_topics.get((channel, publisher), ()))
+            pubs = state.channel_publishers.get(channel)
+            if pubs is not None and publisher in pubs:
+                pubs.remove(publisher)
+        if rem_topics:
+            self.unsubscribe(ws_url, channel, rem_topics, publisher)
 
     def subscribe(
         self,
@@ -210,10 +233,12 @@ class WebSocketMultiplexer:
 
         with self._lock:
             state = self._get_endpoint(ws_url)
+            pub_set: set[str] | None = None
             if publisher is not None:
                 pubs = state.channel_publishers[channel]
                 if publisher not in pubs:
                     pubs.append(publisher)
+                pub_set = state.publisher_topics[(channel, publisher)]
 
             # Enforce 1,000-contract limit on OPRA options WebSocket endpoints
             if ws_url.endswith("/options"):
@@ -236,6 +261,10 @@ class WebSocketMultiplexer:
 
             newly_subscribed: list[str] = []
             for topic in topic_list:
+                if pub_set is not None:
+                    if topic in pub_set:
+                        continue
+                    pub_set.add(topic)
                 prev = state.topic_ref_counts[topic]
                 state.topic_ref_counts[topic] = prev + 1
                 if prev == 0:
@@ -266,21 +295,31 @@ class WebSocketMultiplexer:
             if state is None:
                 return []
 
-            if publisher is not None and channel in state.channel_publishers:
-                pubs = state.channel_publishers[channel]
-                if publisher in pubs:
-                    pubs.remove(publisher)
+            pub_set = (
+                state.publisher_topics.get((channel, publisher))
+                if publisher is not None
+                else None
+            )
 
             fully_unsubscribed: list[str] = []
             for topic in topic_list:
+                if publisher is not None:
+                    if pub_set is None or topic not in pub_set:
+                        continue
+                    pub_set.remove(topic)
                 prev = state.topic_ref_counts.get(topic, 0)
                 if prev <= 1:
-                    if topic in state.topic_ref_counts:
-                        del state.topic_ref_counts[topic]
+                    state.topic_ref_counts.pop(topic, None)
                     if prev == 1:
                         fully_unsubscribed.append(topic)
                 else:
                     state.topic_ref_counts[topic] = prev - 1
+
+            if publisher is not None and not pub_set:
+                state.publisher_topics.pop((channel, publisher), None)
+                pubs = state.channel_publishers.get(channel)
+                if pubs is not None and publisher in pubs:
+                    pubs.remove(publisher)
 
             if fully_unsubscribed:
                 self._emit_action(state, "unsubscribe", ",".join(fully_unsubscribed))
@@ -294,6 +333,28 @@ class WebSocketMultiplexer:
             if state is None:
                 return frozenset()
             return frozenset(t for t, c in state.topic_ref_counts.items() if c > 0)
+
+    def endpoint_snapshots(self) -> list[dict[str, Any]]:
+        """Return a diagnostic snapshot of all tracked WebSocket endpoints."""
+        with self._lock:
+            rows: list[dict[str, Any]] = []
+            for ws_url, state in sorted(self._endpoints.items()):
+                active = sorted(t for t, c in state.topic_ref_counts.items() if c > 0)
+                rows.append(
+                    {
+                        "WsUrl": ws_url,
+                        "Authenticated": bool(state.authenticated),
+                        "Connecting": bool(state.connecting),
+                        "ActiveTopicCount": len(active),
+                        "ActiveTopics": ",".join(active),
+                        "LastError": (
+                            str(state.last_error)
+                            if state.last_error is not None
+                            else None
+                        ),
+                    }
+                )
+            return rows
 
     def outbox_messages(self, ws_url: str) -> list[dict[str, Any]]:
         """Return a copy of sent control messages for `ws_url`."""
@@ -356,7 +417,7 @@ class WebSocketMultiplexer:
                                 {"action": "subscribe", "params": ",".join(active)}
                             )
                             self._loop.call_soon_threadsafe(
-                                self._loop.create_task, ws_ref.send(sub_msg)
+                                self._schedule_send, ws_ref, sub_msg
                             )
                 elif status_val in ("auth_failed", "error", "not_authorized") and (
                     "auth" in status_val
@@ -390,6 +451,11 @@ class WebSocketMultiplexer:
         """Shut down all WebSocket subscriptions and stop the background event loop thread."""
         with self._lock:
             self._closed = True
+            tasks = [
+                st.conn_task
+                for st in self._endpoints.values()
+                if st.conn_task is not None
+            ]
             self._endpoints.clear()
             loop = self._loop
             thread = self._loop_thread
@@ -397,6 +463,6 @@ class WebSocketMultiplexer:
             self._loop_thread = None
 
         if loop is not None and not loop.is_closed():
-            loop.call_soon_threadsafe(loop.stop)
+            loop.call_soon_threadsafe(self._stop_loop, loop, tasks)
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)

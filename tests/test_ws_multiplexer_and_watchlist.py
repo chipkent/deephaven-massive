@@ -55,6 +55,8 @@ def test_ws_multiplexer_ref_counting_and_dispatch(dh_exec_ctx: Any) -> None:
     # First subscription: T.AAPL, T.MSFT
     newly1 = mux.subscribe(ws_url, "T", ["T.AAPL", "T.MSFT"], pub1)
     assert newly1 == ["T.AAPL", "T.MSFT"]
+    # Duplicate subscribe by same publisher is a no-op (does not double-increment ref_count)
+    assert mux.subscribe(ws_url, "T", ["T.AAPL"], pub1) == []
     assert mux.active_topics(ws_url) == frozenset({"T.AAPL", "T.MSFT"})
 
     # Overlapping subscription from pub2: T.AAPL (ref_count -> 2), T.NVDA (ref_count -> 1)
@@ -62,11 +64,13 @@ def test_ws_multiplexer_ref_counting_and_dispatch(dh_exec_ctx: Any) -> None:
     assert newly2 == ["T.NVDA"]
     assert mux.active_topics(ws_url) == frozenset({"T.AAPL", "T.MSFT", "T.NVDA"})
 
-    # Unsubscribe T.AAPL from pub1 -> ref_count drops to 1, so NO unsubscribe frame is sent
+    # Partial unsubscribe T.AAPL from pub1 -> ref_count drops to 1, pub1 remains registered for T.MSFT
     unsub1 = mux.unsubscribe(ws_url, "T", ["T.AAPL"], pub1)
     assert unsub1 == []
-    # Second unsubscribe with pub1 when pub1 is already removed from channel_publishers
-    assert mux.unsubscribe(ws_url, "T", ["T.IBM"], pub1) == []
+    # Unsubscribing a topic not held by pub1 is a no-op
+    assert mux.unsubscribe(ws_url, "T", ["T.AAPL", "T.IBM"], pub1) == []
+    # Unsubscribing a non-existent topic with publisher=None on an active endpoint is a no-op
+    assert mux.unsubscribe(ws_url, "T", ["T.IBM"], None) == []
     assert "T.AAPL" in mux.active_topics(ws_url)
 
     # Unsubscribe T.AAPL and non-existent T.IBM from pub2 -> T.AAPL drops to 0 and emits unsubscribe
@@ -74,18 +78,23 @@ def test_ws_multiplexer_ref_counting_and_dispatch(dh_exec_ctx: Any) -> None:
     assert unsub2 == ["T.AAPL"]
     assert "T.AAPL" not in mux.active_topics(ws_url)
 
-    # Reconnect simulation emits auth + subscribe for remaining active topics
+    # Unregister pub2 while it still holds T.NVDA -> automatically unsubscribes T.NVDA
+    mux.unregister_publisher(ws_url, "T", pub2)
+    assert "T.NVDA" not in mux.active_topics(ws_url)
+    # Unsubscribing with an unregistered publisher is a no-op
+    assert mux.unsubscribe(ws_url, "T", ["T.MSFT"], pub2) == []
+
+    # Reconnect simulation emits auth + subscribe for remaining active topics (T.MSFT)
     reconnect_frames = mux.simulate_reconnect(ws_url)
     assert reconnect_frames[0] == {"action": "auth", "params": "ws-secret"}
-    assert reconnect_frames[1] == {"action": "subscribe", "params": "T.MSFT,T.NVDA"}
+    assert reconnect_frames[1] == {"action": "subscribe", "params": "T.MSFT"}
 
     # Reconnect on endpoint with no active topics only emits auth
     empty_reconnect = mux.simulate_reconnect("wss://socket.massive.com/forex")
     assert empty_reconnect == [{"action": "auth", "params": "ws-secret"}]
     assert len(mux.outbox_messages(ws_url)) >= 4
 
-    # Re-register pub1 and test raw JSON message dispatch
-    mux.register_publisher(ws_url, "T", pub1)
+    # pub1 is still registered on channel "T" (because T.MSFT is still active); test raw JSON dispatch
     enq_json = mux.handle_raw_message(
         ws_url,
         json.dumps(
@@ -312,6 +321,7 @@ def test_reactive_watchlist_controller_lifecycle(dh_exec_ctx: Any) -> None:
     )
 
     assert ctrl.wait_idle(timeout=5.0)
+    ctrl.start()  # idempotent second start() call
 
     assert "AAPL" in ctrl.active_symbols
     assert "T.AAPL" in mux.active_topics(ws_url)

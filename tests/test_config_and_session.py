@@ -135,12 +135,27 @@ def test_session_request_json_and_retries() -> None:
         res_all_none = sess.request_json("/v3/trades/AAPL", {"empty": None})
         assert res_all_none["status"] == "OK"
 
+        # Empty status() and stats() before any streams or builders are active
+        assert sess.status().size == 0
+        assert sess.stats().size == 0
+
         # Duplicate register_builder is idempotent; test stop_stream filtering
         b = sess.stocks.trades("AAPL")
         b2 = sess.stocks.quotes(["MSFT", "NVDA"])
         sess.register_builder(b)
         sess.register_builder(b)
         sess.register_builder(b2)
+        _ = b.latest(seed=False)
+        b_poll = sess.stocks.snapshots("AAPL")
+        _ = b_poll.poll(interval_s=30.0)
+        b_wl = sess.stocks.trades("GOOG")
+        b_wl._watchlist_controller = object()  # type: ignore[assignment]
+        sess.register_builder(b_wl)
+        assert sess.status().size == 1
+        assert sess.stats().size >= 3
+        b_wl._watchlist_controller = None
+        sess.stop_stream(b_wl)
+        sess.stop_stream(b_poll)
         assert sess.stop_stream("nonexistent") == 0
         assert sess.stop_stream(ws_channel="AM") == 0
         assert sess.stop_stream(symbols="GOOG") == 0

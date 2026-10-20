@@ -552,3 +552,57 @@ TMX_CORPORATE_EVENTS_SCHEMA = SchemaSpec(
     ),
     allow_dynamic_columns=True,
 )
+
+FABLE_MERCHANT_AGGREGATES_SCHEMA = SchemaSpec(
+    name="fable_eu_merchant_aggregates",
+    arrow_schema=pa.schema(
+        [
+            pa.field("MerchantId", pa.string()),
+            pa.field("MerchantName", pa.string()),
+            pa.field("Symbol", pa.string()),
+            pa.field("TransactionDate", DATE32_TYPE),
+            pa.field("SpendAmount", pa.float64()),
+            pa.field("TransactionCount", pa.int64()),
+            pa.field("Currency", pa.string()),
+        ]
+    ),
+    key_cols=("MerchantId", "TransactionDate"),
+    normalizer=_hybrid_partner_normalizer(
+        {
+            "MerchantId": ("MerchantId", "merchant_id", "id"),
+            "MerchantName": ("MerchantName", "merchant_name", "name"),
+            "Symbol": ("Symbol", "ticker", "symbol"),
+            "TransactionDate": ("TransactionDate", "transaction_date", "date"),
+            "SpendAmount": ("SpendAmount", "spend_amount", "total_spend"),
+            "TransactionCount": ("TransactionCount", "transaction_count", "transactions"),
+            "Currency": ("Currency", "currency"),
+        }
+    ),
+    allow_dynamic_columns=True,
+)
+
+FABLE_MERCHANT_HIERARCHY_SCHEMA = SchemaSpec(
+    name="fable_eu_merchant_hierarchy",
+    arrow_schema=pa.schema(
+        [
+            pa.field("MerchantId", pa.string()),
+            pa.field("MerchantName", pa.string()),
+            pa.field("ParentMerchantId", pa.string()),
+            pa.field("Symbol", pa.string()),
+            pa.field("Country", pa.string()),
+            pa.field("Category", pa.string()),
+        ]
+    ),
+    key_cols=("MerchantId",),
+    normalizer=_hybrid_partner_normalizer(
+        {
+            "MerchantId": ("MerchantId", "merchant_id", "id"),
+            "MerchantName": ("MerchantName", "merchant_name", "name"),
+            "ParentMerchantId": ("ParentMerchantId", "parent_merchant_id", "parent_id"),
+            "Symbol": ("Symbol", "ticker", "symbol"),
+            "Country": ("Country", "country"),
+            "Category": ("Category", "category", "sector"),
+        }
+    ),
+    allow_dynamic_columns=True,
+)

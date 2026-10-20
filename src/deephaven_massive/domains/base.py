@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +57,73 @@ def format_date_param(val: str | date | datetime | int | None) -> str | None:
     if isinstance(val, date):
         return val.isoformat()
     return str(val).strip()
+
+
+_FILTER_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("_any_of", ".any_of"),
+    ("_gte", ".gte"),
+    ("_lte", ".lte"),
+    ("_gt", ".gt"),
+    ("_lt", ".lt"),
+)
+
+
+def normalize_filter_params(
+    base_params: Mapping[str, Any] | None = None,
+    filters: Mapping[str, Any] | None = None,
+    *,
+    symbol: str | None = None,
+    tickers: str | Iterable[str] | None = None,
+    normalizer: SymbolNormalizer | None = None,
+    ticker_param: str = "ticker",
+) -> dict[str, Any]:
+    """Normalize REST query parameters, `tickers` lists, and `*_gte`/`*_lte`/`*_gt`/`*_lt`/`*_any_of` filter kwargs."""
+    out: dict[str, Any] = {}
+    if base_params:
+        for k, v in base_params.items():
+            if v is not None:
+                out[k] = format_date_param(v) if isinstance(v, (date, datetime)) else v
+
+    def _norm_sym(s: str) -> str:
+        return (
+            normalizer.rest_ticker(s)
+            if normalizer is not None
+            else s.strip().upper()
+        )
+
+    if tickers is not None:
+        if isinstance(tickers, str):
+            t_list = [_norm_sym(s) for s in tickers.split(",") if s.strip()]
+        else:
+            t_list = [_norm_sym(str(s)) for s in tickers if str(s).strip()]
+        if len(t_list) == 1 and symbol is None:
+            out[ticker_param] = t_list[0]
+        elif len(t_list) > 1:
+            key = (
+                f"{ticker_param}.any_of"
+                if ticker_param in ("ticker", "cik")
+                else ticker_param
+            )
+            out[key] = ",".join(t_list)
+    elif symbol is not None:
+        out[ticker_param] = _norm_sym(symbol)
+
+    if filters:
+        for raw_k, raw_v in filters.items():
+            if raw_v is None:
+                continue
+            mapped_k = raw_k
+            for suffix, dot_suffix in _FILTER_SUFFIXES:
+                if raw_k.endswith(suffix) and len(raw_k) > len(suffix):
+                    mapped_k = raw_k[: -len(suffix)] + dot_suffix
+                    break
+            if isinstance(raw_v, (date, datetime)):
+                out[mapped_k] = format_date_param(raw_v)
+            elif isinstance(raw_v, Sequence) and not isinstance(raw_v, (str, bytes)):
+                out[mapped_k] = ",".join(str(x) for x in raw_v)
+            else:
+                out[mapped_k] = raw_v
+    return out
 
 
 def extract_rows_from_payload(
@@ -256,6 +324,8 @@ class BaseDomainClient:
         source: str,
         symbols: Sequence[str] | None,
         s3_dataset: str | None,
+        *,
+        adjusted: bool | None = None,
     ) -> bool:
         """Determine whether `.historical()` should route to S3 Flat Files or REST pagination."""
         clean_source = source.strip().lower()
@@ -279,7 +349,110 @@ class BaseDomainClient:
             return False
         if symbols is None or "*" in symbols:
             return True
+        if adjusted is True:
+            return False
         return len(symbols) >= self.session.config.flat_file_ticker_threshold
+
+    def fetch_multi_symbol_historical(
+        self,
+        symbols: Any,
+        schema_spec: SchemaSpec,
+        s3_dataset: str | None,
+        rest_path_fn: Callable[[str, Any, Any], tuple[str, dict[str, Any]]],
+        *,
+        start: Any = None,
+        end: Any = None,
+        limit: int | None = None,
+        source: str = "auto",
+        adjusted: bool | None = None,
+        empty_error: str = "Specific symbol(s) are required for REST historical queries.",
+        chunk_size: int = 50_000,
+    ) -> Table:
+        """Route a single- or multi-symbol `.historical()` query to S3 Flat Files or chunked REST pagination."""
+        canon_syms = (
+            None
+            if hasattr(symbols, "j_table") or hasattr(symbols, "column_names")
+            else self.canonical_symbols(symbols)
+        )
+        if self.should_use_flat_files(
+            source, canon_syms, s3_dataset, adjusted=adjusted
+        ):
+            assert s3_dataset is not None
+            return self.session.flat_files.load(
+                s3_dataset,
+                start=start,
+                end=end,
+                symbols=canon_syms,
+                schema_spec=schema_spec,
+                domain=self.domain,
+                limit=limit,
+            )
+
+        target_syms = [s for s in (canon_syms or []) if s != "*"]
+        if not target_syms:
+            raise ValueError(empty_error)
+
+        if len(target_syms) == 1:
+            sym = target_syms[0]
+            path, params = rest_path_fn(sym, start, end)
+            return self.fetch_chunked_table(
+                path,
+                schema_spec,
+                params,
+                limit=limit,
+                inject_symbol=sym,
+                chunk_size=chunk_size,
+            )
+
+        batches: list[pa.RecordBatch] = []
+        buffer: list[dict[str, Any]] = []
+        total_rows = 0
+
+        if limit is None:
+            def _fetch_one(sym: str) -> list[dict[str, Any]]:
+                path, params = rest_path_fn(sym, start, end)
+                return self.fetch_rest_rows(path, params, inject_symbol=sym)
+
+            with ThreadPoolExecutor(max_workers=min(len(target_syms), 8)) as pool:
+                per_sym_rows = list(pool.map(_fetch_one, target_syms))
+            for rows in per_sym_rows:
+                buffer.extend(rows)
+                while len(buffer) >= chunk_size:
+                    chunk = buffer[:chunk_size]
+                    buffer = buffer[chunk_size:]
+                    batches.append(
+                        rows_to_record_batch(
+                            chunk, schema_spec, self.symbol_normalizer
+                        )
+                    )
+        else:
+            for sym in target_syms:
+                rem = limit - total_rows
+                path, params = rest_path_fn(sym, start, end)
+                rows = self.fetch_rest_rows(
+                    path, params, limit=rem, inject_symbol=sym
+                )
+                buffer.extend(rows)
+                total_rows += len(rows)
+                while len(buffer) >= chunk_size:
+                    chunk = buffer[:chunk_size]
+                    buffer = buffer[chunk_size:]
+                    batches.append(
+                        rows_to_record_batch(
+                            chunk, schema_spec, self.symbol_normalizer
+                        )
+                    )
+                if total_rows >= limit:
+                    break
+
+        if buffer:
+            batches.append(
+                rows_to_record_batch(
+                    buffer, schema_spec, self.symbol_normalizer
+                )
+            )
+        pa_tbl = record_batches_to_arrow_table(batches, schema_spec)
+        return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
     def build_feed(
         self,
@@ -291,6 +464,8 @@ class BaseDomainClient:
         symbols: Any = None,
         symbol_col: str = "Symbol",
         seed_fn: Callable[[list[str]], Sequence[Mapping[str, Any]]] | None = None,
+        seed_rows_fn: Callable[[list[str], Any], Sequence[Mapping[str, Any]]]
+        | None = None,
         snapshot_fn: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
         historical_fn: Callable[..., Table] | None = None,
     ) -> FeedBuilder:
@@ -306,10 +481,43 @@ class BaseDomainClient:
             symbols=symbols,
             symbol_col=symbol_col,
             seed_fn=seed_fn,
+            seed_rows_fn=seed_rows_fn,
             snapshot_fn=snapshot_fn,
             historical_fn=historical_fn,
             flush_interval_ms=self.session.config.flush_interval_ms,
             max_batch_size=self.session.config.max_batch_size,
             auto_flush=self.session.auto_flush,
             on_register_lifecycle=self.session.register_builder,
+            stream_registry=self.session._stream_registry,
         )
+
+    def fetch_seed_rows(
+        self,
+        syms: Sequence[str],
+        seed_since: Any,
+        rest_path_fn: Callable[[str, Any, Any], tuple[str, dict[str, Any]]],
+        *,
+        extra_fields: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch historical REST backfill rows since `seed_since` for each canonical symbol in `syms`."""
+        concrete = [s for s in syms if s != "*"]
+        if not concrete:
+            return []
+
+        def _fetch_one(sym: str) -> list[dict[str, Any]]:
+            path, params = rest_path_fn(sym, seed_since, None)
+            return self.fetch_rest_rows(
+                path,
+                params,
+                inject_symbol=sym,
+                extra_fields=extra_fields,
+            )
+
+        if len(concrete) == 1:
+            return _fetch_one(concrete[0])
+
+        rows: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=min(len(concrete), 8)) as pool:
+            for sym_rows in pool.map(_fetch_one, concrete):
+                rows.extend(sym_rows)
+        return rows

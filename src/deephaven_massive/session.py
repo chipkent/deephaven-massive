@@ -9,6 +9,7 @@ import time
 from typing import TYPE_CHECKING, Any, BinaryIO
 from urllib.parse import urlencode
 
+import pyarrow as pa
 import urllib3
 
 from deephaven_massive.config import MassiveConfig, MassiveEntitlementError
@@ -21,11 +22,14 @@ from deephaven_massive.domains.indices import IndicesClient
 from deephaven_massive.domains.options import OptionsClient
 from deephaven_massive.domains.partners import PartnersClient
 from deephaven_massive.domains.stocks import StocksClient
+from deephaven_massive.engine.arrow_bridge import arrow_to_deephaven_table
 from deephaven_massive.engine.ws_multiplexer import WebSocketMultiplexer
 
 if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
+    from deephaven.table import Table
     from deephaven_massive.engine.builder import FeedBuilder
+    from deephaven_massive.engine.publisher import MicroBatchPublisher
 
 
 def ensure_deephaven_server(
@@ -120,6 +124,9 @@ class MassiveSession:
             ws_connector=ws_connector,
         )
         self._active_builders: list[FeedBuilder] = []
+        self._stream_registry: dict[
+            tuple[str, str, tuple[str, ...]], MicroBatchPublisher
+        ] = {}
 
         self.stocks = StocksClient(self)
         self.options = OptionsClient(self)
@@ -155,11 +162,7 @@ class MassiveSession:
                 if ws_channel is not None and builder.ws_channel != ws_channel:
                     continue
                 if symbols is not None:
-                    target_syms = (
-                        {symbols.strip().upper()}
-                        if isinstance(symbols, str)
-                        else {str(s).strip().upper() for s in symbols}
-                    )
+                    target_syms = set(builder.normalize_symbols(symbols))
                     if not (set(builder._canonical_symbol_list()) & target_syms):
                         continue
                 to_stop.append(builder)
@@ -168,6 +171,64 @@ class MassiveSession:
                 builder.stop()
                 self._active_builders.remove(builder)
             return len(to_stop)
+
+    def status(self) -> Table:
+        """Return a Deephaven Table summarizing WebSocket endpoint connections and active subscriptions."""
+        schema = pa.schema(
+            [
+                pa.field("WsUrl", pa.string()),
+                pa.field("Authenticated", pa.bool_()),
+                pa.field("Connecting", pa.bool_()),
+                pa.field("ActiveTopicCount", pa.int64()),
+                pa.field("ActiveTopics", pa.string()),
+                pa.field("LastError", pa.string()),
+            ]
+        )
+        rows = self.ws_multiplexer.endpoint_snapshots()
+        pa_tbl = (
+            pa.Table.from_pylist(rows, schema=schema)
+            if rows
+            else schema.empty_table()
+        )
+        return arrow_to_deephaven_table(pa_tbl, self.exec_ctx)
+
+    def stats(self) -> Table:
+        """Return a Deephaven Table summarizing active FeedBuilders and published row counts."""
+        schema = pa.schema(
+            [
+                pa.field("FeedName", pa.string()),
+                pa.field("Mode", pa.string()),
+                pa.field("WsChannel", pa.string()),
+                pa.field("Symbols", pa.string()),
+                pa.field("RowsPublished", pa.int64()),
+            ]
+        )
+        with self._lock:
+            builders = list(self._active_builders)
+        rows: list[dict[str, Any]] = []
+        for b in builders:
+            if b.watchlist_controller is not None:
+                mode = "watchlist"
+            elif b.poller is not None:
+                mode = "poll"
+            else:
+                mode = "stream"
+            rows_pub = b.publisher.rows_published if b.publisher is not None else 0
+            rows.append(
+                {
+                    "FeedName": b.name,
+                    "Mode": mode,
+                    "WsChannel": b.ws_channel,
+                    "Symbols": ",".join(b._canonical_symbol_list()),
+                    "RowsPublished": rows_pub,
+                }
+            )
+        pa_tbl = (
+            pa.Table.from_pylist(rows, schema=schema)
+            if rows
+            else schema.empty_table()
+        )
+        return arrow_to_deephaven_table(pa_tbl, self.exec_ctx)
 
     def _build_url(
         self, path_or_url: str, params: Mapping[str, Any] | None
@@ -248,6 +309,7 @@ class MassiveSession:
         with self._lock:
             builders = list(self._active_builders)
             self._active_builders.clear()
+            self._stream_registry.clear()
         for builder in builders:
             builder.stop()
         self.ws_multiplexer.close()

@@ -2,27 +2,29 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from deephaven_massive.domains.base import BaseDomainClient, format_date_param
-from deephaven_massive.engine.arrow_bridge import (
-    SchemaSpec,
-    arrow_to_deephaven_table,
-    record_batches_to_arrow_table,
-    rows_to_record_batch,
+from deephaven_massive.domains.base import (
+    BaseDomainClient,
+    format_date_param,
+    normalize_filter_params,
 )
+from deephaven_massive.engine.arrow_bridge import SchemaSpec
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
     FUTURES_SNAPSHOT_SCHEMA,
     QUOTES_SCHEMA,
     TRADES_SCHEMA,
+    compute_bar_span_ns,
 )
 from deephaven_massive.schemas.reference import (
+    EXCHANGES_SCHEMA,
     FUTURES_CONTRACTS_SCHEMA,
     FUTURES_PRODUCTS_SCHEMA,
     FUTURES_SCHEDULES_SCHEMA,
+    MARKET_STATUS_SCHEMA,
 )
 
 if TYPE_CHECKING:
@@ -37,12 +39,17 @@ class FuturesClient(BaseDomainClient):
         super().__init__(session, domain="futures")
 
     def _fetch_futures_snapshots(
-        self, symbols: Sequence[str] | None = None
+        self,
+        symbols: Sequence[str] | None = None,
+        *,
+        extra_fields: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
         if symbols and "*" not in symbols:
             params["ticker.any_of"] = ",".join(symbols)
-        return self.fetch_rest_rows("/futures/vX/snapshot", params)
+        return self.fetch_rest_rows(
+            "/futures/vX/snapshot", params, extra_fields=extra_fields
+        )
 
     def _historical_futures(
         self,
@@ -56,49 +63,17 @@ class FuturesClient(BaseDomainClient):
         limit: int | None = None,
         source: str = "auto",
     ) -> Table:
-        canon_syms = (
-            None
-            if hasattr(contracts, "j_table") or hasattr(contracts, "column_names")
-            else self.canonical_symbols(contracts)
+        return self.fetch_multi_symbol_historical(
+            contracts,
+            schema_spec,
+            s3_dataset,
+            rest_path_fn,
+            start=start,
+            end=end,
+            limit=limit,
+            source=source,
+            empty_error="Specific futures contract(s) are required for REST historical queries.",
         )
-        if self.should_use_flat_files(source, canon_syms, s3_dataset):
-            assert s3_dataset is not None
-            return self.session.flat_files.load(
-                s3_dataset,
-                start=start,
-                end=end,
-                symbols=canon_syms,
-                schema_spec=schema_spec,
-                domain="futures",
-                limit=limit,
-            )
-
-        target_syms = [s for s in (canon_syms or []) if s != "*"]
-        if not target_syms:
-            raise ValueError(
-                "Specific futures contract(s) are required for REST historical queries."
-            )
-
-        if len(target_syms) == 1:
-            sym = target_syms[0]
-            path, params = rest_path_fn(sym, start, end)
-            return self.fetch_chunked_table(
-                path, schema_spec, params, limit=limit, inject_symbol=sym
-            )
-
-        all_rows: list[dict[str, Any]] = []
-        for sym in target_syms:
-            path, params = rest_path_fn(sym, start, end)
-            all_rows.extend(
-                self.fetch_rest_rows(path, params, limit=limit, inject_symbol=sym)
-            )
-        batches = (
-            [rows_to_record_batch(all_rows, schema_spec, self.symbol_normalizer)]
-            if all_rows
-            else []
-        )
-        pa_tbl = record_batches_to_arrow_table(batches, schema_spec)
-        return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
     def trades(
         self,
@@ -129,6 +104,9 @@ class FuturesClient(BaseDomainClient):
             symbols=contracts,
             symbol_col=symbol_col,
             seed_fn=self._fetch_futures_snapshots,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms, since, _rest_path
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_futures(
                 contracts,
                 TRADES_SCHEMA,
@@ -170,6 +148,9 @@ class FuturesClient(BaseDomainClient):
             symbols=contracts,
             symbol_col=symbol_col,
             seed_fn=self._fetch_futures_snapshots,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms, since, _rest_path
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_futures(
                 contracts,
                 QUOTES_SCHEMA,
@@ -204,16 +185,21 @@ class FuturesClient(BaseDomainClient):
             s3_ds = "us_futures/minute_aggs_v1"
         elif multiplier == 1 and clean_span == "day":
             s3_ds = "us_futures/day_aggs_v1"
+        elif multiplier == 1 and clean_span == "session":
+            s3_ds = "us_futures/session_aggs_v1"
+
+        span_unit = "day" if clean_span == "session" else clean_span
 
         def _rest_path(
             sym: str, start: Any, end: Any
         ) -> tuple[str, dict[str, Any]]:
             return f"/futures/vX/aggs/{sym}", {
-                "resolution": f"{multiplier}_{clean_span}",
+                "resolution": f"{multiplier}_{span_unit}",
                 "window_start.gte": format_date_param(start),
                 "window_start.lte": format_date_param(end),
             }
 
+        span_ns = compute_bar_span_ns(multiplier, span_unit)
         return self.build_feed(
             name=f"futures_bars_{venue.lower()}_{multiplier}_{clean_span}",
             schema_spec=BARS_SCHEMA,
@@ -221,7 +207,15 @@ class FuturesClient(BaseDomainClient):
             ws_channel=ws_channel,
             symbols=contracts,
             symbol_col=symbol_col,
-            seed_fn=self._fetch_futures_snapshots,
+            seed_fn=lambda syms: self._fetch_futures_snapshots(
+                syms, extra_fields={"_span_ns": span_ns}
+            ),
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms,
+                since,
+                _rest_path,
+                extra_fields={"_span_ns": span_ns},
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_futures(
                 contracts,
                 BARS_SCHEMA,
@@ -247,15 +241,22 @@ class FuturesClient(BaseDomainClient):
         )
 
     def contracts(
-        self, product_code: str | None = None, *, active: bool = True
+        self,
+        product_code: str | None = None,
+        *,
+        active: bool = True,
+        **filters: Any,
     ) -> FeedBuilder:
         """Futures contract specifications, tick size, and expiration (`/futures/vX/contracts`)."""
-        params = {
-            "product_code": product_code.strip().upper()
-            if product_code
-            else None,
-            "active": str(active).lower(),
-        }
+        params = normalize_filter_params(
+            {
+                "product_code": product_code.strip().upper()
+                if product_code
+                else None,
+                "active": str(active).lower(),
+            },
+            filters,
+        )
         return self.build_feed(
             name="futures_contracts",
             schema_spec=FUTURES_CONTRACTS_SCHEMA,
@@ -264,9 +265,14 @@ class FuturesClient(BaseDomainClient):
             ),
         )
 
-    def products(self, *, venue: str | None = None) -> FeedBuilder:
+    def products(
+        self, *, venue: str | None = None, **filters: Any
+    ) -> FeedBuilder:
         """Futures product catalog (`/futures/vX/products`)."""
-        params = {"market_sector": venue.upper() if venue else None}
+        params = normalize_filter_params(
+            {"market_sector": venue.upper() if venue else None},
+            filters,
+        )
         return self.build_feed(
             name="futures_products",
             schema_spec=FUTURES_PRODUCTS_SCHEMA,
@@ -275,17 +281,40 @@ class FuturesClient(BaseDomainClient):
             ),
         )
 
-    def schedules(self, product_code: str | None = None) -> FeedBuilder:
+    def schedules(
+        self, product_code: str | None = None, **filters: Any
+    ) -> FeedBuilder:
         """Trading session schedules by futures product and exchange (`/futures/vX/schedules`)."""
-        params = {
-            "product_code": product_code.strip().upper()
-            if product_code
-            else None
-        }
+        params = normalize_filter_params(
+            {
+                "product_code": product_code.strip().upper()
+                if product_code
+                else None
+            },
+            filters,
+        )
         return self.build_feed(
             name="futures_schedules",
             schema_spec=FUTURES_SCHEDULES_SCHEMA,
             snapshot_fn=lambda: self.fetch_rest_rows(
                 "/futures/vX/schedules", params
+            ),
+        )
+
+    def exchanges(self) -> FeedBuilder:
+        """Futures exchange directory (`/futures/vX/exchanges`)."""
+        return self.build_feed(
+            name="futures_exchanges",
+            schema_spec=EXCHANGES_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows("/futures/vX/exchanges"),
+        )
+
+    def market_status(self) -> FeedBuilder:
+        """Futures exchange and product group open/closed status (`/futures/vX/market-status`)."""
+        return self.build_feed(
+            name="futures_market_status",
+            schema_spec=MARKET_STATUS_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                "/futures/vX/market-status"
             ),
         )

@@ -78,13 +78,53 @@ class MicroBatchPublisher:
         self._buffer: list[dict[str, Any]] = []
         self._seed_buffer: list[dict[str, Any]] = []
         self._seeding = False
+        self._seeded = False
+        self._has_snapshot_seed = False
+        self._consumer_count = 0
+        self._rows_published = 0
         self._stop_event = threading.Event()
+        self._flush_wakeup = threading.Event()
         self._flush_thread: threading.Thread | None = None
 
         empty_dh = arrow_to_deephaven_table(self.full_schema.empty_table(), self._exec_ctx)
         col_defs = {c.name: c.data_type for c in empty_dh.columns}
         with exec_ctx_scope(self._exec_ctx):
             self._blink_table, self._dh_publisher = table_publisher(name, col_defs)
+
+    @property
+    def is_seeded(self) -> bool:
+        """Return True if startup seeding has completed on this publisher."""
+        with self._lock:
+            return self._seeded
+
+    @property
+    def has_snapshot_seed(self) -> bool:
+        """Return True if a REST snapshot or historical seed has been applied to this publisher."""
+        with self._lock:
+            return self._has_snapshot_seed
+
+    def mark_snapshot_seeded(self) -> None:
+        """Record that a REST snapshot or historical seed has been applied to this publisher."""
+        with self._lock:
+            self._has_snapshot_seed = True
+
+    def acquire_consumer(self) -> int:
+        """Increment and return the active consumer reference count on this publisher."""
+        with self._lock:
+            self._consumer_count += 1
+            return self._consumer_count
+
+    def release_consumer(self) -> int:
+        """Decrement and return the remaining active consumer reference count on this publisher."""
+        with self._lock:
+            self._consumer_count = max(0, self._consumer_count - 1)
+            return self._consumer_count
+
+    @property
+    def rows_published(self) -> int:
+        """Return the total number of rows published to Deephaven so far."""
+        with self._lock:
+            return self._rows_published
 
     @property
     def blink_table(self) -> Table:
@@ -154,7 +194,7 @@ class MicroBatchPublisher:
         min_seed_ts_ns = to_utc_ns(seed_since) if seed_since is not None else None
         norm_seeds: list[dict[str, Any]] = []
         seen_trade_ids: set[tuple[str | None, str]] = set()
-        seen_keys: set[tuple[Any, ...]] = set()
+        seen_event_sigs: set[tuple[Any, ...]] = set()
         max_ts_by_symbol: dict[str | None, int] = {}
         has_trade_id = "TradeId" in self.schema_spec.arrow_schema.names
 
@@ -173,7 +213,9 @@ class MicroBatchPublisher:
                 seen_trade_ids.add((sym, str(nr["TradeId"])))
             if self.schema_spec.key_cols:
                 key_tuple = tuple(nr.get(k) for k in self.schema_spec.key_cols)
-                seen_keys.add(key_tuple)
+                seen_event_sigs.add(
+                    (key_tuple, ts_ns, nr.get("TradeId"), nr.get("SequenceNumber"))
+                )
             if ts_ns is not None:
                 prev_max = max_ts_by_symbol.get(sym)
                 if prev_max is None or ts_ns > prev_max:
@@ -184,6 +226,7 @@ class MicroBatchPublisher:
             buffered = self._seed_buffer
             self._seed_buffer = []
             self._seeding = False
+            self._seeded = True
 
             deduped_ws: list[dict[str, Any]] = []
             for ws_row in buffered:
@@ -197,11 +240,17 @@ class MicroBatchPublisher:
                     continue
                 if self.schema_spec.key_cols:
                     key_tuple = tuple(ws_row.get(k) for k in self.schema_spec.key_cols)
+                    ws_sig = (
+                        key_tuple,
+                        ws_ts,
+                        ws_row.get("TradeId"),
+                        ws_row.get("SequenceNumber"),
+                    )
                     if (
-                        key_tuple in seen_keys
-                        and ws_ts is not None
+                        ws_ts is not None
                         and max_seed_ts is not None
-                        and ws_ts <= max_seed_ts
+                        and ws_ts == max_seed_ts
+                        and ws_sig in seen_event_sigs
                     ):
                         continue
                 deduped_ws.append(ws_row)
@@ -247,15 +296,22 @@ class MicroBatchPublisher:
             return 0
 
         should_flush = False
+        thread_alive = False
         with self._lock:
             if self._seeding:
                 self._seed_buffer.extend(accepted)
             else:
                 self._buffer.extend(accepted)
                 should_flush = len(self._buffer) >= self.max_batch_size
+                thread_alive = (
+                    self._flush_thread is not None and self._flush_thread.is_alive()
+                )
 
         if should_flush:
-            self.flush_now()
+            if thread_alive:
+                self._flush_wakeup.set()
+            else:
+                self.flush_now()
 
         return len(accepted)
 
@@ -282,6 +338,8 @@ class MicroBatchPublisher:
             with exec_ctx_scope(self._exec_ctx):
                 self._dh_publisher.add(dh_tbl)
 
+            with self._lock:
+                self._rows_published += len(batch_rows)
             return len(batch_rows)
 
     def start(self) -> None:
@@ -290,10 +348,13 @@ class MicroBatchPublisher:
             if self._flush_thread is not None and self._flush_thread.is_alive():
                 return
             self._stop_event.clear()
+            self._flush_wakeup.clear()
             interval_s = self.flush_interval_ms / 1000.0
 
             def _loop() -> None:
-                while not self._stop_event.wait(interval_s):
+                while not self._stop_event.is_set():
+                    self._flush_wakeup.wait(interval_s)
+                    self._flush_wakeup.clear()
                     self.flush_now()
 
             self._flush_thread = threading.Thread(
@@ -306,6 +367,7 @@ class MicroBatchPublisher:
     def stop(self) -> None:
         """Stop the background flush thread and flush any remaining buffered rows."""
         self._stop_event.set()
+        self._flush_wakeup.set()
         thread = self._flush_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)

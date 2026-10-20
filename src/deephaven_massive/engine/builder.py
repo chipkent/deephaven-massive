@@ -56,12 +56,15 @@ class FeedBuilder:
         symbols: str | Iterable[str] | Table | None = None,
         symbol_col: str = "Symbol",
         seed_fn: Callable[[list[str]], Sequence[Mapping[str, Any]]] | None = None,
+        seed_rows_fn: Callable[[list[str], Any], Sequence[Mapping[str, Any]]] | None = None,
         snapshot_fn: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
         historical_fn: Callable[..., Table] | None = None,
         flush_interval_ms: int = 50,
         max_batch_size: int = 10_000,
         auto_flush: bool = True,
         on_register_lifecycle: Callable[[FeedBuilder], None] | None = None,
+        stream_registry: dict[tuple[str, str, tuple[str, ...]], MicroBatchPublisher]
+        | None = None,
     ) -> None:
         self.name = name
         self.schema_spec = schema_spec
@@ -73,17 +76,21 @@ class FeedBuilder:
         self.symbols = symbols
         self.symbol_col = symbol_col
         self.seed_fn = seed_fn
+        self.seed_rows_fn = seed_rows_fn
         self.snapshot_fn = snapshot_fn
         self.historical_fn = historical_fn
         self.flush_interval_ms = flush_interval_ms
         self.max_batch_size = max_batch_size
         self.auto_flush = auto_flush
         self._on_register_lifecycle = on_register_lifecycle
+        self._stream_registry = stream_registry
 
         self._publisher: MicroBatchPublisher | None = None
+        self._acquired_publisher: bool = False
         self._poller: SnapshotPoller | None = None
         self._watchlist_controller: ReactiveWatchlistController | None = None
         self._static_topics: list[str] = []
+        self._stream_key: tuple[str, str, tuple[str, ...]] | None = None
 
     @property
     def publisher(self) -> MicroBatchPublisher | None:
@@ -100,14 +107,26 @@ class FeedBuilder:
         """Return the active :class:`ReactiveWatchlistController`, if started."""
         return self._watchlist_controller
 
-    def _canonical_symbol_list(self) -> list[str]:
-        if self.symbols is None:
+    def normalize_symbols(
+        self, symbols: str | Iterable[str] | Table | None
+    ) -> list[str]:
+        """Normalize `symbols` using this builder's :class:`SymbolNormalizer` (or active watchlist symbols)."""
+        if _is_deephaven_table(symbols):
+            return (
+                sorted(self._watchlist_controller.active_symbols)
+                if self._watchlist_controller is not None
+                else []
+            )
+        if symbols is None:
             return ["*"]
         if self.symbol_normalizer is not None:
-            return self.symbol_normalizer.canonical_list(self.symbols)  # type: ignore[arg-type]
-        if isinstance(self.symbols, str):
-            return [self.symbols.strip().upper()]
-        return [str(s).strip().upper() for s in self.symbols]  # type: ignore[union-attr]
+            return self.symbol_normalizer.canonical_list(symbols)  # type: ignore[arg-type]
+        if isinstance(symbols, str):
+            return [symbols.strip().upper()]
+        return [str(s).strip().upper() for s in symbols]  # type: ignore[union-attr]
+
+    def _canonical_symbol_list(self) -> list[str]:
+        return self.normalize_symbols(self.symbols)
 
     def _setup_streaming(
         self, *, seed: bool, seed_since: Any = None
@@ -127,26 +146,21 @@ class FeedBuilder:
             )
 
         effective_seed = bool(seed or seed_since is not None)
-        pub = MicroBatchPublisher(
-            name=self.name,
-            schema_spec=self.schema_spec,
-            symbol_normalizer=self.symbol_normalizer,
-            exec_ctx=self._exec_ctx,
-            flush_interval_ms=self.flush_interval_ms,
-            max_batch_size=self.max_batch_size,
-        )
-        self._publisher = pub
-
         watchlist_ctrl: ReactiveWatchlistController | None = None
-
-        def _default_finalize() -> None:
-            if self.auto_flush:
-                pub.start()
-
-        finalize_seed: Callable[[], None] = _default_finalize
 
         if _is_deephaven_table(self.symbols):
             assert self.symbol_normalizer is not None
+            pub = MicroBatchPublisher(
+                name=self.name,
+                schema_spec=self.schema_spec,
+                symbol_normalizer=self.symbol_normalizer,
+                exec_ctx=self._exec_ctx,
+                flush_interval_ms=self.flush_interval_ms,
+                max_batch_size=self.max_batch_size,
+            )
+            self._publisher = pub
+            pub.acquire_consumer()
+            self._acquired_publisher = True
             watchlist_ctrl = ReactiveWatchlistController(
                 watchlist_table=self.symbols,  # type: ignore[arg-type]
                 ws_url=self.ws_url,
@@ -157,11 +171,19 @@ class FeedBuilder:
                 symbol_col=self.symbol_col,
                 exec_ctx=self._exec_ctx,
                 seed_fn=self.seed_fn if effective_seed else None,
+                auto_start=False,
             )
             self._watchlist_controller = watchlist_ctrl
+            wl_ref = watchlist_ctrl
+
+            def _finalize_watchlist() -> None:
+                wl_ref.start()
+                if self.auto_flush:
+                    pub.start()
+
+            finalize_seed: Callable[[], None] = _finalize_watchlist
         else:
             canon_syms = self._canonical_symbol_list()
-            pub.set_allowed_symbols(canon_syms)
             if self.symbol_normalizer is not None:
                 topics = [
                     self.symbol_normalizer.ws_topic(self.ws_channel, s)
@@ -170,25 +192,82 @@ class FeedBuilder:
             else:
                 topics = [f"{self.ws_channel}.{s}" for s in canon_syms]
             self._static_topics = topics
+            stream_key = (self.ws_url, self.ws_channel, tuple(canon_syms))
+            self._stream_key = stream_key
 
-            if effective_seed and self.seed_fn is not None:
+            existing_pub = self._publisher or (
+                self._stream_registry.get(stream_key)
+                if self._stream_registry is not None
+                else None
+            )
+            if existing_pub is not None:
+                pub = existing_pub
+                self._publisher = pub
+                if not self._acquired_publisher:
+                    pub.acquire_consumer()
+                    self._acquired_publisher = True
+
+                def _finalize_reused() -> None:
+                    if seed_since is not None and self.seed_rows_fn is not None:
+                        pub.mark_snapshot_seeded()
+                        extra_rows = self.seed_rows_fn(canon_syms, seed_since)
+                        pub.enqueue(extra_rows)
+                        pub.flush_now()
+                    elif (
+                        seed
+                        and self.seed_fn is not None
+                        and not pub.has_snapshot_seed
+                    ):
+                        pub.mark_snapshot_seeded()
+                        snap_rows = self.seed_fn(canon_syms)
+                        pub.enqueue(snap_rows)
+                        pub.flush_now()
+                    if self.auto_flush:
+                        pub.start()
+
+                finalize_seed = _finalize_reused
+            else:
+                pub = MicroBatchPublisher(
+                    name=self.name,
+                    schema_spec=self.schema_spec,
+                    symbol_normalizer=self.symbol_normalizer,
+                    exec_ctx=self._exec_ctx,
+                    flush_interval_ms=self.flush_interval_ms,
+                    max_batch_size=self.max_batch_size,
+                )
+                self._publisher = pub
+                pub.acquire_consumer()
+                self._acquired_publisher = True
+                if self._stream_registry is not None:
+                    self._stream_registry[stream_key] = pub
+                pub.set_allowed_symbols(canon_syms)
+
                 pub.begin_seeding()
                 self.ws_multiplexer.subscribe(
                     self.ws_url, self.ws_channel, topics, pub
                 )
-                seed_fn_ref = self.seed_fn
+                seed_fn_ref = self.seed_fn if effective_seed else None
+                seed_rows_fn_ref = (
+                    self.seed_rows_fn
+                    if (seed_since is not None and self.seed_rows_fn is not None)
+                    else None
+                )
+                if seed_fn_ref is not None or seed_rows_fn_ref is not None:
+                    pub.mark_snapshot_seeded()
 
-                def _do_seed() -> None:
-                    seed_rows = seed_fn_ref(canon_syms)
-                    pub.complete_seeding(seed_rows, seed_since=seed_since)
+                def _finalize_static() -> None:
+                    seed_rows: Sequence[Mapping[str, Any]] = ()
+                    try:
+                        if seed_rows_fn_ref is not None:
+                            seed_rows = seed_rows_fn_ref(canon_syms, seed_since)
+                        elif seed_fn_ref is not None:
+                            seed_rows = seed_fn_ref(canon_syms)
+                    finally:
+                        pub.complete_seeding(seed_rows, seed_since=seed_since)
                     if self.auto_flush:
                         pub.start()
 
-                finalize_seed = _do_seed
-            else:
-                self.ws_multiplexer.subscribe(
-                    self.ws_url, self.ws_channel, topics, pub
-                )
+                finalize_seed = _finalize_static
 
         if self._on_register_lifecycle is not None:
             self._on_register_lifecycle(self)
@@ -393,23 +472,32 @@ class FeedBuilder:
             self._watchlist_controller.stop()
             self._watchlist_controller = None
 
-        if (
-            self._static_topics
-            and self.ws_multiplexer is not None
-            and self.ws_url is not None
-            and self.ws_channel is not None
-        ):
-            self.ws_multiplexer.unsubscribe(
-                self.ws_url,
-                self.ws_channel,
-                self._static_topics,
-                self._publisher,
-            )
-            self._static_topics = []
+        pub = self._publisher
+        self._publisher = None
+        if pub is not None and self._acquired_publisher:
+            self._acquired_publisher = False
+            if pub.release_consumer() == 0:
+                if (
+                    self._stream_registry is not None
+                    and self._stream_key is not None
+                ):
+                    self._stream_registry.pop(self._stream_key, None)
+                if (
+                    self._static_topics
+                    and self.ws_multiplexer is not None
+                    and self.ws_url is not None
+                    and self.ws_channel is not None
+                ):
+                    self.ws_multiplexer.unsubscribe(
+                        self.ws_url,
+                        self.ws_channel,
+                        self._static_topics,
+                        pub,
+                    )
+                pub.stop()
 
-        if self._publisher is not None:
-            self._publisher.stop()
-            self._publisher = None
+        self._stream_key = None
+        self._static_topics = []
 
         if self._poller is not None:
             self._poller.stop()

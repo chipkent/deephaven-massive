@@ -80,6 +80,8 @@ def test_publisher_symbol_filtering_and_flushing(dh_exec_ctx: Any) -> None:
     assert len(rows) == 3
 
     # Test already_normalized=True and background flush thread
+    assert pub.is_seeded is False
+    assert pub.rows_published == 3
     pub.start()
     pub.start()  # idempotent second call while thread is alive
     pub.enqueue(
@@ -98,14 +100,45 @@ def test_publisher_symbol_filtering_and_flushing(dh_exec_ctx: Any) -> None:
                 "ParticipantTimestamp": None,
                 "TrfId": None,
                 "TrfTimestamp": None,
-            }
+            },
+            {
+                "Symbol": "GOOG",
+                "Price": 176.0,
+                "Size": 5,
+                "TradeId": "5",
+                "Exchange": 4,
+                "Tape": 3,
+                "Conditions": [],
+                "Correction": 0,
+                "SequenceNumber": 11,
+                "Timestamp": 1700000000000000005,
+                "ParticipantTimestamp": None,
+                "TrfId": None,
+                "TrfTimestamp": None,
+            },
+            {
+                "Symbol": "GOOG",
+                "Price": 177.0,
+                "Size": 5,
+                "TradeId": "6",
+                "Exchange": 4,
+                "Tape": 3,
+                "Conditions": [],
+                "Correction": 0,
+                "SequenceNumber": 12,
+                "Timestamp": 1700000000000000006,
+                "ParticipantTimestamp": None,
+                "TrfId": None,
+                "TrfTimestamp": None,
+            },
         ],
         already_normalized=True,
     )
     hist.await_update()
     pub.stop()
     pub.stop()  # idempotent stop when thread is None
-    assert len(dh_to_pylist(hist)) == 4
+    assert len(dh_to_pylist(hist)) == 6
+    assert pub.rows_published == 6
 
 
 def test_publisher_without_explicit_exec_ctx_or_normalizer(dh_exec_ctx: Any) -> None:
@@ -191,8 +224,10 @@ def test_publisher_seed_cutover_deduplication(dh_exec_ctx: Any) -> None:
     bar_pub.begin_seeding()
     bar_pub.enqueue(
         [
-            # Same (Symbol, WindowStart) and ws_ts <= max_seed_ts -> dropped by key_cols check
+            # Same (Symbol, WindowStart) and ws_ts == max_seed_ts -> dropped by seen_event_sigs check
             {"sym": "AAPL", "o": 150.0, "c": 151.0, "s": 2000000000000},
+            # Same timestamp on Quotes/Bars with distinct key or sequence -> kept
+            {"sym": "MSFT", "o": 300.0, "c": 301.0, "s": 2000000000000},
             # Newer bar -> kept
             {"sym": "AAPL", "o": 151.0, "c": 152.0, "s": 2060000000000},
         ]
@@ -200,6 +235,28 @@ def test_publisher_seed_cutover_deduplication(dh_exec_ctx: Any) -> None:
     assert (
         bar_pub.complete_seeding(
             [{"sym": "AAPL", "o": 150.0, "c": 151.0, "s": 2000000000000}]
+        )
+        == 3
+    )
+    assert bar_pub.is_seeded is True
+
+    # Test quote boundary timestamp with distinct SequenceNumber at ws_ts == max_seed_ts
+    q_pub = MicroBatchPublisher(
+        name="test_quote_seed",
+        schema_spec=QUOTES_SCHEMA,
+        symbol_normalizer=norm,
+        exec_ctx=dh_exec_ctx,
+    )
+    q_pub.begin_seeding()
+    q_pub.enqueue(
+        [
+            {"sym": "AAPL", "bp": 150.0, "ap": 150.1, "q": 10, "t": 2000000000000000000},
+            {"sym": "AAPL", "bp": 150.1, "ap": 150.2, "q": 11, "t": 2000000000000000000},
+        ]
+    )
+    assert (
+        q_pub.complete_seeding(
+            [{"sym": "AAPL", "bp": 150.0, "ap": 150.1, "q": 10, "t": 2000000000000000000}]
         )
         == 2
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 import gzip
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -153,22 +154,100 @@ class FlatFilesClient:
         clean_ds = dataset.strip("/")
         return f"{clean_ds}/{target_date.year:04d}/{target_date.month:02d}/{target_date.isoformat()}.csv.gz"
 
+    def _read_day_batches(
+        self,
+        dataset: str,
+        target_date: date,
+        resolved_schema: SchemaSpec,
+        normalizer: SymbolNormalizer,
+        value_set: pa.Array | None,
+        bar_span_ns: int | None,
+        remaining_limit: int | None = None,
+    ) -> list[pa.RecordBatch]:
+        """Download and parse a single day's S3 `.csv.gz` flat file into RecordBatches."""
+        key = self.build_s3_key(dataset, target_date)
+        raw_stream = self._open_s3_object(self.session.config.s3_bucket, key)
+        head = raw_stream.read(2)
+        prep = _PrependReader(head, raw_stream)
+        csv_stream: Any = (
+            gzip.GzipFile(fileobj=prep, mode="rb")  # type: ignore[arg-type]
+            if head == b"\x1f\x8b"
+            else prep
+        )
+
+        reader = pa_csv.open_csv(
+            csv_stream,
+            read_options=pa_csv.ReadOptions(block_size=16 * 1024 * 1024),
+            convert_options=pa_csv.ConvertOptions(strings_can_be_null=True),
+        )
+
+        day_batches: list[pa.RecordBatch] = []
+        day_rows = 0
+        for batch in reader:
+            if value_set is not None:
+                sym_col = next(
+                    (
+                        c
+                        for c in ("ticker", "sym", "Symbol", "pair")
+                        if c in batch.schema.names
+                    ),
+                    batch.schema.names[0],
+                )
+                mask = pc.is_in(batch[sym_col], value_set=value_set)
+                batch = batch.filter(mask)
+
+            if (
+                remaining_limit is not None
+                and day_rows + batch.num_rows > remaining_limit
+            ):
+                batch = batch.slice(0, remaining_limit - day_rows)
+
+            if batch.num_rows > 0:
+                raw_rows = batch.to_pylist()
+                if bar_span_ns is not None:
+                    for r in raw_rows:
+                        r.setdefault("_span_ns", bar_span_ns)
+                rb = rows_to_record_batch(
+                    raw_rows, resolved_schema, normalizer
+                )
+                day_batches.append(rb)
+                day_rows += len(raw_rows)
+
+            if remaining_limit is not None and day_rows >= remaining_limit:
+                break
+
+        return day_batches
+
     def load(
         self,
         dataset: str,
         start: str | date | datetime | None = None,
         end: str | date | datetime | None = None,
+        end_pos: str | date | datetime | None = None,
         *,
+        table_type: str | None = None,
         date: str | date | datetime | None = None,
         start_date: str | date | datetime | None = None,
         end_date: str | date | datetime | None = None,
         symbols: str | Iterable[str] | None = None,
+        tickers: str | Iterable[str] | None = None,
         schema_spec: SchemaSpec | None = None,
         domain: str | None = None,
         limit: int | None = None,
         max_rows: int | None = None,
     ) -> Table:
         """Stream one or more daily `.csv.gz` S3 Flat Files into a single Deephaven Table."""
+        if (
+            "/" not in dataset
+            and isinstance(start, str)
+            and not start.strip()[:4].isdigit()
+        ):
+            dataset = f"{dataset.strip('/')}/{start.strip('/')}"
+            start = end
+            end = end_pos
+        elif table_type is not None and "/" not in dataset:
+            dataset = f"{dataset.strip('/')}/{table_type.strip('/')}"
+
         resolved_schema, resolved_domain = _infer_schema_and_domain(
             dataset, schema_spec, domain
         )
@@ -177,10 +256,11 @@ class FlatFilesClient:
         effective_start = start if start is not None else start_date
         effective_end = end if end is not None else end_date
         effective_limit = limit if limit is not None else max_rows
+        effective_symbols = symbols if symbols is not None else tickers
 
         value_set: pa.Array | None = None
-        if symbols is not None:
-            canon_list = normalizer.canonical_list(symbols)
+        if effective_symbols is not None:
+            canon_list = normalizer.canonical_list(effective_symbols)
             if "*" not in canon_list:
                 allowed_raw: set[str] = set()
                 for s in canon_list:
@@ -200,60 +280,47 @@ class FlatFilesClient:
 
         dates = _date_range(effective_start, effective_end, single_date=date)
         batches: list[pa.RecordBatch] = []
-        total_rows = 0
 
-        for d in dates:
-            key = self.build_s3_key(dataset, d)
-            raw_stream = self._open_s3_object(self.session.config.s3_bucket, key)
-            head = raw_stream.read(2)
-            prep = _PrependReader(head, raw_stream)
-            csv_stream: Any = (
-                gzip.GzipFile(fileobj=prep, mode="rb")  # type: ignore[arg-type]
-                if head == b"\x1f\x8b"
-                else prep
-            )
-
-            reader = pa_csv.open_csv(
-                csv_stream,
-                read_options=pa_csv.ReadOptions(block_size=16 * 1024 * 1024),
-                convert_options=pa_csv.ConvertOptions(strings_can_be_null=True),
-            )
-
-            for batch in reader:
-                if value_set is not None:
-                    sym_col = next(
-                        (
-                            c
-                            for c in ("ticker", "sym", "Symbol", "pair")
-                            if c in batch.schema.names
+        if len(dates) > 1 and effective_limit is None:
+            with ThreadPoolExecutor(max_workers=min(len(dates), 4)) as pool:
+                day_results = list(
+                    pool.map(
+                        lambda d: self._read_day_batches(
+                            dataset,
+                            d,
+                            resolved_schema,
+                            normalizer,
+                            value_set,
+                            bar_span_ns,
+                            None,
                         ),
-                        batch.schema.names[0],
+                        dates,
                     )
-                    mask = pc.is_in(batch[sym_col], value_set=value_set)
-                    batch = batch.filter(mask)
-
-                if (
-                    effective_limit is not None
-                    and total_rows + batch.num_rows > effective_limit
-                ):
-                    batch = batch.slice(0, effective_limit - total_rows)
-
-                if batch.num_rows > 0:
-                    raw_rows = batch.to_pylist()
-                    if bar_span_ns is not None:
-                        for r in raw_rows:
-                            r.setdefault("_span_ns", bar_span_ns)
-                    rb = rows_to_record_batch(
-                        raw_rows, resolved_schema, normalizer
-                    )
+                )
+            for day_b in day_results:
+                batches.extend(day_b)
+        else:
+            total_rows = 0
+            for d in dates:
+                rem = (
+                    (effective_limit - total_rows)
+                    if effective_limit is not None
+                    else None
+                )
+                day_b = self._read_day_batches(
+                    dataset,
+                    d,
+                    resolved_schema,
+                    normalizer,
+                    value_set,
+                    bar_span_ns,
+                    rem,
+                )
+                for rb in day_b:
                     batches.append(rb)
-                    total_rows += len(raw_rows)
-
+                    total_rows += rb.num_rows
                 if effective_limit is not None and total_rows >= effective_limit:
                     break
-
-            if effective_limit is not None and total_rows >= effective_limit:
-                break
 
         pa_tbl = record_batches_to_arrow_table(batches, resolved_schema)
         return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)

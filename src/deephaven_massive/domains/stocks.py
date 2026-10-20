@@ -6,13 +6,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from deephaven_massive.domains.base import BaseDomainClient, format_date_param
-from deephaven_massive.engine.arrow_bridge import (
-    SchemaSpec,
-    arrow_to_deephaven_table,
-    record_batches_to_arrow_table,
-    rows_to_record_batch,
+from deephaven_massive.domains.base import (
+    BaseDomainClient,
+    format_date_param,
+    normalize_filter_params,
 )
+from deephaven_massive.engine.arrow_bridge import SchemaSpec
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
@@ -24,6 +23,7 @@ from deephaven_massive.schemas.market import (
     QUOTES_SCHEMA,
     STOCK_SNAPSHOT_SCHEMA,
     TRADES_SCHEMA,
+    compute_bar_span_ns,
 )
 from deephaven_massive.schemas.reference import (
     CONDITIONS_SCHEMA,
@@ -61,7 +61,10 @@ class StocksClient(BaseDomainClient):
         super().__init__(session, domain="stocks")
 
     def _fetch_stock_snapshots(
-        self, symbols: Sequence[str] | None = None
+        self,
+        symbols: Sequence[str] | None = None,
+        *,
+        extra_fields: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
         if symbols and "*" not in symbols:
@@ -70,7 +73,9 @@ class StocksClient(BaseDomainClient):
                 for s in symbols
             )
         return self.fetch_rest_rows(
-            "/v2/snapshot/locale/us/markets/stocks/tickers", params
+            "/v2/snapshot/locale/us/markets/stocks/tickers",
+            params,
+            extra_fields=extra_fields,
         )
 
     def _historical_multi_symbol(
@@ -84,53 +89,21 @@ class StocksClient(BaseDomainClient):
         end: Any = None,
         limit: int | None = None,
         source: str = "auto",
+        adjusted: bool | None = None,
         extra_params: Mapping[str, Any] | None = None,
     ) -> Table:
-        canon_syms = (
-            None
-            if hasattr(symbols, "j_table") or hasattr(symbols, "column_names")
-            else self.canonical_symbols(symbols)
+        return self.fetch_multi_symbol_historical(
+            symbols,
+            schema_spec,
+            s3_dataset,
+            lambda sym, s, e: rest_path_fn(sym, s, e, extra_params),
+            start=start,
+            end=end,
+            limit=limit,
+            source=source,
+            adjusted=adjusted,
+            empty_error="Specific symbol(s) are required for REST historical queries (or configure S3 credentials for '*' flat files).",
         )
-        if self.should_use_flat_files(source, canon_syms, s3_dataset):
-            assert s3_dataset is not None
-            return self.session.flat_files.load(
-                s3_dataset,
-                start=start,
-                end=end,
-                symbols=canon_syms,
-                schema_spec=schema_spec,
-                domain="stocks",
-                limit=limit,
-            )
-
-        target_syms = [s for s in (canon_syms or []) if s != "*"]
-        if not target_syms:
-            raise ValueError(
-                "Specific symbol(s) are required for REST historical queries (or configure S3 credentials for '*' flat files)."
-            )
-
-        if len(target_syms) == 1:
-            sym = target_syms[0]
-            path, params = rest_path_fn(sym, start, end, extra_params)
-            return self.fetch_chunked_table(
-                path, schema_spec, params, limit=limit, inject_symbol=sym
-            )
-
-        all_rows: list[dict[str, Any]] = []
-        for sym in target_syms:
-            path, params = rest_path_fn(sym, start, end, extra_params)
-            rows = self.fetch_rest_rows(
-                path, params, limit=limit, inject_symbol=sym
-            )
-            all_rows.extend(rows)
-
-        batches = (
-            [rows_to_record_batch(all_rows, schema_spec, self.symbol_normalizer)]
-            if all_rows
-            else []
-        )
-        pa_tbl = record_batches_to_arrow_table(batches, schema_spec)
-        return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
     def trades(
         self,
@@ -159,6 +132,9 @@ class StocksClient(BaseDomainClient):
             symbols=symbols,
             symbol_col=symbol_col,
             seed_fn=self._fetch_stock_snapshots,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms, since, lambda sym, s, e: _rest_path(sym, s, e, None)
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_multi_symbol(
                 symbols,
                 TRADES_SCHEMA,
@@ -198,6 +174,9 @@ class StocksClient(BaseDomainClient):
             symbols=symbols,
             symbol_col=symbol_col,
             seed_fn=self._fetch_stock_snapshots,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms, since, lambda sym, s, e: _rest_path(sym, s, e, None)
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_multi_symbol(
                 symbols,
                 QUOTES_SCHEMA,
@@ -246,6 +225,7 @@ class StocksClient(BaseDomainClient):
                 params,
             )
 
+        span_ns = compute_bar_span_ns(multiplier, clean_span)
         return self.build_feed(
             name=f"stocks_bars_{multiplier}_{clean_span}",
             schema_spec=BARS_SCHEMA,
@@ -253,7 +233,15 @@ class StocksClient(BaseDomainClient):
             ws_channel=ws_channel,
             symbols=symbols,
             symbol_col=symbol_col,
-            seed_fn=self._fetch_stock_snapshots,
+            seed_fn=lambda syms: self._fetch_stock_snapshots(
+                syms, extra_fields={"_span_ns": span_ns}
+            ),
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms,
+                since,
+                lambda sym, s, e: _rest_path(sym, s, e, None),
+                extra_fields={"_span_ns": span_ns},
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_multi_symbol(
                 symbols,
                 BARS_SCHEMA,
@@ -263,6 +251,7 @@ class StocksClient(BaseDomainClient):
                 end=end,
                 limit=limit,
                 source=source,
+                adjusted=adjusted,
             ),
         )
 
@@ -356,6 +345,20 @@ class StocksClient(BaseDomainClient):
             snapshot_fn=_fetch,
         )
 
+    def top_movers(
+        self, direction: str = "gainers", *, include_otc: bool = False
+    ) -> FeedBuilder:
+        """Top US Stock market movers (`direction='gainers'` or `'losers'`, `/v2/snapshot/locale/us/markets/stocks/{direction}`)."""
+        return self.snapshots(direction=direction, include_otc=include_otc)
+
+    def gainers(self, *, include_otc: bool = False) -> FeedBuilder:
+        """Top US Stock gainers (`/v2/snapshot/locale/us/markets/stocks/gainers`)."""
+        return self.snapshots(direction="gainers", include_otc=include_otc)
+
+    def losers(self, *, include_otc: bool = False) -> FeedBuilder:
+        """Top US Stock losers (`/v2/snapshot/locale/us/markets/stocks/losers`)."""
+        return self.snapshots(direction="losers", include_otc=include_otc)
+
     def daily_market_summary(
         self,
         target_date: str | date | datetime,
@@ -396,6 +399,8 @@ class StocksClient(BaseDomainClient):
             ),
         )
 
+    previous_day_bar = previous_close
+
     def daily_open_close(
         self,
         symbol: str,
@@ -417,6 +422,8 @@ class StocksClient(BaseDomainClient):
                 inject_symbol=canon,
             ),
         )
+
+    daily_ticker_summary = daily_open_close
 
     def _indicator_feed(
         self,
@@ -557,10 +564,21 @@ class StocksClient(BaseDomainClient):
         schema_spec: SchemaSpec,
         params: Mapping[str, Any] | None = None,
         *,
+        symbol: str | None = None,
+        tickers: str | Iterable[str] | None = None,
+        ticker_param: str = "ticker",
+        filters: Mapping[str, Any] | None = None,
         date_param: str = "date",
         inject_symbol: str | None = None,
     ) -> FeedBuilder:
-        base_params = {k: v for k, v in (params or {}).items() if v is not None}
+        base_params = normalize_filter_params(
+            params,
+            filters,
+            symbol=symbol,
+            tickers=tickers,
+            normalizer=self.symbol_normalizer,
+            ticker_param=ticker_param,
+        )
 
         def _hist(
             start: Any = None,
@@ -584,119 +602,217 @@ class StocksClient(BaseDomainClient):
             historical_fn=_hist,
         )
 
-    def short_interest(self, symbol: str | None = None) -> FeedBuilder:
+    def short_interest(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
         """Bi-weekly FINRA short interest (`/stocks/v1/short-interest`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_short_interest",
             "/stocks/v1/short-interest",
             SHORT_INTEREST_SCHEMA,
-            {"ticker": canon},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="settlement_date",
         )
 
-    def short_volume(self, symbol: str | None = None) -> FeedBuilder:
+    def short_volume(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
         """Daily short sale volume & ratio (`/stocks/v1/short-volume`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_short_volume",
             "/stocks/v1/short-volume",
             SHORT_VOLUME_SCHEMA,
-            {"ticker": canon},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="date",
         )
 
-    def float(self, symbol: str | None = None) -> FeedBuilder:
+    def float(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
         """Public share float & free float percentage (`/stocks/vX/float`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_float",
             "/stocks/vX/float",
             SHARE_FLOAT_SCHEMA,
-            {"ticker": canon},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="effective_date",
         )
 
+    share_float = float
+
     def balance_sheets(
-        self, symbol: str | None = None, *, timeframe: str | None = None
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        timeframe: str | None = None,
+        **filters: Any,
     ) -> FeedBuilder:
         """Quarterly and annual balance sheets (`/stocks/financials/v1/balance-sheets`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_balance_sheets",
             "/stocks/financials/v1/balance-sheets",
             FINANCIAL_STATEMENT_SCHEMA,
-            {"tickers": canon, "timeframe": timeframe},
+            {"timeframe": timeframe},
+            symbol=symbol,
+            tickers=tickers,
+            ticker_param="tickers",
+            filters=filters,
             date_param="period_of_report_date",
         )
 
     def income_statements(
-        self, symbol: str | None = None, *, timeframe: str | None = None
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        timeframe: str | None = None,
+        **filters: Any,
     ) -> FeedBuilder:
         """Quarterly and annual income statements (`/stocks/financials/v1/income-statements`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_income_statements",
             "/stocks/financials/v1/income-statements",
             FINANCIAL_STATEMENT_SCHEMA,
-            {"tickers": canon, "timeframe": timeframe},
+            {"timeframe": timeframe},
+            symbol=symbol,
+            tickers=tickers,
+            ticker_param="tickers",
+            filters=filters,
             date_param="period_of_report_date",
         )
 
     def cash_flow_statements(
-        self, symbol: str | None = None, *, timeframe: str | None = None
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        timeframe: str | None = None,
+        **filters: Any,
     ) -> FeedBuilder:
         """Quarterly and annual cash flow statements (`/stocks/financials/v1/cash-flow-statements`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_cash_flow_statements",
             "/stocks/financials/v1/cash-flow-statements",
             FINANCIAL_STATEMENT_SCHEMA,
-            {"tickers": canon, "timeframe": timeframe},
+            {"timeframe": timeframe},
+            symbol=symbol,
+            tickers=tickers,
+            ticker_param="tickers",
+            filters=filters,
             date_param="period_of_report_date",
         )
 
-    def ratios(self, symbol: str | None = None) -> FeedBuilder:
+    def financials(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        timeframe: str | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
+        """Combined quarterly and annual financial statements (`/vX/reference/financials`)."""
+        return self._rest_collection_feed(
+            "stocks_financials",
+            "/vX/reference/financials",
+            FINANCIAL_STATEMENT_SCHEMA,
+            {"timeframe": timeframe},
+            symbol=symbol,
+            tickers=tickers,
+            ticker_param="ticker",
+            filters=filters,
+            date_param="period_of_report_date",
+        )
+
+    financials_vx = financials
+
+    def ratios(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
         """Valuation, profitability, liquidity, and leverage ratios (`/stocks/financials/v1/ratios`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_ratios",
             "/stocks/financials/v1/ratios",
             RATIOS_SCHEMA,
-            {"ticker": canon},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="date",
         )
 
-    def dividends(self, symbol: str | None = None) -> FeedBuilder:
+    def dividends(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
         """Cash and stock dividends (`/stocks/v1/dividends`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_dividends",
             "/stocks/v1/dividends",
             DIVIDENDS_SCHEMA,
-            {"ticker": canon},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="ex_dividend_date",
         )
 
-    def splits(self, symbol: str | None = None) -> FeedBuilder:
+    def splits(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
         """Forward and reverse stock splits (`/stocks/v1/splits`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_splits",
             "/stocks/v1/splits",
             SPLITS_SCHEMA,
-            {"ticker": canon},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="execution_date",
         )
 
-    def ipos(self, symbol: str | None = None) -> FeedBuilder:
+    def ipos(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
         """Upcoming and historical IPO events (`/vX/reference/ipos`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_ipos",
             "/vX/reference/ipos",
             IPOS_SCHEMA,
-            {"ticker": canon},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="listing_date",
         )
 
@@ -706,6 +822,7 @@ class StocksClient(BaseDomainClient):
         market: str = "stocks",
         active: bool = True,
         search: str | None = None,
+        **filters: Any,
     ) -> FeedBuilder:
         """All active and historical tickers (`/v3/reference/tickers`)."""
         return self._rest_collection_feed(
@@ -713,6 +830,7 @@ class StocksClient(BaseDomainClient):
             "/v3/reference/tickers",
             TICKERS_SCHEMA,
             {"market": market, "active": str(active).lower(), "search": search},
+            filters=filters,
         )
 
     def ticker_details(self, symbol: str) -> FeedBuilder:
@@ -776,52 +894,174 @@ class StocksClient(BaseDomainClient):
         )
 
     def sec_filings(
-        self, symbol: str | None = None, *, form_type: str | None = None
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        form_type: str | None = None,
+        **filters: Any,
     ) -> FeedBuilder:
         """SEC EDGAR filings index (`/stocks/filings/vX/index`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_sec_filings",
             "/stocks/filings/vX/index",
             SEC_FILINGS_SCHEMA,
-            {"ticker": canon, "form_type": form_type},
+            {"form_type": form_type},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
+            date_param="filing_date",
+        )
+
+    sec_edgar_index = sec_filings
+
+    def sec_10k_sections(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        section: str | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
+        """Parsed 10-K narrative sections (`/stocks/filings/10-K/vX/sections`)."""
+        return self._rest_collection_feed(
+            "stocks_sec_10k_sections",
+            "/stocks/filings/10-K/vX/sections",
+            SEC_FILINGS_SCHEMA,
+            {"section": section},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
+            date_param="filing_date",
+        )
+
+    def sec_8k_text(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
+        """Parsed 8-K item disclosures (`/stocks/filings/8-K/vX/text`)."""
+        return self._rest_collection_feed(
+            "stocks_sec_8k_text",
+            "/stocks/filings/8-K/vX/text",
+            SEC_FILINGS_SCHEMA,
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
+            date_param="filing_date",
+        )
+
+    def sec_risk_factors(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
+        """Categorized SEC filing risk factor disclosures (`/stocks/filings/vX/risk-factors`)."""
+        return self._rest_collection_feed(
+            "stocks_sec_risk_factors",
+            "/stocks/filings/vX/risk-factors",
+            SEC_FILINGS_SCHEMA,
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
+            date_param="filing_date",
+        )
+
+    def sec_disclosures(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
+        """Structured SEC text & taxonomy disclosures (`/stocks/filings/vX/disclosures`)."""
+        return self._rest_collection_feed(
+            "stocks_sec_disclosures",
+            "/stocks/filings/vX/disclosures",
+            SEC_FILINGS_SCHEMA,
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="filing_date",
         )
 
     def sec_13f_holdings(
-        self, symbol: str | None = None, *, cik: str | None = None
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        cik: str | None = None,
+        **filters: Any,
     ) -> FeedBuilder:
         """Institutional 13F holdings (`/stocks/filings/13f/vX/holdings`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_sec_13f",
             "/stocks/filings/13f/vX/holdings",
             SEC_13F_SCHEMA,
-            {"ticker": canon, "cik": cik},
+            {"cik": cik},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="period_of_report_date",
         )
 
+    def sec_form3_ownership(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
+        """Initial beneficial ownership Form 3 holdings (`/stocks/filings/insider-transactions/vX/holdings`)."""
+        return self._rest_collection_feed(
+            "stocks_sec_form3",
+            "/stocks/filings/insider-transactions/vX/holdings",
+            SEC_13F_SCHEMA,
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
+            date_param="filing_date",
+        )
+
     def sec_insider_transactions(
-        self, symbol: str | None = None
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
     ) -> FeedBuilder:
         """Form 3/4/5 insider transactions (`/stocks/filings/insider-transactions/vX/transactions`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_sec_insider",
             "/stocks/filings/insider-transactions/vX/transactions",
             SEC_INSIDER_SCHEMA,
-            {"ticker": canon},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="transaction_date",
         )
 
-    def news(self, symbol: str | None = None) -> FeedBuilder:
+    sec_form4_transactions = sec_insider_transactions
+
+    def news(
+        self,
+        symbol: str | None = None,
+        *,
+        tickers: str | Iterable[str] | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
         """Real-time news articles with sentiment & insights (`/v2/reference/news`)."""
-        canon = self.symbol_normalizer.canonical(symbol) if symbol else None  # type: ignore[union-attr]
         return self._rest_collection_feed(
             "stocks_news",
             "/v2/reference/news",
             NEWS_SCHEMA,
-            {"ticker": canon},
+            symbol=symbol,
+            tickers=tickers,
+            filters=filters,
             date_param="published_utc",
         )
 
@@ -850,6 +1090,8 @@ class StocksClient(BaseDomainClient):
             "/v1/marketstatus/upcoming",
             HOLIDAYS_SCHEMA,
         )
+
+    holidays = market_holidays
 
     def market_status(self) -> FeedBuilder:
         """Current exchange and market group open/closed status (`/v1/marketstatus/now`)."""

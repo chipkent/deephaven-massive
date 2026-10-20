@@ -61,10 +61,10 @@ class ReactiveWatchlistController:
         symbol_col: str = "Symbol",
         exec_ctx: ExecutionContext | None = None,
         seed_fn: Callable[[list[str]], Sequence[Mapping[str, Any]]] | None = None,
+        auto_start: bool = True,
     ) -> None:
         from deephaven import dtypes as dht
         from deephaven import input_table
-        from deephaven.table_listener import listen
 
         self.watchlist_table = watchlist_table
         self.ws_url = ws_url
@@ -82,6 +82,7 @@ class ReactiveWatchlistController:
         self._active_symbols: set[str] = set()
         self._pending_ops = 0
         self._idle_Condition = threading.Condition()
+        self._listener_handle: Any = None
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix=f"massive-watchlist-{self.channel}"
         )
@@ -95,12 +96,24 @@ class ReactiveWatchlistController:
                 col_defs={"Symbol": dht.string, "SubscribedAt": dht.Instant},
                 key_cols=["Symbol"],
             )
-            self._listener_handle = listen(
-                self.watchlist_table,
-                self._on_table_update,
-                description=f"massive-watchlist-{self.channel}",
-                do_replay=True,
-            )
+
+        if auto_start:
+            self.start()
+
+    def start(self) -> None:
+        """Start listening to the watchlist table (idempotent)."""
+        from deephaven.table_listener import listen
+
+        with self._op_lock:
+            if self._stopped or self._listener_handle is not None:
+                return
+            with exec_ctx_scope(self._exec_ctx):
+                self._listener_handle = listen(
+                    self.watchlist_table,
+                    self._on_table_update,
+                    description=f"massive-watchlist-{self.channel}",
+                    do_replay=True,
+                )
 
     @property
     def active_subs_table(self) -> Table:
@@ -181,7 +194,9 @@ class ReactiveWatchlistController:
                 rem_topics = [
                     self.symbol_normalizer.ws_topic(self.channel, s) for s in net_rem
                 ]
-                self.ws_multiplexer.unsubscribe(self.ws_url, self.channel, rem_topics)
+                self.ws_multiplexer.unsubscribe(
+                    self.ws_url, self.channel, rem_topics, self.publisher
+                )
 
                 del_batch = pa.RecordBatch.from_arrays(
                     [pa.array(net_rem, type=pa.string())],
@@ -213,15 +228,21 @@ class ReactiveWatchlistController:
                 add_topics = [
                     self.symbol_normalizer.ws_topic(self.channel, s) for s in net_add
                 ]
-                self.ws_multiplexer.subscribe(
-                    self.ws_url, self.channel, add_topics, self.publisher
-                )
-
                 if self.seed_fn is not None:
-                    seed_rows = self.seed_fn(net_add)
-                    if seed_rows:
-                        self.publisher.enqueue(seed_rows)
-                        self.publisher.flush_now()
+                    self.publisher.begin_seeding()
+                    seed_rows: Sequence[Mapping[str, Any]] = ()
+                    try:
+                        self.ws_multiplexer.subscribe(
+                            self.ws_url, self.channel, add_topics, self.publisher
+                        )
+                        seed_rows = self.seed_fn(net_add)
+                    finally:
+                        self.publisher.complete_seeding(seed_rows)
+                    self.publisher.flush_now()
+                else:
+                    self.ws_multiplexer.subscribe(
+                        self.ws_url, self.channel, add_topics, self.publisher
+                    )
 
     def wait_idle(self, timeout: float = 5.0) -> bool:
         """Block until all scheduled watchlist diff operations have completed."""

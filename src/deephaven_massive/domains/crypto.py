@@ -6,13 +6,13 @@ from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from deephaven_massive.domains.base import BaseDomainClient, format_date_param
-from deephaven_massive.engine.arrow_bridge import (
-    SchemaSpec,
-    arrow_to_deephaven_table,
-    record_batches_to_arrow_table,
-    rows_to_record_batch,
+from deephaven_massive.domains.base import (
+    BaseDomainClient,
+    compute_bar_span_ns,
+    format_date_param,
+    normalize_filter_params,
 )
+from deephaven_massive.engine.arrow_bridge import SchemaSpec
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
@@ -22,6 +22,13 @@ from deephaven_massive.schemas.market import (
     QUOTES_SCHEMA,
     STOCK_SNAPSHOT_SCHEMA,
     TRADES_SCHEMA,
+)
+from deephaven_massive.schemas.reference import (
+    CONDITIONS_SCHEMA,
+    EXCHANGES_SCHEMA,
+    HOLIDAYS_SCHEMA,
+    MARKET_STATUS_SCHEMA,
+    TICKERS_SCHEMA,
 )
 
 if TYPE_CHECKING:
@@ -36,7 +43,10 @@ class CryptoClient(BaseDomainClient):
         super().__init__(session, domain="crypto")
 
     def _fetch_crypto_snapshots(
-        self, pairs: Sequence[str] | None = None
+        self,
+        pairs: Sequence[str] | None = None,
+        *,
+        extra_fields: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
         if pairs and "*" not in pairs:
@@ -45,7 +55,9 @@ class CryptoClient(BaseDomainClient):
                 for p in pairs
             )
         return self.fetch_rest_rows(
-            "/v2/snapshot/locale/global/markets/crypto/tickers", params
+            "/v2/snapshot/locale/global/markets/crypto/tickers",
+            params,
+            extra_fields=extra_fields,
         )
 
     def _historical_crypto(
@@ -60,49 +72,17 @@ class CryptoClient(BaseDomainClient):
         limit: int | None = None,
         source: str = "auto",
     ) -> Table:
-        canon_syms = (
-            None
-            if hasattr(pairs, "j_table") or hasattr(pairs, "column_names")
-            else self.canonical_symbols(pairs)
+        return self.fetch_multi_symbol_historical(
+            pairs,
+            schema_spec,
+            s3_dataset,
+            rest_path_fn,
+            empty_error="Specific crypto pair(s) are required for REST historical queries.",
+            start=start,
+            end=end,
+            limit=limit,
+            source=source,
         )
-        if self.should_use_flat_files(source, canon_syms, s3_dataset):
-            assert s3_dataset is not None
-            return self.session.flat_files.load(
-                s3_dataset,
-                start=start,
-                end=end,
-                symbols=canon_syms,
-                schema_spec=schema_spec,
-                domain="crypto",
-                limit=limit,
-            )
-
-        target_syms = [s for s in (canon_syms or []) if s != "*"]
-        if not target_syms:
-            raise ValueError(
-                "Specific crypto pair(s) are required for REST historical queries."
-            )
-
-        if len(target_syms) == 1:
-            sym = target_syms[0]
-            path, params = rest_path_fn(sym, start, end)
-            return self.fetch_chunked_table(
-                path, schema_spec, params, limit=limit, inject_symbol=sym
-            )
-
-        all_rows: list[dict[str, Any]] = []
-        for sym in target_syms:
-            path, params = rest_path_fn(sym, start, end)
-            all_rows.extend(
-                self.fetch_rest_rows(path, params, limit=limit, inject_symbol=sym)
-            )
-        batches = (
-            [rows_to_record_batch(all_rows, schema_spec, self.symbol_normalizer)]
-            if all_rows
-            else []
-        )
-        pa_tbl = record_batches_to_arrow_table(batches, schema_spec)
-        return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
     def trades(
         self,
@@ -131,6 +111,9 @@ class CryptoClient(BaseDomainClient):
             symbols=pairs,
             symbol_col=symbol_col,
             seed_fn=self._fetch_crypto_snapshots,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms, since, _rest_path
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_crypto(
                 pairs,
                 TRADES_SCHEMA,
@@ -194,6 +177,7 @@ class CryptoClient(BaseDomainClient):
                 {"adjusted": str(adjusted).lower()},
             )
 
+        span_ns = compute_bar_span_ns(multiplier, clean_span)
         return self.build_feed(
             name=f"crypto_bars_{multiplier}_{clean_span}",
             schema_spec=BARS_SCHEMA,
@@ -201,7 +185,15 @@ class CryptoClient(BaseDomainClient):
             ws_channel=ws_channel,
             symbols=pairs,
             symbol_col=symbol_col,
-            seed_fn=self._fetch_crypto_snapshots,
+            seed_fn=lambda syms=None: self._fetch_crypto_snapshots(
+                syms, extra_fields={"_span_ns": span_ns}
+            ),
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms,
+                since,
+                _rest_path,
+                extra_fields={"_span_ns": span_ns},
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_crypto(
                 pairs,
                 BARS_SCHEMA,
@@ -260,6 +252,30 @@ class CryptoClient(BaseDomainClient):
             snapshot_fn=_fetch,
         )
 
+    def top_movers(self, direction: str = "gainers") -> FeedBuilder:
+        """Top Crypto market movers (`direction='gainers'` or `'losers'`, `/v2/snapshot/locale/global/markets/crypto/{direction}`)."""
+        return self.snapshots(direction=direction)
+
+    def last_trade(
+        self, from_currency: str, to_currency: str | None = None
+    ) -> FeedBuilder:
+        """Last trade for a Crypto currency pair (`/v1/last/crypto/{from}/{to}`)."""
+        pair = (
+            f"{from_currency}-{to_currency}"
+            if to_currency is not None
+            else from_currency
+        )
+        canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
+        fc, tc = canon.split("-")
+        return self.build_feed(
+            name=f"crypto_last_trade_{fc}_{tc}",
+            schema_spec=TRADES_SCHEMA,
+            symbols=canon,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                f"/v1/last/crypto/{fc}/{tc}", inject_symbol=canon
+            ),
+        )
+
     def daily_market_summary(
         self, target_date: str | date | datetime, *, adjusted: bool = True
     ) -> FeedBuilder:
@@ -274,6 +290,25 @@ class CryptoClient(BaseDomainClient):
                 extra_fields={"Date": d_str},
             ),
         )
+
+    def previous_close(
+        self, pair: str, *, adjusted: bool = True
+    ) -> FeedBuilder:
+        """Previous day's OHLCV bar for a Crypto pair (`/v2/aggs/ticker/{cryptoTicker}/prev`)."""
+        canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
+        ticker = self.symbol_normalizer.rest_ticker(canon)  # type: ignore[union-attr]
+        return self.build_feed(
+            name=f"crypto_prev_close_{canon}",
+            schema_spec=BARS_SCHEMA,
+            symbols=canon,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                f"/v2/aggs/ticker/{ticker}/prev",
+                {"adjusted": str(adjusted).lower()},
+                inject_symbol=canon,
+            ),
+        )
+
+    previous_day_bar = previous_close
 
     def daily_open_close(
         self,
@@ -297,6 +332,72 @@ class CryptoClient(BaseDomainClient):
             ),
         )
 
+    daily_ticker_summary = daily_open_close
+
+    def tickers(
+        self,
+        *,
+        active: bool = True,
+        search: str | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
+        """Crypto pairs directory (`/v3/reference/tickers?market=crypto`)."""
+        params = normalize_filter_params(
+            {
+                "market": "crypto",
+                "active": str(active).lower(),
+                "search": search,
+            },
+            filters,
+        )
+        return self.build_feed(
+            name="crypto_tickers",
+            schema_spec=TICKERS_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                "/v3/reference/tickers", params
+            ),
+        )
+
+    def conditions(self) -> FeedBuilder:
+        """Crypto trade and quote condition codes (`/v3/reference/conditions?asset_class=crypto`)."""
+        return self.build_feed(
+            name="crypto_conditions",
+            schema_spec=CONDITIONS_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                "/v3/reference/conditions", {"asset_class": "crypto"}
+            ),
+        )
+
+    def exchanges(self) -> FeedBuilder:
+        """Crypto exchange directory (`/v3/reference/exchanges?asset_class=crypto`)."""
+        return self.build_feed(
+            name="crypto_exchanges",
+            schema_spec=EXCHANGES_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                "/v3/reference/exchanges", {"asset_class": "crypto"}
+            ),
+        )
+
+    def market_holidays(self) -> FeedBuilder:
+        """Upcoming market holidays (`/v1/marketstatus/upcoming`)."""
+        return self.build_feed(
+            name="crypto_market_holidays",
+            schema_spec=HOLIDAYS_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                "/v1/marketstatus/upcoming"
+            ),
+        )
+
+    holidays = market_holidays
+
+    def market_status(self) -> FeedBuilder:
+        """Current Crypto and currency market status (`/v1/marketstatus/now`)."""
+        return self.build_feed(
+            name="crypto_market_status",
+            schema_spec=MARKET_STATUS_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows("/v1/marketstatus/now"),
+        )
+
     def _indicator_feed(
         self,
         indicator: str,
@@ -314,6 +415,25 @@ class CryptoClient(BaseDomainClient):
             "Timespan": timespan,
             "SeriesType": series_type,
         }
+
+        def _fetch(
+            start: Any = None,
+            end: Any = None,
+            limit: int | None = None,
+            source: str = "auto",
+        ) -> Table:
+            q = dict(params)
+            q["timestamp.gte"] = format_date_param(start)
+            q["timestamp.lte"] = format_date_param(end)
+            return self.fetch_chunked_table(
+                f"/v1/indicators/{indicator.lower()}/{ticker}",
+                INDICATOR_SCHEMA,
+                q,
+                limit=limit,
+                inject_symbol=canon,
+                extra_fields=extra,
+            )
+
         return self.build_feed(
             name=f"crypto_{indicator.lower()}_{canon}",
             schema_spec=INDICATOR_SCHEMA,
@@ -324,6 +444,7 @@ class CryptoClient(BaseDomainClient):
                 inject_symbol=canon,
                 extra_fields=extra,
             ),
+            historical_fn=_fetch,
         )
 
     def sma(

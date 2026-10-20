@@ -6,19 +6,24 @@ from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from deephaven_massive.domains.base import BaseDomainClient, format_date_param
-from deephaven_massive.engine.arrow_bridge import (
-    SchemaSpec,
-    arrow_to_deephaven_table,
-    record_batches_to_arrow_table,
-    rows_to_record_batch,
+from deephaven_massive.domains.base import (
+    BaseDomainClient,
+    compute_bar_span_ns,
+    format_date_param,
+    normalize_filter_params,
 )
+from deephaven_massive.engine.arrow_bridge import SchemaSpec
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
     DAILY_SUMMARY_SCHEMA,
     INDEX_VALUES_SCHEMA,
     INDICATOR_SCHEMA,
+)
+from deephaven_massive.schemas.reference import (
+    HOLIDAYS_SCHEMA,
+    MARKET_STATUS_SCHEMA,
+    TICKERS_SCHEMA,
 )
 
 if TYPE_CHECKING:
@@ -33,7 +38,10 @@ class IndicesClient(BaseDomainClient):
         super().__init__(session, domain="indices")
 
     def _fetch_indices_snapshots(
-        self, symbols: Sequence[str] | None = None
+        self,
+        symbols: Sequence[str] | None = None,
+        *,
+        extra_fields: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
         if symbols and "*" not in symbols:
@@ -41,7 +49,9 @@ class IndicesClient(BaseDomainClient):
                 self.symbol_normalizer.rest_ticker(s)  # type: ignore[union-attr]
                 for s in symbols
             )
-        return self.fetch_rest_rows("/v3/snapshot/indices", params)
+        return self.fetch_rest_rows(
+            "/v3/snapshot/indices", params, extra_fields=extra_fields
+        )
 
     def _historical_indices(
         self,
@@ -55,49 +65,17 @@ class IndicesClient(BaseDomainClient):
         limit: int | None = None,
         source: str = "auto",
     ) -> Table:
-        canon_syms = (
-            None
-            if hasattr(symbols, "j_table") or hasattr(symbols, "column_names")
-            else self.canonical_symbols(symbols)
+        return self.fetch_multi_symbol_historical(
+            symbols,
+            schema_spec,
+            s3_dataset,
+            rest_path_fn,
+            empty_error="Specific index symbol(s) are required for REST historical queries.",
+            start=start,
+            end=end,
+            limit=limit,
+            source=source,
         )
-        if self.should_use_flat_files(source, canon_syms, s3_dataset):
-            assert s3_dataset is not None
-            return self.session.flat_files.load(
-                s3_dataset,
-                start=start,
-                end=end,
-                symbols=canon_syms,
-                schema_spec=schema_spec,
-                domain="indices",
-                limit=limit,
-            )
-
-        target_syms = [s for s in (canon_syms or []) if s != "*"]
-        if not target_syms:
-            raise ValueError(
-                "Specific index symbol(s) are required for REST historical queries."
-            )
-
-        if len(target_syms) == 1:
-            sym = target_syms[0]
-            path, params = rest_path_fn(sym, start, end)
-            return self.fetch_chunked_table(
-                path, schema_spec, params, limit=limit, inject_symbol=sym
-            )
-
-        all_rows: list[dict[str, Any]] = []
-        for sym in target_syms:
-            path, params = rest_path_fn(sym, start, end)
-            all_rows.extend(
-                self.fetch_rest_rows(path, params, limit=limit, inject_symbol=sym)
-            )
-        batches = (
-            [rows_to_record_batch(all_rows, schema_spec, self.symbol_normalizer)]
-            if all_rows
-            else []
-        )
-        pa_tbl = record_batches_to_arrow_table(batches, schema_spec)
-        return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
     def values(
         self,
@@ -122,6 +100,9 @@ class IndicesClient(BaseDomainClient):
             symbols=symbols,
             symbol_col=symbol_col,
             seed_fn=self._fetch_indices_snapshots,
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms, since, _rest_path
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_indices(
                 symbols,
                 INDEX_VALUES_SCHEMA,
@@ -164,6 +145,7 @@ class IndicesClient(BaseDomainClient):
                 {},
             )
 
+        span_ns = compute_bar_span_ns(multiplier, clean_span)
         return self.build_feed(
             name=f"indices_bars_{multiplier}_{clean_span}",
             schema_spec=BARS_SCHEMA,
@@ -171,7 +153,15 @@ class IndicesClient(BaseDomainClient):
             ws_channel=ws_channel,
             symbols=symbols,
             symbol_col=symbol_col,
-            seed_fn=self._fetch_indices_snapshots,
+            seed_fn=lambda syms=None: self._fetch_indices_snapshots(
+                syms, extra_fields={"_span_ns": span_ns}
+            ),
+            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+                syms,
+                since,
+                _rest_path,
+                extra_fields={"_span_ns": span_ns},
+            ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_indices(
                 symbols,
                 BARS_SCHEMA,
@@ -208,6 +198,8 @@ class IndicesClient(BaseDomainClient):
             ),
         )
 
+    previous_day_bar = previous_close
+
     def daily_open_close(
         self, symbol: str, target_date: str | date | datetime
     ) -> FeedBuilder:
@@ -221,6 +213,52 @@ class IndicesClient(BaseDomainClient):
             snapshot_fn=lambda: self.fetch_rest_rows(
                 f"/v1/open-close/{canon}/{d_str}", inject_symbol=canon
             ),
+        )
+
+    daily_ticker_summary = daily_open_close
+
+    def tickers(
+        self,
+        *,
+        active: bool = True,
+        search: str | None = None,
+        **filters: Any,
+    ) -> FeedBuilder:
+        """Index reference directory (`/v3/reference/tickers?market=indices`)."""
+        params = normalize_filter_params(
+            {
+                "market": "indices",
+                "active": str(active).lower(),
+                "search": search,
+            },
+            filters,
+        )
+        return self.build_feed(
+            name="indices_tickers",
+            schema_spec=TICKERS_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                "/v3/reference/tickers", params
+            ),
+        )
+
+    def market_holidays(self) -> FeedBuilder:
+        """Upcoming market holidays and early closes (`/v1/marketstatus/upcoming`)."""
+        return self.build_feed(
+            name="indices_market_holidays",
+            schema_spec=HOLIDAYS_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                "/v1/marketstatus/upcoming"
+            ),
+        )
+
+    holidays = market_holidays
+
+    def market_status(self) -> FeedBuilder:
+        """Current index and market group open/closed status (`/v1/marketstatus/now`)."""
+        return self.build_feed(
+            name="indices_market_status",
+            schema_spec=MARKET_STATUS_SCHEMA,
+            snapshot_fn=lambda: self.fetch_rest_rows("/v1/marketstatus/now"),
         )
 
     def _indicator_feed(
@@ -239,6 +277,25 @@ class IndicesClient(BaseDomainClient):
             "Timespan": timespan,
             "SeriesType": series_type,
         }
+
+        def _fetch(
+            start: Any = None,
+            end: Any = None,
+            limit: int | None = None,
+            source: str = "auto",
+        ) -> Table:
+            q = dict(params)
+            q["timestamp.gte"] = format_date_param(start)
+            q["timestamp.lte"] = format_date_param(end)
+            return self.fetch_chunked_table(
+                f"/v1/indicators/{indicator.lower()}/{canon}",
+                INDICATOR_SCHEMA,
+                q,
+                limit=limit,
+                inject_symbol=canon,
+                extra_fields=extra,
+            )
+
         return self.build_feed(
             name=f"indices_{indicator.lower()}_{canon}",
             schema_spec=INDICATOR_SCHEMA,
@@ -249,6 +306,7 @@ class IndicesClient(BaseDomainClient):
                 inject_symbol=canon,
                 extra_fields=extra,
             ),
+            historical_fn=_fetch,
         )
 
     def sma(
