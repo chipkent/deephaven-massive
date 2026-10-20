@@ -158,7 +158,7 @@ m = MassiveSession(
     max_batch_size=10_000,
 )
 
-# Option B: Explicit MassiveConfig dataclass via MassiveConfig.from_args()
+# Option B: Inspect or validate resolved settings via MassiveConfig.from_args()
 config = MassiveConfig.from_args(
     api_key="your-api-key",
     feed="realtime",
@@ -166,7 +166,7 @@ config = MassiveConfig.from_args(
     flat_file_ticker_threshold=50,
     auto_start_server=True,
 )
-m = MassiveSession(config=config)
+assert config.has_s3_credentials is False
 ```
 
 | `MassiveConfig` Field | Default | Description |
@@ -334,14 +334,14 @@ Massive's raw APIs use different symbol conventions across asset classes and tra
 | **Crypto** | `"BTC-USD"`, `"BTC/USD"`, `"X:BTCUSD"` | `"BTC-USD"` | `"X:BTCUSD"` | `"XT.BTC-USD"`, `"XQ.BTC-USD"` |
 | **Futures** | `"ESZ5"`, `"NQH6"` | `"ESZ5"`, `"NQH6"` | `"ESZ5"`, `"NQH6"` | `"T.ESZ5"`, `"Q.NQH6"` |
 
-### Formatting OCC Option Symbols
+### Normalizing OCC Option Symbols
 
-Use [`format_occ_contract`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/engine/symbols.py) to construct canonical OCC option contract tickers without manual zero-padding:
+Use [`SymbolNormalizer`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/engine/symbols.py) (or pass unprefixed OCC contract strings directly to `m.options.*`) to normalize OCC option contract tickers into canonical `"O:..."` format:
 
 ```python
-from deephaven_massive.engine.symbols import format_occ_contract
+from deephaven_massive.engine.symbols import SymbolNormalizer
 
-contract = format_occ_contract("AAPL", "2026-01-16", "C", 200.0)
+contract = SymbolNormalizer("options").canonical("AAPL260116C00200000")
 # -> "O:AAPL260116C00200000"
 
 quotes = m.options.quotes(contract).latest()
@@ -417,8 +417,6 @@ quotes = m.options.quotes(contract).latest()
 ### 8.2 Options (`m.options`)
 
 ```python
-from deephaven_massive.engine.symbols import format_occ_contract
-
 # Snapshot or poll the full option chain with Greeks, IV, and Break-Even Price
 nvda_chain = m.options.chain_snapshot(
     "NVDA",
@@ -427,7 +425,7 @@ nvda_chain = m.options.chain_snapshot(
 ).snapshot()
 
 # Stream live NBBO quotes and trades for a specific OCC option contract
-contract = format_occ_contract("NVDA", "2026-01-16", "C", 150.0)
+contract = "O:NVDA260116C00150000"
 opt_quotes = m.options.quotes([contract]).latest()
 opt_trades = m.options.trades([contract]).history(seed=True)
 ```

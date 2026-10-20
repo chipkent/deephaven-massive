@@ -15,7 +15,7 @@ Modules:
     economy: Schemas and normalizers for Federal Reserve and U.S. Treasury
         macroeconomic series.
     partners: Hybrid anchor + dynamic-column schemas and normalizers for
-        partner feeds (Benzinga, ETF Global, TMX).
+        partner feeds (Benzinga, ETF Global, TMX, Fable Data).
 """
 
 from __future__ import annotations
@@ -57,6 +57,8 @@ from deephaven_massive.schemas.partners import (
     ETF_GLOBAL_FUND_FLOWS_SCHEMA,
     ETF_GLOBAL_PROFILES_SCHEMA,
     ETF_GLOBAL_TAXONOMIES_SCHEMA,
+    FABLE_MERCHANT_AGGREGATES_SCHEMA,
+    FABLE_MERCHANT_HIERARCHY_SCHEMA,
     TMX_CORPORATE_EVENTS_SCHEMA,
 )
 from deephaven_massive.schemas.reference import (
@@ -108,6 +110,8 @@ __all__ = [
     "ETF_GLOBAL_PROFILES_SCHEMA",
     "ETF_GLOBAL_TAXONOMIES_SCHEMA",
     "EXCHANGES_SCHEMA",
+    "FABLE_MERCHANT_AGGREGATES_SCHEMA",
+    "FABLE_MERCHANT_HIERARCHY_SCHEMA",
     "FINANCIAL_STATEMENT_SCHEMA",
     "FMV_SCHEMA",
     "FUNDING_CONDITIONS_SCHEMA",
