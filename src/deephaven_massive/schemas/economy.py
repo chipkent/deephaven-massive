@@ -1,4 +1,11 @@
-"""Unified PascalCase PyArrow schemas for Federal Reserve & Macroeconomic datasets."""
+"""Unified PascalCase PyArrow schemas for Federal Reserve and macroeconomic datasets.
+
+This module defines the strictly typed PyArrow schemas and row normalizers for
+macroeconomic time series published by the Federal Reserve and U.S. Treasury
+via Massive.com's ``/fed/v1/*`` endpoints. All date strings are parsed into
+canonical ``pa.date32()`` columns and interest rates, yields, and index levels
+are coerced to ``pa.float64()``.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +28,23 @@ if TYPE_CHECKING:
 def normalize_funding_conditions(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/fed/v1/funding-conditions` rows (SOFR, EFFR, OBFR, TGCR, IORB, repo, CP)."""
+    """Normalize a ``/fed/v1/funding-conditions`` payload into PascalCase columns.
+
+    Extracts overnight reference rates (SOFR, EFFR, OBFR, TGCR, BGCR, IORB),
+    intraday percentiles, transaction volumes, tri-party/GCF repo metrics, and
+    commercial paper spreads into a flat dictionary aligned with
+    ``FUNDING_CONDITIONS_SCHEMA``.
+
+    Args:
+        row: Raw dictionary or SDK model mapping returned by the funding
+            conditions endpoint.
+        norm: Optional symbol normalizer (unused for macroeconomic series,
+            accepted for signature compatibility with ``RowNormalizer``).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``FUNDING_CONDITIONS_SCHEMA``.
+    """
     flat = flatten_dict(row)
     flat.update(
         {
@@ -101,7 +124,20 @@ def normalize_funding_conditions(
 def normalize_treasury_yields(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/fed/v1/treasury-yields` rows."""
+    """Normalize a ``/fed/v1/treasury-yields`` payload into PascalCase columns.
+
+    Maps constant-maturity U.S. Treasury par yield curve rates (1-month through
+    30-year tenors) and observation dates into ``TREASURY_YIELDS_SCHEMA``.
+
+    Args:
+        row: Raw dictionary or SDK model mapping for a single observation date.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            protocol compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``TREASURY_YIELDS_SCHEMA``.
+    """
     return {
         "Date": _first_present(row, "Date", "date"),
         "Yield1Month": _first_present(row, "Yield1Month", "yield_1_month"),
@@ -121,7 +157,20 @@ def normalize_treasury_yields(
 def normalize_inflation(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/fed/v1/inflation` rows."""
+    """Normalize a ``/fed/v1/inflation`` payload into PascalCase columns.
+
+    Maps Consumer Price Index (CPI, Core CPI, year-over-year CPI) and Personal
+    Consumption Expenditures (PCE, Core PCE, PCE spending) metrics into
+    ``INFLATION_SCHEMA``.
+
+    Args:
+        row: Raw dictionary or SDK model mapping for a single observation date.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            protocol compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``INFLATION_SCHEMA``.
+    """
     return {
         "Date": _first_present(row, "Date", "date"),
         "Cpi": _first_present(row, "Cpi", "cpi"),
@@ -138,7 +187,22 @@ def normalize_inflation(
 def normalize_inflation_expectations(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/fed/v1/inflation-expectations` rows."""
+    """Normalize a ``/fed/v1/inflation-expectations`` payload into PascalCase columns.
+
+    Maps market-implied breakeven inflation rates, Cleveland Fed model
+    expectations, and NY Fed consumer survey expectations across 1-year,
+    5-year, 10-year, and 5-year-5-year-forward horizons into
+    ``INFLATION_EXPECTATIONS_SCHEMA``.
+
+    Args:
+        row: Raw dictionary or SDK model mapping for a single observation date.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            protocol compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``INFLATION_EXPECTATIONS_SCHEMA``.
+    """
     return {
         "Date": _first_present(row, "Date", "date"),
         "Market5Year": _first_present(row, "Market5Year", "market_5_year"),
@@ -156,7 +220,21 @@ def normalize_inflation_expectations(
 def normalize_labor_market(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/fed/v1/labor-market` rows."""
+    """Normalize a ``/fed/v1/labor-market`` payload into PascalCase columns.
+
+    Maps unemployment rate, labor force participation, average hourly earnings,
+    job openings, and initial/continued jobless claims into
+    ``LABOR_MARKET_SCHEMA``.
+
+    Args:
+        row: Raw dictionary or SDK model mapping for a single observation date.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            protocol compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``LABOR_MARKET_SCHEMA``.
+    """
     return {
         "Date": _first_present(row, "Date", "date"),
         "UnemploymentRate": _first_present(

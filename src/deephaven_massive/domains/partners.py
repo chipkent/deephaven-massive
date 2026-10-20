@@ -1,4 +1,20 @@
-"""Partner & Alternative Data domain clients (`m.partners.benzinga`, `m.partners.etf_global`, `m.partners.tmx`, `m.partners.fable`)."""
+"""Partner & Alternative Data domain clients (`m.partners`).
+
+This module implements :class:`PartnersClient` and its four specialized vendor
+sub-clients:
+
+- :class:`BenzingaClient` (`m.partners.benzinga`): Real-time analyst ratings,
+  narrative insights, earnings actuals vs. estimates, corporate guidance,
+  consensus ratings, news, analyst/firm directories, bull/bear cases, and
+  earnings call transcripts.
+- :class:`EtfGlobalClient` (`m.partners.etf_global`): Daily ETF underlying
+  constituents, creation/redemption fund flows, quantitative risk/reward
+  analytics, fund profiles, and asset-class taxonomies.
+- :class:`TmxClient` (`m.partners.tmx`): Wall Street Horizon corporate events
+  calendar (conferences, shareholder meetings, dividends, splits).
+- :class:`FableClient` (`m.partners.fable`): European consumer transaction
+  merchant spend aggregates and merchant-to-corporate parent hierarchy.
+"""
 
 from __future__ import annotations
 
@@ -33,16 +49,31 @@ if TYPE_CHECKING:
 
 
 class _PartnerSubClient(BaseDomainClient):
-    """Base helper for partner sub-clients supporting `.snapshot()`, `.poll()`, and `.historical()`."""
+    """Base helper for Partner & Alternative Data sub-clients.
+
+    Inherits from :class:`~deephaven_massive.domains.base.BaseDomainClient`
+    with US equity ticker normalization and exposes `_partner_feed` for
+    configuring `.snapshot()`, `.poll()`, and `.historical()` REST collection
+    feeds.
+    """
 
     def __init__(self, session: MassiveSession) -> None:
+        """Initialize the partner sub-client.
+
+        Args:
+            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+        """
         super().__init__(session, domain="stocks")
 
     _partner_feed = BaseDomainClient._rest_collection_feed
 
 
 class BenzingaClient(_PartnerSubClient):
-    """Benzinga analyst ratings, earnings, guidance, consensus, news, and call transcripts (`m.partners.benzinga`)."""
+    """Domain client for Benzinga analyst, earnings, guidance, and news feeds (`m.partners.benzinga`).
+
+    Every method returns a :class:`~deephaven_massive.engine.builder.FeedBuilder`
+    supporting `.snapshot()`, `.poll()`, and `.historical()`.
+    """
 
     def ratings(
         self,
@@ -51,7 +82,19 @@ class BenzingaClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Analyst upgrades, downgrades, and price target actions (`/benzinga/v1/ratings`)."""
+        """Configure a Benzinga analyst upgrades, downgrades, and price-target actions feed (`/benzinga/v1/ratings`).
+
+        Args:
+            symbol: Optional single equity ticker filter (e.g., `"AAPL"`).
+            tickers: Optional ticker or iterable of tickers for multi-symbol
+                filtering (`ticker.any_of`).
+            **filters: Additional Massive REST query parameters (e.g.,
+                `date__gte="2025-01-01"`, `rating_action="Upgrades"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_RATINGS_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_ratings",
             "/benzinga/v1/ratings",
@@ -68,7 +111,17 @@ class BenzingaClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Analyst research notes and narrative insights (`/benzinga/v1/analyst-insights`)."""
+        """Configure a Benzinga analyst research notes and narrative insights feed (`/benzinga/v1/analyst-insights`).
+
+        Args:
+            symbol: Optional single equity ticker filter.
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_RATINGS_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_analyst_insights",
             "/benzinga/v1/analyst-insights",
@@ -85,7 +138,18 @@ class BenzingaClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Historical and upcoming EPS & revenue actuals vs estimates (`/benzinga/v1/earnings`)."""
+        """Configure a Benzinga EPS and revenue actuals vs. consensus estimates feed (`/benzinga/v1/earnings`).
+
+        Args:
+            symbol: Optional single equity ticker filter.
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters (e.g.,
+                `date__gte="2025-01-01"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_EARNINGS_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_earnings",
             "/benzinga/v1/earnings",
@@ -102,7 +166,17 @@ class BenzingaClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Corporate management EPS and revenue guidance (`/benzinga/v1/guidance`)."""
+        """Configure a Benzinga corporate management EPS and revenue guidance feed (`/benzinga/v1/guidance`).
+
+        Args:
+            symbol: Optional single equity ticker filter.
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_GUIDANCE_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_guidance",
             "/benzinga/v1/guidance",
@@ -119,7 +193,17 @@ class BenzingaClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Aggregated consensus ratings and price targets (`/benzinga/v1/consensus-ratings`)."""
+        """Configure a Benzinga aggregated consensus ratings and price targets feed (`/benzinga/v1/consensus-ratings`).
+
+        Args:
+            symbol: Optional single equity ticker filter.
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_CONSENSUS_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_consensus_ratings",
             "/benzinga/v1/consensus-ratings",
@@ -136,7 +220,18 @@ class BenzingaClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Real-time Benzinga news articles (`/benzinga/v2/news`)."""
+        """Configure a real-time Benzinga financial news articles feed (`/benzinga/v2/news`).
+
+        Args:
+            symbol: Optional single equity ticker filter.
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters (e.g.,
+                `published__gte="2025-01-01"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_NEWS_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_news",
             "/benzinga/v2/news",
@@ -151,7 +246,16 @@ class BenzingaClient(_PartnerSubClient):
     def analysts(
         self, analyst_id: str | None = None, **filters: Any
     ) -> FeedBuilder:
-        """Individual analyst directory and accuracy metrics (`/benzinga/v1/analysts`)."""
+        """Configure a Benzinga wall-street analyst directory and performance metrics feed (`/benzinga/v1/analysts`).
+
+        Args:
+            analyst_id: Optional Benzinga analyst identifier filter.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_ANALYSTS_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_analysts",
             "/benzinga/v1/analysts",
@@ -163,7 +267,16 @@ class BenzingaClient(_PartnerSubClient):
     def firms(
         self, firm_id: str | None = None, **filters: Any
     ) -> FeedBuilder:
-        """Research firm directory (`/benzinga/v1/firms`)."""
+        """Configure a Benzinga research firm directory feed (`/benzinga/v1/firms`).
+
+        Args:
+            firm_id: Optional Benzinga research firm identifier filter.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_FIRMS_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_firms",
             "/benzinga/v1/firms",
@@ -179,7 +292,17 @@ class BenzingaClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Curated bull case and bear case summaries (`/benzinga/v1/bulls-bears-say`)."""
+        """Configure a Benzinga curated bull-case and bear-case investment thesis feed (`/benzinga/v1/bulls-bears-say`).
+
+        Args:
+            symbol: Optional single equity ticker filter.
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_BULLS_BEARS_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_bulls_bears",
             "/benzinga/v1/bulls-bears-say",
@@ -198,7 +321,17 @@ class BenzingaClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Full earnings call transcripts (`/benzinga/v1/transcripts`)."""
+        """Configure a Benzinga full earnings-call transcripts feed (`/benzinga/v1/transcripts`).
+
+        Args:
+            symbol: Optional single equity ticker filter.
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `BENZINGA_TRANSCRIPTS_SCHEMA`.
+        """
         return self._partner_feed(
             "benzinga_transcripts",
             "/benzinga/v1/transcripts",
@@ -210,7 +343,7 @@ class BenzingaClient(_PartnerSubClient):
 
 
 class EtfGlobalClient(_PartnerSubClient):
-    """ETF Global constituents, fund flows, analytics, profiles, and taxonomies (`m.partners.etf_global`)."""
+    """Domain client for ETF Global holdings, fund flows, analytics, profiles, and taxonomies (`m.partners.etf_global`)."""
 
     def constituents(
         self,
@@ -219,7 +352,18 @@ class EtfGlobalClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Daily ETF underlying holdings and weights (`/etf-global/v1/constituents`)."""
+        """Configure an ETF Global daily underlying constituents and weights feed (`/etf-global/v1/constituents`).
+
+        Args:
+            symbol: Optional composite ETF ticker filter (e.g., `"SPY"`).
+            tickers: Optional ETF ticker or iterable of ETF tickers.
+            **filters: Additional Massive REST query parameters (e.g.,
+                `effective_date="2025-01-15"`, `constituent_ticker="AAPL"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `ETF_GLOBAL_CONSTITUENTS_SCHEMA`.
+        """
         return self._partner_feed(
             "etf_global_constituents",
             "/etf-global/v1/constituents",
@@ -238,7 +382,17 @@ class EtfGlobalClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Daily ETF creation/redemption net dollar flows and NAV (`/etf-global/v1/fund-flows`)."""
+        """Configure an ETF Global daily creation/redemption net dollar flows and NAV feed (`/etf-global/v1/fund-flows`).
+
+        Args:
+            symbol: Optional composite ETF ticker filter (e.g., `"SPY"`).
+            tickers: Optional ETF ticker or iterable of ETF tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `ETF_GLOBAL_FUND_FLOWS_SCHEMA`.
+        """
         return self._partner_feed(
             "etf_global_fund_flows",
             "/etf-global/v1/fund-flows",
@@ -257,7 +411,17 @@ class EtfGlobalClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """ETF Global quantitative risk, reward, and behavioral scores (`/etf-global/v1/analytics`)."""
+        """Configure an ETF Global quantitative risk, reward, and behavioral scores feed (`/etf-global/v1/analytics`).
+
+        Args:
+            symbol: Optional composite ETF ticker filter (e.g., `"SPY"`).
+            tickers: Optional ETF ticker or iterable of ETF tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `ETF_GLOBAL_ANALYTICS_SCHEMA`.
+        """
         return self._partner_feed(
             "etf_global_analytics",
             "/etf-global/v1/analytics",
@@ -276,7 +440,17 @@ class EtfGlobalClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """ETF expense ratios, AUM, issuer, and benchmark metadata (`/etf-global/v1/profiles`)."""
+        """Configure an ETF Global expense ratios, AUM, issuer, and benchmark metadata feed (`/etf-global/v1/profiles`).
+
+        Args:
+            symbol: Optional composite ETF ticker filter (e.g., `"SPY"`).
+            tickers: Optional ETF ticker or iterable of ETF tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `ETF_GLOBAL_PROFILES_SCHEMA`.
+        """
         return self._partner_feed(
             "etf_global_profiles",
             "/etf-global/v1/profiles",
@@ -295,7 +469,17 @@ class EtfGlobalClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Asset class, category, region, and focus classifications (`/etf-global/v1/taxonomies`)."""
+        """Configure an ETF Global asset-class, category, region, and focus classifications feed (`/etf-global/v1/taxonomies`).
+
+        Args:
+            symbol: Optional composite ETF ticker filter (e.g., `"SPY"`).
+            tickers: Optional ETF ticker or iterable of ETF tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `ETF_GLOBAL_TAXONOMIES_SCHEMA`.
+        """
         return self._partner_feed(
             "etf_global_taxonomies",
             "/etf-global/v1/taxonomies",
@@ -309,7 +493,7 @@ class EtfGlobalClient(_PartnerSubClient):
 
 
 class TmxClient(_PartnerSubClient):
-    """TMX Wall Street Horizon corporate events calendar (`m.partners.tmx`)."""
+    """Domain client for TMX Wall Street Horizon corporate events calendar (`m.partners.tmx`)."""
 
     def corporate_events(
         self,
@@ -318,7 +502,18 @@ class TmxClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Conferences, shareholder meetings, dividend dates, and splits (`/tmx/v1/corporate-events`)."""
+        """Configure a TMX corporate events calendar feed (`/tmx/v1/corporate-events`).
+
+        Args:
+            symbol: Optional equity ticker filter (e.g., `"AAPL"`).
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters (e.g.,
+                `date__gte="2025-01-01"`, `type="earnings_conference_call"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `TMX_CORPORATE_EVENTS_SCHEMA`.
+        """
         return self._partner_feed(
             "tmx_corporate_events",
             "/tmx/v1/corporate-events",
@@ -331,7 +526,7 @@ class TmxClient(_PartnerSubClient):
 
 
 class FableClient(_PartnerSubClient):
-    """Fable Data European consumer transaction aggregates and merchant hierarchy (`m.partners.fable`)."""
+    """Domain client for Fable Data European consumer transaction feeds (`m.partners.fable`)."""
 
     def eu_merchant_aggregates(
         self,
@@ -340,7 +535,19 @@ class FableClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """European consumer transaction merchant spend aggregates (`/fable/v1/eu/merchant-aggregates`)."""
+        """Configure a Fable Data European consumer transaction merchant spend aggregates feed (`/fable/v1/eu/merchant-aggregates`).
+
+        Args:
+            symbol: Optional listed parent equity ticker filter.
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters (e.g.,
+                `transaction_date__gte="2025-01-01"`, `country="GB"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with
+            `FABLE_MERCHANT_AGGREGATES_SCHEMA`.
+        """
         return self._partner_feed(
             "fable_eu_merchant_aggregates",
             "/fable/v1/eu/merchant-aggregates",
@@ -358,7 +565,18 @@ class FableClient(_PartnerSubClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """European merchant-to-corporate parent hierarchy (`/fable/v1/eu/merchant-hierarchy`)."""
+        """Configure a Fable Data European merchant-to-corporate parent hierarchy feed (`/fable/v1/eu/merchant-hierarchy`).
+
+        Args:
+            symbol: Optional listed parent equity ticker filter.
+            tickers: Optional ticker or iterable of tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with
+            `FABLE_MERCHANT_HIERARCHY_SCHEMA`.
+        """
         return self._partner_feed(
             "fable_eu_merchant_hierarchy",
             "/fable/v1/eu/merchant-hierarchy",
@@ -371,9 +589,27 @@ class FableClient(_PartnerSubClient):
 
 
 class PartnersClient:
-    """Container for Partner & Alternative Data clients (`benzinga`, `etf_global`, `tmx`, `fable`)."""
+    """Namespace container for Partner & Alternative Data clients (`m.partners`).
+
+    Exposes both structured vendor sub-clients (`m.partners.benzinga`,
+    `m.partners.etf_global`, `m.partners.tmx`, `m.partners.fable`) and flat
+    convenience methods (`m.partners.benzinga_ratings()`,
+    `m.partners.etf_fund_flows()`, `m.partners.tmx_corporate_events()`, etc.).
+
+    Attributes:
+        session: Parent :class:`~deephaven_massive.session.MassiveSession`.
+        benzinga: :class:`BenzingaClient` sub-client.
+        etf_global: :class:`EtfGlobalClient` sub-client.
+        tmx: :class:`TmxClient` sub-client.
+        fable: :class:`FableClient` sub-client.
+    """
 
     def __init__(self, session: MassiveSession) -> None:
+        """Initialize the Partner & Alternative Data container client.
+
+        Args:
+            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+        """
         self.session = session
         self.benzinga = BenzingaClient(session)
         self.etf_global = EtfGlobalClient(session)

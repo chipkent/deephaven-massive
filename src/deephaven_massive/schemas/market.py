@@ -1,4 +1,22 @@
-"""Unified PascalCase PyArrow schemas and normalizers for market data feeds."""
+"""Unified PascalCase PyArrow schemas and normalizers for market data feeds.
+
+This module defines the canonical PyArrow schemas (`SchemaSpec`) and row
+normalizers for high-frequency and historical market data across all asset
+classes—including trades, NBBO quotes, OHLCV aggregate bars, Limit Up–Limit Down
+(LULD) bands, net order imbalances (NOI), Fair Market Value (FMV), index values,
+cross-asset snapshots, daily summaries, currency conversions, and technical
+indicators.
+
+Every normalizer reconciles structural differences across Massive.com's three
+transport surfaces:
+* **WebSocket events**: Short single-letter keys (e.g., ``sym``, ``p``, ``s``,
+  ``t``, ``bp``, ``ap``).
+* **REST API responses**: Descriptive ``snake_case`` or ``camelCase`` keys and
+  deeply nested snapshot objects (e.g., ``last_trade``, ``last_quote``,
+  ``greeks``).
+* **S3 Flat Files**: Tabular CSV headers (e.g., ``sip_timestamp``,
+  ``window_start``, ``bid_price``).
+"""
 
 from __future__ import annotations
 
@@ -20,7 +38,16 @@ if TYPE_CHECKING:
 
 
 def _first_present(row: Mapping[str, Any], *keys: str) -> Any:
-    """Return the first non-None value found in `row` across `keys`."""
+    """Return the first non-``None`` value found in ``row`` across ``keys``.
+
+    Args:
+        row: Source dictionary or mapping to inspect.
+        *keys: Candidate dictionary keys in descending priority order.
+
+    Returns:
+        Any: The value associated with the first matching key whose value is not
+        ``None``, or ``None`` if no key matches.
+    """
     for k in keys:
         if k in row and row[k] is not None:
             return row[k]
@@ -32,6 +59,18 @@ def _norm_symbol(
     norm: SymbolNormalizer | None,
     *keys: str,
 ) -> str | None:
+    """Extract and canonicalize a ticker or instrument symbol from ``row``.
+
+    Args:
+        row: Source dictionary or mapping to inspect.
+        norm: Optional ``SymbolNormalizer`` for stripping wire prefixes and
+            formatting canonical symbols.
+        *keys: Candidate symbol keys in priority order.
+
+    Returns:
+        str | None: Canonical uppercase symbol string, or ``None`` if absent or
+        blank.
+    """
     raw = _first_present(row, *keys)
     if raw is None:
         return None
@@ -44,7 +83,20 @@ def _norm_symbol(
 def normalize_trade(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize a WebSocket, REST, Snapshot, or S3 Flat File trade row."""
+    """Normalize a WebSocket, REST, Snapshot, or S3 Flat File trade row.
+
+    Extracts trade execution price, size, exchange ID, condition codes, sequence
+    number, tape, and nanosecond SIP/participant/TRF timestamps—automatically
+    unwrapping nested ``last_trade`` or ``lastTrade`` sub-objects when invoked
+    on a snapshot payload.
+
+    Args:
+        row: Raw trade or snapshot dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``TRADES_SCHEMA``.
+    """
     # Support snapshot rows containing nested `last_trade` or `lastTrade`
     nested_lt = row.get("last_trade") or row.get("lastTrade")
     src = nested_lt if isinstance(nested_lt, Mapping) else row
@@ -75,7 +127,20 @@ def normalize_trade(
 def normalize_quote(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize a WebSocket, REST, Snapshot, or S3 Flat File quote row."""
+    """Normalize a WebSocket, REST, Snapshot, or S3 Flat File quote row.
+
+    Extracts top-of-book bid/ask prices, sizes, exchange IDs, condition and
+    indicator arrays, sequence numbers, and timestamps across equities, options,
+    futures, forex (where ``p`` carries the currency pair on WebSocket frames),
+    and crypto.
+
+    Args:
+        row: Raw quote or snapshot dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``QUOTES_SCHEMA``.
+    """
     nested_lq = row.get("last_quote") or row.get("lastQuote") or row.get("last")
     src = nested_lq if isinstance(nested_lq, Mapping) else row
     # Note: In Forex WS (`C.*`), `p` is the currency pair string (e.g. "EUR/USD")
@@ -133,7 +198,18 @@ TIMESPAN_NS: dict[str, int] = {
 
 
 def compute_bar_span_ns(multiplier: int = 1, timespan: str = "minute") -> int:
-    """Compute the bar duration in nanoseconds from `multiplier` and `timespan`."""
+    """Compute the duration of an aggregate bar in nanoseconds.
+
+    Args:
+        multiplier: Number of base ``timespan`` units per bar (e.g., ``5`` for
+            5-minute bars).
+        timespan: Base interval unit name (e.g., ``"second"``, ``"minute"``,
+            ``"hour"``, ``"day"``, ``"week"``, ``"month"``, ``"quarter"``,
+            ``"year"``). Unknown values default to 1 minute.
+
+    Returns:
+        int: Total bar duration in nanoseconds.
+    """
     unit_ns = TIMESPAN_NS.get(timespan.strip().lower(), 60_000_000_000)
     return int(multiplier) * unit_ns
 
@@ -141,7 +217,20 @@ def compute_bar_span_ns(multiplier: int = 1, timespan: str = "minute") -> int:
 def normalize_bar(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize a WebSocket (`A`, `AM`, `CA`, `XA`), REST aggregate, Snapshot, or S3 Flat File bar row."""
+    """Normalize a WebSocket, REST aggregate, Snapshot, or S3 Flat File OHLCV bar row.
+
+    Unifies bar start and end timestamps (`Timestamp` and `EndTimestamp`),
+    synthesizing `EndTimestamp` from `_span_ns` or `(multiplier, timespan)` when
+    REST or S3 payloads provide only the window start time. Also unwraps nested
+    ``min``, ``day``, or ``session`` bar sub-objects from snapshot payloads.
+
+    Args:
+        row: Raw aggregate bar or snapshot dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``BARS_SCHEMA``.
+    """
     nested_bar = row.get("min") or row.get("day") or row.get("session")
     src = (
         nested_bar
@@ -188,7 +277,15 @@ def normalize_bar(
 def normalize_luld(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize a Limit Up - Limit Down (`LULD.*`) event."""
+    """Normalize a Limit Up–Limit Down (``LULD.*``) price band event.
+
+    Args:
+        row: Raw LULD WebSocket event dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``LULD_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "T", "sym", "ticker"),
         "Timestamp": _first_present(row, "Timestamp", "t", "timestamp"),
@@ -203,7 +300,15 @@ def normalize_luld(
 def normalize_imbalance(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize a Net Order Imbalance (`NOI.*`) event."""
+    """Normalize a Net Order Imbalance (``NOI.*``) auction event.
+
+    Args:
+        row: Raw NOI WebSocket event dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``IMBALANCES_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "T", "sym", "ticker"),
         "Timestamp": _first_present(row, "Timestamp", "t", "timestamp"),
@@ -227,7 +332,15 @@ def normalize_imbalance(
 def normalize_fmv(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize a Fair Market Value (`FMV.*`) event."""
+    """Normalize a Fair Market Value (``FMV.*``) real-time pricing event.
+
+    Args:
+        row: Raw FMV WebSocket event dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``FMV_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "sym", "ticker", "T"),
         "Timestamp": _first_present(row, "Timestamp", "t", "timestamp"),
@@ -238,7 +351,16 @@ def normalize_fmv(
 def normalize_index_value(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize an Index Value (`V.I:*` or S3 `values_v1`) row."""
+    """Normalize an Index Value (``V.I:*`` or S3 ``values_v1``) tick row.
+
+    Args:
+        row: Raw index value event or CSV row dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``INDEX_VALUES_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "T", "sym", "ticker"),
         "Timestamp": _first_present(row, "Timestamp", "t", "timestamp"),
@@ -249,7 +371,20 @@ def normalize_index_value(
 def normalize_stock_snapshot(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Flatten a nested Stock / Forex / Crypto / Universal Snapshot into PascalCase columns."""
+    """Flatten a nested Stock, Forex, Crypto, or Universal Snapshot into PascalCase columns.
+
+    Unpacks nested ``day``, ``prevDay``, ``lastTrade``, ``lastQuote``, ``min``,
+    and ``session`` dictionaries from REST snapshot payloads into a single flat
+    row suitable for tabular analysis in Deephaven.
+
+    Args:
+        row: Raw nested snapshot dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``STOCK_SNAPSHOT_SCHEMA``.
+    """
     day = row.get("day") if isinstance(row.get("day"), Mapping) else {}
     prev = row.get("prevDay") or row.get("prev_day")
     prev_map = prev if isinstance(prev, Mapping) else {}
@@ -301,7 +436,20 @@ def normalize_stock_snapshot(
 def normalize_option_chain_snapshot(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Flatten an Option Chain / Option Contract Snapshot (including Greeks, IV, OI) into PascalCase columns."""
+    """Flatten an Option Chain or Option Contract Snapshot into PascalCase columns.
+
+    Unpacks nested contract ``details``, option ``greeks`` (Delta, Gamma, Theta,
+    Vega), ``underlying_asset`` metrics, ``last_quote`` NBBO/midpoint,
+    ``last_trade``, and ``day`` OHLCV into ``OPTION_CHAIN_SCHEMA``.
+
+    Args:
+        row: Raw option contract snapshot dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``OPTION_CHAIN_SCHEMA``.
+    """
     details = row.get("details") if isinstance(row.get("details"), Mapping) else {}
     greeks = row.get("greeks") if isinstance(row.get("greeks"), Mapping) else {}
     underlying = (
@@ -357,7 +505,20 @@ def normalize_option_chain_snapshot(
 def normalize_futures_snapshot(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Flatten a Futures Snapshot into PascalCase columns."""
+    """Flatten a Futures Snapshot into PascalCase columns.
+
+    Unpacks nested ``details``, ``last_trade``, ``last_quote``, ``session``, and
+    ``last_minute`` sub-objects into a flat dictionary aligned with
+    ``FUTURES_SNAPSHOT_SCHEMA``.
+
+    Args:
+        row: Raw futures contract snapshot dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``FUTURES_SNAPSHOT_SCHEMA``.
+    """
     details = row.get("details") if isinstance(row.get("details"), Mapping) else {}
     lt = row.get("last_trade") if isinstance(row.get("last_trade"), Mapping) else {}
     lq = row.get("last_quote") if isinstance(row.get("last_quote"), Mapping) else {}
@@ -391,7 +552,16 @@ def normalize_futures_snapshot(
 def normalize_daily_summary(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize grouped daily or single-ticker open-close summary."""
+    """Normalize a grouped daily or single-ticker open/close summary row.
+
+    Args:
+        row: Raw grouped daily bar or daily open/close summary dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``DAILY_SUMMARY_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "T", "symbol", "ticker"),
         "Date": _first_present(row, "Date", "from", "date", "t"),
@@ -411,7 +581,16 @@ def normalize_daily_summary(
 def normalize_currency_conversion(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v1/conversion/{from}/{to}` response."""
+    """Normalize a ``/v1/conversion/{from}/{to}`` real-time FX conversion response.
+
+    Args:
+        row: Raw currency conversion response dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``CURRENCY_CONVERSION_SCHEMA``.
+    """
     last_q = row.get("last") if isinstance(row.get("last"), Mapping) else {}
     from_curr = _first_present(row, "FromCurrency", "from")
     to_curr = _first_present(row, "ToCurrency", "to")
@@ -434,7 +613,15 @@ def normalize_currency_conversion(
 def normalize_indicator(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize SMA, EMA, MACD, or RSI indicator value rows."""
+    """Normalize an SMA, EMA, MACD, or RSI technical indicator value row.
+
+    Args:
+        row: Raw technical indicator value dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``INDICATOR_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker", "sym"),
         "Timestamp": _first_present(row, "Timestamp", "timestamp", "t"),

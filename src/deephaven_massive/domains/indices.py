@@ -1,4 +1,11 @@
-"""Market Indices domain client (`m.indices`) covering values, bars, snapshots, and technical indicators."""
+"""Market Indices domain client (`m.indices`).
+
+This module implements :class:`IndicesClient`, which provides real-time and
+delayed WebSocket streams, REST snapshots, historical backfills (via S3 Flat
+Files or REST), reference directories, and technical indicators (`SMA`, `EMA`,
+`MACD`, `RSI`) for US and global market indices (`I:SPX`, `I:NDX`, `I:VIX`,
+`I:DJI`, etc.).
+"""
 
 from __future__ import annotations
 
@@ -30,9 +37,26 @@ if TYPE_CHECKING:
 
 
 class IndicesClient(BaseDomainClient):
-    """Domain client for Market Indices (`I:SPX`, `I:NDX`, `I:VIX`, etc.)."""
+    """Domain client for Market Indices (`I:SPX`, `I:NDX`, `I:VIX`, etc.).
+
+    User-supplied index symbols may be passed with or without the `"I:"`
+    prefix (for example, `"SPX"` or `"I:SPX"`). ``IndicesClient`` normalizes
+    every symbol to its canonical `"I:<TICKER>"` form across all tables and
+    outbound subscriptions.
+
+    Example:
+        Stream live S&P 500 and VIX index values seeded with the current
+        snapshot::
+
+            idx = m.indices.values(["SPX", "VIX"]).with_seed().stream()
+    """
 
     def __init__(self, session: MassiveSession) -> None:
+        """Initialize the Market Indices domain client.
+
+        Args:
+            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+        """
         super().__init__(session, domain="indices")
 
     def _fetch_indices_snapshots(
@@ -58,7 +82,24 @@ class IndicesClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, or fetch historical Index values (`V.I:*`, `/v3/snapshot/indices`, `us_indices/values_v1`)."""
+        """Configure a Market Index tick values feed (`V.I:*`, `/v3/snapshot/indices`).
+
+        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        `.poll()`, and `.historical()` (backed by S3 `us_indices/values_v1` or
+        REST `/v3/snapshot/indices`).
+
+        Args:
+            symbols: Index symbol (`"SPX"` or `"I:SPX"`), iterable of symbols,
+                `"*"` for all indices, or a reactive Deephaven `Table`
+                watchlist.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `symbols` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `INDEX_VALUES_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url("indices", feed_override=feed)
 
         def _rest_path(
@@ -98,7 +139,29 @@ class IndicesClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, or fetch historical Index bars (`A.I:*` / `AM.I:*`, `/v2/aggs/...`)."""
+        """Configure a Market Index OHLC bars feed (`A.I:*` / `AM.I:*`, `/v2/aggs/...`).
+
+        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
+        `.poll()`, and `.historical()` (routed to S3 `us_indices/minute_aggs_v1`
+        or `us_indices/day_aggs_v1` when `multiplier == 1`, or REST
+        `/v2/aggs/ticker/{indicesTicker}/range/...`).
+
+        Args:
+            symbols: Index symbol (`"SPX"` or `"I:SPX"`), iterable of symbols,
+                `"*"` for all indices, or a reactive Deephaven `Table`
+                watchlist.
+            multiplier: Number of `timespan` units per bar. Defaults to `1`.
+            timespan: Bar duration unit (`"second"`, `"minute"`, `"hour"`,
+                `"day"`, `"week"`, `"month"`, `"quarter"`, `"year"`). Defaults
+                to `"minute"`.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `symbols` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `BARS_SCHEMA`.
+        """
         clean_span = timespan.strip().lower()
         ws_channel = "A" if clean_span == "second" else "AM"
         ws_url = self.session.config.resolve_ws_url("indices", feed_override=feed)
@@ -151,7 +214,16 @@ class IndicesClient(BaseDomainClient):
     def snapshots(
         self, symbols: str | Iterable[str] | None = None
     ) -> FeedBuilder:
-        """Snapshot or poll Index values and daily sessions (`/v3/snapshot/indices`)."""
+        """Configure a Market Index snapshots feed (`/v3/snapshot/indices`).
+
+        Args:
+            symbols: Optional index symbol or iterable of index symbols to
+                filter. When `None`, returns snapshots for all indices.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `INDEX_VALUES_SCHEMA`.
+        """
         canon = self.canonical_symbols(symbols) if symbols is not None else None
         return self.build_feed(
             name="indices_snapshots",
@@ -161,7 +233,15 @@ class IndicesClient(BaseDomainClient):
         )
 
     def previous_close(self, symbol: str) -> FeedBuilder:
-        """Previous day's OHLC bar for an Index (`/v2/aggs/ticker/{indicesTicker}/prev`)."""
+        """Configure a feed for an Index's previous trading day OHLC bar (`/v2/aggs/ticker/{indicesTicker}/prev`).
+
+        Args:
+            symbol: Index symbol (e.g., `"SPX"` or `"I:SPX"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `BARS_SCHEMA`.
+        """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
         return self.build_feed(
             name=f"indices_prev_close_{canon}",
@@ -177,7 +257,16 @@ class IndicesClient(BaseDomainClient):
     def daily_open_close(
         self, symbol: str, target_date: str | date | datetime
     ) -> FeedBuilder:
-        """Daily open/close for an Index (`/v1/open-close/{indicesTicker}/{date}`)."""
+        """Configure a feed for an Index's daily open/close summary on `target_date` (`/v1/open-close/{indicesTicker}/{date}`).
+
+        Args:
+            symbol: Index symbol (e.g., `"SPX"` or `"I:SPX"`).
+            target_date: Calendar date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `DAILY_SUMMARY_SCHEMA`.
+        """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
         d_str = format_date_param(target_date)
         return self.build_feed(
@@ -198,7 +287,17 @@ class IndicesClient(BaseDomainClient):
         search: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Index reference directory (`/v3/reference/tickers?market=indices`)."""
+        """Configure a Market Index reference directory feed (`/v3/reference/tickers?market=indices`).
+
+        Args:
+            active: If `True` (default), return only active index tickers.
+            search: Optional keyword search query across index names/tickers.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `TICKERS_SCHEMA`.
+        """
         params = normalize_filter_params(
             {
                 "market": "indices",
@@ -216,7 +315,12 @@ class IndicesClient(BaseDomainClient):
         )
 
     def market_holidays(self) -> FeedBuilder:
-        """Upcoming market holidays and early closes (`/v1/marketstatus/upcoming`)."""
+        """Configure an upcoming market holidays and early-closes feed (`/v1/marketstatus/upcoming`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `HOLIDAYS_SCHEMA`.
+        """
         return self.build_feed(
             name="indices_market_holidays",
             schema_spec=HOLIDAYS_SCHEMA,
@@ -228,7 +332,12 @@ class IndicesClient(BaseDomainClient):
     holidays = market_holidays
 
     def market_status(self) -> FeedBuilder:
-        """Current index and market group open/closed status (`/v1/marketstatus/now`)."""
+        """Configure a current index and market-group open/closed status feed (`/v1/marketstatus/now`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `MARKET_STATUS_SCHEMA`.
+        """
         return self.build_feed(
             name="indices_market_status",
             schema_spec=MARKET_STATUS_SCHEMA,
@@ -243,7 +352,20 @@ class IndicesClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """SMA indicator for an Index."""
+        """Configure a Simple Moving Average (`SMA`) indicator feed for an Index (`/v1/indicators/sma/{indicesTicker}`).
+
+        Args:
+            symbol: Index symbol (e.g., `"SPX"` or `"I:SPX"`).
+            window: Rolling window period length. Defaults to `50`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "SMA",
             symbol,
@@ -261,7 +383,20 @@ class IndicesClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """EMA indicator for an Index."""
+        """Configure an Exponential Moving Average (`EMA`) indicator feed for an Index (`/v1/indicators/ema/{indicesTicker}`).
+
+        Args:
+            symbol: Index symbol (e.g., `"SPX"` or `"I:SPX"`).
+            window: Rolling window period length. Defaults to `50`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "EMA",
             symbol,
@@ -281,7 +416,22 @@ class IndicesClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """MACD indicator for an Index."""
+        """Configure a Moving Average Convergence/Divergence (`MACD`) indicator feed for an Index (`/v1/indicators/macd/{indicesTicker}`).
+
+        Args:
+            symbol: Index symbol (e.g., `"SPX"` or `"I:SPX"`).
+            short_window: Fast EMA period length. Defaults to `12`.
+            long_window: Slow EMA period length. Defaults to `26`.
+            signal_window: Signal line EMA period length. Defaults to `9`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "MACD",
             symbol,
@@ -305,7 +455,20 @@ class IndicesClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """RSI indicator for an Index."""
+        """Configure a Relative Strength Index (`RSI`) indicator feed for an Index (`/v1/indicators/rsi/{indicesTicker}`).
+
+        Args:
+            symbol: Index symbol (e.g., `"SPX"` or `"I:SPX"`).
+            window: Rolling lookback window length. Defaults to `14`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "RSI",
             symbol,

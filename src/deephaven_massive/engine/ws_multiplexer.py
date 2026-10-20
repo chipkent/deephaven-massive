@@ -1,4 +1,10 @@
-"""Multiplexed raw-JSON WebSocket connection pool with reference-counted subscriptions."""
+"""Multiplexed raw-JSON WebSocket connection pool with reference-counted subscriptions.
+
+`WebSocketMultiplexer` shares a single underlying WebSocket connection per `ws_url`
+across any number of active `FeedBuilder` instances, reference-counting individual
+subscription topics (`T.AAPL`, `Q.MSFT`, etc.) and dispatching decoded JSON event
+batches directly to registered `MicroBatchPublisher` instances.
+"""
 
 from __future__ import annotations
 
@@ -18,16 +24,24 @@ MAX_OPTION_CONTRACTS = 1000
 
 
 def _default_ws_connector(ws_url: str) -> Any:
-    """Open a live WebSocket connection using the `websockets` package."""
+    """Open an async WebSocket connection context manager using the `websockets` package.
+
+    Args:
+        ws_url: Target `wss://` endpoint URL.
+
+    Returns:
+        An async context manager yielding a connected WebSocket client protocol.
+    """
     import websockets
 
     return websockets.connect(ws_url)
 
 
 class _EndpointState:
-    """Internal per-URL state tracking ref-counted topics and channel publishers."""
+    """Internal per-URL state tracking reference-counted topics and channel publishers."""
 
     def __init__(self, ws_url: str) -> None:
+        """Initialize endpoint state for `ws_url`."""
         self.ws_url = ws_url
         self.topic_ref_counts: dict[str, int] = defaultdict(int)
         self.channel_publishers: dict[str, list[MicroBatchPublisher]] = defaultdict(list)
@@ -41,7 +55,17 @@ class _EndpointState:
 
 
 class WebSocketMultiplexer:
-    """Manages shared WebSocket connections per `ws_url` and dispatches raw JSON batches to publishers."""
+    """Manages shared WebSocket connections per `ws_url` and dispatches raw JSON batches to publishers.
+
+    Key responsibilities:
+    - Maintains a single socket connection per `ws_url` (`wss://socket.massive.com/stocks`,
+      `wss://socket.massive.com/options`, etc.).
+    - Tracks reference counts per subscription topic so overlapping feeds only emit
+      `"subscribe"` on `0 -> 1` transitions and `"unsubscribe"` on `1 -> 0` transitions.
+    - Enforces the 1,000-contract subscription cap on OPRA options WebSocket endpoints.
+    - Automatically re-authenticates and resubscribes all active topics after transient
+      network disconnects.
+    """
 
     def __init__(
         self,
@@ -51,6 +75,15 @@ class WebSocketMultiplexer:
         ws_connector: Callable[[str], Any] | None = None,
         reconnect_delay_s: float = 0.5,
     ) -> None:
+        """Initialize a `WebSocketMultiplexer`.
+
+        Args:
+            config: Session `MassiveConfig` providing API credentials.
+            send_hook: Optional callback `(ws_url, payload)` invoked on outbound control
+                frames for deterministic testing.
+            ws_connector: Optional custom async WebSocket connector callable.
+            reconnect_delay_s: Delay in seconds before reconnecting after a socket error.
+        """
         self.config = config
         self._send_hook = send_hook
         self._ws_connector = ws_connector
@@ -87,11 +120,17 @@ class WebSocketMultiplexer:
     def call_soon_threadsafe(
         self, callback: Callable[..., Any], *args: Any
     ) -> None:
-        """Schedule a non-blocking callback on the multiplexer's background event loop thread."""
+        """Schedule a non-blocking callback on the multiplexer's background event loop thread.
+
+        Args:
+            callback: Callable to invoke on the event loop thread.
+            *args: Positional arguments forwarded to `callback`.
+        """
         loop = self._ensure_loop()
         loop.call_soon_threadsafe(callback, *args)
 
     def _get_endpoint(self, ws_url: str) -> _EndpointState:
+        """Return or create the `_EndpointState` for `ws_url`."""
         state = self._endpoints.get(ws_url)
         if state is None:
             state = _EndpointState(ws_url)
@@ -194,7 +233,13 @@ class WebSocketMultiplexer:
         channel: str,
         publisher: MicroBatchPublisher,
     ) -> None:
-        """Register a :class:`MicroBatchPublisher` to receive events for `(ws_url, channel)`."""
+        """Register a `MicroBatchPublisher` to receive events for `(ws_url, channel)`.
+
+        Args:
+            ws_url: Target WebSocket endpoint URL.
+            channel: WebSocket event type (`"T"`, `"Q"`, `"AM"`, etc.).
+            publisher: `MicroBatchPublisher` to register.
+        """
         with self._lock:
             state = self._get_endpoint(ws_url)
             pubs = state.channel_publishers[channel]
@@ -207,7 +252,13 @@ class WebSocketMultiplexer:
         channel: str,
         publisher: MicroBatchPublisher,
     ) -> None:
-        """Remove a :class:`MicroBatchPublisher` from `(ws_url, channel)` and release its topic references."""
+        """Remove a `MicroBatchPublisher` from `(ws_url, channel)` and release its topic references.
+
+        Args:
+            ws_url: Target WebSocket endpoint URL.
+            channel: WebSocket event type.
+            publisher: `MicroBatchPublisher` to unregister.
+        """
         with self._lock:
             state = self._endpoints.get(ws_url)
             if state is None:
@@ -226,7 +277,21 @@ class WebSocketMultiplexer:
         topics: Iterable[str],
         publisher: MicroBatchPublisher | None = None,
     ) -> list[str]:
-        """Increment reference counts for `topics` and send a subscribe frame for newly active topics."""
+        """Increment reference counts for `topics` and emit a `"subscribe"` frame for newly active topics.
+
+        Args:
+            ws_url: Target WebSocket endpoint URL.
+            channel: WebSocket event channel (`"T"`, `"Q"`, `"AM"`, etc.).
+            topics: Iterable of formatted topic strings (e.g., `["T.AAPL", "T.MSFT"]`).
+            publisher: Optional `MicroBatchPublisher` acquiring the topic references.
+
+        Returns:
+            List of topics that transitioned from reference count `0 -> 1`.
+
+        Raises:
+            ValueError: If subscribing on an `/options` endpoint would exceed the
+                1,000-contract limit (`MAX_OPTION_CONTRACTS`).
+        """
         topic_list = [t.strip() for t in topics if t and t.strip()]
         if not topic_list:
             return []
@@ -285,7 +350,17 @@ class WebSocketMultiplexer:
         topics: Iterable[str],
         publisher: MicroBatchPublisher | None = None,
     ) -> list[str]:
-        """Decrement reference counts for `topics` and send an unsubscribe frame for topics reaching zero."""
+        """Decrement reference counts for `topics` and emit an `"unsubscribe"` frame for topics reaching zero.
+
+        Args:
+            ws_url: Target WebSocket endpoint URL.
+            channel: WebSocket event channel.
+            topics: Iterable of formatted topic strings to release.
+            publisher: Optional `MicroBatchPublisher` releasing the topic references.
+
+        Returns:
+            List of topics that transitioned from reference count `1 -> 0`.
+        """
         topic_list = [t.strip() for t in topics if t and t.strip()]
         if not topic_list:
             return []
@@ -327,7 +402,14 @@ class WebSocketMultiplexer:
             return fully_unsubscribed
 
     def active_topics(self, ws_url: str) -> frozenset[str]:
-        """Return the set of currently active (ref_count > 0) topics on `ws_url`."""
+        """Return the set of currently active (`ref_count > 0`) topics on `ws_url`.
+
+        Args:
+            ws_url: Target WebSocket endpoint URL.
+
+        Returns:
+            Frozenset of active topic strings.
+        """
         with self._lock:
             state = self._endpoints.get(ws_url)
             if state is None:
@@ -335,7 +417,11 @@ class WebSocketMultiplexer:
             return frozenset(t for t, c in state.topic_ref_counts.items() if c > 0)
 
     def endpoint_snapshots(self) -> list[dict[str, Any]]:
-        """Return a diagnostic snapshot of all tracked WebSocket endpoints."""
+        """Return a diagnostic snapshot of all tracked WebSocket endpoints.
+
+        Returns:
+            List of dictionaries suitable for constructing the `MassiveSession.status()` table.
+        """
         with self._lock:
             rows: list[dict[str, Any]] = []
             for ws_url, state in sorted(self._endpoints.items()):
@@ -357,13 +443,27 @@ class WebSocketMultiplexer:
             return rows
 
     def outbox_messages(self, ws_url: str) -> list[dict[str, Any]]:
-        """Return a copy of sent control messages for `ws_url`."""
+        """Return a copy of sent control messages for `ws_url`.
+
+        Args:
+            ws_url: Target WebSocket endpoint URL.
+
+        Returns:
+            List of `{"action": ..., "params": ...}` dictionaries sent to `ws_url`.
+        """
         with self._lock:
             state = self._endpoints.get(ws_url)
             return list(state.outbox) if state is not None else []
 
     def simulate_reconnect(self, ws_url: str) -> list[dict[str, Any]]:
-        """Emit auth and resubscribe control frames for all active topics on `ws_url` after reconnect."""
+        """Emit `"auth"` and `"subscribe"` control frames for all active topics on `ws_url` after reconnect.
+
+        Args:
+            ws_url: Target WebSocket endpoint URL.
+
+        Returns:
+            List of control frame dictionaries emitted during the reconnect sequence.
+        """
         with self._lock:
             state = self._get_endpoint(ws_url)
             sent: list[dict[str, Any]] = []
@@ -378,7 +478,19 @@ class WebSocketMultiplexer:
         ws_url: str,
         raw_payload: str | bytes | Sequence[Mapping[str, Any]] | Mapping[str, Any],
     ) -> int:
-        """Decode a raw WebSocket JSON frame and dispatch grouped event rows to registered publishers."""
+        """Decode a raw WebSocket JSON frame and dispatch grouped event rows to registered publishers.
+
+        Args:
+            ws_url: WebSocket endpoint URL that received the frame.
+            raw_payload: Raw JSON string/bytes or pre-decoded JSON object/array.
+
+        Returns:
+            Total number of rows enqueued across all registered publishers.
+
+        Raises:
+            MassiveEntitlementError: If a `"status"` event reports an authentication or
+                entitlement failure (`auth_failed`, `not_authorized`).
+        """
         if isinstance(raw_payload, (str, bytes)):
             parsed = json.loads(raw_payload)
         else:

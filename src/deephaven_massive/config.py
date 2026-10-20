@@ -1,4 +1,9 @@
-"""Configuration and authentication utilities for deephaven-massive."""
+"""Configuration, feed-tier routing, and entitlement exceptions for `deephaven-massive`.
+
+This module defines `MassiveConfig`, the immutable configuration container used by
+`MassiveSession` to manage REST authentication, WebSocket feed-tier host resolution,
+S3 Flat File credentials, and micro-batching performance parameters.
+"""
 
 from __future__ import annotations
 
@@ -21,12 +26,46 @@ VALID_FUTURES_VENUES: frozenset[str] = frozenset({"cme", "cbot", "nymex", "comex
 
 
 class MassiveEntitlementError(PermissionError):
-    """Raised when an API key lacks entitlement for a Massive endpoint or WebSocket feed."""
+    """Raised when an API key lacks entitlement for a Massive REST endpoint or WebSocket feed.
+
+    Massive.com enforces subscription tiers per asset class and feed latency (for
+    example, real-time vs. 15-minute delayed equities, OPRA options, or Fair Market
+    Value business feeds). When a REST request returns HTTP 403 or a WebSocket
+    handshake returns `auth_failed` / `not_authorized`, `MassiveEntitlementError`
+    is raised immediately rather than retrying.
+    """
 
 
 @dataclass(frozen=True)
 class MassiveConfig:
-    """Immutable configuration for a :class:`MassiveSession`."""
+    """Immutable configuration governing a `MassiveSession`.
+
+    Prefer constructing instances via `MassiveConfig.from_args`, which resolves missing
+    credentials from standard environment variables (`MASSIVE_API_KEY`, `POLYGON_API_KEY`,
+    `MASSIVE_S3_ACCESS_KEY_ID`, and `MASSIVE_S3_SECRET_ACCESS_KEY`) and validates
+    numeric thresholds.
+
+    Attributes:
+        api_key: Massive.com (or Polygon.io) REST and WebSocket API key.
+        feed: Default WebSocket feed tier (`"realtime"`, `"delayed"`, `"business"`,
+            `"delayed_business"`, `"nasdaq"`, `"polyfeed"`, `"polyfeed_plus"`,
+            `"starter"`, `"launchpad"`, or a custom hostname).
+        rest_base_url: Base URL for Massive REST API calls (without trailing slash).
+        s3_access_key_id: Optional S3 access key ID for Massive Flat Files.
+        s3_secret_access_key: Optional S3 secret access key for Massive Flat Files.
+        s3_endpoint_url: S3-compatible endpoint URL for Massive Flat Files.
+        s3_bucket: S3 bucket name hosting Massive Flat Files (defaults to `"flatfiles"`).
+        flush_interval_ms: Milliseconds between periodic micro-batch flushes from
+            WebSocket buffers into Deephaven `TablePublisher` instances.
+        max_batch_size: Maximum buffered WebSocket rows before an immediate flush is triggered.
+        max_retries: Maximum retry attempts with exponential backoff for transient HTTP
+            errors (`429`, `500`, `502`, `503`, `504`).
+        flat_file_ticker_threshold: Symbol count at or above which `source="auto"`
+            historical queries prefer S3 Flat Files over REST pagination when S3
+            credentials are configured.
+        auto_start_server: Whether `MassiveSession` should automatically initialize an
+            embedded `deephaven_server.Server` if none is running.
+    """
 
     api_key: str
     feed: str = "realtime"
@@ -57,7 +96,32 @@ class MassiveConfig:
         flat_file_ticker_threshold: int = 50,
         auto_start_server: bool = True,
     ) -> MassiveConfig:
-        """Create a validated :class:`MassiveConfig` from arguments and environment variables."""
+        """Create a validated `MassiveConfig` from explicit arguments and environment variables.
+
+        Args:
+            api_key: Explicit API key. If omitted, falls back to `MASSIVE_API_KEY` and
+                then `POLYGON_API_KEY` in `os.environ`.
+            feed: Default WebSocket feed tier name or custom host.
+            rest_base_url: Base URL for Massive REST requests.
+            s3_access_key_id: Explicit S3 access key ID. Falls back to
+                `MASSIVE_S3_ACCESS_KEY_ID` in `os.environ`.
+            s3_secret_access_key: Explicit S3 secret access key. Falls back to
+                `MASSIVE_S3_SECRET_ACCESS_KEY` in `os.environ`.
+            s3_endpoint_url: S3 endpoint URL for Flat Files.
+            s3_bucket: S3 bucket name for Flat Files.
+            flush_interval_ms: Micro-batch flush interval in milliseconds (must be > 0).
+            max_batch_size: Maximum rows per micro-batch before immediate flush (must be > 0).
+            max_retries: Maximum HTTP retry count for transient errors (must be >= 0).
+            flat_file_ticker_threshold: Symbol count threshold for `source="auto"` S3 routing.
+            auto_start_server: Whether to start an embedded Deephaven server if needed.
+
+        Returns:
+            A validated, immutable `MassiveConfig` instance.
+
+        Raises:
+            ValueError: If no API key is provided or found in the environment, or if
+                `flush_interval_ms <= 0`, `max_batch_size <= 0`, or `max_retries < 0`.
+        """
         resolved_key = (
             api_key
             or os.environ.get("MASSIVE_API_KEY")
@@ -99,7 +163,7 @@ class MassiveConfig:
 
     @property
     def has_s3_credentials(self) -> bool:
-        """Return True if both S3 access key ID and secret access key are configured."""
+        """Return `True` if both S3 access key ID and secret access key are configured."""
         return bool(self.s3_access_key_id and self.s3_secret_access_key)
 
     def resolve_ws_url(
@@ -110,7 +174,26 @@ class MassiveConfig:
         is_fmv: bool = False,
         venue: str | None = None,
     ) -> str:
-        """Resolve the exact WebSocket URL for a market, feed tier, FMV channel, and futures venue."""
+        """Resolve the WebSocket URL for a market, feed tier, FMV channel, and futures venue.
+
+        Args:
+            market: Asset class path segment (`"stocks"`, `"options"`, `"futures"`,
+                `"indices"`, `"forex"`, or `"crypto"`).
+            feed_override: Optional per-feed tier override (`"realtime"`, `"delayed"`,
+                `"business"`, `"delayed_business"`, etc.). Defaults to `self.feed`.
+            is_fmv: If `True`, routes the connection to Massive's Fair Market Value
+                business WebSocket cluster (`business.massive.com` or
+                `delayed-business.massive.com`).
+            venue: Optional futures exchange venue (`"cme"`, `"cbot"`, `"nymex"`, or
+                `"comex"`). Appended as `/{market}/{venue}` when provided.
+
+        Returns:
+            A fully qualified `wss://` WebSocket endpoint URL.
+
+        Raises:
+            ValueError: If `venue` is provided and is not one of `"cme"`, `"cbot"`,
+                `"nymex"`, or `"comex"`.
+        """
         effective_feed = (feed_override or self.feed).strip().lower()
         if is_fmv:
             host = (

@@ -1,4 +1,10 @@
-"""Zero-dataclass JSON/CSV -> PyArrow RecordBatch -> Deephaven Table bridge."""
+"""Zero-dataclass JSON/CSV-to-PyArrow `RecordBatch`-to-Deephaven `Table` bridge.
+
+Rather than instantiating intermediate Python objects or `massive` SDK dataclasses on
+the hot path, `deephaven-massive` normalizes incoming JSON dictionaries and CSV rows
+directly into columnar `pyarrow.RecordBatch` chunks and converts them to Deephaven
+tables via `deephaven.arrow.to_table` inside a captured `ExecutionContext`.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +33,19 @@ _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
 
 
 def to_pascal_case(name: str) -> str:
-    """Convert snake_case, kebab-case, or camelCase field names to PascalCase."""
+    """Convert `snake_case`, `kebab-case`, or `camelCase` field names to `PascalCase`.
+
+    If the resulting identifier begins with a numeric digit (for example, `"52_week_high"`),
+    it is prefixed with `"F"` (`"F52WeekHigh"`) so that it remains a valid Deephaven
+    query language identifier.
+
+    Args:
+        name: Raw JSON or CSV field name.
+
+    Returns:
+        Normalized `PascalCase` column name (`"Field"` if `name` contains no alphanumeric
+        characters).
+    """
     spaced = _CAMEL_BOUNDARY_RE.sub(r"\1_\2", name.strip())
     parts = [p for p in _SNAKE_BOUNDARY_RE.split(spaced) if p]
     if not parts:
@@ -39,7 +57,21 @@ def to_pascal_case(name: str) -> str:
 
 
 def to_utc_ns(val: Any) -> int | None:
-    """Normalize Unix s/ms/us/ns numbers, datetime objects, or ISO-8601 strings to UTC nanoseconds."""
+    """Normalize Unix epoch numbers (`s`, `ms`, `us`, `ns`), `datetime` objects, or ISO-8601 strings to UTC nanoseconds.
+
+    Massive endpoints emit timestamps in varying precisions (seconds, milliseconds,
+    microseconds, nanoseconds, or ISO-8601 strings). Numeric timestamps are classified
+    by magnitude (`>= 1e17` for nanoseconds, `>= 1e14` for microseconds, `>= 1e11` for
+    milliseconds, and seconds otherwise) and scaled to UTC nanoseconds since
+    `1970-01-01T00:00:00Z`.
+
+    Args:
+        val: Raw timestamp value (`int`, `float`, `datetime`, `date`, or `str`).
+
+    Returns:
+        Integer nanoseconds since the Unix epoch in UTC, or `None` if `val` is null,
+        non-positive, or unparseable.
+    """
     if val is None or val == "":
         return None
     if isinstance(val, bool):
@@ -90,7 +122,15 @@ def to_utc_ns(val: Any) -> int | None:
 
 
 def to_epoch_days(val: Any) -> int | None:
-    """Normalize 'YYYY-MM-DD' strings, date/datetime objects, or timestamps to days since 1970-01-01."""
+    """Normalize `'YYYY-MM-DD'` strings, `date`/`datetime` objects, or epoch numbers to days since `1970-01-01`.
+
+    Args:
+        val: Raw calendar date value (`str`, `date`, `datetime`, `int`, or `float`).
+
+    Returns:
+        Integer day offset from `1970-01-01` suitable for `pa.date32()`, or `None` if
+        `val` is null or unparseable.
+    """
     if val is None or val == "":
         return None
     if isinstance(val, datetime):
@@ -120,7 +160,14 @@ def to_epoch_days(val: Any) -> int | None:
 
 
 def to_float(val: Any) -> float | None:
-    """Convert scalar value to float64 or None."""
+    """Convert a scalar value to `float` or `None` if null, boolean, or unparseable.
+
+    Args:
+        val: Raw scalar value.
+
+    Returns:
+        Coerced `float` value, or `None`.
+    """
     if val is None or val == "" or isinstance(val, bool):
         return None
     try:
@@ -130,7 +177,14 @@ def to_float(val: Any) -> float | None:
 
 
 def to_int(val: Any) -> int | None:
-    """Convert scalar value to int or None."""
+    """Convert a scalar value to `int` or `None` if null, boolean, or unparseable.
+
+    Args:
+        val: Raw scalar value.
+
+    Returns:
+        Coerced `int` value, or `None`.
+    """
     if val is None or val == "" or isinstance(val, bool):
         return None
     try:
@@ -140,7 +194,14 @@ def to_int(val: Any) -> int | None:
 
 
 def to_bool(val: Any) -> bool | None:
-    """Convert scalar value to bool or None."""
+    """Convert a scalar or string literal (`'true'`, `'1'`, `'yes'`) to `bool` or `None`.
+
+    Args:
+        val: Raw scalar value.
+
+    Returns:
+        Coerced `bool` value, or `None`.
+    """
     if val is None or val == "":
         return None
     if isinstance(val, bool):
@@ -156,7 +217,14 @@ def to_bool(val: Any) -> bool | None:
 
 
 def to_str(val: Any) -> str | None:
-    """Convert scalar value to stripped string or None."""
+    """Convert a scalar value to a whitespace-stripped `str` or `None` if empty.
+
+    Args:
+        val: Raw scalar value.
+
+    Returns:
+        Stripped non-empty `str`, or `None`.
+    """
     if val is None:
         return None
     s = str(val).strip()
@@ -164,7 +232,17 @@ def to_str(val: Any) -> str | None:
 
 
 def parse_int32_list(val: Any) -> list[int] | None:
-    """Parse list of integers or CSV string like '[12, 37]' / '12,37' / '12 37' into list[int]."""
+    """Parse a sequence of integers or delimited string (`'[12, 37]'`, `'12,37'`, `'12 37'`) into `list[int]`.
+
+    Used primarily for trade and quote condition code arrays across WebSocket JSON
+    arrays, REST JSON lists, and S3 Flat File string representations.
+
+    Args:
+        val: Raw sequence, delimited string, or single integer value.
+
+    Returns:
+        A `list[int]` of parsed condition codes, or `None` if `val` is null.
+    """
     if val is None or val == "":
         return None
     if isinstance(val, (list, tuple)):
@@ -190,7 +268,14 @@ def parse_int32_list(val: Any) -> list[int] | None:
 
 
 def parse_str_list(val: Any) -> list[str] | None:
-    """Parse list of strings or delimited string into list[str]."""
+    """Parse a sequence of strings or comma-delimited string into `list[str]`.
+
+    Args:
+        val: Raw sequence of strings or comma-delimited string.
+
+    Returns:
+        A `list[str]` of stripped non-empty strings, or `None` if `val` is null.
+    """
     if val is None or val == "":
         return None
     if isinstance(val, (list, tuple)):
@@ -206,7 +291,15 @@ def parse_str_list(val: Any) -> list[str] | None:
 def flatten_dict(
     data: Mapping[str, Any], prefix: str = ""
 ) -> dict[str, Any]:
-    """Flatten nested JSON dictionaries (including financial statement `{value, unit}` objects) into PascalCase keys."""
+    """Flatten nested JSON dictionaries (including financial statement `{value, unit}` objects) into `PascalCase` keys.
+
+    Args:
+        data: Nested JSON mapping to flatten.
+        prefix: Optional `PascalCase` prefix prepended to each flattened key.
+
+    Returns:
+        A single-level dictionary mapping `PascalCase` column names to scalar or list values.
+    """
     flat: dict[str, Any] = {}
     for k, v in data.items():
         pascal_k = f"{prefix}{to_pascal_case(str(k))}"
@@ -227,7 +320,19 @@ def flatten_dict(
 
 @dataclass(frozen=True)
 class SchemaSpec:
-    """Specification binding a PyArrow schema, key columns, and row normalizer."""
+    """Immutable specification binding a PyArrow schema, primary key columns, and row normalizer.
+
+    Attributes:
+        name: Logical schema name (e.g., `"stocks.trades"`).
+        arrow_schema: Canonical `pyarrow.Schema` with `PascalCase` fields.
+        key_cols: Default key column names used by `.latest()` (`last_by(key_cols)`)
+            and `.poll(mode="replace" | "upsert")`.
+        normalizer: Callable `(raw_row, symbol_normalizer) -> dict[str, Any]` that maps
+            wire-level JSON or CSV keys into canonical `PascalCase` keys.
+        allow_dynamic_columns: If `True`, additional `PascalCase` keys emitted by the
+            normalizer (such as dynamic line items in financial statements) are
+            automatically inferred and appended to the resulting `RecordBatch`.
+    """
 
     name: str
     arrow_schema: pa.Schema
@@ -236,13 +341,21 @@ class SchemaSpec:
     allow_dynamic_columns: bool = False
 
     def with_extra_fields(self, extra_fields: Sequence[pa.Field]) -> pa.Schema:
-        """Return a copy of arrow_schema with extra fields (such as __ReceivedAt or __PollId) appended."""
+        """Return a copy of `arrow_schema` with extra internal fields appended.
+
+        Args:
+            extra_fields: Additional `pyarrow.Field` definitions (such as `__ReceivedAt`
+                or `__PollId`).
+
+        Returns:
+            A new `pyarrow.Schema` containing the base fields followed by `extra_fields`.
+        """
         fields = list(self.arrow_schema) + list(extra_fields)
         return pa.schema(fields)
 
 
 def _coerce_column_array(values: list[Any], field_type: pa.DataType) -> pa.Array:
-    """Build a typed PyArrow array for a single column."""
+    """Build a typed `pyarrow.Array` for a single column according to `field_type`."""
     if field_type == UTC_NS_TYPE:
         ns_vals = [to_utc_ns(v) for v in values]
         return pa.array(ns_vals, type=UTC_NS_TYPE)
@@ -269,7 +382,7 @@ def _coerce_column_array(values: list[Any], field_type: pa.DataType) -> pa.Array
 
 
 def _infer_dynamic_column(values: list[Any]) -> pa.Array:
-    """Infer a sensible PyArrow array for a dynamic fundamental/partner column."""
+    """Infer a typed `pyarrow.Array` (`bool_`, `float64`, or `string`) for a dynamic column."""
     non_null = [v for v in values if v is not None and v != ""]
     if not non_null:
         return pa.array([None] * len(values), type=pa.string())
@@ -288,7 +401,19 @@ def rows_to_record_batch(
     extra_columns: Mapping[str, tuple[pa.DataType, Any]] | None = None,
     already_normalized: bool = False,
 ) -> pa.RecordBatch:
-    """Convert raw or normalized row dicts into a typed :class:`pyarrow.RecordBatch`."""
+    """Convert raw or normalized row dictionaries into a typed `pyarrow.RecordBatch`.
+
+    Args:
+        rows: Sequence of raw wire dictionaries or pre-normalized row dictionaries.
+        schema_spec: Target `SchemaSpec` governing column names, types, and row normalization.
+        symbol_normalizer: Optional `SymbolNormalizer` passed to `schema_spec.normalizer`.
+        extra_columns: Optional mapping of `col_name -> (pa.DataType, scalar_or_list)`
+            appended to the batch (for example, `__ReceivedAt` or `__PollId`).
+        already_normalized: If `True`, skips calling `schema_spec.normalizer` on `rows`.
+
+    Returns:
+        A typed `pyarrow.RecordBatch` matching `schema_spec` (plus any dynamic or extra columns).
+    """
     normalized_rows = (
         list(rows)
         if already_normalized
@@ -336,7 +461,20 @@ def record_batches_to_arrow_table(
     *,
     extra_fields: Sequence[pa.Field] | None = None,
 ) -> pa.Table:
-    """Combine one or more RecordBatches (or create an empty typed table if empty) into a PyArrow Table."""
+    """Combine one or more `RecordBatch` instances into a `pyarrow.Table`.
+
+    When `batches` is empty, returns an empty `pyarrow.Table` preserving the exact
+    column names and types of `schema_spec`. When `schema_spec.allow_dynamic_columns`
+    is `True`, schemas across multiple batches are unified via `promote_options="default"`.
+
+    Args:
+        batches: Sequence of `pyarrow.RecordBatch` chunks.
+        schema_spec: `SchemaSpec` used to construct an empty table when `batches` is empty.
+        extra_fields: Optional extra `pyarrow.Field` definitions to include on empty tables.
+
+    Returns:
+        A consolidated `pyarrow.Table`.
+    """
     base_schema = (
         schema_spec.with_extra_fields(extra_fields)
         if extra_fields
@@ -354,7 +492,20 @@ def record_batches_to_arrow_table(
 
 @contextlib.contextmanager
 def exec_ctx_scope(exec_ctx: ExecutionContext | None) -> Iterator[None]:
-    """Thread-safe and re-entrant ExecutionContext context manager."""
+    """Enter a thread-safe and re-entrant Deephaven `ExecutionContext` scope.
+
+    Deephaven requires background threads (such as WebSocket flushers, REST pollers,
+    and watchlist executors) to bind the host `ExecutionContext` before invoking table
+    operations or `TablePublisher.add`. Calling `j_exec_ctx.open()` directly returns a
+    re-entrant token that can be safely closed in a `finally` block across concurrent
+    threads.
+
+    Args:
+        exec_ctx: Deephaven `ExecutionContext` to bind, or `None` for a no-op scope.
+
+    Yields:
+        Control to the wrapped block with `exec_ctx` bound on the current thread.
+    """
     if exec_ctx is not None:
         token = exec_ctx.j_exec_ctx.open()
         try:
@@ -369,7 +520,15 @@ def arrow_to_deephaven_table(
     pa_table: pa.Table,
     exec_ctx: ExecutionContext | None = None,
 ) -> Table:
-    """Convert a :class:`pyarrow.Table` into a :class:`deephaven.table.Table` under the execution context."""
+    """Convert a `pyarrow.Table` into a `deephaven.table.Table` inside `exec_ctx`.
+
+    Args:
+        pa_table: Source `pyarrow.Table`.
+        exec_ctx: Optional Deephaven `ExecutionContext` to bind during conversion.
+
+    Returns:
+        A materialized Deephaven `Table`.
+    """
     from deephaven import arrow as dh_arrow
 
     with exec_ctx_scope(exec_ctx):

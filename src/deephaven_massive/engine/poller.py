@@ -1,4 +1,9 @@
-"""Periodic REST endpoint poller producing live updating Deephaven tables."""
+"""Periodic REST endpoint poller producing live updating Deephaven tables.
+
+`SnapshotPoller` powers `FeedBuilder.poll()`, turning any REST snapshot, reference,
+economy, or partner endpoint into a live updating Deephaven `Table` with configurable
+eviction semantics (`"replace"`, `"upsert"`, or `"append"`).
+"""
 
 from __future__ import annotations
 
@@ -24,12 +29,17 @@ VALID_POLL_MODES: frozenset[str] = frozenset({"replace", "upsert", "append"})
 
 
 class SnapshotPoller:
-    """Periodically polls a REST endpoint and publishes updates into a Deephaven table.
+    """Periodically polls a REST endpoint and publishes updates into a Deephaven `Table`.
 
-    Modes:
-    - ``"replace"``: Evicts stale keys not present in the latest poll cycle using a monotonic `__PollId` join.
-    - ``"upsert"``: Retains all historical keys and updates rows by `key_cols` (`last_by(key_cols)`).
-    - ``"append"``: Appends every poll batch into an append-only history table (`blink_to_append_only`).
+    Three update modes are supported:
+
+    - `"replace"`: Evicts stale keys that are no longer present in the latest poll
+      cycle by joining `last_by(key_cols)` against the current monotonic `__PollId`
+      epoch. Ideal for top-movers (`gainers_losers`) or active market status tables.
+    - `"upsert"`: Retains all previously seen keys and updates rows in place via
+      `last_by(key_cols)`. Ideal for full-universe snapshots or reference tables.
+    - `"append"`: Appends every poll batch into an append-only history table via
+      `blink_to_append_only`. Ideal for recording periodic snapshots over time.
     """
 
     def __init__(
@@ -44,6 +54,24 @@ class SnapshotPoller:
         symbol_normalizer: SymbolNormalizer | None = None,
         exec_ctx: ExecutionContext | None = None,
     ) -> None:
+        """Initialize a `SnapshotPoller` and construct its Deephaven query DAG.
+
+        Args:
+            name: Logical name for the underlying Deephaven `table_publisher`.
+            schema_spec: `SchemaSpec` governing column types, key columns, and row normalization.
+            fetch_fn: Zero-argument callable returning a sequence of raw row dictionaries.
+            interval_s: Seconds between background poll cycles (must be > 0).
+            mode: Poll materialization mode (`"replace"`, `"upsert"`, or `"append"`).
+            key_cols: Optional override for primary key columns (defaults to
+                `schema_spec.key_cols`).
+            symbol_normalizer: Optional `SymbolNormalizer` passed to the row normalizer.
+            exec_ctx: Optional Deephaven `ExecutionContext` bound during table creation
+                and background publishing.
+
+        Raises:
+            ValueError: If `mode` is not in `{"replace", "upsert", "append"}` or
+                `interval_s <= 0`.
+        """
         from deephaven.stream import blink_to_append_only
         from deephaven.stream.table_publisher import table_publisher
 
@@ -114,7 +142,7 @@ class SnapshotPoller:
 
     @property
     def table(self) -> Table:
-        """Return the live Deephaven Table updated by this poller."""
+        """Return the live Deephaven `Table` updated by this poller."""
         return self._table
 
     @property
@@ -124,7 +152,15 @@ class SnapshotPoller:
             return self._poll_id
 
     def poll_once(self) -> int:
-        """Execute a single synchronous poll fetch and publish the resulting batch to Deephaven in monotonic epoch order."""
+        """Execute a single synchronous poll fetch and publish the resulting batch to Deephaven.
+
+        Serialized under `_poll_lock` so that monotonic `__PollId` epochs are always
+        published to Deephaven in strictly increasing order even if `poll_once()` is
+        called concurrently with the background polling thread.
+
+        Returns:
+            The number of rows fetched and published in this poll cycle.
+        """
         with self._poll_lock:
             rows = self.fetch_fn()
             with self._lock:
@@ -153,7 +189,13 @@ class SnapshotPoller:
             return len(rows)
 
     def start(self, *, initial_poll: bool = True) -> None:
-        """Perform an optional initial poll and start the background polling loop."""
+        """Perform an optional synchronous initial poll and start the background polling loop.
+
+        Args:
+            initial_poll: If `True`, executes `poll_once()` synchronously before
+                spawning the background daemon thread so that `self.table` is
+                immediately populated upon return.
+        """
         if initial_poll:
             self.poll_once()
 
@@ -174,7 +216,7 @@ class SnapshotPoller:
             self._poll_thread.start()
 
     def stop(self) -> None:
-        """Stop the background polling thread."""
+        """Stop the background polling thread and wait up to 2 seconds for termination."""
         self._stop_event.set()
         thread = self._poll_thread
         if thread is not None and thread.is_alive():

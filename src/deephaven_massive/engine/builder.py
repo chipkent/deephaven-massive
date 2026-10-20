@@ -1,4 +1,10 @@
-"""Fluent FeedBuilder unifying WebSocket streaming, REST polling, snapshots, and historical tables."""
+"""Fluent `FeedBuilder` unifying WebSocket streaming, REST polling, snapshots, and historical tables.
+
+Every domain method on `MassiveSession` returns a `FeedBuilder`. Rather than learning
+separate APIs for WebSockets, REST snapshots, periodic pollers, and S3 Flat Files,
+users chain one of seven terminal verbs onto the builder to materialize a Deephaven
+`Table` with identical `PascalCase` column names and types.
+"""
 
 from __future__ import annotations
 
@@ -24,23 +30,45 @@ if TYPE_CHECKING:
 
 
 def _is_deephaven_table(obj: Any) -> bool:
-    """Return True if `obj` is a Deephaven `Table` or `InputTable` instance."""
+    """Return `True` if `obj` is a Deephaven `Table` or `InputTable` instance."""
     if obj is None or isinstance(obj, (str, bytes, list, tuple, set, frozenset, dict)):
         return False
     return hasattr(obj, "j_table") or hasattr(obj, "column_names")
 
 
 class FeedBuilder:
-    """Fluent builder that materializes a Massive data feed as a Deephaven :class:`Table`.
+    """Fluent builder that materializes a Massive data feed as a Deephaven `Table`.
 
-    Terminal methods:
-    - :meth:`latest`: Live updating current-state table (`last_by(key_cols)`), optionally seeded via REST.
-    - :meth:`history`: Live updating in-memory append-only history table (`blink_to_append_only`).
-    - :meth:`ring`: Bounded live history table retaining the most recent `capacity` rows (`ring_table`).
-    - :meth:`blink`: Raw stateless single-cycle Deephaven blink table.
-    - :meth:`snapshot`: One-shot static point-in-time Deephaven table fetched via REST.
-    - :meth:`poll`: Periodic background REST poller with ``mode="replace" | "upsert" | "append"``.
-    - :meth:`historical`: Static historical table fetched via REST pagination or S3 Flat Files.
+    A `FeedBuilder` encapsulates the target `SchemaSpec`, symbol normalizer, WebSocket
+    channel metadata, REST snapshot/seed hooks, and historical fetchers for a specific
+    domain endpoint. Nothing is fetched or subscribed until one of the seven terminal
+    methods is called:
+
+    - `latest()`: Live updating current-state table (`last_by(key_cols)`), seeded via REST
+      before streaming begins with zero duplicate or dropped events at cutover.
+    - `history()`: Live updating in-memory append-only history table (`blink_to_append_only`).
+    - `ring(capacity)`: Bounded live history table retaining the most recent `capacity`
+      rows (`ring_table`).
+    - `blink()`: Raw stateless single-cycle Deephaven blink table.
+    - `snapshot()`: One-shot static point-in-time Deephaven table fetched via REST.
+    - `poll(interval_s, mode)`: Periodic background REST poller (`"replace"`, `"upsert"`,
+      or `"append"`).
+    - `historical(start, end, source)`: Static historical Deephaven table fetched via REST
+      pagination or S3 Flat Files.
+
+    Example:
+        ```python
+        # Live current-state quotes seeded via REST snapshot
+        quotes_latest = m.stocks.quotes(["AAPL", "NVDA"]).latest()
+
+        # Bounded ring buffer of the last 50,000 trades
+        trades_ring = m.stocks.trades(["AAPL", "NVDA"]).ring(50_000)
+
+        # Static historical bars from S3 Flat Files or REST
+        hist_bars = m.stocks.bars(["AAPL", "NVDA"], 1, "minute").historical(
+            "2025-01-01", "2025-01-31"
+        )
+        ```
     """
 
     def __init__(
@@ -66,6 +94,33 @@ class FeedBuilder:
         stream_registry: dict[tuple[str, str, tuple[str, ...]], MicroBatchPublisher]
         | None = None,
     ) -> None:
+        """Initialize a `FeedBuilder`.
+
+        Args:
+            name: Logical feed name (e.g., `"stocks.quotes"`).
+            schema_spec: `SchemaSpec` defining the PyArrow schema, key columns, and normalizer.
+            symbol_normalizer: Domain `SymbolNormalizer` for cross-transport symbol conversion.
+            exec_ctx: Host Deephaven `ExecutionContext`.
+            ws_multiplexer: Session `WebSocketMultiplexer` for streaming channels.
+            ws_url: Resolved `wss://` endpoint URL if the feed supports WebSocket streaming.
+            ws_channel: WebSocket event prefix (e.g., `"T"`, `"Q"`, `"AM"`).
+            symbols: Target symbol(s) as a `str`, `Iterable[str]`, reactive Deephaven
+                `Table` watchlist, or `None` (`"*"`).
+            symbol_col: Column name to observe when `symbols` is a reactive Deephaven `Table`.
+            seed_fn: Optional callable `(canonical_symbols) -> rows` used to seed `.latest()`
+                or `.history(seed=True)` before streaming cutover.
+            seed_rows_fn: Optional callable `(canonical_symbols, seed_since) -> rows` used
+                by `.history(seed_since=...)` to backfill intraday history before cutover.
+            snapshot_fn: Optional callable `() -> rows` used by `.snapshot()` and `.poll()`.
+            historical_fn: Optional callable `(start, end, limit, source) -> Table` used
+                by `.historical()`.
+            flush_interval_ms: Micro-batch flush interval in milliseconds.
+            max_batch_size: Maximum buffered rows before immediate flush.
+            auto_flush: Whether to start the background flush thread automatically.
+            on_register_lifecycle: Callback invoked to register active builders with the session.
+            stream_registry: Shared session registry deduplicating `MicroBatchPublisher`
+                instances across identical `(ws_url, ws_channel, symbols)` streams.
+        """
         self.name = name
         self.schema_spec = schema_spec
         self.symbol_normalizer = symbol_normalizer
@@ -94,23 +149,31 @@ class FeedBuilder:
 
     @property
     def publisher(self) -> MicroBatchPublisher | None:
-        """Return the active :class:`MicroBatchPublisher`, if started."""
+        """Return the active `MicroBatchPublisher` if streaming has been started, else `None`."""
         return self._publisher
 
     @property
     def poller(self) -> SnapshotPoller | None:
-        """Return the active :class:`SnapshotPoller`, if started."""
+        """Return the active `SnapshotPoller` if `.poll()` has been started, else `None`."""
         return self._poller
 
     @property
     def watchlist_controller(self) -> ReactiveWatchlistController | None:
-        """Return the active :class:`ReactiveWatchlistController`, if started."""
+        """Return the active `ReactiveWatchlistController` if streaming a table watchlist, else `None`."""
         return self._watchlist_controller
 
     def normalize_symbols(
         self, symbols: str | Iterable[str] | Table | None
     ) -> list[str]:
-        """Normalize `symbols` using this builder's :class:`SymbolNormalizer` (or active watchlist symbols)."""
+        """Normalize `symbols` using this builder's `SymbolNormalizer` (or active watchlist symbols).
+
+        Args:
+            symbols: A single symbol string, an iterable of symbols, a Deephaven `Table`
+                watchlist, or `None` (which normalizes to `["*"]`).
+
+        Returns:
+            Deduplicated list of canonical symbol strings.
+        """
         if _is_deephaven_table(symbols):
             return (
                 sorted(self._watchlist_controller.active_symbols)
@@ -126,6 +189,7 @@ class FeedBuilder:
         return [str(s).strip().upper() for s in symbols]  # type: ignore[union-attr]
 
     def _canonical_symbol_list(self) -> list[str]:
+        """Return the canonical symbol list for `self.symbols`."""
         return self.normalize_symbols(self.symbols)
 
     def _setup_streaming(
@@ -135,6 +199,7 @@ class FeedBuilder:
         ReactiveWatchlistController | None,
         Callable[[], None],
     ]:
+        """Initialize or reuse the `MicroBatchPublisher` and prepare the startup seed finalizer."""
         if (
             self.ws_url is None
             or self.ws_channel is None
@@ -281,7 +346,30 @@ class FeedBuilder:
         by: str | Sequence[str] | None = None,
         seed: bool = True,
     ) -> Table:
-        """Return a live updating current-state table (`last_by(key_cols)`), seeded before streaming."""
+        """Return a live updating current-state table (`last_by(key_cols)`), seeded before streaming.
+
+        When `seed=True` (the default) and the feed supports REST seeding, the builder
+        first buffers incoming WebSocket events, fetches the initial state via REST,
+        deduplicates the buffered events against the REST seed, and flushes the merged
+        batch only after the downstream `last_by` DAG node is registered.
+
+        When `self.symbols` is a reactive Deephaven `Table` watchlist, rows for
+        unsubscribed symbols are automatically evicted from the returned table.
+
+        Args:
+            key_cols: Optional sequence of grouping key columns for `last_by`. Defaults
+                to `schema_spec.key_cols` (typically `("Symbol",)`).
+            by: Convenient alias for `key_cols` accepting a single column name or sequence
+                (for example, `by=["Symbol", "BidExchange"]`).
+            seed: Whether to pre-populate the table from the REST snapshot endpoint
+                before cutting over to live WebSocket ticks.
+
+        Returns:
+            A live updating Deephaven `Table` holding the latest row per key.
+
+        Raises:
+            NotImplementedError: If this feed does not support WebSocket streaming.
+        """
         if by is not None and key_cols is None:
             key_cols = [by] if isinstance(by, str) else list(by)
 
@@ -327,6 +415,7 @@ class FeedBuilder:
         seed_since: Any = None,
         capacity: int | None = None,
     ) -> Table:
+        """Construct either an unbounded `blink_to_append_only` table or a bounded `ring_table`."""
         from deephaven import ring_table
         from deephaven.stream import blink_to_append_only
 
@@ -370,13 +459,43 @@ class FeedBuilder:
         *,
         seed: bool = False,
     ) -> Table:
-        """Return a live updating append-only history table (`blink_to_append_only`)."""
+        """Return a live updating append-only history table (`blink_to_append_only`).
+
+        Every incoming WebSocket tick (and optional startup seed batch) is appended
+        in memory for the lifetime of the table. For high-throughput tick feeds where
+        bounded memory is desired, consider `.ring(capacity)` instead.
+
+        Args:
+            seed_since: Optional start timestamp (`str`, `datetime`, or epoch `int`)
+                from which to backfill historical rows via REST before cutting over to
+                live WebSocket streaming without duplicates.
+            seed: If `True` and `seed_since` is not provided, seeds the initial rows
+                using the feed's default REST snapshot seed function.
+
+        Returns:
+            A live updating append-only Deephaven `Table`.
+
+        Raises:
+            NotImplementedError: If this feed does not support WebSocket streaming.
+        """
         return self._build_history_or_ring(
             seed=seed, seed_since=seed_since, capacity=None
         )
 
     def ring(self, capacity: int = 100_000, *, seed: bool = False) -> Table:
-        """Return a bounded live history table retaining the most recent `capacity` rows (`ring_table`)."""
+        """Return a bounded live history table retaining the most recent `capacity` rows (`ring_table`).
+
+        Args:
+            capacity: Maximum number of rows retained in the ring table (must be > 0).
+            seed: Whether to seed initial rows via REST before streaming begins.
+
+        Returns:
+            A live updating bounded Deephaven `ring_table`.
+
+        Raises:
+            ValueError: If `capacity <= 0`.
+            NotImplementedError: If this feed does not support WebSocket streaming.
+        """
         if capacity <= 0:
             raise ValueError("capacity must be > 0")
         return self._build_history_or_ring(
@@ -384,13 +503,31 @@ class FeedBuilder:
         )
 
     def blink(self) -> Table:
-        """Return the raw stateless single-cycle Deephaven blink table."""
+        """Return the raw stateless single-cycle Deephaven blink table.
+
+        Blink tables retain rows only for the current Deephaven update-graph cycle and
+        consume near-zero steady-state memory. They are ideal as inputs to downstream
+        streaming aggregations (`update_by`, `ema_time`, `last_by`, etc.).
+
+        Returns:
+            A live Deephaven blink `Table` with internal metadata columns stripped.
+
+        Raises:
+            NotImplementedError: If this feed does not support WebSocket streaming.
+        """
         pub, _, finalize_seed = self._setup_streaming(seed=False)
         finalize_seed()
         return pub.user_blink_table
 
     def snapshot(self) -> Table:
-        """Fetch a one-shot static point-in-time Deephaven table via REST."""
+        """Fetch a one-shot static point-in-time Deephaven `Table` via REST.
+
+        Returns:
+            A static Deephaven `Table` containing the current REST snapshot.
+
+        Raises:
+            NotImplementedError: If this feed does not support REST snapshots.
+        """
         fetch = self.snapshot_fn
         if fetch is None and self.seed_fn is not None:
             canon_syms = self._canonical_symbol_list()
@@ -417,7 +554,27 @@ class FeedBuilder:
         mode: str = "replace",
         key_cols: Sequence[str] | None = None,
     ) -> Table:
-        """Start a periodic background REST poller and return its live updating Deephaven table."""
+        """Start a periodic background REST poller and return its live updating Deephaven `Table`.
+
+        Args:
+            interval_s: Seconds between background REST poll cycles (must be > 0).
+            mode: How poll batches are materialized in Deephaven:
+                - `"replace"`: Evicts keys absent from the latest poll cycle via a
+                  monotonic `__PollId` join.
+                - `"upsert"`: Retains all previously seen keys and updates matching rows
+                  via `last_by(key_cols)`.
+                - `"append"`: Appends every poll batch into an append-only history table.
+            key_cols: Optional override for primary key columns used in `"replace"` and
+                `"upsert"` modes.
+
+        Returns:
+            A live updating Deephaven `Table` driven by the background `SnapshotPoller`.
+
+        Raises:
+            NotImplementedError: If this feed does not support REST polling.
+            ValueError: If `interval_s <= 0` or `mode` is not one of `"replace"`,
+                `"upsert"`, or `"append"`.
+        """
         fetch = self.snapshot_fn
         if fetch is None and self.seed_fn is not None:
             canon_syms = self._canonical_symbol_list()
@@ -453,7 +610,29 @@ class FeedBuilder:
         limit: int | None = None,
         source: str = "auto",
     ) -> Table:
-        """Fetch a static historical Deephaven table via REST pagination or S3 Flat Files."""
+        """Fetch a static historical Deephaven `Table` via REST pagination or S3 Flat Files.
+
+        Args:
+            start: Optional start date (`"YYYY-MM-DD"`), ISO-8601 timestamp, `date`,
+                `datetime`, or epoch number.
+            end: Optional end date (`"YYYY-MM-DD"`), ISO-8601 timestamp, `date`,
+                `datetime`, or epoch number.
+            limit: Optional maximum number of rows or page size limit.
+            source: Transport selection strategy:
+                - `"auto"`: Uses S3 Flat Files when S3 credentials are configured and
+                  either a wildcard (`"*"`) or at least `flat_file_ticker_threshold`
+                  symbols are requested for a supported dataset; otherwise uses
+                  concurrent REST pagination.
+                - `"rest"`: Forces concurrent REST pagination.
+                - `"flat_files"` / `"s3"`: Forces S3 `.csv.gz` Flat File streaming.
+
+        Returns:
+            A static Deephaven `Table` containing the historical dataset.
+
+        Raises:
+            NotImplementedError: If this feed does not support historical queries.
+            ValueError: If `source` is invalid or required parameters are missing.
+        """
         if self.historical_fn is not None:
             return self.historical_fn(
                 start=start, end=end, limit=limit, source=source
@@ -467,7 +646,7 @@ class FeedBuilder:
         )
 
     def stop(self) -> None:
-        """Stop all background publishers, pollers, and watchlist listeners associated with this feed."""
+        """Stop all background publishers, pollers, and watchlist listeners associated with this builder."""
         if self._watchlist_controller is not None:
             self._watchlist_controller.stop()
             self._watchlist_controller = None

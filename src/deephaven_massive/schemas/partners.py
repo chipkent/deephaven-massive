@@ -1,4 +1,19 @@
-"""Unified PascalCase PyArrow schemas and normalizers for Partner & Alternative feeds (Benzinga, ETF Global, TMX)."""
+"""Unified PascalCase PyArrow schemas and normalizers for Partner & Alternative feeds.
+
+This module defines the hybrid anchor schemas and dynamic column normalizers for
+third-party datasets integrated into Massive.com—specifically Benzinga
+(analyst ratings, consensus ratings, earnings, guidance, news, firms, analysts,
+bulls/bears say), ETF Global (analytics, constituents, fund flows, profiles,
+taxonomies), and TMX corporate events.
+
+Because partner payloads evolve frequently and often contain dozens of
+feed-specific fields, each dataset uses a **hybrid schema architecture**:
+1. Core queryable fields (such as ``Symbol``, ``Date``, ``Published``, or
+   ``CompositeTicker``) are declared as explicit anchor columns with strict
+   PyArrow types.
+2. Any remaining payload keys are dynamically flattened into PascalCase columns
+   at batch construction time by ``ArrowBridge.to_table(..., infer_extra_columns=True)``.
+"""
 
 from __future__ import annotations
 
@@ -23,7 +38,24 @@ if TYPE_CHECKING:
 def _hybrid_partner_normalizer(
     anchor_Extractors: Mapping[str, tuple[str, ...]],
 ) -> Any:
-    """Create a normalizer that extracts anchor keys and flattens remaining fields into PascalCase."""
+    """Build a row normalizer that extracts anchor keys and flattens remaining fields into PascalCase.
+
+    The returned normalizer inspects each raw partner payload, resolves every
+    anchor column from its prioritized list of candidate source keys (coercing
+    ``Symbol`` and ``CompositeTicker`` via ``SymbolNormalizer`` and date/timestamp
+    anchors via ``ArrowBridge``), and converts all remaining top-level keys to
+    PascalCase so ``ArrowBridge.to_table(..., infer_extra_columns=True)`` can
+    infer and append them dynamically.
+
+    Args:
+        anchor_Extractors: Mapping from target PascalCase anchor column name
+            (e.g., ``"Symbol"``, ``"Date"``, ``"Published"``) to a tuple of
+            candidate source dictionary keys in priority order.
+
+    Returns:
+        Callable[[Mapping[str, Any], SymbolNormalizer | None], dict[str, Any]]:
+        A ``RowNormalizer`` function compatible with ``ArrowBridge.to_table``.
+    """
 
     def _norm(
         row: Mapping[str, Any], norm: SymbolNormalizer | None = None

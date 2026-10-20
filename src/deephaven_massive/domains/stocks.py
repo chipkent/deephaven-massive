@@ -1,4 +1,22 @@
-"""US Stocks domain client (`m.stocks`) covering trades, quotes, bars, snapshots, fundamentals, SEC, and reference."""
+"""US Stocks domain client (`m.stocks`).
+
+This module implements :class:`StocksClient`, which provides complete coverage
+of Massive's US Equities (`SIP` and `Business` tiers):
+
+- **Real-Time & Delayed Market Data**: Trades (`T.*`), NBBO quotes (`Q.*`),
+  second and minute OHLCV bars (`A.*` / `AM.*`), Limit Up - Limit Down bands
+  (`LULD.*`), Net Order Imbalances (`NOI.*`), and Fair Market Value (`FMV.*`).
+- **Snapshots & Summaries**: Full-market and filtered snapshots, top gainers
+  and losers, grouped daily summaries, previous close, and daily open/close.
+- **Technical Indicators**: Server-computed `SMA`, `EMA`, `MACD`, and `RSI`.
+- **Fundamentals & Corporate Actions**: Balance sheets, income statements,
+  cash flow statements, financial ratios, short interest, short volume, share
+  float, dividends, stock splits, and IPO calendars.
+- **SEC EDGAR & Reference**: EDGAR filings index, 10-K sections, 8-K text,
+  risk factors, structured disclosures, 13F institutional holdings, Form 3/4/5
+  insider transactions, ticker directory, profiles, rebranding events, peer
+  companies, news with sentiment, exchanges, conditions, and market status.
+"""
 
 from __future__ import annotations
 
@@ -52,9 +70,29 @@ if TYPE_CHECKING:
 
 
 class StocksClient(BaseDomainClient):
-    """Domain client for US Stocks real-time, delayed, historical, fundamental, and reference feeds."""
+    """Domain client for US Equities (`SIP` / `OTC`) feeds (`m.stocks`).
+
+    ``StocksClient`` normalizes all equity tickers to uppercase strings (for
+    example, ``"aapl"`` -> ``"AAPL"``, ``"brk.b"`` -> ``"BRK.B"``) and returns
+    a :class:`~deephaven_massive.engine.builder.FeedBuilder` from every method
+    so you can choose `.stream()`, `.snapshot()`, `.poll()`, or `.historical()`
+    with a uniform, chainable API.
+
+    Example:
+        Stream live US Stock trades and NBBO quotes for a reactive watchlist
+        of today's top gainers::
+
+            gainers = m.stocks.gainers().poll(interval=30)
+            trades = m.stocks.trades(gainers).with_seed().stream()
+            quotes = m.stocks.quotes(gainers).with_seed().stream()
+    """
 
     def __init__(self, session: MassiveSession) -> None:
+        """Initialize the US Stocks domain client.
+
+        Args:
+            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+        """
         super().__init__(session, domain="stocks")
 
     def _fetch_stock_snapshots(
@@ -82,7 +120,23 @@ class StocksClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, poll, or fetch historical US Stock trades (`T.*`, `/v3/trades/{ticker}`)."""
+        """Configure a US Stock SIP tick-by-tick trades feed (`T.*`, `/v3/trades/{ticker}`).
+
+        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        `.poll()`, and `.historical()` (backed by S3 `us_stocks_sip/trades_v1`
+        or REST `/v3/trades/{ticker}`).
+
+        Args:
+            symbols: Equity ticker (`"AAPL"`), iterable of tickers, `"*"` for
+                all US equities, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `symbols` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `TRADES_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
 
         def _rest_path(
@@ -124,7 +178,23 @@ class StocksClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, poll, or fetch historical US Stock NBBO quotes (`Q.*`, `/v3/quotes/{ticker}`)."""
+        """Configure a US Stock SIP NBBO quotes feed (`Q.*`, `/v3/quotes/{ticker}`).
+
+        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        `.poll()`, and `.historical()` (backed by S3 `us_stocks_sip/quotes_v1`
+        or REST `/v3/quotes/{ticker}`).
+
+        Args:
+            symbols: Equity ticker (`"AAPL"`), iterable of tickers, `"*"` for
+                all US equities, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `symbols` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `QUOTES_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
 
         def _rest_path(
@@ -169,7 +239,31 @@ class StocksClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, poll, or fetch historical US Stock OHLCV bars (`A.*` / `AM.*`, `/v2/aggs/...`)."""
+        """Configure a US Stock OHLCV bars feed (`A.*` / `AM.*`, `/v2/aggs/...`).
+
+        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
+        `.poll()`, and `.historical()` (routed to S3
+        `us_stocks_sip/minute_aggs_v1` or `us_stocks_sip/day_aggs_v1` when
+        `multiplier == 1` and `adjusted is True`, or REST
+        `/v2/aggs/ticker/{ticker}/range/...`).
+
+        Args:
+            symbols: Equity ticker (`"AAPL"`), iterable of tickers, `"*"` for
+                all US equities, or a reactive Deephaven `Table` watchlist.
+            multiplier: Number of `timespan` units per bar. Defaults to `1`.
+            timespan: Bar duration unit (`"second"`, `"minute"`, `"hour"`,
+                `"day"`, `"week"`, `"month"`, `"quarter"`, `"year"`). Defaults
+                to `"minute"`.
+            adjusted: Whether to adjust historical bars for splits. Defaults
+                to `True`.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `symbols` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `BARS_SCHEMA`.
+        """
         clean_span = timespan.strip().lower()
         ws_channel = "A" if clean_span == "second" else "AM"
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
@@ -228,7 +322,19 @@ class StocksClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream US Stock Limit Up - Limit Down (LULD) price bands (`LULD.*`)."""
+        """Configure a US Stock Limit Up - Limit Down (`LULD.*`) price bands stream.
+
+        Args:
+            symbols: Equity ticker (`"AAPL"`), iterable of tickers, `"*"` for
+                all US equities, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `symbols` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.stream()` with
+            `LULD_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
         return self.build_feed(
             name="stocks_luld",
@@ -246,7 +352,19 @@ class StocksClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream US Stock Net Order Imbalances (`NOI.*`)."""
+        """Configure a US Stock Net Order Imbalances (`NOI.*`) auction stream.
+
+        Args:
+            symbols: Equity ticker (`"AAPL"`), iterable of tickers, `"*"` for
+                all US equities, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `symbols` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.stream()` with
+            `IMBALANCES_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
         return self.build_feed(
             name="stocks_imbalances",
@@ -264,7 +382,19 @@ class StocksClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream US Stock Fair Market Value (`FMV.*` on `business.massive.com`)."""
+        """Configure a US Stock Fair Market Value (`FMV.*`) stream on `business.massive.com`.
+
+        Args:
+            symbols: Equity ticker (`"AAPL"`), iterable of tickers, `"*"` for
+                all US equities, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"`).
+            symbol_col: Column name to watch when `symbols` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.stream()` with
+            `FMV_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url(
             "stocks", feed_override=feed, is_fmv=True
         )
@@ -284,7 +414,23 @@ class StocksClient(BaseDomainClient):
         direction: str | None = None,
         include_otc: bool = False,
     ) -> FeedBuilder:
-        """Snapshot or poll full-market or filtered US Stock snapshots (including top gainers/losers)."""
+        """Configure a US Stock market snapshots feed (`/v2/snapshot/locale/us/markets/stocks/...`).
+
+        Args:
+            symbols: Optional equity ticker or iterable of tickers to filter.
+                When `None` and `direction` is `None`, returns snapshots for
+                all ~10,000+ active US equities.
+            direction: Optional top-movers filter (`"gainers"` or `"losers"`).
+            include_otc: Whether to include OTC securities. Defaults to `False`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `STOCK_SNAPSHOT_SCHEMA`.
+
+        Raises:
+            ValueError: If `direction` is not `"gainers"` or `"losers"` when
+                evaluated.
+        """
         canon_syms = self.canonical_symbols(symbols) if symbols is not None else None
 
         def _fetch() -> list[dict[str, Any]]:
@@ -314,15 +460,40 @@ class StocksClient(BaseDomainClient):
     def top_movers(
         self, direction: str = "gainers", *, include_otc: bool = False
     ) -> FeedBuilder:
-        """Top US Stock market movers (`direction='gainers'` or `'losers'`, `/v2/snapshot/locale/us/markets/stocks/{direction}`)."""
+        """Configure a top US Stock market movers feed (`/v2/snapshot/locale/us/markets/stocks/{direction}`).
+
+        Args:
+            direction: `"gainers"` (default) or `"losers"`.
+            include_otc: Whether to include OTC securities. Defaults to `False`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `STOCK_SNAPSHOT_SCHEMA`.
+        """
         return self.snapshots(direction=direction, include_otc=include_otc)
 
     def gainers(self, *, include_otc: bool = False) -> FeedBuilder:
-        """Top US Stock gainers (`/v2/snapshot/locale/us/markets/stocks/gainers`)."""
+        """Configure a top US Stock gainers feed (`/v2/snapshot/locale/us/markets/stocks/gainers`).
+
+        Args:
+            include_otc: Whether to include OTC securities. Defaults to `False`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `STOCK_SNAPSHOT_SCHEMA`.
+        """
         return self.snapshots(direction="gainers", include_otc=include_otc)
 
     def losers(self, *, include_otc: bool = False) -> FeedBuilder:
-        """Top US Stock losers (`/v2/snapshot/locale/us/markets/stocks/losers`)."""
+        """Configure a top US Stock losers feed (`/v2/snapshot/locale/us/markets/stocks/losers`).
+
+        Args:
+            include_otc: Whether to include OTC securities. Defaults to `False`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `STOCK_SNAPSHOT_SCHEMA`.
+        """
         return self.snapshots(direction="losers", include_otc=include_otc)
 
     def daily_market_summary(
@@ -332,7 +503,17 @@ class StocksClient(BaseDomainClient):
         adjusted: bool = True,
         include_otc: bool = False,
     ) -> FeedBuilder:
-        """Fetch grouped daily OHLCV market summary for all US stocks on `target_date`."""
+        """Configure a grouped daily OHLCV market summary feed for all US stocks on `target_date` (`/v2/aggs/grouped/locale/us/market/stocks/{date}`).
+
+        Args:
+            target_date: Calendar date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            adjusted: Whether to adjust for splits. Defaults to `True`.
+            include_otc: Whether to include OTC securities. Defaults to `False`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `DAILY_SUMMARY_SCHEMA`.
+        """
         d_str = format_date_param(target_date)
         params = {
             "adjusted": str(adjusted).lower(),
@@ -351,7 +532,16 @@ class StocksClient(BaseDomainClient):
     def previous_close(
         self, symbol: str, *, adjusted: bool = True
     ) -> FeedBuilder:
-        """Fetch previous day's OHLCV bar for `symbol` (`/v2/aggs/ticker/{ticker}/prev`)."""
+        """Configure a feed for a US Stock's previous trading day OHLCV bar (`/v2/aggs/ticker/{ticker}/prev`).
+
+        Args:
+            symbol: Equity ticker (e.g., `"AAPL"`).
+            adjusted: Whether to adjust for splits. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `BARS_SCHEMA`.
+        """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
         params = {"adjusted": str(adjusted).lower()}
         return self.build_feed(
@@ -374,7 +564,17 @@ class StocksClient(BaseDomainClient):
         *,
         adjusted: bool = True,
     ) -> FeedBuilder:
-        """Fetch daily open/close summary with pre-market and after-hours prices (`/v1/open-close/{ticker}/{date}`)."""
+        """Configure a daily open/close summary feed with pre-market and after-hours prices (`/v1/open-close/{ticker}/{date}`).
+
+        Args:
+            symbol: Equity ticker (e.g., `"AAPL"`).
+            target_date: Calendar date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            adjusted: Whether to adjust for splits. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `DAILY_SUMMARY_SCHEMA`.
+        """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
         d_str = format_date_param(target_date)
         params = {"adjusted": str(adjusted).lower()}
@@ -400,7 +600,21 @@ class StocksClient(BaseDomainClient):
         series_type: str = "close",
         adjusted: bool = True,
     ) -> FeedBuilder:
-        """Simple Moving Average (SMA) indicator feed (`/v1/indicators/sma/{ticker}`)."""
+        """Configure a Simple Moving Average (`SMA`) indicator feed (`/v1/indicators/sma/{ticker}`).
+
+        Args:
+            symbol: Equity ticker (e.g., `"AAPL"`).
+            window: Rolling window period length. Defaults to `50`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+            adjusted: Whether to use split-adjusted prices. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         params = {
             "window": window,
             "timespan": timespan,
@@ -420,7 +634,21 @@ class StocksClient(BaseDomainClient):
         series_type: str = "close",
         adjusted: bool = True,
     ) -> FeedBuilder:
-        """Exponential Moving Average (EMA) indicator feed (`/v1/indicators/ema/{ticker}`)."""
+        """Configure an Exponential Moving Average (`EMA`) indicator feed (`/v1/indicators/ema/{ticker}`).
+
+        Args:
+            symbol: Equity ticker (e.g., `"AAPL"`).
+            window: Rolling window period length. Defaults to `50`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+            adjusted: Whether to use split-adjusted prices. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         params = {
             "window": window,
             "timespan": timespan,
@@ -442,7 +670,23 @@ class StocksClient(BaseDomainClient):
         series_type: str = "close",
         adjusted: bool = True,
     ) -> FeedBuilder:
-        """Moving Average Convergence/Divergence (MACD) indicator feed (`/v1/indicators/macd/{ticker}`)."""
+        """Configure a Moving Average Convergence/Divergence (`MACD`) indicator feed (`/v1/indicators/macd/{ticker}`).
+
+        Args:
+            symbol: Equity ticker (e.g., `"AAPL"`).
+            short_window: Fast EMA period length. Defaults to `12`.
+            long_window: Slow EMA period length. Defaults to `26`.
+            signal_window: Signal line EMA period length. Defaults to `9`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+            adjusted: Whether to use split-adjusted prices. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         params = {
             "short_window": short_window,
             "long_window": long_window,
@@ -464,7 +708,21 @@ class StocksClient(BaseDomainClient):
         series_type: str = "close",
         adjusted: bool = True,
     ) -> FeedBuilder:
-        """Relative Strength Index (RSI) indicator feed (`/v1/indicators/rsi/{ticker}`)."""
+        """Configure a Relative Strength Index (`RSI`) indicator feed (`/v1/indicators/rsi/{ticker}`).
+
+        Args:
+            symbol: Equity ticker (e.g., `"AAPL"`).
+            window: Rolling lookback window length. Defaults to `14`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+            adjusted: Whether to use split-adjusted prices. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         params = {
             "window": window,
             "timespan": timespan,
@@ -482,7 +740,21 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Bi-weekly FINRA short interest (`/stocks/v1/short-interest`)."""
+        """Build a feed for bi-weekly FINRA short interest reports (`/stocks/v1/short-interest`).
+
+        Tracks total shares sold short, average daily trading volume, and days-to-cover
+        reported on FINRA's semi-monthly settlement schedule.
+
+        Args:
+            symbol: Optional single equity ticker (for example, `"GME"`).
+            tickers: Optional multi-ticker filter (`"GME,AMC"` or `["GME", "AMC"]`).
+            **filters: Additional REST query parameters (for example,
+                `settlement_date_gte="2025-01-01"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_short_interest",
             "/stocks/v1/short-interest",
@@ -500,7 +772,20 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Daily short sale volume & ratio (`/stocks/v1/short-volume`)."""
+        """Build a feed for daily off-exchange and exchange short sale volume (`/stocks/v1/short-volume`).
+
+        Reports daily short sale volume, total volume, and short volume ratio across
+        FINRA TRFs and exchange venues.
+
+        Args:
+            symbol: Optional single equity ticker (for example, `"NVDA"`).
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters (for example, `date_gte="2026-01-01"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_short_volume",
             "/stocks/v1/short-volume",
@@ -518,7 +803,18 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Public share float & free float percentage (`/stocks/vX/float`)."""
+        """Build a feed for public share float and free-float percentage (`/stocks/vX/float`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters (for example,
+                `effective_date_gte="2025-01-01"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_float",
             "/stocks/vX/float",
@@ -539,7 +835,18 @@ class StocksClient(BaseDomainClient):
         timeframe: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Quarterly and annual balance sheets (`/stocks/financials/v1/balance-sheets`)."""
+        """Build a feed for standardized quarterly and annual balance sheets (`/stocks/financials/v1/balance-sheets`).
+
+        Args:
+            symbol: Optional single equity ticker (for example, `"AAPL"`).
+            tickers: Optional multi-ticker filter.
+            timeframe: Optional reporting period filter (`"quarterly"`, `"annual"`, or `"ttm"`).
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_balance_sheets",
             "/stocks/financials/v1/balance-sheets",
@@ -560,7 +867,18 @@ class StocksClient(BaseDomainClient):
         timeframe: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Quarterly and annual income statements (`/stocks/financials/v1/income-statements`)."""
+        """Build a feed for standardized quarterly and annual income statements (`/stocks/financials/v1/income-statements`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            timeframe: Optional reporting period filter (`"quarterly"`, `"annual"`, or `"ttm"`).
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_income_statements",
             "/stocks/financials/v1/income-statements",
@@ -581,7 +899,18 @@ class StocksClient(BaseDomainClient):
         timeframe: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Quarterly and annual cash flow statements (`/stocks/financials/v1/cash-flow-statements`)."""
+        """Build a feed for standardized quarterly and annual cash flow statements (`/stocks/financials/v1/cash-flow-statements`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            timeframe: Optional reporting period filter (`"quarterly"`, `"annual"`, or `"ttm"`).
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_cash_flow_statements",
             "/stocks/financials/v1/cash-flow-statements",
@@ -602,7 +931,18 @@ class StocksClient(BaseDomainClient):
         timeframe: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Combined quarterly and annual financial statements (`/vX/reference/financials`)."""
+        """Build a feed for combined financial statements (`/vX/reference/financials`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            timeframe: Optional reporting period filter (`"quarterly"`, `"annual"`, or `"ttm"`).
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_financials",
             "/vX/reference/financials",
@@ -624,7 +964,17 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Valuation, profitability, liquidity, and leverage ratios (`/stocks/financials/v1/ratios`)."""
+        """Build a feed for valuation, profitability, liquidity, and leverage ratios (`/stocks/financials/v1/ratios`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_ratios",
             "/stocks/financials/v1/ratios",
@@ -642,7 +992,18 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Cash and stock dividends (`/stocks/v1/dividends`)."""
+        """Build a feed for cash and stock dividend distributions (`/stocks/v1/dividends`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters (for example,
+                `ex_dividend_date_gte="2025-01-01"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_dividends",
             "/stocks/v1/dividends",
@@ -660,7 +1021,18 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Forward and reverse stock splits (`/stocks/v1/splits`)."""
+        """Build a feed for historical and upcoming forward/reverse stock splits (`/stocks/v1/splits`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters (for example,
+                `execution_date_gte="2025-01-01"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_splits",
             "/stocks/v1/splits",
@@ -678,7 +1050,18 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Upcoming and historical IPO events (`/vX/reference/ipos`)."""
+        """Build a feed for upcoming and historical initial public offerings (`/vX/reference/ipos`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters (for example,
+                `listing_date_gte="2025-01-01"`, `ipo_status="upcoming"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_ipos",
             "/vX/reference/ipos",
@@ -697,7 +1080,20 @@ class StocksClient(BaseDomainClient):
         search: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """All active and historical tickers (`/v3/reference/tickers`)."""
+        """Build a feed for reference ticker directory entries (`/v3/reference/tickers`).
+
+        Args:
+            market: Asset market filter (defaults to `"stocks"`).
+            active: If `True`, include only actively traded symbols; if `False`,
+                include delisted historical symbols.
+            search: Optional free-text search query matching symbol or company name.
+            **filters: Additional REST query parameters (for example, `type="CS"`,
+                `exchange="XNAS"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_tickers",
             "/v3/reference/tickers",
@@ -707,7 +1103,18 @@ class StocksClient(BaseDomainClient):
         )
 
     def ticker_details(self, symbol: str) -> FeedBuilder:
-        """Company profile, SIC, market cap, and address (`/v3/reference/tickers/{ticker}`)."""
+        """Build a feed for a single company's detailed profile (`/v3/reference/tickers/{ticker}`).
+
+        Includes SIC industry classification, market capitalization, share count,
+        headquarters address, and branding metadata.
+
+        Args:
+            symbol: Equity ticker symbol (for example, `"AAPL"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()` and `.poll()`.
+        """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
         return self._rest_collection_feed(
             f"stocks_ticker_details_{canon}",
@@ -717,7 +1124,15 @@ class StocksClient(BaseDomainClient):
         )
 
     def ticker_events(self, symbol: str) -> FeedBuilder:
-        """Symbol change and rebranding history (`/vX/reference/tickers/{ticker}/events`)."""
+        """Build a feed for a symbol's corporate rebranding and ticker-change timeline (`/vX/reference/tickers/{ticker}/events`).
+
+        Args:
+            symbol: Equity ticker symbol (for example, `"META"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()` and `.poll()`.
+        """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
 
         def _fetch() -> list[dict[str, Any]]:
@@ -748,7 +1163,18 @@ class StocksClient(BaseDomainClient):
         )
 
     def related_companies(self, symbol: str) -> FeedBuilder:
-        """Peer/related ticker relationships (`/v1/related-companies/{ticker}`)."""
+        """Build a feed for peer and related company tickers (`/v1/related-companies/{ticker}`).
+
+        Identifies comparable tickers based on news co-mention frequency, institutional
+        holdings overlap, and sector classification.
+
+        Args:
+            symbol: Equity ticker symbol (for example, `"NVDA"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()` and `.poll()`.
+        """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
         return self._rest_collection_feed(
             f"stocks_related_companies_{canon}",
@@ -758,7 +1184,15 @@ class StocksClient(BaseDomainClient):
         )
 
     def ticker_types(self, *, asset_class: str = "stocks") -> FeedBuilder:
-        """Supported security types (`/v3/reference/tickers/types`)."""
+        """Build a feed for supported security type codes (`/v3/reference/tickers/types`).
+
+        Args:
+            asset_class: Asset class filter (defaults to `"stocks"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()` and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_ticker_types",
             "/v3/reference/tickers/types",
@@ -774,7 +1208,19 @@ class StocksClient(BaseDomainClient):
         form_type: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """SEC EDGAR filings index (`/stocks/filings/vX/index`)."""
+        """Build a feed for the SEC EDGAR filings index (`/stocks/filings/vX/index`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            form_type: Optional SEC form filter (for example, `"10-K"`, `"10-Q"`, `"8-K"`).
+            **filters: Additional REST query parameters (for example,
+                `filing_date_gte="2025-01-01"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_sec_filings",
             "/stocks/filings/vX/index",
@@ -796,7 +1242,19 @@ class StocksClient(BaseDomainClient):
         section: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Parsed 10-K narrative sections (`/stocks/filings/10-K/vX/sections`)."""
+        """Build a feed for parsed Form 10-K narrative sections (`/stocks/filings/10-K/vX/sections`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            section: Optional 10-K section identifier (for example, `"item_1"`,
+                `"item_1a"`, `"item_7"`).
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_sec_10k_sections",
             "/stocks/filings/10-K/vX/sections",
@@ -815,7 +1273,17 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Parsed 8-K item disclosures (`/stocks/filings/8-K/vX/text`)."""
+        """Build a feed for parsed Form 8-K material event disclosures (`/stocks/filings/8-K/vX/text`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_sec_8k_text",
             "/stocks/filings/8-K/vX/text",
@@ -833,7 +1301,17 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Categorized SEC filing risk factor disclosures (`/stocks/filings/vX/risk-factors`)."""
+        """Build a feed for categorized SEC filing risk-factor disclosures (`/stocks/filings/vX/risk-factors`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_sec_risk_factors",
             "/stocks/filings/vX/risk-factors",
@@ -851,7 +1329,17 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Structured SEC text & taxonomy disclosures (`/stocks/filings/vX/disclosures`)."""
+        """Build a feed for structured SEC text and taxonomy disclosures (`/stocks/filings/vX/disclosures`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_sec_disclosures",
             "/stocks/filings/vX/disclosures",
@@ -870,7 +1358,18 @@ class StocksClient(BaseDomainClient):
         cik: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Institutional 13F holdings (`/stocks/filings/13f/vX/holdings`)."""
+        """Build a feed for institutional Form 13F equity holdings (`/stocks/filings/13f/vX/holdings`).
+
+        Args:
+            symbol: Optional single equity ticker held by institutional managers.
+            tickers: Optional multi-ticker filter.
+            cik: Optional institutional manager CIK number.
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_sec_13f",
             "/stocks/filings/13f/vX/holdings",
@@ -889,7 +1388,17 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Initial beneficial ownership Form 3 holdings (`/stocks/filings/insider-transactions/vX/holdings`)."""
+        """Build a feed for initial beneficial ownership Form 3 holdings (`/stocks/filings/insider-transactions/vX/holdings`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_sec_form3",
             "/stocks/filings/insider-transactions/vX/holdings",
@@ -907,7 +1416,18 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Form 3/4/5 insider transactions (`/stocks/filings/insider-transactions/vX/transactions`)."""
+        """Build a feed for Form 3, Form 4, and Form 5 insider transactions (`/stocks/filings/insider-transactions/vX/transactions`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters (for example,
+                `transaction_date_gte="2025-01-01"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_sec_insider",
             "/stocks/filings/insider-transactions/vX/transactions",
@@ -927,7 +1447,18 @@ class StocksClient(BaseDomainClient):
         tickers: str | Iterable[str] | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Real-time news articles with sentiment & insights (`/v2/reference/news`)."""
+        """Build a feed for real-time financial news articles with sentiment and entity insights (`/v2/reference/news`).
+
+        Args:
+            symbol: Optional single equity ticker.
+            tickers: Optional multi-ticker filter.
+            **filters: Additional REST query parameters (for example,
+                `published_utc_gte="2026-01-01"`, `order="desc"`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()`, `.historical()`, and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_news",
             "/v2/reference/news",
@@ -939,7 +1470,16 @@ class StocksClient(BaseDomainClient):
         )
 
     def exchanges(self, *, asset_class: str = "stocks") -> FeedBuilder:
-        """Exchange directory (`/v3/reference/exchanges`)."""
+        """Build a feed for the global exchange and trading venue directory (`/v3/reference/exchanges`).
+
+        Args:
+            asset_class: Asset class filter (`"stocks"`, `"options"`, `"crypto"`, `"fx"`,
+                or `"futures"`). Defaults to `"stocks"`.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()` and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_exchanges",
             "/v3/reference/exchanges",
@@ -948,7 +1488,16 @@ class StocksClient(BaseDomainClient):
         )
 
     def conditions(self, *, asset_class: str = "stocks") -> FeedBuilder:
-        """Trade and quote condition code mappings (`/v3/reference/conditions`)."""
+        """Build a feed for SIP/exchange trade and quote condition code mappings (`/v3/reference/conditions`).
+
+        Args:
+            asset_class: Asset class filter (`"stocks"`, `"options"`, `"crypto"`, or `"fx"`).
+                Defaults to `"stocks"`.
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()` and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_conditions",
             "/v3/reference/conditions",
@@ -957,7 +1506,12 @@ class StocksClient(BaseDomainClient):
         )
 
     def market_holidays(self) -> FeedBuilder:
-        """Upcoming market holidays and early closes (`/v1/marketstatus/upcoming`)."""
+        """Build a feed for upcoming exchange holidays and early-close schedules (`/v1/marketstatus/upcoming`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()` and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_market_holidays",
             "/v1/marketstatus/upcoming",
@@ -967,7 +1521,12 @@ class StocksClient(BaseDomainClient):
     holidays = market_holidays
 
     def market_status(self) -> FeedBuilder:
-        """Current exchange and market group open/closed status (`/v1/marketstatus/now`)."""
+        """Build a feed for real-time exchange, market-group, and currency session status (`/v1/marketstatus/now`).
+
+        Returns:
+            A [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] supporting
+            `.snapshot()` and `.poll()`.
+        """
         return self._rest_collection_feed(
             "stocks_market_status",
             "/v1/marketstatus/now",

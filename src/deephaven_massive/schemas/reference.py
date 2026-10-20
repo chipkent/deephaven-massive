@@ -1,4 +1,22 @@
-"""Unified PascalCase PyArrow schemas for Reference, Fundamentals, Short Data, Corporate Actions, and SEC Filings."""
+"""Unified PascalCase PyArrow schemas for reference data, fundamentals, short interest, corporate actions, and SEC filings.
+
+This module defines the strictly typed PyArrow schemas (`SchemaSpec`) and row
+normalizers for non-tick reference and fundamental datasets across Massive.com:
+* **Short Data & Share Float**: FINRA bi-weekly short interest, daily off-exchange
+  short volume by facility, and free-float share metrics.
+* **Fundamental Financials & Valuation Ratios**: Income statements, balance
+  sheets, cash flow statements (supporting both v1 and vX XBRL taxonomies), and
+  daily valuation multiples.
+* **Corporate Actions**: Cash/stock dividends, stock splits, IPO calendars, and
+  ticker change events.
+* **Security Master & Venue Directories**: Ticker directories, detailed company
+  profiles, peer relationships, security types, option/futures contract specs,
+  futures product catalogs, trading schedules, exchanges, condition codes,
+  market holidays, and live market status.
+* **SEC Filings & News**: EDGAR filing index, 10-K sections, 8-K items, risk
+  factors, Form 13F institutional holdings, Form 3/4 insider transactions, and
+  sentiment-tagged financial news.
+"""
 
 from __future__ import annotations
 
@@ -23,7 +41,16 @@ if TYPE_CHECKING:
 def normalize_short_interest(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/stocks/v1/short-interest` rows."""
+    """Normalize a ``/stocks/v1/short-interest`` FINRA bi-weekly short interest row.
+
+    Args:
+        row: Raw short interest dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``SHORT_INTEREST_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "SettlementDate": _first_present(row, "SettlementDate", "settlement_date"),
@@ -36,7 +63,20 @@ def normalize_short_interest(
 def normalize_short_volume(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/stocks/v1/short-volume` rows."""
+    """Normalize a ``/stocks/v1/short-volume`` daily short sale volume row.
+
+    Extracts aggregate short and total volume alongside facility-specific short
+    volumes (FINRA TRF Carteret/Chicago, NYSE, Arca/ADF) and flattens any
+    remaining facility columns into PascalCase.
+
+    Args:
+        row: Raw daily short volume dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``SHORT_VOLUME_SCHEMA``.
+    """
     flat = flatten_dict(row)
     flat.update(
         {
@@ -75,7 +115,15 @@ def normalize_short_volume(
 def normalize_share_float(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/stocks/vX/float` rows."""
+    """Normalize a ``/stocks/vX/float`` public free-float and shares-outstanding row.
+
+    Args:
+        row: Raw share float dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``SHARE_FLOAT_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "EffectiveDate": _first_present(row, "EffectiveDate", "effective_date", "date"),
@@ -92,7 +140,23 @@ def normalize_share_float(
 def normalize_financial_statement(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize balance sheets, income statements, and cash flow statements (supporting both v1 and vX formats)."""
+    """Normalize a balance sheet, income statement, or cash flow statement row.
+
+    Supports both flat ``/stocks/financials/v1/*`` statements and nested
+    ``/vX/reference/financials`` XBRL structures, extracting core anchor
+    metrics (Revenue, NetIncome, OperatingIncome, DilutedEps, TotalAssets,
+    TotalLiabilities, TotalEquity, CashAndEquivalents, OperatingCashFlow,
+    CapitalExpenditure, FreeCashFlow) while preserving all additional line items
+    as dynamic PascalCase columns.
+
+    Args:
+        row: Raw financial statement dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``FINANCIAL_STATEMENT_SCHEMA``.
+    """
     flat = flatten_dict(row)
     fin = row.get("financials") if isinstance(row.get("financials"), Mapping) else {}
     for section in fin.values():
@@ -153,7 +217,15 @@ def normalize_financial_statement(
 def normalize_ratios(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/stocks/financials/v1/ratios` rows."""
+    """Normalize a ``/stocks/financials/v1/ratios`` valuation and profitability ratios row.
+
+    Args:
+        row: Raw financial ratios dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``RATIOS_SCHEMA``.
+    """
     flat = flatten_dict(row)
     flat.update(
         {
@@ -193,7 +265,15 @@ def normalize_ratios(
 def normalize_dividend(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize dividend declaration rows."""
+    """Normalize a cash or stock dividend declaration row.
+
+    Args:
+        row: Raw dividend dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``DIVIDENDS_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "ExDividendDate": _first_present(row, "ExDividendDate", "ex_dividend_date"),
@@ -210,7 +290,15 @@ def normalize_dividend(
 def normalize_split(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize stock split rows."""
+    """Normalize a forward or reverse stock split row.
+
+    Args:
+        row: Raw stock split dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``SPLITS_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "ExecutionDate": _first_present(row, "ExecutionDate", "execution_date"),
@@ -222,7 +310,15 @@ def normalize_split(
 def normalize_ipo(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/vX/reference/ipos` rows."""
+    """Normalize a ``/vX/reference/ipos`` initial public offering event row.
+
+    Args:
+        row: Raw IPO event dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``IPOS_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "IssuerName": _first_present(row, "IssuerName", "issuer_name"),
@@ -247,7 +343,15 @@ def normalize_ipo(
 def normalize_ticker(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v3/reference/tickers` directory rows."""
+    """Normalize a ``/v3/reference/tickers`` security directory row.
+
+    Args:
+        row: Raw ticker directory dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``TICKERS_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "Name": _first_present(row, "Name", "name"),
@@ -269,7 +373,17 @@ def normalize_ticker(
 def normalize_ticker_details(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v3/reference/tickers/{ticker}` detailed profile."""
+    """Normalize a ``/v3/reference/tickers/{ticker}`` company profile row.
+
+    Args:
+        row: Raw ticker details dictionary (including nested ``address`` and
+            ``branding`` sub-objects).
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``TICKER_DETAILS_SCHEMA``.
+    """
     addr = row.get("address") if isinstance(row.get("address"), Mapping) else {}
     flat = flatten_dict(row)
     flat.update(
@@ -314,7 +428,16 @@ def normalize_ticker_details(
 def normalize_ticker_event(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/vX/reference/tickers/{id}/events` rows."""
+    """Normalize a ``/vX/reference/tickers/{id}/events`` symbol change event row.
+
+    Args:
+        row: Raw ticker event dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``TICKER_EVENTS_SCHEMA``.
+    """
     tc = row.get("ticker_change") if isinstance(row.get("ticker_change"), Mapping) else {}
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
@@ -327,7 +450,17 @@ def normalize_ticker_event(
 def normalize_related_company(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v1/related-companies/{ticker}` rows."""
+    """Normalize a ``/v1/related-companies/{ticker}`` peer relationship row.
+
+    Args:
+        row: Raw related company dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol`` and
+            ``RelatedSymbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``RELATED_COMPANIES_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "symbol"),
         "RelatedSymbol": _norm_symbol(row, norm, "RelatedSymbol", "ticker"),
@@ -337,7 +470,17 @@ def normalize_related_company(
 def normalize_ticker_type(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v3/reference/tickers/types` rows."""
+    """Normalize a ``/v3/reference/tickers/types`` security classification row.
+
+    Args:
+        row: Raw ticker type classification dictionary.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``TICKER_TYPES_SCHEMA``.
+    """
     return {
         "Code": _first_present(row, "Code", "code"),
         "Description": _first_present(row, "Description", "description"),
@@ -349,7 +492,16 @@ def normalize_ticker_type(
 def normalize_option_contract(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v3/reference/options/contracts` rows."""
+    """Normalize a ``/v3/reference/options/contracts`` OCC option contract row.
+
+    Args:
+        row: Raw option contract specification dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``OPTION_CONTRACTS_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "UnderlyingSymbol": _first_present(
@@ -370,7 +522,16 @@ def normalize_option_contract(
 def normalize_futures_contract(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/futures/vX/contracts` rows."""
+    """Normalize a ``/futures/vX/contracts`` futures contract specification row.
+
+    Args:
+        row: Raw futures contract specification dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``FUTURES_CONTRACTS_SCHEMA``.
+    """
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "ProductCode": _first_present(row, "ProductCode", "product_code"),
@@ -389,7 +550,17 @@ def normalize_futures_contract(
 def normalize_futures_product(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/futures/vX/products` rows."""
+    """Normalize a ``/futures/vX/products`` futures product catalog row.
+
+    Args:
+        row: Raw futures product dictionary.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``FUTURES_PRODUCTS_SCHEMA``.
+    """
     return {
         "ProductCode": _first_present(row, "ProductCode", "product_code"),
         "Name": _first_present(row, "Name", "name"),
@@ -408,7 +579,17 @@ def normalize_futures_product(
 def normalize_futures_schedule(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/futures/vX/schedules` rows."""
+    """Normalize a ``/futures/vX/schedules`` trading session event row.
+
+    Args:
+        row: Raw futures session schedule dictionary.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``FUTURES_SCHEDULES_SCHEMA``.
+    """
     return {
         "SessionEndDate": _first_present(row, "SessionEndDate", "session_end_date"),
         "ProductCode": _first_present(row, "ProductCode", "product_code"),
@@ -422,7 +603,16 @@ def normalize_futures_schedule(
 def normalize_sec_filing(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize SEC EDGAR index, 10-K sections, 8-K text, risk factors, and disclosures."""
+    """Normalize an SEC EDGAR filing index, 10-K section, 8-K item, risk factor, or disclosure row.
+
+    Args:
+        row: Raw SEC filing or parsed section dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``SEC_FILINGS_SCHEMA``.
+    """
     flat = flatten_dict(row)
     flat.update(
         {
@@ -450,7 +640,15 @@ def normalize_sec_filing(
 def normalize_sec_13f(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/stocks/filings/13F/v1/holdings` rows."""
+    """Normalize a ``/stocks/filings/13F/v1/holdings`` institutional holding row.
+
+    Args:
+        row: Raw Form 13F holding dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``SEC_13F_SCHEMA``.
+    """
     flat = flatten_dict(row)
     flat.update(
         {
@@ -481,7 +679,16 @@ def normalize_sec_13f(
 def normalize_sec_insider(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize Form 3 and Form 4 insider ownership and transaction rows."""
+    """Normalize a Form 3 or Form 4 insider ownership and transaction row.
+
+    Args:
+        row: Raw insider transaction or ownership dictionary.
+        norm: Optional symbol normalizer used to canonicalize ``Symbol``.
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``SEC_INSIDER_SCHEMA``.
+    """
     flat = flatten_dict(row)
     flat.update(
         {
@@ -521,7 +728,16 @@ def normalize_sec_insider(
 def normalize_news(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v2/reference/news` rows with publisher and sentiment insights."""
+    """Normalize a ``/v2/reference/news`` article row with publisher and sentiment insights.
+
+    Args:
+        row: Raw news article dictionary.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``NEWS_SCHEMA``.
+    """
     pub = row.get("publisher") if isinstance(row.get("publisher"), Mapping) else {}
     insights = row.get("insights") if isinstance(row.get("insights"), list) else []
     first_insight = (
@@ -547,7 +763,16 @@ def normalize_news(
 def normalize_exchange(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v3/reference/exchanges` and `/futures/vX/exchanges` rows."""
+    """Normalize a ``/v3/reference/exchanges`` or ``/futures/vX/exchanges`` venue row.
+
+    Args:
+        row: Raw exchange directory dictionary.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``EXCHANGES_SCHEMA``.
+    """
     return {
         "ExchangeId": _first_present(row, "ExchangeId", "id"),
         "Type": _first_present(row, "Type", "type"),
@@ -565,7 +790,17 @@ def normalize_exchange(
 def normalize_condition(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v3/reference/conditions` rows."""
+    """Normalize a ``/v3/reference/conditions`` trade/quote condition code row.
+
+    Args:
+        row: Raw condition code dictionary.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``CONDITIONS_SCHEMA``.
+    """
     return {
         "ConditionId": _first_present(row, "ConditionId", "id"),
         "Type": _first_present(row, "Type", "type"),
@@ -579,7 +814,16 @@ def normalize_condition(
 def normalize_holiday(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v1/marketstatus/upcoming` rows."""
+    """Normalize a ``/v1/marketstatus/upcoming`` market holiday or early-close row.
+
+    Args:
+        row: Raw market holiday dictionary.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching ``HOLIDAYS_SCHEMA``.
+    """
     return {
         "Date": _first_present(row, "Date", "date"),
         "Exchange": _first_present(row, "Exchange", "exchange"),
@@ -593,7 +837,17 @@ def normalize_holiday(
 def normalize_market_status(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize `/v1/marketstatus/now` rows."""
+    """Normalize a ``/v1/marketstatus/now`` real-time exchange and currency status row.
+
+    Args:
+        row: Raw market status dictionary.
+        norm: Optional symbol normalizer (accepted for ``RowNormalizer``
+            compatibility).
+
+    Returns:
+        dict[str, Any]: Normalized row dictionary matching
+        ``MARKET_STATUS_SCHEMA``.
+    """
     exchanges = row.get("exchanges") if isinstance(row.get("exchanges"), Mapping) else {}
     currencies = (
         row.get("currencies") if isinstance(row.get("currencies"), Mapping) else {}

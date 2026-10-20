@@ -1,4 +1,11 @@
-"""Micro-batching Deephaven TablePublisher with startup seed cutover deduplication."""
+"""Micro-batching Deephaven `TablePublisher` with lossless startup seed cutover deduplication.
+
+`MicroBatchPublisher` bridges high-frequency WebSocket JSON frames into Deephaven's
+update graph. It buffers incoming rows into columnar `pyarrow.RecordBatch` chunks,
+flushes them periodically (or when `max_batch_size` is reached), and coordinates
+startup seeding so that `.latest()` and `.history(seed_since=...)` transition from
+REST snapshots to live WebSocket ticks without dropping or duplicating events.
+"""
 
 from __future__ import annotations
 
@@ -36,13 +43,19 @@ def _row_timestamp_ns(row: Mapping[str, Any]) -> int | None:
 
 
 class MicroBatchPublisher:
-    """Thread-safe micro-batching wrapper around Deephaven's :func:`table_publisher`.
+    """Thread-safe micro-batching wrapper around Deephaven's `table_publisher`.
 
-    Features:
-    - Batches incoming WebSocket rows into Arrow :class:`pyarrow.RecordBatch` chunks.
-    - Wraps all Deephaven JNI / publisher calls in the captured :class:`ExecutionContext`.
-    - Supports per-feed symbol filtering for multiplexed WebSocket connections and reactive watchlists.
-    - Supports deterministic startup seed buffering and deduplication (`begin_seeding` / `complete_seeding`).
+    Key responsibilities:
+    - Coalesces incoming WebSocket events into `pyarrow.RecordBatch` chunks flushed
+      every `flush_interval_ms` or immediately upon reaching `max_batch_size`.
+    - Binds the captured Deephaven `ExecutionContext` on background threads before
+      invoking `TablePublisher.add`.
+    - Enforces per-publisher symbol filtering so multiple feeds sharing a multiplexed
+      WebSocket channel receive only their subscribed symbols.
+    - Implements two-phase startup seeding (`begin_seeding` / `complete_seeding`) that
+      buffers live WebSocket events while the REST seed is in flight, deduplicates by
+      `(Symbol, TradeId)` and `(key_cols, Timestamp, SequenceNumber)`, and flushes in
+      strict FIFO order under `_publish_lock`.
     """
 
     def __init__(
@@ -56,6 +69,19 @@ class MicroBatchPublisher:
         max_batch_size: int = 10_000,
         allowed_symbols: Iterable[str] | None = None,
     ) -> None:
+        """Initialize a `MicroBatchPublisher` and allocate its Deephaven blink table.
+
+        Args:
+            name: Logical name passed to `deephaven.stream.table_publisher`.
+            schema_spec: `SchemaSpec` governing column types and row normalization.
+            symbol_normalizer: Optional `SymbolNormalizer` for canonicalizing `Symbol` values.
+            exec_ctx: Optional Deephaven `ExecutionContext` bound during table creation
+                and flushes.
+            flush_interval_ms: Milliseconds between background flush cycles.
+            max_batch_size: Maximum buffered rows before an immediate flush is triggered.
+            allowed_symbols: Optional initial iterable of symbols permitted through the
+                publisher filter (`None` disables filtering).
+        """
         from deephaven.stream.table_publisher import table_publisher
 
         self.name = name
@@ -93,13 +119,13 @@ class MicroBatchPublisher:
 
     @property
     def is_seeded(self) -> bool:
-        """Return True if startup seeding has completed on this publisher."""
+        """Return `True` if startup seeding (`complete_seeding`) has completed."""
         with self._lock:
             return self._seeded
 
     @property
     def has_snapshot_seed(self) -> bool:
-        """Return True if a REST snapshot or historical seed has been applied to this publisher."""
+        """Return `True` if a REST snapshot or historical seed has been applied."""
         with self._lock:
             return self._has_snapshot_seed
 
@@ -109,35 +135,36 @@ class MicroBatchPublisher:
             self._has_snapshot_seed = True
 
     def acquire_consumer(self) -> int:
-        """Increment and return the active consumer reference count on this publisher."""
+        """Increment and return the active `FeedBuilder` consumer reference count."""
         with self._lock:
             self._consumer_count += 1
             return self._consumer_count
 
     def release_consumer(self) -> int:
-        """Decrement and return the remaining active consumer reference count on this publisher."""
+        """Decrement and return the remaining active `FeedBuilder` consumer reference count."""
         with self._lock:
             self._consumer_count = max(0, self._consumer_count - 1)
             return self._consumer_count
 
     @property
     def rows_published(self) -> int:
-        """Return the total number of rows published to Deephaven so far."""
+        """Return the cumulative number of rows published to Deephaven so far."""
         with self._lock:
             return self._rows_published
 
     @property
     def blink_table(self) -> Table:
-        """Return the raw blink table including the internal `__ReceivedAt` column."""
+        """Return the raw Deephaven blink `Table` including the internal `__ReceivedAt` column."""
         return self._blink_table
 
     @property
     def user_blink_table(self) -> Table:
-        """Return the blink table with internal `__ReceivedAt` stripped."""
+        """Return the Deephaven blink `Table` with internal `__ReceivedAt` stripped."""
         with exec_ctx_scope(self._exec_ctx):
             return self._blink_table.drop_columns(["__ReceivedAt"])
 
     def _canonicalize(self, sym: str) -> str:
+        """Canonicalize `sym` using `self.symbol_normalizer` if present."""
         return (
             self.symbol_normalizer.canonical(sym)
             if self.symbol_normalizer is not None
@@ -145,7 +172,11 @@ class MicroBatchPublisher:
         )
 
     def set_allowed_symbols(self, symbols: Iterable[str] | None) -> None:
-        """Replace the set of allowed symbols (`None` disables symbol filtering)."""
+        """Replace the set of allowed symbols (`None` disables symbol filtering).
+
+        Args:
+            symbols: Iterable of symbol strings to permit, or `None` to accept all rows.
+        """
         with self._lock:
             if symbols is None:
                 self._allowed_symbols = None
@@ -153,7 +184,11 @@ class MicroBatchPublisher:
                 self._allowed_symbols = {self._canonicalize(s) for s in symbols}
 
     def enable_symbols(self, symbols: Iterable[str]) -> None:
-        """Enable one or more symbols in the publisher's symbol filter."""
+        """Add one or more symbols to the publisher's allowed symbol filter.
+
+        Args:
+            symbols: Iterable of symbol strings to enable.
+        """
         canon = {self._canonicalize(s) for s in symbols}
         with self._lock:
             if self._allowed_symbols is None:
@@ -162,7 +197,11 @@ class MicroBatchPublisher:
                 self._allowed_symbols.update(canon)
 
     def disable_symbols(self, symbols: Iterable[str]) -> None:
-        """Disable one or more symbols in the publisher's symbol filter."""
+        """Remove one or more symbols from the publisher's allowed symbol filter.
+
+        Args:
+            symbols: Iterable of symbol strings to disable.
+        """
         canon = {self._canonicalize(s) for s in symbols}
         with self._lock:
             if self._allowed_symbols is not None:
@@ -170,7 +209,7 @@ class MicroBatchPublisher:
 
     @property
     def allowed_symbols(self) -> frozenset[str] | None:
-        """Return a snapshot of currently allowed symbols, or `None` if unfiltered."""
+        """Return an immutable snapshot of currently allowed symbols, or `None` if unfiltered."""
         with self._lock:
             return (
                 frozenset(self._allowed_symbols)
@@ -179,7 +218,7 @@ class MicroBatchPublisher:
             )
 
     def begin_seeding(self) -> None:
-        """Enter startup seeding mode: buffer incoming WebSocket rows until `complete_seeding`."""
+        """Enter startup seeding mode so incoming WebSocket rows are buffered until `complete_seeding`."""
         with self._lock:
             self._seeding = True
 
@@ -189,7 +228,16 @@ class MicroBatchPublisher:
         *,
         seed_since: Any = None,
     ) -> int:
-        """Deduplicate buffered WebSocket rows against `seed_rows` and flush both to Deephaven."""
+        """Deduplicate buffered WebSocket rows against `seed_rows` and flush both to Deephaven.
+
+        Args:
+            seed_rows: Raw REST snapshot or historical backfill rows.
+            seed_since: Optional minimum timestamp cutoff (`str`, `datetime`, or epoch
+                number); seed rows older than `seed_since` are discarded.
+
+        Returns:
+            Total number of merged seed and buffered WebSocket rows flushed to Deephaven.
+        """
         now_ns = time.time_ns()
         min_seed_ts_ns = to_utc_ns(seed_since) if seed_since is not None else None
         norm_seeds: list[dict[str, Any]] = []
@@ -265,7 +313,15 @@ class MicroBatchPublisher:
         *,
         already_normalized: bool = False,
     ) -> int:
-        """Normalize, filter, and enqueue incoming rows. Flushes immediately if `max_batch_size` is reached."""
+        """Normalize, filter, and enqueue incoming rows, flushing if `max_batch_size` is reached.
+
+        Args:
+            rows: Sequence of raw wire dictionaries or pre-normalized row dictionaries.
+            already_normalized: If `True`, skips running `schema_spec.normalizer`.
+
+        Returns:
+            Number of rows accepted after symbol filtering.
+        """
         if not rows:
             return 0
 
@@ -316,7 +372,11 @@ class MicroBatchPublisher:
         return len(accepted)
 
     def flush_now(self) -> int:
-        """Atomically drain the micro-batch buffer and publish a RecordBatch to Deephaven in strict FIFO order."""
+        """Atomically drain the micro-batch buffer and publish a `RecordBatch` in FIFO order.
+
+        Returns:
+            Number of rows published in this flush (0 if seeding is active or buffer is empty).
+        """
         with self._publish_lock:
             with self._lock:
                 if self._seeding or not self._buffer:
@@ -343,7 +403,7 @@ class MicroBatchPublisher:
             return len(batch_rows)
 
     def start(self) -> None:
-        """Start the background periodic flush thread."""
+        """Start the background periodic flush daemon thread (idempotent)."""
         with self._lock:
             if self._flush_thread is not None and self._flush_thread.is_alive():
                 return

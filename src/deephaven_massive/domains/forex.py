@@ -1,4 +1,10 @@
-"""Global Forex domain client (`m.forex`) covering quotes, bars, FMV, snapshots, currency conversion, and indicators."""
+"""Global Forex domain client (`m.forex`).
+
+This module implements :class:`ForexClient`, which provides real-time WebSocket
+streams (`quotes`, `bars`, `fmv`), REST snapshots, historical backfills (via S3
+Flat Files or REST), real-time currency conversion, and technical indicators
+for global foreign exchange pairs (`EUR/USD`, `GBP/JPY`, etc.).
+"""
 
 from __future__ import annotations
 
@@ -34,9 +40,26 @@ if TYPE_CHECKING:
 
 
 class ForexClient(BaseDomainClient):
-    """Domain client for Global Forex (`EUR/USD`, `GBP/JPY`, etc.)."""
+    """Domain client for Global Forex (`EUR/USD`, `GBP/JPY`, etc.) feeds (`m.forex`).
+
+    Currency pairs may be passed in `"EUR/USD"`, `"EUR-USD"`, `"C:EURUSD"`, or
+    `"C:EUR-USD"` notation. ``ForexClient`` normalizes all pairs to the
+    canonical `"BASE/QUOTE"` representation (e.g., `"EUR/USD"`) in every
+    Deephaven table while translating to Massive's wire format (`"C.EUR/USD"`
+    on WebSockets and `"C:EURUSD"` on REST/S3) automatically.
+
+    Example:
+        Stream live G10 currency BBO quotes seeded with the latest snapshot::
+
+            fx = m.forex.quotes(["EUR/USD", "USD/JPY", "GBP/USD"]).with_seed().stream()
+    """
 
     def __init__(self, session: MassiveSession) -> None:
+        """Initialize the Global Forex domain client.
+
+        Args:
+            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+        """
         super().__init__(session, domain="forex")
 
     def _fetch_forex_snapshots(
@@ -64,7 +87,23 @@ class ForexClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, or fetch historical Forex BBO quotes (`C.*`, `/v3/quotes/{fxTicker}`)."""
+        """Configure a Global Forex BBO quotes feed (`C.*`, `/v3/quotes/{fxTicker}`).
+
+        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        `.poll()`, and `.historical()` (backed by S3 `global_forex/quotes_v1`
+        or REST `/v3/quotes/{fxTicker}`).
+
+        Args:
+            pairs: Currency pair (`"EUR/USD"`), iterable of pairs, `"*"` for
+                all Forex pairs, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"`).
+            symbol_col: Column name to watch when `pairs` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `QUOTES_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url("forex", feed_override=feed)
 
         def _rest_path(
@@ -109,7 +148,29 @@ class ForexClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, or fetch historical Forex OHLCV bars (`CAS.*` / `CA.*`, `/v2/aggs/...`)."""
+        """Configure a Global Forex OHLCV bars feed (`CAS.*` / `CA.*`, `/v2/aggs/...`).
+
+        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
+        `.poll()`, and `.historical()` (routed to S3
+        `global_forex/minute_aggs_v1` or `global_forex/day_aggs_v1` when
+        `multiplier == 1`, or REST `/v2/aggs/...`).
+
+        Args:
+            pairs: Currency pair (`"EUR/USD"`), iterable of pairs, `"*"` for
+                all Forex pairs, or a reactive Deephaven `Table` watchlist.
+            multiplier: Number of `timespan` units per bar. Defaults to `1`.
+            timespan: Bar duration unit (`"second"`, `"minute"`, `"hour"`,
+                `"day"`, `"week"`, `"month"`, `"quarter"`, `"year"`). Defaults
+                to `"minute"`.
+            adjusted: Whether to adjust historical bars. Defaults to `True`.
+            feed: Optional feed tier override (`"realtime"`).
+            symbol_col: Column name to watch when `pairs` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `BARS_SCHEMA`.
+        """
         clean_span = timespan.strip().lower()
         ws_channel = "CAS" if clean_span == "second" else "CA"
         ws_url = self.session.config.resolve_ws_url("forex", feed_override=feed)
@@ -167,7 +228,19 @@ class ForexClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream Forex Fair Market Value (`FMV.*` on `business.massive.com`)."""
+        """Configure a Global Forex Fair Market Value (`FMV.*`) stream on `business.massive.com`.
+
+        Args:
+            pairs: Currency pair (`"EUR/USD"`), iterable of pairs, `"*"` for
+                all Forex pairs, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"`).
+            symbol_col: Column name to watch when `pairs` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.stream()` with
+            `FMV_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url(
             "forex", feed_override=feed, is_fmv=True
         )
@@ -186,7 +259,22 @@ class ForexClient(BaseDomainClient):
         *,
         direction: str | None = None,
     ) -> FeedBuilder:
-        """Snapshot or poll Forex pairs (including top gainers/losers)."""
+        """Configure a Global Forex market snapshots feed (`/v2/snapshot/locale/global/markets/forex/...`).
+
+        Args:
+            pairs: Optional currency pair or iterable of pairs to filter.
+                When `None` and `direction` is `None`, returns snapshots for
+                all active currency pairs.
+            direction: Optional top-movers filter (`"gainers"` or `"losers"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `STOCK_SNAPSHOT_SCHEMA`.
+
+        Raises:
+            ValueError: If `direction` is not `"gainers"` or `"losers"` when
+                evaluated.
+        """
         canon_syms = self.canonical_symbols(pairs) if pairs is not None else None
 
         def _fetch() -> list[dict[str, Any]]:
@@ -207,13 +295,31 @@ class ForexClient(BaseDomainClient):
         )
 
     def top_movers(self, direction: str = "gainers") -> FeedBuilder:
-        """Top Forex market movers (`direction='gainers'` or `'losers'`, `/v2/snapshot/locale/global/markets/forex/{direction}`)."""
+        """Configure a top Forex market movers feed (`/v2/snapshot/locale/global/markets/forex/{direction}`).
+
+        Args:
+            direction: `"gainers"` (default) or `"losers"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `STOCK_SNAPSHOT_SCHEMA`.
+        """
         return self.snapshots(direction=direction)
 
     def last_quote(
         self, from_currency: str, to_currency: str | None = None
     ) -> FeedBuilder:
-        """Last BBO quote for a currency pair (`/v1/last_quote/currencies/{from}/{to}`)."""
+        """Configure a latest BBO quote feed for a currency pair (`/v1/last_quote/currencies/{from}/{to}`).
+
+        Args:
+            from_currency: Base currency (`"EUR"`) or full pair (`"EUR/USD"`
+                when `to_currency` is omitted).
+            to_currency: Optional quote currency (`"USD"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `QUOTES_SCHEMA`.
+        """
         pair = (
             f"{from_currency}/{to_currency}"
             if to_currency is not None
@@ -233,7 +339,16 @@ class ForexClient(BaseDomainClient):
     def daily_market_summary(
         self, target_date: str | date | datetime, *, adjusted: bool = True
     ) -> FeedBuilder:
-        """Grouped daily summary for all Forex pairs on `target_date` (`/v2/aggs/grouped/locale/global/market/fx/{date}`)."""
+        """Configure a grouped daily OHLCV summary feed for all Forex pairs on `target_date` (`/v2/aggs/grouped/locale/global/market/fx/{date}`).
+
+        Args:
+            target_date: Calendar date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            adjusted: Whether to adjust for splits. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `DAILY_SUMMARY_SCHEMA`.
+        """
         d_str = format_date_param(target_date)
         return self.build_feed(
             name="forex_daily_market_summary",
@@ -248,7 +363,16 @@ class ForexClient(BaseDomainClient):
     def previous_close(
         self, pair: str, *, adjusted: bool = True
     ) -> FeedBuilder:
-        """Previous day's OHLCV bar for a Forex pair (`/v2/aggs/ticker/{forexTicker}/prev`)."""
+        """Configure a feed for a Forex pair's previous trading day OHLCV bar (`/v2/aggs/ticker/{forexTicker}/prev`).
+
+        Args:
+            pair: Currency pair (e.g., `"EUR/USD"` or `"C:EURUSD"`).
+            adjusted: Whether to adjust for splits. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `BARS_SCHEMA`.
+        """
         canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
         ticker = self.symbol_normalizer.rest_ticker(canon)  # type: ignore[union-attr]
         return self.build_feed(
@@ -271,7 +395,17 @@ class ForexClient(BaseDomainClient):
         *,
         adjusted: bool = True,
     ) -> FeedBuilder:
-        """Daily open/close summary for a Forex pair (`/v1/open-close/{forexTicker}/{date}`)."""
+        """Configure a daily open/close summary feed for a Forex pair (`/v1/open-close/{forexTicker}/{date}`).
+
+        Args:
+            pair: Currency pair (e.g., `"EUR/USD"` or `"C:EURUSD"`).
+            target_date: Calendar date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            adjusted: Whether to adjust for splits. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `DAILY_SUMMARY_SCHEMA`.
+        """
         canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
         ticker = self.symbol_normalizer.rest_ticker(canon)  # type: ignore[union-attr]
         d_str = format_date_param(target_date)
@@ -296,7 +430,19 @@ class ForexClient(BaseDomainClient):
         amount: float = 100.0,
         precision: int = 2,
     ) -> FeedBuilder:
-        """Real-time currency conversion (`/v1/conversion/{from}/{to}`)."""
+        """Configure a real-time currency conversion feed (`/v1/conversion/{from}/{to}`).
+
+        Args:
+            from_currency: 3-letter ISO source currency code (e.g., `"USD"`).
+            to_currency: 3-letter ISO target currency code (e.g., `"EUR"`).
+            amount: Monetary amount of `from_currency` to convert. Defaults
+                to `100.0`.
+            precision: Decimal places for the converted amount. Defaults to `2`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `CURRENCY_CONVERSION_SCHEMA`.
+        """
         fc = from_currency.strip().upper()
         tc = to_currency.strip().upper()
         return self.build_feed(
@@ -317,7 +463,17 @@ class ForexClient(BaseDomainClient):
         search: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Forex currency pairs directory (`/v3/reference/tickers?market=fx`)."""
+        """Configure a Forex currency pairs reference directory feed (`/v3/reference/tickers?market=fx`).
+
+        Args:
+            active: If `True` (default), return only active currency pairs.
+            search: Optional keyword search query across pair tickers/names.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `TICKERS_SCHEMA`.
+        """
         params = normalize_filter_params(
             {"market": "fx", "active": str(active).lower(), "search": search},
             filters,
@@ -331,7 +487,12 @@ class ForexClient(BaseDomainClient):
         )
 
     def exchanges(self) -> FeedBuilder:
-        """Forex exchange directory (`/v3/reference/exchanges?asset_class=fx`)."""
+        """Configure a Forex institutional venue directory feed (`/v3/reference/exchanges?asset_class=fx`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `EXCHANGES_SCHEMA`.
+        """
         return self.build_feed(
             name="forex_exchanges",
             schema_spec=EXCHANGES_SCHEMA,
@@ -341,7 +502,12 @@ class ForexClient(BaseDomainClient):
         )
 
     def market_holidays(self) -> FeedBuilder:
-        """Upcoming market holidays (`/v1/marketstatus/upcoming`)."""
+        """Configure an upcoming market holidays feed (`/v1/marketstatus/upcoming`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `HOLIDAYS_SCHEMA`.
+        """
         return self.build_feed(
             name="forex_market_holidays",
             schema_spec=HOLIDAYS_SCHEMA,
@@ -353,7 +519,12 @@ class ForexClient(BaseDomainClient):
     holidays = market_holidays
 
     def market_status(self) -> FeedBuilder:
-        """Current Forex and currency market status (`/v1/marketstatus/now`)."""
+        """Configure a current Forex and currency market status feed (`/v1/marketstatus/now`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `MARKET_STATUS_SCHEMA`.
+        """
         return self.build_feed(
             name="forex_market_status",
             schema_spec=MARKET_STATUS_SCHEMA,
@@ -368,7 +539,20 @@ class ForexClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """SMA indicator for a Forex pair."""
+        """Configure a Simple Moving Average (`SMA`) indicator feed for a Forex pair (`/v1/indicators/sma/{forexTicker}`).
+
+        Args:
+            pair: Currency pair (e.g., `"EUR/USD"` or `"C:EURUSD"`).
+            window: Rolling window period length. Defaults to `50`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "SMA",
             pair,
@@ -386,7 +570,20 @@ class ForexClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """EMA indicator for a Forex pair."""
+        """Configure an Exponential Moving Average (`EMA`) indicator feed for a Forex pair (`/v1/indicators/ema/{forexTicker}`).
+
+        Args:
+            pair: Currency pair (e.g., `"EUR/USD"` or `"C:EURUSD"`).
+            window: Rolling window period length. Defaults to `50`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "EMA",
             pair,
@@ -406,7 +603,22 @@ class ForexClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """MACD indicator for a Forex pair."""
+        """Configure a Moving Average Convergence/Divergence (`MACD`) indicator feed for a Forex pair (`/v1/indicators/macd/{forexTicker}`).
+
+        Args:
+            pair: Currency pair (e.g., `"EUR/USD"` or `"C:EURUSD"`).
+            short_window: Fast EMA period length. Defaults to `12`.
+            long_window: Slow EMA period length. Defaults to `26`.
+            signal_window: Signal line EMA period length. Defaults to `9`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "MACD",
             pair,
@@ -430,7 +642,20 @@ class ForexClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """RSI indicator for a Forex pair."""
+        """Configure a Relative Strength Index (`RSI`) indicator feed for a Forex pair (`/v1/indicators/rsi/{forexTicker}`).
+
+        Args:
+            pair: Currency pair (e.g., `"EUR/USD"` or `"C:EURUSD"`).
+            window: Rolling lookback window length. Defaults to `14`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "RSI",
             pair,

@@ -1,4 +1,26 @@
-"""Domain sub-clients for MassiveSession."""
+"""Domain sub-clients attached to ``MassiveSession``.
+
+Each domain client in this package exposes a fluent ``FeedBuilder`` catalog for
+a specific asset class or data provider:
+* ``StocksClient`` (``m.stocks``): U.S. equities market data, snapshots,
+  indicators, reference data, fundamentals, short data, and SEC filings.
+* ``OptionsClient`` (``m.options``): OPRA options trades, quotes, bars, chain
+  snapshots with Greeks/IV, contracts, and indicators.
+* ``FuturesClient`` (``m.futures``): CME, CBOT, NYMEX, and COMEX futures trades,
+  quotes, bars, snapshots, contracts, products, and schedules.
+* ``IndicesClient`` (``m.indices``): Market index values, bars, snapshots, and
+  technical indicators.
+* ``ForexClient`` (``m.forex``): Global spot FX quotes, bars, snapshots,
+  conversions, and indicators.
+* ``CryptoClient`` (``m.crypto``): Spot cryptocurrency trades, quotes, bars,
+  snapshots, and indicators.
+* ``EconomyClient`` (``m.economy``): Federal Reserve and U.S. Treasury
+  macroeconomic time series.
+* ``PartnersClient`` (``m.partners``): Benzinga, ETF Global, and TMX partner
+  datasets.
+* ``FlatFilesClient`` (``m.flat_files``): Direct S3 Flat File discovery and
+  parallel bulk loading.
+"""
 
 from __future__ import annotations
 

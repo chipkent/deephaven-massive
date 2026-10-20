@@ -1,4 +1,22 @@
-"""Unified PyArrow schemas and normalizers for all Massive.com feeds."""
+"""Unified PyArrow schemas and payload normalizers for all Massive.com feeds.
+
+This package defines the canonical, strictly typed PyArrow schemas (`pa.Schema`)
+and row-level normalizer callbacks used across the entire ``deephaven_massive``
+engine. Every dataset—whether delivered via real-time WebSocket frames, REST API
+responses, or S3 Flat File archives—is projected onto these PascalCase schemas
+so that historical and streaming tables can be combined seamlessly with
+Deephaven's ``merge()``, ``aj()`` (as-of join), and ``update()`` operations.
+
+Modules:
+    market: Schemas and normalizers for trades, quotes, bars, snapshots,
+        technical indicators, and futures/options market data.
+    reference: Schemas and normalizers for reference data, corporate actions,
+        fundamental financials, filings, news, and short interest.
+    economy: Schemas and normalizers for Federal Reserve and U.S. Treasury
+        macroeconomic series.
+    partners: Hybrid anchor + dynamic-column schemas and normalizers for
+        partner feeds (Benzinga, ETF Global, TMX).
+"""
 
 from __future__ import annotations
 

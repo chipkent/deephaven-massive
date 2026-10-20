@@ -1,4 +1,12 @@
-"""S3 Flat Files (.csv.gz) streaming loader using PyArrow CSV and predicate pushdown."""
+"""S3 Flat Files (`.csv.gz`) streaming loader (`m.flat_files`).
+
+This module implements :class:`FlatFilesClient`, which streams daily gzipped
+CSV archives from Massive's S3-compatible object store
+(`https://files.massive.com`) directly into PyArrow `RecordBatch` streams using
+16 MB C++ chunks (`pyarrow.csv.open_csv`), applies vectorized predicate
+pushdown (`pyarrow.compute.is_in`) before Python materialization, and converts
+the filtered batches into a single Deephaven `Table`.
+"""
 
 from __future__ import annotations
 
@@ -42,6 +50,14 @@ DATASET_PREFIX_BY_DOMAIN: dict[str, str] = {
 
 
 def _parse_date(val: str | date | datetime) -> date:
+    """Coerce an ISO string, `date`, or `datetime` into a `datetime.date`.
+
+    Args:
+        val: Date value (`"YYYY-MM-DD"`, `date`, or `datetime`).
+
+    Returns:
+        date: Parsed calendar date.
+    """
     if isinstance(val, datetime):
         return val.date()
     if isinstance(val, date):
@@ -54,6 +70,20 @@ def _date_range(
     end: str | date | datetime | None,
     single_date: str | date | datetime | None = None,
 ) -> list[date]:
+    """Expand a single date or inclusive `[start, end]` range into a list of `date` objects.
+
+    Args:
+        start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+        end: Inclusive end date; defaults to `start` when `None`.
+        single_date: Optional single date override.
+
+    Returns:
+        list[date]: Chronological list of calendar dates.
+
+    Raises:
+        ValueError: If neither `single_date` nor `start` is provided, or if
+            `end < start`.
+    """
     if single_date is not None:
         d = _parse_date(single_date)
         return [d]
@@ -76,6 +106,16 @@ def _infer_schema_and_domain(
     schema_spec: SchemaSpec | None,
     domain: str | None,
 ) -> tuple[SchemaSpec, str]:
+    """Infer the target `SchemaSpec` and domain name from an S3 dataset path.
+
+    Args:
+        dataset: S3 dataset prefix (e.g., `"us_stocks_sip/trades_v1"`).
+        schema_spec: Optional explicit `SchemaSpec` override.
+        domain: Optional explicit domain override (`"stocks"`, `"options"`, etc.).
+
+    Returns:
+        tuple[SchemaSpec, str]: Resolved `(SchemaSpec, domain)` pair.
+    """
     inferred_domain = domain
     if inferred_domain is None:
         for dom, prefix in DATASET_PREFIX_BY_DOMAIN.items():
@@ -98,18 +138,31 @@ def _infer_schema_and_domain(
 
 
 class _PrependReader:
-    """Minimal stream wrapper that prepends peeked magic bytes before delegating to `stream`."""
+    """Binary stream wrapper that replays peeked magic bytes before delegating to `stream`.
+
+    Used to inspect the first two bytes of an S3 response body (`0x1f 0x8b`)
+    for gzip magic detection without consuming or seeking the underlying network
+    stream.
+    """
 
     closed = False
 
     def __init__(self, prefix: bytes, stream: BinaryIO) -> None:
+        """Initialize the prepend reader.
+
+        Args:
+            prefix: Initial peeked bytes to replay first.
+            stream: Underlying binary stream for subsequent reads.
+        """
         self._prefix = prefix
         self._stream = stream
 
     def readable(self) -> bool:
+        """Return `True` to satisfy `gzip.GzipFile` and `pyarrow.csv` stream checks."""
         return True
 
     def read(self, size: int = -1) -> bytes:
+        """Read up to `size` bytes, draining `prefix` before reading from `stream`."""
         if self._prefix:
             out = self._prefix + self._stream.read(max(0, size - len(self._prefix)))
             self._prefix = b""
@@ -118,7 +171,27 @@ class _PrependReader:
 
 
 class FlatFilesClient:
-    """Streams Massive S3 Flat Files (`.csv.gz`) into Deephaven tables with predicate pushdown."""
+    """High-throughput S3 Flat Files (`.csv.gz`) loader (`m.flat_files`).
+
+    ``FlatFilesClient`` downloads daily gzipped CSV archives from Massive's S3
+    endpoint (`https://files.massive.com`), parses them in 16 MB blocks using
+    PyArrow's multi-threaded C++ CSV reader, filters rows in C++ via
+    `pyarrow.compute.is_in` when `symbols` are specified, and normalizes the
+    result into the identical PascalCase Deephaven schema used by live
+    WebSocket and REST feeds.
+
+    Multi-day ranges (`start` through `end` without a row `limit`) are fetched
+    and parsed concurrently across a 4-worker `ThreadPoolExecutor`.
+
+    Example:
+        Load three days of US SIP trades for `AAPL` and `NVDA` directly from S3::
+
+            trades_hist = m.flat_files.stocks_trades(
+                start="2025-01-13",
+                end="2025-01-15",
+                symbols=["AAPL", "NVDA"],
+            )
+    """
 
     def __init__(
         self,
@@ -126,6 +199,14 @@ class FlatFilesClient:
         *,
         s3_opener: Callable[[str, str], BinaryIO] | None = None,
     ) -> None:
+        """Initialize the S3 Flat Files client.
+
+        Args:
+            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+            s3_opener: Optional callable `(bucket, key) -> BinaryIO` for custom
+                transport or unit testing. When `None`, uses `boto3` configured
+                with `session.config` S3 credentials.
+        """
         self.session = session
         self._s3_opener = s3_opener
 
@@ -150,7 +231,16 @@ class FlatFilesClient:
 
     @staticmethod
     def build_s3_key(dataset: str, target_date: date) -> str:
-        """Build the canonical Massive S3 flat-file object key for a dataset and date."""
+        """Build the canonical Massive S3 flat-file object key for a dataset and date.
+
+        Args:
+            dataset: Dataset prefix (e.g., `"us_stocks_sip/trades_v1"`).
+            target_date: Calendar date of the archive.
+
+        Returns:
+            str: Canonical S3 object key of the form
+            `"<dataset>/<YYYY>/<MM>/<YYYY-MM-DD>.csv.gz"`.
+        """
         clean_ds = dataset.strip("/")
         return f"{clean_ds}/{target_date.year:04d}/{target_date.month:02d}/{target_date.isoformat()}.csv.gz"
 
@@ -164,7 +254,7 @@ class FlatFilesClient:
         bar_span_ns: int | None,
         remaining_limit: int | None = None,
     ) -> list[pa.RecordBatch]:
-        """Download and parse a single day's S3 `.csv.gz` flat file into RecordBatches."""
+        """Download and parse a single day's S3 `.csv.gz` flat file into normalized `RecordBatch` objects."""
         key = self.build_s3_key(dataset, target_date)
         raw_stream = self._open_s3_object(self.session.config.s3_bucket, key)
         head = raw_stream.read(2)
@@ -236,7 +326,44 @@ class FlatFilesClient:
         limit: int | None = None,
         max_rows: int | None = None,
     ) -> Table:
-        """Stream one or more daily `.csv.gz` S3 Flat Files into a single Deephaven Table."""
+        """Stream one or more daily `.csv.gz` S3 Flat Files into a single Deephaven `Table`.
+
+        Supports both combined dataset paths (`load("us_stocks_sip/trades_v1", "2025-01-15")`)
+        and two-part positional calls (`load("us_stocks_sip", "trades_v1", "2025-01-15")`).
+
+        Args:
+            dataset: S3 dataset path (e.g., `"us_stocks_sip/trades_v1"`) or
+                domain prefix (`"us_stocks_sip"`) when `table_type` or a
+                non-date second positional argument is supplied.
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`),
+                or `table_type` when called with three positional arguments.
+            end: Inclusive end date; defaults to `start` when `None`.
+            end_pos: Inclusive end date when `start` is used as a positional
+                `table_type`.
+            table_type: Optional table type suffix (e.g., `"trades_v1"`,
+                `"quotes_v1"`, `"minute_aggs_v1"`, `"day_aggs_v1"`).
+            date: Single calendar date alias for `start`.
+            start_date: Keyword alias for `start`.
+            end_date: Keyword alias for `end`.
+            symbols: Optional symbol or iterable of symbols for C++ predicate
+                pushdown filtering (`pyarrow.compute.is_in`).
+            tickers: Keyword alias for `symbols`.
+            schema_spec: Optional explicit `SchemaSpec` override; inferred from
+                `dataset` when `None`.
+            domain: Optional domain name override (`"stocks"`, `"options"`,
+                `"futures"`, `"indices"`, `"forex"`, `"crypto"`).
+            limit: Optional maximum number of rows to materialize across the
+                date range.
+            max_rows: Keyword alias for `limit`.
+
+        Returns:
+            Table: Static Deephaven `Table` populated with normalized rows from
+            the requested S3 archive(s).
+
+        Raises:
+            ValueError: If S3 credentials are not configured or date bounds are
+                missing/invalid.
+        """
         if (
             "/" not in dataset
             and isinstance(start, str)
@@ -326,7 +453,21 @@ class FlatFilesClient:
         return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
     def dataset_for(self, domain: str, feed_kind: str) -> str:
-        """Resolve the S3 flat-file dataset path for a domain and feed kind."""
+        """Resolve the canonical S3 flat-file dataset path for a domain and feed kind.
+
+        Args:
+            domain: Asset domain (`"stocks"`, `"options"`, `"futures"`,
+                `"indices"`, `"forex"`, or `"crypto"`).
+            feed_kind: Feed table kind (`"trades_v1"`, `"quotes_v1"`,
+                `"minute_aggs_v1"`, `"day_aggs_v1"`, `"session_aggs_v1"`, or
+                `"values_v1"`).
+
+        Returns:
+            str: Full S3 dataset prefix (e.g., `"us_stocks_sip/trades_v1"`).
+
+        Raises:
+            ValueError: If `domain` is not a supported S3 flat-file domain.
+        """
         prefix = DATASET_PREFIX_BY_DOMAIN.get(domain.strip().lower())
         if prefix is None:
             raise ValueError(f"Unsupported S3 flat-file domain '{domain}'.")
@@ -345,77 +486,227 @@ class FlatFilesClient:
         return self.load(self.dataset_for(domain, kind), start, end, domain=domain, **kwargs)
 
     def stocks_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load US Stocks SIP trades (`us_stocks_sip/trades_v1`) from S3 Flat Files."""
+        """Load US Stocks SIP trades (`us_stocks_sip/trades_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `TRADES_SCHEMA`.
+        """
         return self.load("us_stocks_sip/trades_v1", start, end, domain="stocks", **kwargs)
 
     def stocks_quotes(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load US Stocks SIP quotes (`us_stocks_sip/quotes_v1`) from S3 Flat Files."""
+        """Load US Stocks SIP NBBO quotes (`us_stocks_sip/quotes_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `QUOTES_SCHEMA`.
+        """
         return self.load("us_stocks_sip/quotes_v1", start, end, domain="stocks", **kwargs)
 
     def stocks_bars(
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
-        """Load US Stocks SIP bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        """Load US Stocks SIP bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            timespan: `"minute"` (default) or `"day"`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `BARS_SCHEMA`.
+        """
         return self._load_bars("stocks", start, end, timespan=timespan, **kwargs)
 
     def options_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load US Options OPRA trades (`us_options_opra/trades_v1`) from S3 Flat Files."""
+        """Load US Options OPRA trades (`us_options_opra/trades_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `TRADES_SCHEMA`.
+        """
         return self.load("us_options_opra/trades_v1", start, end, domain="options", **kwargs)
 
     def options_quotes(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load US Options OPRA quotes (`us_options_opra/quotes_v1`) from S3 Flat Files."""
+        """Load US Options OPRA quotes (`us_options_opra/quotes_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `QUOTES_SCHEMA`.
+        """
         return self.load("us_options_opra/quotes_v1", start, end, domain="options", **kwargs)
 
     def options_bars(
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
-        """Load US Options OPRA bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        """Load US Options OPRA bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            timespan: `"minute"` (default) or `"day"`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `BARS_SCHEMA`.
+        """
         return self._load_bars("options", start, end, timespan=timespan, **kwargs)
 
     def futures_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load US Futures trades (`us_futures/trades_v1`) from S3 Flat Files."""
+        """Load US Futures trades (`us_futures/trades_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `TRADES_SCHEMA`.
+        """
         return self.load("us_futures/trades_v1", start, end, domain="futures", **kwargs)
 
     def futures_quotes(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load US Futures quotes (`us_futures/quotes_v1`) from S3 Flat Files."""
+        """Load US Futures quotes (`us_futures/quotes_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `QUOTES_SCHEMA`.
+        """
         return self.load("us_futures/quotes_v1", start, end, domain="futures", **kwargs)
 
     def futures_bars(
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
-        """Load US Futures bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        """Load US Futures bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            timespan: `"minute"` (default) or `"day"`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `BARS_SCHEMA`.
+        """
         return self._load_bars("futures", start, end, timespan=timespan, **kwargs)
 
     def futures_session_bars(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load US Futures session bars (`us_futures/session_aggs_v1`) from S3 Flat Files."""
+        """Load US Futures full-session bars (`us_futures/session_aggs_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `BARS_SCHEMA`.
+        """
         return self.load("us_futures/session_aggs_v1", start, end, domain="futures", **kwargs)
 
     def indices_values(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load US Indices values (`us_indices/values_v1`) from S3 Flat Files."""
+        """Load US Indices tick values (`us_indices/values_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `INDEX_VALUES_SCHEMA`.
+        """
         return self.load("us_indices/values_v1", start, end, domain="indices", **kwargs)
 
     def indices_bars(
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
-        """Load US Indices bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        """Load US Indices bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            timespan: `"minute"` (default) or `"day"`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `BARS_SCHEMA`.
+        """
         return self._load_bars("indices", start, end, timespan=timespan, **kwargs)
 
     def forex_quotes(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load Global Forex quotes (`global_forex/quotes_v1`) from S3 Flat Files."""
+        """Load Global Forex BBO quotes (`global_forex/quotes_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `QUOTES_SCHEMA`.
+        """
         return self.load("global_forex/quotes_v1", start, end, domain="forex", **kwargs)
 
     def forex_bars(
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
-        """Load Global Forex bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        """Load Global Forex bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            timespan: `"minute"` (default) or `"day"`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `BARS_SCHEMA`.
+        """
         return self._load_bars("forex", start, end, timespan=timespan, **kwargs)
 
     def crypto_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
-        """Load Global Crypto trades (`global_crypto/trades_v1`) from S3 Flat Files."""
+        """Load Global Crypto trades (`global_crypto/trades_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `TRADES_SCHEMA`.
+        """
         return self.load("global_crypto/trades_v1", start, end, domain="crypto", **kwargs)
 
     def crypto_bars(
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
-        """Load Global Crypto bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
+        """Load Global Crypto bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files.
+
+        Args:
+            start: Inclusive start date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            end: Optional inclusive end date; defaults to `start`.
+            timespan: `"minute"` (default) or `"day"`.
+            **kwargs: Forwarded to :meth:`load` (e.g., `symbols`, `limit`).
+
+        Returns:
+            Table: Deephaven `Table` conforming to `BARS_SCHEMA`.
+        """
         return self._load_bars("crypto", start, end, timespan=timespan, **kwargs)

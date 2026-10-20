@@ -1,4 +1,23 @@
-"""Base domain client with raw-JSON REST pagination, chunked Arrow conversion, and S3 flat-file routing."""
+"""Base domain client with raw-JSON REST pagination, chunked Arrow conversion, and S3 flat-file routing.
+
+This module defines :class:`BaseDomainClient` and its supporting query/payload
+helpers. Every asset-class and data-provider domain client (`stocks`, `options`,
+`futures`, `indices`, `forex`, `crypto`, `economy`, `partners`) inherits from
+:class:`BaseDomainClient` to share:
+1. **Cursor Pagination with Bounded Memory**: ``fetch_chunked_table`` follows
+   Massive ``next_url`` cursors and converts rows in 50,000-row PyArrow
+   ``RecordBatch`` chunks so multi-million-row historical pulls never exhaust
+   heap memory.
+2. **Automatic S3 vs. REST Routing**: ``should_use_flat_files`` and
+   ``fetch_multi_symbol_historical`` transparently route wildcard (``"*"``) and
+   wide multi-symbol historical queries to S3 Flat Files when credentials are
+   configured, or parallelize per-symbol REST requests across a bounded
+   ``ThreadPoolExecutor``.
+3. **Ergonomic Query Filter Translation**: ``normalize_filter_params`` converts
+   Pythonic keyword arguments (such as ``filing_date_gte="2025-01-01"`` or
+   ``ticker_any_of=["AAPL", "MSFT"]``) into Massive's dotted query syntax
+   (``filing_date.gte``, ``ticker.any_of``).
+"""
 
 from __future__ import annotations
 
@@ -43,7 +62,18 @@ def _resolve_bar_extra_fields(
     params: Mapping[str, Any] | None,
     extra_fields: Mapping[str, Any] | None,
 ) -> Mapping[str, Any] | None:
-    """Attach `_span_ns` for aggregate bar REST requests when `path` or `params` encode a bar span."""
+    """Attach ``_span_ns`` for aggregate bar REST requests when ``path`` or ``params`` encode a bar span.
+
+    Args:
+        path: REST endpoint path (e.g., ``/v2/aggs/ticker/AAPL/range/5/minute/...``).
+        params: Optional query parameter mapping (e.g., ``{"resolution": "1_minute"}``).
+        extra_fields: Existing extra fields dictionary to augment.
+
+    Returns:
+        Mapping[str, Any] | None: Augmented extra fields mapping containing
+        ``_span_ns`` if a bar duration could be inferred, otherwise
+        ``extra_fields`` unchanged.
+    """
     span_ns: int | None = None
     if "/range/" in path:
         parts = path.split("/range/", 1)[1].split("/")
@@ -61,7 +91,16 @@ def _resolve_bar_extra_fields(
 
 
 def format_date_param(val: str | date | datetime | int | None) -> str | None:
-    """Format a start/end date or timestamp parameter for Massive REST endpoints."""
+    """Format a start/end date or timestamp parameter for Massive REST endpoints.
+
+    Args:
+        val: ISO-8601 string, ``datetime.date``, ``datetime.datetime``, epoch
+            integer, or ``None``.
+
+    Returns:
+        str | None: ISO-8601 string or stringified epoch suitable for Massive
+        REST query parameters, or ``None`` if ``val`` is ``None``.
+    """
     if val is None:
         return None
     if isinstance(val, datetime):
@@ -89,7 +128,28 @@ def normalize_filter_params(
     normalizer: SymbolNormalizer | None = None,
     ticker_param: str = "ticker",
 ) -> dict[str, Any]:
-    """Normalize REST query parameters, `tickers` lists, and `*_gte`/`*_lte`/`*_gt`/`*_lt`/`*_any_of` filter kwargs."""
+    """Normalize REST query parameters, ``tickers`` lists, and comparison filter kwargs.
+
+    Translates Pythonic underscore filter suffixes (``_gte``, ``_lte``, ``_gt``,
+    ``_lt``, ``_any_of``) into Massive's dotted REST query parameters
+    (``.gte``, ``.lte``, ``.gt``, ``.lt``, ``.any_of``), formats ``date`` and
+    ``datetime`` objects into ISO-8601 strings, and normalizes single or
+    multi-ticker parameters via ``normalizer``.
+
+    Args:
+        base_params: Baseline query parameter dictionary.
+        filters: Additional keyword filter arguments supplied by the caller.
+        symbol: Optional single symbol filter.
+        tickers: Optional comma-separated string or iterable of symbols.
+        normalizer: Optional :class:`SymbolNormalizer` to translate canonical
+            symbols into REST ticker parameters.
+        ticker_param: Target query parameter name for symbols (e.g., ``"ticker"``
+            or ``"composite_ticker"``).
+
+    Returns:
+        dict[str, Any]: Normalized query parameter dictionary ready for
+        ``session.request_json``.
+    """
     out: dict[str, Any] = {}
     if base_params:
         for k, v in base_params.items():
@@ -144,7 +204,24 @@ def extract_rows_from_payload(
     inject_symbol: str | None = None,
     extra_fields: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract a list of row dicts from a Massive REST JSON response payload."""
+    """Extract a uniform list of row dictionaries from a Massive REST JSON payload.
+
+    Handles all envelope variations used across Massive v1, v2, v3, and vX
+    endpoints—including ``{"results": [...]}``, ``{"results": {"values": [...]}}``
+    (technical indicators), ``{"tickers": [...]}`` (snapshots), ``{"last": {...}}``
+    (last trade/quote), ``{"ticker": {...}}`` (single-ticker snapshot), and
+    top-level JSON arrays.
+
+    Args:
+        payload: Parsed JSON response object returned by ``session.request_json``.
+        inject_symbol: Optional canonical symbol to inject as ``"Symbol"`` when
+            individual row items omit a ticker field.
+        extra_fields: Optional default key-value pairs to attach to every
+            extracted row.
+
+    Returns:
+        list[dict[str, Any]]: Extracted and enriched row dictionaries.
+    """
     if payload is None:
         return []
 
@@ -193,13 +270,29 @@ def extract_rows_from_payload(
 
 
 class BaseDomainClient:
-    """Shared base class for Massive domain sub-clients (`stocks`, `options`, `futures`, etc.)."""
+    """Shared base class for all Massive domain sub-clients.
+
+    Attributes:
+        session: Owning :class:`MassiveSession` instance.
+        domain: Canonical domain identifier (e.g., ``"stocks"``, ``"options"``,
+            ``"futures"``, ``"indices"``, ``"forex"``, ``"crypto"``), or ``None``
+            for non-instrument domains such as ``economy``.
+        symbol_normalizer: Domain-configured :class:`SymbolNormalizer` instance,
+            or ``None`` when ``domain`` is ``None``.
+    """
 
     def __init__(
         self,
         session: MassiveSession,
         domain: str | None = None,
     ) -> None:
+        """Initialize the domain client.
+
+        Args:
+            session: Owning :class:`MassiveSession` instance.
+            domain: Optional domain identifier used to configure symbol
+                normalization and S3 routing.
+        """
         self.session = session
         self.domain = domain
         self.symbol_normalizer = (
@@ -209,7 +302,15 @@ class BaseDomainClient:
     def canonical_symbols(
         self, symbols: str | Iterable[str] | None
     ) -> list[str]:
-        """Normalize `symbols` into a deduplicated list of canonical symbols."""
+        """Normalize ``symbols`` into a deduplicated list of canonical symbols.
+
+        Args:
+            symbols: A single symbol string, comma-separated symbol list,
+                iterable of symbols, or ``None`` (which defaults to ``["*"]``).
+
+        Returns:
+            list[str]: Ordered list of canonical symbol strings.
+        """
         if symbols is None:
             return ["*"]
         if self.symbol_normalizer is not None:
@@ -227,7 +328,22 @@ class BaseDomainClient:
         inject_symbol: str | None = None,
         extra_fields: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch and paginate REST JSON results into a list of row dicts."""
+        """Fetch and paginate REST JSON results into a list of row dictionaries.
+
+        Automatically follows ``next_url`` cursors until exhausted or until
+        ``limit`` rows have been collected.
+
+        Args:
+            path: Initial REST path or URL.
+            params: Optional query parameter mapping for the first page.
+            limit: Optional maximum number of rows to return across all pages.
+            inject_symbol: Optional canonical symbol to inject into rows that
+                omit a symbol field.
+            extra_fields: Optional extra key-value pairs to attach to each row.
+
+        Returns:
+            list[dict[str, Any]]: Collected row dictionaries.
+        """
         collected: list[dict[str, Any]] = []
         resolved_extra = _resolve_bar_extra_fields(path, params, extra_fields)
         next_path: str | None = path
@@ -272,7 +388,21 @@ class BaseDomainClient:
         extra_fields: Mapping[str, Any] | None = None,
         chunk_size: int = 50_000,
     ) -> Table:
-        """Paginate a REST endpoint and convert pages in bounded RecordBatch chunks into a Deephaven Table."""
+        """Paginate a REST endpoint and convert pages in bounded RecordBatch chunks into a Deephaven Table.
+
+        Args:
+            path: Initial REST endpoint path.
+            schema_spec: Target :class:`SchemaSpec` governing column types and
+                normalization.
+            params: Optional query parameters for the initial request.
+            limit: Optional maximum number of rows to fetch.
+            inject_symbol: Optional canonical symbol to inject into each row.
+            extra_fields: Optional extra key-value pairs to attach to each row.
+            chunk_size: Number of rows per intermediate PyArrow ``RecordBatch``.
+
+        Returns:
+            Table: Static Deephaven table containing all paginated rows.
+        """
         batches: list[pa.RecordBatch] = []
         buffer: list[dict[str, Any]] = []
         total_rows = 0
@@ -339,7 +469,29 @@ class BaseDomainClient:
         *,
         adjusted: bool | None = None,
     ) -> bool:
-        """Determine whether `.historical()` should route to S3 Flat Files or REST pagination."""
+        """Determine whether ``.historical()`` should route to S3 Flat Files or REST pagination.
+
+        When ``source="auto"``, S3 Flat Files are selected if S3 credentials are
+        configured, ``s3_dataset`` is available, ``adjusted`` is not ``True``
+        (since S3 archives contain unadjusted raw exchange prints/bars), and
+        either ``symbols`` is a wildcard (``"*"``) or contains at least
+        ``config.flat_file_ticker_threshold`` symbols.
+
+        Args:
+            source: Routing policy (``"auto"``, ``"rest"``, or ``"flat_files"``).
+            symbols: Sequence of canonical symbols, or ``None`` for a reactive
+                table watchlist.
+            s3_dataset: S3 dataset identifier (e.g., ``"us_stocks_sip/trades_v1"``),
+                or ``None`` if the feed has no S3 archive.
+            adjusted: Whether split-adjusted prices were requested.
+
+        Returns:
+            bool: ``True`` to route to S3 Flat Files; ``False`` to use REST.
+
+        Raises:
+            ValueError: If ``source`` is invalid, or if ``source="flat_files"``
+                is requested without S3 support or S3 credentials.
+        """
         clean_source = source.strip().lower()
         if clean_source not in VALID_HISTORICAL_SOURCES:
             raise ValueError(
@@ -379,7 +531,31 @@ class BaseDomainClient:
         adjusted: bool | None = None,
         chunk_size: int = 50_000,
     ) -> Table:
-        """Route a single- or multi-symbol `.historical()` query to S3 Flat Files or chunked REST pagination."""
+        """Route a single- or multi-symbol ``.historical()`` query to S3 Flat Files or chunked REST pagination.
+
+        When routed to REST for multiple symbols without a row ``limit``, fetches
+        each symbol concurrently using up to 8 worker threads while streaming
+        into bounded PyArrow ``RecordBatch`` chunks.
+
+        Args:
+            symbols: Target symbol(s) or wildcard ``"*"``.
+            schema_spec: Target :class:`SchemaSpec` for Arrow conversion.
+            s3_dataset: S3 dataset path if S3 Flat Files are supported.
+            rest_path_fn: Callback ``(symbol, start, end) -> (path, params)``
+                producing the per-symbol REST endpoint and query parameters.
+            start: Start date or timestamp filter.
+            end: End date or timestamp filter.
+            limit: Optional maximum number of rows to return.
+            source: Routing policy (``"auto"``, ``"rest"``, or ``"flat_files"``).
+            adjusted: Optional split-adjustment flag used by ``should_use_flat_files``.
+            chunk_size: Maximum rows per PyArrow ``RecordBatch``.
+
+        Returns:
+            Table: Static Deephaven table containing the historical dataset.
+
+        Raises:
+            ValueError: If REST routing is selected without concrete symbols.
+        """
         canon_syms = (
             None
             if hasattr(symbols, "j_table") or hasattr(symbols, "column_names")
@@ -480,7 +656,29 @@ class BaseDomainClient:
         snapshot_fn: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
         historical_fn: Callable[..., Table] | None = None,
     ) -> FeedBuilder:
-        """Create a :class:`FeedBuilder` wired to the session's execution context and multiplexer."""
+        """Create a :class:`FeedBuilder` wired to the session's execution context and multiplexer.
+
+        Args:
+            name: Descriptive feed name used for logging and stream deduplication.
+            schema_spec: Target :class:`SchemaSpec` for this feed.
+            ws_url: Optional WebSocket endpoint URL for ``.stream()``.
+            ws_channel: Optional WebSocket event prefix (e.g., ``"T"``, ``"Q"``,
+                ``"AM"``).
+            symbols: Target symbols, iterable of symbols, or reactive Deephaven
+                watchlist ``Table``.
+            symbol_col: Column name when ``symbols`` is a Deephaven ``Table``.
+            seed_fn: Optional snapshot seed callback for ``.with_seed()`` and
+                symbol-scoped ``.snapshot()``.
+            seed_rows_fn: Optional historical backfill callback for
+                ``.with_seed(since=...)``.
+            snapshot_fn: Optional zero-argument snapshot callback for
+                non-symbol-scoped ``.snapshot()`` and ``.poll()``.
+            historical_fn: Optional historical query callback for
+                ``.historical()``.
+
+        Returns:
+            FeedBuilder: Configured fluent feed builder.
+        """
         return FeedBuilder(
             name=name,
             schema_spec=schema_spec,
@@ -510,7 +708,18 @@ class BaseDomainClient:
         *,
         extra_fields: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch historical REST backfill rows since `seed_since` for each canonical symbol in `syms`."""
+        """Fetch historical REST backfill rows since ``seed_since`` for each canonical symbol in ``syms``.
+
+        Args:
+            syms: Sequence of canonical symbols to backfill.
+            seed_since: Start timestamp or date for the backfill window.
+            rest_path_fn: Callback ``(symbol, start, end) -> (path, params)``.
+            extra_fields: Optional extra key-value pairs to attach to each row.
+
+        Returns:
+            list[dict[str, Any]]: Combined backfill rows across all concrete
+            symbols.
+        """
         concrete = [s for s in syms if s != "*"]
         if not concrete:
             return []
@@ -547,7 +756,27 @@ class BaseDomainClient:
         date_param: str = "date",
         inject_symbol: str | None = None,
     ) -> FeedBuilder:
-        """Build a :class:`FeedBuilder` backed by a paginated REST collection endpoint."""
+        """Build a :class:`FeedBuilder` backed by a paginated REST collection endpoint.
+
+        Wires both ``snapshot_fn`` (for ``.snapshot()`` and ``.poll()``) and
+        ``historical_fn`` (for ``.historical(start=..., end=..., limit=...)``
+        using ``{date_param}.gte`` and ``{date_param}.lte``).
+
+        Args:
+            name: Descriptive feed name.
+            path: REST endpoint path.
+            schema_spec: Target :class:`SchemaSpec`.
+            params: Baseline query parameters.
+            symbol: Optional single symbol filter.
+            tickers: Optional multi-symbol filter.
+            ticker_param: Query parameter name for ticker filtering.
+            filters: Additional comparison filter keyword arguments.
+            date_param: Date field name used by ``.historical(start=..., end=...)``.
+            inject_symbol: Optional canonical symbol to inject into returned rows.
+
+        Returns:
+            FeedBuilder: Configured feed builder.
+        """
         base_params = normalize_filter_params(
             params,
             filters,
@@ -594,7 +823,20 @@ class BaseDomainClient:
         timespan: str,
         series_type: str,
     ) -> FeedBuilder:
-        """Build a :class:`FeedBuilder` for a technical indicator (`sma`, `ema`, `macd`, `rsi`)."""
+        """Build a :class:`FeedBuilder` for a technical indicator (``SMA``, ``EMA``, ``MACD``, ``RSI``).
+
+        Args:
+            indicator: Indicator code (``"SMA"``, ``"EMA"``, ``"MACD"``, or ``"RSI"``).
+            symbol: Target symbol, contract, or pair.
+            params: Query parameters for ``/v1/indicators/{indicator}/{ticker}``.
+            window: Primary indicator lookback window.
+            timespan: Bar timespan (e.g., ``"day"``, ``"minute"``).
+            series_type: Price series input (e.g., ``"close"``).
+
+        Returns:
+            FeedBuilder: Builder supporting ``.snapshot()``, ``.historical()``,
+            and ``.poll()`` with ``INDICATOR_SCHEMA``.
+        """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
         ticker = self.symbol_normalizer.rest_ticker(canon)  # type: ignore[union-attr]
         extra = {

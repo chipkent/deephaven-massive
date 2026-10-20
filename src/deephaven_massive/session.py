@@ -1,4 +1,11 @@
-"""Top-level MassiveSession orchestrating Deephaven ExecutionContext, REST HTTP pool, WebSocket multiplexer, and 9 domain sub-clients."""
+"""Top-level `MassiveSession` orchestrating Deephaven, REST, WebSockets, and 9 domain clients.
+
+`MassiveSession` is the single entry point for interacting with Massive.com in
+Deephaven. It manages the host Deephaven `ExecutionContext`, a thread-safe `urllib3`
+HTTP connection pool with exponential backoff, a multiplexed WebSocket connection pool,
+and nine specialized domain sub-clients (`stocks`, `options`, `futures`, `indices`,
+`forex`, `crypto`, `economy`, `partners`, and `flat_files`).
+"""
 
 from __future__ import annotations
 
@@ -38,7 +45,24 @@ def ensure_deephaven_server(
     port: int = 10000,
     jvm_args: list[str] | None = None,
 ) -> ExecutionContext | None:
-    """Ensure the embedded Deephaven server is initialized and return the host :class:`ExecutionContext`."""
+    """Ensure the embedded Deephaven server is initialized and return the host `ExecutionContext`.
+
+    When running inside an already-started Deephaven IDE or worker, `Server.instance`
+    is already populated and its active `ExecutionContext` is captured immediately.
+    When running in a standalone Python script or notebook, a new embedded server is
+    started on `port` if `auto_start=True`.
+
+    Args:
+        auto_start: Whether to start a new embedded `deephaven_server.Server` when
+            `Server.instance` is `None`.
+        port: TCP port for the embedded Deephaven server when auto-starting.
+        jvm_args: Optional JVM flags passed to `Server` on startup (defaults to
+            `["-Xmx4g"]`).
+
+    Returns:
+        The captured Deephaven `ExecutionContext`, or `None` if no server is running
+        and `auto_start=False`.
+    """
     from deephaven_server import Server
 
     if Server.instance is None:
@@ -55,16 +79,42 @@ def ensure_deephaven_server(
 class MassiveSession:
     """Primary user-facing entry point for `deephaven-massive`.
 
-    Exposes 9 domain sub-clients:
-    - :attr:`stocks`: US Equities (`m.stocks`)
-    - :attr:`options`: US Options OPRA (`m.options`)
-    - :attr:`futures`: US Futures CME/CBOT/NYMEX/COMEX (`m.futures`)
-    - :attr:`indices`: Market Indices (`m.indices`)
-    - :attr:`forex`: Global Forex (`m.forex`)
-    - :attr:`crypto`: Global Crypto (`m.crypto`)
-    - :attr:`economy`: Federal Reserve & Macroeconomics (`m.economy`)
-    - :attr:`partners`: Benzinga, ETF Global, and TMX (`m.partners`)
-    - :attr:`flat_files`: Direct S3 `.csv.gz` streaming (`m.flat_files`)
+    `MassiveSession` coordinates authentication, connection pooling, background
+    threads, and Deephaven table creation across all nine Massive.com data domains.
+    It can be used directly in interactive Deephaven sessions or as a context manager
+    (`with MassiveSession() as m:`) for deterministic cleanup.
+
+    Attributes:
+        config: Validated `MassiveConfig` instance for this session.
+        exec_ctx: Captured Deephaven `ExecutionContext` used by background threads.
+        ws_multiplexer: Shared `WebSocketMultiplexer` managing per-endpoint connections.
+        stocks: `StocksClient` for US equities trades, quotes, bars, snapshots,
+            reference data, fundamentals, corporate actions, and technical indicators.
+        options: `OptionsClient` for OPRA options contracts, chains, trades, quotes,
+            bars, snapshots, and technical indicators.
+        futures: `FuturesClient` for CME, CBOT, NYMEX, and COMEX futures contracts,
+            schedules, trades, quotes, and bars.
+        indices: `IndicesClient` for market index values, bars, snapshots, and
+            technical indicators.
+        forex: `ForexClient` for global FX quotes, bars, snapshots, currency
+            conversion, and technical indicators.
+        crypto: `CryptoClient` for global crypto trades, quotes, L2 book, bars,
+            snapshots, and technical indicators.
+        economy: `EconomyClient` for US Treasury yields, inflation, and inflation
+            expectations.
+        partners: `PartnersClient` for Benzinga news/ratings/earnings, ETF Global,
+            and TMX corporate events.
+        flat_files: `FlatFilesClient` for direct S3 `.csv.gz` flat-file streaming
+            with PyArrow predicate pushdown.
+
+    Example:
+        ```python
+        from deephaven_massive import MassiveSession
+
+        m = MassiveSession(feed="realtime")
+        quotes = m.stocks.quotes(["AAPL", "MSFT", "NVDA"]).latest()
+        status_tbl = m.status()
+        ```
     """
 
     def __init__(
@@ -94,6 +144,36 @@ class MassiveSession:
         s3_opener: Callable[[str, str], BinaryIO] | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
+        """Initialize a `MassiveSession` and its nine domain sub-clients.
+
+        Args:
+            api_key: Massive API key. Defaults to `MASSIVE_API_KEY` or `POLYGON_API_KEY`
+                environment variables.
+            feed: Default WebSocket feed tier (`"realtime"`, `"delayed"`, `"business"`, etc.).
+            rest_base_url: Base URL for Massive REST API requests.
+            s3_access_key_id: S3 access key ID for Flat Files. Defaults to
+                `MASSIVE_S3_ACCESS_KEY_ID`.
+            s3_secret_access_key: S3 secret access key for Flat Files. Defaults to
+                `MASSIVE_S3_SECRET_ACCESS_KEY`.
+            s3_endpoint_url: S3 endpoint URL for Flat Files.
+            s3_bucket: S3 bucket name for Flat Files.
+            flush_interval_ms: Interval in milliseconds between micro-batch flushes.
+            max_batch_size: Maximum buffered rows before immediate flush.
+            max_retries: Maximum HTTP retry attempts on transient status codes.
+            flat_file_ticker_threshold: Symbol count threshold at which `source="auto"`
+                historical queries switch from REST pagination to S3 Flat Files.
+            auto_start_server: Start an embedded Deephaven server if none is active.
+            server_port: Port for the embedded Deephaven server if auto-started.
+            auto_flush: Automatically start background flush threads on publishers.
+            http_handler: Optional custom HTTP transport hook for deterministic testing.
+            ws_send_hook: Optional WebSocket outbound control frame hook for testing.
+            ws_connector: Optional custom async WebSocket connector callable.
+            s3_opener: Optional custom `(bucket, key) -> BinaryIO` opener for S3 testing.
+            sleep_fn: Sleep function used during HTTP retry backoff.
+
+        Raises:
+            ValueError: If API credentials or numeric configuration parameters are invalid.
+        """
         self.config = MassiveConfig.from_args(
             api_key=api_key,
             feed=feed,
@@ -139,7 +219,11 @@ class MassiveSession:
         self.flat_files = FlatFilesClient(self, s3_opener=s3_opener)
 
     def register_builder(self, builder: FeedBuilder) -> None:
-        """Track an active :class:`FeedBuilder` for cleanup on :meth:`close`."""
+        """Track an active `FeedBuilder` so its background resources are cleaned up on `close`.
+
+        Args:
+            builder: Active `FeedBuilder` instance to register with this session.
+        """
         with self._lock:
             if builder not in self._active_builders:
                 self._active_builders.append(builder)
@@ -151,7 +235,20 @@ class MassiveSession:
         ws_channel: str | None = None,
         symbols: str | Iterable[str] | None = None,
     ) -> int:
-        """Stop and unregister active streaming/polling :class:`FeedBuilder` instances matching criteria."""
+        """Stop and unregister active streaming or polling `FeedBuilder` instances matching criteria.
+
+        If called with no arguments, stops all active builders registered on this session.
+
+        Args:
+            target: Optional `FeedBuilder` instance, feed name (e.g., `"stocks.quotes"`),
+                WebSocket channel (e.g., `"Q"`), or WebSocket URL to match.
+            ws_channel: Optional WebSocket event prefix filter (e.g., `"T"`, `"Q"`, `"AM"`).
+            symbols: Optional symbol or iterable of symbols; stops builders whose
+                subscription set intersects with `symbols`.
+
+        Returns:
+            The number of active `FeedBuilder` instances that were stopped.
+        """
         with self._lock:
             to_stop: list[FeedBuilder] = []
             for builder in list(self._active_builders):
@@ -173,7 +270,19 @@ class MassiveSession:
             return len(to_stop)
 
     def status(self) -> Table:
-        """Return a Deephaven Table summarizing WebSocket endpoint connections and active subscriptions."""
+        """Return a Deephaven `Table` summarizing WebSocket connections and active topic counts.
+
+        Columns returned:
+        - `WsUrl` (`string`): WebSocket endpoint URL.
+        - `Authenticated` (`bool`): Whether authentication succeeded on the socket.
+        - `Connecting` (`bool`): Whether a background connection task is active.
+        - `ActiveTopicCount` (`int64`): Count of reference-counted topics (`ref_count > 0`).
+        - `ActiveTopics` (`string`): Comma-separated list of active subscription topics.
+        - `LastError` (`string`): Most recent connection or entitlement error, if any.
+
+        Returns:
+            A static diagnostic Deephaven `Table`.
+        """
         schema = pa.schema(
             [
                 pa.field("WsUrl", pa.string()),
@@ -193,7 +302,18 @@ class MassiveSession:
         return arrow_to_deephaven_table(pa_tbl, self.exec_ctx)
 
     def stats(self) -> Table:
-        """Return a Deephaven Table summarizing active FeedBuilders and published row counts."""
+        """Return a Deephaven `Table` summarizing active `FeedBuilder` instances and published rows.
+
+        Columns returned:
+        - `FeedName` (`string`): Logical feed name (e.g., `"stocks.trades"`).
+        - `Mode` (`string`): Execution mode (`"stream"`, `"watchlist"`, or `"poll"`).
+        - `WsChannel` (`string`): WebSocket channel prefix, or `None` for REST pollers.
+        - `Symbols` (`string`): Comma-separated list of active canonical symbols.
+        - `RowsPublished` (`int64`): Total rows published into Deephaven by the feed.
+
+        Returns:
+            A static diagnostic Deephaven `Table`.
+        """
         schema = pa.schema(
             [
                 pa.field("FeedName", pa.string()),
@@ -233,6 +353,7 @@ class MassiveSession:
     def _build_url(
         self, path_or_url: str, params: Mapping[str, Any] | None
     ) -> str:
+        """Resolve a relative REST path or full URL and append non-null query parameters."""
         if path_or_url.startswith(("http://", "https://")):
             url = path_or_url
         else:
@@ -258,6 +379,7 @@ class MassiveSession:
         params: Mapping[str, Any] | None,
         headers: Mapping[str, str],
     ) -> tuple[int, Any]:
+        """Execute an HTTP GET request via the injected handler or the `urllib3` pool."""
         if self._http_handler is not None:
             return self._http_handler(url, params, headers)
 
@@ -271,7 +393,22 @@ class MassiveSession:
         path_or_url: str,
         params: Mapping[str, Any] | None = None,
     ) -> Any:
-        """Perform a GET request to a Massive REST endpoint with retry/backoff and entitlement checking."""
+        """Perform an authenticated GET request to a Massive REST endpoint with retry and backoff.
+
+        Args:
+            path_or_url: Relative REST path (e.g., `"/v3/reference/tickers"`) or a full
+                pagination `next_url` returned by a previous response.
+            params: Optional dictionary of query parameters (`None` values are omitted).
+
+        Returns:
+            Decoded JSON payload (typically a `dict` containing `"results"` or `"tickers"`).
+
+        Raises:
+            MassiveEntitlementError: If the endpoint returns HTTP 403 Forbidden.
+            RuntimeError: If the request fails with a non-retryable HTTP status or
+                exhausts `config.max_retries` on transient errors (`429`, `500`, `502`,
+                `503`, `504`).
+        """
         url = self._build_url(path_or_url, params)
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
@@ -315,7 +452,9 @@ class MassiveSession:
         self.ws_multiplexer.close()
 
     def __enter__(self) -> MassiveSession:
+        """Enter the runtime context related to this `MassiveSession`."""
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit the runtime context and close all active streams, pollers, and sockets."""
         self.close()

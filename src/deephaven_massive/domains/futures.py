@@ -1,4 +1,10 @@
-"""Futures (CME, CBOT, NYMEX, COMEX) domain client (`m.futures`)."""
+"""US Futures (`CME`, `CBOT`, `NYMEX`, `COMEX`) domain client (`m.futures`).
+
+This module implements :class:`FuturesClient`, which exposes real-time and
+delayed WebSocket streams, REST snapshots, historical backfills (via S3 Flat
+Files or REST), and contract/product reference catalogs across CME Group
+exchanges (`cme`, `cbot`, `nymex`, and `comex`).
+"""
 
 from __future__ import annotations
 
@@ -32,9 +38,29 @@ if TYPE_CHECKING:
 
 
 class FuturesClient(BaseDomainClient):
-    """Domain client for US Futures (`cme`, `cbot`, `nymex`, `comex`) streaming, snapshots, and reference data."""
+    """Domain client for US Futures (`cme`, `cbot`, `nymex`, `comex`) feeds.
+
+    ``FuturesClient`` routes streaming subscriptions to the venue-specific
+    WebSocket endpoint (for example, ``wss://socket.massive.com/futures/cme``)
+    and normalizes futures contract tickers (such as ``"ESZ5"`` or ``"CLF6"``)
+    to canonical uppercase strings.
+
+    Example:
+        Stream live CME E-mini S&P 500 trades seeded with the latest snapshot::
+
+            es_trades = (
+                m.futures.trades(["ESZ5", "NQZ5"], venue="cme")
+                .with_seed()
+                .stream()
+            )
+    """
 
     def __init__(self, session: MassiveSession) -> None:
+        """Initialize the US Futures domain client.
+
+        Args:
+            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+        """
         super().__init__(session, domain="futures")
 
     def _fetch_futures_snapshots(
@@ -58,7 +84,26 @@ class FuturesClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, or fetch historical Futures trades (`T.*` on `/futures/{venue}`, `/futures/vX/trades`)."""
+        """Configure a US Futures tick-by-tick trades feed (`T.*`, `/futures/vX/trades`).
+
+        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        `.poll()`, and `.historical()` (backed by S3 `us_futures/trades_v1` or
+        REST `/futures/vX/trades/{contract}`).
+
+        Args:
+            contracts: Contract symbol (`"ESZ5"`), iterable of symbols,
+                `"*"` for all contracts on `venue`, or a reactive Deephaven
+                `Table` watchlist.
+            venue: CME Group exchange code (`"cme"`, `"cbot"`, `"nymex"`, or
+                `"comex"`). Defaults to `"cme"`.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `contracts` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `TRADES_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url(
             "futures", feed_override=feed, venue=venue
         )
@@ -102,7 +147,26 @@ class FuturesClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, or fetch historical Futures top-of-book quotes (`Q.*` on `/futures/{venue}`)."""
+        """Configure a US Futures top-of-book quotes feed (`Q.*`, `/futures/vX/quotes`).
+
+        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        `.poll()`, and `.historical()` (backed by S3 `us_futures/quotes_v1` or
+        REST `/futures/vX/quotes/{contract}`).
+
+        Args:
+            contracts: Contract symbol (`"ESZ5"`), iterable of symbols,
+                `"*"` for all contracts on `venue`, or a reactive Deephaven
+                `Table` watchlist.
+            venue: CME Group exchange code (`"cme"`, `"cbot"`, `"nymex"`, or
+                `"comex"`). Defaults to `"cme"`.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `contracts` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `QUOTES_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url(
             "futures", feed_override=feed, venue=venue
         )
@@ -148,7 +212,30 @@ class FuturesClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, or fetch historical Futures OHLCV + settlement bars (`A.*` / `AM.*`, `/futures/vX/aggs`)."""
+        """Configure a US Futures OHLCV + settlement bars feed (`A.*` / `AM.*`, `/futures/vX/aggs`).
+
+        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
+        `.poll()`, and `.historical()` (routed to S3 `us_futures/minute_aggs_v1`,
+        `us_futures/day_aggs_v1`, or `us_futures/session_aggs_v1` when
+        `multiplier == 1`, or REST `/futures/vX/aggs/{contract}`).
+
+        Args:
+            contracts: Contract symbol (`"ESZ5"`), iterable of symbols,
+                `"*"` for all contracts on `venue`, or a reactive Deephaven
+                `Table` watchlist.
+            multiplier: Number of `timespan` units per bar. Defaults to `1`.
+            timespan: Bar duration unit (`"second"`, `"minute"`, `"hour"`,
+                `"day"`, or `"session"`). Defaults to `"minute"`.
+            venue: CME Group exchange code (`"cme"`, `"cbot"`, `"nymex"`, or
+                `"comex"`). Defaults to `"cme"`.
+            feed: Optional feed tier override (`"realtime"` or `"delayed"`).
+            symbol_col: Column name to watch when `contracts` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `BARS_SCHEMA` (including `SettlementPrice` when reported).
+        """
         clean_span = timespan.strip().lower()
         ws_channel = "A" if clean_span == "second" else "AM"
         ws_url = self.session.config.resolve_ws_url(
@@ -206,7 +293,17 @@ class FuturesClient(BaseDomainClient):
     def snapshots(
         self, contracts: str | Iterable[str] | None = None
     ) -> FeedBuilder:
-        """Snapshot or poll Futures contracts (`/futures/vX/snapshot`)."""
+        """Configure a US Futures contract snapshot feed (`/futures/vX/snapshot`).
+
+        Args:
+            contracts: Optional contract symbol or iterable of contract symbols
+                to filter. When `None`, returns snapshots for all active
+                futures contracts.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `FUTURES_SNAPSHOT_SCHEMA`.
+        """
         canon = self.canonical_symbols(contracts) if contracts is not None else None
         return self.build_feed(
             name="futures_snapshots",
@@ -222,7 +319,22 @@ class FuturesClient(BaseDomainClient):
         active: bool = True,
         **filters: Any,
     ) -> FeedBuilder:
-        """Futures contract specifications, tick size, and expiration (`/futures/vX/contracts`)."""
+        """Configure a Futures contract specifications feed (`/futures/vX/contracts`).
+
+        Returns tick size, point value multiplier, settlement type, and
+        first/last trade dates for listed futures contracts.
+
+        Args:
+            product_code: Optional root product code filter (e.g., `"ES"`,
+                `"CL"`, `"GC"`).
+            active: If `True` (default), restrict to currently tradable
+                contracts.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `FUTURES_CONTRACTS_SCHEMA`.
+        """
         params = normalize_filter_params(
             {
                 "product_code": product_code.strip().upper()
@@ -243,7 +355,17 @@ class FuturesClient(BaseDomainClient):
     def products(
         self, *, venue: str | None = None, **filters: Any
     ) -> FeedBuilder:
-        """Futures product catalog (`/futures/vX/products`)."""
+        """Configure a Futures root product catalog feed (`/futures/vX/products`).
+
+        Args:
+            venue: Optional exchange/market sector filter (e.g., `"CME"`,
+                `"CBOT"`, `"NYMEX"`, `"COMEX"`).
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `FUTURES_PRODUCTS_SCHEMA`.
+        """
         params = normalize_filter_params(
             {"market_sector": venue.upper() if venue else None},
             filters,
@@ -259,7 +381,16 @@ class FuturesClient(BaseDomainClient):
     def schedules(
         self, product_code: str | None = None, **filters: Any
     ) -> FeedBuilder:
-        """Trading session schedules by futures product and exchange (`/futures/vX/schedules`)."""
+        """Configure a Futures trading session schedules feed (`/futures/vX/schedules`).
+
+        Args:
+            product_code: Optional root product code filter (e.g., `"ES"`).
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `FUTURES_SCHEDULES_SCHEMA`.
+        """
         params = normalize_filter_params(
             {
                 "product_code": product_code.strip().upper()
@@ -277,7 +408,12 @@ class FuturesClient(BaseDomainClient):
         )
 
     def exchanges(self) -> FeedBuilder:
-        """Futures exchange directory (`/futures/vX/exchanges`)."""
+        """Configure a Futures exchange directory feed (`/futures/vX/exchanges`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `EXCHANGES_SCHEMA`.
+        """
         return self.build_feed(
             name="futures_exchanges",
             schema_spec=EXCHANGES_SCHEMA,
@@ -285,7 +421,12 @@ class FuturesClient(BaseDomainClient):
         )
 
     def market_status(self) -> FeedBuilder:
-        """Futures exchange and product group open/closed status (`/futures/vX/market-status`)."""
+        """Configure a Futures exchange and product-group status feed (`/futures/vX/market-status`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `MARKET_STATUS_SCHEMA`.
+        """
         return self.build_feed(
             name="futures_market_status",
             schema_spec=MARKET_STATUS_SCHEMA,

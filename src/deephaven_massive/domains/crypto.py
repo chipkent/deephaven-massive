@@ -1,4 +1,11 @@
-"""Global Crypto domain client (`m.crypto`) covering trades, quotes, bars, FMV, snapshots, and indicators."""
+"""Global Crypto domain client (`m.crypto`).
+
+This module implements :class:`CryptoClient`, which provides 24/7 real-time
+WebSocket streams (`trades`, `quotes`, `bars`, `fmv`), REST snapshots,
+historical backfills (via S3 Flat Files or REST), exchange directories, and
+technical indicators for global cryptocurrency pairs (`BTC-USD`, `ETH-USD`,
+`SOL-USD`, etc.).
+"""
 
 from __future__ import annotations
 
@@ -35,9 +42,26 @@ if TYPE_CHECKING:
 
 
 class CryptoClient(BaseDomainClient):
-    """Domain client for Global Crypto (`BTC-USD`, `ETH-USD`, etc.)."""
+    """Domain client for Global Crypto (`BTC-USD`, `ETH-USD`, etc.) feeds (`m.crypto`).
+
+    Cryptocurrency pairs may be passed in `"BTC-USD"`, `"BTC/USD"`,
+    `"X:BTCUSD"`, or `"X:BTC-USD"` notation. ``CryptoClient`` normalizes all
+    pairs to the canonical `"BASE-QUOTE"` representation (e.g., `"BTC-USD"`)
+    in every Deephaven table while translating to Massive's wire format
+    (`"XT.BTC-USD"` on WebSockets and `"X:BTCUSD"` on REST/S3) automatically.
+
+    Example:
+        Stream live Bitcoin and Ethereum trades seeded with the latest snapshot::
+
+            crypto = m.crypto.trades(["BTC-USD", "ETH-USD"]).with_seed().stream()
+    """
 
     def __init__(self, session: MassiveSession) -> None:
+        """Initialize the Global Crypto domain client.
+
+        Args:
+            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+        """
         super().__init__(session, domain="crypto")
 
     def _fetch_crypto_snapshots(
@@ -65,7 +89,23 @@ class CryptoClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, or fetch historical Crypto trades (`XT.*`, `/v3/trades/{cryptoTicker}`)."""
+        """Configure a Global Crypto tick-by-tick trades feed (`XT.*`, `/v3/trades/{cryptoTicker}`).
+
+        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        `.poll()`, and `.historical()` (backed by S3 `global_crypto/trades_v1`
+        or REST `/v3/trades/{cryptoTicker}`).
+
+        Args:
+            pairs: Crypto pair (`"BTC-USD"`), iterable of pairs, `"*"` for all
+                Crypto pairs, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"`).
+            symbol_col: Column name to watch when `pairs` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `TRADES_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url("crypto", feed_override=feed)
 
         def _rest_path(
@@ -107,7 +147,19 @@ class CryptoClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream or snapshot Crypto BBO quotes (`XQ.*`)."""
+        """Configure a Global Crypto BBO quotes feed (`XQ.*`).
+
+        Args:
+            pairs: Crypto pair (`"BTC-USD"`), iterable of pairs, `"*"` for all
+                Crypto pairs, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"`).
+            symbol_col: Column name to watch when `pairs` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.stream()` (with
+            optional `.with_seed()`) with `QUOTES_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url("crypto", feed_override=feed)
         return self.build_feed(
             name="crypto_quotes",
@@ -129,7 +181,29 @@ class CryptoClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream, snapshot, or fetch historical Crypto OHLCV bars (`XAS.*` / `XA.*`, `/v2/aggs/...`)."""
+        """Configure a Global Crypto OHLCV bars feed (`XAS.*` / `XA.*`, `/v2/aggs/...`).
+
+        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
+        `.poll()`, and `.historical()` (routed to S3
+        `global_crypto/minute_aggs_v1` or `global_crypto/day_aggs_v1` when
+        `multiplier == 1`, or REST `/v2/aggs/...`).
+
+        Args:
+            pairs: Crypto pair (`"BTC-USD"`), iterable of pairs, `"*"` for all
+                Crypto pairs, or a reactive Deephaven `Table` watchlist.
+            multiplier: Number of `timespan` units per bar. Defaults to `1`.
+            timespan: Bar duration unit (`"second"`, `"minute"`, `"hour"`,
+                `"day"`, `"week"`, `"month"`, `"quarter"`, `"year"`). Defaults
+                to `"minute"`.
+            adjusted: Whether to adjust historical bars. Defaults to `True`.
+            feed: Optional feed tier override (`"realtime"`).
+            symbol_col: Column name to watch when `pairs` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder producing a table matching
+            `BARS_SCHEMA`.
+        """
         clean_span = timespan.strip().lower()
         ws_channel = "XAS" if clean_span == "second" else "XA"
         ws_url = self.session.config.resolve_ws_url("crypto", feed_override=feed)
@@ -187,7 +261,19 @@ class CryptoClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Stream Crypto Fair Market Value (`FMV.*` on `business.massive.com`)."""
+        """Configure a Global Crypto Fair Market Value (`FMV.*`) stream on `business.massive.com`.
+
+        Args:
+            pairs: Crypto pair (`"BTC-USD"`), iterable of pairs, `"*"` for all
+                Crypto pairs, or a reactive Deephaven `Table` watchlist.
+            feed: Optional feed tier override (`"realtime"`).
+            symbol_col: Column name to watch when `pairs` is a Deephaven
+                `Table`. Defaults to `"Symbol"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.stream()` with
+            `FMV_SCHEMA`.
+        """
         ws_url = self.session.config.resolve_ws_url(
             "crypto", feed_override=feed, is_fmv=True
         )
@@ -206,7 +292,22 @@ class CryptoClient(BaseDomainClient):
         *,
         direction: str | None = None,
     ) -> FeedBuilder:
-        """Snapshot or poll Crypto pairs (including top gainers/losers)."""
+        """Configure a Global Crypto market snapshots feed (`/v2/snapshot/locale/global/markets/crypto/...`).
+
+        Args:
+            pairs: Optional crypto pair or iterable of pairs to filter. When
+                `None` and `direction` is `None`, returns snapshots for all
+                active crypto pairs.
+            direction: Optional top-movers filter (`"gainers"` or `"losers"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `STOCK_SNAPSHOT_SCHEMA`.
+
+        Raises:
+            ValueError: If `direction` is not `"gainers"` or `"losers"` when
+                evaluated.
+        """
         canon_syms = self.canonical_symbols(pairs) if pairs is not None else None
 
         def _fetch() -> list[dict[str, Any]]:
@@ -227,13 +328,31 @@ class CryptoClient(BaseDomainClient):
         )
 
     def top_movers(self, direction: str = "gainers") -> FeedBuilder:
-        """Top Crypto market movers (`direction='gainers'` or `'losers'`, `/v2/snapshot/locale/global/markets/crypto/{direction}`)."""
+        """Configure a top Crypto market movers feed (`/v2/snapshot/locale/global/markets/crypto/{direction}`).
+
+        Args:
+            direction: `"gainers"` (default) or `"losers"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `STOCK_SNAPSHOT_SCHEMA`.
+        """
         return self.snapshots(direction=direction)
 
     def last_trade(
         self, from_currency: str, to_currency: str | None = None
     ) -> FeedBuilder:
-        """Last trade for a Crypto currency pair (`/v1/last/crypto/{from}/{to}`)."""
+        """Configure a latest trade feed for a Crypto currency pair (`/v1/last/crypto/{from}/{to}`).
+
+        Args:
+            from_currency: Base asset (`"BTC"`) or full pair (`"BTC-USD"` when
+                `to_currency` is omitted).
+            to_currency: Optional quote asset (`"USD"`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `TRADES_SCHEMA`.
+        """
         pair = (
             f"{from_currency}-{to_currency}"
             if to_currency is not None
@@ -253,7 +372,16 @@ class CryptoClient(BaseDomainClient):
     def daily_market_summary(
         self, target_date: str | date | datetime, *, adjusted: bool = True
     ) -> FeedBuilder:
-        """Grouped daily summary for all Crypto pairs on `target_date` (`/v2/aggs/grouped/locale/global/market/crypto/{date}`)."""
+        """Configure a grouped daily OHLCV summary feed for all Crypto pairs on `target_date` (`/v2/aggs/grouped/locale/global/market/crypto/{date}`).
+
+        Args:
+            target_date: Calendar date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            adjusted: Whether to adjust for splits. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `DAILY_SUMMARY_SCHEMA`.
+        """
         d_str = format_date_param(target_date)
         return self.build_feed(
             name="crypto_daily_market_summary",
@@ -268,7 +396,16 @@ class CryptoClient(BaseDomainClient):
     def previous_close(
         self, pair: str, *, adjusted: bool = True
     ) -> FeedBuilder:
-        """Previous day's OHLCV bar for a Crypto pair (`/v2/aggs/ticker/{cryptoTicker}/prev`)."""
+        """Configure a feed for a Crypto pair's previous day OHLCV bar (`/v2/aggs/ticker/{cryptoTicker}/prev`).
+
+        Args:
+            pair: Crypto pair (e.g., `"BTC-USD"` or `"X:BTCUSD"`).
+            adjusted: Whether to adjust for splits. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `BARS_SCHEMA`.
+        """
         canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
         ticker = self.symbol_normalizer.rest_ticker(canon)  # type: ignore[union-attr]
         return self.build_feed(
@@ -291,7 +428,17 @@ class CryptoClient(BaseDomainClient):
         *,
         adjusted: bool = True,
     ) -> FeedBuilder:
-        """Daily open/close for a Crypto pair (`/v1/open-close/crypto/{from}/{to}/{date}`)."""
+        """Configure a daily open/close summary feed for a Crypto pair (`/v1/open-close/crypto/{from}/{to}/{date}`).
+
+        Args:
+            pair: Crypto pair (e.g., `"BTC-USD"` or `"X:BTCUSD"`).
+            target_date: Calendar date (`"YYYY-MM-DD"`, `date`, or `datetime`).
+            adjusted: Whether to adjust for splits. Defaults to `True`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `DAILY_SUMMARY_SCHEMA`.
+        """
         canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
         base, quote = canon.split("-")
         d_str = format_date_param(target_date)
@@ -315,7 +462,17 @@ class CryptoClient(BaseDomainClient):
         search: str | None = None,
         **filters: Any,
     ) -> FeedBuilder:
-        """Crypto pairs directory (`/v3/reference/tickers?market=crypto`)."""
+        """Configure a Crypto currency pairs reference directory feed (`/v3/reference/tickers?market=crypto`).
+
+        Args:
+            active: If `True` (default), return only active crypto pairs.
+            search: Optional keyword search query across pair tickers/names.
+            **filters: Additional Massive REST query parameters.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `TICKERS_SCHEMA`.
+        """
         params = normalize_filter_params(
             {
                 "market": "crypto",
@@ -333,7 +490,12 @@ class CryptoClient(BaseDomainClient):
         )
 
     def conditions(self) -> FeedBuilder:
-        """Crypto trade and quote condition codes (`/v3/reference/conditions?asset_class=crypto`)."""
+        """Configure a Crypto trade and quote condition codes feed (`/v3/reference/conditions?asset_class=crypto`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `CONDITIONS_SCHEMA`.
+        """
         return self.build_feed(
             name="crypto_conditions",
             schema_spec=CONDITIONS_SCHEMA,
@@ -343,7 +505,12 @@ class CryptoClient(BaseDomainClient):
         )
 
     def exchanges(self) -> FeedBuilder:
-        """Crypto exchange directory (`/v3/reference/exchanges?asset_class=crypto`)."""
+        """Configure a Crypto exchange directory feed (`/v3/reference/exchanges?asset_class=crypto`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `EXCHANGES_SCHEMA`.
+        """
         return self.build_feed(
             name="crypto_exchanges",
             schema_spec=EXCHANGES_SCHEMA,
@@ -353,7 +520,12 @@ class CryptoClient(BaseDomainClient):
         )
 
     def market_holidays(self) -> FeedBuilder:
-        """Upcoming market holidays (`/v1/marketstatus/upcoming`)."""
+        """Configure an upcoming market holidays feed (`/v1/marketstatus/upcoming`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `HOLIDAYS_SCHEMA`.
+        """
         return self.build_feed(
             name="crypto_market_holidays",
             schema_spec=HOLIDAYS_SCHEMA,
@@ -365,7 +537,12 @@ class CryptoClient(BaseDomainClient):
     holidays = market_holidays
 
     def market_status(self) -> FeedBuilder:
-        """Current Crypto and currency market status (`/v1/marketstatus/now`)."""
+        """Configure a current Crypto and currency market status feed (`/v1/marketstatus/now`).
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()` and
+            `.poll()` with `MARKET_STATUS_SCHEMA`.
+        """
         return self.build_feed(
             name="crypto_market_status",
             schema_spec=MARKET_STATUS_SCHEMA,
@@ -380,7 +557,20 @@ class CryptoClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """SMA indicator for a Crypto pair."""
+        """Configure a Simple Moving Average (`SMA`) indicator feed for a Crypto pair (`/v1/indicators/sma/{cryptoTicker}`).
+
+        Args:
+            pair: Crypto pair (e.g., `"BTC-USD"` or `"X:BTCUSD"`).
+            window: Rolling window period length. Defaults to `50`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "SMA",
             pair,
@@ -398,7 +588,20 @@ class CryptoClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """EMA indicator for a Crypto pair."""
+        """Configure an Exponential Moving Average (`EMA`) indicator feed for a Crypto pair (`/v1/indicators/ema/{cryptoTicker}`).
+
+        Args:
+            pair: Crypto pair (e.g., `"BTC-USD"` or `"X:BTCUSD"`).
+            window: Rolling window period length. Defaults to `50`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "EMA",
             pair,
@@ -418,7 +621,22 @@ class CryptoClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """MACD indicator for a Crypto pair."""
+        """Configure a Moving Average Convergence/Divergence (`MACD`) indicator feed for a Crypto pair (`/v1/indicators/macd/{cryptoTicker}`).
+
+        Args:
+            pair: Crypto pair (e.g., `"BTC-USD"` or `"X:BTCUSD"`).
+            short_window: Fast EMA period length. Defaults to `12`.
+            long_window: Slow EMA period length. Defaults to `26`.
+            signal_window: Signal line EMA period length. Defaults to `9`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "MACD",
             pair,
@@ -442,7 +660,20 @@ class CryptoClient(BaseDomainClient):
         timespan: str = "day",
         series_type: str = "close",
     ) -> FeedBuilder:
-        """RSI indicator for a Crypto pair."""
+        """Configure a Relative Strength Index (`RSI`) indicator feed for a Crypto pair (`/v1/indicators/rsi/{cryptoTicker}`).
+
+        Args:
+            pair: Crypto pair (e.g., `"BTC-USD"` or `"X:BTCUSD"`).
+            window: Rolling lookback window length. Defaults to `14`.
+            timespan: Aggregation bar size (`"minute"`, `"hour"`, `"day"`,
+                `"week"`, `"month"`). Defaults to `"day"`.
+            series_type: Price series component (`"close"`, `"open"`, `"high"`,
+                `"low"`). Defaults to `"close"`.
+
+        Returns:
+            FeedBuilder: Configured feed builder supporting `.snapshot()`,
+            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+        """
         return self._indicator_feed(
             "RSI",
             pair,

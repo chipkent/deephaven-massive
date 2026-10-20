@@ -1,4 +1,21 @@
-"""Core streaming, polling, symbol normalization, and Arrow bridge engine."""
+"""Core streaming, polling, symbol normalization, and PyArrow-to-Deephaven bridge engine.
+
+This subpackage contains the transport-agnostic execution components that power
+`deephaven-massive`:
+
+- `arrow_bridge`: Zero-dataclass JSON/CSV-to-PyArrow `RecordBatch` coercion and
+  thread-safe Deephaven `ExecutionContext` table conversion.
+- `builder`: The fluent `FeedBuilder` unifying `.latest()`, `.history()`, `.ring()`,
+  `.blink()`, `.snapshot()`, `.poll()`, and `.historical()`.
+- `poller`: `SnapshotPoller` for background REST polling (`"replace"`, `"upsert"`,
+  and `"append"`).
+- `publisher`: `MicroBatchPublisher` for high-throughput micro-batching and
+  lossless startup seed deduplication.
+- `symbols`: `SymbolNormalizer` for cross-transport symbol canonicalization.
+- `watchlist`: `ReactiveWatchlistController` for dynamic WebSocket subscriptions
+  driven by live Deephaven tables.
+- `ws_multiplexer`: `WebSocketMultiplexer` for reference-counted WebSocket pooling.
+"""
 
 from __future__ import annotations
 

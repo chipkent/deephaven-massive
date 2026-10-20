@@ -1,4 +1,11 @@
-"""Reactive Deephaven Table watchlist listener driving dynamic WebSocket subscriptions."""
+"""Reactive Deephaven `Table` watchlist listener driving dynamic WebSocket subscriptions.
+
+`ReactiveWatchlistController` allows any live Deephaven `Table` (such as an
+`input_table`, a filtered portfolio view, or an options-chain screener) to act as the
+`symbols` argument to a `FeedBuilder`. As rows enter or leave the watchlist table,
+the controller automatically subscribes and unsubscribes WebSocket topics and evicts
+removed symbols from `.latest()`, `.history()`, and `.ring()` tables.
+"""
 
 from __future__ import annotations
 
@@ -38,15 +45,19 @@ _ACTIVE_SUBS_KEY_SCHEMA = pa.schema(
 
 
 class ReactiveWatchlistController:
-    """Bridges a live Deephaven `Table` watchlist to WebSocket subscriptions and `.latest()` / `.history()` eviction.
+    """Bridges a live Deephaven `Table` watchlist to WebSocket subscriptions and row eviction.
 
-    Guarantees:
-    - Lock-free listener callback: Deephaven `table_listener.listen` callbacks never block the UpdateGraph thread;
-      diffs are dispatched via `ws_multiplexer.call_soon_threadsafe`.
-    - Strict subscribe ordering: `(Symbol, SubscribedAt)` is added to `active_subs` BEFORE the symbol is enabled
-      in `MicroBatchPublisher` and subscribed on the WebSocket multiplexer.
-    - Strict unsubscribe ordering: The symbol is disabled in `MicroBatchPublisher` and unsubscribed on the
-      WebSocket multiplexer BEFORE being deleted from `active_subs`.
+    Architectural guarantees:
+    - **Non-blocking listener callback**: Deephaven `table_listener.listen` callbacks
+      never perform network I/O or acquire blocking locks on the UpdateGraph thread;
+      symbol diffs are submitted to a dedicated single-thread executor.
+    - **Strict subscribe ordering**: `(Symbol, SubscribedAt)` is written to the keyed
+      `active_subs` `InputTable` *before* the symbol is enabled in `MicroBatchPublisher`
+      and subscribed on `WebSocketMultiplexer`, preventing early ticks from being dropped
+      by the downstream `natural_join`.
+    - **Strict unsubscribe ordering**: Removed symbols are disabled in `MicroBatchPublisher`
+      and unsubscribed on `WebSocketMultiplexer` *before* being deleted from `active_subs`,
+      immediately evicting stale rows from `.latest()` and `.history()`.
     """
 
     def __init__(
@@ -63,6 +74,23 @@ class ReactiveWatchlistController:
         seed_fn: Callable[[list[str]], Sequence[Mapping[str, Any]]] | None = None,
         auto_start: bool = True,
     ) -> None:
+        """Initialize a `ReactiveWatchlistController`.
+
+        Args:
+            watchlist_table: Live Deephaven `Table` containing the symbol column to watch.
+            ws_url: Target WebSocket endpoint URL.
+            channel: WebSocket channel prefix (e.g., `"T"`, `"Q"`, `"AM"`).
+            publisher: `MicroBatchPublisher` receiving events for this feed.
+            ws_multiplexer: Shared `WebSocketMultiplexer` managing topic subscriptions.
+            symbol_normalizer: Domain `SymbolNormalizer` for canonicalizing watchlist symbols.
+            symbol_col: Column name in `watchlist_table` containing ticker strings
+                (defaults to `"Symbol"`).
+            exec_ctx: Host Deephaven `ExecutionContext`.
+            seed_fn: Optional callable `(canonical_symbols) -> rows` invoked whenever
+                new symbols are added to the watchlist.
+            auto_start: If `True`, registers the Deephaven `table_listener` immediately;
+                if `False`, defers listener registration until `start()` is called.
+        """
         from deephaven import dtypes as dht
         from deephaven import input_table
 
@@ -101,7 +129,7 @@ class ReactiveWatchlistController:
             self.start()
 
     def start(self) -> None:
-        """Start listening to the watchlist table (idempotent)."""
+        """Start listening to `watchlist_table` and replay its initial rows (idempotent)."""
         from deephaven.table_listener import listen
 
         with self._op_lock:
@@ -122,11 +150,12 @@ class ReactiveWatchlistController:
 
     @property
     def active_symbols(self) -> frozenset[str]:
-        """Return a snapshot of currently active canonical symbols."""
+        """Return an immutable snapshot of currently active canonical symbols."""
         with self._lock:
             return frozenset(self._active_symbols)
 
     def _extract_symbols(self, col_map: Mapping[str, Any] | None) -> list[str]:
+        """Extract and canonicalize non-empty symbol strings from a listener update map."""
         if not col_map or self.symbol_col not in col_map:
             return []
         raw_seq = col_map[self.symbol_col]
@@ -160,6 +189,7 @@ class ReactiveWatchlistController:
     def _apply_diff_safe(
         self, to_add: Iterable[str], to_remove: Iterable[str]
     ) -> None:
+        """Execute `apply_diff` on the worker thread and notify `wait_idle` callers."""
         try:
             self.apply_diff(to_add, to_remove)
         finally:
@@ -174,7 +204,13 @@ class ReactiveWatchlistController:
         *,
         _from_stop: bool = False,
     ) -> None:
-        """Apply symbol additions and removals with strict serialized ordering across `active_subs`, publisher, and WS."""
+        """Apply symbol additions and removals with serialized ordering across `active_subs`, publisher, and WebSocket.
+
+        Args:
+            to_add: Iterable of symbols added to the watchlist.
+            to_remove: Iterable of symbols removed from the watchlist.
+            _from_stop: Internal flag permitting final unsubscription during `stop()`.
+        """
         add_set = {self.symbol_normalizer.canonical(s) for s in to_add if s}
         rem_set = {self.symbol_normalizer.canonical(s) for s in to_remove if s} - add_set
 
@@ -245,7 +281,14 @@ class ReactiveWatchlistController:
                     )
 
     def wait_idle(self, timeout: float = 5.0) -> bool:
-        """Block until all scheduled watchlist diff operations have completed."""
+        """Block until all scheduled watchlist diff operations have completed.
+
+        Args:
+            timeout: Maximum seconds to wait for pending diffs to drain.
+
+        Returns:
+            `True` if all pending operations completed before `timeout`, else `False`.
+        """
         deadline = time.monotonic() + timeout
         with self._idle_Condition:
             while self._pending_ops > 0:
