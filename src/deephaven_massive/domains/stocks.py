@@ -75,16 +75,16 @@ class StocksClient(BaseDomainClient):
     ``StocksClient`` normalizes all equity tickers to uppercase strings (for
     example, ``"aapl"`` -> ``"AAPL"``, ``"brk.b"`` -> ``"BRK.B"``) and returns
     a :class:`~deephaven_massive.engine.builder.FeedBuilder` from every method
-    so you can choose `.stream()`, `.snapshot()`, `.poll()`, or `.historical()`
-    with a uniform, chainable API.
+    so you can choose `.latest()`, `.history()`, `.ring()`, `.blink()`,
+    `.snapshot()`, `.poll()`, or `.historical()` with a uniform, chainable API.
 
     Example:
         Stream live US Stock trades and NBBO quotes for a reactive watchlist
         of today's top gainers::
 
-            gainers = m.stocks.gainers().poll(interval=30)
-            trades = m.stocks.trades(gainers).with_seed().stream()
-            quotes = m.stocks.quotes(gainers).with_seed().stream()
+            gainers = m.stocks.gainers().poll(interval_s=30.0)
+            trades = m.stocks.trades(gainers).latest()
+            quotes = m.stocks.quotes(gainers).latest()
     """
 
     def __init__(self, session: MassiveSession) -> None:
@@ -122,7 +122,7 @@ class StocksClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a US Stock SIP tick-by-tick trades feed (`T.*`, `/v3/trades/{ticker}`).
 
-        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`,
         `.poll()`, and `.historical()` (backed by S3 `us_stocks_sip/trades_v1`
         or REST `/v3/trades/{ticker}`).
 
@@ -180,7 +180,7 @@ class StocksClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a US Stock SIP NBBO quotes feed (`Q.*`, `/v3/quotes/{ticker}`).
 
-        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`,
         `.poll()`, and `.historical()` (backed by S3 `us_stocks_sip/quotes_v1`
         or REST `/v3/quotes/{ticker}`).
 
@@ -241,11 +241,11 @@ class StocksClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a US Stock OHLCV bars feed (`A.*` / `AM.*`, `/v2/aggs/...`).
 
-        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
-        `.poll()`, and `.historical()` (routed to S3
-        `us_stocks_sip/minute_aggs_v1` or `us_stocks_sip/day_aggs_v1` when
-        `multiplier == 1` and `adjusted is True`, or REST
-        `/v2/aggs/ticker/{ticker}/range/...`).
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()` (second or
+        minute aggregates), `.snapshot()`, `.poll()`, and `.historical()`
+        (routed to S3 `us_stocks_sip/minute_aggs_v1` or
+        `us_stocks_sip/day_aggs_v1` when `multiplier == 1` and
+        `adjusted is True`, or REST `/v2/aggs/ticker/{ticker}/range/...`).
 
         Args:
             symbols: Equity ticker (`"AAPL"`), iterable of tickers, `"*"` for
@@ -332,8 +332,8 @@ class StocksClient(BaseDomainClient):
                 `Table`. Defaults to `"Symbol"`.
 
         Returns:
-            FeedBuilder: Configured feed builder supporting `.stream()` with
-            `LULD_SCHEMA`.
+            FeedBuilder: Configured feed builder supporting `.latest()`,
+            `.history()`, `.ring()`, and `.blink()` with `LULD_SCHEMA`.
         """
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
         return self.build_feed(
@@ -362,8 +362,8 @@ class StocksClient(BaseDomainClient):
                 `Table`. Defaults to `"Symbol"`.
 
         Returns:
-            FeedBuilder: Configured feed builder supporting `.stream()` with
-            `IMBALANCES_SCHEMA`.
+            FeedBuilder: Configured feed builder supporting `.latest()`,
+            `.history()`, `.ring()`, and `.blink()` with `IMBALANCES_SCHEMA`.
         """
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
         return self.build_feed(
@@ -392,8 +392,8 @@ class StocksClient(BaseDomainClient):
                 `Table`. Defaults to `"Symbol"`.
 
         Returns:
-            FeedBuilder: Configured feed builder supporting `.stream()` with
-            `FMV_SCHEMA`.
+            FeedBuilder: Configured feed builder supporting `.latest()`,
+            `.history()`, `.ring()`, and `.blink()` with `FMV_SCHEMA`.
         """
         ws_url = self.session.config.resolve_ws_url(
             "stocks", feed_override=feed, is_fmv=True
@@ -613,7 +613,7 @@ class StocksClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         params = {
             "window": window,
@@ -647,7 +647,7 @@ class StocksClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         params = {
             "window": window,
@@ -685,7 +685,7 @@ class StocksClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         params = {
             "short_window": short_window,
@@ -721,7 +721,7 @@ class StocksClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         params = {
             "window": window,

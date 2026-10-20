@@ -74,7 +74,7 @@ class OptionsClient(BaseDomainClient):
 
             chain = m.options.chain_snapshot("AAPL").snapshot()
             near_atm = chain.where("abs(Delta) > 0.25 && abs(Delta) < 0.75")
-            live_quotes = m.options.quotes(near_atm).stream()
+            live_quotes = m.options.quotes(near_atm).latest()
     """
 
     def __init__(self, session: MassiveSession) -> None:
@@ -126,7 +126,7 @@ class OptionsClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure an OPRA option tick-by-tick trades feed (`T.O:*`, `/v3/trades/{optionsTicker}`).
 
-        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`,
         `.poll()`, and `.historical()` (backed by S3 `us_options_opra/trades_v1`
         or REST `/v3/trades/{optionsTicker}`).
 
@@ -185,7 +185,7 @@ class OptionsClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure an OPRA option NBBO quotes feed (`Q.O:*`, `/v3/quotes/{optionsTicker}`).
 
-        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`,
         `.poll()`, and `.historical()` (backed by S3 `us_options_opra/quotes_v1`
         or REST `/v3/quotes/{optionsTicker}`).
 
@@ -246,10 +246,11 @@ class OptionsClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure an OPRA option OHLCV bars feed (`A.O:*` / `AM.O:*`, `/v2/aggs/...`).
 
-        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
-        `.poll()`, and `.historical()` (routed to S3
-        `us_options_opra/minute_aggs_v1` or `us_options_opra/day_aggs_v1` when
-        `multiplier == 1` and `adjusted is True`, or REST `/v2/aggs/...`).
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()` (second or
+        minute aggregates), `.snapshot()`, `.poll()`, and `.historical()`
+        (routed to S3 `us_options_opra/minute_aggs_v1` or
+        `us_options_opra/day_aggs_v1` when `multiplier == 1` and
+        `adjusted is True`, or REST `/v2/aggs/...`).
 
         Args:
             contracts: OCC contract symbol, iterable of symbols, `"*"` for all
@@ -335,8 +336,8 @@ class OptionsClient(BaseDomainClient):
                 `Table`. Defaults to `"Symbol"`.
 
         Returns:
-            FeedBuilder: Configured feed builder supporting `.stream()` with
-            `FMV_SCHEMA`.
+            FeedBuilder: Configured feed builder supporting `.latest()`,
+            `.history()`, `.ring()`, and `.blink()` with `FMV_SCHEMA`.
         """
         ws_url = self.session.config.resolve_ws_url(
             "options", feed_override=feed, is_fmv=True
@@ -599,7 +600,7 @@ class OptionsClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "SMA",
@@ -630,7 +631,7 @@ class OptionsClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "EMA",
@@ -665,7 +666,7 @@ class OptionsClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "MACD",
@@ -702,7 +703,7 @@ class OptionsClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "RSI",

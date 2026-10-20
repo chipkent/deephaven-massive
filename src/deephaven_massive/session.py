@@ -98,12 +98,12 @@ class MassiveSession:
             technical indicators.
         forex: `ForexClient` for global FX quotes, bars, snapshots, currency
             conversion, and technical indicators.
-        crypto: `CryptoClient` for global crypto trades, quotes, L2 book, bars,
+        crypto: `CryptoClient` for global crypto trades, quotes, FMV, bars,
             snapshots, and technical indicators.
-        economy: `EconomyClient` for US Treasury yields, inflation, and inflation
-            expectations.
-        partners: `PartnersClient` for Benzinga news/ratings/earnings, ETF Global,
-            and TMX corporate events.
+        economy: `EconomyClient` for US Treasury yields, inflation, inflation
+            expectations, labor market indicators, and funding conditions.
+        partners: `PartnersClient` for Benzinga news/ratings/earnings/guidance/transcripts,
+            ETF Global, TMX corporate events, and Fable Data.
         flat_files: `FlatFilesClient` for direct S3 `.csv.gz` flat-file streaming
             with PyArrow predicate pushdown.
 

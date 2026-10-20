@@ -48,7 +48,7 @@ class IndicesClient(BaseDomainClient):
         Stream live S&P 500 and VIX index values seeded with the current
         snapshot::
 
-            idx = m.indices.values(["SPX", "VIX"]).with_seed().stream()
+            idx = m.indices.values(["SPX", "VIX"]).latest()
     """
 
     def __init__(self, session: MassiveSession) -> None:
@@ -84,7 +84,7 @@ class IndicesClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a Market Index tick values feed (`V.I:*`, `/v3/snapshot/indices`).
 
-        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`,
         `.poll()`, and `.historical()` (backed by S3 `us_indices/values_v1` or
         REST `/v3/snapshot/indices`).
 
@@ -141,9 +141,10 @@ class IndicesClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a Market Index OHLC bars feed (`A.I:*` / `AM.I:*`, `/v2/aggs/...`).
 
-        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
-        `.poll()`, and `.historical()` (routed to S3 `us_indices/minute_aggs_v1`
-        or `us_indices/day_aggs_v1` when `multiplier == 1`, or REST
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()` (second or
+        minute aggregates), `.snapshot()`, `.poll()`, and `.historical()`
+        (routed to S3 `us_indices/minute_aggs_v1` or `us_indices/day_aggs_v1`
+        when `multiplier == 1`, or REST
         `/v2/aggs/ticker/{indicesTicker}/range/...`).
 
         Args:
@@ -364,7 +365,7 @@ class IndicesClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "SMA",
@@ -395,7 +396,7 @@ class IndicesClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "EMA",
@@ -430,7 +431,7 @@ class IndicesClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "MACD",
@@ -467,7 +468,7 @@ class IndicesClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "RSI",

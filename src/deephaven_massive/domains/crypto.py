@@ -51,16 +51,18 @@ class CryptoClient(BaseDomainClient):
     (`"XT.BTC-USD"` on WebSockets and `"X:BTCUSD"` on REST/S3) automatically.
 
     Example:
-        Stream live Bitcoin and Ethereum trades seeded with the latest snapshot::
+        Stream live Bitcoin and Ethereum trades in a bounded ring table seeded with the latest snapshot:
 
-            crypto = m.crypto.trades(["BTC-USD", "ETH-USD"]).with_seed().stream()
+        ```python
+        crypto = m.crypto.trades(["BTC-USD", "ETH-USD"]).ring(100_000, seed=True)
+        ```
     """
 
     def __init__(self, session: MassiveSession) -> None:
         """Initialize the Global Crypto domain client.
 
         Args:
-            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+            session: Active [`MassiveSession`][deephaven_massive.session.MassiveSession].
         """
         super().__init__(session, domain="crypto")
 
@@ -91,9 +93,9 @@ class CryptoClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a Global Crypto tick-by-tick trades feed (`XT.*`, `/v3/trades/{cryptoTicker}`).
 
-        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
-        `.poll()`, and `.historical()` (backed by S3 `global_crypto/trades_v1`
-        or REST `/v3/trades/{cryptoTicker}`).
+        Supports `.latest(seed=True)`, `.history(seed=True)`, `.ring(capacity, seed=True)`,
+        `.blink()`, `.snapshot()`, `.poll()`, and `.historical()` (backed by S3
+        `global_crypto/trades_v1` or REST `/v3/trades/{cryptoTicker}`).
 
         Args:
             pairs: Crypto pair (`"BTC-USD"`), iterable of pairs, `"*"` for all
@@ -157,8 +159,9 @@ class CryptoClient(BaseDomainClient):
                 `Table`. Defaults to `"Symbol"`.
 
         Returns:
-            FeedBuilder: Configured feed builder supporting `.stream()` (with
-            optional `.with_seed()`) with `QUOTES_SCHEMA`.
+            FeedBuilder: Configured feed builder supporting `.latest(seed=True)`,
+            `.history(seed=True)`, `.ring(capacity, seed=True)`, and `.blink()`
+            with `QUOTES_SCHEMA`.
         """
         ws_url = self.session.config.resolve_ws_url("crypto", feed_override=feed)
         return self.build_feed(
@@ -183,8 +186,8 @@ class CryptoClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a Global Crypto OHLCV bars feed (`XAS.*` / `XA.*`, `/v2/aggs/...`).
 
-        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
-        `.poll()`, and `.historical()` (routed to S3
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()` (second or minute
+        aggregates), `.snapshot()`, `.poll()`, and `.historical()` (routed to S3
         `global_crypto/minute_aggs_v1` or `global_crypto/day_aggs_v1` when
         `multiplier == 1`, or REST `/v2/aggs/...`).
 
@@ -271,8 +274,8 @@ class CryptoClient(BaseDomainClient):
                 `Table`. Defaults to `"Symbol"`.
 
         Returns:
-            FeedBuilder: Configured feed builder supporting `.stream()` with
-            `FMV_SCHEMA`.
+            FeedBuilder: Configured feed builder supporting `.latest()`, `.history()`,
+            `.ring()`, and `.blink()` with `FMV_SCHEMA`.
         """
         ws_url = self.session.config.resolve_ws_url(
             "crypto", feed_override=feed, is_fmv=True
@@ -569,7 +572,7 @@ class CryptoClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "SMA",
@@ -600,7 +603,7 @@ class CryptoClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "EMA",
@@ -635,7 +638,7 @@ class CryptoClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "MACD",
@@ -672,7 +675,7 @@ class CryptoClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "RSI",

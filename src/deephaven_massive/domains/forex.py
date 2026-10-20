@@ -49,16 +49,18 @@ class ForexClient(BaseDomainClient):
     on WebSockets and `"C:EURUSD"` on REST/S3) automatically.
 
     Example:
-        Stream live G10 currency BBO quotes seeded with the latest snapshot::
+        Stream live G10 currency BBO quotes in a `last_by` state table seeded with the latest snapshot:
 
-            fx = m.forex.quotes(["EUR/USD", "USD/JPY", "GBP/USD"]).with_seed().stream()
+        ```python
+        fx = m.forex.quotes(["EUR/USD", "USD/JPY", "GBP/USD"]).latest()
+        ```
     """
 
     def __init__(self, session: MassiveSession) -> None:
         """Initialize the Global Forex domain client.
 
         Args:
-            session: Active :class:`~deephaven_massive.session.MassiveSession`.
+            session: Active [`MassiveSession`][deephaven_massive.session.MassiveSession].
         """
         super().__init__(session, domain="forex")
 
@@ -89,9 +91,9 @@ class ForexClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a Global Forex BBO quotes feed (`C.*`, `/v3/quotes/{fxTicker}`).
 
-        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
-        `.poll()`, and `.historical()` (backed by S3 `global_forex/quotes_v1`
-        or REST `/v3/quotes/{fxTicker}`).
+        Supports `.latest(seed=True)`, `.history(seed=True)`, `.ring(capacity, seed=True)`,
+        `.blink()`, `.snapshot()`, `.poll()`, and `.historical()` (backed by S3
+        `global_forex/quotes_v1` or REST `/v3/quotes/{fxTicker}`).
 
         Args:
             pairs: Currency pair (`"EUR/USD"`), iterable of pairs, `"*"` for
@@ -150,8 +152,8 @@ class ForexClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a Global Forex OHLCV bars feed (`CAS.*` / `CA.*`, `/v2/aggs/...`).
 
-        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
-        `.poll()`, and `.historical()` (routed to S3
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()` (second or minute
+        aggregates), `.snapshot()`, `.poll()`, and `.historical()` (routed to S3
         `global_forex/minute_aggs_v1` or `global_forex/day_aggs_v1` when
         `multiplier == 1`, or REST `/v2/aggs/...`).
 
@@ -238,8 +240,8 @@ class ForexClient(BaseDomainClient):
                 `Table`. Defaults to `"Symbol"`.
 
         Returns:
-            FeedBuilder: Configured feed builder supporting `.stream()` with
-            `FMV_SCHEMA`.
+            FeedBuilder: Configured feed builder supporting `.latest()`, `.history()`,
+            `.ring()`, and `.blink()` with `FMV_SCHEMA`.
         """
         ws_url = self.session.config.resolve_ws_url(
             "forex", feed_override=feed, is_fmv=True
@@ -551,7 +553,7 @@ class ForexClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "SMA",
@@ -582,7 +584,7 @@ class ForexClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "EMA",
@@ -617,7 +619,7 @@ class ForexClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "MACD",
@@ -654,7 +656,7 @@ class ForexClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder supporting `.snapshot()`,
-            `.poll()`, and `.historical()` with `INDICATORS_SCHEMA`.
+            `.poll()`, and `.historical()` with `INDICATOR_SCHEMA`.
         """
         return self._indicator_feed(
             "RSI",

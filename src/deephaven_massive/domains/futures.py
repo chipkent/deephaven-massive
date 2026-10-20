@@ -48,11 +48,7 @@ class FuturesClient(BaseDomainClient):
     Example:
         Stream live CME E-mini S&P 500 trades seeded with the latest snapshot::
 
-            es_trades = (
-                m.futures.trades(["ESZ5", "NQZ5"], venue="cme")
-                .with_seed()
-                .stream()
-            )
+            es_trades = m.futures.trades(["ESZ5", "NQZ5"], venue="cme").latest()
     """
 
     def __init__(self, session: MassiveSession) -> None:
@@ -86,7 +82,7 @@ class FuturesClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a US Futures tick-by-tick trades feed (`T.*`, `/futures/vX/trades`).
 
-        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`,
         `.poll()`, and `.historical()` (backed by S3 `us_futures/trades_v1` or
         REST `/futures/vX/trades/{contract}`).
 
@@ -149,7 +145,7 @@ class FuturesClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a US Futures top-of-book quotes feed (`Q.*`, `/futures/vX/quotes`).
 
-        Supports `.stream()` (with optional `.with_seed()`), `.snapshot()`,
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`,
         `.poll()`, and `.historical()` (backed by S3 `us_futures/quotes_v1` or
         REST `/futures/vX/quotes/{contract}`).
 
@@ -214,10 +210,11 @@ class FuturesClient(BaseDomainClient):
     ) -> FeedBuilder:
         """Configure a US Futures OHLCV + settlement bars feed (`A.*` / `AM.*`, `/futures/vX/aggs`).
 
-        Supports `.stream()` (second or minute aggregates), `.snapshot()`,
-        `.poll()`, and `.historical()` (routed to S3 `us_futures/minute_aggs_v1`,
-        `us_futures/day_aggs_v1`, or `us_futures/session_aggs_v1` when
-        `multiplier == 1`, or REST `/futures/vX/aggs/{contract}`).
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()` (second or
+        minute aggregates), `.snapshot()`, `.poll()`, and `.historical()`
+        (routed to S3 `us_futures/minute_aggs_v1`, `us_futures/day_aggs_v1`, or
+        `us_futures/session_aggs_v1` when `multiplier == 1`, or REST
+        `/futures/vX/aggs/{contract}`).
 
         Args:
             contracts: Contract symbol (`"ESZ5"`), iterable of symbols,

@@ -656,28 +656,30 @@ class BaseDomainClient:
         snapshot_fn: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
         historical_fn: Callable[..., Table] | None = None,
     ) -> FeedBuilder:
-        """Create a :class:`FeedBuilder` wired to the session's execution context and multiplexer.
+        """Create a [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder] wired to the session's execution context and multiplexer.
 
         Args:
             name: Descriptive feed name used for logging and stream deduplication.
-            schema_spec: Target :class:`SchemaSpec` for this feed.
-            ws_url: Optional WebSocket endpoint URL for ``.stream()``.
-            ws_channel: Optional WebSocket event prefix (e.g., ``"T"``, ``"Q"``,
-                ``"AM"``).
+            schema_spec: Target [`SchemaSpec`][deephaven_massive.engine.arrow_bridge.SchemaSpec]
+                for this feed.
+            ws_url: Optional WebSocket endpoint URL for `.blink()`, `.history()`,
+                `.ring()`, and `.latest()`.
+            ws_channel: Optional WebSocket event prefix (for example, `"T"`, `"Q"`,
+                `"AM"`).
             symbols: Target symbols, iterable of symbols, or reactive Deephaven
-                watchlist ``Table``.
-            symbol_col: Column name when ``symbols`` is a Deephaven ``Table``.
-            seed_fn: Optional snapshot seed callback for ``.with_seed()`` and
-                symbol-scoped ``.snapshot()``.
+                watchlist `Table`.
+            symbol_col: Column name when `symbols` is a Deephaven `Table`.
+            seed_fn: Optional snapshot seed callback for `.latest(seed=True)`,
+                `.history(seed=True)`, `.ring(seed=True)`, and symbol-scoped `.snapshot()`.
             seed_rows_fn: Optional historical backfill callback for
-                ``.with_seed(since=...)``.
+                `.history(seed_since=...)`.
             snapshot_fn: Optional zero-argument snapshot callback for
-                non-symbol-scoped ``.snapshot()`` and ``.poll()``.
+                non-symbol-scoped `.snapshot()` and `.poll()`.
             historical_fn: Optional historical query callback for
-                ``.historical()``.
+                `.historical()`.
 
         Returns:
-            FeedBuilder: Configured fluent feed builder.
+            A configured [`FeedBuilder`][deephaven_massive.engine.builder.FeedBuilder].
         """
         return FeedBuilder(
             name=name,
