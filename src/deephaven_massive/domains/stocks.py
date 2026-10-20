@@ -9,16 +9,13 @@ from typing import TYPE_CHECKING, Any
 from deephaven_massive.domains.base import (
     BaseDomainClient,
     format_date_param,
-    normalize_filter_params,
 )
-from deephaven_massive.engine.arrow_bridge import SchemaSpec
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
     DAILY_SUMMARY_SCHEMA,
     FMV_SCHEMA,
     IMBALANCES_SCHEMA,
-    INDICATOR_SCHEMA,
     LULD_SCHEMA,
     QUOTES_SCHEMA,
     STOCK_SNAPSHOT_SCHEMA,
@@ -78,33 +75,6 @@ class StocksClient(BaseDomainClient):
             extra_fields=extra_fields,
         )
 
-    def _historical_multi_symbol(
-        self,
-        symbols: Any,
-        schema_spec: SchemaSpec,
-        s3_dataset: str | None,
-        rest_path_fn: Any,
-        *,
-        start: Any = None,
-        end: Any = None,
-        limit: int | None = None,
-        source: str = "auto",
-        adjusted: bool | None = None,
-        extra_params: Mapping[str, Any] | None = None,
-    ) -> Table:
-        return self.fetch_multi_symbol_historical(
-            symbols,
-            schema_spec,
-            s3_dataset,
-            lambda sym, s, e: rest_path_fn(sym, s, e, extra_params),
-            start=start,
-            end=end,
-            limit=limit,
-            source=source,
-            adjusted=adjusted,
-            empty_error="Specific symbol(s) are required for REST historical queries (or configure S3 credentials for '*' flat files).",
-        )
-
     def trades(
         self,
         symbols: str | Iterable[str] | Table = "*",
@@ -116,13 +86,13 @@ class StocksClient(BaseDomainClient):
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
 
         def _rest_path(
-            sym: str, start: Any, end: Any, extra: Mapping[str, Any] | None
+            sym: str, start: Any, end: Any
         ) -> tuple[str, dict[str, Any]]:
             ticker = self.symbol_normalizer.rest_ticker(sym)  # type: ignore[union-attr]
-            params: dict[str, Any] = dict(extra or {})
-            params["timestamp.gte"] = format_date_param(start)
-            params["timestamp.lte"] = format_date_param(end)
-            return f"/v3/trades/{ticker}", params
+            return f"/v3/trades/{ticker}", {
+                "timestamp.gte": format_date_param(start),
+                "timestamp.lte": format_date_param(end),
+            }
 
         return self.build_feed(
             name="stocks_trades",
@@ -133,9 +103,9 @@ class StocksClient(BaseDomainClient):
             symbol_col=symbol_col,
             seed_fn=self._fetch_stock_snapshots,
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
-                syms, since, lambda sym, s, e: _rest_path(sym, s, e, None)
+                syms, since, _rest_path
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_multi_symbol(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 symbols,
                 TRADES_SCHEMA,
                 "us_stocks_sip/trades_v1",
@@ -158,13 +128,13 @@ class StocksClient(BaseDomainClient):
         ws_url = self.session.config.resolve_ws_url("stocks", feed_override=feed)
 
         def _rest_path(
-            sym: str, start: Any, end: Any, extra: Mapping[str, Any] | None
+            sym: str, start: Any, end: Any
         ) -> tuple[str, dict[str, Any]]:
             ticker = self.symbol_normalizer.rest_ticker(sym)  # type: ignore[union-attr]
-            params: dict[str, Any] = dict(extra or {})
-            params["timestamp.gte"] = format_date_param(start)
-            params["timestamp.lte"] = format_date_param(end)
-            return f"/v3/quotes/{ticker}", params
+            return f"/v3/quotes/{ticker}", {
+                "timestamp.gte": format_date_param(start),
+                "timestamp.lte": format_date_param(end),
+            }
 
         return self.build_feed(
             name="stocks_quotes",
@@ -175,9 +145,9 @@ class StocksClient(BaseDomainClient):
             symbol_col=symbol_col,
             seed_fn=self._fetch_stock_snapshots,
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
-                syms, since, lambda sym, s, e: _rest_path(sym, s, e, None)
+                syms, since, _rest_path
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_multi_symbol(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 symbols,
                 QUOTES_SCHEMA,
                 "us_stocks_sip/quotes_v1",
@@ -211,18 +181,14 @@ class StocksClient(BaseDomainClient):
             s3_ds = "us_stocks_sip/day_aggs_v1"
 
         def _rest_path(
-            sym: str, start: Any, end: Any, extra: Mapping[str, Any] | None
+            sym: str, start: Any, end: Any
         ) -> tuple[str, dict[str, Any]]:
             ticker = self.symbol_normalizer.rest_ticker(sym)  # type: ignore[union-attr]
             s_str = format_date_param(start) or "1970-01-01"
             e_str = format_date_param(end) or s_str
-            params: dict[str, Any] = {
-                "adjusted": str(adjusted).lower(),
-                **(extra or {}),
-            }
             return (
                 f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{clean_span}/{s_str}/{e_str}",
-                params,
+                {"adjusted": str(adjusted).lower()},
             )
 
         span_ns = compute_bar_span_ns(multiplier, clean_span)
@@ -239,10 +205,10 @@ class StocksClient(BaseDomainClient):
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
                 syms,
                 since,
-                lambda sym, s, e: _rest_path(sym, s, e, None),
+                _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_multi_symbol(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 symbols,
                 BARS_SCHEMA,
                 s3_ds,
@@ -425,54 +391,6 @@ class StocksClient(BaseDomainClient):
 
     daily_ticker_summary = daily_open_close
 
-    def _indicator_feed(
-        self,
-        indicator: str,
-        symbol: str,
-        params: dict[str, Any],
-        window: int,
-        timespan: str,
-        series_type: str,
-    ) -> FeedBuilder:
-        canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
-        extra = {
-            "Indicator": indicator.upper(),
-            "Window": window,
-            "Timespan": timespan,
-            "SeriesType": series_type,
-        }
-
-        def _fetch(
-            start: Any = None,
-            end: Any = None,
-            limit: int | None = None,
-            source: str = "auto",
-        ) -> Table:
-            q = dict(params)
-            q["timestamp.gte"] = format_date_param(start)
-            q["timestamp.lte"] = format_date_param(end)
-            return self.fetch_chunked_table(
-                f"/v1/indicators/{indicator.lower()}/{canon}",
-                INDICATOR_SCHEMA,
-                q,
-                limit=limit,
-                inject_symbol=canon,
-                extra_fields=extra,
-            )
-
-        return self.build_feed(
-            name=f"stocks_{indicator.lower()}_{canon}",
-            schema_spec=INDICATOR_SCHEMA,
-            symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
-                f"/v1/indicators/{indicator.lower()}/{canon}",
-                params,
-                inject_symbol=canon,
-                extra_fields=extra,
-            ),
-            historical_fn=_fetch,
-        )
-
     def sma(
         self,
         symbol: str,
@@ -555,51 +473,6 @@ class StocksClient(BaseDomainClient):
         }
         return self._indicator_feed(
             "RSI", symbol, params, window, timespan, series_type
-        )
-
-    def _rest_collection_feed(
-        self,
-        name: str,
-        path: str,
-        schema_spec: SchemaSpec,
-        params: Mapping[str, Any] | None = None,
-        *,
-        symbol: str | None = None,
-        tickers: str | Iterable[str] | None = None,
-        ticker_param: str = "ticker",
-        filters: Mapping[str, Any] | None = None,
-        date_param: str = "date",
-        inject_symbol: str | None = None,
-    ) -> FeedBuilder:
-        base_params = normalize_filter_params(
-            params,
-            filters,
-            symbol=symbol,
-            tickers=tickers,
-            normalizer=self.symbol_normalizer,
-            ticker_param=ticker_param,
-        )
-
-        def _hist(
-            start: Any = None,
-            end: Any = None,
-            limit: int | None = None,
-            source: str = "auto",
-        ) -> Table:
-            q = dict(base_params)
-            q[f"{date_param}.gte"] = format_date_param(start)
-            q[f"{date_param}.lte"] = format_date_param(end)
-            return self.fetch_chunked_table(
-                path, schema_spec, q, limit=limit, inject_symbol=inject_symbol
-            )
-
-        return self.build_feed(
-            name=name,
-            schema_spec=schema_spec,
-            snapshot_fn=lambda: self.fetch_rest_rows(
-                path, base_params, inject_symbol=inject_symbol
-            ),
-            historical_fn=_hist,
         )
 
     def short_interest(

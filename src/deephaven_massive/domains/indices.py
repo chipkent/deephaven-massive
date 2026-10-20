@@ -12,13 +12,11 @@ from deephaven_massive.domains.base import (
     format_date_param,
     normalize_filter_params,
 )
-from deephaven_massive.engine.arrow_bridge import SchemaSpec
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
     DAILY_SUMMARY_SCHEMA,
     INDEX_VALUES_SCHEMA,
-    INDICATOR_SCHEMA,
 )
 from deephaven_massive.schemas.reference import (
     HOLIDAYS_SCHEMA,
@@ -53,30 +51,6 @@ class IndicesClient(BaseDomainClient):
             "/v3/snapshot/indices", params, extra_fields=extra_fields
         )
 
-    def _historical_indices(
-        self,
-        symbols: Any,
-        schema_spec: SchemaSpec,
-        s3_dataset: str | None,
-        rest_path_fn: Any,
-        *,
-        start: Any = None,
-        end: Any = None,
-        limit: int | None = None,
-        source: str = "auto",
-    ) -> Table:
-        return self.fetch_multi_symbol_historical(
-            symbols,
-            schema_spec,
-            s3_dataset,
-            rest_path_fn,
-            empty_error="Specific index symbol(s) are required for REST historical queries.",
-            start=start,
-            end=end,
-            limit=limit,
-            source=source,
-        )
-
     def values(
         self,
         symbols: str | Iterable[str] | Table = "*",
@@ -103,7 +77,7 @@ class IndicesClient(BaseDomainClient):
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
                 syms, since, _rest_path
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_indices(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 symbols,
                 INDEX_VALUES_SCHEMA,
                 "us_indices/values_v1",
@@ -162,7 +136,7 @@ class IndicesClient(BaseDomainClient):
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_indices(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 symbols,
                 BARS_SCHEMA,
                 s3_ds,
@@ -259,54 +233,6 @@ class IndicesClient(BaseDomainClient):
             name="indices_market_status",
             schema_spec=MARKET_STATUS_SCHEMA,
             snapshot_fn=lambda: self.fetch_rest_rows("/v1/marketstatus/now"),
-        )
-
-    def _indicator_feed(
-        self,
-        indicator: str,
-        symbol: str,
-        params: dict[str, Any],
-        window: int,
-        timespan: str,
-        series_type: str,
-    ) -> FeedBuilder:
-        canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
-        extra = {
-            "Indicator": indicator.upper(),
-            "Window": window,
-            "Timespan": timespan,
-            "SeriesType": series_type,
-        }
-
-        def _fetch(
-            start: Any = None,
-            end: Any = None,
-            limit: int | None = None,
-            source: str = "auto",
-        ) -> Table:
-            q = dict(params)
-            q["timestamp.gte"] = format_date_param(start)
-            q["timestamp.lte"] = format_date_param(end)
-            return self.fetch_chunked_table(
-                f"/v1/indicators/{indicator.lower()}/{canon}",
-                INDICATOR_SCHEMA,
-                q,
-                limit=limit,
-                inject_symbol=canon,
-                extra_fields=extra,
-            )
-
-        return self.build_feed(
-            name=f"indices_{indicator.lower()}_{canon}",
-            schema_spec=INDICATOR_SCHEMA,
-            symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
-                f"/v1/indicators/{indicator.lower()}/{canon}",
-                params,
-                inject_symbol=canon,
-                extra_fields=extra,
-            ),
-            historical_fn=_fetch,
         )
 
     def sma(

@@ -332,6 +332,18 @@ class FlatFilesClient:
             raise ValueError(f"Unsupported S3 flat-file domain '{domain}'.")
         return f"{prefix}/{feed_kind}"
 
+    def _load_bars(
+        self,
+        domain: str,
+        start: Any = None,
+        end: Any = None,
+        *,
+        timespan: str = "minute",
+        **kwargs: Any,
+    ) -> Table:
+        kind = "day_aggs_v1" if timespan.strip().lower() == "day" else "minute_aggs_v1"
+        return self.load(self.dataset_for(domain, kind), start, end, domain=domain, **kwargs)
+
     def stocks_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
         """Load US Stocks SIP trades (`us_stocks_sip/trades_v1`) from S3 Flat Files."""
         return self.load("us_stocks_sip/trades_v1", start, end, domain="stocks", **kwargs)
@@ -344,8 +356,7 @@ class FlatFilesClient:
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
         """Load US Stocks SIP bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
-        ds = "us_stocks_sip/day_aggs_v1" if timespan.strip().lower() == "day" else "us_stocks_sip/minute_aggs_v1"
-        return self.load(ds, start, end, domain="stocks", **kwargs)
+        return self._load_bars("stocks", start, end, timespan=timespan, **kwargs)
 
     def options_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
         """Load US Options OPRA trades (`us_options_opra/trades_v1`) from S3 Flat Files."""
@@ -359,8 +370,7 @@ class FlatFilesClient:
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
         """Load US Options OPRA bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
-        ds = "us_options_opra/day_aggs_v1" if timespan.strip().lower() == "day" else "us_options_opra/minute_aggs_v1"
-        return self.load(ds, start, end, domain="options", **kwargs)
+        return self._load_bars("options", start, end, timespan=timespan, **kwargs)
 
     def futures_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
         """Load US Futures trades (`us_futures/trades_v1`) from S3 Flat Files."""
@@ -374,8 +384,7 @@ class FlatFilesClient:
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
         """Load US Futures bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
-        ds = "us_futures/day_aggs_v1" if timespan.strip().lower() == "day" else "us_futures/minute_aggs_v1"
-        return self.load(ds, start, end, domain="futures", **kwargs)
+        return self._load_bars("futures", start, end, timespan=timespan, **kwargs)
 
     def futures_session_bars(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
         """Load US Futures session bars (`us_futures/session_aggs_v1`) from S3 Flat Files."""
@@ -389,8 +398,7 @@ class FlatFilesClient:
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
         """Load US Indices bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
-        ds = "us_indices/day_aggs_v1" if timespan.strip().lower() == "day" else "us_indices/minute_aggs_v1"
-        return self.load(ds, start, end, domain="indices", **kwargs)
+        return self._load_bars("indices", start, end, timespan=timespan, **kwargs)
 
     def forex_quotes(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
         """Load Global Forex quotes (`global_forex/quotes_v1`) from S3 Flat Files."""
@@ -400,8 +408,7 @@ class FlatFilesClient:
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
         """Load Global Forex bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
-        ds = "global_forex/day_aggs_v1" if timespan.strip().lower() == "day" else "global_forex/minute_aggs_v1"
-        return self.load(ds, start, end, domain="forex", **kwargs)
+        return self._load_bars("forex", start, end, timespan=timespan, **kwargs)
 
     def crypto_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
         """Load Global Crypto trades (`global_crypto/trades_v1`) from S3 Flat Files."""
@@ -411,5 +418,4 @@ class FlatFilesClient:
         self, start: Any = None, end: Any = None, *, timespan: str = "minute", **kwargs: Any
     ) -> Table:
         """Load Global Crypto bars (`minute_aggs_v1` or `day_aggs_v1`) from S3 Flat Files."""
-        ds = "global_crypto/day_aggs_v1" if timespan.strip().lower() == "day" else "global_crypto/minute_aggs_v1"
-        return self.load(ds, start, end, domain="crypto", **kwargs)
+        return self._load_bars("crypto", start, end, timespan=timespan, **kwargs)

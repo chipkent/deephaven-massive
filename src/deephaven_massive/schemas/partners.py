@@ -14,30 +14,10 @@ from deephaven_massive.engine.arrow_bridge import (
     SchemaSpec,
     flatten_dict,
 )
+from deephaven_massive.schemas.market import _first_present, _norm_symbol
 
 if TYPE_CHECKING:
     from deephaven_massive.engine.symbols import SymbolNormalizer
-
-
-def _first_present(row: Mapping[str, Any], *keys: str) -> Any:
-    for k in keys:
-        if k in row and row[k] is not None:
-            return row[k]
-    return None
-
-
-def _norm_symbol(
-    row: Mapping[str, Any],
-    norm: SymbolNormalizer | None,
-    *keys: str,
-) -> str | None:
-    raw = _first_present(row, *keys)
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
-    return norm.canonical(s) if norm is not None else s.upper()
 
 
 def _hybrid_partner_normalizer(

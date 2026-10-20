@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
-from deephaven_massive.domains.base import (
-    BaseDomainClient,
-    format_date_param,
-    normalize_filter_params,
-)
-from deephaven_massive.engine.arrow_bridge import SchemaSpec
+from deephaven_massive.domains.base import BaseDomainClient
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.partners import (
     BENZINGA_ANALYSTS_SCHEMA,
@@ -43,45 +38,7 @@ class _PartnerSubClient(BaseDomainClient):
     def __init__(self, session: MassiveSession) -> None:
         super().__init__(session, domain="stocks")
 
-    def _partner_feed(
-        self,
-        name: str,
-        path: str,
-        schema_spec: SchemaSpec,
-        params: Mapping[str, Any] | None = None,
-        *,
-        symbol: str | None = None,
-        tickers: str | Iterable[str] | None = None,
-        ticker_param: str = "ticker",
-        filters: Mapping[str, Any] | None = None,
-        date_param: str = "date",
-    ) -> FeedBuilder:
-        base_params = normalize_filter_params(
-            params,
-            filters,
-            symbol=symbol,
-            tickers=tickers,
-            normalizer=self.symbol_normalizer,
-            ticker_param=ticker_param,
-        )
-
-        def _hist(
-            start: Any = None,
-            end: Any = None,
-            limit: int | None = None,
-            source: str = "auto",
-        ) -> Table:
-            q = dict(base_params)
-            q[f"{date_param}.gte"] = format_date_param(start)
-            q[f"{date_param}.lte"] = format_date_param(end)
-            return self.fetch_chunked_table(path, schema_spec, q, limit=limit)
-
-        return self.build_feed(
-            name=name,
-            schema_spec=schema_spec,
-            snapshot_fn=lambda: self.fetch_rest_rows(path, base_params),
-            historical_fn=_hist,
-        )
+    _partner_feed = BaseDomainClient._rest_collection_feed
 
 
 class BenzingaClient(_PartnerSubClient):

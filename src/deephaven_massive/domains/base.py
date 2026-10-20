@@ -17,13 +17,25 @@ from deephaven_massive.engine.arrow_bridge import (
 )
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.engine.symbols import SymbolNormalizer
-from deephaven_massive.schemas.market import compute_bar_span_ns
+from deephaven_massive.schemas.market import (
+    INDICATOR_SCHEMA,
+    compute_bar_span_ns,
+)
 
 if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven_massive.session import MassiveSession
 
 VALID_HISTORICAL_SOURCES: frozenset[str] = frozenset({"auto", "rest", "flat_files"})
+
+_EMPTY_HISTORICAL_ERRORS: dict[str, str] = {
+    "stocks": "Specific symbol(s) are required for REST historical queries (or configure S3 credentials for '*' flat files).",
+    "options": "Specific option contract(s) are required for REST historical queries.",
+    "futures": "Specific futures contract(s) are required for REST historical queries.",
+    "indices": "Specific index symbol(s) are required for REST historical queries.",
+    "forex": "Specific currency pair(s) are required for REST historical queries.",
+    "crypto": "Specific crypto pair(s) are required for REST historical queries.",
+}
 
 
 def _resolve_bar_extra_fields(
@@ -365,7 +377,6 @@ class BaseDomainClient:
         limit: int | None = None,
         source: str = "auto",
         adjusted: bool | None = None,
-        empty_error: str = "Specific symbol(s) are required for REST historical queries.",
         chunk_size: int = 50_000,
     ) -> Table:
         """Route a single- or multi-symbol `.historical()` query to S3 Flat Files or chunked REST pagination."""
@@ -390,7 +401,7 @@ class BaseDomainClient:
 
         target_syms = [s for s in (canon_syms or []) if s != "*"]
         if not target_syms:
-            raise ValueError(empty_error)
+            raise ValueError(_EMPTY_HISTORICAL_ERRORS[self.domain or "stocks"])
 
         if len(target_syms) == 1:
             sym = target_syms[0]
@@ -521,3 +532,105 @@ class BaseDomainClient:
             for sym_rows in pool.map(_fetch_one, concrete):
                 rows.extend(sym_rows)
         return rows
+
+    def _rest_collection_feed(
+        self,
+        name: str,
+        path: str,
+        schema_spec: SchemaSpec,
+        params: Mapping[str, Any] | None = None,
+        *,
+        symbol: str | None = None,
+        tickers: str | Iterable[str] | None = None,
+        ticker_param: str = "ticker",
+        filters: Mapping[str, Any] | None = None,
+        date_param: str = "date",
+        inject_symbol: str | None = None,
+    ) -> FeedBuilder:
+        """Build a :class:`FeedBuilder` backed by a paginated REST collection endpoint."""
+        base_params = normalize_filter_params(
+            params,
+            filters,
+            symbol=symbol,
+            tickers=tickers,
+            ticker_param=ticker_param,
+            normalizer=self.symbol_normalizer,
+        )
+
+        def _hist(
+            start: Any = None,
+            end: Any = None,
+            limit: int | None = None,
+            source: str = "auto",
+        ) -> Table:
+            q: dict[str, Any] = {
+                **base_params,
+                f"{date_param}.gte": format_date_param(start),
+                f"{date_param}.lte": format_date_param(end),
+            }
+            return self.fetch_chunked_table(
+                path,
+                schema_spec,
+                q,
+                limit=limit,
+                inject_symbol=inject_symbol,
+            )
+
+        return self.build_feed(
+            name=name,
+            schema_spec=schema_spec,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                path, base_params, inject_symbol=inject_symbol
+            ),
+            historical_fn=_hist,
+        )
+
+    def _indicator_feed(
+        self,
+        indicator: str,
+        symbol: str,
+        params: dict[str, Any],
+        window: int,
+        timespan: str,
+        series_type: str,
+    ) -> FeedBuilder:
+        """Build a :class:`FeedBuilder` for a technical indicator (`sma`, `ema`, `macd`, `rsi`)."""
+        canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
+        ticker = self.symbol_normalizer.rest_ticker(canon)  # type: ignore[union-attr]
+        extra = {
+            "Indicator": indicator.upper(),
+            "Window": window,
+            "Timespan": timespan,
+            "SeriesType": series_type,
+        }
+
+        def _fetch(
+            start: Any = None,
+            end: Any = None,
+            limit: int | None = None,
+            source: str = "auto",
+        ) -> Table:
+            q = dict(params)
+            q["timestamp.gte"] = format_date_param(start)
+            q["timestamp.lte"] = format_date_param(end)
+            return self.fetch_chunked_table(
+                f"/v1/indicators/{indicator.lower()}/{ticker}",
+                INDICATOR_SCHEMA,
+                q,
+                limit=limit,
+                inject_symbol=canon,
+                extra_fields=extra,
+            )
+
+        return self.build_feed(
+            name=f"{self.domain}_{indicator.lower()}_{canon}",
+            schema_spec=INDICATOR_SCHEMA,
+            symbols=canon,
+            snapshot_fn=lambda: self.fetch_rest_rows(
+                f"/v1/indicators/{indicator.lower()}/{ticker}",
+                params,
+                inject_symbol=canon,
+                extra_fields=extra,
+            ),
+            historical_fn=_fetch,
+        )

@@ -12,13 +12,11 @@ from deephaven_massive.domains.base import (
     format_date_param,
     normalize_filter_params,
 )
-from deephaven_massive.engine.arrow_bridge import SchemaSpec
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
     DAILY_SUMMARY_SCHEMA,
     FMV_SCHEMA,
-    INDICATOR_SCHEMA,
     OPTION_CHAIN_SCHEMA,
     QUOTES_SCHEMA,
     TRADES_SCHEMA,
@@ -85,32 +83,6 @@ class OptionsClient(BaseDomainClient):
                 rows.extend(sym_rows)
         return rows
 
-    def _historical_options(
-        self,
-        contracts: Any,
-        schema_spec: SchemaSpec,
-        s3_dataset: str | None,
-        rest_path_fn: Any,
-        *,
-        start: Any = None,
-        end: Any = None,
-        limit: int | None = None,
-        source: str = "auto",
-        adjusted: bool | None = None,
-    ) -> Table:
-        return self.fetch_multi_symbol_historical(
-            contracts,
-            schema_spec,
-            s3_dataset,
-            rest_path_fn,
-            start=start,
-            end=end,
-            limit=limit,
-            source=source,
-            adjusted=adjusted,
-            empty_error="Specific option contract(s) are required for REST historical queries.",
-        )
-
     def trades(
         self,
         contracts: str | Iterable[str] | Table = "*",
@@ -140,7 +112,7 @@ class OptionsClient(BaseDomainClient):
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
                 syms, since, _rest_path
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_options(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 contracts,
                 TRADES_SCHEMA,
                 "us_options_opra/trades_v1",
@@ -181,7 +153,7 @@ class OptionsClient(BaseDomainClient):
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
                 syms, since, _rest_path
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_options(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 contracts,
                 QUOTES_SCHEMA,
                 "us_options_opra/quotes_v1",
@@ -241,7 +213,7 @@ class OptionsClient(BaseDomainClient):
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_options(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 contracts,
                 BARS_SCHEMA,
                 s3_ds,
@@ -332,7 +304,10 @@ class OptionsClient(BaseDomainClient):
         **filters: Any,
     ) -> FeedBuilder:
         """Fetch active or historical OPRA option contracts (`/v3/reference/options/contracts`)."""
-        params = normalize_filter_params(
+        return self._rest_collection_feed(
+            "options_contracts",
+            "/v3/reference/options/contracts",
+            OPTION_CONTRACTS_SCHEMA,
             {
                 "underlying_ticker": underlying.strip().upper()
                 if underlying
@@ -341,32 +316,8 @@ class OptionsClient(BaseDomainClient):
                 "contract_type": contract_type,
                 "expired": str(not active).lower(),
             },
-            filters,
-        )
-        return self.build_feed(
-            name="options_contracts",
-            schema_spec=OPTION_CONTRACTS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows(
-                "/v3/reference/options/contracts", params
-            ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_chunked_table(
-                "/v3/reference/options/contracts",
-                OPTION_CONTRACTS_SCHEMA,
-                {
-                    **params,
-                    **(
-                        {"expiration_date.gte": format_date_param(start)}
-                        if start is not None
-                        else {}
-                    ),
-                    **(
-                        {"expiration_date.lte": format_date_param(end)}
-                        if end is not None
-                        else {}
-                    ),
-                },
-                limit=limit,
-            ),
+            filters=filters,
+            date_param="expiration_date",
         )
 
     def contract_details(self, contract: str) -> FeedBuilder:
@@ -443,54 +394,6 @@ class OptionsClient(BaseDomainClient):
             snapshot_fn=lambda: self.fetch_rest_rows(
                 "/v3/reference/conditions", {"asset_class": "options"}
             ),
-        )
-
-    def _indicator_feed(
-        self,
-        indicator: str,
-        contract: str,
-        params: dict[str, Any],
-        window: int,
-        timespan: str,
-        series_type: str,
-    ) -> FeedBuilder:
-        canon = self.symbol_normalizer.canonical(contract)  # type: ignore[union-attr]
-        extra = {
-            "Indicator": indicator.upper(),
-            "Window": window,
-            "Timespan": timespan,
-            "SeriesType": series_type,
-        }
-
-        def _fetch(
-            start: Any = None,
-            end: Any = None,
-            limit: int | None = None,
-            source: str = "auto",
-        ) -> Table:
-            q = dict(params)
-            q["timestamp.gte"] = format_date_param(start)
-            q["timestamp.lte"] = format_date_param(end)
-            return self.fetch_chunked_table(
-                f"/v1/indicators/{indicator.lower()}/{canon}",
-                INDICATOR_SCHEMA,
-                q,
-                limit=limit,
-                inject_symbol=canon,
-                extra_fields=extra,
-            )
-
-        return self.build_feed(
-            name=f"options_{indicator.lower()}_{canon}",
-            schema_spec=INDICATOR_SCHEMA,
-            symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
-                f"/v1/indicators/{indicator.lower()}/{canon}",
-                params,
-                inject_symbol=canon,
-                extra_fields=extra,
-            ),
-            historical_fn=_fetch,
         )
 
     def sma(

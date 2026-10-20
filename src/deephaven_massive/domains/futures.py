@@ -10,7 +10,6 @@ from deephaven_massive.domains.base import (
     format_date_param,
     normalize_filter_params,
 )
-from deephaven_massive.engine.arrow_bridge import SchemaSpec
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
@@ -51,30 +50,6 @@ class FuturesClient(BaseDomainClient):
             "/futures/vX/snapshot", params, extra_fields=extra_fields
         )
 
-    def _historical_futures(
-        self,
-        contracts: Any,
-        schema_spec: SchemaSpec,
-        s3_dataset: str | None,
-        rest_path_fn: Any,
-        *,
-        start: Any = None,
-        end: Any = None,
-        limit: int | None = None,
-        source: str = "auto",
-    ) -> Table:
-        return self.fetch_multi_symbol_historical(
-            contracts,
-            schema_spec,
-            s3_dataset,
-            rest_path_fn,
-            start=start,
-            end=end,
-            limit=limit,
-            source=source,
-            empty_error="Specific futures contract(s) are required for REST historical queries.",
-        )
-
     def trades(
         self,
         contracts: str | Iterable[str] | Table = "*",
@@ -107,7 +82,7 @@ class FuturesClient(BaseDomainClient):
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
                 syms, since, _rest_path
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_futures(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 contracts,
                 TRADES_SCHEMA,
                 "us_futures/trades_v1",
@@ -151,7 +126,7 @@ class FuturesClient(BaseDomainClient):
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
                 syms, since, _rest_path
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_futures(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 contracts,
                 QUOTES_SCHEMA,
                 "us_futures/quotes_v1",
@@ -216,7 +191,7 @@ class FuturesClient(BaseDomainClient):
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_futures(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 contracts,
                 BARS_SCHEMA,
                 s3_ds,

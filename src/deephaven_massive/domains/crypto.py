@@ -12,13 +12,11 @@ from deephaven_massive.domains.base import (
     format_date_param,
     normalize_filter_params,
 )
-from deephaven_massive.engine.arrow_bridge import SchemaSpec
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
     BARS_SCHEMA,
     DAILY_SUMMARY_SCHEMA,
     FMV_SCHEMA,
-    INDICATOR_SCHEMA,
     QUOTES_SCHEMA,
     STOCK_SNAPSHOT_SCHEMA,
     TRADES_SCHEMA,
@@ -60,30 +58,6 @@ class CryptoClient(BaseDomainClient):
             extra_fields=extra_fields,
         )
 
-    def _historical_crypto(
-        self,
-        pairs: Any,
-        schema_spec: SchemaSpec,
-        s3_dataset: str | None,
-        rest_path_fn: Any,
-        *,
-        start: Any = None,
-        end: Any = None,
-        limit: int | None = None,
-        source: str = "auto",
-    ) -> Table:
-        return self.fetch_multi_symbol_historical(
-            pairs,
-            schema_spec,
-            s3_dataset,
-            rest_path_fn,
-            empty_error="Specific crypto pair(s) are required for REST historical queries.",
-            start=start,
-            end=end,
-            limit=limit,
-            source=source,
-        )
-
     def trades(
         self,
         pairs: str | Iterable[str] | Table = "*",
@@ -114,7 +88,7 @@ class CryptoClient(BaseDomainClient):
             seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
                 syms, since, _rest_path
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_crypto(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 pairs,
                 TRADES_SCHEMA,
                 "global_crypto/trades_v1",
@@ -194,7 +168,7 @@ class CryptoClient(BaseDomainClient):
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
-            historical_fn=lambda start=None, end=None, limit=None, source="auto": self._historical_crypto(
+            historical_fn=lambda start=None, end=None, limit=None, source="auto": self.fetch_multi_symbol_historical(
                 pairs,
                 BARS_SCHEMA,
                 s3_ds,
@@ -396,55 +370,6 @@ class CryptoClient(BaseDomainClient):
             name="crypto_market_status",
             schema_spec=MARKET_STATUS_SCHEMA,
             snapshot_fn=lambda: self.fetch_rest_rows("/v1/marketstatus/now"),
-        )
-
-    def _indicator_feed(
-        self,
-        indicator: str,
-        pair: str,
-        params: dict[str, Any],
-        window: int,
-        timespan: str,
-        series_type: str,
-    ) -> FeedBuilder:
-        canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
-        ticker = self.symbol_normalizer.rest_ticker(canon)  # type: ignore[union-attr]
-        extra = {
-            "Indicator": indicator.upper(),
-            "Window": window,
-            "Timespan": timespan,
-            "SeriesType": series_type,
-        }
-
-        def _fetch(
-            start: Any = None,
-            end: Any = None,
-            limit: int | None = None,
-            source: str = "auto",
-        ) -> Table:
-            q = dict(params)
-            q["timestamp.gte"] = format_date_param(start)
-            q["timestamp.lte"] = format_date_param(end)
-            return self.fetch_chunked_table(
-                f"/v1/indicators/{indicator.lower()}/{ticker}",
-                INDICATOR_SCHEMA,
-                q,
-                limit=limit,
-                inject_symbol=canon,
-                extra_fields=extra,
-            )
-
-        return self.build_feed(
-            name=f"crypto_{indicator.lower()}_{canon}",
-            schema_spec=INDICATOR_SCHEMA,
-            symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
-                f"/v1/indicators/{indicator.lower()}/{ticker}",
-                params,
-                inject_symbol=canon,
-                extra_fields=extra,
-            ),
-            historical_fn=_fetch,
         )
 
     def sma(
