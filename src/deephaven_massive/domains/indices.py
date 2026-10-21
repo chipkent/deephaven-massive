@@ -84,8 +84,7 @@ class IndicesClient(BaseDomainClient):
         """Configure a Market Index tick values feed (`V.I:*`, `/v3/snapshot/indices`).
 
         Supports `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`,
-        `.poll()`, and `.historical()` (backed by S3 `us_indices/values_v1` or
-        REST `/v3/snapshot/indices`).
+        `.poll()`, and `.historical()` (backed by S3 `us_indices/values_v1`).
 
         Args:
             symbols: Index symbol (`"SPX"` or `"I:SPX"`), iterable of symbols,
@@ -102,11 +101,10 @@ class IndicesClient(BaseDomainClient):
         ws_url = self.session.config._resolve_ws_url("indices", feed_override=feed)
 
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
-            return "/v3/snapshot/indices", {
-                "ticker.any_of": sym,
-                "timestamp.gte": _format_date_param(start),
-                "timestamp.lte": _format_date_param(end),
-            }
+            raise ValueError(
+                "Historical index tick values are only available via S3 Flat Files "
+                "('us_indices/values_v1'); use m.indices.bars() for REST historical aggregates."
+            )
 
         return self._build_feed(
             name="indices_values",
@@ -116,7 +114,6 @@ class IndicesClient(BaseDomainClient):
             symbols=symbols,
             symbol_col=symbol_col,
             seed_fn=self._fetch_indices_snapshots,
-            seed_rows_fn=lambda syms, since: self._fetch_seed_rows(syms, since, _rest_path),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": (
                 self._fetch_multi_symbol_historical(
                     symbols,
@@ -126,7 +123,8 @@ class IndicesClient(BaseDomainClient):
                     start=start,
                     end=end,
                     limit=limit,
-                    source=source,
+                    source="flat_files" if source.strip().lower() == "auto" else source,
+                    symbol_col=symbol_col,
                 )
             ),
         )

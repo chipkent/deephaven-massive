@@ -353,6 +353,28 @@ def test_market_schemas_normalization_and_fallbacks() -> None:
         )["EndTimestamp"]
         == 1700000300000000000
     )
+    assert BARS_SCHEMA.normalizer(
+        {
+            "T": "AAPL",
+            "o": 100,
+            "c": 105,
+            "t": "2025-01-01T00:00:00Z",
+            "timespan": "month",
+            "multiplier": 1,
+        },
+        stocks_norm,
+    )["EndTimestamp"] == to_utc_ns("2025-02-01T00:00:00Z")
+    assert BARS_SCHEMA.normalizer(
+        {
+            "T": "AAPL",
+            "o": 100,
+            "c": 105,
+            "t": "2024-01-01T00:00:00Z",
+            "timespan": "year",
+            "multiplier": 1,
+        },
+        stocks_norm,
+    )["EndTimestamp"] == to_utc_ns("2025-01-01T00:00:00Z")
     assert (
         BARS_SCHEMA.normalizer({"T": "AAPL", "o": 100, "c": 105}, stocks_norm)["EndTimestamp"]
         is None

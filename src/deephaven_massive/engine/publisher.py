@@ -109,7 +109,6 @@ class MicroBatchPublisher:
         self._rows_published = 0
         self._last_error: Exception | None = None
         self._latest_ts_by_symbol: dict[str | None, int] = {}
-        self._min_ts_by_symbol: dict[str | None, int] = {}
         self._stop_event = threading.Event()
         self._flush_wakeup = threading.Event()
         self._flush_thread: threading.Thread | None = None
@@ -161,15 +160,17 @@ class MicroBatchPublisher:
             return self._last_error
 
     def _record_row_timestamp(self, sym: str | None, ts_ns: int | None) -> None:
-        """Update per-symbol min and max observed event timestamps (caller holds `_lock`)."""
+        """Update per-symbol max observed event timestamp (caller holds `_lock`)."""
         if ts_ns is None:
             return
         prev_max = self._latest_ts_by_symbol.get(sym)
         if prev_max is None or ts_ns > prev_max:
             self._latest_ts_by_symbol[sym] = ts_ns
-        prev_min = self._min_ts_by_symbol.get(sym)
-        if prev_min is None or ts_ns < prev_min:
-            self._min_ts_by_symbol[sym] = ts_ns
+
+    def capture_backfill_cutoff(self) -> dict[str | None, int]:
+        """Snapshot per-symbol latest timestamps observed prior to attaching a new history/ring view."""
+        with self._lock:
+            return dict(self._latest_ts_by_symbol)
 
     @property
     def blink_table(self) -> Table:
@@ -365,27 +366,37 @@ class MicroBatchPublisher:
         seed_rows: Sequence[Mapping[str, Any]],
         *,
         seed_since: Any = None,
+        cutoff_by_symbol: Mapping[str | None, int] | None = None,
     ) -> list[dict[str, Any]]:
-        """Normalize and filter historical backfill rows so they precede all live stream rows.
+        """Normalize and filter historical backfill rows for a newly attached history/ring view.
+
+        Retains rows at or after `seed_since` up to the per-symbol cutoff timestamp
+        captured when the view was attached (so rows flushed before the view existed
+        are included in the backfill, while newer rows after the cutoff arrive from
+        the live stream).
 
         Args:
             seed_rows: Raw historical rows fetched for `seed_since`.
             seed_since: Optional minimum timestamp cutoff.
+            cutoff_by_symbol: Optional per-symbol maximum timestamp snapshot captured
+                when the downstream view was created. Defaults to the publisher's
+                current `_latest_ts_by_symbol`.
 
         Returns:
-            Normalized rows older than the earliest live/seeded row per symbol.
+            Normalized rows belonging to the backfill window.
         """
         min_seed_ts_ns = to_utc_ns(seed_since) if seed_since is not None else None
         filtered: list[dict[str, Any]] = []
         with self._lock:
+            cutoffs = self._latest_ts_by_symbol if cutoff_by_symbol is None else cutoff_by_symbol
             for raw in seed_rows:
                 nr = dict(self.schema_spec.normalizer(raw, self.symbol_normalizer))
                 ts_ns = _row_timestamp_ns(nr)
                 if min_seed_ts_ns is not None and ts_ns is not None and ts_ns < min_seed_ts_ns:
                     continue
                 sym = nr.get("Symbol")
-                earliest_live = self._min_ts_by_symbol.get(sym)
-                if earliest_live is not None and ts_ns is not None and ts_ns >= earliest_live:
+                cutoff_ts = cutoffs.get(sym)
+                if cutoff_ts is not None and ts_ns is not None and ts_ns > cutoff_ts:
                     continue
                 filtered.append(nr)
         return filtered

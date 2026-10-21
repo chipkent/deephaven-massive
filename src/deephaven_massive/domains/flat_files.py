@@ -55,7 +55,10 @@ _DATASET_PREFIX_BY_DOMAIN: dict[str, str] = {
 def _subday_bound_ns(val: Any) -> int | None:
     """Return UTC nanoseconds if `val` specifies a sub-day timestamp rather than a calendar date."""
     if isinstance(val, (datetime, int, float)) or (isinstance(val, str) and len(val.strip()) > 10):
-        return to_utc_ns(val)
+        ns = to_utc_ns(val)
+        if ns is None:
+            raise ValueError(f"Unparseable sub-day timestamp bound: {val!r}")
+        return ns
     return None
 
 

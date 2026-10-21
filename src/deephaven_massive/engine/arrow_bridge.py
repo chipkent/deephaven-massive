@@ -32,6 +32,7 @@ _EPOCH_DATE = date(1970, 1, 1)
 _EPOCH_DT = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _SNAKE_BOUNDARY_RE = re.compile(r"[^a-zA-Z0-9]+")
 _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_ISO_FRACTION_RE = re.compile(r"^(.*[T ]\d{2}:\d{2}:\d{2})\.(\d+)(.*)$")
 
 
 def _dt_to_utc_ns(dt: datetime) -> int:
@@ -121,8 +122,13 @@ def to_utc_ns(val: Any) -> int | None:
             return to_utc_ns(int(s))
         try:
             iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+            frac_ns = 0
+            m = _ISO_FRACTION_RE.match(iso)
+            if m is not None:
+                iso = f"{m.group(1)}{m.group(3)}"
+                frac_ns = int(m.group(2)[:9].ljust(9, "0"))
             dt = datetime.fromisoformat(iso)
-            return _dt_to_utc_ns(dt)
+            return _dt_to_utc_ns(dt) + frac_ns
         except ValueError:
             return None
     return None

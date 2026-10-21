@@ -241,7 +241,7 @@ enriched_quotes = latest_quotes.natural_join(
 
 ## 5. Delivery Modes in Depth
 
-Every dataset method returns a [`FeedBuilder`](src/deephaven_massive/engine/builder.py) supporting up to seven terminal delivery modes:
+Every domain dataset method (except `m.flat_files.*`, which returns a `Table` directly) returns a [`FeedBuilder`](src/deephaven_massive/engine/builder.py) supporting up to seven terminal delivery modes:
 
 | Method | Return Type | Transport | When to Use |
 | :--- | :--- | :--- | :--- |

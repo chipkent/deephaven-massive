@@ -514,6 +514,7 @@ def test_reactive_watchlist_edge_cases_and_shutdown(dh_exec_ctx: Any) -> None:
     ctrl.seed_fn = lambda _syms: (_ for _ in ()).throw(RuntimeError("seed boom"))
     ctrl._apply_diff_safe(["ERR"], [])
     assert isinstance(ctrl.last_error, RuntimeError)
+    assert ctrl.active_symbols == frozenset({"ERR"})
     ctrl.seed_fn = None
 
     ctrl.stop()

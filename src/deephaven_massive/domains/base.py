@@ -31,6 +31,7 @@ import pyarrow as pa
 from deephaven_massive.engine.arrow_bridge import (
     SchemaSpec,
     arrow_to_deephaven_table,
+    exec_ctx_scope,
     record_batches_to_arrow_table,
     rows_to_record_batch,
 )
@@ -76,18 +77,25 @@ def _resolve_bar_extra_fields(
         ``extra_fields`` unchanged.
     """
     span_ns: int | None = None
+    mult: int | None = None
+    span_name: str | None = None
     if "/range/" in path:
         parts = path.split("/range/", 1)[1].split("/")
-        span_ns = _compute_bar_span_ns(int(parts[0]), parts[1])
+        mult, span_name = int(parts[0]), parts[1].strip().lower()
+        span_ns = _compute_bar_span_ns(mult, span_name)
     elif path.endswith("/prev"):
+        mult, span_name = 1, "day"
         span_ns = _compute_bar_span_ns(1, "day")
     elif params and "resolution" in params:
         mult_s, span_s = str(params["resolution"]).split("_", 1)
-        span_ns = _compute_bar_span_ns(int(mult_s), span_s)
+        mult, span_name = int(mult_s), span_s.strip().lower()
+        span_ns = _compute_bar_span_ns(mult, span_name)
     if span_ns is None:
         return extra_fields
     merged = dict(extra_fields or {})
     merged.setdefault("_span_ns", span_ns)
+    merged.setdefault("multiplier", mult)
+    merged.setdefault("timespan", span_name)
     return merged
 
 
@@ -294,18 +302,39 @@ class BaseDomainClient:
         self.domain = domain
         self.symbol_normalizer = SymbolNormalizer(domain) if domain is not None else None
 
-    def _canonical_symbols(self, symbols: str | Iterable[str] | None) -> list[str]:
+    def _canonical_symbols(
+        self,
+        symbols: Any,
+        *,
+        symbol_col: str = "Symbol",
+    ) -> list[str]:
         """Normalize ``symbols`` into a deduplicated list of canonical symbols.
 
         Args:
             symbols: A single symbol string, comma-separated symbol list,
-                iterable of symbols, or ``None`` (which defaults to ``["*"]``).
+                iterable of symbols, Deephaven ``Table`` watchlist, or ``None``
+                (which defaults to ``["*"]``).
+            symbol_col: Column name to read when ``symbols`` is a Deephaven
+                ``Table``. Defaults to ``"Symbol"``.
 
         Returns:
             list[str]: Ordered list of canonical symbol strings.
         """
         if symbols is None:
             return ["*"]
+        if hasattr(symbols, "j_table") or hasattr(symbols, "column_names"):
+            from deephaven import arrow as dh_arrow
+
+            with exec_ctx_scope(self.session.exec_ctx):
+                pa_tbl = dh_arrow.to_arrow(symbols.view([symbol_col]))
+            raw_vals = [
+                str(v).strip()
+                for v in pa_tbl.column(symbol_col).to_pylist()
+                if v is not None and str(v).strip()
+            ]
+            if not raw_vals:
+                return []
+            symbols = raw_vals
         if self.symbol_normalizer is not None:
             return self.symbol_normalizer.canonical_list(symbols)
         if isinstance(symbols, str):
@@ -441,7 +470,7 @@ class BaseDomainClient:
     def _should_use_flat_files(
         self,
         source: str,
-        symbols: Sequence[str] | None,
+        symbols: Sequence[str],
         s3_dataset: str | None,
         *,
         adjusted: bool | None = None,
@@ -456,8 +485,7 @@ class BaseDomainClient:
 
         Args:
             source: Routing policy (``"auto"``, ``"rest"``, or ``"flat_files"``).
-            symbols: Sequence of canonical symbols, or ``None`` for a reactive
-                table watchlist.
+            symbols: Sequence of canonical symbols.
             s3_dataset: S3 dataset identifier (e.g., ``"us_stocks_sip/trades_v1"``),
                 or ``None`` if the feed has no S3 archive.
             adjusted: Whether split-adjusted prices were requested.
@@ -490,7 +518,7 @@ class BaseDomainClient:
             return False
         if adjusted is True:
             return False
-        if symbols is None or "*" in symbols:
+        if "*" in symbols:
             return True
         return len(symbols) >= self.session.config.flat_file_ticker_threshold
 
@@ -507,6 +535,7 @@ class BaseDomainClient:
         source: str = "auto",
         adjusted: bool | None = None,
         chunk_size: int = 50_000,
+        symbol_col: str = "Symbol",
     ) -> Table:
         """Route a single- or multi-symbol ``.historical()`` query to S3 Flat Files or chunked REST pagination.
 
@@ -515,7 +544,7 @@ class BaseDomainClient:
         into bounded PyArrow ``RecordBatch`` chunks.
 
         Args:
-            symbols: Target symbol(s) or wildcard ``"*"``.
+            symbols: Target symbol(s), wildcard ``"*"``, or Deephaven ``Table`` watchlist.
             schema_spec: Target :class:`SchemaSpec` for Arrow conversion.
             s3_dataset: S3 dataset path if S3 Flat Files are supported.
             rest_path_fn: Callback ``(symbol, start, end) -> (path, params)``
@@ -526,6 +555,7 @@ class BaseDomainClient:
             source: Routing policy (``"auto"``, ``"rest"``, or ``"flat_files"``).
             adjusted: Optional split-adjustment flag used by ``_should_use_flat_files``.
             chunk_size: Maximum rows per PyArrow ``RecordBatch``.
+            symbol_col: Column name to read when ``symbols`` is a Deephaven ``Table``.
 
         Returns:
             Table: Static Deephaven table containing the historical dataset.
@@ -533,11 +563,9 @@ class BaseDomainClient:
         Raises:
             ValueError: If REST routing is selected without concrete symbols.
         """
-        canon_syms = (
-            None
-            if hasattr(symbols, "j_table") or hasattr(symbols, "column_names")
-            else self._canonical_symbols(symbols)
-        )
+        canon_syms = self._canonical_symbols(symbols, symbol_col=symbol_col)
+        if not canon_syms:
+            raise ValueError(_EMPTY_HISTORICAL_ERRORS[self.domain or "stocks"])
         if self._should_use_flat_files(source, canon_syms, s3_dataset, adjusted=adjusted):
             assert s3_dataset is not None
             return self.session.flat_files.load(

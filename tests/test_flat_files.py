@@ -169,11 +169,26 @@ def test_flat_files_load_limits_and_call_signatures(mock_session: Any) -> None:
 
     tbl_subday = sess.flat_files.load(
         "us_stocks_sip/trades_v1",
-        start="2023-11-14T22:13:25Z",
-        end="2023-11-14T22:13:30Z",
+        start="2023-11-14T22:13:20.000000003Z",
+        end="2023-11-14T22:13:20.000000003Z",
         symbols=["AAPL"],
     )
-    assert len(dh_to_pylist(tbl_subday)) == 0
+    assert len(dh_to_pylist(tbl_subday)) == 1
+
+    tbl_subday_empty = sess.flat_files.load(
+        "us_stocks_sip/trades_v1",
+        start="2023-11-14T22:13:20.000000099Z",
+        end="2023-11-14T22:13:20.000000099Z",
+        symbols=["AAPL"],
+    )
+    assert len(dh_to_pylist(tbl_subday_empty)) == 0
+
+    with pytest.raises(ValueError, match="Unparseable sub-day"):
+        sess.flat_files.load(
+            "us_stocks_sip/trades_v1",
+            start="2023-11-14Tnot-a-time",
+            symbols=["AAPL"],
+        )
 
 
 def test_flat_files_boto3_client_and_credentials_validation(

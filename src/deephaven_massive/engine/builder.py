@@ -444,6 +444,7 @@ class FeedBuilder:
                 )
             return stream_tbl.drop_columns(["__ReceivedAt"])
 
+        cutoff_by_symbol = pub.capture_backfill_cutoff()
         with exec_ctx_scope(self._exec_ctx):
             tbl = _build()
         finalize_seed()
@@ -456,7 +457,11 @@ class FeedBuilder:
         ):
             pub.mark_snapshot_seeded()
             raw_backfill = self._seed_rows_fn(self._canonical_symbol_list(), seed_since)
-            backfill_rows = pub.filter_historical_backfill(raw_backfill, seed_since=seed_since)
+            backfill_rows = pub.filter_historical_backfill(
+                raw_backfill,
+                seed_since=seed_since,
+                cutoff_by_symbol=cutoff_by_symbol,
+            )
             if backfill_rows:
                 rb = rows_to_record_batch(
                     backfill_rows,

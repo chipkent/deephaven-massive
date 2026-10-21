@@ -248,7 +248,9 @@ class ReactiveWatchlistController:
                         new_count = max(0, updated_counts.get(sym, 0) + delta)
                         if new_count > 0:
                             updated_counts[sym] = new_count
-                            if sym not in self._active_symbols:
+                            if sym in self._active_symbols:
+                                self._symbol_counts[sym] = new_count
+                            else:
                                 net_add_set.add(sym)
                         else:
                             updated_counts.pop(sym, None)
@@ -274,6 +276,10 @@ class ReactiveWatchlistController:
                 )
                 with exec_ctx_scope(self._exec_ctx):
                     self._active_subs.delete(del_dh)
+                with self._lock:
+                    for sym in net_rem:
+                        self._symbol_counts.pop(sym, None)
+                    self._active_symbols.difference_update(net_rem)
 
             # 2. Handle additions: write (Symbol, SubscribedAt) to active_subs -> enable in publisher -> subscribe WS -> seed
             if net_add:
@@ -300,6 +306,10 @@ class ReactiveWatchlistController:
                         self.ws_multiplexer.subscribe(
                             self.ws_url, self.channel, add_topics, self.publisher
                         )
+                        with self._lock:
+                            for sym in net_add:
+                                self._symbol_counts[sym] = updated_counts[sym]
+                            self._active_symbols.update(net_add)
                         seed_rows = self.seed_fn(net_add)
                     finally:
                         self.publisher.complete_seeding(seed_rows)
@@ -308,11 +318,10 @@ class ReactiveWatchlistController:
                     self.ws_multiplexer.subscribe(
                         self.ws_url, self.channel, add_topics, self.publisher
                     )
-
-            with self._lock:
-                self._symbol_counts = updated_counts
-                self._active_symbols.difference_update(net_rem)
-                self._active_symbols.update(net_add)
+                    with self._lock:
+                        for sym in net_add:
+                            self._symbol_counts[sym] = updated_counts[sym]
+                        self._active_symbols.update(net_add)
 
     def wait_idle(self, timeout: float = 5.0) -> bool:
         """Block until all scheduled watchlist diff operations have completed.

@@ -147,6 +147,22 @@ def test_base_domain_client_rest_pagination_and_chunked_tables(
     assert base._canonical_symbols("aapl") == ["AAPL"]
     assert base._canonical_symbols(["aapl", "msft"]) == ["AAPL", "MSFT"]
 
+    wl_pa = pa.table({"Symbol": ["aapl", "msft"]})
+    wl_dh = arrow_to_deephaven_table(wl_pa, sess.exec_ctx)
+    assert base._canonical_symbols(wl_dh) == ["AAPL", "MSFT"]
+    empty_wl_dh = arrow_to_deephaven_table(
+        pa.table({"Symbol": pa.array([], type=pa.string())}), sess.exec_ctx
+    )
+    assert base._canonical_symbols(empty_wl_dh) == []
+    with pytest.raises(ValueError, match="Specific symbol"):
+        base._fetch_multi_symbol_historical(
+            empty_wl_dh,
+            TRADES_SCHEMA,
+            None,
+            lambda sym, s, e: (f"/v3/trades/{sym}", {}),
+            source="rest",
+        )
+
     rows = base._fetch_rest_rows("/v3/trades/AAPL", {"foo": "bar"}, limit=3)
     assert len(rows) == 3
 

@@ -476,16 +476,8 @@ def test_indices_domain_all_feeds(mock_session: Any) -> None:
     )
 
     assert (
-        len(dh_to_pylist(idx.values("I:SPX").historical("2025-01-01", "2025-01-02", source="rest")))
+        len(dh_to_pylist(idx.values("I:SPX").historical("2025-01-01", "2025-01-01", source="auto")))
         == 1
-    )
-    assert (
-        len(
-            dh_to_pylist(
-                idx.values(["I:SPX", "I:NDX"]).historical("2025-01-01", "2025-01-02", source="rest")
-            )
-        )
-        == 2
     )
     assert (
         len(
@@ -495,6 +487,8 @@ def test_indices_domain_all_feeds(mock_session: Any) -> None:
         )
         == 1
     )
+    with pytest.raises(ValueError, match="S3 Flat Files"):
+        idx.values("I:SPX").historical("2025-01-01", "2025-01-02", source="rest")
     with pytest.raises(ValueError, match="Specific index symbol"):
         idx.values("*").historical("2025-01-01", "2025-01-02", source="rest")
 
@@ -536,12 +530,6 @@ def test_indices_domain_all_feeds(mock_session: Any) -> None:
     urls = _recorded_urls(sess)
     assert any("/v3/snapshot/indices" in u for u in urls)
     assert any("/v1/indicators/sma/I:SPX" in u for u in urls)
-    assert any(
-        "/v3/snapshot/indices" in u
-        and p.get("timestamp.gte") == "2025-01-01"
-        and p.get("timestamp.lte") == "2025-01-02"
-        for u, p, _ in sess.recorded_requests
-    )
 
 
 def test_forex_domain_all_feeds(mock_session: Any) -> None:

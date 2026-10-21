@@ -246,16 +246,17 @@ def test_publisher_seed_since_cutoff_filtering(dh_exec_ctx: Any) -> None:
         == 1
     )
 
-    # Historical backfill filtering skips rows older than seed_since or >= earliest live row
+    # Historical backfill filtering skips rows older than seed_since or > cutoff_by_symbol
     backfill = pub.filter_historical_backfill(
         [
             {"sym": "NVDA", "p": 800.0, "s": 5, "i": "B_TOO_OLD", "t": 1000000000000000000},
             {"sym": "NVDA", "p": 870.0, "s": 5, "i": "B_OK", "t": 2000000000000000000},
-            {"sym": "NVDA", "p": 905.0, "s": 5, "i": "B_OVERLAP", "t": 2600000000000000000},
+            {"sym": "NVDA", "p": 905.0, "s": 5, "i": "B_MID", "t": 2600000000000000000},
+            {"sym": "NVDA", "p": 930.0, "s": 5, "i": "B_AFTER_CUTOFF", "t": 4500000000000000000},
         ],
         seed_since=1500000000000000000,
     )
-    assert [r["TradeId"] for r in backfill] == ["B_OK"]
+    assert [r["TradeId"] for r in backfill] == ["B_OK", "B_MID"]
 
 
 def test_publisher_seed_cutover_bars_quotes_and_keyless_schemas(

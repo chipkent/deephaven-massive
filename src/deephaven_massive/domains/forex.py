@@ -222,7 +222,6 @@ class ForexClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
-                    adjusted=adjusted,
                 )
             ),
         )

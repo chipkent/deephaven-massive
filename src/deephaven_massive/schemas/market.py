@@ -20,7 +20,9 @@ transport surfaces:
 
 from __future__ import annotations
 
+import calendar
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -214,6 +216,29 @@ _TIMESPAN_NS: dict[str, int] = {
 }
 
 
+_CALENDAR_MONTH_FACTORS: dict[str, int] = {
+    "month": 1,
+    "quarter": 3,
+    "year": 12,
+}
+
+
+def _add_calendar_months_ns(start_ns: int, months: int) -> int:
+    """Advance a UTC nanosecond epoch timestamp by ``months`` calendar months."""
+    sec, rem_ns = divmod(start_ns, 1_000_000_000)
+    dt = datetime.fromtimestamp(sec, tz=timezone.utc)
+    total_months = (dt.year * 12 + (dt.month - 1)) + months
+    target_year, target_month_zero = divmod(total_months, 12)
+    target_month = target_month_zero + 1
+    max_day = calendar.monthrange(target_year, target_month)[1]
+    target_dt = dt.replace(
+        year=target_year,
+        month=target_month,
+        day=min(dt.day, max_day),
+    )
+    return int(target_dt.timestamp()) * 1_000_000_000 + rem_ns
+
+
 def _compute_bar_span_ns(multiplier: int = 1, timespan: str = "minute") -> int:
     """Compute the duration of an aggregate bar in nanoseconds.
 
@@ -265,12 +290,18 @@ def _normalize_bar(row: Mapping[str, Any], norm: SymbolNormalizer | None = None)
     if end_raw is not None:
         end_ns = to_utc_ns(end_raw)
     elif start_ns is not None:
-        if span_ns is None and ("timespan" in row or "multiplier" in row):
-            span_ns = _compute_bar_span_ns(
-                int(row.get("multiplier", 1)),
-                str(row.get("timespan", "minute")),
-            )
-        end_ns = start_ns + int(span_ns) if span_ns is not None else start_ns
+        raw_timespan = str(row.get("timespan", "")).strip().lower()
+        month_factor = _CALENDAR_MONTH_FACTORS.get(raw_timespan)
+        if month_factor is not None:
+            mult = int(row.get("multiplier", 1))
+            end_ns = _add_calendar_months_ns(start_ns, mult * month_factor)
+        else:
+            if span_ns is None and ("timespan" in row or "multiplier" in row):
+                span_ns = _compute_bar_span_ns(
+                    int(row.get("multiplier", 1)),
+                    raw_timespan or "minute",
+                )
+            end_ns = start_ns + int(span_ns) if span_ns is not None else start_ns
     else:
         end_ns = None
     return {
