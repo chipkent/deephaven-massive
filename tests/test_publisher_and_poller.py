@@ -178,6 +178,7 @@ def test_publisher_seed_cutover_trade_id_and_timestamp_deduplication(
     )
     with dh_exec_ctx:
         hist = blink_to_append_only(pub.user_blink_table)
+        latest = pub.user_blink_table.last_by(["Symbol"])
 
     pub.begin_seeding()
     assert pub.flush_now() == 0
@@ -198,11 +199,13 @@ def test_publisher_seed_cutover_trade_id_and_timestamp_deduplication(
             {"sym": "MSFT", "p": 300.0, "s": 10},
         ]
     )
-    assert flushed == 5
+    assert flushed == 6
     hist.await_update()
     rows = dh_to_pylist(hist)
     trade_ids = [r["TradeId"] for r in rows if r["Symbol"] == "AAPL"]
-    assert trade_ids == ["T098", "T100", "T097", "T102"]
+    assert trade_ids == ["T099", "T098", "T100", "T097", "T102"]
+    latest_rows = {r["Symbol"]: r for r in dh_to_pylist(latest)}
+    assert latest_rows["AAPL"]["TradeId"] == "T102"
 
 
 def test_publisher_seed_since_cutoff_filtering(dh_exec_ctx: Any) -> None:
@@ -246,17 +249,29 @@ def test_publisher_seed_since_cutoff_filtering(dh_exec_ctx: Any) -> None:
         == 1
     )
 
-    # Historical backfill filtering skips rows older than seed_since or > cutoff_by_symbol
+    # Historical backfill filtering skips rows older than seed_since, > cutoff_by_symbol, or matching post-attach live signatures
     backfill = pub.filter_historical_backfill(
         [
             {"sym": "NVDA", "p": 800.0, "s": 5, "i": "B_TOO_OLD", "t": 1000000000000000000},
             {"sym": "NVDA", "p": 870.0, "s": 5, "i": "B_OK", "t": 2000000000000000000},
-            {"sym": "NVDA", "p": 905.0, "s": 5, "i": "B_MID", "t": 2600000000000000000},
+            {"sym": "NVDA", "p": 870.0, "s": 5, "i": "B_OK", "t": 2000000000000000000},
+            {"sym": "NVDA", "p": 920.0, "s": 5, "i": "N_NEW", "t": 4000000000000000000},
+            {"sym": "NVDA", "p": 905.0, "s": 5, "t": 2600000000000000000},
+            {"sym": "NVDA", "p": 905.0, "s": 5, "t": 2600000000000000000},
             {"sym": "NVDA", "p": 930.0, "s": 5, "i": "B_AFTER_CUTOFF", "t": 4500000000000000000},
         ],
         seed_since=1500000000000000000,
     )
-    assert [r["TradeId"] for r in backfill] == ["B_OK", "B_MID"]
+    assert [r["TradeId"] for r in backfill] == ["B_OK", None]
+    backfill_empty_cutoffs = pub.filter_historical_backfill(
+        [
+            {"sym": "NVDA", "p": 870.0, "s": 5, "i": "B_OK2", "t": 2000000000000000000},
+            {"sym": "NVDA", "p": 930.0, "s": 5, "i": "B_AFTER_EARLIEST", "t": 3500000000000000000},
+        ],
+        seed_since=1500000000000000000,
+        cutoff_by_symbol={},
+    )
+    assert [r["TradeId"] for r in backfill_empty_cutoffs] == ["B_OK2"]
 
 
 def test_publisher_seed_cutover_bars_quotes_and_keyless_schemas(
@@ -397,19 +412,29 @@ def test_snapshot_poller_replace_mode_evicts_stale_keys(dh_exec_ctx: Any) -> Non
     )
     assert poller.poll_once() == 2
     assert poller.poll_id == 1
-    poller.table.await_update()
+    assert set(dh_to_pydict(poller.table)["Symbol"]) == {"AAPL", "MSFT"}
+
+    # Poll identical keys to cover the non-stale branch (stale_rows is empty)
+    idx = 0
+    assert poller.poll_once() == 2
+    assert poller.poll_id == 2
     assert set(dh_to_pydict(poller.table)["Symbol"]) == {"AAPL", "MSFT"}
 
     assert poller.poll_once() == 2
-    assert poller.poll_id == 2
-    poller.table.await_update()
+    assert poller.poll_id == 3
     d2 = dh_to_pydict(poller.table)
     assert set(d2["Symbol"]) == {"MSFT", "NVDA"}
     msft_idx = d2["Symbol"].index("MSFT")
     assert d2["BidPrice"][msft_idx] == pytest.approx(305.0)
 
+    # Empty poll evicts all active keys in replace mode
     assert poller.poll_once() == 0
-    assert poller.poll_id == 3
+    assert poller.poll_id == 4
+    assert poller.table.size == 0
+
+    # Subsequent empty poll is a no-op when _active_replace_keys is already empty
+    assert poller.poll_once() == 0
+    assert poller.poll_id == 5
 
 
 def test_snapshot_poller_upsert_mode_retains_prior_keys(dh_exec_ctx: Any) -> None:

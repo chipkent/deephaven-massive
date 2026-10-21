@@ -241,8 +241,12 @@ def test_session_stop_stream_filtering_and_lifecycle(dh_exec_ctx: Any) -> None:
         assert sess.stop_stream(symbols="GOOG") == 0
         assert sess.stop_stream(symbols=["GOOG"]) == 0
 
-        assert sess.stop_stream(ws_channel="Q", symbols=["MSFT"]) == 1
+        assert sess.stop_stream(ws_channel="Q", symbols=iter(["MSFT"])) == 1
         sess._register_builder(b_quotes)
+        b_trades_msft = sess.stocks.trades("MSFT")
+        sess._register_builder(b_trades_msft)
+        assert sess.stop_stream("stocks.trades", symbols=iter(["MSFT"])) == 1
+        assert b_trades in sess._active_builders
         assert sess.stop_stream("stocks.quotes") == 1
         assert sess.stop_stream(b_trades) == 1
 

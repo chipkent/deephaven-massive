@@ -392,20 +392,31 @@ def _normalize_fmv(row: Mapping[str, Any], norm: SymbolNormalizer | None = None)
 def _normalize_index_value(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
-    """Normalize an Index Value (``V.I:*`` or S3 ``values_v1``) tick row.
+    """Normalize an Index Value (``V.I:*``, ``/v3/snapshot/indices``, or S3 ``values_v1``) row.
 
     Args:
-        row: Raw index value event or CSV row dictionary.
+        row: Raw index value event, snapshot, or CSV row dictionary.
         norm: Optional symbol normalizer used to canonicalize ``Symbol``.
 
     Returns:
         dict[str, Any]: Normalized row dictionary matching
         ``INDEX_VALUES_SCHEMA``.
     """
+    session = _submap(row, "session")
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "T", "sym", "ticker"),
-        "Timestamp": _first_present(row, "Timestamp", "t", "timestamp"),
-        "Value": _first_present(row, "Value", "val", "value", "c"),
+        "Timestamp": _first_present(
+            row,
+            "Timestamp",
+            "t",
+            "timestamp",
+            "last_updated",
+            "lastUpdated",
+            "updated",
+        )
+        or _first_present(session, "last_updated", "lastUpdated", "updated"),
+        "Value": _first_present(row, "Value", "val", "value", "c")
+        or _first_present(session, "close", "price"),
     }
 
 

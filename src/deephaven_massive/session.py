@@ -248,23 +248,25 @@ class MassiveSession:
         Returns:
             The number of active `FeedBuilder` instances that were stopped.
         """
+        symbols_list: str | list[str] | None = (
+            symbols if symbols is None or isinstance(symbols, str) else list(symbols)
+        )
+
         with self._lock:
             to_stop: list[FeedBuilder] = []
             for builder in list(self._active_builders):
-                if target is not None:
-                    if (
-                        builder is target
-                        or builder.name == target
-                        or (isinstance(target, str) and builder.name == target.replace(".", "_"))
-                        or builder.ws_channel == target
-                        or builder.ws_url == target
-                    ):
-                        to_stop.append(builder)
+                if target is not None and not (
+                    builder is target
+                    or builder.name == target
+                    or (isinstance(target, str) and builder.name == target.replace(".", "_"))
+                    or builder.ws_channel == target
+                    or builder.ws_url == target
+                ):
                     continue
                 if ws_channel is not None and builder.ws_channel != ws_channel:
                     continue
-                if symbols is not None:
-                    target_syms = set(builder._normalize_symbols(symbols))
+                if symbols_list is not None:
+                    target_syms = set(builder._normalize_symbols(symbols_list))
                     if not (set(builder._canonical_symbol_list()) & target_syms):
                         continue
                 to_stop.append(builder)

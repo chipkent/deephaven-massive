@@ -109,7 +109,9 @@ class MicroBatchPublisher:
         self._rows_published = 0
         self._last_error: Exception | None = None
         self._latest_ts_by_symbol: dict[str | None, int] = {}
+        self._published_latest_ts_by_symbol: dict[str | None, int] = {}
         self._earliest_ts_by_symbol: dict[str | None, int] = {}
+        self._post_attach_sigs: set[tuple[Any, ...]] = set()
         self._stop_event = threading.Event()
         self._flush_wakeup = threading.Event()
         self._flush_thread: threading.Thread | None = None
@@ -171,16 +173,36 @@ class MicroBatchPublisher:
         if prev_min is None or ts_ns < prev_min:
             self._earliest_ts_by_symbol[sym] = ts_ns
 
+    def _row_event_signature(self, nr: Mapping[str, Any]) -> tuple[Any, ...]:
+        """Compute a deterministic event identity tuple for deduplicating seed and live rows."""
+        key_tuple = tuple(nr.get(k) for k in self.schema_spec.key_cols)
+        return (
+            key_tuple,
+            _row_timestamp_ns(nr),
+            nr.get("TradeId"),
+            nr.get("SequenceNumber"),
+        )
+
+    def _record_event_signatures(
+        self,
+        nr: Mapping[str, Any],
+        target: set[tuple[Any, ...]],
+    ) -> None:
+        """Add event-identity signatures (and TradeId key if present) for `nr` into `target`."""
+        target.add(self._row_event_signature(nr))
+        if nr.get("TradeId") is not None:
+            target.add(("__trade_id__", nr.get("Symbol"), str(nr["TradeId"])))
+
     def attach_downstream(
         self,
         build_fn: Callable[[], Table],
     ) -> tuple[Table, dict[str | None, int]]:
-        """Atomically flush pending rows, capture the backfill cutoff, and attach a downstream view.
+        """Atomically coordinate with the UpdateGraph, attach a downstream view, and flush pending rows.
 
-        Holding `_publish_lock` across `_flush_locked()`, cutoff capture, and
-        `build_fn()` guarantees that every row in the returned cutoff was flushed
-        before the downstream view attached, and any row flushed afterward arrives
-        via the live stream without duplication or gaps.
+        Acquires `_publish_lock` and Deephaven's UpdateGraph `exclusive_lock`, captures the
+        already-published timestamp cutoff before attaching `build_fn()`, and then flushes
+        any buffered rows into the newly attached view while recording their event identities
+        in `_post_attach_sigs` for backfill deduplication.
 
         Args:
             build_fn: Callable that constructs and returns a downstream Deephaven `Table`.
@@ -188,12 +210,15 @@ class MicroBatchPublisher:
         Returns:
             Tuple of `(table, cutoff_by_symbol)`.
         """
+        from deephaven.update_graph import exclusive_lock
+
         with self._publish_lock:
-            self._flush_locked()
             with self._lock:
-                cutoff = dict(self._latest_ts_by_symbol)
-            with exec_ctx_scope(self._exec_ctx):
+                cutoff = dict(self._published_latest_ts_by_symbol)
+                self._post_attach_sigs.clear()
+            with exec_ctx_scope(self._exec_ctx), exclusive_lock(self._blink_table):
                 tbl = build_fn()
+            self._flush_locked()
         return tbl, cutoff
 
     @property
@@ -296,8 +321,7 @@ class MicroBatchPublisher:
             if has_trade_id and nr.get("TradeId") is not None:
                 seen_trade_ids.add((sym, str(nr["TradeId"])))
             if self.schema_spec.key_cols:
-                key_tuple = tuple(nr.get(k) for k in self.schema_spec.key_cols)
-                seen_event_sigs.add((key_tuple, ts_ns, nr.get("TradeId"), nr.get("SequenceNumber")))
+                seen_event_sigs.add(self._row_event_signature(nr))
             if ts_ns is not None:
                 prev_max = max_ts_by_symbol.get(sym)
                 if prev_max is None or ts_ns > prev_max:
@@ -310,7 +334,8 @@ class MicroBatchPublisher:
             self._seeding = False
             self._seeded = True
 
-            deduped_ws: list[dict[str, Any]] = []
+            older_ws: list[dict[str, Any]] = []
+            newer_ws: list[dict[str, Any]] = []
             for ws_row in buffered:
                 sym = ws_row.get("Symbol")
                 if (
@@ -322,27 +347,21 @@ class MicroBatchPublisher:
                 ws_ts = _row_timestamp_ns(ws_row)
                 if min_seed_ts_ns is not None and ws_ts is not None and ws_ts < min_seed_ts_ns:
                     continue
+                if (
+                    self.schema_spec.key_cols
+                    and self._row_event_signature(ws_row) in seen_event_sigs
+                ):
+                    continue
                 max_seed_ts = max_ts_by_symbol.get(sym)
                 if ws_ts is not None and max_seed_ts is not None and ws_ts < max_seed_ts:
-                    continue
-                if self.schema_spec.key_cols:
-                    key_tuple = tuple(ws_row.get(k) for k in self.schema_spec.key_cols)
-                    ws_sig = (
-                        key_tuple,
-                        ws_ts,
-                        ws_row.get("TradeId"),
-                        ws_row.get("SequenceNumber"),
-                    )
-                    if (
-                        ws_ts is not None
-                        and max_seed_ts is not None
-                        and ws_ts == max_seed_ts
-                        and ws_sig in seen_event_sigs
-                    ):
-                        continue
-                deduped_ws.append(ws_row)
+                    older_ws.append(ws_row)
+                else:
+                    newer_ws.append(ws_row)
 
-            self._buffer = norm_seeds + deduped_ws + self._buffer
+            merged = older_ws + norm_seeds + newer_ws
+            for r in merged:
+                self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
+            self._buffer = merged + self._buffer
 
         return self.flush_now()
 
@@ -354,8 +373,9 @@ class MicroBatchPublisher:
     ) -> int:
         """Apply a REST snapshot seed to an already-live publisher without regressing newer ticks.
 
-        Rows whose event timestamp is older than an already-observed live tick for the
-        same symbol are skipped so `.latest()` never regresses.
+        Timestamp validation, buffer insertion, and optional publication are serialized
+        under `_publish_lock` and `_lock` against both already-published and queued live
+        ticks so `.latest()` never regresses.
 
         Args:
             seed_rows: Raw REST snapshot rows.
@@ -364,23 +384,27 @@ class MicroBatchPublisher:
         Returns:
             Number of snapshot rows accepted.
         """
-        self.flush_now()
+        now_ns = time.time_ns()
         accepted: list[dict[str, Any]] = []
-        with self._lock:
-            for raw in seed_rows:
-                nr = dict(self.schema_spec.normalizer(raw, self.symbol_normalizer))
-                sym = nr.get("Symbol")
-                ts_ns = _row_timestamp_ns(nr)
-                latest_ts = self._latest_ts_by_symbol.get(sym)
-                if latest_ts is not None and (ts_ns is None or ts_ns <= latest_ts):
-                    continue
-                accepted.append(nr)
-            self._has_snapshot_seed = True
-
-        count = self.enqueue(accepted, already_normalized=True) if accepted else 0
-        if auto_flush and count > 0:
-            self.flush_now()
-        return count
+        with self._publish_lock:
+            self._flush_locked()
+            with self._lock:
+                for raw in seed_rows:
+                    nr = dict(self.schema_spec.normalizer(raw, self.symbol_normalizer))
+                    sym = nr.get("Symbol")
+                    ts_ns = _row_timestamp_ns(nr)
+                    latest_ts = self._latest_ts_by_symbol.get(sym)
+                    if latest_ts is not None and (ts_ns is None or ts_ns <= latest_ts):
+                        continue
+                    nr.setdefault("__ReceivedAt", now_ns)
+                    self._record_row_timestamp(sym, ts_ns)
+                    accepted.append(nr)
+                self._has_snapshot_seed = True
+                if accepted:
+                    self._buffer.extend(accepted)
+            if auto_flush and accepted:
+                self._flush_locked()
+        return len(accepted)
 
     def filter_historical_backfill(
         self,
@@ -392,16 +416,15 @@ class MicroBatchPublisher:
         """Normalize and filter historical backfill rows for a newly attached history/ring view.
 
         Retains rows at or after `seed_since` up to the per-symbol cutoff timestamp
-        captured when the view was attached (so rows flushed before the view existed
-        are included in the backfill, while newer rows after the cutoff arrive from
-        the live stream).
+        captured when the view was attached, while deduplicating by event identity against
+        any rows flushed after attachment.
 
         Args:
             seed_rows: Raw historical rows fetched for `seed_since`.
             seed_since: Optional minimum timestamp cutoff.
             cutoff_by_symbol: Optional per-symbol maximum timestamp snapshot captured
                 when the downstream view was created. Defaults to the publisher's
-                current `_latest_ts_by_symbol`.
+                current `_published_latest_ts_by_symbol`.
 
         Returns:
             Normalized rows belonging to the backfill window.
@@ -410,13 +433,25 @@ class MicroBatchPublisher:
         min_seed_ts_ns = to_utc_ns(seed_since) if seed_since is not None else None
         filtered: list[dict[str, Any]] = []
         with self._lock:
-            cutoffs = self._latest_ts_by_symbol if cutoff_by_symbol is None else cutoff_by_symbol
+            seen_sigs = set(self._post_attach_sigs)
+            cutoffs = (
+                self._published_latest_ts_by_symbol
+                if cutoff_by_symbol is None
+                else cutoff_by_symbol
+            )
             for raw in seed_rows:
                 nr = dict(self.schema_spec.normalizer(raw, self.symbol_normalizer))
+                sym = nr.get("Symbol")
+                if (
+                    nr.get("TradeId") is not None
+                    and ("__trade_id__", sym, str(nr["TradeId"])) in seen_sigs
+                ):
+                    continue
+                if self._row_event_signature(nr) in seen_sigs:
+                    continue
                 ts_ns = _row_timestamp_ns(nr)
                 if min_seed_ts_ns is not None and ts_ns is not None and ts_ns < min_seed_ts_ns:
                     continue
-                sym = nr.get("Symbol")
                 cutoff_ts = cutoffs.get(sym)
                 if cutoff_ts is not None:
                     if ts_ns is not None and ts_ns > cutoff_ts:
@@ -425,6 +460,7 @@ class MicroBatchPublisher:
                     first_live_ts = self._earliest_ts_by_symbol.get(sym)
                     if first_live_ts is not None and ts_ns is not None and ts_ns >= first_live_ts:
                         continue
+                self._record_event_signatures(nr, seen_sigs)
                 filtered.append(nr)
         return filtered
 
@@ -474,6 +510,8 @@ class MicroBatchPublisher:
             if self._seeding:
                 self._seed_buffer.extend(accepted)
             else:
+                for r in accepted:
+                    self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
                 self._buffer.extend(accepted)
                 should_flush = len(self._buffer) >= self.max_batch_size
                 thread_alive = self._flush_thread is not None and self._flush_thread.is_alive()
@@ -494,7 +532,14 @@ class MicroBatchPublisher:
             batch_rows = self._buffer
             self._buffer = []
             for r in batch_rows:
-                self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
+                sym = r.get("Symbol")
+                ts_ns = _row_timestamp_ns(r)
+                self._record_row_timestamp(sym, ts_ns)
+                if ts_ns is not None:
+                    prev_pub = self._published_latest_ts_by_symbol.get(sym)
+                    if prev_pub is None or ts_ns > prev_pub:
+                        self._published_latest_ts_by_symbol[sym] = ts_ns
+                self._record_event_signatures(r, self._post_attach_sigs)
 
         received_vals = [r.get("__ReceivedAt") for r in batch_rows]
         rb = rows_to_record_batch(

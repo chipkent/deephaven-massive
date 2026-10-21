@@ -34,9 +34,10 @@ class SnapshotPoller:
 
     Three update modes are supported:
 
-    - `"replace"`: Evicts stale keys that are no longer present in the latest poll
-      cycle by joining `last_by(key_cols)` against the current monotonic `__PollId`
-      epoch. Ideal for top-movers (`gainers_losers`) or active market status tables.
+    - `"replace"`: Maintains a keyed Deephaven `input_table` and explicitly deletes stale
+      keys that are no longer present in the latest poll cycle (including on empty polls),
+      so retained memory strictly tracks the current snapshot. Ideal for top-movers
+      (`gainers_losers`), news, ratings, or active market status tables.
     - `"upsert"`: Retains all previously seen keys and updates rows in place via
       `last_by(key_cols)`. Ideal for full-universe snapshots or reference tables.
     - `"append"`: Appends every poll batch into an append-only history table via
@@ -73,6 +74,7 @@ class SnapshotPoller:
             ValueError: If `mode` is not in `{"replace", "upsert", "append"}` or
                 `interval_s <= 0`.
         """
+        from deephaven import input_table
         from deephaven.stream import blink_to_append_only
         from deephaven.stream.table_publisher import table_publisher
 
@@ -114,6 +116,11 @@ class SnapshotPoller:
                 pa.field("__RowIdx", pa.int64()),
             ]
         )
+        self._replace_keys: list[str] = list(self.key_cols) if self.key_cols else ["__RowIdx"]
+        self._replace_key_schema = pa.schema(
+            [self.full_schema.field(k) for k in self._replace_keys]
+        )
+        self._active_replace_keys: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._poll_id = 0
         self._rows_published = 0
         self._last_error: Exception | None = None
@@ -124,36 +131,34 @@ class SnapshotPoller:
 
         empty_dh = arrow_to_deephaven_table(self.full_schema.empty_table(), self._exec_ctx)
         col_defs = {c.name: c.data_type for c in empty_dh.columns}
-        epoch_schema = pa.schema([pa.field("__PollId", pa.int64())])
-        empty_epoch_dh = arrow_to_deephaven_table(epoch_schema.empty_table(), self._exec_ctx)
-        epoch_col_defs = {c.name: c.data_type for c in empty_epoch_dh.columns}
 
         def _build_tables() -> tuple[Table, Any, Any, Table]:
-            blink_tbl, dh_pub = table_publisher(name, col_defs)
-            epoch_pub: Any = None
             if self.mode == "replace":
-                epoch_blink_tbl, epoch_pub = table_publisher(f"{name}_epoch", epoch_col_defs)
-                replace_keys = list(self.key_cols) if self.key_cols else ["__RowIdx"]
-                raw_keyed = blink_tbl.last_by(replace_keys)
-                current_epoch = epoch_blink_tbl.last_by()
-                out_tbl = (
-                    raw_keyed.natural_join(current_epoch, on=[], joins=["CurrentPollId = __PollId"])
-                    .where("__PollId == CurrentPollId")
-                    .drop_columns(["__PollId", "__RowIdx", "CurrentPollId"])
-                )
-            elif self.mode == "upsert":
+                replace_tbl = input_table(col_defs=col_defs, key_cols=self._replace_keys)
+                out_tbl = replace_tbl.drop_columns(["__PollId", "__RowIdx"])
+                return replace_tbl, None, replace_tbl, out_tbl
+            blink_tbl, dh_pub = table_publisher(name, col_defs)
+            if self.mode == "upsert":
                 stripped = blink_tbl.drop_columns(["__PollId", "__RowIdx"])
                 out_tbl = (
                     stripped.last_by(list(self.key_cols)) if self.key_cols else stripped.last_by()
                 )
             else:
                 out_tbl = blink_to_append_only(blink_tbl.drop_columns(["__PollId", "__RowIdx"]))
-            return blink_tbl, dh_pub, epoch_pub, out_tbl
+            return blink_tbl, dh_pub, None, out_tbl
 
         with exec_ctx_scope(self._exec_ctx):
-            self._blink_table, self._dh_publisher, self._epoch_publisher, self._table = (
+            self._blink_table, self._dh_publisher, self._replace_input_table, self._table = (
                 _build_tables()
             )
+
+    def _build_key_table(self, key_rows: Sequence[Mapping[str, Any]]) -> pa.Table:
+        """Build a static PyArrow key table matching `_replace_key_schema` for `input_table.delete`."""
+        arrays = [
+            pa.array([r[field.name] for r in key_rows], type=field.type)
+            for field in self._replace_key_schema
+        ]
+        return pa.Table.from_arrays(arrays, schema=self._replace_key_schema)
 
     @property
     def table(self) -> Table:
@@ -198,15 +203,15 @@ class SnapshotPoller:
                 self._poll_id += 1
                 epoch = self._poll_id
 
-            epoch_dh_tbl: Table | None = None
-            if self._epoch_publisher is not None:
-                epoch_pa = pa.Table.from_pydict({"__PollId": pa.array([epoch], type=pa.int64())})
-                epoch_dh_tbl = arrow_to_deephaven_table(epoch_pa, self._exec_ctx)
-
             if not rows:
-                if epoch_dh_tbl is not None:
+                if self._replace_input_table is not None and self._active_replace_keys:
+                    stale_dh = arrow_to_deephaven_table(
+                        self._build_key_table(list(self._active_replace_keys.values())),
+                        self._exec_ctx,
+                    )
                     with exec_ctx_scope(self._exec_ctx):
-                        self._epoch_publisher.add(epoch_dh_tbl)
+                        self._replace_input_table.delete(stale_dh)
+                    self._active_replace_keys.clear()
                 return 0
 
             row_indices = list(range(len(rows)))
@@ -222,10 +227,27 @@ class SnapshotPoller:
             pa_tbl = pa.Table.from_batches([rb])
             dh_tbl = arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
 
-            with exec_ctx_scope(self._exec_ctx):
-                self._dh_publisher.add(dh_tbl)
-                if epoch_dh_tbl is not None:
-                    self._epoch_publisher.add(epoch_dh_tbl)
+            if self._replace_input_table is not None:
+                key_cols_pydict = {k: pa_tbl.column(k).to_pylist() for k in self._replace_keys}
+                new_keys: dict[tuple[Any, ...], dict[str, Any]] = {}
+                for i in range(pa_tbl.num_rows):
+                    k_tuple = tuple(key_cols_pydict[k][i] for k in self._replace_keys)
+                    new_keys[k_tuple] = {k: key_cols_pydict[k][i] for k in self._replace_keys}
+                stale_rows = [v for k, v in self._active_replace_keys.items() if k not in new_keys]
+                stale_dh_tbl: Table | None = None
+                if stale_rows:
+                    stale_dh_tbl = arrow_to_deephaven_table(
+                        self._build_key_table(stale_rows),
+                        self._exec_ctx,
+                    )
+                with exec_ctx_scope(self._exec_ctx):
+                    if stale_dh_tbl is not None:
+                        self._replace_input_table.delete(stale_dh_tbl)
+                    self._replace_input_table.add(dh_tbl)
+                self._active_replace_keys = new_keys
+            else:
+                with exec_ctx_scope(self._exec_ctx):
+                    self._dh_publisher.add(dh_tbl)
 
             with self._lock:
                 self._rows_published += len(rows)

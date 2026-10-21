@@ -487,6 +487,25 @@ def test_indices_domain_all_feeds(mock_session: Any) -> None:
     assert (
         v_seeded is not None and fb_seeded.publisher is not None and fb_seeded.publisher.is_seeded
     )
+    sess_last_updated = mock_session(
+        http_handler=lambda _u, _p, _h: (
+            200,
+            {
+                "status": "OK",
+                "results": [
+                    {
+                        "ticker": "I:SPX",
+                        "value": 5123.45,
+                        "last_updated": 1700000000000000000,
+                    }
+                ],
+            },
+        )
+    )
+    snap_rows = dh_to_pylist(sess_last_updated.indices.values("I:SPX").snapshot())
+    assert len(snap_rows) == 1
+    assert snap_rows[0]["Value"] == 5123.45
+    assert snap_rows[0]["Timestamp"] is not None
 
     assert (
         len(dh_to_pylist(idx.values("I:SPX").historical("2025-01-01", "2025-01-01", source="auto")))

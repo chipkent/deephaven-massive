@@ -477,8 +477,20 @@ class FeedBuilder:
                 )
                 pa_tbl = record_batches_to_arrow_table([rb], self.schema_spec)
                 backfill_dh = arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
+                dedup_cols = [
+                    c
+                    for c in (
+                        *self.schema_spec.key_cols,
+                        "Timestamp",
+                        "WindowStart",
+                        "LastUpdated",
+                        "TradeId",
+                        "SequenceNumber",
+                    )
+                    if c in col_names
+                ]
                 with exec_ctx_scope(self._exec_ctx):
-                    tbl = merge([backfill_dh, tbl])
+                    tbl = merge([backfill_dh.where_not_in(tbl, dedup_cols), tbl])
         return tbl
 
     def history(
