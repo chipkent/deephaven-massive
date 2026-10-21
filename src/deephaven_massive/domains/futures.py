@@ -126,6 +126,7 @@ class FuturesClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )
@@ -185,6 +186,7 @@ class FuturesClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )
@@ -278,6 +280,7 @@ class FuturesClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )

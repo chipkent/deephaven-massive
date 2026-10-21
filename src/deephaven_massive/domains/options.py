@@ -171,6 +171,7 @@ class OptionsClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )
@@ -227,6 +228,7 @@ class OptionsClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )
@@ -314,6 +316,7 @@ class OptionsClient(BaseDomainClient):
                     limit=limit,
                     source=source,
                     adjusted=adjusted,
+                    symbol_col=symbol_col,
                 )
             ),
         )

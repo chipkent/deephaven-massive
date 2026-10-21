@@ -137,6 +137,7 @@ class CryptoClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )
@@ -256,6 +257,7 @@ class CryptoClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )

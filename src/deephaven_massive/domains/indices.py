@@ -211,6 +211,7 @@ class IndicesClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )

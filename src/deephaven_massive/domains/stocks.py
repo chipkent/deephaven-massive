@@ -166,6 +166,7 @@ class StocksClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )
@@ -222,6 +223,7 @@ class StocksClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    symbol_col=symbol_col,
                 )
             ),
         )
@@ -312,6 +314,7 @@ class StocksClient(BaseDomainClient):
                     limit=limit,
                     source=source,
                     adjusted=adjusted,
+                    symbol_col=symbol_col,
                 )
             ),
         )

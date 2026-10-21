@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+import pyarrow as pa
 import pytest
 
 from deephaven_massive.domains.options import _extract_option_underlying
+from deephaven_massive.engine.arrow_bridge import arrow_to_deephaven_table
 from tests.conftest import dh_to_pylist, make_csv_gz_stream
 
 
@@ -40,6 +42,17 @@ def test_stocks_streaming_historical_and_bars(mock_session: Any) -> None:
 
     assert (
         len(dh_to_pylist(st.trades("AAPL").historical("2025-01-01", "2025-01-02", source="rest")))
+        == 1
+    )
+    wl_custom = arrow_to_deephaven_table(pa.table({"Ticker": ["AAPL"]}), sess.exec_ctx)
+    assert (
+        len(
+            dh_to_pylist(
+                st.trades(wl_custom, symbol_col="Ticker").historical(
+                    "2025-01-01", "2025-01-02", source="rest"
+                )
+            )
+        )
         == 1
     )
     assert (
