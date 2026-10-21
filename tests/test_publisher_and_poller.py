@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -12,6 +15,16 @@ from deephaven_massive.engine.publisher import MicroBatchPublisher, _row_timesta
 from deephaven_massive.engine.symbols import SymbolNormalizer
 from deephaven_massive.schemas.market import BARS_SCHEMA, QUOTES_SCHEMA, TRADES_SCHEMA
 from tests.conftest import dh_to_pydict, dh_to_pylist
+
+
+def _await_ug(tbl: Any, predicate: Callable[[], bool], timeout_s: float = 2.0) -> None:
+    """Wait for the 25ms Deephaven UpdateGraph cycle to satisfy `predicate` without racing."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with contextlib.suppress(Exception):
+            tbl.await_update(timeout_ms=50)
+        if predicate():
+            return
 
 
 def test_row_timestamp_ns_extraction() -> None:
@@ -84,7 +97,7 @@ def test_publisher_micro_batch_auto_flush_and_background_thread(
         ]
     )
     assert count == 3
-    hist.await_update()
+    _await_ug(hist, lambda: len(dh_to_pylist(hist)) == 3)
     assert len(dh_to_pylist(hist)) == 3
     assert pub.is_seeded is False
     assert pub.rows_published == 3
@@ -141,7 +154,7 @@ def test_publisher_micro_batch_auto_flush_and_background_thread(
         ],
         already_normalized=True,
     )
-    hist.await_update()
+    _await_ug(hist, lambda: len(dh_to_pylist(hist)) == 6)
     pub.stop()
     pub.stop()  # idempotent stop when thread is None
     assert len(dh_to_pylist(hist)) == 6
@@ -200,7 +213,10 @@ def test_publisher_seed_cutover_trade_id_and_timestamp_deduplication(
         ]
     )
     assert flushed == 6
-    hist.await_update()
+    _await_ug(
+        hist,
+        lambda: len(dh_to_pylist(hist)) == 6 and len(dh_to_pylist(latest)) == 2,
+    )
     rows = dh_to_pylist(hist)
     trade_ids = [r["TradeId"] for r in rows if r["Symbol"] == "AAPL"]
     assert trade_ids == ["T099", "T098", "T100", "T097", "T102"]
@@ -412,16 +428,19 @@ def test_snapshot_poller_replace_mode_evicts_stale_keys(dh_exec_ctx: Any) -> Non
     )
     assert poller.poll_once() == 2
     assert poller.poll_id == 1
+    _await_ug(poller.table, lambda: set(dh_to_pydict(poller.table)["Symbol"]) == {"AAPL", "MSFT"})
     assert set(dh_to_pydict(poller.table)["Symbol"]) == {"AAPL", "MSFT"}
 
     # Poll identical keys to cover the non-stale branch (stale_rows is empty)
     idx = 0
     assert poller.poll_once() == 2
     assert poller.poll_id == 2
+    _await_ug(poller.table, lambda: set(dh_to_pydict(poller.table)["Symbol"]) == {"AAPL", "MSFT"})
     assert set(dh_to_pydict(poller.table)["Symbol"]) == {"AAPL", "MSFT"}
 
     assert poller.poll_once() == 2
     assert poller.poll_id == 3
+    _await_ug(poller.table, lambda: set(dh_to_pydict(poller.table)["Symbol"]) == {"MSFT", "NVDA"})
     d2 = dh_to_pydict(poller.table)
     assert set(d2["Symbol"]) == {"MSFT", "NVDA"}
     msft_idx = d2["Symbol"].index("MSFT")
@@ -430,6 +449,7 @@ def test_snapshot_poller_replace_mode_evicts_stale_keys(dh_exec_ctx: Any) -> Non
     # Empty poll evicts all active keys in replace mode
     assert poller.poll_once() == 0
     assert poller.poll_id == 4
+    _await_ug(poller.table, lambda: poller.table.size == 0)
     assert poller.table.size == 0
 
     # Subsequent empty poll is a no-op when _active_replace_keys is already empty
@@ -468,9 +488,12 @@ def test_snapshot_poller_upsert_mode_retains_prior_keys(dh_exec_ctx: Any) -> Non
         exec_ctx=dh_exec_ctx,
     )
     poller.poll_once()
-    poller.table.await_update()
+    _await_ug(poller.table, lambda: set(dh_to_pydict(poller.table)["Symbol"]) == {"AAPL", "MSFT"})
     poller.poll_once()
-    poller.table.await_update()
+    _await_ug(
+        poller.table,
+        lambda: set(dh_to_pydict(poller.table)["Symbol"]) == {"AAPL", "MSFT", "NVDA"},
+    )
     assert set(dh_to_pydict(poller.table)["Symbol"]) == {"AAPL", "MSFT", "NVDA"}
 
 
@@ -506,8 +529,7 @@ def test_snapshot_poller_append_mode_and_background_thread(dh_exec_ctx: Any) -> 
     )
     poller.start(initial_poll=True)
     poller.start(initial_poll=False)  # idempotent while thread is alive
-    poller.table.await_update()
-    poller.table.await_update()
+    _await_ug(poller.table, lambda: len(dh_to_pydict(poller.table)["Symbol"]) >= 4)
     poller.stop()
     poller.stop()
     assert len(dh_to_pydict(poller.table)["Symbol"]) >= 4
