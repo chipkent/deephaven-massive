@@ -231,6 +231,11 @@ class CryptoClient(BaseDomainClient):
             )
 
         span_ns = _compute_bar_span_ns(multiplier, clean_span)
+        bar_extra: dict[str, Any] = {
+            "_span_ns": span_ns,
+            "timespan": clean_span,
+            "multiplier": multiplier,
+        }
         return self._build_feed(
             name=f"crypto_bars_{multiplier}_{clean_span}",
             schema_spec=BARS_SCHEMA,
@@ -238,14 +243,12 @@ class CryptoClient(BaseDomainClient):
             ws_channel=ws_channel,
             symbols=pairs,
             symbol_col=symbol_col,
-            seed_fn=lambda syms: self._fetch_crypto_snapshots(
-                syms, extra_fields={"_span_ns": span_ns}
-            ),
+            seed_fn=lambda syms: self._fetch_crypto_snapshots(syms, extra_fields=bar_extra),
             seed_rows_fn=lambda syms, since: self._fetch_seed_rows(
                 syms,
                 since,
                 _rest_path,
-                extra_fields={"_span_ns": span_ns},
+                extra_fields=bar_extra,
             ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": (
                 self._fetch_multi_symbol_historical(

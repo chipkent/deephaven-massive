@@ -28,6 +28,7 @@ def test_flat_files_date_and_stream_helpers() -> None:
     """Verify _parse_date, _PrependReader, and _date_range handle valid inputs and boundary errors."""
     assert _parse_date(datetime(2025, 1, 2, 10, 0)) == date(2025, 1, 2)
     assert _parse_date("2025-01-01T23:30:00-05:00") == date(2025, 1, 2)
+    assert _parse_date("2025-01-01T23:59:59.999999999Z") == date(2025, 1, 1)
     assert _parse_date(date(2025, 1, 2)) == date(2025, 1, 2)
     assert _parse_date("2025-01-02") == date(2025, 1, 2)
     assert _parse_date(1735776000000) == date(2025, 1, 2)

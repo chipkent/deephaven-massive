@@ -9,7 +9,6 @@ users chain one of seven terminal verbs onto the builder to materialize a Deepha
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from deephaven_massive.engine.arrow_bridge import (
@@ -174,11 +173,20 @@ class FeedBuilder:
             Deduplicated list of canonical symbol strings.
         """
         if _is_deephaven_table(symbols):
-            return (
-                sorted(self._watchlist_controller.active_symbols)
-                if self._watchlist_controller is not None
-                else []
-            )
+            if self._watchlist_controller is not None:
+                return sorted(self._watchlist_controller.active_symbols)
+            from deephaven import arrow as dh_arrow
+
+            with exec_ctx_scope(self._exec_ctx):
+                pa_tbl = dh_arrow.to_arrow(symbols.view([self._symbol_col]))  # type: ignore[union-attr]
+            raw_vals = [
+                str(v).strip()
+                for v in pa_tbl.column(self._symbol_col).to_pylist()
+                if v is not None and str(v).strip()
+            ]
+            if not raw_vals:
+                return []
+            symbols = raw_vals
         if symbols is None:
             return ["*"]
         if self.symbol_normalizer is not None:
@@ -535,6 +543,20 @@ class FeedBuilder:
         finalize_seed()
         return pub.user_blink_table
 
+    def _resolve_snapshot_fetch(self) -> Callable[[], Sequence[Mapping[str, Any]]] | None:
+        """Resolve the callable used by `.snapshot()` and `.poll()`."""
+        if self._snapshot_fn is not None:
+            return self._snapshot_fn
+        if self._seed_fn is not None:
+            seed_fn_ref = self._seed_fn
+
+            def _seed_snapshot() -> Sequence[Mapping[str, Any]]:
+                syms = self._canonical_symbol_list()
+                return seed_fn_ref(syms) if syms else []
+
+            return _seed_snapshot
+        return None
+
     def snapshot(self) -> Table:
         """Fetch a one-shot static point-in-time Deephaven `Table` via REST.
 
@@ -544,10 +566,7 @@ class FeedBuilder:
         Raises:
             NotImplementedError: If this feed does not support REST snapshots.
         """
-        fetch = self._snapshot_fn
-        if fetch is None and self._seed_fn is not None:
-            canon_syms = self._canonical_symbol_list()
-            fetch = partial(self._seed_fn, canon_syms)
+        fetch = self._resolve_snapshot_fetch()
         if fetch is None:
             raise NotImplementedError(
                 f"Feed '{self.name}' does not support .snapshot(). Use .historical() or .latest()."
@@ -589,10 +608,7 @@ class FeedBuilder:
             ValueError: If `interval_s <= 0` or `mode` is not one of `"replace"`,
                 `"upsert"`, or `"append"`.
         """
-        fetch = self._snapshot_fn
-        if fetch is None and self._seed_fn is not None:
-            canon_syms = self._canonical_symbol_list()
-            fetch = partial(self._seed_fn, canon_syms)
+        fetch = self._resolve_snapshot_fetch()
         if fetch is None:
             raise NotImplementedError(f"Feed '{self.name}' does not support .poll().")
 

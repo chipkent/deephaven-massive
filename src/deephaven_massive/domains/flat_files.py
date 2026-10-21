@@ -83,7 +83,7 @@ def _parse_date(val: Any) -> date:
     """
     ns = _subday_bound_ns(val)
     if ns is not None:
-        return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc).date()
+        return datetime.fromtimestamp(ns // 1_000_000_000, tz=timezone.utc).date()
     if isinstance(val, date):
         return val
     return date.fromisoformat(str(val).strip()[:10])

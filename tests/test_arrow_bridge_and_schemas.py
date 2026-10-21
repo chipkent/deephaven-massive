@@ -130,6 +130,8 @@ def test_to_utc_ns_epoch_units_and_temporal_inputs() -> None:
     assert to_utc_ns(date(2025, 1, 2)) == 1_735_776_000_000_000_000
     assert to_utc_ns("2025-01-02T10:00:00Z") == 1_735_812_000_000_000_000
     assert to_utc_ns("2025-01-02T10:00:00") == 1_735_812_000_000_000_000
+    assert to_utc_ns("2025-01-02T10:00:00.123456Z") == 1_735_812_000_123_456_000
+    assert to_utc_ns("2025-01-02T10:00:00.123456789123Z") == 1_735_812_000_123_456_789
     assert to_utc_ns("not-a-timestamp") is None
     assert to_utc_ns(object()) is None
 

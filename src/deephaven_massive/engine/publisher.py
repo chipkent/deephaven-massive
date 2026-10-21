@@ -109,6 +109,7 @@ class MicroBatchPublisher:
         self._rows_published = 0
         self._last_error: Exception | None = None
         self._latest_ts_by_symbol: dict[str | None, int] = {}
+        self._earliest_ts_by_symbol: dict[str | None, int] = {}
         self._stop_event = threading.Event()
         self._flush_wakeup = threading.Event()
         self._flush_thread: threading.Thread | None = None
@@ -160,12 +161,15 @@ class MicroBatchPublisher:
             return self._last_error
 
     def _record_row_timestamp(self, sym: str | None, ts_ns: int | None) -> None:
-        """Update per-symbol max observed event timestamp (caller holds `_lock`)."""
+        """Update per-symbol min and max observed event timestamps (caller holds `_lock`)."""
         if ts_ns is None:
             return
         prev_max = self._latest_ts_by_symbol.get(sym)
         if prev_max is None or ts_ns > prev_max:
             self._latest_ts_by_symbol[sym] = ts_ns
+        prev_min = self._earliest_ts_by_symbol.get(sym)
+        if prev_min is None or ts_ns < prev_min:
+            self._earliest_ts_by_symbol[sym] = ts_ns
 
     def attach_downstream(
         self,
@@ -360,6 +364,7 @@ class MicroBatchPublisher:
         Returns:
             Number of snapshot rows accepted.
         """
+        self.flush_now()
         accepted: list[dict[str, Any]] = []
         with self._lock:
             for raw in seed_rows:
@@ -367,7 +372,7 @@ class MicroBatchPublisher:
                 sym = nr.get("Symbol")
                 ts_ns = _row_timestamp_ns(nr)
                 latest_ts = self._latest_ts_by_symbol.get(sym)
-                if latest_ts is not None and (ts_ns is None or ts_ns < latest_ts):
+                if latest_ts is not None and (ts_ns is None or ts_ns <= latest_ts):
                     continue
                 accepted.append(nr)
             self._has_snapshot_seed = True
@@ -401,6 +406,7 @@ class MicroBatchPublisher:
         Returns:
             Normalized rows belonging to the backfill window.
         """
+        self.flush_now()
         min_seed_ts_ns = to_utc_ns(seed_since) if seed_since is not None else None
         filtered: list[dict[str, Any]] = []
         with self._lock:
@@ -412,8 +418,13 @@ class MicroBatchPublisher:
                     continue
                 sym = nr.get("Symbol")
                 cutoff_ts = cutoffs.get(sym)
-                if cutoff_ts is not None and ts_ns is not None and ts_ns > cutoff_ts:
-                    continue
+                if cutoff_ts is not None:
+                    if ts_ns is not None and ts_ns > cutoff_ts:
+                        continue
+                else:
+                    first_live_ts = self._earliest_ts_by_symbol.get(sym)
+                    if first_live_ts is not None and ts_ns is not None and ts_ns >= first_live_ts:
+                        continue
                 filtered.append(nr)
         return filtered
 

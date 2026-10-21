@@ -395,13 +395,18 @@ def test_feed_builder_reactive_watchlist_delivery_modes(
 
     sess = mock_session(auto_flush=False)
     with exec_ctx_scope(dh_exec_ctx):
+        empty_wl = input_table(col_defs={"Symbol": dht.string}, key_cols=["Symbol"])
         wl_tbl = input_table(col_defs={"Symbol": dht.string}, key_cols=["Symbol"])
         wl_tbl.add(
             arrow_to_deephaven_table(pa.Table.from_pydict({"Symbol": ["AAPL"]}), dh_exec_ctx)
         )
 
+    assert sess.stocks.trades(empty_wl)._canonical_symbol_list() == []
+    assert len(dh_to_pylist(sess.stocks.trades(empty_wl).snapshot())) == 0
+    assert len(dh_to_pylist(sess.stocks.trades(wl_tbl).snapshot())) == 1
+
     fb_wl_trades = sess.stocks.trades(wl_tbl)
-    assert fb_wl_trades._canonical_symbol_list() == []
+    assert fb_wl_trades._canonical_symbol_list() == ["AAPL"]
     t_latest = fb_wl_trades.latest(seed=False)
     assert t_latest is not None
     t_hist_reuse = fb_wl_trades.history(seed_since="2025-01-01")
@@ -510,6 +515,25 @@ def test_feed_builder_stream_registry_sharing_and_backfill(mock_session: Any) ->
     assert fb_unseeded.publisher.has_snapshot_seed is True
     fb_unseeded.stop()
     fb_seed_later.stop()
+
+    fb_amd_blink = sess.stocks.trades("AMD")
+    _ = fb_amd_blink.blink()
+    fb_no_cutoff = sess.stocks.trades("AMD")
+
+    def _seed_with_concurrent_live(_syms: list[str], _since: Any) -> list[dict[str, Any]]:
+        assert fb_amd_blink.publisher is not None
+        fb_amd_blink.publisher.enqueue(
+            [{"sym": "AMD", "p": 160.0, "s": 5, "i": "A_LIVE", "t": 1800000000000000000}]
+        )
+        return [
+            {"sym": "AMD", "p": 150.0, "s": 5, "i": "A_HIST", "t": 1750000000000000000},
+            {"sym": "AMD", "p": 160.0, "s": 5, "i": "A_LIVE", "t": 1800000000000000000},
+        ]
+
+    fb_no_cutoff._seed_rows_fn = _seed_with_concurrent_live
+    _ = fb_no_cutoff.history(seed_since="2025-01-01", seed=False)
+    fb_no_cutoff.stop()
+    fb_amd_blink.stop()
 
 
 def test_feed_builder_seed_since_historical_backfill(mock_session: Any) -> None:
