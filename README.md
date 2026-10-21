@@ -107,7 +107,7 @@ flowchart LR
 
 ### Key Architectural Guarantees
 
-1. **Non-Blocking Ingestion**: All network I/O, JSON parsing, and gzip decompression run on isolated background daemon threads. Rows are converted into vectorized PyArrow batches via `rows_to_record_batch` / `rows_to_arrow_table` and handed to Deephaven via `arrow_to_deephaven_table` (`pa_table_to_dh`), keeping the Deephaven Update Graph lock-free.
+1. **Non-Blocking Ingestion**: All network I/O, JSON parsing, and gzip decompression run on isolated background daemon threads. Rows are converted into vectorized PyArrow batches via `rows_to_record_batch` / `record_batches_to_arrow_table` and handed to Deephaven via `arrow_to_deephaven_table`, keeping the Deephaven Update Graph lock-free.
 2. **Two-Phase Seed & Cutover Deduplication**: When combining a REST seed with a live WebSocket stream (`.latest(seed=True)` or `.history(seed=True)`), [`MicroBatchPublisher`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/engine/publisher.py) buffers incoming live WebSocket frames while the REST snapshot is in flight and deduplicates across the cutover boundary by `(Symbol, TradeId)` and `(key_cols, Timestamp, SequenceNumber)`.
 3. **Bounded Memory Footprint**: Multi-page REST queries and multi-gigabyte S3 flat files are streamed, filtered per chunk via PyArrow compute expressions, and concatenated into a single table without unbounded intermediate Python object graphs.
 
@@ -438,8 +438,8 @@ opt_trades = m.options.trades([contract]).history(seed=True)
 | `m.options.trades(contracts="*", *, feed=None)` | `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`, `.poll()`, `.historical()` | OPRA option trade executions (`T.O:*`, `us_options_opra/trades_v1`). |
 | `m.options.bars(contracts="*", *, multiplier=1, timespan="minute", adjusted=True)` | `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`, `.poll()`, `.historical()` | OHLCV aggregate bars for option contracts. |
 | `m.options.fmv(contracts="*", *, feed=None)` | `.latest()`, `.history()`, `.ring()`, `.blink()` | Real-time Fair Market Value (`FMV.O:*`) for option contracts on `business.massive.com`. |
-| `m.options.contracts(underlying_ticker=None, ...)` | `.snapshot()`, `.poll()`, `.historical()` | Active and expired option contracts reference directory. |
-| `m.options.contract_details(contract, *, date=None)` | `.snapshot()`, `.poll()` | Reference metadata for a single OCC option contract. |
+| `m.options.contracts(underlying=None, *, contract_type=None, expiration_date=None, strike_price=None, expired=False, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Active and expired option contracts reference directory. |
+| `m.options.contract_details(contract)` | `.snapshot()`, `.poll()` | Reference metadata for a single OCC option contract. |
 | `m.options.previous_close(contract)` / `daily_open_close(contract, date)` | `.snapshot()`, `.poll()` | Previous day OHLCV (`previous_day_bar()`) and daily open/close summary (`daily_ticker_summary()`). |
 | `m.options.sma(...)` / `ema(...)` / `macd(...)` / `rsi(...)` | `.snapshot()`, `.poll()`, `.historical()` | Technical indicators computed on option contract prices. |
 | `m.options.exchanges()` / `m.options.conditions(...)` | `.snapshot()`, `.poll()` | OPRA options exchange and condition code reference tables. |
@@ -463,10 +463,10 @@ schedules = m.futures.schedules(product_code="ES").snapshot()
 | `m.futures.trades(contracts="*", *, venue="cme", feed=None)` | `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`, `.poll()`, `.historical()` | Real-time and historical futures trade executions across `"cme"`, `"cbot"`, `"nymex"`, and `"comex"` (`us_futures/trades_v1`). |
 | `m.futures.quotes(contracts="*", *, venue="cme", feed=None)` | `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`, `.poll()`, `.historical()` | Top-of-book futures bid/ask quotes (`us_futures/quotes_v1`). |
 | `m.futures.bars(contracts="*", *, multiplier=1, timespan="minute", venue="cme")` | `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`, `.poll()`, `.historical()` | OHLCV and settlement price bars (`"second"`, `"minute"`, `"hour"`, `"day"`, `"session"`). |
-| `m.futures.snapshots(contracts=None, *, product_code=None)` | `.snapshot()`, `.poll()` | Multi-contract futures market snapshot (`LastTradePrice`, `BidPrice`, `AskPrice`, `SessionVolume`, `SettlementPrice`, `OpenInterest`). |
-| `m.futures.contracts(contract=None, *, product_code=None, active=None)` | `.snapshot()`, `.poll()`, `.historical()` | Active and historical futures contract specifications (`TickSize`, `TradingVenue`, `FirstTradeDate`, `LastTradeDate`). |
-| `m.futures.products(product_code=None, **filters)` | `.snapshot()`, `.poll()` | Futures product catalog (`ProductCode`, `Name`, `AssetClass`, `TradingVenue`, `SettlementMethod`). |
-| `m.futures.schedules(product_code=None, *, session_end_date=None)` | `.snapshot()`, `.poll()` | Exchange trading session schedules (`SessionEndDate`, `Event`, `Timestamp`). |
+| `m.futures.snapshots(contracts=None)` | `.snapshot()`, `.poll()` | Multi-contract futures market snapshot (`LastTradePrice`, `BidPrice`, `AskPrice`, `SessionVolume`, `SettlementPrice`, `OpenInterest`). |
+| `m.futures.contracts(product_code=None, *, active=True, **filters)` | `.snapshot()`, `.poll()` | Active and historical futures contract specifications (`TickSize`, `TradingVenue`, `FirstTradeDate`, `LastTradeDate`). |
+| `m.futures.products(*, venue=None, **filters)` | `.snapshot()`, `.poll()` | Futures product catalog (`ProductCode`, `Name`, `AssetClass`, `TradingVenue`, `SettlementMethod`). |
+| `m.futures.schedules(product_code=None, **filters)` | `.snapshot()`, `.poll()` | Exchange trading session schedules (`SessionEndDate`, `Event`, `Timestamp`). |
 | `m.futures.exchanges()` / `m.futures.market_status()` | `.snapshot()`, `.poll()` | Futures exchanges directory and real-time venue status. |
 
 ---
@@ -530,7 +530,7 @@ btc_quotes = m.crypto.quotes(["BTC-USD", "ETH-USD", "SOL-USD"]).latest()
 | Method | Supported Delivery Modes | Description |
 | :--- | :--- | :--- |
 | `m.crypto.trades(pairs="*", *, feed=None)` | `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`, `.poll()`, `.historical()` | Real-time and historical digital asset trade executions (`XT.*`, `global_crypto/trades_v1`). |
-| `m.crypto.quotes(pairs="*", *, feed=None)` | `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`, `.poll()`, `.historical()` | Best bid and offer (BBO) crypto quotes (`XQ.*`). |
+| `m.crypto.quotes(pairs="*", *, feed=None)` | `.latest()`, `.history()`, `.ring()`, `.blink()` | Best bid and offer (BBO) crypto quotes (`XQ.*`). |
 | `m.crypto.bars(pairs="*", *, multiplier=1, timespan="minute", adjusted=True)` | `.latest()`, `.history()`, `.ring()`, `.blink()`, `.snapshot()`, `.poll()`, `.historical()` | OHLCV aggregate bars for digital currency pairs (`XAS.*`, `XA.*`, `global_crypto/minute_aggs_v1`, `global_crypto/day_aggs_v1`). |
 | `m.crypto.fmv(pairs="*", *, feed=None)` | `.latest()`, `.history()`, `.ring()`, `.blink()` | Real-time Fair Market Value (`FMV.*`) for digital assets on `business.massive.com`. |
 | `m.crypto.snapshots(pairs=None)` / `m.crypto.last_trade(pair)` | `.snapshot()`, `.poll()` | Multi-pair market snapshots and single-pair latest trade execution. |
@@ -556,11 +556,11 @@ funding = m.economy.funding_conditions().snapshot()
 
 | Method | Supported Delivery Modes | Description |
 | :--- | :--- | :--- |
-| `m.economy.treasury_yields(*, date=None, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Daily constant-maturity US Treasury yield curve (`Yield1Month` through `Yield30Year`). |
-| `m.economy.inflation(*, date=None, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Headline and Core CPI and PCE inflation metrics (`Cpi`, `CpiCore`, `CpiYearOverYear`, `Pce`, `PceCore`). |
-| `m.economy.inflation_expectations(*, date=None, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Market-based TIPS breakevens (`Market5Year`, `Market10Year`, `ForwardYears5To10`) and Cleveland Fed models. |
-| `m.economy.labor_market(*, date=None, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Labor market indicators (`UnemploymentRate`, `LaborForceParticipationRate`, `AvgHourlyEarnings`, `JobOpenings`). |
-| `m.economy.funding_conditions(*, date=None, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Short-term money market and Federal Reserve rates (`Effr`, `FedFundsTargetLow`, `FedFundsTargetHigh`, `Iorb`, `Sofr`, `OvernightReverseRepoVolume`). |
+| `m.economy.treasury_yields(date=None, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Daily constant-maturity US Treasury yield curve (`Yield1Month` through `Yield30Year`). |
+| `m.economy.inflation(date=None, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Headline and Core CPI and PCE inflation metrics (`Cpi`, `CpiCore`, `CpiYearOverYear`, `Pce`, `PceCore`). |
+| `m.economy.inflation_expectations(date=None, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Market-based TIPS breakevens (`Market5Year`, `Market10Year`, `ForwardYears5To10`) and Cleveland Fed models. |
+| `m.economy.labor_market(date=None, **filters)` | `.snapshot()`, `.poll()`, `.historical()` | Labor market indicators (`UnemploymentRate`, `LaborForceParticipationRate`, `AvgHourlyEarnings`, `JobOpenings`). |
+| `m.economy.funding_conditions(date=None, **filters)` (`fed_funds_rate`) | `.snapshot()`, `.poll()`, `.historical()` | Short-term money market and Federal Reserve rates (`Effr`, `FedFundsTargetLow`, `FedFundsTargetHigh`, `Iorb`, `Sofr`, `OvernightReverseRepoVolume`). |
 
 ---
 
@@ -587,13 +587,13 @@ spy_flows = m.partners.etf_global.fund_flows("SPY").historical(start="2025-01-01
 | `m.partners.benzinga.earnings(...)` (`m.partners.benzinga_earnings`) | Historical and upcoming quarterly earnings releases (`EpsActual`, `EpsEstimate`, `EpsSurprisePercent`, `RevenueActual`). |
 | `m.partners.benzinga.guidance(...)` (`m.partners.benzinga_guidance`) | Corporate management EPS and revenue guidance ranges (`EpsGuidanceMin`, `EpsGuidanceMax`). |
 | `m.partners.benzinga.consensus_ratings(...)` (`m.partners.benzinga_consensus_ratings`) | Aggregated consensus rating scores and price target distributions. |
-| `m.partners.benzinga.analysts(...)` / `firms(...)` | Directory of individual Wall Street analysts and sell-side research firms. |
+| `m.partners.benzinga.analysts(analyst_id=None, **filters)` / `firms(firm_id=None, **filters)` | Directory of individual Wall Street analysts and sell-side research firms. |
 | `m.partners.benzinga.news(...)` (`m.partners.benzinga_news`) | Real-time Benzinga financial news feed with channels and tags. |
-| `m.partners.benzinga.bulls_bears_say(...)` (`m.partners.benzinga_bulls_bears`) | Curated bull-case and bear-case investment thesis summaries. |
+| `m.partners.benzinga.bulls_say_bears_say(...)` (`m.partners.benzinga_bulls_bears`) | Curated bull-case and bear-case investment thesis summaries. |
 | `m.partners.benzinga.analyst_insights(...)` / `transcripts(...)` | Narrative analyst research commentary and earnings call transcripts. |
 | `m.partners.etf_global.constituents(...)` / `fund_flows(...)` / `analytics(...)` / `profiles(...)` / `taxonomies(...)` | ETF Global holdings weights, daily creation/redemption flows, risk/reward scores, fund profiles, and classification taxonomies. |
 | `m.partners.tmx.corporate_events(...)` (`m.partners.tmx_corporate_events`) | TMX Wall Street Horizon corporate events calendar (conferences, shareholder meetings, splits). |
-| `m.partners.fable.eu_merchant_aggregates(...)` / `eu_merchant_hierarchy(...)` | Fable Data European consumer transaction aggregates and merchant-to-corporate parent hierarchy. |
+| `m.partners.fable.eu_merchant_aggregates(...)` / `eu_merchant_hierarchy(...)` (`m.partners.fable_*`) | Fable Data European consumer transaction aggregates and merchant-to-corporate parent hierarchy. |
 
 ---
 

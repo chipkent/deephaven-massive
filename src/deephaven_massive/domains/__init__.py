@@ -16,8 +16,8 @@ a specific asset class or data provider:
   snapshots, and indicators.
 * ``EconomyClient`` (``m.economy``): Federal Reserve and U.S. Treasury
   macroeconomic time series.
-* ``PartnersClient`` (``m.partners``): Benzinga, ETF Global, and TMX partner
-  datasets.
+* ``PartnersClient`` (``m.partners``): Benzinga, ETF Global, Fable, and TMX
+  partner datasets.
 * ``FlatFilesClient`` (``m.flat_files``): Direct S3 Flat File discovery and
   parallel bulk loading.
 """
@@ -35,6 +35,7 @@ from deephaven_massive.domains.options import OptionsClient
 from deephaven_massive.domains.partners import (
     BenzingaClient,
     EtfGlobalClient,
+    FableClient,
     PartnersClient,
     TmxClient,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "CryptoClient",
     "EconomyClient",
     "EtfGlobalClient",
+    "FableClient",
     "FlatFilesClient",
     "ForexClient",
     "FuturesClient",

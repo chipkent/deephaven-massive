@@ -108,9 +108,9 @@ class FeedBuilder:
             symbols: Target symbol(s) as a `str`, `Iterable[str]`, reactive Deephaven
                 `Table` watchlist, or `None` (`"*"`).
             symbol_col: Column name to observe when `symbols` is a reactive Deephaven `Table`.
-            seed_fn: Optional callable `(canonical_symbols) -> rows` used to seed `.latest()`
+            seed_fn: Optional callable `(_canonical_symbols) -> rows` used to seed `.latest()`
                 or `.history(seed=True)` before streaming cutover.
-            seed_rows_fn: Optional callable `(canonical_symbols, seed_since) -> rows` used
+            seed_rows_fn: Optional callable `(_canonical_symbols, seed_since) -> rows` used
                 by `.history(seed_since=...)` to backfill intraday history before cutover.
             snapshot_fn: Optional callable `() -> rows` used by `.snapshot()` and `.poll()`.
             historical_fn: Optional callable `(start, end, limit, source) -> Table` used
@@ -130,14 +130,14 @@ class FeedBuilder:
         self.ws_url = ws_url
         self.ws_channel = ws_channel
         self.symbols = symbols
-        self.symbol_col = symbol_col
-        self.seed_fn = seed_fn
-        self.seed_rows_fn = seed_rows_fn
-        self.snapshot_fn = snapshot_fn
-        self.historical_fn = historical_fn
-        self.flush_interval_ms = flush_interval_ms
-        self.max_batch_size = max_batch_size
-        self.auto_flush = auto_flush
+        self._symbol_col = symbol_col
+        self._seed_fn = seed_fn
+        self._seed_rows_fn = seed_rows_fn
+        self._snapshot_fn = snapshot_fn
+        self._historical_fn = historical_fn
+        self._flush_interval_ms = flush_interval_ms
+        self._max_batch_size = max_batch_size
+        self._auto_flush = auto_flush
         self._on_register_lifecycle = on_register_lifecycle
         self._stream_registry = stream_registry
 
@@ -163,7 +163,7 @@ class FeedBuilder:
         """Return the active `ReactiveWatchlistController` if streaming a table watchlist, else `None`."""
         return self._watchlist_controller
 
-    def normalize_symbols(self, symbols: str | Iterable[str] | Table | None) -> list[str]:
+    def _normalize_symbols(self, symbols: str | Iterable[str] | Table | None) -> list[str]:
         """Normalize `symbols` using this builder's `SymbolNormalizer` (or active watchlist symbols).
 
         Args:
@@ -189,7 +189,7 @@ class FeedBuilder:
 
     def _canonical_symbol_list(self) -> list[str]:
         """Return the canonical symbol list for `self.symbols`."""
-        return self.normalize_symbols(self.symbols)
+        return self._normalize_symbols(self.symbols)
 
     def _setup_streaming(
         self, *, seed: bool, seed_since: Any = None
@@ -215,8 +215,8 @@ class FeedBuilder:
                 schema_spec=self.schema_spec,
                 symbol_normalizer=self.symbol_normalizer,
                 exec_ctx=self._exec_ctx,
-                flush_interval_ms=self.flush_interval_ms,
-                max_batch_size=self.max_batch_size,
+                flush_interval_ms=self._flush_interval_ms,
+                max_batch_size=self._max_batch_size,
             )
             self._publisher = pub
             pub.acquire_consumer()
@@ -228,9 +228,9 @@ class FeedBuilder:
                 publisher=pub,
                 ws_multiplexer=self.ws_multiplexer,
                 symbol_normalizer=self.symbol_normalizer,
-                symbol_col=self.symbol_col,
+                symbol_col=self._symbol_col,
                 exec_ctx=self._exec_ctx,
-                seed_fn=self.seed_fn if effective_seed else None,
+                seed_fn=self._seed_fn if effective_seed else None,
                 auto_start=False,
             )
             self._watchlist_controller = watchlist_ctrl
@@ -238,7 +238,7 @@ class FeedBuilder:
 
             def _finalize_watchlist() -> None:
                 wl_ref.start()
-                if self.auto_flush:
+                if self._auto_flush:
                     pub.start()
 
             finalize_seed: Callable[[], None] = _finalize_watchlist
@@ -263,17 +263,17 @@ class FeedBuilder:
                     self._acquired_publisher = True
 
                 def _finalize_reused() -> None:
-                    if seed_since is not None and self.seed_rows_fn is not None:
+                    if seed_since is not None and self._seed_rows_fn is not None:
                         pub.mark_snapshot_seeded()
-                        extra_rows = self.seed_rows_fn(canon_syms, seed_since)
+                        extra_rows = self._seed_rows_fn(canon_syms, seed_since)
                         pub.enqueue(extra_rows)
                         pub.flush_now()
-                    elif seed and self.seed_fn is not None and not pub.has_snapshot_seed:
+                    elif seed and self._seed_fn is not None and not pub.has_snapshot_seed:
                         pub.mark_snapshot_seeded()
-                        snap_rows = self.seed_fn(canon_syms)
+                        snap_rows = self._seed_fn(canon_syms)
                         pub.enqueue(snap_rows)
                         pub.flush_now()
-                    if self.auto_flush:
+                    if self._auto_flush:
                         pub.start()
 
                 finalize_seed = _finalize_reused
@@ -283,8 +283,8 @@ class FeedBuilder:
                     schema_spec=self.schema_spec,
                     symbol_normalizer=self.symbol_normalizer,
                     exec_ctx=self._exec_ctx,
-                    flush_interval_ms=self.flush_interval_ms,
-                    max_batch_size=self.max_batch_size,
+                    flush_interval_ms=self._flush_interval_ms,
+                    max_batch_size=self._max_batch_size,
                 )
                 self._publisher = pub
                 pub.acquire_consumer()
@@ -295,10 +295,10 @@ class FeedBuilder:
 
                 pub.begin_seeding()
                 self.ws_multiplexer.subscribe(self.ws_url, self.ws_channel, topics, pub)
-                seed_fn_ref = self.seed_fn if effective_seed else None
+                seed_fn_ref = self._seed_fn if effective_seed else None
                 seed_rows_fn_ref = (
-                    self.seed_rows_fn
-                    if (seed_since is not None and self.seed_rows_fn is not None)
+                    self._seed_rows_fn
+                    if (seed_since is not None and self._seed_rows_fn is not None)
                     else None
                 )
                 if seed_fn_ref is not None or seed_rows_fn_ref is not None:
@@ -313,7 +313,7 @@ class FeedBuilder:
                             seed_rows = seed_fn_ref(canon_syms)
                     finally:
                         pub.complete_seeding(seed_rows, seed_since=seed_since)
-                    if self.auto_flush:
+                    if self._auto_flush:
                         pub.start()
 
                 finalize_seed = _finalize_static
@@ -502,10 +502,10 @@ class FeedBuilder:
         Raises:
             NotImplementedError: If this feed does not support REST snapshots.
         """
-        fetch = self.snapshot_fn
-        if fetch is None and self.seed_fn is not None:
+        fetch = self._snapshot_fn
+        if fetch is None and self._seed_fn is not None:
             canon_syms = self._canonical_symbol_list()
-            fetch = partial(self.seed_fn, canon_syms)
+            fetch = partial(self._seed_fn, canon_syms)
         if fetch is None:
             raise NotImplementedError(
                 f"Feed '{self.name}' does not support .snapshot(). Use .historical() or .latest()."
@@ -547,10 +547,10 @@ class FeedBuilder:
             ValueError: If `interval_s <= 0` or `mode` is not one of `"replace"`,
                 `"upsert"`, or `"append"`.
         """
-        fetch = self.snapshot_fn
-        if fetch is None and self.seed_fn is not None:
+        fetch = self._snapshot_fn
+        if fetch is None and self._seed_fn is not None:
             canon_syms = self._canonical_symbol_list()
-            fetch = partial(self.seed_fn, canon_syms)
+            fetch = partial(self._seed_fn, canon_syms)
         if fetch is None:
             raise NotImplementedError(f"Feed '{self.name}' does not support .poll().")
 
@@ -603,12 +603,12 @@ class FeedBuilder:
             NotImplementedError: If this feed does not support historical queries.
             ValueError: If `source` is invalid or required parameters are missing.
         """
-        if self.historical_fn is not None:
-            return self.historical_fn(start=start, end=end, limit=limit, source=source)
+        if self._historical_fn is not None:
+            return self._historical_fn(start=start, end=end, limit=limit, source=source)
         if (
             start is None
             and end is None
-            and (self.snapshot_fn is not None or self.seed_fn is not None)
+            and (self._snapshot_fn is not None or self._seed_fn is not None)
         ):
             return self.snapshot()
         raise NotImplementedError(f"Feed '{self.name}' does not support .historical(start, end).")

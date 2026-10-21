@@ -224,8 +224,32 @@ def test_stocks_fundamentals_corporate_actions_and_reference(
 
 def test_stocks_sec_filings_and_insider_feeds(mock_session: Any) -> None:
     """Verify StocksClient SEC filings, 10-K/8-K disclosures, 13F holdings, and Form 3/4 insider feeds."""
-    sess = mock_session()
+    sess = mock_session(
+        http_handler=lambda _u, _p, _h: (
+            200,
+            {
+                "status": "OK",
+                "results": [
+                    {
+                        "ticker": "AAPL",
+                        "filing_date": "2025-01-15",
+                        "insider_name": "Jane Doe",
+                        "officer_title": "CFO",
+                        "shares_owned": 25000.0,
+                        "form_type": "3",
+                    }
+                ],
+            },
+        )
+    )
     st = sess.stocks
+
+    form3_rows = dh_to_pylist(st.sec_form3_ownership("AAPL").snapshot())
+    assert len(form3_rows) == 1
+    assert form3_rows[0]["InsiderName"] == "Jane Doe"
+    assert form3_rows[0]["InsiderTitle"] == "CFO"
+    assert form3_rows[0]["SharesOwnedAfter"] == 25000.0
+    assert form3_rows[0]["FormType"] == "3"
 
     for fb in (
         st.sec_filings("AAPL", form_type="10-K"),
@@ -510,6 +534,12 @@ def test_indices_domain_all_feeds(mock_session: Any) -> None:
     urls = _recorded_urls(sess)
     assert any("/v3/snapshot/indices" in u for u in urls)
     assert any("/v1/indicators/sma/I:SPX" in u for u in urls)
+    assert any(
+        "/v3/snapshot/indices" in u
+        and p.get("timestamp.gte") == "2025-01-01"
+        and p.get("timestamp.lte") == "2025-01-02"
+        for u, p, _ in sess.recorded_requests
+    )
 
 
 def test_forex_domain_all_feeds(mock_session: Any) -> None:
@@ -699,7 +729,8 @@ def test_economy_domain_all_feeds(mock_session: Any) -> None:
 
     for ef in (
         ec.funding_conditions(),
-        ec.treasury_yields(),
+        ec.fed_funds_rate("2025-01-15"),
+        ec.treasury_yields("2025-01-15"),
         ec.inflation(),
         ec.inflation_expectations(),
         ec.labor_market(),
@@ -709,6 +740,10 @@ def test_economy_domain_all_feeds(mock_session: Any) -> None:
 
     urls = _recorded_urls(sess)
     assert any("/fed/v1/funding-conditions" in u for u in urls)
+    assert any(
+        "/fed/v1/treasury-yields" in u and p.get("date") == "2025-01-15"
+        for u, p, _ in sess.recorded_requests
+    )
     assert any("/fed/v1/treasury-yields" in u for u in urls)
     assert any("/fed/v1/inflation" in u for u in urls)
     assert any("/fed/v1/inflation-expectations" in u for u in urls)
@@ -775,6 +810,8 @@ def test_partners_etf_global_tmx_and_fable_feeds(mock_session: Any) -> None:
         tmx.corporate_events(),
         fb_part.eu_merchant_aggregates("AAPL"),
         fb_part.eu_merchant_hierarchy("AAPL"),
+        sess.partners.fable_eu_merchant_aggregates("AAPL"),
+        sess.partners.fable_eu_merchant_hierarchy("AAPL"),
     ):
         assert len(dh_to_pylist(pf.snapshot())) == 1
         assert len(dh_to_pylist(pf.historical("2025-01-01", "2025-01-02"))) == 1

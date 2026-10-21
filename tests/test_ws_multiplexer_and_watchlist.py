@@ -20,7 +20,7 @@ from deephaven_massive.engine.publisher import MicroBatchPublisher
 from deephaven_massive.engine.symbols import SymbolNormalizer
 from deephaven_massive.engine.watchlist import ReactiveWatchlistController
 from deephaven_massive.engine.ws_multiplexer import (
-    MAX_OPTION_CONTRACTS,
+    _MAX_OPTION_CONTRACTS,
     WebSocketMultiplexer,
     _default_ws_connector,
 )
@@ -166,7 +166,7 @@ def test_ws_multiplexer_options_1000_contract_limit() -> None:
     opt_url = "wss://socket.massive.com/options"
 
     mux.subscribe(opt_url, "T", ["T.O:*"])
-    topics_1000 = [f"T.O:AAPL250117C{i:08d}" for i in range(1, MAX_OPTION_CONTRACTS + 1)]
+    topics_1000 = [f"T.O:AAPL250117C{i:08d}" for i in range(1, _MAX_OPTION_CONTRACTS + 1)]
     mux.subscribe(opt_url, "T", topics_1000)
 
     with pytest.raises(ValueError, match="1000-contract subscription limit"):
@@ -496,10 +496,10 @@ def test_reactive_watchlist_edge_cases_and_shutdown(dh_exec_ctx: Any) -> None:
 
     ctrl._on_table_update(_FakeUpdate(), False)
 
-    with ctrl._idle_Condition:
+    with ctrl._idle_condition:
         ctrl._pending_ops = 1
     assert ctrl.wait_idle(timeout=0.001) is False
-    with ctrl._idle_Condition:
+    with ctrl._idle_condition:
         ctrl._pending_ops = 0
 
     ctrl.apply_diff(["IBM"], [])

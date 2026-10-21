@@ -88,7 +88,7 @@ class ReactiveWatchlistController:
             symbol_col: Column name in `watchlist_table` containing ticker strings
                 (defaults to `"Symbol"`).
             exec_ctx: Host Deephaven `ExecutionContext`.
-            seed_fn: Optional callable `(canonical_symbols) -> rows` invoked whenever
+            seed_fn: Optional callable `(_canonical_symbols) -> rows` invoked whenever
                 new symbols are added to the watchlist.
             auto_start: If `True`, registers the Deephaven `table_listener` immediately;
                 if `False`, defers listener registration until `start()` is called.
@@ -111,7 +111,7 @@ class ReactiveWatchlistController:
         self._stopped = False
         self._active_symbols: set[str] = set()
         self._pending_ops = 0
-        self._idle_Condition = threading.Condition()
+        self._idle_condition = threading.Condition()
         self._listener_handle: Any = None
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix=f"massive-watchlist-{self.channel}"
@@ -183,7 +183,7 @@ class ReactiveWatchlistController:
         if not to_add and not to_remove:
             return
 
-        with self._idle_Condition:
+        with self._idle_condition:
             self._pending_ops += 1
 
         self._executor.submit(self._apply_diff_safe, to_add, to_remove)
@@ -193,9 +193,9 @@ class ReactiveWatchlistController:
         try:
             self.apply_diff(to_add, to_remove)
         finally:
-            with self._idle_Condition:
+            with self._idle_condition:
                 self._pending_ops = max(0, self._pending_ops - 1)
-                self._idle_Condition.notify_all()
+                self._idle_condition.notify_all()
 
     def apply_diff(
         self,
@@ -286,12 +286,12 @@ class ReactiveWatchlistController:
             `True` if all pending operations completed before `timeout`, else `False`.
         """
         deadline = time.monotonic() + timeout
-        with self._idle_Condition:
+        with self._idle_condition:
             while self._pending_ops > 0:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
-                self._idle_Condition.wait(timeout=remaining)
+                self._idle_condition.wait(timeout=remaining)
             return True
 
     def stop(self) -> None:

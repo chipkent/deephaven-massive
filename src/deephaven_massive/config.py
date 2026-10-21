@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-FEED_HOST_MAP: dict[str, str] = {
+_FEED_HOST_MAP: dict[str, str] = {
     "realtime": "socket.massive.com",
     "delayed": "delayed.massive.com",
     "business": "business.massive.com",
@@ -22,7 +22,7 @@ FEED_HOST_MAP: dict[str, str] = {
     "launchpad": "launchpad.massive.com",
 }
 
-VALID_FUTURES_VENUES: frozenset[str] = frozenset({"cme", "cbot", "nymex", "comex"})
+_VALID_FUTURES_VENUES: frozenset[str] = frozenset({"cme", "cbot", "nymex", "comex"})
 
 
 class MassiveEntitlementError(PermissionError):
@@ -160,7 +160,7 @@ class MassiveConfig:
         """Return `True` if both S3 access key ID and secret access key are configured."""
         return bool(self.s3_access_key_id and self.s3_secret_access_key)
 
-    def resolve_ws_url(
+    def _resolve_ws_url(
         self,
         market: str,
         *,
@@ -191,20 +191,20 @@ class MassiveConfig:
         effective_feed = (feed_override or self.feed).strip().lower()
         if is_fmv:
             host = (
-                FEED_HOST_MAP["delayed_business"]
+                _FEED_HOST_MAP["delayed_business"]
                 if "delayed" in effective_feed
-                else FEED_HOST_MAP["business"]
+                else _FEED_HOST_MAP["business"]
             )
         else:
-            host = FEED_HOST_MAP.get(effective_feed, effective_feed)
+            host = _FEED_HOST_MAP.get(effective_feed, effective_feed)
 
         clean_market = market.strip().lower()
         path = f"/{clean_market}"
         if venue is not None:
             clean_venue = venue.strip().lower()
-            if clean_venue not in VALID_FUTURES_VENUES:
+            if clean_venue not in _VALID_FUTURES_VENUES:
                 raise ValueError(
-                    f"Unsupported futures venue '{venue}'. Expected one of {sorted(VALID_FUTURES_VENUES)}."
+                    f"Unsupported futures venue '{venue}'. Expected one of {sorted(_VALID_FUTURES_VENUES)}."
                 )
             path = f"{path}/{clean_venue}"
 

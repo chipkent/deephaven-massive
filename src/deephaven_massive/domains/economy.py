@@ -21,6 +21,8 @@ from deephaven_massive.schemas.economy import (
 )
 
 if TYPE_CHECKING:
+    from datetime import date
+
     from deephaven_massive.session import MassiveSession
 
 
@@ -40,15 +42,15 @@ class EconomyClient(BaseDomainClient):
         """
         super().__init__(session, domain=None)
 
-    def funding_conditions(self, **filters: Any) -> FeedBuilder:
+    def funding_conditions(self, date: str | date | None = None, **filters: Any) -> FeedBuilder:
         """Build a feed for overnight funding rates, repo volumes, and commercial paper spreads.
 
         Wraps ``/fed/v1/funding-conditions`` covering SOFR, EFFR, OBFR, TGCR,
         BGCR, IORB, and the Federal Reserve target range.
 
         Args:
-            **filters: Optional REST query filters (e.g., ``date="2025-01-15"``,
-                ``date_gte="2025-01-01"``).
+            date: Optional observation date (``"YYYY-MM-DD"`` or :class:`datetime.date`).
+            **filters: Optional REST query filters (e.g., ``date_gte="2025-01-01"``).
 
         Returns:
             FeedBuilder: Builder supporting ``.snapshot()``, ``.historical()``,
@@ -58,15 +60,19 @@ class EconomyClient(BaseDomainClient):
             "economy_funding_conditions",
             "/fed/v1/funding-conditions",
             FUNDING_CONDITIONS_SCHEMA,
+            {"date": date},
             filters=filters,
         )
 
-    def treasury_yields(self, **filters: Any) -> FeedBuilder:
+    fed_funds_rate = funding_conditions
+
+    def treasury_yields(self, date: str | date | None = None, **filters: Any) -> FeedBuilder:
         """Build a feed for daily U.S. Treasury par yield curve rates (``1M`` through ``30Y``).
 
         Wraps ``/fed/v1/treasury-yields``.
 
         Args:
+            date: Optional observation date (``"YYYY-MM-DD"`` or :class:`datetime.date`).
             **filters: Optional REST query filters (e.g., ``date_gte="2024-01-01"``).
 
         Returns:
@@ -77,15 +83,17 @@ class EconomyClient(BaseDomainClient):
             "economy_treasury_yields",
             "/fed/v1/treasury-yields",
             TREASURY_YIELDS_SCHEMA,
+            {"date": date},
             filters=filters,
         )
 
-    def inflation(self, **filters: Any) -> FeedBuilder:
+    def inflation(self, date: str | date | None = None, **filters: Any) -> FeedBuilder:
         """Build a feed for Headline and Core CPI and PCE inflation metrics.
 
         Wraps ``/fed/v1/inflation``.
 
         Args:
+            date: Optional observation date (``"YYYY-MM-DD"`` or :class:`datetime.date`).
             **filters: Optional REST query filters (e.g., ``date_gte="2020-01-01"``).
 
         Returns:
@@ -96,15 +104,17 @@ class EconomyClient(BaseDomainClient):
             "economy_inflation",
             "/fed/v1/inflation",
             INFLATION_SCHEMA,
+            {"date": date},
             filters=filters,
         )
 
-    def inflation_expectations(self, **filters: Any) -> FeedBuilder:
+    def inflation_expectations(self, date: str | date | None = None, **filters: Any) -> FeedBuilder:
         """Build a feed for TIPS breakeven inflation, Cleveland Fed model, and NY Fed survey expectations.
 
         Wraps ``/fed/v1/inflation-expectations``.
 
         Args:
+            date: Optional observation date (``"YYYY-MM-DD"`` or :class:`datetime.date`).
             **filters: Optional REST query filters (e.g., ``date_gte="2020-01-01"``).
 
         Returns:
@@ -115,15 +125,17 @@ class EconomyClient(BaseDomainClient):
             "economy_inflation_expectations",
             "/fed/v1/inflation-expectations",
             INFLATION_EXPECTATIONS_SCHEMA,
+            {"date": date},
             filters=filters,
         )
 
-    def labor_market(self, **filters: Any) -> FeedBuilder:
+    def labor_market(self, date: str | date | None = None, **filters: Any) -> FeedBuilder:
         """Build a feed for unemployment rate, labor force participation, job openings, and jobless claims.
 
         Wraps ``/fed/v1/labor-market``.
 
         Args:
+            date: Optional observation date (``"YYYY-MM-DD"`` or :class:`datetime.date`).
             **filters: Optional REST query filters (e.g., ``date_gte="2020-01-01"``).
 
         Returns:
@@ -134,5 +146,6 @@ class EconomyClient(BaseDomainClient):
             "economy_labor_market",
             "/fed/v1/labor-market",
             LABOR_MARKET_SCHEMA,
+            {"date": date},
             filters=filters,
         )

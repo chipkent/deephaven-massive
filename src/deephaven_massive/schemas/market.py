@@ -86,7 +86,9 @@ def _norm_symbol(
     return norm.canonical(s) if norm is not None else s.upper()
 
 
-def normalize_trade(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
+def _normalize_trade(
+    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
+) -> dict[str, Any]:
     """Normalize a WebSocket, REST, Snapshot, or S3 Flat File trade row.
 
     Extracts trade execution price, size, exchange ID, condition codes, sequence
@@ -128,7 +130,9 @@ def normalize_trade(row: Mapping[str, Any], norm: SymbolNormalizer | None = None
     }
 
 
-def normalize_quote(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
+def _normalize_quote(
+    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
+) -> dict[str, Any]:
     """Normalize a WebSocket, REST, Snapshot, or S3 Flat File quote row.
 
     Extracts top-of-book bid/ask prices, sizes, exchange IDs, condition and
@@ -178,7 +182,7 @@ def normalize_quote(row: Mapping[str, Any], norm: SymbolNormalizer | None = None
     }
 
 
-TIMESPAN_NS: dict[str, int] = {
+_TIMESPAN_NS: dict[str, int] = {
     "second": 1_000_000_000,
     "sec": 1_000_000_000,
     "s": 1_000_000_000,
@@ -199,7 +203,7 @@ TIMESPAN_NS: dict[str, int] = {
 }
 
 
-def compute_bar_span_ns(multiplier: int = 1, timespan: str = "minute") -> int:
+def _compute_bar_span_ns(multiplier: int = 1, timespan: str = "minute") -> int:
     """Compute the duration of an aggregate bar in nanoseconds.
 
     Args:
@@ -212,11 +216,11 @@ def compute_bar_span_ns(multiplier: int = 1, timespan: str = "minute") -> int:
     Returns:
         int: Total bar duration in nanoseconds.
     """
-    unit_ns = TIMESPAN_NS.get(timespan.strip().lower(), 60_000_000_000)
+    unit_ns = _TIMESPAN_NS.get(timespan.strip().lower(), 60_000_000_000)
     return int(multiplier) * unit_ns
 
 
-def normalize_bar(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
+def _normalize_bar(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a WebSocket, REST aggregate, Snapshot, or S3 Flat File OHLCV bar row.
 
     Unifies bar start and end timestamps (`Timestamp` and `EndTimestamp`),
@@ -248,7 +252,7 @@ def normalize_bar(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) 
     elif start_ns is not None:
         span_ns = _first_present(row, "_span_ns", "span_ns")
         if span_ns is None and ("timespan" in row or "multiplier" in row):
-            span_ns = compute_bar_span_ns(
+            span_ns = _compute_bar_span_ns(
                 int(row.get("multiplier", 1)),
                 str(row.get("timespan", "minute")),
             )
@@ -272,7 +276,7 @@ def normalize_bar(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) 
     }
 
 
-def normalize_luld(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
+def _normalize_luld(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a Limit Up-Limit Down (``LULD.*``) price band event.
 
     Args:
@@ -293,7 +297,7 @@ def normalize_luld(row: Mapping[str, Any], norm: SymbolNormalizer | None = None)
     }
 
 
-def normalize_imbalance(
+def _normalize_imbalance(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a Net Order Imbalance (``NOI.*``) auction event.
@@ -323,7 +327,7 @@ def normalize_imbalance(
     }
 
 
-def normalize_fmv(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
+def _normalize_fmv(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a Fair Market Value (``FMV.*``) real-time pricing event.
 
     Args:
@@ -340,7 +344,7 @@ def normalize_fmv(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) 
     }
 
 
-def normalize_index_value(
+def _normalize_index_value(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize an Index Value (``V.I:*`` or S3 ``values_v1``) tick row.
@@ -360,7 +364,7 @@ def normalize_index_value(
     }
 
 
-def normalize_stock_snapshot(
+def _normalize_stock_snapshot(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Flatten a nested Stock, Forex, Crypto, or Universal Snapshot into PascalCase columns.
@@ -441,7 +445,7 @@ def normalize_stock_snapshot(
     }
 
 
-def normalize_option_chain_snapshot(
+def _normalize_option_chain_snapshot(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Flatten an Option Chain or Option Contract Snapshot into PascalCase columns.
@@ -519,7 +523,7 @@ def normalize_option_chain_snapshot(
     }
 
 
-def normalize_futures_snapshot(
+def _normalize_futures_snapshot(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Flatten a Futures Snapshot into PascalCase columns.
@@ -583,7 +587,7 @@ def normalize_futures_snapshot(
     }
 
 
-def normalize_daily_summary(
+def _normalize_daily_summary(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a grouped daily or single-ticker open/close summary row.
@@ -612,7 +616,7 @@ def normalize_daily_summary(
     }
 
 
-def normalize_currency_conversion(
+def _normalize_currency_conversion(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v1/conversion/{from}/{to}`` real-time FX conversion response.
@@ -644,7 +648,7 @@ def normalize_currency_conversion(
     }
 
 
-def normalize_indicator(
+def _normalize_indicator(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize an SMA, EMA, MACD, or RSI technical indicator value row.
@@ -685,7 +689,7 @@ TRADES_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_trade,
+    normalizer=_normalize_trade,
 )
 
 QUOTES_SCHEMA = SchemaSpec(
@@ -708,7 +712,7 @@ QUOTES_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_quote,
+    normalizer=_normalize_quote,
 )
 
 BARS_SCHEMA = SchemaSpec(
@@ -731,7 +735,7 @@ BARS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_bar,
+    normalizer=_normalize_bar,
 )
 
 LULD_SCHEMA = SchemaSpec(
@@ -748,7 +752,7 @@ LULD_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_luld,
+    normalizer=_normalize_luld,
 )
 
 IMBALANCES_SCHEMA = SchemaSpec(
@@ -770,7 +774,7 @@ IMBALANCES_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_imbalance,
+    normalizer=_normalize_imbalance,
 )
 
 FMV_SCHEMA = SchemaSpec(
@@ -783,7 +787,7 @@ FMV_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_fmv,
+    normalizer=_normalize_fmv,
 )
 
 INDEX_VALUES_SCHEMA = SchemaSpec(
@@ -796,7 +800,7 @@ INDEX_VALUES_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_index_value,
+    normalizer=_normalize_index_value,
 )
 
 STOCK_SNAPSHOT_SCHEMA = SchemaSpec(
@@ -833,7 +837,7 @@ STOCK_SNAPSHOT_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_stock_snapshot,
+    normalizer=_normalize_stock_snapshot,
 )
 
 OPTION_CHAIN_SCHEMA = SchemaSpec(
@@ -877,7 +881,7 @@ OPTION_CHAIN_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_option_chain_snapshot,
+    normalizer=_normalize_option_chain_snapshot,
 )
 
 FUTURES_SNAPSHOT_SCHEMA = SchemaSpec(
@@ -907,7 +911,7 @@ FUTURES_SNAPSHOT_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_futures_snapshot,
+    normalizer=_normalize_futures_snapshot,
 )
 
 DAILY_SUMMARY_SCHEMA = SchemaSpec(
@@ -929,7 +933,7 @@ DAILY_SUMMARY_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "Date"),
-    normalizer=normalize_daily_summary,
+    normalizer=_normalize_daily_summary,
 )
 
 CURRENCY_CONVERSION_SCHEMA = SchemaSpec(
@@ -947,7 +951,7 @@ CURRENCY_CONVERSION_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_currency_conversion,
+    normalizer=_normalize_currency_conversion,
 )
 
 INDICATOR_SCHEMA = SchemaSpec(
@@ -962,5 +966,5 @@ INDICATOR_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "Timestamp"),
-    normalizer=normalize_indicator,
+    normalizer=_normalize_indicator,
 )

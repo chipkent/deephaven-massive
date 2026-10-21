@@ -4,16 +4,16 @@ This module defines :class:`BaseDomainClient` and its supporting query/payload
 helpers. Every asset-class and data-provider domain client (`stocks`, `options`,
 `futures`, `indices`, `forex`, `crypto`, `economy`, `partners`) inherits from
 :class:`BaseDomainClient` to share:
-1. **Cursor Pagination with Bounded Memory**: ``fetch_chunked_table`` follows
+1. **Cursor Pagination with Bounded Memory**: ``_fetch_chunked_table`` follows
    Massive ``next_url`` cursors and converts rows in 50,000-row PyArrow
    ``RecordBatch`` chunks so multi-million-row historical pulls never exhaust
    heap memory.
-2. **Automatic S3 vs. REST Routing**: ``should_use_flat_files`` and
-   ``fetch_multi_symbol_historical`` transparently route wildcard (``"*"``) and
+2. **Automatic S3 vs. REST Routing**: ``_should_use_flat_files`` and
+   ``_fetch_multi_symbol_historical`` transparently route wildcard (``"*"``) and
    wide multi-symbol historical queries to S3 Flat Files when credentials are
    configured, or parallelize per-symbol REST requests across a bounded
    ``ThreadPoolExecutor``.
-3. **Ergonomic Query Filter Translation**: ``normalize_filter_params`` converts
+3. **Ergonomic Query Filter Translation**: ``_normalize_filter_params`` converts
    Pythonic keyword arguments (such as ``filing_date_gte="2025-01-01"`` or
    ``ticker_any_of=["AAPL", "MSFT"]``) into Massive's dotted query syntax
    (``filing_date.gte``, ``ticker.any_of``).
@@ -38,7 +38,7 @@ from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.engine.symbols import SymbolNormalizer
 from deephaven_massive.schemas.market import (
     INDICATOR_SCHEMA,
-    compute_bar_span_ns,
+    _compute_bar_span_ns,
 )
 
 if TYPE_CHECKING:
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive.session import MassiveSession
 
-VALID_HISTORICAL_SOURCES: frozenset[str] = frozenset({"auto", "rest", "flat_files"})
+_VALID_HISTORICAL_SOURCES: frozenset[str] = frozenset({"auto", "rest", "flat_files", "s3"})
 
 _EMPTY_HISTORICAL_ERRORS: dict[str, str] = {
     "stocks": "Specific symbol(s) are required for REST historical queries (or configure S3 credentials for '*' flat files).",
@@ -78,12 +78,12 @@ def _resolve_bar_extra_fields(
     span_ns: int | None = None
     if "/range/" in path:
         parts = path.split("/range/", 1)[1].split("/")
-        span_ns = compute_bar_span_ns(int(parts[0]), parts[1])
+        span_ns = _compute_bar_span_ns(int(parts[0]), parts[1])
     elif path.endswith("/prev"):
-        span_ns = compute_bar_span_ns(1, "day")
+        span_ns = _compute_bar_span_ns(1, "day")
     elif params and "resolution" in params:
         mult_s, span_s = str(params["resolution"]).split("_", 1)
-        span_ns = compute_bar_span_ns(int(mult_s), span_s)
+        span_ns = _compute_bar_span_ns(int(mult_s), span_s)
     if span_ns is None:
         return extra_fields
     merged = dict(extra_fields or {})
@@ -91,7 +91,7 @@ def _resolve_bar_extra_fields(
     return merged
 
 
-def format_date_param(val: str | date | datetime | int | None) -> str | None:
+def _format_date_param(val: str | date | datetime | int | None) -> str | None:
     """Format a start/end date or timestamp parameter for Massive REST endpoints.
 
     Args:
@@ -120,7 +120,7 @@ _FILTER_SUFFIXES: tuple[tuple[str, str], ...] = (
 )
 
 
-def normalize_filter_params(
+def _normalize_filter_params(
     base_params: Mapping[str, Any] | None = None,
     filters: Mapping[str, Any] | None = None,
     *,
@@ -149,13 +149,13 @@ def normalize_filter_params(
 
     Returns:
         dict[str, Any]: Normalized query parameter dictionary ready for
-        ``session.request_json``.
+        ``session._request_json``.
     """
     out: dict[str, Any] = {}
     if base_params:
         for k, v in base_params.items():
             if v is not None:
-                out[k] = format_date_param(v) if isinstance(v, (date, datetime)) else v
+                out[k] = _format_date_param(v) if isinstance(v, (date, datetime)) else v
 
     def _norm_sym(s: str) -> str:
         return normalizer.rest_ticker(s) if normalizer is not None else s.strip().upper()
@@ -183,7 +183,7 @@ def normalize_filter_params(
                     mapped_k = raw_k[: -len(suffix)] + dot_suffix
                     break
             if isinstance(raw_v, (date, datetime)):
-                out[mapped_k] = format_date_param(raw_v)
+                out[mapped_k] = _format_date_param(raw_v)
             elif isinstance(raw_v, Sequence) and not isinstance(raw_v, (str, bytes)):
                 out[mapped_k] = ",".join(str(x) for x in raw_v)
             else:
@@ -191,7 +191,7 @@ def normalize_filter_params(
     return out
 
 
-def extract_rows_from_payload(
+def _extract_rows_from_payload(
     payload: Any,
     *,
     inject_symbol: str | None = None,
@@ -206,7 +206,7 @@ def extract_rows_from_payload(
     top-level JSON arrays.
 
     Args:
-        payload: Parsed JSON response object returned by ``session.request_json``.
+        payload: Parsed JSON response object returned by ``session._request_json``.
         inject_symbol: Optional canonical symbol to inject as ``"Symbol"`` when
             individual row items omit a ticker field.
         extra_fields: Optional default key-value pairs to attach to every
@@ -289,7 +289,7 @@ class BaseDomainClient:
         self.domain = domain
         self.symbol_normalizer = SymbolNormalizer(domain) if domain is not None else None
 
-    def canonical_symbols(self, symbols: str | Iterable[str] | None) -> list[str]:
+    def _canonical_symbols(self, symbols: str | Iterable[str] | None) -> list[str]:
         """Normalize ``symbols`` into a deduplicated list of canonical symbols.
 
         Args:
@@ -307,7 +307,7 @@ class BaseDomainClient:
             return [symbols.strip().upper()]
         return [str(s).strip().upper() for s in symbols]
 
-    def fetch_rest_rows(
+    def _fetch_rest_rows(
         self,
         path: str,
         params: Mapping[str, Any] | None = None,
@@ -342,8 +342,8 @@ class BaseDomainClient:
             next_params["limit"] = min(limit, 50_000)
 
         while next_path is not None:
-            payload = self.session.request_json(next_path, next_params)
-            page_rows = extract_rows_from_payload(
+            payload = self.session._request_json(next_path, next_params)
+            page_rows = _extract_rows_from_payload(
                 payload,
                 inject_symbol=inject_symbol,
                 extra_fields=resolved_extra,
@@ -361,7 +361,7 @@ class BaseDomainClient:
 
         return collected
 
-    def fetch_chunked_table(
+    def _fetch_chunked_table(
         self,
         path: str,
         schema_spec: SchemaSpec,
@@ -400,8 +400,8 @@ class BaseDomainClient:
             next_params["limit"] = min(limit, chunk_size)
 
         while next_path is not None:
-            payload = self.session.request_json(next_path, next_params)
-            page_rows = extract_rows_from_payload(
+            payload = self.session._request_json(next_path, next_params)
+            page_rows = _extract_rows_from_payload(
                 payload,
                 inject_symbol=inject_symbol,
                 extra_fields=resolved_extra,
@@ -433,7 +433,7 @@ class BaseDomainClient:
         pa_tbl = record_batches_to_arrow_table(batches, schema_spec)
         return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
-    def should_use_flat_files(
+    def _should_use_flat_files(
         self,
         source: str,
         symbols: Sequence[str] | None,
@@ -465,13 +465,13 @@ class BaseDomainClient:
                 is requested without S3 support or S3 credentials.
         """
         clean_source = source.strip().lower()
-        if clean_source not in VALID_HISTORICAL_SOURCES:
+        if clean_source not in _VALID_HISTORICAL_SOURCES:
             raise ValueError(
-                f"Unsupported historical source '{source}'. Expected one of {sorted(VALID_HISTORICAL_SOURCES)}."
+                f"Unsupported historical source '{source}'. Expected one of {sorted(_VALID_HISTORICAL_SOURCES)}."
             )
         if clean_source == "rest":
             return False
-        if clean_source == "flat_files":
+        if clean_source in ("flat_files", "s3"):
             if s3_dataset is None:
                 raise ValueError("S3 Flat Files are not supported for this feed.")
             if not self.session.config.has_s3_credentials:
@@ -489,7 +489,7 @@ class BaseDomainClient:
             return False
         return len(symbols) >= self.session.config.flat_file_ticker_threshold
 
-    def fetch_multi_symbol_historical(
+    def _fetch_multi_symbol_historical(
         self,
         symbols: Any,
         schema_spec: SchemaSpec,
@@ -519,7 +519,7 @@ class BaseDomainClient:
             end: End date or timestamp filter.
             limit: Optional maximum number of rows to return.
             source: Routing policy (``"auto"``, ``"rest"``, or ``"flat_files"``).
-            adjusted: Optional split-adjustment flag used by ``should_use_flat_files``.
+            adjusted: Optional split-adjustment flag used by ``_should_use_flat_files``.
             chunk_size: Maximum rows per PyArrow ``RecordBatch``.
 
         Returns:
@@ -531,9 +531,9 @@ class BaseDomainClient:
         canon_syms = (
             None
             if hasattr(symbols, "j_table") or hasattr(symbols, "column_names")
-            else self.canonical_symbols(symbols)
+            else self._canonical_symbols(symbols)
         )
-        if self.should_use_flat_files(source, canon_syms, s3_dataset, adjusted=adjusted):
+        if self._should_use_flat_files(source, canon_syms, s3_dataset, adjusted=adjusted):
             assert s3_dataset is not None
             return self.session.flat_files.load(
                 s3_dataset,
@@ -552,7 +552,7 @@ class BaseDomainClient:
         if len(target_syms) == 1:
             sym = target_syms[0]
             path, params = rest_path_fn(sym, start, end)
-            return self.fetch_chunked_table(
+            return self._fetch_chunked_table(
                 path,
                 schema_spec,
                 params,
@@ -569,7 +569,7 @@ class BaseDomainClient:
 
             def _fetch_one(sym: str) -> list[dict[str, Any]]:
                 path, params = rest_path_fn(sym, start, end)
-                return self.fetch_rest_rows(path, params, inject_symbol=sym)
+                return self._fetch_rest_rows(path, params, inject_symbol=sym)
 
             with ThreadPoolExecutor(max_workers=min(len(target_syms), 8)) as pool:
                 per_sym_rows = list(pool.map(_fetch_one, target_syms))
@@ -583,7 +583,7 @@ class BaseDomainClient:
             for sym in target_syms:
                 rem = limit - total_rows
                 path, params = rest_path_fn(sym, start, end)
-                rows = self.fetch_rest_rows(path, params, limit=rem, inject_symbol=sym)
+                rows = self._fetch_rest_rows(path, params, limit=rem, inject_symbol=sym)
                 buffer.extend(rows)
                 total_rows += len(rows)
                 while len(buffer) >= chunk_size:
@@ -598,7 +598,7 @@ class BaseDomainClient:
         pa_tbl = record_batches_to_arrow_table(batches, schema_spec)
         return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
-    def build_feed(
+    def _build_feed(
         self,
         name: str,
         schema_spec: SchemaSpec,
@@ -653,12 +653,12 @@ class BaseDomainClient:
             historical_fn=historical_fn,
             flush_interval_ms=self.session.config.flush_interval_ms,
             max_batch_size=self.session.config.max_batch_size,
-            auto_flush=self.session.auto_flush,
-            on_register_lifecycle=self.session.register_builder,
+            auto_flush=self.session._auto_flush,
+            on_register_lifecycle=self.session._register_builder,
             stream_registry=self.session._stream_registry,
         )
 
-    def fetch_seed_rows(
+    def _fetch_seed_rows(
         self,
         syms: Sequence[str],
         seed_since: Any,
@@ -684,7 +684,7 @@ class BaseDomainClient:
 
         def _fetch_one(sym: str) -> list[dict[str, Any]]:
             path, params = rest_path_fn(sym, seed_since, None)
-            return self.fetch_rest_rows(
+            return self._fetch_rest_rows(
                 path,
                 params,
                 inject_symbol=sym,
@@ -735,7 +735,7 @@ class BaseDomainClient:
         Returns:
             FeedBuilder: Configured feed builder.
         """
-        base_params = normalize_filter_params(
+        base_params = _normalize_filter_params(
             params,
             filters,
             symbol=symbol,
@@ -752,10 +752,10 @@ class BaseDomainClient:
         ) -> Table:
             q: dict[str, Any] = {
                 **base_params,
-                f"{date_param}.gte": format_date_param(start),
-                f"{date_param}.lte": format_date_param(end),
+                f"{date_param}.gte": _format_date_param(start),
+                f"{date_param}.lte": _format_date_param(end),
             }
-            return self.fetch_chunked_table(
+            return self._fetch_chunked_table(
                 path,
                 schema_spec,
                 q,
@@ -763,10 +763,10 @@ class BaseDomainClient:
                 inject_symbol=inject_symbol,
             )
 
-        return self.build_feed(
+        return self._build_feed(
             name=name,
             schema_spec=schema_spec,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 path, base_params, inject_symbol=inject_symbol
             ),
             historical_fn=_hist,
@@ -811,9 +811,9 @@ class BaseDomainClient:
             source: str = "auto",
         ) -> Table:
             q = dict(params)
-            q["timestamp.gte"] = format_date_param(start)
-            q["timestamp.lte"] = format_date_param(end)
-            return self.fetch_chunked_table(
+            q["timestamp.gte"] = _format_date_param(start)
+            q["timestamp.lte"] = _format_date_param(end)
+            return self._fetch_chunked_table(
                 f"/v1/indicators/{indicator.lower()}/{ticker}",
                 INDICATOR_SCHEMA,
                 q,
@@ -822,11 +822,11 @@ class BaseDomainClient:
                 extra_fields=extra,
             )
 
-        return self.build_feed(
+        return self._build_feed(
             name=f"{self.domain}_{indicator.lower()}_{canon}",
             schema_spec=INDICATOR_SCHEMA,
             symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 f"/v1/indicators/{indicator.lower()}/{ticker}",
                 params,
                 inject_symbol=canon,

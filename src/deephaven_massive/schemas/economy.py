@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from deephaven_massive.engine.symbols import SymbolNormalizer
 
 
-def normalize_funding_conditions(
+def _normalize_funding_conditions(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/fed/v1/funding-conditions`` payload into PascalCase columns.
@@ -119,7 +119,7 @@ def normalize_funding_conditions(
     return flat
 
 
-def normalize_treasury_yields(
+def _normalize_treasury_yields(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/fed/v1/treasury-yields`` payload into PascalCase columns.
@@ -152,7 +152,7 @@ def normalize_treasury_yields(
     }
 
 
-def normalize_inflation(
+def _normalize_inflation(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/fed/v1/inflation`` payload into PascalCase columns.
@@ -180,7 +180,7 @@ def normalize_inflation(
     }
 
 
-def normalize_inflation_expectations(
+def _normalize_inflation_expectations(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/fed/v1/inflation-expectations`` payload into PascalCase columns.
@@ -211,7 +211,7 @@ def normalize_inflation_expectations(
     }
 
 
-def normalize_labor_market(
+def _normalize_labor_market(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/fed/v1/labor-market`` payload into PascalCase columns.
@@ -274,7 +274,7 @@ FUNDING_CONDITIONS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Date",),
-    normalizer=normalize_funding_conditions,
+    normalizer=_normalize_funding_conditions,
     allow_dynamic_columns=True,
 )
 
@@ -297,7 +297,7 @@ TREASURY_YIELDS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Date",),
-    normalizer=normalize_treasury_yields,
+    normalizer=_normalize_treasury_yields,
 )
 
 INFLATION_SCHEMA = SchemaSpec(
@@ -314,7 +314,7 @@ INFLATION_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Date",),
-    normalizer=normalize_inflation,
+    normalizer=_normalize_inflation,
 )
 
 INFLATION_EXPECTATIONS_SCHEMA = SchemaSpec(
@@ -332,7 +332,7 @@ INFLATION_EXPECTATIONS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Date",),
-    normalizer=normalize_inflation_expectations,
+    normalizer=_normalize_inflation_expectations,
 )
 
 LABOR_MARKET_SCHEMA = SchemaSpec(
@@ -347,5 +347,5 @@ LABOR_MARKET_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Date",),
-    normalizer=normalize_labor_market,
+    normalizer=_normalize_labor_market,
 )

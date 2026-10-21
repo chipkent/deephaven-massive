@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-KNOWN_QUOTE_CURRENCIES: tuple[str, ...] = (
+_KNOWN_QUOTE_CURRENCIES: tuple[str, ...] = (
     "USDT",
     "USDC",
     "BUSD",
@@ -61,7 +61,7 @@ def _split_currency_pair(raw: str) -> tuple[str, str]:
                 return parts[0], parts[1]
     if len(raw) == 6:
         return raw[:3], raw[3:]
-    for quote in KNOWN_QUOTE_CURRENCIES:
+    for quote in _KNOWN_QUOTE_CURRENCIES:
         if raw.endswith(quote) and len(raw) > len(quote):
             return raw[: -len(quote)], quote
     raise ValueError(

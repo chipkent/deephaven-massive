@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from deephaven_massive.engine.symbols import SymbolNormalizer
 
 
-def normalize_short_interest(
+def _normalize_short_interest(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/stocks/v1/short-interest`` FINRA bi-weekly short interest row.
@@ -60,7 +60,7 @@ def normalize_short_interest(
     }
 
 
-def normalize_short_volume(
+def _normalize_short_volume(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/stocks/v1/short-volume`` daily short sale volume row.
@@ -106,7 +106,7 @@ def normalize_short_volume(
     return flat
 
 
-def normalize_share_float(
+def _normalize_share_float(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/stocks/vX/float`` public free-float and shares-outstanding row.
@@ -129,7 +129,7 @@ def normalize_share_float(
     }
 
 
-def normalize_financial_statement(
+def _normalize_financial_statement(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a balance sheet, income statement, or cash flow statement row.
@@ -200,7 +200,7 @@ def normalize_financial_statement(
     return flat
 
 
-def normalize_ratios(
+def _normalize_ratios(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/stocks/financials/v1/ratios`` valuation and profitability ratios row.
@@ -238,7 +238,7 @@ def normalize_ratios(
     return flat
 
 
-def normalize_dividend(
+def _normalize_dividend(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a cash or stock dividend declaration row.
@@ -263,7 +263,9 @@ def normalize_dividend(
     }
 
 
-def normalize_split(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
+def _normalize_split(
+    row: Mapping[str, Any], norm: SymbolNormalizer | None = None
+) -> dict[str, Any]:
     """Normalize a forward or reverse stock split row.
 
     Args:
@@ -281,7 +283,7 @@ def normalize_split(row: Mapping[str, Any], norm: SymbolNormalizer | None = None
     }
 
 
-def normalize_ipo(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
+def _normalize_ipo(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a ``/vX/reference/ipos`` initial public offering event row.
 
     Args:
@@ -308,7 +310,7 @@ def normalize_ipo(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) 
     }
 
 
-def normalize_ticker(
+def _normalize_ticker(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v3/reference/tickers`` security directory row.
@@ -336,7 +338,7 @@ def normalize_ticker(
     }
 
 
-def normalize_ticker_details(
+def _normalize_ticker_details(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v3/reference/tickers/{ticker}`` company profile row.
@@ -386,7 +388,7 @@ def normalize_ticker_details(
     return flat
 
 
-def normalize_ticker_event(
+def _normalize_ticker_event(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/vX/reference/tickers/{id}/events`` symbol change event row.
@@ -408,7 +410,7 @@ def normalize_ticker_event(
     }
 
 
-def normalize_related_company(
+def _normalize_related_company(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v1/related-companies/{ticker}`` peer relationship row.
@@ -428,7 +430,7 @@ def normalize_related_company(
     }
 
 
-def normalize_ticker_type(
+def _normalize_ticker_type(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v3/reference/tickers/types`` security classification row.
@@ -450,7 +452,7 @@ def normalize_ticker_type(
     }
 
 
-def normalize_option_contract(
+def _normalize_option_contract(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v3/reference/options/contracts`` OCC option contract row.
@@ -476,7 +478,7 @@ def normalize_option_contract(
     }
 
 
-def normalize_futures_contract(
+def _normalize_futures_contract(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/futures/vX/contracts`` futures contract specification row.
@@ -504,7 +506,7 @@ def normalize_futures_contract(
     }
 
 
-def normalize_futures_product(
+def _normalize_futures_product(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/futures/vX/products`` futures product catalog row.
@@ -531,7 +533,7 @@ def normalize_futures_product(
     }
 
 
-def normalize_futures_schedule(
+def _normalize_futures_schedule(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/futures/vX/schedules`` trading session event row.
@@ -555,7 +557,7 @@ def normalize_futures_schedule(
     }
 
 
-def normalize_sec_filing(
+def _normalize_sec_filing(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize an SEC EDGAR filing index, 10-K section, 8-K item, risk factor, or disclosure row.
@@ -586,7 +588,7 @@ def normalize_sec_filing(
     return flat
 
 
-def normalize_sec_13f(
+def _normalize_sec_13f(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/stocks/filings/13F/v1/holdings`` institutional holding row.
@@ -619,7 +621,7 @@ def normalize_sec_13f(
     return flat
 
 
-def normalize_sec_insider(
+def _normalize_sec_insider(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a Form 3 or Form 4 insider ownership and transaction row.
@@ -651,14 +653,18 @@ def normalize_sec_insider(
                 row, "PricePerShare", "price_per_share", "transaction_price_per_share"
             ),
             "SharesOwnedAfter": _first_present(
-                row, "SharesOwnedAfter", "shares_owned_following_transaction"
+                row,
+                "SharesOwnedAfter",
+                "shares_owned_following_transaction",
+                "shares_owned_after",
+                "shares_owned",
             ),
         }
     )
     return flat
 
 
-def normalize_news(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
+def _normalize_news(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
     """Normalize a ``/v2/reference/news`` article row with publisher and sentiment insights.
 
     Args:
@@ -691,7 +697,7 @@ def normalize_news(row: Mapping[str, Any], norm: SymbolNormalizer | None = None)
     }
 
 
-def normalize_exchange(
+def _normalize_exchange(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v3/reference/exchanges`` or ``/futures/vX/exchanges`` venue row.
@@ -718,7 +724,7 @@ def normalize_exchange(
     }
 
 
-def normalize_condition(
+def _normalize_condition(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v3/reference/conditions`` trade/quote condition code row.
@@ -742,7 +748,7 @@ def normalize_condition(
     }
 
 
-def normalize_holiday(
+def _normalize_holiday(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v1/marketstatus/upcoming`` market holiday or early-close row.
@@ -765,7 +771,7 @@ def normalize_holiday(
     }
 
 
-def normalize_market_status(
+def _normalize_market_status(
     row: Mapping[str, Any], norm: SymbolNormalizer | None = None
 ) -> dict[str, Any]:
     """Normalize a ``/v1/marketstatus/now`` real-time exchange and currency status row.
@@ -806,7 +812,7 @@ SHORT_INTEREST_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "SettlementDate"),
-    normalizer=normalize_short_interest,
+    normalizer=_normalize_short_interest,
 )
 
 SHORT_VOLUME_SCHEMA = SchemaSpec(
@@ -827,7 +833,7 @@ SHORT_VOLUME_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "Date"),
-    normalizer=normalize_short_volume,
+    normalizer=_normalize_short_volume,
     allow_dynamic_columns=True,
 )
 
@@ -843,7 +849,7 @@ SHARE_FLOAT_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_share_float,
+    normalizer=_normalize_share_float,
 )
 
 FINANCIAL_STATEMENT_SCHEMA = SchemaSpec(
@@ -872,7 +878,7 @@ FINANCIAL_STATEMENT_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "PeriodEnd", "FiscalPeriod"),
-    normalizer=normalize_financial_statement,
+    normalizer=_normalize_financial_statement,
     allow_dynamic_columns=True,
 )
 
@@ -897,7 +903,7 @@ RATIOS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "Date"),
-    normalizer=normalize_ratios,
+    normalizer=_normalize_ratios,
     allow_dynamic_columns=True,
 )
 
@@ -917,7 +923,7 @@ DIVIDENDS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "ExDividendDate"),
-    normalizer=normalize_dividend,
+    normalizer=_normalize_dividend,
 )
 
 SPLITS_SCHEMA = SchemaSpec(
@@ -931,7 +937,7 @@ SPLITS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "ExecutionDate"),
-    normalizer=normalize_split,
+    normalizer=_normalize_split,
 )
 
 IPOS_SCHEMA = SchemaSpec(
@@ -952,7 +958,7 @@ IPOS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "ListingDate"),
-    normalizer=normalize_ipo,
+    normalizer=_normalize_ipo,
 )
 
 TICKERS_SCHEMA = SchemaSpec(
@@ -974,7 +980,7 @@ TICKERS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_ticker,
+    normalizer=_normalize_ticker,
 )
 
 TICKER_DETAILS_SCHEMA = SchemaSpec(
@@ -1007,7 +1013,7 @@ TICKER_DETAILS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_ticker_details,
+    normalizer=_normalize_ticker_details,
     allow_dynamic_columns=True,
 )
 
@@ -1022,7 +1028,7 @@ TICKER_EVENTS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "Date"),
-    normalizer=normalize_ticker_event,
+    normalizer=_normalize_ticker_event,
 )
 
 RELATED_COMPANIES_SCHEMA = SchemaSpec(
@@ -1034,7 +1040,7 @@ RELATED_COMPANIES_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol", "RelatedSymbol"),
-    normalizer=normalize_related_company,
+    normalizer=_normalize_related_company,
 )
 
 TICKER_TYPES_SCHEMA = SchemaSpec(
@@ -1048,7 +1054,7 @@ TICKER_TYPES_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Code",),
-    normalizer=normalize_ticker_type,
+    normalizer=_normalize_ticker_type,
 )
 
 OPTION_CONTRACTS_SCHEMA = SchemaSpec(
@@ -1067,7 +1073,7 @@ OPTION_CONTRACTS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_option_contract,
+    normalizer=_normalize_option_contract,
 )
 
 FUTURES_CONTRACTS_SCHEMA = SchemaSpec(
@@ -1088,7 +1094,7 @@ FUTURES_CONTRACTS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Symbol",),
-    normalizer=normalize_futures_contract,
+    normalizer=_normalize_futures_contract,
 )
 
 FUTURES_PRODUCTS_SCHEMA = SchemaSpec(
@@ -1107,7 +1113,7 @@ FUTURES_PRODUCTS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("ProductCode",),
-    normalizer=normalize_futures_product,
+    normalizer=_normalize_futures_product,
 )
 
 FUTURES_SCHEDULES_SCHEMA = SchemaSpec(
@@ -1123,7 +1129,7 @@ FUTURES_SCHEDULES_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("ProductCode", "Event", "Timestamp"),
-    normalizer=normalize_futures_schedule,
+    normalizer=_normalize_futures_schedule,
 )
 
 SEC_FILINGS_SCHEMA = SchemaSpec(
@@ -1143,7 +1149,7 @@ SEC_FILINGS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("AccessionNumber",),
-    normalizer=normalize_sec_filing,
+    normalizer=_normalize_sec_filing,
     allow_dynamic_columns=True,
 )
 
@@ -1165,7 +1171,7 @@ SEC_13F_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Cik", "Cusip", "PeriodOfReport"),
-    normalizer=normalize_sec_13f,
+    normalizer=_normalize_sec_13f,
     allow_dynamic_columns=True,
 )
 
@@ -1188,7 +1194,7 @@ SEC_INSIDER_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("AccessionNumber", "InsiderName"),
-    normalizer=normalize_sec_insider,
+    normalizer=_normalize_sec_insider,
     allow_dynamic_columns=True,
 )
 
@@ -1210,7 +1216,7 @@ NEWS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("ArticleId",),
-    normalizer=normalize_news,
+    normalizer=_normalize_news,
 )
 
 EXCHANGES_SCHEMA = SchemaSpec(
@@ -1230,7 +1236,7 @@ EXCHANGES_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("ExchangeId",),
-    normalizer=normalize_exchange,
+    normalizer=_normalize_exchange,
 )
 
 CONDITIONS_SCHEMA = SchemaSpec(
@@ -1246,7 +1252,7 @@ CONDITIONS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("ConditionId",),
-    normalizer=normalize_condition,
+    normalizer=_normalize_condition,
 )
 
 HOLIDAYS_SCHEMA = SchemaSpec(
@@ -1262,7 +1268,7 @@ HOLIDAYS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Date", "Exchange"),
-    normalizer=normalize_holiday,
+    normalizer=_normalize_holiday,
 )
 
 MARKET_STATUS_SCHEMA = SchemaSpec(
@@ -1281,5 +1287,5 @@ MARKET_STATUS_SCHEMA = SchemaSpec(
         ]
     ),
     key_cols=("Market",),
-    normalizer=normalize_market_status,
+    normalizer=_normalize_market_status,
 )

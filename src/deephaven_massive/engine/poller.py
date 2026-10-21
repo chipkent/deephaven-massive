@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive.engine.symbols import SymbolNormalizer
 
-VALID_POLL_MODES: frozenset[str] = frozenset({"replace", "upsert", "append"})
+_VALID_POLL_MODES: frozenset[str] = frozenset({"replace", "upsert", "append"})
 
 
 class SnapshotPoller:
@@ -77,9 +77,9 @@ class SnapshotPoller:
         from deephaven.stream.table_publisher import table_publisher
 
         clean_mode = mode.strip().lower()
-        if clean_mode not in VALID_POLL_MODES:
+        if clean_mode not in _VALID_POLL_MODES:
             raise ValueError(
-                f"Unsupported poll mode '{mode}'. Expected one of {sorted(VALID_POLL_MODES)}."
+                f"Unsupported poll mode '{mode}'. Expected one of {sorted(_VALID_POLL_MODES)}."
             )
         if interval_s <= 0:
             raise ValueError("interval_s must be > 0")

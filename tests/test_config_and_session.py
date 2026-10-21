@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from deephaven_massive.config import MassiveConfig, MassiveEntitlementError
-from deephaven_massive.session import MassiveSession, ensure_deephaven_server
+from deephaven_massive.session import MassiveSession, _ensure_deephaven_server
 from tests.conftest import dh_to_pylist
 
 
@@ -59,35 +59,35 @@ def test_config_from_args_validation_errors(monkeypatch: pytest.MonkeyPatch) -> 
 def test_config_resolve_ws_url_tiers_fmv_and_venues() -> None:
     """Verify WebSocket URL resolution across realtime/delayed tiers, FMV, custom hosts, and futures venues."""
     cfg = MassiveConfig.from_args(api_key="k", feed="realtime")
-    assert cfg.resolve_ws_url("stocks") == "wss://socket.massive.com/stocks"
+    assert cfg._resolve_ws_url("stocks") == "wss://socket.massive.com/stocks"
     assert (
-        cfg.resolve_ws_url("options", feed_override="delayed")
+        cfg._resolve_ws_url("options", feed_override="delayed")
         == "wss://delayed.massive.com/options"
     )
-    assert cfg.resolve_ws_url("stocks", is_fmv=True) == "wss://business.massive.com/stocks"
+    assert cfg._resolve_ws_url("stocks", is_fmv=True) == "wss://business.massive.com/stocks"
     assert (
-        cfg.resolve_ws_url("stocks", feed_override="delayed", is_fmv=True)
+        cfg._resolve_ws_url("stocks", feed_override="delayed", is_fmv=True)
         == "wss://delayed-business.massive.com/stocks"
     )
-    assert cfg.resolve_ws_url("futures", venue="cme") == "wss://socket.massive.com/futures/cme"
+    assert cfg._resolve_ws_url("futures", venue="cme") == "wss://socket.massive.com/futures/cme"
     assert (
-        cfg.resolve_ws_url("stocks", feed_override="custom.host.example.com")
+        cfg._resolve_ws_url("stocks", feed_override="custom.host.example.com")
         == "wss://custom.host.example.com/stocks"
     )
     with pytest.raises(ValueError, match="Unsupported futures venue"):
-        cfg.resolve_ws_url("futures", venue="invalid_venue")
+        cfg._resolve_ws_url("futures", venue="invalid_venue")
 
 
 def test_ensure_deephaven_server_auto_start_branches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify ensure_deephaven_server respects auto_start=False and boots Server when auto_start=True."""
+    """Verify _ensure_deephaven_server respects auto_start=False and boots Server when auto_start=True."""
     from deephaven_server import Server
 
     orig_instance = Server.instance
     try:
         monkeypatch.setattr(Server, "instance", None)
-        assert ensure_deephaven_server(auto_start=False) is None
+        assert _ensure_deephaven_server(auto_start=False) is None
 
         started: list[int] = []
 
@@ -102,7 +102,7 @@ def test_ensure_deephaven_server_auto_start_branches(
 
         monkeypatch.setattr("deephaven_server.Server", DummyServer)
         monkeypatch.setattr(DummyServer, "instance", None, raising=False)
-        ctx = ensure_deephaven_server(auto_start=True, port=10099)
+        ctx = _ensure_deephaven_server(auto_start=True, port=10099)
         assert started == [10099]
         assert ctx is not None
     finally:
@@ -110,7 +110,7 @@ def test_ensure_deephaven_server_auto_start_branches(
 
 
 def test_session_request_json_url_building_and_param_filtering() -> None:
-    """Verify request_json constructs relative/full URLs, attaches Bearer headers, and drops None params."""
+    """Verify _request_json constructs relative/full URLs, attaches Bearer headers, and drops None params."""
     calls: list[str] = []
 
     def _handler(
@@ -128,15 +128,15 @@ def test_session_request_json_url_building_and_param_filtering() -> None:
         ws_send_hook=lambda _u, _p: None,
         sleep_fn=lambda _: None,
     ) as sess:
-        res = sess.request_json("v3/trades/AAPL", {"limit": 10, "empty": None})
+        res = sess._request_json("v3/trades/AAPL", {"limit": 10, "empty": None})
         assert res["results"] == [{"ok": True}]
         assert calls[-1] == "https://api.massive.com/v3/trades/AAPL?limit=10"
 
-        res_all_none = sess.request_json("/v3/trades/AAPL", {"empty": None})
+        res_all_none = sess._request_json("/v3/trades/AAPL", {"empty": None})
         assert res_all_none["status"] == "OK"
         assert calls[-1] == "https://api.massive.com/v3/trades/AAPL"
 
-        res_cursor = sess.request_json(
+        res_cursor = sess._request_json(
             "https://api.massive.com/v3/trades/AAPL?cursor=abc",
             {"limit": 5},
         )
@@ -145,7 +145,7 @@ def test_session_request_json_url_building_and_param_filtering() -> None:
 
 
 def test_session_request_json_retry_backoff_and_error_handling() -> None:
-    """Verify request_json retries HTTP 429/5xx responses and raises on 403/400 errors."""
+    """Verify _request_json retries HTTP 429/5xx responses and raises on 403/400 errors."""
     calls: list[str] = []
     sleeps: list[float] = []
 
@@ -170,16 +170,16 @@ def test_session_request_json_retry_backoff_and_error_handling() -> None:
         ws_send_hook=lambda _u, _p: None,
         sleep_fn=sleeps.append,
     ) as sess:
-        res_flaky = sess.request_json("/flaky")
+        res_flaky = sess._request_json("/flaky")
         assert res_flaky["status"] == "OK"
         assert len(calls) == 3
         assert len(sleeps) == 2
 
         with pytest.raises(MassiveEntitlementError, match="Upgrade plan"):
-            sess.request_json("/entitlement_error")
+            sess._request_json("/entitlement_error")
 
         with pytest.raises(RuntimeError, match="HTTP 400"):
-            sess.request_json("/hard_error")
+            sess._request_json("/hard_error")
 
 
 def test_session_status_and_stats_diagnostic_tables(dh_exec_ctx: Any) -> None:
@@ -201,8 +201,8 @@ def test_session_status_and_stats_diagnostic_tables(dh_exec_ctx: Any) -> None:
 
         b_wl = sess.stocks.trades("GOOG")
         b_wl._watchlist_controller = object()  # type: ignore[assignment]
-        sess.register_builder(b_wl)
-        sess.register_builder(b_wl)  # idempotent registration
+        sess._register_builder(b_wl)
+        sess._register_builder(b_wl)  # idempotent registration
 
         status_rows = dh_to_pylist(sess.status())
         assert len(status_rows) == 1
@@ -230,8 +230,8 @@ def test_session_stop_stream_filtering_and_lifecycle(dh_exec_ctx: Any) -> None:
     ) as sess:
         b_trades = sess.stocks.trades("AAPL")
         b_quotes = sess.stocks.quotes(["MSFT", "NVDA"])
-        sess.register_builder(b_trades)
-        sess.register_builder(b_quotes)
+        sess._register_builder(b_trades)
+        sess._register_builder(b_quotes)
 
         assert sess.stop_stream("nonexistent") == 0
         assert sess.stop_stream(ws_channel="AM") == 0
@@ -241,10 +241,10 @@ def test_session_stop_stream_filtering_and_lifecycle(dh_exec_ctx: Any) -> None:
         assert sess.stop_stream(ws_channel="Q", symbols=["MSFT"]) == 1
         assert sess.stop_stream(b_trades) == 1
 
-        sess.register_builder(b_trades)
+        sess._register_builder(b_trades)
         assert sess.stop_stream(symbols="AAPL") == 1
 
-        sess.register_builder(b_trades)
+        sess._register_builder(b_trades)
         assert sess.stop_stream() == 1
 
 
@@ -257,10 +257,10 @@ def test_session_urllib3_pool_execution() -> None:
     sess._http_pool = MagicMock()
     sess._http_pool.request.return_value = mock_resp
 
-    data = sess.request_json("/v1/marketstatus/now")
+    data = sess._request_json("/v1/marketstatus/now")
     assert data == {"status": "OK", "results": []}
 
     mock_resp.data = b""
-    data_empty = sess.request_json("/v1/marketstatus/now")
+    data_empty = sess._request_json("/v1/marketstatus/now")
     assert data_empty == {}
     sess.close()

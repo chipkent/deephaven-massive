@@ -13,7 +13,7 @@ feed-specific fields, each dataset uses a **hybrid schema architecture**:
    ``UpdatedTimestamp``, or ``EffectiveDate``) are declared as explicit anchor
    columns with strict PyArrow types.
 2. Any remaining payload keys are dynamically flattened into PascalCase columns
-   at batch construction time by ``rows_to_arrow_table(..., spec=SchemaSpec(..., dynamic_columns=True))``.
+   at batch construction time by ``rows_to_record_batch(..., spec=SchemaSpec(..., allow_dynamic_columns=True))``.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 
 def _hybrid_partner_normalizer(
-    anchor_Extractors: Mapping[str, tuple[str, ...]],
+    anchor_extractors: Mapping[str, tuple[str, ...]],
 ) -> Any:
     """Build a row normalizer that extracts anchor keys and flattens remaining fields into PascalCase.
 
@@ -45,22 +45,22 @@ def _hybrid_partner_normalizer(
     anchor column from its prioritized list of candidate source keys (coercing
     ``Symbol`` via ``SymbolNormalizer`` and date/timestamp anchors via
     ``arrow_bridge``), and flattens nested dictionaries into PascalCase keys so
-    ``rows_to_arrow_table`` can infer and append dynamic columns when
-    ``SchemaSpec.dynamic_columns`` is ``True``.
+    ``rows_to_record_batch`` can infer and append dynamic columns when
+    ``SchemaSpec.allow_dynamic_columns`` is ``True``.
 
     Args:
-        anchor_Extractors: Mapping from target PascalCase anchor column name
+        anchor_extractors: Mapping from target PascalCase anchor column name
             (e.g., ``"Symbol"``, ``"Date"``, ``"PublishedTimestamp"``) to a tuple of
             candidate source dictionary keys in priority order.
 
     Returns:
         Callable[[Mapping[str, Any], SymbolNormalizer | None], dict[str, Any]]:
-        A ``RowNormalizer`` function compatible with ``rows_to_arrow_table``.
+        A ``RowNormalizer`` function compatible with ``rows_to_record_batch``.
     """
 
     def _norm(row: Mapping[str, Any], norm: SymbolNormalizer | None = None) -> dict[str, Any]:
         flat = flatten_dict(row)
-        for col_name, candidate_keys in anchor_Extractors.items():
+        for col_name, candidate_keys in anchor_extractors.items():
             if col_name == "Symbol":
                 flat["Symbol"] = _norm_symbol(row, norm, *candidate_keys)
             else:

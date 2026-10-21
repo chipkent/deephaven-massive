@@ -45,7 +45,7 @@ def test_flat_files_date_and_stream_helpers() -> None:
 
 
 def test_flat_files_infer_schema_and_dataset_for(mock_session: Any) -> None:
-    """Verify _infer_schema_and_domain and dataset_for map S3 dataset paths to schemas and domains."""
+    """Verify _infer_schema_and_domain and _dataset_for map S3 dataset paths to schemas and domains."""
     assert _infer_schema_and_domain("us_stocks_sip/trades_v1", None, None) == (
         TRADES_SCHEMA,
         "stocks",
@@ -68,9 +68,9 @@ def test_flat_files_infer_schema_and_dataset_for(mock_session: Any) -> None:
     )
 
     sess = mock_session()
-    assert sess.flat_files.dataset_for("stocks", "trades_v1") == "us_stocks_sip/trades_v1"
+    assert sess.flat_files._dataset_for("stocks", "trades_v1") == "us_stocks_sip/trades_v1"
     with pytest.raises(ValueError, match="Unsupported S3 flat-file domain"):
-        sess.flat_files.dataset_for("unknown_domain", "trades_v1")
+        sess.flat_files._dataset_for("unknown_domain", "trades_v1")
 
 
 def test_flat_files_load_gzip_uncompressed_and_symbol_pushdown(

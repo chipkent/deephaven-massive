@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from deephaven_massive.domains.base import (
     BaseDomainClient,
-    format_date_param,
-    normalize_filter_params,
+    _format_date_param,
+    _normalize_filter_params,
 )
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
@@ -22,7 +22,7 @@ from deephaven_massive.schemas.market import (
     FUTURES_SNAPSHOT_SCHEMA,
     QUOTES_SCHEMA,
     TRADES_SCHEMA,
-    compute_bar_span_ns,
+    _compute_bar_span_ns,
 )
 from deephaven_massive.schemas.reference import (
     EXCHANGES_SCHEMA,
@@ -69,7 +69,7 @@ class FuturesClient(BaseDomainClient):
         params: dict[str, Any] = {}
         if symbols and "*" not in symbols:
             params["ticker.any_of"] = ",".join(symbols)
-        return self.fetch_rest_rows("/futures/vX/snapshot", params, extra_fields=extra_fields)
+        return self._fetch_rest_rows("/futures/vX/snapshot", params, extra_fields=extra_fields)
 
     def trades(
         self,
@@ -99,15 +99,15 @@ class FuturesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder producing a table matching
             `TRADES_SCHEMA`.
         """
-        ws_url = self.session.config.resolve_ws_url("futures", feed_override=feed, venue=venue)
+        ws_url = self.session.config._resolve_ws_url("futures", feed_override=feed, venue=venue)
 
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             return f"/futures/vX/trades/{sym}", {
-                "timestamp.gte": format_date_param(start),
-                "timestamp.lte": format_date_param(end),
+                "timestamp.gte": _format_date_param(start),
+                "timestamp.lte": _format_date_param(end),
             }
 
-        return self.build_feed(
+        return self._build_feed(
             name=f"futures_trades_{venue.lower()}",
             schema_spec=TRADES_SCHEMA,
             ws_url=ws_url,
@@ -115,9 +115,9 @@ class FuturesClient(BaseDomainClient):
             symbols=contracts,
             symbol_col=symbol_col,
             seed_fn=self._fetch_futures_snapshots,
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(syms, since, _rest_path),
+            seed_rows_fn=lambda syms, since: self._fetch_seed_rows(syms, since, _rest_path),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": (
-                self.fetch_multi_symbol_historical(
+                self._fetch_multi_symbol_historical(
                     contracts,
                     TRADES_SCHEMA,
                     "us_futures/trades_v1",
@@ -158,15 +158,15 @@ class FuturesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder producing a table matching
             `QUOTES_SCHEMA`.
         """
-        ws_url = self.session.config.resolve_ws_url("futures", feed_override=feed, venue=venue)
+        ws_url = self.session.config._resolve_ws_url("futures", feed_override=feed, venue=venue)
 
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             return f"/futures/vX/quotes/{sym}", {
-                "timestamp.gte": format_date_param(start),
-                "timestamp.lte": format_date_param(end),
+                "timestamp.gte": _format_date_param(start),
+                "timestamp.lte": _format_date_param(end),
             }
 
-        return self.build_feed(
+        return self._build_feed(
             name=f"futures_quotes_{venue.lower()}",
             schema_spec=QUOTES_SCHEMA,
             ws_url=ws_url,
@@ -174,9 +174,9 @@ class FuturesClient(BaseDomainClient):
             symbols=contracts,
             symbol_col=symbol_col,
             seed_fn=self._fetch_futures_snapshots,
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(syms, since, _rest_path),
+            seed_rows_fn=lambda syms, since: self._fetch_seed_rows(syms, since, _rest_path),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": (
-                self.fetch_multi_symbol_historical(
+                self._fetch_multi_symbol_historical(
                     contracts,
                     QUOTES_SCHEMA,
                     "us_futures/quotes_v1",
@@ -226,7 +226,7 @@ class FuturesClient(BaseDomainClient):
         """
         clean_span = timespan.strip().lower()
         ws_channel = "A" if clean_span == "second" else "AM"
-        ws_url = self.session.config.resolve_ws_url("futures", feed_override=feed, venue=venue)
+        ws_url = self.session.config._resolve_ws_url("futures", feed_override=feed, venue=venue)
 
         s3_ds: str | None = None
         if multiplier == 1 and clean_span == "minute":
@@ -241,12 +241,12 @@ class FuturesClient(BaseDomainClient):
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             return f"/futures/vX/aggs/{sym}", {
                 "resolution": f"{multiplier}_{span_unit}",
-                "window_start.gte": format_date_param(start),
-                "window_start.lte": format_date_param(end),
+                "window_start.gte": _format_date_param(start),
+                "window_start.lte": _format_date_param(end),
             }
 
-        span_ns = compute_bar_span_ns(multiplier, span_unit)
-        return self.build_feed(
+        span_ns = _compute_bar_span_ns(multiplier, span_unit)
+        return self._build_feed(
             name=f"futures_bars_{venue.lower()}_{multiplier}_{clean_span}",
             schema_spec=BARS_SCHEMA,
             ws_url=ws_url,
@@ -256,14 +256,14 @@ class FuturesClient(BaseDomainClient):
             seed_fn=lambda syms: self._fetch_futures_snapshots(
                 syms, extra_fields={"_span_ns": span_ns}
             ),
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+            seed_rows_fn=lambda syms, since: self._fetch_seed_rows(
                 syms,
                 since,
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": (
-                self.fetch_multi_symbol_historical(
+                self._fetch_multi_symbol_historical(
                     contracts,
                     BARS_SCHEMA,
                     s3_ds,
@@ -288,8 +288,8 @@ class FuturesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `FUTURES_SNAPSHOT_SCHEMA`.
         """
-        canon = self.canonical_symbols(contracts) if contracts is not None else None
-        return self.build_feed(
+        canon = self._canonical_symbols(contracts) if contracts is not None else None
+        return self._build_feed(
             name="futures_snapshots",
             schema_spec=FUTURES_SNAPSHOT_SCHEMA,
             symbols=contracts,
@@ -319,17 +319,17 @@ class FuturesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `FUTURES_CONTRACTS_SCHEMA`.
         """
-        params = normalize_filter_params(
+        params = _normalize_filter_params(
             {
                 "product_code": product_code.strip().upper() if product_code else None,
                 "active": str(active).lower(),
             },
             filters,
         )
-        return self.build_feed(
+        return self._build_feed(
             name="futures_contracts",
             schema_spec=FUTURES_CONTRACTS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/futures/vX/contracts", params),
+            snapshot_fn=lambda: self._fetch_rest_rows("/futures/vX/contracts", params),
         )
 
     def products(self, *, venue: str | None = None, **filters: Any) -> FeedBuilder:
@@ -344,14 +344,14 @@ class FuturesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `FUTURES_PRODUCTS_SCHEMA`.
         """
-        params = normalize_filter_params(
+        params = _normalize_filter_params(
             {"market_sector": venue.upper() if venue else None},
             filters,
         )
-        return self.build_feed(
+        return self._build_feed(
             name="futures_products",
             schema_spec=FUTURES_PRODUCTS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/futures/vX/products", params),
+            snapshot_fn=lambda: self._fetch_rest_rows("/futures/vX/products", params),
         )
 
     def schedules(self, product_code: str | None = None, **filters: Any) -> FeedBuilder:
@@ -365,14 +365,14 @@ class FuturesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `FUTURES_SCHEDULES_SCHEMA`.
         """
-        params = normalize_filter_params(
+        params = _normalize_filter_params(
             {"product_code": product_code.strip().upper() if product_code else None},
             filters,
         )
-        return self.build_feed(
+        return self._build_feed(
             name="futures_schedules",
             schema_spec=FUTURES_SCHEDULES_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/futures/vX/schedules", params),
+            snapshot_fn=lambda: self._fetch_rest_rows("/futures/vX/schedules", params),
         )
 
     def exchanges(self) -> FeedBuilder:
@@ -382,10 +382,10 @@ class FuturesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `EXCHANGES_SCHEMA`.
         """
-        return self.build_feed(
+        return self._build_feed(
             name="futures_exchanges",
             schema_spec=EXCHANGES_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/futures/vX/exchanges"),
+            snapshot_fn=lambda: self._fetch_rest_rows("/futures/vX/exchanges"),
         )
 
     def market_status(self) -> FeedBuilder:
@@ -395,8 +395,8 @@ class FuturesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `MARKET_STATUS_SCHEMA`.
         """
-        return self.build_feed(
+        return self._build_feed(
             name="futures_market_status",
             schema_spec=MARKET_STATUS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/futures/vX/market-status"),
+            snapshot_fn=lambda: self._fetch_rest_rows("/futures/vX/market-status"),
         )

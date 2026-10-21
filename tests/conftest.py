@@ -12,7 +12,7 @@ from typing import Any, BinaryIO
 
 import pytest
 
-from deephaven_massive.session import MassiveSession, ensure_deephaven_server
+from deephaven_massive.session import MassiveSession, _ensure_deephaven_server
 
 _EXIT_STATUS: int = 0
 
@@ -47,7 +47,7 @@ def dh_exec_ctx() -> Any:
     Returns:
         The systemic Deephaven ExecutionContext bound to the embedded JVM server.
     """
-    ctx = ensure_deephaven_server(
+    ctx = _ensure_deephaven_server(
         auto_start=True,
         port=10099,
         jvm_args=[

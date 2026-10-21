@@ -20,7 +20,7 @@ from deephaven_massive.config import MassiveConfig, MassiveEntitlementError
 if TYPE_CHECKING:
     from deephaven_massive.engine.publisher import MicroBatchPublisher
 
-MAX_OPTION_CONTRACTS = 1000
+_MAX_OPTION_CONTRACTS = 1000
 
 
 def _default_ws_connector(ws_url: str) -> Any:
@@ -274,7 +274,7 @@ class WebSocketMultiplexer:
 
         Raises:
             ValueError: If subscribing on an `/options` endpoint would exceed the
-                1,000-contract limit (`MAX_OPTION_CONTRACTS`).
+                1,000-contract limit (`_MAX_OPTION_CONTRACTS`).
         """
         topic_list = [t.strip() for t in topics if t and t.strip()]
         if not topic_list:
@@ -300,9 +300,9 @@ class WebSocketMultiplexer:
                     t.split(".", 1)[1] for t in topic_list if "." in t and not t.endswith("*")
                 }
                 total_contracts = len(active_contracts | new_contracts)
-                if total_contracts > MAX_OPTION_CONTRACTS:
+                if total_contracts > _MAX_OPTION_CONTRACTS:
                     raise ValueError(
-                        f"Options WebSocket connection '{ws_url}' exceeds the {MAX_OPTION_CONTRACTS}-contract "
+                        f"Options WebSocket connection '{ws_url}' exceeds the {_MAX_OPTION_CONTRACTS}-contract "
                         f"subscription limit ({total_contracts} requested). Use a wildcard ('*') or filter contracts."
                     )
 

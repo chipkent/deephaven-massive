@@ -627,3 +627,5 @@ class PartnersClient:
         self.etf_profiles = self.etf_global.profiles
         self.etf_taxonomies = self.etf_global.taxonomies
         self.tmx_corporate_events = self.tmx.corporate_events
+        self.fable_eu_merchant_aggregates = self.fable.eu_merchant_aggregates
+        self.fable_eu_merchant_hierarchy = self.fable.eu_merchant_hierarchy

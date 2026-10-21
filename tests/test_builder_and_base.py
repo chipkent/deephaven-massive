@@ -11,9 +11,9 @@ import pytest
 
 from deephaven_massive.domains.base import (
     BaseDomainClient,
-    extract_rows_from_payload,
-    format_date_param,
-    normalize_filter_params,
+    _extract_rows_from_payload,
+    _format_date_param,
+    _normalize_filter_params,
 )
 from deephaven_massive.engine.arrow_bridge import (
     UTC_NS_TYPE,
@@ -29,29 +29,29 @@ from tests.conftest import dh_to_pylist
 
 
 def test_format_date_param_and_extract_rows_from_payload() -> None:
-    """Verify format_date_param and extract_rows_from_payload normalize all Massive REST envelope shapes."""
-    assert format_date_param(None) is None
-    assert format_date_param(date(2025, 1, 2)) == "2025-01-02"
-    dt_str = format_date_param(datetime(2025, 1, 2, 12, 0, tzinfo=timezone.utc))
+    """Verify _format_date_param and _extract_rows_from_payload normalize all Massive REST envelope shapes."""
+    assert _format_date_param(None) is None
+    assert _format_date_param(date(2025, 1, 2)) == "2025-01-02"
+    dt_str = _format_date_param(datetime(2025, 1, 2, 12, 0, tzinfo=timezone.utc))
     assert dt_str is not None and dt_str.startswith("2025-01-02T12:00:00")
-    assert format_date_param(1700000000000) == "1700000000000"
+    assert _format_date_param(1700000000000) == "1700000000000"
 
-    assert extract_rows_from_payload(None) == []
-    assert extract_rows_from_payload("not-a-dict") == []
-    assert extract_rows_from_payload([{"a": 1}, "not-a-dict"]) == [{"a": 1}]
-    assert extract_rows_from_payload({"results": 123}) == []
-    assert extract_rows_from_payload({"results": {"values": [{"value": 50.0}]}}) == [
+    assert _extract_rows_from_payload(None) == []
+    assert _extract_rows_from_payload("not-a-dict") == []
+    assert _extract_rows_from_payload([{"a": 1}, "not-a-dict"]) == [{"a": 1}]
+    assert _extract_rows_from_payload({"results": 123}) == []
+    assert _extract_rows_from_payload({"results": {"values": [{"value": 50.0}]}}) == [
         {"value": 50.0}
     ]
-    assert extract_rows_from_payload({"results": {"ticker": "AAPL"}}) == [{"ticker": "AAPL"}]
-    assert extract_rows_from_payload({"tickers": [{"ticker": "MSFT"}]}) == [{"ticker": "MSFT"}]
-    assert extract_rows_from_payload({"last": {"ask": 1.1}, "symbol": "EUR/USD"}) == [
+    assert _extract_rows_from_payload({"results": {"ticker": "AAPL"}}) == [{"ticker": "AAPL"}]
+    assert _extract_rows_from_payload({"tickers": [{"ticker": "MSFT"}]}) == [{"ticker": "MSFT"}]
+    assert _extract_rows_from_payload({"last": {"ask": 1.1}, "symbol": "EUR/USD"}) == [
         {"ask": 1.1, "symbol": "EUR/USD"}
     ]
-    assert extract_rows_from_payload({"last": {"ask": 1.1}}) == [{"ask": 1.1}]
-    assert extract_rows_from_payload({"ticker": {"ticker": "NVDA"}}) == [{"ticker": "NVDA"}]
-    assert extract_rows_from_payload({"status": "OK"}) == []
-    assert extract_rows_from_payload(
+    assert _extract_rows_from_payload({"last": {"ask": 1.1}}) == [{"ask": 1.1}]
+    assert _extract_rows_from_payload({"ticker": {"ticker": "NVDA"}}) == [{"ticker": "NVDA"}]
+    assert _extract_rows_from_payload({"status": "OK"}) == []
+    assert _extract_rows_from_payload(
         {"status": "open", "serverTime": "2025-01-02T14:30:00Z"},
         inject_symbol="AAPL",
         extra_fields={"Tag": "v1"},
@@ -66,8 +66,8 @@ def test_format_date_param_and_extract_rows_from_payload() -> None:
 
 
 def test_normalize_filter_params_operators_and_tickers() -> None:
-    """Verify normalize_filter_params translates operator suffixes and multi-ticker filters."""
-    assert normalize_filter_params(
+    """Verify _normalize_filter_params translates operator suffixes and multi-ticker filters."""
+    assert _normalize_filter_params(
         {"d": date(2025, 1, 2), "keep": 1, "skip": None},
         {
             "date_gte": date(2025, 1, 1),
@@ -87,21 +87,21 @@ def test_normalize_filter_params_operators_and_tickers() -> None:
         "tags.any_of": "tech,ai",
         "plain": "x",
     }
-    assert normalize_filter_params(
+    assert _normalize_filter_params(
         None,
         None,
         tickers=["aapl", "msft"],
         ticker_param="ticker",
         normalizer=SymbolNormalizer("stocks"),
     ) == {"ticker.any_of": "AAPL,MSFT"}
-    assert normalize_filter_params(
+    assert _normalize_filter_params(
         None,
         None,
         tickers=["spy", "qqq"],
         ticker_param="composite_ticker",
     ) == {"composite_ticker": "SPY,QQQ"}
     assert (
-        normalize_filter_params(
+        _normalize_filter_params(
             None,
             None,
             symbol="aapl",
@@ -114,7 +114,7 @@ def test_normalize_filter_params_operators_and_tickers() -> None:
 def test_base_domain_client_rest_pagination_and_chunked_tables(
     mock_session: Any,
 ) -> None:
-    """Verify fetch_rest_rows and fetch_chunked_table follow next_url cursors and enforce row limits."""
+    """Verify _fetch_rest_rows and _fetch_chunked_table follow next_url cursors and enforce row limits."""
     pages = [
         {
             "results": [
@@ -143,19 +143,19 @@ def test_base_domain_client_rest_pagination_and_chunked_tables(
     sess = mock_session(http_handler=_http)
     base = BaseDomainClient(sess, domain=None)
 
-    assert base.canonical_symbols(None) == ["*"]
-    assert base.canonical_symbols("aapl") == ["AAPL"]
-    assert base.canonical_symbols(["aapl", "msft"]) == ["AAPL", "MSFT"]
+    assert base._canonical_symbols(None) == ["*"]
+    assert base._canonical_symbols("aapl") == ["AAPL"]
+    assert base._canonical_symbols(["aapl", "msft"]) == ["AAPL", "MSFT"]
 
-    rows = base.fetch_rest_rows("/v3/trades/AAPL", {"foo": "bar"}, limit=3)
+    rows = base._fetch_rest_rows("/v3/trades/AAPL", {"foo": "bar"}, limit=3)
     assert len(rows) == 3
 
     call_idx = 0
-    all_rows = base.fetch_rest_rows("/v3/trades/AAPL")
+    all_rows = base._fetch_rest_rows("/v3/trades/AAPL")
     assert len(all_rows) == 4
 
     call_idx = 0
-    tbl = base.fetch_chunked_table(
+    tbl = base._fetch_chunked_table(
         "/v3/trades/AAPL",
         TRADES_SCHEMA,
         {"foo": "bar"},
@@ -165,14 +165,14 @@ def test_base_domain_client_rest_pagination_and_chunked_tables(
     assert len(dh_to_pylist(tbl)) == 3
 
     call_idx = 0
-    tbl_all = base.fetch_chunked_table("/v3/trades/AAPL", TRADES_SCHEMA, chunk_size=2)
+    tbl_all = base._fetch_chunked_table("/v3/trades/AAPL", TRADES_SCHEMA, chunk_size=2)
     assert len(dh_to_pylist(tbl_all)) == 4
 
 
 def test_base_domain_client_multi_symbol_historical_limit_and_parallel(
     mock_session: Any,
 ) -> None:
-    """Verify fetch_multi_symbol_historical enforces global limits sequentially and parallelizes unlimited queries."""
+    """Verify _fetch_multi_symbol_historical enforces global limits sequentially and parallelizes unlimited queries."""
     pages = [
         {
             "results": [
@@ -193,7 +193,7 @@ def test_base_domain_client_multi_symbol_historical_limit_and_parallel(
     sess = mock_session(http_handler=_http)
     base = BaseDomainClient(sess, domain="stocks")
 
-    tbl_multi_exact = base.fetch_multi_symbol_historical(
+    tbl_multi_exact = base._fetch_multi_symbol_historical(
         ["AAPL", "MSFT", "NVDA"],
         TRADES_SCHEMA,
         None,
@@ -206,7 +206,7 @@ def test_base_domain_client_multi_symbol_historical_limit_and_parallel(
     assert call_idx == 1
 
     call_idx = 0
-    tbl_multi_large_limit = base.fetch_multi_symbol_historical(
+    tbl_multi_large_limit = base._fetch_multi_symbol_historical(
         ["AAPL", "MSFT"],
         TRADES_SCHEMA,
         None,
@@ -219,7 +219,7 @@ def test_base_domain_client_multi_symbol_historical_limit_and_parallel(
     assert call_idx == 2
 
     call_idx = 0
-    tbl_multi_parallel = base.fetch_multi_symbol_historical(
+    tbl_multi_parallel = base._fetch_multi_symbol_historical(
         ["AAPL", "MSFT"],
         TRADES_SCHEMA,
         None,
@@ -233,26 +233,27 @@ def test_base_domain_client_multi_symbol_historical_limit_and_parallel(
 
 
 def test_base_domain_client_should_use_flat_files_routing(mock_session: Any) -> None:
-    """Verify should_use_flat_files selects REST or S3 based on source mode, threshold, adjusted bars, and credentials."""
+    """Verify _should_use_flat_files selects REST or S3 based on source mode, threshold, adjusted bars, and credentials."""
     sess = mock_session()
     base = BaseDomainClient(sess, domain="stocks")
 
     with pytest.raises(ValueError, match="Unsupported historical source"):
-        base.should_use_flat_files("invalid", ["AAPL"], "us_stocks_sip/trades_v1")
+        base._should_use_flat_files("invalid", ["AAPL"], "us_stocks_sip/trades_v1")
 
-    assert base.should_use_flat_files("rest", ["*"], "us_stocks_sip/trades_v1") is False
+    assert base._should_use_flat_files("rest", ["*"], "us_stocks_sip/trades_v1") is False
 
     with pytest.raises(ValueError, match="not supported for this feed"):
-        base.should_use_flat_files("flat_files", ["AAPL"], None)
+        base._should_use_flat_files("flat_files", ["AAPL"], None)
 
-    assert base.should_use_flat_files("flat_files", ["AAPL"], "us_stocks_sip/trades_v1") is True
-    assert base.should_use_flat_files("auto", ["*"], "us_stocks_sip/trades_v1") is True
+    assert base._should_use_flat_files("flat_files", ["AAPL"], "us_stocks_sip/trades_v1") is True
+    assert base._should_use_flat_files("s3", ["AAPL"], "us_stocks_sip/trades_v1") is True
+    assert base._should_use_flat_files("auto", ["*"], "us_stocks_sip/trades_v1") is True
     assert (
-        base.should_use_flat_files("auto", ["AAPL", "MSFT", "NVDA"], "us_stocks_sip/trades_v1")
+        base._should_use_flat_files("auto", ["AAPL", "MSFT", "NVDA"], "us_stocks_sip/trades_v1")
         is True
     )
     assert (
-        base.should_use_flat_files(
+        base._should_use_flat_files(
             "auto",
             ["AAPL", "MSFT", "NVDA"],
             "us_stocks_sip/day_aggs_v1",
@@ -260,14 +261,14 @@ def test_base_domain_client_should_use_flat_files_routing(mock_session: Any) -> 
         )
         is False
     )
-    assert base.should_use_flat_files("auto", ["AAPL"], "us_stocks_sip/trades_v1") is False
+    assert base._should_use_flat_files("auto", ["AAPL"], "us_stocks_sip/trades_v1") is False
 
     sess_no_s3 = mock_session(s3_access_key_id=None, s3_secret_access_key=None)
     base_no_s3 = BaseDomainClient(sess_no_s3, domain="stocks")
-    assert base_no_s3.canonical_symbols("aapl") == ["AAPL"]
-    assert base_no_s3.should_use_flat_files("auto", ["*"], "us_stocks_sip/trades_v1") is False
+    assert base_no_s3._canonical_symbols("aapl") == ["AAPL"]
+    assert base_no_s3._should_use_flat_files("auto", ["*"], "us_stocks_sip/trades_v1") is False
     with pytest.raises(ValueError, match="S3 credentials"):
-        base_no_s3.should_use_flat_files("flat_files", ["AAPL"], "us_stocks_sip/trades_v1")
+        base_no_s3._should_use_flat_files("flat_files", ["AAPL"], "us_stocks_sip/trades_v1")
 
 
 def test_feed_builder_capability_guards_and_validation(dh_exec_ctx: Any) -> None:

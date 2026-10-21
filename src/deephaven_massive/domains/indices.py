@@ -15,9 +15,9 @@ from typing import TYPE_CHECKING, Any
 
 from deephaven_massive.domains.base import (
     BaseDomainClient,
-    compute_bar_span_ns,
-    format_date_param,
-    normalize_filter_params,
+    _compute_bar_span_ns,
+    _format_date_param,
+    _normalize_filter_params,
 )
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
@@ -72,7 +72,7 @@ class IndicesClient(BaseDomainClient):
                 self.symbol_normalizer.rest_ticker(s)  # type: ignore[union-attr]
                 for s in symbols
             )
-        return self.fetch_rest_rows("/v3/snapshot/indices", params, extra_fields=extra_fields)
+        return self._fetch_rest_rows("/v3/snapshot/indices", params, extra_fields=extra_fields)
 
     def values(
         self,
@@ -99,12 +99,16 @@ class IndicesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder producing a table matching
             `INDEX_VALUES_SCHEMA`.
         """
-        ws_url = self.session.config.resolve_ws_url("indices", feed_override=feed)
+        ws_url = self.session.config._resolve_ws_url("indices", feed_override=feed)
 
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
-            return "/v3/snapshot/indices", {"ticker.any_of": sym}
+            return "/v3/snapshot/indices", {
+                "ticker.any_of": sym,
+                "timestamp.gte": _format_date_param(start),
+                "timestamp.lte": _format_date_param(end),
+            }
 
-        return self.build_feed(
+        return self._build_feed(
             name="indices_values",
             schema_spec=INDEX_VALUES_SCHEMA,
             ws_url=ws_url,
@@ -112,9 +116,9 @@ class IndicesClient(BaseDomainClient):
             symbols=symbols,
             symbol_col=symbol_col,
             seed_fn=self._fetch_indices_snapshots,
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(syms, since, _rest_path),
+            seed_rows_fn=lambda syms, since: self._fetch_seed_rows(syms, since, _rest_path),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": (
-                self.fetch_multi_symbol_historical(
+                self._fetch_multi_symbol_historical(
                     symbols,
                     INDEX_VALUES_SCHEMA,
                     "us_indices/values_v1",
@@ -162,7 +166,7 @@ class IndicesClient(BaseDomainClient):
         """
         clean_span = timespan.strip().lower()
         ws_channel = "A" if clean_span == "second" else "AM"
-        ws_url = self.session.config.resolve_ws_url("indices", feed_override=feed)
+        ws_url = self.session.config._resolve_ws_url("indices", feed_override=feed)
 
         s3_ds: str | None = None
         if multiplier == 1 and clean_span == "minute":
@@ -171,15 +175,15 @@ class IndicesClient(BaseDomainClient):
             s3_ds = "us_indices/day_aggs_v1"
 
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
-            s_str = format_date_param(start) or "1970-01-01"
-            e_str = format_date_param(end) or s_str
+            s_str = _format_date_param(start) or "1970-01-01"
+            e_str = _format_date_param(end) or s_str
             return (
                 f"/v2/aggs/ticker/{sym}/range/{multiplier}/{clean_span}/{s_str}/{e_str}",
                 {},
             )
 
-        span_ns = compute_bar_span_ns(multiplier, clean_span)
-        return self.build_feed(
+        span_ns = _compute_bar_span_ns(multiplier, clean_span)
+        return self._build_feed(
             name=f"indices_bars_{multiplier}_{clean_span}",
             schema_spec=BARS_SCHEMA,
             ws_url=ws_url,
@@ -189,14 +193,14 @@ class IndicesClient(BaseDomainClient):
             seed_fn=lambda syms: self._fetch_indices_snapshots(
                 syms, extra_fields={"_span_ns": span_ns}
             ),
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+            seed_rows_fn=lambda syms, since: self._fetch_seed_rows(
                 syms,
                 since,
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": (
-                self.fetch_multi_symbol_historical(
+                self._fetch_multi_symbol_historical(
                     symbols,
                     BARS_SCHEMA,
                     s3_ds,
@@ -220,8 +224,8 @@ class IndicesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `INDEX_VALUES_SCHEMA`.
         """
-        canon = self.canonical_symbols(symbols) if symbols is not None else None
-        return self.build_feed(
+        canon = self._canonical_symbols(symbols) if symbols is not None else None
+        return self._build_feed(
             name="indices_snapshots",
             schema_spec=INDEX_VALUES_SCHEMA,
             symbols=symbols,
@@ -239,11 +243,11 @@ class IndicesClient(BaseDomainClient):
             `.poll()` with `BARS_SCHEMA`.
         """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
-        return self.build_feed(
+        return self._build_feed(
             name=f"indices_prev_close_{canon}",
             schema_spec=BARS_SCHEMA,
             symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 f"/v2/aggs/ticker/{canon}/prev", inject_symbol=canon
             ),
         )
@@ -262,12 +266,12 @@ class IndicesClient(BaseDomainClient):
             `.poll()` with `DAILY_SUMMARY_SCHEMA`.
         """
         canon = self.symbol_normalizer.canonical(symbol)  # type: ignore[union-attr]
-        d_str = format_date_param(target_date)
-        return self.build_feed(
+        d_str = _format_date_param(target_date)
+        return self._build_feed(
             name=f"indices_open_close_{canon}",
             schema_spec=DAILY_SUMMARY_SCHEMA,
             symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 f"/v1/open-close/{canon}/{d_str}", inject_symbol=canon
             ),
         )
@@ -292,7 +296,7 @@ class IndicesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `TICKERS_SCHEMA`.
         """
-        params = normalize_filter_params(
+        params = _normalize_filter_params(
             {
                 "market": "indices",
                 "active": str(active).lower(),
@@ -300,10 +304,10 @@ class IndicesClient(BaseDomainClient):
             },
             filters,
         )
-        return self.build_feed(
+        return self._build_feed(
             name="indices_tickers",
             schema_spec=TICKERS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/v3/reference/tickers", params),
+            snapshot_fn=lambda: self._fetch_rest_rows("/v3/reference/tickers", params),
         )
 
     def market_holidays(self) -> FeedBuilder:
@@ -313,10 +317,10 @@ class IndicesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `HOLIDAYS_SCHEMA`.
         """
-        return self.build_feed(
+        return self._build_feed(
             name="indices_market_holidays",
             schema_spec=HOLIDAYS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/v1/marketstatus/upcoming"),
+            snapshot_fn=lambda: self._fetch_rest_rows("/v1/marketstatus/upcoming"),
         )
 
     holidays = market_holidays
@@ -328,10 +332,10 @@ class IndicesClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `MARKET_STATUS_SCHEMA`.
         """
-        return self.build_feed(
+        return self._build_feed(
             name="indices_market_status",
             schema_spec=MARKET_STATUS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/v1/marketstatus/now"),
+            snapshot_fn=lambda: self._fetch_rest_rows("/v1/marketstatus/now"),
         )
 
     def sma(

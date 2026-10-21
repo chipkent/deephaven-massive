@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from deephaven_massive.engine.publisher import MicroBatchPublisher
 
 
-def ensure_deephaven_server(
+def _ensure_deephaven_server(
     *,
     auto_start: bool = True,
     port: int = 10000,
@@ -189,13 +189,13 @@ class MassiveSession:
             flat_file_ticker_threshold=flat_file_ticker_threshold,
             auto_start_server=auto_start_server,
         )
-        self.auto_flush = auto_flush
+        self._auto_flush = auto_flush
         self._http_handler = http_handler
         self._sleep_fn = sleep_fn
         self._http_pool = urllib3.PoolManager()
         self._lock = threading.RLock()
 
-        self.exec_ctx = ensure_deephaven_server(
+        self.exec_ctx = _ensure_deephaven_server(
             auto_start=self.config.auto_start_server,
             port=server_port,
         )
@@ -217,7 +217,7 @@ class MassiveSession:
         self.partners = PartnersClient(self)
         self.flat_files = FlatFilesClient(self, s3_opener=s3_opener)
 
-    def register_builder(self, builder: FeedBuilder) -> None:
+    def _register_builder(self, builder: FeedBuilder) -> None:
         """Track an active `FeedBuilder` so its background resources are cleaned up on `close`.
 
         Args:
@@ -263,7 +263,7 @@ class MassiveSession:
                 if ws_channel is not None and builder.ws_channel != ws_channel:
                     continue
                 if symbols is not None:
-                    target_syms = set(builder.normalize_symbols(symbols))
+                    target_syms = set(builder._normalize_symbols(symbols))
                     if not (set(builder._canonical_symbol_list()) & target_syms):
                         continue
                 to_stop.append(builder)
@@ -376,7 +376,7 @@ class MassiveSession:
         parsed = json.loads(raw_text) if raw_text.strip() else {}
         return int(resp.status), parsed
 
-    def request_json(
+    def _request_json(
         self,
         path_or_url: str,
         params: Mapping[str, Any] | None = None,

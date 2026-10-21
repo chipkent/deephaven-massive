@@ -32,7 +32,7 @@ from deephaven_massive.schemas.market import (
     INDEX_VALUES_SCHEMA,
     QUOTES_SCHEMA,
     TRADES_SCHEMA,
-    compute_bar_span_ns,
+    _compute_bar_span_ns,
 )
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive.session import MassiveSession
 
-DATASET_PREFIX_BY_DOMAIN: dict[str, str] = {
+_DATASET_PREFIX_BY_DOMAIN: dict[str, str] = {
     "stocks": "us_stocks_sip",
     "options": "us_options_opra",
     "futures": "us_futures",
@@ -119,7 +119,7 @@ def _infer_schema_and_domain(
     """
     inferred_domain = domain
     if inferred_domain is None:
-        for dom, prefix in DATASET_PREFIX_BY_DOMAIN.items():
+        for dom, prefix in _DATASET_PREFIX_BY_DOMAIN.items():
             if dataset.startswith(prefix):
                 inferred_domain = dom
                 break
@@ -231,7 +231,7 @@ class FlatFilesClient:
         return resp["Body"]
 
     @staticmethod
-    def build_s3_key(dataset: str, target_date: date) -> str:
+    def _build_s3_key(dataset: str, target_date: date) -> str:
         """Build the canonical Massive S3 flat-file object key for a dataset and date.
 
         Args:
@@ -256,7 +256,7 @@ class FlatFilesClient:
         remaining_limit: int | None = None,
     ) -> list[pa.RecordBatch]:
         """Download and parse a single day's S3 `.csv.gz` flat file into normalized `RecordBatch` objects."""
-        key = self.build_s3_key(dataset, target_date)
+        key = self._build_s3_key(dataset, target_date)
         raw_stream = self._open_s3_object(self.session.config.s3_bucket, key)
         head = raw_stream.read(2)
         prep = _PrependReader(head, raw_stream)
@@ -386,9 +386,9 @@ class FlatFilesClient:
         bar_span_ns: int | None = None
         if resolved_schema.name == "Bars":
             bar_span_ns = (
-                compute_bar_span_ns(1, "day")
+                _compute_bar_span_ns(1, "day")
                 if ("day_aggs" in dataset or "session_aggs" in dataset)
-                else compute_bar_span_ns(1, "minute")
+                else _compute_bar_span_ns(1, "minute")
             )
 
         dates = _date_range(effective_start, effective_end, single_date=date)
@@ -434,7 +434,7 @@ class FlatFilesClient:
         pa_tbl = record_batches_to_arrow_table(batches, resolved_schema)
         return arrow_to_deephaven_table(pa_tbl, self.session.exec_ctx)
 
-    def dataset_for(self, domain: str, feed_kind: str) -> str:
+    def _dataset_for(self, domain: str, feed_kind: str) -> str:
         """Resolve the canonical S3 flat-file dataset path for a domain and feed kind.
 
         Args:
@@ -450,7 +450,7 @@ class FlatFilesClient:
         Raises:
             ValueError: If `domain` is not a supported S3 flat-file domain.
         """
-        prefix = DATASET_PREFIX_BY_DOMAIN.get(domain.strip().lower())
+        prefix = _DATASET_PREFIX_BY_DOMAIN.get(domain.strip().lower())
         if prefix is None:
             raise ValueError(f"Unsupported S3 flat-file domain '{domain}'.")
         return f"{prefix}/{feed_kind}"
@@ -465,7 +465,7 @@ class FlatFilesClient:
         **kwargs: Any,
     ) -> Table:
         kind = "day_aggs_v1" if timespan.strip().lower() == "day" else "minute_aggs_v1"
-        return self.load(self.dataset_for(domain, kind), start, end, domain=domain, **kwargs)
+        return self.load(self._dataset_for(domain, kind), start, end, domain=domain, **kwargs)
 
     def stocks_trades(self, start: Any = None, end: Any = None, **kwargs: Any) -> Table:
         """Load US Stocks SIP trades (`us_stocks_sip/trades_v1`) from S3 Flat Files.

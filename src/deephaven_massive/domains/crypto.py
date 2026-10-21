@@ -15,9 +15,9 @@ from typing import TYPE_CHECKING, Any
 
 from deephaven_massive.domains.base import (
     BaseDomainClient,
-    compute_bar_span_ns,
-    format_date_param,
-    normalize_filter_params,
+    _compute_bar_span_ns,
+    _format_date_param,
+    _normalize_filter_params,
 )
 from deephaven_massive.engine.builder import FeedBuilder
 from deephaven_massive.schemas.market import (
@@ -79,7 +79,7 @@ class CryptoClient(BaseDomainClient):
                 self.symbol_normalizer.rest_ticker(p)  # type: ignore[union-attr]
                 for p in pairs
             )
-        return self.fetch_rest_rows(
+        return self._fetch_rest_rows(
             "/v2/snapshot/locale/global/markets/crypto/tickers",
             params,
             extra_fields=extra_fields,
@@ -109,16 +109,16 @@ class CryptoClient(BaseDomainClient):
             FeedBuilder: Configured feed builder producing a table matching
             `TRADES_SCHEMA`.
         """
-        ws_url = self.session.config.resolve_ws_url("crypto", feed_override=feed)
+        ws_url = self.session.config._resolve_ws_url("crypto", feed_override=feed)
 
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             ticker = self.symbol_normalizer.rest_ticker(sym)  # type: ignore[union-attr]
             return f"/v3/trades/{ticker}", {
-                "timestamp.gte": format_date_param(start),
-                "timestamp.lte": format_date_param(end),
+                "timestamp.gte": _format_date_param(start),
+                "timestamp.lte": _format_date_param(end),
             }
 
-        return self.build_feed(
+        return self._build_feed(
             name="crypto_trades",
             schema_spec=TRADES_SCHEMA,
             ws_url=ws_url,
@@ -126,9 +126,9 @@ class CryptoClient(BaseDomainClient):
             symbols=pairs,
             symbol_col=symbol_col,
             seed_fn=self._fetch_crypto_snapshots,
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(syms, since, _rest_path),
+            seed_rows_fn=lambda syms, since: self._fetch_seed_rows(syms, since, _rest_path),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": (
-                self.fetch_multi_symbol_historical(
+                self._fetch_multi_symbol_historical(
                     pairs,
                     TRADES_SCHEMA,
                     "global_crypto/trades_v1",
@@ -162,8 +162,8 @@ class CryptoClient(BaseDomainClient):
             `.history(seed=True)`, `.ring(capacity, seed=True)`, and `.blink()`
             with `QUOTES_SCHEMA`.
         """
-        ws_url = self.session.config.resolve_ws_url("crypto", feed_override=feed)
-        return self.build_feed(
+        ws_url = self.session.config._resolve_ws_url("crypto", feed_override=feed)
+        return self._build_feed(
             name="crypto_quotes",
             schema_spec=QUOTES_SCHEMA,
             ws_url=ws_url,
@@ -208,7 +208,7 @@ class CryptoClient(BaseDomainClient):
         """
         clean_span = timespan.strip().lower()
         ws_channel = "XAS" if clean_span == "second" else "XA"
-        ws_url = self.session.config.resolve_ws_url("crypto", feed_override=feed)
+        ws_url = self.session.config._resolve_ws_url("crypto", feed_override=feed)
 
         s3_ds: str | None = None
         if multiplier == 1 and clean_span == "minute":
@@ -218,15 +218,15 @@ class CryptoClient(BaseDomainClient):
 
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             ticker = self.symbol_normalizer.rest_ticker(sym)  # type: ignore[union-attr]
-            s_str = format_date_param(start) or "1970-01-01"
-            e_str = format_date_param(end) or s_str
+            s_str = _format_date_param(start) or "1970-01-01"
+            e_str = _format_date_param(end) or s_str
             return (
                 f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{clean_span}/{s_str}/{e_str}",
                 {"adjusted": str(adjusted).lower()},
             )
 
-        span_ns = compute_bar_span_ns(multiplier, clean_span)
-        return self.build_feed(
+        span_ns = _compute_bar_span_ns(multiplier, clean_span)
+        return self._build_feed(
             name=f"crypto_bars_{multiplier}_{clean_span}",
             schema_spec=BARS_SCHEMA,
             ws_url=ws_url,
@@ -236,14 +236,14 @@ class CryptoClient(BaseDomainClient):
             seed_fn=lambda syms: self._fetch_crypto_snapshots(
                 syms, extra_fields={"_span_ns": span_ns}
             ),
-            seed_rows_fn=lambda syms, since: self.fetch_seed_rows(
+            seed_rows_fn=lambda syms, since: self._fetch_seed_rows(
                 syms,
                 since,
                 _rest_path,
                 extra_fields={"_span_ns": span_ns},
             ),
             historical_fn=lambda start=None, end=None, limit=None, source="auto": (
-                self.fetch_multi_symbol_historical(
+                self._fetch_multi_symbol_historical(
                     pairs,
                     BARS_SCHEMA,
                     s3_ds,
@@ -276,8 +276,8 @@ class CryptoClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.latest()`, `.history()`,
             `.ring()`, and `.blink()` with `FMV_SCHEMA`.
         """
-        ws_url = self.session.config.resolve_ws_url("crypto", feed_override=feed, is_fmv=True)
-        return self.build_feed(
+        ws_url = self.session.config._resolve_ws_url("crypto", feed_override=feed, is_fmv=True)
+        return self._build_feed(
             name="crypto_fmv",
             schema_spec=FMV_SCHEMA,
             ws_url=ws_url,
@@ -308,19 +308,19 @@ class CryptoClient(BaseDomainClient):
             ValueError: If `direction` is not `"gainers"` or `"losers"` when
                 evaluated.
         """
-        canon_syms = self.canonical_symbols(pairs) if pairs is not None else None
+        canon_syms = self._canonical_symbols(pairs) if pairs is not None else None
 
         def _fetch() -> list[dict[str, Any]]:
             if direction is not None:
                 clean_dir = direction.strip().lower()
                 if clean_dir not in ("gainers", "losers"):
                     raise ValueError("direction must be 'gainers' or 'losers'")
-                return self.fetch_rest_rows(
+                return self._fetch_rest_rows(
                     f"/v2/snapshot/locale/global/markets/crypto/{clean_dir}"
                 )
             return self._fetch_crypto_snapshots(canon_syms)
 
-        return self.build_feed(
+        return self._build_feed(
             name="crypto_snapshots",
             schema_spec=STOCK_SNAPSHOT_SCHEMA,
             symbols=pairs,
@@ -354,11 +354,11 @@ class CryptoClient(BaseDomainClient):
         pair = f"{from_currency}-{to_currency}" if to_currency is not None else from_currency
         canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
         fc, tc = canon.split("-")
-        return self.build_feed(
+        return self._build_feed(
             name=f"crypto_last_trade_{fc}_{tc}",
             schema_spec=TRADES_SCHEMA,
             symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 f"/v1/last/crypto/{fc}/{tc}", inject_symbol=canon
             ),
         )
@@ -376,11 +376,11 @@ class CryptoClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `DAILY_SUMMARY_SCHEMA`.
         """
-        d_str = format_date_param(target_date)
-        return self.build_feed(
+        d_str = _format_date_param(target_date)
+        return self._build_feed(
             name="crypto_daily_market_summary",
             schema_spec=DAILY_SUMMARY_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 f"/v2/aggs/grouped/locale/global/market/crypto/{d_str}",
                 {"adjusted": str(adjusted).lower()},
                 extra_fields={"Date": d_str},
@@ -400,11 +400,11 @@ class CryptoClient(BaseDomainClient):
         """
         canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
         ticker = self.symbol_normalizer.rest_ticker(canon)  # type: ignore[union-attr]
-        return self.build_feed(
+        return self._build_feed(
             name=f"crypto_prev_close_{canon}",
             schema_spec=BARS_SCHEMA,
             symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 f"/v2/aggs/ticker/{ticker}/prev",
                 {"adjusted": str(adjusted).lower()},
                 inject_symbol=canon,
@@ -433,12 +433,12 @@ class CryptoClient(BaseDomainClient):
         """
         canon = self.symbol_normalizer.canonical(pair)  # type: ignore[union-attr]
         base, quote = canon.split("-")
-        d_str = format_date_param(target_date)
-        return self.build_feed(
+        d_str = _format_date_param(target_date)
+        return self._build_feed(
             name=f"crypto_open_close_{canon}",
             schema_spec=DAILY_SUMMARY_SCHEMA,
             symbols=canon,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 f"/v1/open-close/crypto/{base}/{quote}/{d_str}",
                 {"adjusted": str(adjusted).lower()},
                 inject_symbol=canon,
@@ -465,7 +465,7 @@ class CryptoClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `TICKERS_SCHEMA`.
         """
-        params = normalize_filter_params(
+        params = _normalize_filter_params(
             {
                 "market": "crypto",
                 "active": str(active).lower(),
@@ -473,10 +473,10 @@ class CryptoClient(BaseDomainClient):
             },
             filters,
         )
-        return self.build_feed(
+        return self._build_feed(
             name="crypto_tickers",
             schema_spec=TICKERS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/v3/reference/tickers", params),
+            snapshot_fn=lambda: self._fetch_rest_rows("/v3/reference/tickers", params),
         )
 
     def conditions(self) -> FeedBuilder:
@@ -486,10 +486,10 @@ class CryptoClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `CONDITIONS_SCHEMA`.
         """
-        return self.build_feed(
+        return self._build_feed(
             name="crypto_conditions",
             schema_spec=CONDITIONS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 "/v3/reference/conditions", {"asset_class": "crypto"}
             ),
         )
@@ -501,10 +501,10 @@ class CryptoClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `EXCHANGES_SCHEMA`.
         """
-        return self.build_feed(
+        return self._build_feed(
             name="crypto_exchanges",
             schema_spec=EXCHANGES_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows(
+            snapshot_fn=lambda: self._fetch_rest_rows(
                 "/v3/reference/exchanges", {"asset_class": "crypto"}
             ),
         )
@@ -516,10 +516,10 @@ class CryptoClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `HOLIDAYS_SCHEMA`.
         """
-        return self.build_feed(
+        return self._build_feed(
             name="crypto_market_holidays",
             schema_spec=HOLIDAYS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/v1/marketstatus/upcoming"),
+            snapshot_fn=lambda: self._fetch_rest_rows("/v1/marketstatus/upcoming"),
         )
 
     holidays = market_holidays
@@ -531,10 +531,10 @@ class CryptoClient(BaseDomainClient):
             FeedBuilder: Configured feed builder supporting `.snapshot()` and
             `.poll()` with `MARKET_STATUS_SCHEMA`.
         """
-        return self.build_feed(
+        return self._build_feed(
             name="crypto_market_status",
             schema_spec=MARKET_STATUS_SCHEMA,
-            snapshot_fn=lambda: self.fetch_rest_rows("/v1/marketstatus/now"),
+            snapshot_fn=lambda: self._fetch_rest_rows("/v1/marketstatus/now"),
         )
 
     def sma(
