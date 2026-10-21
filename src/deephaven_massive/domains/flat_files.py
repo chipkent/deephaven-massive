@@ -63,20 +63,19 @@ def _subday_bound_ns(val: Any) -> int | None:
 
 
 def _parse_date(val: Any) -> date:
-    """Coerce an ISO string, `date`, `datetime`, or epoch number into a `datetime.date`.
+    """Coerce an ISO string, `date`, `datetime`, or epoch number into a UTC `datetime.date`.
 
     Args:
         val: Date or timestamp value (`"YYYY-MM-DD"`, `date`, `datetime`, or epoch number).
 
     Returns:
-        date: Parsed calendar date.
+        date: Parsed UTC calendar date.
     """
-    if isinstance(val, datetime):
-        return val.date()
+    ns = _subday_bound_ns(val)
+    if ns is not None:
+        return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc).date()
     if isinstance(val, date):
         return val
-    if isinstance(val, (int, float)):
-        return datetime.fromtimestamp((to_utc_ns(val) or 0) / 1e9, tz=timezone.utc).date()
     return date.fromisoformat(str(val).strip()[:10])
 
 
