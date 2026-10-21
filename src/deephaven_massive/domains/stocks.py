@@ -244,7 +244,7 @@ class StocksClient(BaseDomainClient):
         minute aggregates), `.snapshot()`, `.poll()`, and `.historical()`
         (routed to S3 `us_stocks_sip/minute_aggs_v1` or
         `us_stocks_sip/day_aggs_v1` when `multiplier == 1` and
-        `adjusted is True`, or REST `/v2/aggs/ticker/{ticker}/range/...`).
+        `adjusted is False`, or REST `/v2/aggs/ticker/{ticker}/range/...`).
 
         Args:
             symbols: Equity ticker (`"AAPL"`), iterable of tickers, `"*"` for

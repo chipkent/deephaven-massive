@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -167,10 +167,30 @@ class MicroBatchPublisher:
         if prev_max is None or ts_ns > prev_max:
             self._latest_ts_by_symbol[sym] = ts_ns
 
-    def capture_backfill_cutoff(self) -> dict[str | None, int]:
-        """Snapshot per-symbol latest timestamps observed prior to attaching a new history/ring view."""
-        with self._lock:
-            return dict(self._latest_ts_by_symbol)
+    def attach_downstream(
+        self,
+        build_fn: Callable[[], Table],
+    ) -> tuple[Table, dict[str | None, int]]:
+        """Atomically flush pending rows, capture the backfill cutoff, and attach a downstream view.
+
+        Holding `_publish_lock` across `_flush_locked()`, cutoff capture, and
+        `build_fn()` guarantees that every row in the returned cutoff was flushed
+        before the downstream view attached, and any row flushed afterward arrives
+        via the live stream without duplication or gaps.
+
+        Args:
+            build_fn: Callable that constructs and returns a downstream Deephaven `Table`.
+
+        Returns:
+            Tuple of `(table, cutoff_by_symbol)`.
+        """
+        with self._publish_lock:
+            self._flush_locked()
+            with self._lock:
+                cutoff = dict(self._latest_ts_by_symbol)
+            with exec_ctx_scope(self._exec_ctx):
+                tbl = build_fn()
+        return tbl, cutoff
 
     @property
     def blink_table(self) -> Table:
@@ -318,10 +338,6 @@ class MicroBatchPublisher:
                         continue
                 deduped_ws.append(ws_row)
 
-            for r in norm_seeds:
-                self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
-            for r in deduped_ws:
-                self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
             self._buffer = norm_seeds + deduped_ws + self._buffer
 
         return self.flush_now()
@@ -447,8 +463,6 @@ class MicroBatchPublisher:
             if self._seeding:
                 self._seed_buffer.extend(accepted)
             else:
-                for r in accepted:
-                    self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
                 self._buffer.extend(accepted)
                 should_flush = len(self._buffer) >= self.max_batch_size
                 thread_alive = self._flush_thread is not None and self._flush_thread.is_alive()
@@ -461,6 +475,34 @@ class MicroBatchPublisher:
 
         return len(accepted)
 
+    def _flush_locked(self) -> int:
+        """Drain `_buffer` and publish a `RecordBatch` to Deephaven (caller holds `_publish_lock`)."""
+        with self._lock:
+            if self._seeding or not self._buffer:
+                return 0
+            batch_rows = self._buffer
+            self._buffer = []
+            for r in batch_rows:
+                self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
+
+        received_vals = [r.get("__ReceivedAt") for r in batch_rows]
+        rb = rows_to_record_batch(
+            batch_rows,
+            self.schema_spec,
+            self.symbol_normalizer,
+            extra_columns={"__ReceivedAt": (UTC_NS_TYPE, received_vals)},
+            already_normalized=True,
+        )
+        pa_tbl = pa.Table.from_batches([rb])
+        dh_tbl = arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
+
+        with exec_ctx_scope(self._exec_ctx):
+            self._dh_publisher.add(dh_tbl)
+
+        with self._lock:
+            self._rows_published += len(batch_rows)
+        return len(batch_rows)
+
     def flush_now(self) -> int:
         """Atomically drain the micro-batch buffer and publish a `RecordBatch` in FIFO order.
 
@@ -468,29 +510,7 @@ class MicroBatchPublisher:
             Number of rows published in this flush (0 if seeding is active or buffer is empty).
         """
         with self._publish_lock:
-            with self._lock:
-                if self._seeding or not self._buffer:
-                    return 0
-                batch_rows = self._buffer
-                self._buffer = []
-
-            received_vals = [r.get("__ReceivedAt") for r in batch_rows]
-            rb = rows_to_record_batch(
-                batch_rows,
-                self.schema_spec,
-                self.symbol_normalizer,
-                extra_columns={"__ReceivedAt": (UTC_NS_TYPE, received_vals)},
-                already_normalized=True,
-            )
-            pa_tbl = pa.Table.from_batches([rb])
-            dh_tbl = arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
-
-            with exec_ctx_scope(self._exec_ctx):
-                self._dh_publisher.add(dh_tbl)
-
-            with self._lock:
-                self._rows_published += len(batch_rows)
-            return len(batch_rows)
+            return self._flush_locked()
 
     def start(self) -> None:
         """Start the background periodic flush daemon thread (idempotent)."""

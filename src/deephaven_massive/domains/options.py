@@ -249,7 +249,7 @@ class OptionsClient(BaseDomainClient):
         minute aggregates), `.snapshot()`, `.poll()`, and `.historical()`
         (routed to S3 `us_options_opra/minute_aggs_v1` or
         `us_options_opra/day_aggs_v1` when `multiplier == 1` and
-        `adjusted is True`, or REST `/v2/aggs/...`).
+        `adjusted is False`, or REST `/v2/aggs/...`).
 
         Args:
             contracts: OCC contract symbol, iterable of symbols, `"*"` for all

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import gzip
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -50,6 +50,16 @@ _DATASET_PREFIX_BY_DOMAIN: dict[str, str] = {
     "forex": "global_forex",
     "crypto": "global_crypto",
 }
+
+
+def _is_missing_s3_key_error(exc: Exception) -> bool:
+    """Return True if `exc` represents a missing S3 object (`NoSuchKey`, `404`, or `FileNotFoundError`)."""
+    if isinstance(exc, FileNotFoundError):
+        return True
+    resp = getattr(exc, "response", None)
+    err = resp.get("Error") if isinstance(resp, Mapping) else None
+    code = str(err.get("Code", "")) if isinstance(err, Mapping) else ""
+    return code in ("NoSuchKey", "404", "NotFound")
 
 
 def _subday_bound_ns(val: Any) -> int | None:
@@ -274,10 +284,16 @@ class FlatFilesClient:
         remaining_limit: int | None = None,
         start_ns: int | None = None,
         end_ns: int | None = None,
+        ignore_missing: bool = False,
     ) -> list[pa.RecordBatch]:
         """Download and parse a single day's S3 `.csv.gz` flat file into normalized `RecordBatch` objects."""
         key = self._build_s3_key(dataset, target_date)
-        raw_stream = self._open_s3_object(self.session.config.s3_bucket, key)
+        try:
+            raw_stream = self._open_s3_object(self.session.config.s3_bucket, key)
+        except Exception as exc:
+            if ignore_missing and _is_missing_s3_key_error(exc):
+                return []
+            raise
         try:
             head = raw_stream.read(2)
             prep = _PrependReader(head, raw_stream)
@@ -419,6 +435,7 @@ class FlatFilesClient:
             )
 
         dates = _date_range(effective_start, effective_end, single_date=date)
+        ignore_missing = len(dates) > 1
         start_ns = _subday_bound_ns(effective_start if date is None else date)
         end_ns = _subday_bound_ns(effective_end)
         batches: list[pa.RecordBatch] = []
@@ -437,6 +454,7 @@ class FlatFilesClient:
                             None,
                             start_ns,
                             end_ns,
+                            ignore_missing,
                         ),
                         dates,
                     )
@@ -457,6 +475,7 @@ class FlatFilesClient:
                     rem,
                     start_ns,
                     end_ns,
+                    ignore_missing,
                 )
                 for rb in day_b:
                     batches.append(rb)

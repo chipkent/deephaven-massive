@@ -191,6 +191,43 @@ def test_flat_files_load_limits_and_call_signatures(mock_session: Any) -> None:
             symbols=["AAPL"],
         )
 
+    class _NoSuchKeyError(Exception):
+        def __init__(self) -> None:
+            self.response = {"Error": {"Code": "NoSuchKey"}}
+
+    def _s3_missing_weekend(bucket: str, key: str) -> Any:
+        if key.endswith("2025-01-01.csv.gz"):
+            return make_csv_gz_stream(csv_day1)
+        if key.endswith("2025-01-02.csv.gz"):
+            raise FileNotFoundError(key)
+        if key.endswith("2025-01-03.csv.gz"):
+            raise _NoSuchKeyError()
+        raise RuntimeError("AccessDenied")
+
+    sess_missing = mock_session(s3_opener=_s3_missing_weekend)
+    tbl_missing_range = sess_missing.flat_files.load(
+        "us_stocks_sip/trades_v1",
+        start="2025-01-01",
+        end="2025-01-03",
+        symbols=["AAPL"],
+    )
+    assert len(dh_to_pylist(tbl_missing_range)) == 2
+
+    with pytest.raises(FileNotFoundError):
+        sess_missing.flat_files.load(
+            "us_stocks_sip/trades_v1",
+            date="2025-01-02",
+            symbols=["AAPL"],
+        )
+
+    with pytest.raises(RuntimeError, match="AccessDenied"):
+        sess_missing.flat_files.load(
+            "us_stocks_sip/trades_v1",
+            start="2025-01-01",
+            end="2025-01-04",
+            symbols=["AAPL"],
+        )
+
 
 def test_flat_files_boto3_client_and_credentials_validation(
     mock_session: Any, monkeypatch: pytest.MonkeyPatch

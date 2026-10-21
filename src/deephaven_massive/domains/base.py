@@ -507,6 +507,10 @@ class BaseDomainClient:
         if clean_source in ("flat_files", "s3"):
             if s3_dataset is None:
                 raise ValueError("S3 Flat Files are not supported for this feed.")
+            if adjusted is True:
+                raise ValueError(
+                    "S3 Flat Files contain unadjusted bars; pass adjusted=False or source='rest'."
+                )
             if not self.session.config.has_s3_credentials:
                 raise ValueError(
                     "S3 credentials (s3_access_key_id / s3_secret_access_key) are required when source='flat_files'."

@@ -444,9 +444,7 @@ class FeedBuilder:
                 )
             return stream_tbl.drop_columns(["__ReceivedAt"])
 
-        cutoff_by_symbol = pub.capture_backfill_cutoff()
-        with exec_ctx_scope(self._exec_ctx):
-            tbl = _build()
+        tbl, cutoff_by_symbol = pub.attach_downstream(_build)
         finalize_seed()
 
         if (

@@ -263,6 +263,13 @@ def test_base_domain_client_should_use_flat_files_routing(mock_session: Any) -> 
 
     assert base._should_use_flat_files("flat_files", ["AAPL"], "us_stocks_sip/trades_v1") is True
     assert base._should_use_flat_files("s3", ["AAPL"], "us_stocks_sip/trades_v1") is True
+    with pytest.raises(ValueError, match="unadjusted bars"):
+        base._should_use_flat_files(
+            "s3",
+            ["AAPL"],
+            "us_stocks_sip/day_aggs_v1",
+            adjusted=True,
+        )
     assert base._should_use_flat_files("auto", ["*"], "us_stocks_sip/trades_v1") is True
     assert (
         base._should_use_flat_files("auto", ["AAPL", "MSFT", "NVDA"], "us_stocks_sip/trades_v1")
