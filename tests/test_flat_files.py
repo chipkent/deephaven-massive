@@ -169,8 +169,8 @@ def test_flat_files_load_limits_and_call_signatures(mock_session: Any) -> None:
 
     tbl_subday = sess.flat_files.load(
         "us_stocks_sip/trades_v1",
-        start="2023-11-14T22:13:20.000000003Z",
-        end="2023-11-14T22:13:20.000000004Z",
+        start="2023-11-14T22:13:25Z",
+        end="2023-11-14T22:13:30Z",
         symbols=["AAPL"],
     )
     assert len(dh_to_pylist(tbl_subday)) == 0
