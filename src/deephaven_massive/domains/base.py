@@ -180,7 +180,7 @@ def _normalize_filter_params(
             mapped_k = raw_k
             for suffix, dot_suffix in _FILTER_SUFFIXES:
                 if raw_k.endswith(suffix) and len(raw_k) > len(suffix):
-                    mapped_k = raw_k[: -len(suffix)] + dot_suffix
+                    mapped_k = raw_k[: -len(suffix)].rstrip("_") + dot_suffix
                     break
             if isinstance(raw_v, (date, datetime)):
                 out[mapped_k] = _format_date_param(raw_v)
@@ -233,7 +233,12 @@ def _extract_rows_from_payload(
                     raw_items = [res]
         elif "tickers" in payload and isinstance(payload["tickers"], list):
             raw_items = payload["tickers"]
-        elif "last" in payload and isinstance(payload["last"], Mapping):
+        elif (
+            "last" in payload
+            and isinstance(payload["last"], Mapping)
+            and "converted" not in payload
+            and "initialAmount" not in payload
+        ):
             item = dict(payload["last"])
             if "symbol" in payload and "symbol" not in item:
                 item["symbol"] = payload["symbol"]
@@ -483,10 +488,10 @@ class BaseDomainClient:
         # source == "auto"
         if s3_dataset is None or not self.session.config.has_s3_credentials:
             return False
-        if symbols is None or "*" in symbols:
-            return True
         if adjusted is True:
             return False
+        if symbols is None or "*" in symbols:
+            return True
         return len(symbols) >= self.session.config.flat_file_ticker_threshold
 
     def _fetch_multi_symbol_historical(
@@ -567,18 +572,19 @@ class BaseDomainClient:
 
         if limit is None:
 
-            def _fetch_one(sym: str) -> list[dict[str, Any]]:
+            def _fetch_one(sym: str) -> list[pa.RecordBatch]:
                 path, params = rest_path_fn(sym, start, end)
-                return self._fetch_rest_rows(path, params, inject_symbol=sym)
+                rows = self._fetch_rest_rows(path, params, inject_symbol=sym)
+                return [
+                    rows_to_record_batch(
+                        rows[idx : idx + chunk_size], schema_spec, self.symbol_normalizer
+                    )
+                    for idx in range(0, len(rows), chunk_size)
+                ]
 
             with ThreadPoolExecutor(max_workers=min(len(target_syms), 8)) as pool:
-                per_sym_rows = list(pool.map(_fetch_one, target_syms))
-            for rows in per_sym_rows:
-                buffer.extend(rows)
-                while len(buffer) >= chunk_size:
-                    chunk = buffer[:chunk_size]
-                    buffer = buffer[chunk_size:]
-                    batches.append(rows_to_record_batch(chunk, schema_spec, self.symbol_normalizer))
+                for sym_batches in pool.map(_fetch_one, target_syms):
+                    batches.extend(sym_batches)
         else:
             for sym in target_syms:
                 rem = limit - total_rows

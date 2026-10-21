@@ -107,6 +107,9 @@ class MicroBatchPublisher:
         self._has_snapshot_seed = False
         self._consumer_count = 0
         self._rows_published = 0
+        self._last_error: Exception | None = None
+        self._latest_ts_by_symbol: dict[str | None, int] = {}
+        self._min_ts_by_symbol: dict[str | None, int] = {}
         self._stop_event = threading.Event()
         self._flush_wakeup = threading.Event()
         self._flush_thread: threading.Thread | None = None
@@ -150,6 +153,23 @@ class MicroBatchPublisher:
         """Return the cumulative number of rows published to Deephaven so far."""
         with self._lock:
             return self._rows_published
+
+    @property
+    def last_error(self) -> Exception | None:
+        """Return the most recent exception raised in the background flush thread, if any."""
+        with self._lock:
+            return self._last_error
+
+    def _record_row_timestamp(self, sym: str | None, ts_ns: int | None) -> None:
+        """Update per-symbol min and max observed event timestamps (caller holds `_lock`)."""
+        if ts_ns is None:
+            return
+        prev_max = self._latest_ts_by_symbol.get(sym)
+        if prev_max is None or ts_ns > prev_max:
+            self._latest_ts_by_symbol[sym] = ts_ns
+        prev_min = self._min_ts_by_symbol.get(sym)
+        if prev_min is None or ts_ns < prev_min:
+            self._min_ts_by_symbol[sym] = ts_ns
 
     @property
     def blink_table(self) -> Table:
@@ -275,6 +295,8 @@ class MicroBatchPublisher:
                 ):
                     continue
                 ws_ts = _row_timestamp_ns(ws_row)
+                if min_seed_ts_ns is not None and ws_ts is not None and ws_ts < min_seed_ts_ns:
+                    continue
                 max_seed_ts = max_ts_by_symbol.get(sym)
                 if ws_ts is not None and max_seed_ts is not None and ws_ts < max_seed_ts:
                     continue
@@ -295,9 +317,78 @@ class MicroBatchPublisher:
                         continue
                 deduped_ws.append(ws_row)
 
+            for r in norm_seeds:
+                self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
+            for r in deduped_ws:
+                self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
             self._buffer = norm_seeds + deduped_ws + self._buffer
 
         return self.flush_now()
+
+    def seed_late_snapshot(
+        self,
+        seed_rows: Sequence[Mapping[str, Any]],
+        *,
+        auto_flush: bool = False,
+    ) -> int:
+        """Apply a REST snapshot seed to an already-live publisher without regressing newer ticks.
+
+        Rows whose event timestamp is older than an already-observed live tick for the
+        same symbol are skipped so `.latest()` never regresses.
+
+        Args:
+            seed_rows: Raw REST snapshot rows.
+            auto_flush: Whether to immediately flush accepted snapshot rows.
+
+        Returns:
+            Number of snapshot rows accepted.
+        """
+        accepted: list[dict[str, Any]] = []
+        with self._lock:
+            for raw in seed_rows:
+                nr = dict(self.schema_spec.normalizer(raw, self.symbol_normalizer))
+                sym = nr.get("Symbol")
+                ts_ns = _row_timestamp_ns(nr)
+                latest_ts = self._latest_ts_by_symbol.get(sym)
+                if latest_ts is not None and (ts_ns is None or ts_ns < latest_ts):
+                    continue
+                accepted.append(nr)
+            self._has_snapshot_seed = True
+
+        count = self.enqueue(accepted, already_normalized=True) if accepted else 0
+        if auto_flush and count > 0:
+            self.flush_now()
+        return count
+
+    def filter_historical_backfill(
+        self,
+        seed_rows: Sequence[Mapping[str, Any]],
+        *,
+        seed_since: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Normalize and filter historical backfill rows so they precede all live stream rows.
+
+        Args:
+            seed_rows: Raw historical rows fetched for `seed_since`.
+            seed_since: Optional minimum timestamp cutoff.
+
+        Returns:
+            Normalized rows older than the earliest live/seeded row per symbol.
+        """
+        min_seed_ts_ns = to_utc_ns(seed_since) if seed_since is not None else None
+        filtered: list[dict[str, Any]] = []
+        with self._lock:
+            for raw in seed_rows:
+                nr = dict(self.schema_spec.normalizer(raw, self.symbol_normalizer))
+                ts_ns = _row_timestamp_ns(nr)
+                if min_seed_ts_ns is not None and ts_ns is not None and ts_ns < min_seed_ts_ns:
+                    continue
+                sym = nr.get("Symbol")
+                earliest_live = self._min_ts_by_symbol.get(sym)
+                if earliest_live is not None and ts_ns is not None and ts_ns >= earliest_live:
+                    continue
+                filtered.append(nr)
+        return filtered
 
     def enqueue(
         self,
@@ -345,6 +436,8 @@ class MicroBatchPublisher:
             if self._seeding:
                 self._seed_buffer.extend(accepted)
             else:
+                for r in accepted:
+                    self._record_row_timestamp(r.get("Symbol"), _row_timestamp_ns(r))
                 self._buffer.extend(accepted)
                 should_flush = len(self._buffer) >= self.max_batch_size
                 thread_alive = self._flush_thread is not None and self._flush_thread.is_alive()
@@ -401,7 +494,11 @@ class MicroBatchPublisher:
                 while not self._stop_event.is_set():
                     self._flush_wakeup.wait(interval_s)
                     self._flush_wakeup.clear()
-                    self.flush_now()
+                    try:
+                        self.flush_now()
+                    except Exception as exc:
+                        with self._lock:
+                            self._last_error = exc
 
             self._flush_thread = threading.Thread(
                 target=_loop,

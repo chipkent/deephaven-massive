@@ -196,34 +196,34 @@ opt_chain_static = m.options.chain("AAPL", expiration="2025-06-20").snapshot()
 opt_chain_live   = m.options.chain("AAPL", expiration="2025-06-20").poll(interval=5.0)
 ```
 
-### 4.3 Direct `Table` Return for Static / Reference / Fundamental REST Queries
-Datasets that represent reference, fundamental, corporate action, macro, or partner queries return a `deephaven.table.Table` directly:
+### 4.3 `FeedBuilder` Delivery for Reference / Fundamental REST Queries vs. Direct `Table` Return for `m.flat_files`
+All domain endpoints—including reference, fundamental, corporate action, macro, and partner queries—return a [`FeedBuilder`](src/deephaven_massive/engine/builder.py) that materializes into a `deephaven.table.Table` via `.snapshot()`, `.historical()`, or `.poll(interval_s=...)` (only `m.flat_files.*` returns a `deephaven.table.Table` directly):
 
 ```python
-# Short Data & Fundamentals
-short_int   = m.stocks.short_interest(ticker="GME", settlement_date_gte="2024-01-01")
-short_vol   = m.stocks.short_volume(ticker="GME", date_gte="2025-01-01")
-bal_sheets  = m.stocks.balance_sheets(tickers="AAPL", timeframe="quarterly")
-inc_stmts   = m.stocks.income_statements(tickers="AAPL", timeframe="quarterly")
-cash_flows  = m.stocks.cash_flow_statements(tickers="AAPL", timeframe="quarterly")
-ratios      = m.stocks.ratios(ticker="AAPL")
-share_float = m.stocks.share_float(ticker="AAPL")
+# Short Data & Fundamentals (materialize via .snapshot() or .poll())
+short_int   = m.stocks.short_interest(ticker="GME", settlement_date_gte="2024-01-01").snapshot()
+short_vol   = m.stocks.short_volume(ticker="GME", date_gte="2025-01-01").snapshot()
+bal_sheets  = m.stocks.balance_sheets(tickers="AAPL", timeframe="quarterly").snapshot()
+inc_stmts   = m.stocks.income_statements(tickers="AAPL", timeframe="quarterly").snapshot()
+cash_flows  = m.stocks.cash_flow_statements(tickers="AAPL", timeframe="quarterly").snapshot()
+ratios      = m.stocks.ratios(ticker="AAPL").snapshot()
+share_float = m.stocks.share_float(ticker="AAPL").snapshot()
 
 # Economy & Overnight Short-Term Funding Rates (/fed/v1/*)
-funding     = m.economy.funding_conditions(date_gte="2025-01-01")  # SOFR, EFFR, OBFR, TGCR, IORB, repo, CP rates
-yields      = m.economy.treasury_yields(date_gte="2025-01-01")
-inflation   = m.economy.inflation(date_gte="2020-01-01")
-infl_exp    = m.economy.inflation_expectations(date_gte="2020-01-01")
-labor       = m.economy.labor_market(date_gte="2020-01-01")
+funding     = m.economy.funding_conditions(date_gte="2025-01-01").snapshot()
+yields      = m.economy.treasury_yields(date_gte="2025-01-01").snapshot()
+inflation   = m.economy.inflation(date_gte="2020-01-01").snapshot()
+infl_exp    = m.economy.inflation_expectations(date_gte="2020-01-01").snapshot()
+labor       = m.economy.labor_market(date_gte="2020-01-01").snapshot()
 
 # Corporate Actions, SEC Filings & Technical Indicators
-dividends   = m.stocks.dividends(ticker="AAPL")
-splits      = m.stocks.splits(ticker="AAPL")
-ipos        = m.stocks.ipos(listing_date_gte="2024-01-01")
-sec_10k     = m.stocks.sec_10k_sections(ticker="AAPL")
-sec_13f     = m.stocks.sec_13f_holdings(cik="0001067983")
-sec_form4   = m.stocks.sec_form4_transactions(ticker="AAPL")
-rsi_table   = m.stocks.rsi("AAPL", timespan="day", window=14)
+dividends   = m.stocks.dividends(ticker="AAPL").snapshot()
+splits      = m.stocks.splits(ticker="AAPL").snapshot()
+ipos        = m.stocks.ipos(listing_date_gte="2024-01-01").snapshot()
+sec_10k     = m.stocks.sec_10k_sections(ticker="AAPL").snapshot()
+sec_13f     = m.stocks.sec_13f_holdings(cik="0001067983").snapshot()
+sec_form4   = m.stocks.sec_form4_transactions(ticker="AAPL").snapshot()
+rsi_table   = m.stocks.rsi("AAPL", timespan="day", window=14).snapshot()
 ```
 
 ---

@@ -11,9 +11,10 @@ the filtered batches into a single Deephaven `Table`.
 from __future__ import annotations
 
 import gzip
+import threading
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 import pyarrow as pa
@@ -25,6 +26,7 @@ from deephaven_massive.engine.arrow_bridge import (
     arrow_to_deephaven_table,
     record_batches_to_arrow_table,
     rows_to_record_batch,
+    to_utc_ns,
 )
 from deephaven_massive.engine.symbols import SymbolNormalizer
 from deephaven_massive.schemas.market import (
@@ -50,11 +52,18 @@ _DATASET_PREFIX_BY_DOMAIN: dict[str, str] = {
 }
 
 
-def _parse_date(val: str | date | datetime) -> date:
-    """Coerce an ISO string, `date`, or `datetime` into a `datetime.date`.
+def _subday_bound_ns(val: Any) -> int | None:
+    """Return UTC nanoseconds if `val` specifies a sub-day timestamp rather than a calendar date."""
+    if isinstance(val, (datetime, int, float)) or (isinstance(val, str) and len(val.strip()) > 10):
+        return to_utc_ns(val)
+    return None
+
+
+def _parse_date(val: Any) -> date:
+    """Coerce an ISO string, `date`, `datetime`, or epoch number into a `datetime.date`.
 
     Args:
-        val: Date value (`"YYYY-MM-DD"`, `date`, or `datetime`).
+        val: Date or timestamp value (`"YYYY-MM-DD"`, `date`, `datetime`, or epoch number).
 
     Returns:
         date: Parsed calendar date.
@@ -63,6 +72,8 @@ def _parse_date(val: str | date | datetime) -> date:
         return val.date()
     if isinstance(val, date):
         return val
+    if isinstance(val, (int, float)):
+        return datetime.fromtimestamp((to_utc_ns(val) or 0) / 1e9, tz=timezone.utc).date()
     return date.fromisoformat(str(val).strip()[:10])
 
 
@@ -210,6 +221,8 @@ class FlatFilesClient:
         """
         self.session = session
         self._s3_opener = s3_opener
+        self._s3_client: Any = None
+        self._client_lock = threading.Lock()
 
     def _open_s3_object(self, bucket: str, key: str) -> BinaryIO:
         if self._s3_opener is not None:
@@ -219,14 +232,17 @@ class FlatFilesClient:
                 "Massive S3 credentials are required to load Flat Files. "
                 "Set MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY."
             )
-        import boto3
+        with self._client_lock:
+            if self._s3_client is None:
+                import boto3
 
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=self.session.config.s3_endpoint_url,
-            aws_access_key_id=self.session.config.s3_access_key_id,
-            aws_secret_access_key=self.session.config.s3_secret_access_key,
-        )
+                self._s3_client = boto3.client(
+                    "s3",
+                    endpoint_url=self.session.config.s3_endpoint_url,
+                    aws_access_key_id=self.session.config.s3_access_key_id,
+                    aws_secret_access_key=self.session.config.s3_secret_access_key,
+                )
+            s3 = self._s3_client
         resp = s3.get_object(Bucket=bucket, Key=key)
         return resp["Body"]
 
@@ -254,51 +270,60 @@ class FlatFilesClient:
         value_set: pa.Array | None,
         bar_span_ns: int | None,
         remaining_limit: int | None = None,
+        start_ns: int | None = None,
+        end_ns: int | None = None,
     ) -> list[pa.RecordBatch]:
         """Download and parse a single day's S3 `.csv.gz` flat file into normalized `RecordBatch` objects."""
         key = self._build_s3_key(dataset, target_date)
         raw_stream = self._open_s3_object(self.session.config.s3_bucket, key)
-        head = raw_stream.read(2)
-        prep = _PrependReader(head, raw_stream)
-        csv_stream: Any = (
-            gzip.GzipFile(fileobj=prep, mode="rb")  # type: ignore[call-overload]
-            if head == b"\x1f\x8b"
-            else prep
-        )
+        try:
+            head = raw_stream.read(2)
+            prep = _PrependReader(head, raw_stream)
+            csv_stream: Any = (
+                gzip.GzipFile(fileobj=prep, mode="rb")  # type: ignore[call-overload]
+                if head == b"\x1f\x8b"
+                else prep
+            )
 
-        reader = pa_csv.open_csv(
-            csv_stream,
-            read_options=pa_csv.ReadOptions(block_size=16 * 1024 * 1024),
-            convert_options=pa_csv.ConvertOptions(strings_can_be_null=True),
-        )
+            reader = pa_csv.open_csv(
+                csv_stream,
+                read_options=pa_csv.ReadOptions(block_size=16 * 1024 * 1024),
+                convert_options=pa_csv.ConvertOptions(strings_can_be_null=True),
+            )
 
-        day_batches: list[pa.RecordBatch] = []
-        day_rows = 0
-        for batch in reader:
-            if value_set is not None:
-                sym_col = next(
-                    (c for c in ("ticker", "sym", "Symbol", "pair") if c in batch.schema.names),
-                    batch.schema.names[0],
-                )
-                mask = pc.is_in(batch[sym_col], value_set=value_set)
-                batch = batch.filter(mask)
+            day_batches: list[pa.RecordBatch] = []
+            day_rows = 0
+            for batch in reader:
+                if value_set is not None:
+                    sym_col = next(
+                        (c for c in ("ticker", "sym", "Symbol", "pair") if c in batch.schema.names),
+                        batch.schema.names[0],
+                    )
+                    mask = pc.is_in(batch[sym_col], value_set=value_set)
+                    batch = batch.filter(mask)
 
-            if remaining_limit is not None and day_rows + batch.num_rows > remaining_limit:
-                batch = batch.slice(0, remaining_limit - day_rows)
+                if batch.num_rows > 0:
+                    raw_rows = batch.to_pylist()
+                    if bar_span_ns is not None:
+                        for r in raw_rows:
+                            r.setdefault("_span_ns", bar_span_ns)
+                    rb = rows_to_record_batch(raw_rows, resolved_schema, normalizer)
+                    if start_ns is not None and "Timestamp" in rb.schema.names:
+                        rb = rb.filter(pc.greater_equal(rb["Timestamp"].cast(pa.int64()), start_ns))
+                    if end_ns is not None and "Timestamp" in rb.schema.names:
+                        rb = rb.filter(pc.less_equal(rb["Timestamp"].cast(pa.int64()), end_ns))
+                    if remaining_limit is not None and day_rows + rb.num_rows > remaining_limit:
+                        rb = rb.slice(0, remaining_limit - day_rows)
+                    if rb.num_rows > 0:
+                        day_batches.append(rb)
+                        day_rows += rb.num_rows
 
-            if batch.num_rows > 0:
-                raw_rows = batch.to_pylist()
-                if bar_span_ns is not None:
-                    for r in raw_rows:
-                        r.setdefault("_span_ns", bar_span_ns)
-                rb = rows_to_record_batch(raw_rows, resolved_schema, normalizer)
-                day_batches.append(rb)
-                day_rows += len(raw_rows)
+                if remaining_limit is not None and day_rows >= remaining_limit:
+                    break
 
-            if remaining_limit is not None and day_rows >= remaining_limit:
-                break
-
-        return day_batches
+            return day_batches
+        finally:
+            raw_stream.close()
 
     def load(
         self,
@@ -392,6 +417,8 @@ class FlatFilesClient:
             )
 
         dates = _date_range(effective_start, effective_end, single_date=date)
+        start_ns = _subday_bound_ns(effective_start if date is None else date)
+        end_ns = _subday_bound_ns(effective_end)
         batches: list[pa.RecordBatch] = []
 
         if len(dates) > 1 and effective_limit is None:
@@ -406,6 +433,8 @@ class FlatFilesClient:
                             value_set,
                             bar_span_ns,
                             None,
+                            start_ns,
+                            end_ns,
                         ),
                         dates,
                     )
@@ -424,6 +453,8 @@ class FlatFilesClient:
                     value_set,
                     bar_span_ns,
                     rem,
+                    start_ns,
+                    end_ns,
                 )
                 for rb in day_b:
                     batches.append(rb)

@@ -95,13 +95,28 @@ class SnapshotPoller:
         self.symbol_normalizer = symbol_normalizer
         self._exec_ctx = exec_ctx
 
-        self.full_schema = schema_spec.with_extra_fields(
+        self._prefetched_rows: Sequence[Mapping[str, Any]] | None = None
+        if schema_spec.allow_dynamic_columns:
+            prefetched = list(fetch_fn())
+            self._prefetched_rows = prefetched
+            probe_rb = rows_to_record_batch(prefetched, schema_spec, symbol_normalizer)
+            self.schema_spec = SchemaSpec(
+                name=schema_spec.name,
+                arrow_schema=probe_rb.schema,
+                normalizer=schema_spec.normalizer,
+                key_cols=schema_spec.key_cols,
+                allow_dynamic_columns=False,
+            )
+
+        self.full_schema = self.schema_spec.with_extra_fields(
             [
                 pa.field("__PollId", pa.int64()),
                 pa.field("__RowIdx", pa.int64()),
             ]
         )
         self._poll_id = 0
+        self._rows_published = 0
+        self._last_error: Exception | None = None
         self._lock = threading.Lock()
         self._poll_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -109,13 +124,18 @@ class SnapshotPoller:
 
         empty_dh = arrow_to_deephaven_table(self.full_schema.empty_table(), self._exec_ctx)
         col_defs = {c.name: c.data_type for c in empty_dh.columns}
+        epoch_schema = pa.schema([pa.field("__PollId", pa.int64())])
+        empty_epoch_dh = arrow_to_deephaven_table(epoch_schema.empty_table(), self._exec_ctx)
+        epoch_col_defs = {c.name: c.data_type for c in empty_epoch_dh.columns}
 
-        def _build_tables() -> tuple[Table, Any, Table]:
+        def _build_tables() -> tuple[Table, Any, Any, Table]:
             blink_tbl, dh_pub = table_publisher(name, col_defs)
+            epoch_pub: Any = None
             if self.mode == "replace":
+                epoch_blink_tbl, epoch_pub = table_publisher(f"{name}_epoch", epoch_col_defs)
                 replace_keys = list(self.key_cols) if self.key_cols else ["__RowIdx"]
                 raw_keyed = blink_tbl.last_by(replace_keys)
-                current_epoch = blink_tbl.view(["__PollId"]).last_by()
+                current_epoch = epoch_blink_tbl.last_by()
                 out_tbl = (
                     raw_keyed.natural_join(current_epoch, on=[], joins=["CurrentPollId = __PollId"])
                     .where("__PollId == CurrentPollId")
@@ -128,10 +148,12 @@ class SnapshotPoller:
                 )
             else:
                 out_tbl = blink_to_append_only(blink_tbl.drop_columns(["__PollId", "__RowIdx"]))
-            return blink_tbl, dh_pub, out_tbl
+            return blink_tbl, dh_pub, epoch_pub, out_tbl
 
         with exec_ctx_scope(self._exec_ctx):
-            self._blink_table, self._dh_publisher, self._table = _build_tables()
+            self._blink_table, self._dh_publisher, self._epoch_publisher, self._table = (
+                _build_tables()
+            )
 
     @property
     def table(self) -> Table:
@@ -144,6 +166,18 @@ class SnapshotPoller:
         with self._lock:
             return self._poll_id
 
+    @property
+    def rows_published(self) -> int:
+        """Return the cumulative number of rows published across all poll cycles."""
+        with self._lock:
+            return self._rows_published
+
+    @property
+    def last_error(self) -> Exception | None:
+        """Return the most recent exception raised in the background poll loop, if any."""
+        with self._lock:
+            return self._last_error
+
     def poll_once(self) -> int:
         """Execute a single synchronous poll fetch and publish the resulting batch to Deephaven.
 
@@ -155,12 +189,24 @@ class SnapshotPoller:
             The number of rows fetched and published in this poll cycle.
         """
         with self._poll_lock:
-            rows = self.fetch_fn()
+            if self._prefetched_rows is not None:
+                rows = self._prefetched_rows
+                self._prefetched_rows = None
+            else:
+                rows = self.fetch_fn()
             with self._lock:
                 self._poll_id += 1
                 epoch = self._poll_id
 
+            epoch_dh_tbl: Table | None = None
+            if self._epoch_publisher is not None:
+                epoch_pa = pa.Table.from_pydict({"__PollId": pa.array([epoch], type=pa.int64())})
+                epoch_dh_tbl = arrow_to_deephaven_table(epoch_pa, self._exec_ctx)
+
             if not rows:
+                if epoch_dh_tbl is not None:
+                    with exec_ctx_scope(self._exec_ctx):
+                        self._epoch_publisher.add(epoch_dh_tbl)
                 return 0
 
             row_indices = list(range(len(rows)))
@@ -178,7 +224,11 @@ class SnapshotPoller:
 
             with exec_ctx_scope(self._exec_ctx):
                 self._dh_publisher.add(dh_tbl)
+                if epoch_dh_tbl is not None:
+                    self._epoch_publisher.add(epoch_dh_tbl)
 
+            with self._lock:
+                self._rows_published += len(rows)
             return len(rows)
 
     def start(self, *, initial_poll: bool = True) -> None:
@@ -199,7 +249,11 @@ class SnapshotPoller:
 
             def _loop() -> None:
                 while not self._stop_event.wait(self.interval_s):
-                    self.poll_once()
+                    try:
+                        self.poll_once()
+                    except Exception as exc:
+                        with self._lock:
+                            self._last_error = exc
 
             self._poll_thread = threading.Thread(
                 target=_loop,

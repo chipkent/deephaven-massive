@@ -29,8 +29,18 @@ INT32_LIST_TYPE = pa.list_(pa.int32())
 STRING_LIST_TYPE = pa.list_(pa.string())
 
 _EPOCH_DATE = date(1970, 1, 1)
+_EPOCH_DT = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _SNAKE_BOUNDARY_RE = re.compile(r"[^a-zA-Z0-9]+")
 _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+
+
+def _dt_to_utc_ns(dt: datetime) -> int:
+    """Convert a `datetime` object to exact integer nanoseconds since the Unix epoch in UTC."""
+    utc_dt = (
+        dt.astimezone(timezone.utc) if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    )
+    delta = utc_dt - _EPOCH_DT
+    return ((delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds) * 1_000
 
 
 def to_pascal_case(name: str) -> str:
@@ -100,11 +110,9 @@ def to_utc_ns(val: Any) -> int | None:
             return int(val * 1_000_000)
         return int(val * 1_000_000_000)
     if isinstance(val, datetime):
-        dt = val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
-        return int(dt.timestamp() * 1_000_000_000)
+        return _dt_to_utc_ns(val)
     if isinstance(val, date):
-        dt = datetime(val.year, val.month, val.day, tzinfo=timezone.utc)
-        return int(dt.timestamp() * 1_000_000_000)
+        return (val - _EPOCH_DATE).days * 86_400_000_000_000
     if isinstance(val, str):
         s = val.strip()
         if not s:
@@ -114,9 +122,7 @@ def to_utc_ns(val: Any) -> int | None:
         try:
             iso = s[:-1] + "+00:00" if s.endswith("Z") else s
             dt = datetime.fromisoformat(iso)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp() * 1_000_000_000)
+            return _dt_to_utc_ns(dt)
         except ValueError:
             return None
     return None
@@ -484,6 +490,25 @@ def record_batches_to_arrow_table(
         return pa.Table.from_batches(batches, schema=batches[0].schema)
 
     tables = [pa.Table.from_batches([b]) for b in batches]
+    if schema_spec.allow_dynamic_columns and len(tables) > 1:
+        non_null_types: dict[str, set[pa.DataType]] = {}
+        for t in tables:
+            for field in t.schema:
+                col = t.column(field.name)
+                if col.null_count < t.num_rows:
+                    non_null_types.setdefault(field.name, set()).add(field.type)
+        target_types: dict[str, pa.DataType] = {
+            name: (next(iter(types)) if len(types) == 1 else pa.string())
+            for name, types in non_null_types.items()
+        }
+        reconciled: list[pa.Table] = []
+        for t in tables:
+            for idx, field in enumerate(t.schema):
+                tgt = target_types.get(field.name)
+                if tgt is not None and field.type != tgt:
+                    t = t.set_column(idx, pa.field(field.name, tgt), t.column(idx).cast(tgt))
+            reconciled.append(t)
+        tables = reconciled
     return pa.concat_tables(tables, promote_options="default")
 
 

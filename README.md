@@ -108,7 +108,7 @@ flowchart LR
 ### Key Architectural Guarantees
 
 1. **Non-Blocking Ingestion**: All network I/O, JSON parsing, and gzip decompression run on isolated background daemon threads. Rows are converted into vectorized PyArrow batches via `rows_to_record_batch` / `record_batches_to_arrow_table` and handed to Deephaven via `arrow_to_deephaven_table`, keeping the Deephaven Update Graph lock-free.
-2. **Two-Phase Seed & Cutover Deduplication**: When combining a REST seed with a live WebSocket stream (`.latest(seed=True)` or `.history(seed=True)`), [`MicroBatchPublisher`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/engine/publisher.py) buffers incoming live WebSocket frames while the REST snapshot is in flight and deduplicates across the cutover boundary by `(Symbol, TradeId)` and `(key_cols, Timestamp, SequenceNumber)`.
+2. **Two-Phase Seed & Cutover Deduplication**: When combining a REST seed with a live WebSocket stream (`.latest(seed=True)` or `.history(seed=True)`), [`MicroBatchPublisher`](src/deephaven_massive/engine/publisher.py) buffers incoming live WebSocket frames while the REST snapshot is in flight and deduplicates across the cutover boundary by `(Symbol, TradeId)` and `(key_cols, Timestamp, SequenceNumber)`.
 3. **Bounded Memory Footprint**: Multi-page REST queries and multi-gigabyte S3 flat files are streamed, filtered per chunk via PyArrow compute expressions, and concatenated into a single table without unbounded intermediate Python object graphs.
 
 ---
@@ -145,7 +145,7 @@ export MASSIVE_S3_SECRET_ACCESS_KEY="your-s3-secret-key"
 
 ### Explicit Programmatic Configuration
 
-You can pass configuration arguments directly to `MassiveSession(...)` or construct an immutable [`MassiveConfig`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/config.py):
+You can pass configuration arguments directly to `MassiveSession(...)` or construct an immutable [`MassiveConfig`](src/deephaven_massive/config.py):
 
 ```python
 from deephaven_massive import MassiveConfig, MassiveSession
@@ -241,7 +241,7 @@ enriched_quotes = latest_quotes.natural_join(
 
 ## 5. Delivery Modes in Depth
 
-Every dataset method returns a [`FeedBuilder`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/engine/builder.py) supporting up to seven terminal delivery modes:
+Every dataset method returns a [`FeedBuilder`](src/deephaven_massive/engine/builder.py) supporting up to seven terminal delivery modes:
 
 | Method | Return Type | Transport | When to Use |
 | :--- | :--- | :--- | :--- |
@@ -290,7 +290,7 @@ Anywhere a streaming method accepts `symbols` (or `contracts` / `pairs`), you ca
 3. `"*"` for full-market wildcard subscriptions
 4. **A live Deephaven `Table`** containing a `Symbol` column (or custom `symbol_col`)
 
-When you pass a Deephaven `Table`, [`ReactiveWatchlistController`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/engine/watchlist.py) attaches a Deephaven table listener (`listen`) to the `Symbol` column:
+When you pass a Deephaven `Table`, [`ReactiveWatchlistController`](src/deephaven_massive/engine/watchlist.py) attaches a Deephaven table listener (`listen`) to the `Symbol` column:
 
 - When rows are **added** to the upstream table, `deephaven-massive` sends a `subscribe` command for the newly added symbols.
 - When rows are **removed** from the upstream table, `deephaven-massive` decrements their reference count and sends an `unsubscribe` command once the count reaches zero.
@@ -320,7 +320,7 @@ live_option_quotes = m.options.quotes(active_calls).latest()
 
 Massive's raw APIs use different symbol conventions across asset classes and transports (`O:` for options, `I:` for indices, `C:` for forex REST vs. `EUR/USD` for forex WebSocket, `X:` for crypto REST vs. `BTC-USD` for crypto WebSocket).
 
-`deephaven-massive` normalizes these transparently through [`SymbolNormalizer`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/engine/symbols.py):
+`deephaven-massive` normalizes these transparently through [`SymbolNormalizer`](src/deephaven_massive/engine/symbols.py):
 
 - **Input**: You can pass user-friendly symbols (`"SPX"`, `"EUR/USD"`, `"BTC-USD"`, `"AAPL250117C00150000"`) or raw prefixed symbols (`"I:SPX"`, `"C:EURUSD"`, `"X:BTCUSD"`, `"O:AAPL250117C00150000"`).
 - **Output**: Every Deephaven table emitted by `deephaven-massive` normalizes the `Symbol` column to a single canonical representation across WebSocket, REST, and S3 Flat Files so joins across transports always match.
@@ -336,7 +336,7 @@ Massive's raw APIs use different symbol conventions across asset classes and tra
 
 ### Normalizing OCC Option Symbols
 
-Use [`SymbolNormalizer`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/engine/symbols.py) (or pass unprefixed OCC contract strings directly to `m.options.*`) to normalize OCC option contract tickers into canonical `"O:..."` format:
+Use [`SymbolNormalizer`](src/deephaven_massive/engine/symbols.py) (or pass unprefixed OCC contract strings directly to `m.options.*`) to normalize OCC option contract tickers into canonical `"O:..."` format:
 
 ```python
 from deephaven_massive.engine.symbols import SymbolNormalizer
@@ -355,15 +355,15 @@ quotes = m.options.quotes(contract).latest()
 
 | Attribute | Client Class | Coverage |
 | :--- | :--- | :--- |
-| `m.stocks` | [`StocksClient`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/domains/stocks.py) | US equities trades, NBBO quotes, bars, LULD, imbalances, FMV, snapshots, technicals, fundamentals, SEC filings, corporate actions, and market status. |
-| `m.options` | [`OptionsClient`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/domains/options.py) | OPRA options trades, quotes, bars, FMV, Greeks/IV chain snapshots, technicals, and contract reference data. |
-| `m.futures` | [`FuturesClient`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/domains/futures.py) | CME, CBOT, NYMEX, and COMEX futures trades, quotes, bars, snapshots, contracts, products, and trading schedules. |
-| `m.indices` | [`IndicesClient`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/domains/indices.py) | Real-time index values (`V.I:*`), minute/second aggregates, snapshots, technicals, and reference data. |
-| `m.forex` | [`ForexClient`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/domains/forex.py) | Global OTC FX spot quotes, aggregates, FMV, snapshots, top movers, technicals, and real-time currency conversion. |
-| `m.crypto` | [`CryptoClient`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/domains/crypto.py) | 24/7 digital asset trades, BBO quotes, bars, FMV, snapshots, top movers, and technical indicators. |
-| `m.economy` | [`EconomyClient`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/domains/economy.py) | US Treasury yield curves, CPI/PCE inflation, inflation expectations, labor market indicators, and Fed/SOFR funding conditions. |
-| `m.partners` | [`PartnersClient`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/domains/partners.py) | Benzinga (ratings, earnings, guidance, consensus, news, transcripts, insights), ETF Global, TMX corporate events, and Fable Data. |
-| `m.flat_files` | [`FlatFilesClient`](file:///Users/chip/dev/deephaven-massive/src/deephaven_massive/domains/flat_files.py) | Direct bulk ingestion of historical gzipped CSV files from `files.massive.com` with symbol predicate pushdown. |
+| `m.stocks` | [`StocksClient`](src/deephaven_massive/domains/stocks.py) | US equities trades, NBBO quotes, bars, LULD, imbalances, FMV, snapshots, technicals, fundamentals, SEC filings, corporate actions, and market status. |
+| `m.options` | [`OptionsClient`](src/deephaven_massive/domains/options.py) | OPRA options trades, quotes, bars, FMV, Greeks/IV chain snapshots, technicals, and contract reference data. |
+| `m.futures` | [`FuturesClient`](src/deephaven_massive/domains/futures.py) | CME, CBOT, NYMEX, and COMEX futures trades, quotes, bars, snapshots, contracts, products, and trading schedules. |
+| `m.indices` | [`IndicesClient`](src/deephaven_massive/domains/indices.py) | Real-time index values (`V.I:*`), minute/second aggregates, snapshots, technicals, and reference data. |
+| `m.forex` | [`ForexClient`](src/deephaven_massive/domains/forex.py) | Global OTC FX spot quotes, aggregates, FMV, snapshots, top movers, technicals, and real-time currency conversion. |
+| `m.crypto` | [`CryptoClient`](src/deephaven_massive/domains/crypto.py) | 24/7 digital asset trades, BBO quotes, bars, FMV, snapshots, top movers, and technical indicators. |
+| `m.economy` | [`EconomyClient`](src/deephaven_massive/domains/economy.py) | US Treasury yield curves, CPI/PCE inflation, inflation expectations, labor market indicators, and Fed/SOFR funding conditions. |
+| `m.partners` | [`PartnersClient`](src/deephaven_massive/domains/partners.py) | Benzinga (ratings, earnings, guidance, consensus, news, transcripts, insights), ETF Global, TMX corporate events, and Fable Data. |
+| `m.flat_files` | [`FlatFilesClient`](src/deephaven_massive/domains/flat_files.py) | Direct bulk ingestion of historical gzipped CSV files from `files.massive.com` with symbol predicate pushdown. |
 
 ---
 

@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, BinaryIO
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import pyarrow as pa
 import urllib3
@@ -239,8 +239,8 @@ class MassiveSession:
         If called with no arguments, stops all active builders registered on this session.
 
         Args:
-            target: Optional `FeedBuilder` instance, feed name (e.g., `"stocks.quotes"`),
-                WebSocket channel (e.g., `"Q"`), or WebSocket URL to match.
+            target: Optional `FeedBuilder` instance, feed name (e.g., `"stocks_quotes"` or
+                `"stocks.quotes"`), WebSocket channel (e.g., `"Q"`), or WebSocket URL to match.
             ws_channel: Optional WebSocket event prefix filter (e.g., `"T"`, `"Q"`, `"AM"`).
             symbols: Optional symbol or iterable of symbols; stops builders whose
                 subscription set intersects with `symbols`.
@@ -255,6 +255,7 @@ class MassiveSession:
                     if (
                         builder is target
                         or builder.name == target
+                        or (isinstance(target, str) and builder.name == target.replace(".", "_"))
                         or builder.ws_channel == target
                         or builder.ws_url == target
                     ):
@@ -305,7 +306,7 @@ class MassiveSession:
         """Return a Deephaven `Table` summarizing active `FeedBuilder` instances and published rows.
 
         Columns returned:
-        - `FeedName` (`string`): Logical feed name (e.g., `"stocks.trades"`).
+        - `FeedName` (`string`): Logical feed name (e.g., `"stocks_trades"`).
         - `Mode` (`string`): Execution mode (`"stream"`, `"watchlist"`, or `"poll"`).
         - `WsChannel` (`string`): WebSocket channel prefix, or `None` for REST pollers.
         - `Symbols` (`string`): Comma-separated list of active canonical symbols.
@@ -333,7 +334,12 @@ class MassiveSession:
                 mode = "poll"
             else:
                 mode = "stream"
-            rows_pub = b.publisher.rows_published if b.publisher is not None else 0
+            if b.publisher is not None:
+                rows_pub = b.publisher.rows_published
+            elif b.poller is not None:
+                rows_pub = b.poller.rows_published
+            else:
+                rows_pub = 0
             rows.append(
                 {
                     "FeedName": b.name,
@@ -349,6 +355,14 @@ class MassiveSession:
     def _build_url(self, path_or_url: str, params: Mapping[str, Any] | None) -> str:
         """Resolve a relative REST path or full URL and append non-null query parameters."""
         if path_or_url.startswith(("http://", "https://")):
+            parsed_url = urlsplit(path_or_url)
+            base_url = urlsplit(self.config.rest_base_url)
+            if (parsed_url.scheme, parsed_url.netloc) != (base_url.scheme, base_url.netloc):
+                raise ValueError(
+                    f"Refusing to send authenticated Massive request to untrusted origin "
+                    f"'{parsed_url.scheme}://{parsed_url.netloc}' (expected "
+                    f"'{base_url.scheme}://{base_url.netloc}')"
+                )
             url = path_or_url
         else:
             clean_path = path_or_url if path_or_url.startswith("/") else f"/{path_or_url}"
@@ -371,9 +385,19 @@ class MassiveSession:
         if self._http_handler is not None:
             return self._http_handler(url, params, headers)
 
-        resp = self._http_pool.request("GET", url, headers=dict(headers))
-        raw_text = resp.data.decode("utf-8") if resp.data else "{}"
-        parsed = json.loads(raw_text) if raw_text.strip() else {}
+        resp = self._http_pool.request(
+            "GET",
+            url,
+            headers=dict(headers),
+            timeout=urllib3.Timeout(connect=10.0, read=30.0),
+        )
+        raw_text = resp.data.decode("utf-8", errors="replace") if resp.data else "{}"
+        if not raw_text.strip():
+            return int(resp.status), {}
+        try:
+            parsed: Any = json.loads(raw_text)
+        except ValueError:
+            parsed = raw_text
         return int(resp.status), parsed
 
     def _request_json(
@@ -407,6 +431,10 @@ class MassiveSession:
         while True:
             status, payload = self._execute_http(url, params, headers)
             if 200 <= status < 300:
+                if isinstance(payload, str):
+                    raise RuntimeError(
+                        f"Massive REST request to '{url}' returned invalid JSON: {payload}"
+                    )
                 return payload
 
             if status == 403:
@@ -435,9 +463,12 @@ class MassiveSession:
             builders = list(self._active_builders)
             self._active_builders.clear()
             self._stream_registry.clear()
-        for builder in builders:
-            builder.stop()
-        self.ws_multiplexer.close()
+        try:
+            for builder in builders:
+                builder.stop()
+        finally:
+            self.ws_multiplexer.close()
+            self._http_pool.clear()
 
     def __enter__(self) -> MassiveSession:
         """Enter the runtime context related to this `MassiveSession`."""

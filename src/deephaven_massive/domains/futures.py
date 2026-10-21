@@ -199,10 +199,10 @@ class FuturesClient(BaseDomainClient):
         feed: str | None = None,
         symbol_col: str = "Symbol",
     ) -> FeedBuilder:
-        """Configure a US Futures OHLCV + settlement bars feed (`A.*` / `AM.*`, `/futures/vX/aggs`).
+        """Configure a US Futures OHLCV bars feed (`AM.*`, `/futures/vX/aggs`).
 
-        Supports `.latest()`, `.history()`, `.ring()`, `.blink()` (second or
-        minute aggregates), `.snapshot()`, `.poll()`, and `.historical()`
+        Supports `.latest()`, `.history()`, `.ring()`, `.blink()` (1-minute
+        aggregates), `.snapshot()`, `.poll()`, and `.historical()`
         (routed to S3 `us_futures/minute_aggs_v1`, `us_futures/day_aggs_v1`, or
         `us_futures/session_aggs_v1` when `multiplier == 1`, or REST
         `/futures/vX/aggs/{contract}`).
@@ -222,11 +222,17 @@ class FuturesClient(BaseDomainClient):
 
         Returns:
             FeedBuilder: Configured feed builder producing a table matching
-            `BARS_SCHEMA` (including `SettlementPrice` when reported).
+            `BARS_SCHEMA`.
         """
         clean_span = timespan.strip().lower()
-        ws_channel = "A" if clean_span == "second" else "AM"
-        ws_url = self.session.config._resolve_ws_url("futures", feed_override=feed, venue=venue)
+        if multiplier == 1 and clean_span == "minute":
+            ws_channel: str | None = "AM"
+            ws_url: str | None = self.session.config._resolve_ws_url(
+                "futures", feed_override=feed, venue=venue
+            )
+        else:
+            ws_channel = None
+            ws_url = None
 
         s3_ds: str | None = None
         if multiplier == 1 and clean_span == "minute":

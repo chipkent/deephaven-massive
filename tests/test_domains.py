@@ -444,7 +444,9 @@ def test_futures_domain_all_feeds(mock_session: Any) -> None:
         )
         == 1
     )
-    assert fut.bars("ESH5", multiplier=1, timespan="second").blink() is not None
+    assert fut.bars("ESH5", multiplier=1, timespan="minute").blink() is not None
+    with pytest.raises(NotImplementedError, match="does not support WebSocket streaming"):
+        fut.bars("ESH5", multiplier=1, timespan="second").blink()
     assert len(dh_to_pylist(fut.snapshots("ESH5").snapshot())) == 1
     assert len(dh_to_pylist(fut.snapshots().snapshot())) == 1
     assert len(dh_to_pylist(fut.contracts("ES").snapshot())) == 1

@@ -210,30 +210,47 @@ class FeedBuilder:
 
         if _is_deephaven_table(self.symbols):
             assert self.symbol_normalizer is not None
-            pub = MicroBatchPublisher(
-                name=self.name,
-                schema_spec=self.schema_spec,
-                symbol_normalizer=self.symbol_normalizer,
-                exec_ctx=self._exec_ctx,
-                flush_interval_ms=self._flush_interval_ms,
-                max_batch_size=self._max_batch_size,
-            )
-            self._publisher = pub
-            pub.acquire_consumer()
-            self._acquired_publisher = True
-            watchlist_ctrl = ReactiveWatchlistController(
-                watchlist_table=self.symbols,  # type: ignore[arg-type]
-                ws_url=self.ws_url,
-                channel=self.ws_channel,
-                publisher=pub,
-                ws_multiplexer=self.ws_multiplexer,
-                symbol_normalizer=self.symbol_normalizer,
-                symbol_col=self._symbol_col,
-                exec_ctx=self._exec_ctx,
-                seed_fn=self._seed_fn if effective_seed else None,
-                auto_start=False,
-            )
-            self._watchlist_controller = watchlist_ctrl
+            wl_seed_fn: Callable[[list[str]], Sequence[Mapping[str, Any]]] | None = None
+            if seed_since is not None and self._seed_rows_fn is not None:
+                seed_rows_ref = self._seed_rows_fn
+
+                def _wl_seed_since(syms: list[str]) -> Sequence[Mapping[str, Any]]:
+                    return seed_rows_ref(syms, seed_since)
+
+                wl_seed_fn = _wl_seed_since
+            elif effective_seed:
+                wl_seed_fn = self._seed_fn
+
+            if self._publisher is not None and self._watchlist_controller is not None:
+                pub = self._publisher
+                watchlist_ctrl = self._watchlist_controller
+                if wl_seed_fn is not None and watchlist_ctrl.seed_fn is None:
+                    watchlist_ctrl.seed_fn = wl_seed_fn
+            else:
+                pub = MicroBatchPublisher(
+                    name=self.name,
+                    schema_spec=self.schema_spec,
+                    symbol_normalizer=self.symbol_normalizer,
+                    exec_ctx=self._exec_ctx,
+                    flush_interval_ms=self._flush_interval_ms,
+                    max_batch_size=self._max_batch_size,
+                )
+                self._publisher = pub
+                pub.acquire_consumer()
+                self._acquired_publisher = True
+                watchlist_ctrl = ReactiveWatchlistController(
+                    watchlist_table=self.symbols,  # type: ignore[arg-type]
+                    ws_url=self.ws_url,
+                    channel=self.ws_channel,
+                    publisher=pub,
+                    ws_multiplexer=self.ws_multiplexer,
+                    symbol_normalizer=self.symbol_normalizer,
+                    symbol_col=self._symbol_col,
+                    exec_ctx=self._exec_ctx,
+                    seed_fn=wl_seed_fn,
+                    auto_start=False,
+                )
+                self._watchlist_controller = watchlist_ctrl
             wl_ref = watchlist_ctrl
 
             def _finalize_watchlist() -> None:
@@ -263,16 +280,9 @@ class FeedBuilder:
                     self._acquired_publisher = True
 
                 def _finalize_reused() -> None:
-                    if seed_since is not None and self._seed_rows_fn is not None:
-                        pub.mark_snapshot_seeded()
-                        extra_rows = self._seed_rows_fn(canon_syms, seed_since)
-                        pub.enqueue(extra_rows)
-                        pub.flush_now()
-                    elif seed and self._seed_fn is not None and not pub.has_snapshot_seed:
-                        pub.mark_snapshot_seeded()
+                    if seed and self._seed_fn is not None and not pub.has_snapshot_seed:
                         snap_rows = self._seed_fn(canon_syms)
-                        pub.enqueue(snap_rows)
-                        pub.flush_now()
+                        pub.seed_late_snapshot(snap_rows, auto_flush=True)
                     if self._auto_flush:
                         pub.start()
 
@@ -396,9 +406,17 @@ class FeedBuilder:
         capacity: int | None = None,
     ) -> Table:
         """Construct either an unbounded `blink_to_append_only` table or a bounded `ring_table`."""
-        from deephaven import ring_table
+        from deephaven import merge, ring_table
         from deephaven.stream import blink_to_append_only
 
+        was_reused = self._publisher is not None or (
+            not _is_deephaven_table(self.symbols)
+            and self._stream_registry is not None
+            and self.ws_url is not None
+            and self.ws_channel is not None
+            and (self.ws_url, self.ws_channel, tuple(self._canonical_symbol_list()))
+            in self._stream_registry
+        )
         pub, watchlist_ctrl, finalize_seed = self._setup_streaming(seed=seed, seed_since=seed_since)
         col_names = set(self.schema_spec.arrow_schema.names)
         if "Timestamp" in col_names:
@@ -429,6 +447,27 @@ class FeedBuilder:
         with exec_ctx_scope(self._exec_ctx):
             tbl = _build()
         finalize_seed()
+
+        if (
+            was_reused
+            and watchlist_ctrl is None
+            and seed_since is not None
+            and self._seed_rows_fn is not None
+        ):
+            pub.mark_snapshot_seeded()
+            raw_backfill = self._seed_rows_fn(self._canonical_symbol_list(), seed_since)
+            backfill_rows = pub.filter_historical_backfill(raw_backfill, seed_since=seed_since)
+            if backfill_rows:
+                rb = rows_to_record_batch(
+                    backfill_rows,
+                    self.schema_spec,
+                    self.symbol_normalizer,
+                    already_normalized=True,
+                )
+                pa_tbl = record_batches_to_arrow_table([rb], self.schema_spec)
+                backfill_dh = arrow_to_deephaven_table(pa_tbl, self._exec_ctx)
+                with exec_ctx_scope(self._exec_ctx):
+                    tbl = merge([backfill_dh, tbl])
         return tbl
 
     def history(
@@ -553,6 +592,10 @@ class FeedBuilder:
             fetch = partial(self._seed_fn, canon_syms)
         if fetch is None:
             raise NotImplementedError(f"Feed '{self.name}' does not support .poll().")
+
+        if self._poller is not None:
+            self._poller.stop()
+            self._poller = None
 
         poller = SnapshotPoller(
             name=self.name,

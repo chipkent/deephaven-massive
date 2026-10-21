@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
@@ -110,6 +111,8 @@ class ReactiveWatchlistController:
         self._op_lock = threading.RLock()
         self._stopped = False
         self._active_symbols: set[str] = set()
+        self._symbol_counts: Counter[str] = Counter()
+        self._last_error: Exception | None = None
         self._pending_ops = 0
         self._idle_condition = threading.Condition()
         self._listener_handle: Any = None
@@ -156,6 +159,12 @@ class ReactiveWatchlistController:
         with self._lock:
             return frozenset(self._active_symbols)
 
+    @property
+    def last_error(self) -> Exception | None:
+        """Return the most recent exception raised by a background watchlist diff, if any."""
+        with self._lock:
+            return self._last_error
+
     def _extract_symbols(self, col_map: Mapping[str, Any] | None) -> list[str]:
         """Extract and canonicalize non-empty symbol strings from a listener update map."""
         if not col_map or self.symbol_col not in col_map:
@@ -176,11 +185,9 @@ class ReactiveWatchlistController:
         modified = self._extract_symbols(update.modified())
         modified_prev = self._extract_symbols(update.modified_prev())
 
-        unchanged_mod = set(modified) & set(modified_prev)
-        to_add = [s for s in (added + modified) if s not in unchanged_mod]
-        to_remove = [s for s in (removed + modified_prev) if s not in unchanged_mod]
-
-        if not to_add and not to_remove:
+        to_add = added + modified
+        to_remove = removed + modified_prev
+        if Counter(to_add) == Counter(to_remove):
             return
 
         with self._idle_condition:
@@ -192,6 +199,9 @@ class ReactiveWatchlistController:
         """Execute `apply_diff` on the worker thread and notify `wait_idle` callers."""
         try:
             self.apply_diff(to_add, to_remove)
+        except Exception as exc:
+            with self._lock:
+                self._last_error = exc
         finally:
             with self._idle_condition:
                 self._pending_ops = max(0, self._pending_ops - 1)
@@ -206,23 +216,46 @@ class ReactiveWatchlistController:
     ) -> None:
         """Apply symbol additions and removals with serialized ordering across `active_subs`, publisher, and WebSocket.
 
+        Tracks per-symbol row multiplicity so duplicate symbols in a watchlist table
+        remain subscribed until the final row for that symbol is removed.
+
         Args:
             to_add: Iterable of symbols added to the watchlist.
             to_remove: Iterable of symbols removed from the watchlist.
             _from_stop: Internal flag permitting final unsubscription during `stop()`.
         """
-        add_set = {self.symbol_normalizer.canonical(s) for s in to_add if s}
-        rem_set = {self.symbol_normalizer.canonical(s) for s in to_remove if s} - add_set
+        add_counts = Counter(self.symbol_normalizer.canonical(s) for s in to_add if s)
+        rem_counts = Counter(self.symbol_normalizer.canonical(s) for s in to_remove if s)
 
         with self._op_lock:
             if self._stopped and not _from_stop:
                 return
 
             with self._lock:
-                net_add = sorted(add_set - self._active_symbols)
-                net_rem = sorted(rem_set & self._active_symbols)
-                self._active_symbols.update(net_add)
-                self._active_symbols.difference_update(net_rem)
+                if _from_stop:
+                    net_add: list[str] = []
+                    net_rem = sorted(self._active_symbols)
+                    updated_counts: Counter[str] = Counter()
+                else:
+                    updated_counts = Counter(self._symbol_counts)
+                    touched = set(add_counts) | set(rem_counts)
+                    net_add_set: set[str] = set()
+                    net_rem_set: set[str] = set()
+                    for sym in touched:
+                        delta = add_counts.get(sym, 0) - rem_counts.get(sym, 0)
+                        if delta == 0:
+                            continue
+                        new_count = max(0, updated_counts.get(sym, 0) + delta)
+                        if new_count > 0:
+                            updated_counts[sym] = new_count
+                            if sym not in self._active_symbols:
+                                net_add_set.add(sym)
+                        else:
+                            updated_counts.pop(sym, None)
+                            if sym in self._active_symbols:
+                                net_rem_set.add(sym)
+                    net_add = sorted(net_add_set)
+                    net_rem = sorted(net_rem_set)
 
             # 1. Handle removals first: disable in publisher -> unsubscribe WS -> delete from active_subs
             if net_rem:
@@ -275,6 +308,11 @@ class ReactiveWatchlistController:
                     self.ws_multiplexer.subscribe(
                         self.ws_url, self.channel, add_topics, self.publisher
                     )
+
+            with self._lock:
+                self._symbol_counts = updated_counts
+                self._active_symbols.difference_update(net_rem)
+                self._active_symbols.update(net_add)
 
     def wait_idle(self, timeout: float = 5.0) -> bool:
         """Block until all scheduled watchlist diff operations have completed.

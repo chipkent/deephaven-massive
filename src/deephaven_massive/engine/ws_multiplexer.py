@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -46,7 +46,7 @@ class _EndpointState:
         self.topic_ref_counts: dict[str, int] = defaultdict(int)
         self.channel_publishers: dict[str, list[MicroBatchPublisher]] = defaultdict(list)
         self.publisher_topics: dict[tuple[str, MicroBatchPublisher], set[str]] = defaultdict(set)
-        self.outbox: list[dict[str, Any]] = []
+        self.outbox: deque[dict[str, Any]] = deque(maxlen=1000)
         self.last_error: Exception | None = None
         self.active_ws: Any = None
         self.authenticated: bool = False
@@ -145,14 +145,23 @@ class WebSocketMultiplexer:
             self._get_endpoint(ws_url).conn_task = task
 
     @staticmethod
+    async def _shutdown_tasks(
+        loop: asyncio.AbstractEventLoop,
+        tasks: list[asyncio.Task[None]],
+    ) -> None:
+        """Cancel active connection tasks, await their cleanup, and stop the event loop."""
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        loop.stop()
+
+    @staticmethod
     def _stop_loop(
         loop: asyncio.AbstractEventLoop,
         tasks: list[asyncio.Task[None]],
     ) -> None:
         """Cancel any active connection tasks and stop the event loop on the loop thread."""
-        for task in tasks:
-            task.cancel()
-        loop.stop()
+        loop.create_task(WebSocketMultiplexer._shutdown_tasks(loop, tasks))
 
     def _emit_action(self, state: _EndpointState, action: str, params: str) -> dict[str, Any]:
         payload = {"action": action, "params": params}
@@ -196,6 +205,11 @@ class WebSocketMultiplexer:
                     await ws.send(json.dumps({"action": "auth", "params": self.config.api_key}))
                     async for raw_msg in ws:
                         self.handle_raw_message(ws_url, raw_msg)
+                with self._lock:
+                    state = self._get_endpoint(ws_url)
+                    state.active_ws = None
+                    state.authenticated = False
+                await asyncio.sleep(self._reconnect_delay_s)
             except MassiveEntitlementError:
                 with self._lock:
                     state = self._get_endpoint(ws_url)

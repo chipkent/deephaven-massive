@@ -59,11 +59,11 @@ def _split_currency_pair(raw: str) -> tuple[str, str]:
             parts = [p for p in raw.split(sep) if p]
             if len(parts) == 2:
                 return parts[0], parts[1]
-    if len(raw) == 6:
-        return raw[:3], raw[3:]
     for quote in _KNOWN_QUOTE_CURRENCIES:
         if raw.endswith(quote) and len(raw) > len(quote):
             return raw[: -len(quote)], quote
+    if len(raw) == 6:
+        return raw[:3], raw[3:]
     raise ValueError(
         f"Cannot parse currency/crypto pair '{raw}'. Use 'BASE/QUOTE' or 'BASE-QUOTE' format."
     )

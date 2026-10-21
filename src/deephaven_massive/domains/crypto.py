@@ -10,7 +10,7 @@ technical indicators for global cryptocurrency pairs (`BTC-USD`, `ETH-USD`,
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from deephaven_massive.domains.base import (
@@ -207,8 +207,12 @@ class CryptoClient(BaseDomainClient):
             `BARS_SCHEMA`.
         """
         clean_span = timespan.strip().lower()
-        ws_channel = "XAS" if clean_span == "second" else "XA"
-        ws_url = self.session.config._resolve_ws_url("crypto", feed_override=feed)
+        if multiplier == 1 and clean_span in ("second", "minute"):
+            ws_channel: str | None = "XAS" if clean_span == "second" else "XA"
+            ws_url: str | None = self.session.config._resolve_ws_url("crypto", feed_override=feed)
+        else:
+            ws_channel = None
+            ws_url = None
 
         s3_ds: str | None = None
         if multiplier == 1 and clean_span == "minute":
@@ -219,7 +223,7 @@ class CryptoClient(BaseDomainClient):
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             ticker = self.symbol_normalizer.rest_ticker(sym)  # type: ignore[union-attr]
             s_str = _format_date_param(start) or "1970-01-01"
-            e_str = _format_date_param(end) or s_str
+            e_str = _format_date_param(end) or datetime.now(timezone.utc).date().isoformat()
             return (
                 f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{clean_span}/{s_str}/{e_str}",
                 {"adjusted": str(adjusted).lower()},
@@ -252,6 +256,7 @@ class CryptoClient(BaseDomainClient):
                     end=end,
                     limit=limit,
                     source=source,
+                    adjusted=adjusted,
                 )
             ),
         )

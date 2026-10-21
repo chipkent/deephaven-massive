@@ -230,6 +230,33 @@ def test_publisher_seed_since_cutoff_filtering(dh_exec_ctx: Any) -> None:
     )
     assert flushed_since == 2
 
+    # Late snapshot seeding skips rows older than observed live ticks and flushes newer ones
+    assert (
+        pub.seed_late_snapshot(
+            [{"sym": "NVDA", "p": 850.0, "s": 5, "i": "N_STALE", "t": 1000000000000000000}],
+            auto_flush=True,
+        )
+        == 0
+    )
+    assert (
+        pub.seed_late_snapshot(
+            [{"sym": "NVDA", "p": 920.0, "s": 5, "i": "N_NEW", "t": 4000000000000000000}],
+            auto_flush=True,
+        )
+        == 1
+    )
+
+    # Historical backfill filtering skips rows older than seed_since or >= earliest live row
+    backfill = pub.filter_historical_backfill(
+        [
+            {"sym": "NVDA", "p": 800.0, "s": 5, "i": "B_TOO_OLD", "t": 1000000000000000000},
+            {"sym": "NVDA", "p": 870.0, "s": 5, "i": "B_OK", "t": 2000000000000000000},
+            {"sym": "NVDA", "p": 905.0, "s": 5, "i": "B_OVERLAP", "t": 2600000000000000000},
+        ],
+        seed_since=1500000000000000000,
+    )
+    assert [r["TradeId"] for r in backfill] == ["B_OK"]
+
 
 def test_publisher_seed_cutover_bars_quotes_and_keyless_schemas(
     dh_exec_ctx: Any,
@@ -461,7 +488,9 @@ def test_snapshot_poller_append_mode_and_background_thread(dh_exec_ctx: Any) -> 
 
 
 def test_snapshot_poller_keyless_and_default_exec_ctx(dh_exec_ctx: Any) -> None:
-    """Verify SnapshotPoller supports key_cols=() and exec_ctx=None inside an active context."""
+    """Verify SnapshotPoller supports key_cols=(), dynamic columns, background error capture, and exec_ctx=None."""
+    from deephaven_massive.schemas.reference import FINANCIAL_STATEMENT_SCHEMA
+
     norm = SymbolNormalizer("stocks")
     with dh_exec_ctx:
         poller = SnapshotPoller(
@@ -475,3 +504,64 @@ def test_snapshot_poller_keyless_and_default_exec_ctx(dh_exec_ctx: Any) -> None:
             exec_ctx=None,
         )
         assert poller.poll_once() == 1
+        assert poller.rows_published == 1
+        assert poller.last_error is None
+
+    # Dynamic column schema prefetching and empty upsert poll
+    dyn_poller = SnapshotPoller(
+        "poll_dyn",
+        FINANCIAL_STATEMENT_SCHEMA,
+        lambda: [{"tickers": ["AAPL"], "filing_date": "2025-01-15", "revenues": {"value": 100.0}}],
+        interval_s=10.0,
+        mode="upsert",
+        symbol_normalizer=norm,
+        exec_ctx=dh_exec_ctx,
+    )
+    assert dyn_poller.poll_once() == 1
+    dyn_poller.fetch_fn = list
+    assert dyn_poller.poll_once() == 0
+
+    # Background error capture in poller and publisher
+    def _boom_fetch() -> list[dict[str, Any]]:
+        raise RuntimeError("poll boom")
+
+    err_poller = SnapshotPoller(
+        "poll_err",
+        QUOTES_SCHEMA,
+        _boom_fetch,
+        interval_s=0.01,
+        mode="append",
+        symbol_normalizer=norm,
+        exec_ctx=dh_exec_ctx,
+    )
+    err_poller.start(initial_poll=False)
+    for _ in range(100):
+        if err_poller.last_error is not None:
+            break
+        err_poller._stop_event.wait(0.01)
+    err_poller.stop()
+    assert isinstance(err_poller.last_error, RuntimeError)
+
+    err_pub = MicroBatchPublisher(
+        name="err_pub",
+        schema_spec=QUOTES_SCHEMA,
+        symbol_normalizer=norm,
+        exec_ctx=dh_exec_ctx,
+        flush_interval_ms=10,
+    )
+
+    def _boom_flush() -> int:
+        raise RuntimeError("boom")
+
+    assert err_pub.last_error is None
+    err_pub.flush_now = _boom_flush  # type: ignore[method-assign]
+    err_pub.start()
+    for _ in range(100):
+        if err_pub.last_error is not None:
+            break
+        err_pub._stop_event.wait(0.01)
+    err_pub._stop_event.set()
+    err_pub._flush_wakeup.set()
+    if err_pub._flush_thread is not None:
+        err_pub._flush_thread.join(timeout=2.0)
+    assert isinstance(err_pub.last_error, RuntimeError)

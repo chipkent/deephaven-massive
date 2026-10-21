@@ -143,6 +143,9 @@ def test_session_request_json_url_building_and_param_filtering() -> None:
         assert res_cursor["status"] == "OK"
         assert calls[-1] == "https://api.massive.com/v3/trades/AAPL?cursor=abc&limit=5"
 
+        with pytest.raises(ValueError, match="untrusted origin"):
+            sess._request_json("https://evil.example.com/v3/trades/AAPL")
+
 
 def test_session_request_json_retry_backoff_and_error_handling() -> None:
     """Verify _request_json retries HTTP 429/5xx responses and raises on 403/400 errors."""
@@ -239,6 +242,8 @@ def test_session_stop_stream_filtering_and_lifecycle(dh_exec_ctx: Any) -> None:
         assert sess.stop_stream(symbols=["GOOG"]) == 0
 
         assert sess.stop_stream(ws_channel="Q", symbols=["MSFT"]) == 1
+        sess._register_builder(b_quotes)
+        assert sess.stop_stream("stocks.quotes") == 1
         assert sess.stop_stream(b_trades) == 1
 
         sess._register_builder(b_trades)
@@ -263,4 +268,12 @@ def test_session_urllib3_pool_execution() -> None:
     mock_resp.data = b""
     data_empty = sess._request_json("/v1/marketstatus/now")
     assert data_empty == {}
+
+    mock_resp.data = b"   "
+    data_ws = sess._request_json("/v1/marketstatus/now")
+    assert data_ws == {}
+
+    mock_resp.data = b"<html>Gateway Error</html>"
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        sess._request_json("/v1/marketstatus/now")
     sess.close()

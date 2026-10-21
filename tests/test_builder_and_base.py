@@ -358,6 +358,8 @@ def test_feed_builder_delivery_modes_and_fallback_seeding(
     poll_fb = sess.stocks.snapshots("AAPL")
     poll_ctx = poll_fb.poll(interval_s=10.0)
     assert poll_ctx is not None
+    poll_ctx2 = poll_fb.poll(interval_s=10.0)
+    assert poll_ctx2 is not None
     poll_fb.stop()
 
 
@@ -379,13 +381,18 @@ def test_feed_builder_reactive_watchlist_delivery_modes(
     assert fb_wl_trades._canonical_symbol_list() == []
     t_latest = fb_wl_trades.latest(seed=False)
     assert t_latest is not None
+    t_hist_reuse = fb_wl_trades.history(seed_since="2025-01-01")
+    assert t_hist_reuse is not None
+    t_ring_reuse = fb_wl_trades.ring(capacity=10, seed=True)
+    assert t_ring_reuse is not None
     assert fb_wl_trades.watchlist_controller is not None
+    assert fb_wl_trades.watchlist_controller.seed_fn is not None
     assert fb_wl_trades.watchlist_controller.wait_idle(timeout=5.0)
     assert fb_wl_trades._canonical_symbol_list() == ["AAPL"]
     assert sess.stop_stream(symbols="aapl") == 1
 
     fb_wl_bars = sess.stocks.bars(wl_tbl)
-    b_hist = fb_wl_bars.history(seed=False)
+    b_hist = fb_wl_bars.history(seed=True)
     assert b_hist is not None
     assert fb_wl_bars.watchlist_controller is not None
     assert fb_wl_bars.watchlist_controller.wait_idle(timeout=5.0)
@@ -447,11 +454,24 @@ def test_feed_builder_stream_registry_sharing_and_backfill(mock_session: Any) ->
     """Verify multiple builders for the same stream share a single publisher and reference-count stop()."""
     sess_auto = mock_session(auto_flush=True)
     fb_auto_seed = sess_auto.stocks.trades("AAPL")
+    fb_auto_seed._seed_fn = lambda _syms: [
+        {"sym": "AAPL", "p": 155.0, "s": 10, "i": "T_LIVE", "t": 1800000000000000000}
+    ]
     _ = fb_auto_seed.latest(seed=True)
 
     fb_auto_reused = sess_auto.stocks.trades("AAPL")
+    fb_auto_reused._seed_rows_fn = lambda _syms, _since: [
+        {"sym": "AAPL", "p": 150.0, "s": 10, "i": "T_HIST", "t": 1750000000000000000}
+    ]
     _ = fb_auto_reused.history(seed_since="2025-01-01", seed=True)
     assert fb_auto_seed.publisher is fb_auto_reused.publisher
+
+    fb_auto_reused_empty = sess_auto.stocks.trades("AAPL")
+    fb_auto_reused_empty._seed_rows_fn = lambda _syms, _since: [
+        {"sym": "AAPL", "p": 156.0, "s": 10, "i": "T_NEWER", "t": 1900000000000000000}
+    ]
+    _ = fb_auto_reused_empty.history(seed_since="2025-01-01", seed=True)
+    fb_auto_reused_empty.stop()
 
     fb_auto_seed.stop()
     assert "T.AAPL" in sess_auto.ws_multiplexer.active_topics("wss://socket.massive.com/stocks")

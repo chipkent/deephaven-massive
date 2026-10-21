@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from deephaven_massive.domains.base import (
@@ -267,8 +267,12 @@ class OptionsClient(BaseDomainClient):
             `BARS_SCHEMA`.
         """
         clean_span = timespan.strip().lower()
-        ws_channel = "A" if clean_span == "second" else "AM"
-        ws_url = self.session.config._resolve_ws_url("options", feed_override=feed)
+        if multiplier == 1 and clean_span in ("second", "minute"):
+            ws_channel: str | None = "A" if clean_span == "second" else "AM"
+            ws_url: str | None = self.session.config._resolve_ws_url("options", feed_override=feed)
+        else:
+            ws_channel = None
+            ws_url = None
 
         s3_ds: str | None = None
         if multiplier == 1 and clean_span == "minute":
@@ -278,7 +282,7 @@ class OptionsClient(BaseDomainClient):
 
         def _rest_path(sym: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
             s_str = _format_date_param(start) or "1970-01-01"
-            e_str = _format_date_param(end) or s_str
+            e_str = _format_date_param(end) or datetime.now(timezone.utc).date().isoformat()
             return (
                 f"/v2/aggs/ticker/{sym}/range/{multiplier}/{clean_span}/{s_str}/{e_str}",
                 {"adjusted": str(adjusted).lower()},

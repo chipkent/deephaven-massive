@@ -245,7 +245,8 @@ def test_dynamic_columns_and_arrow_to_deephaven_conversion(
                 "Symbol": "MSFT",
                 "Flag": False,
                 "Tags": ["cloud"],
-                "DynFloat": 20.0,
+                "DynFloat": "conflict_str",
+                "DynNull": 42.5,
                 "ExtraMetric": 99.0,
             }
         ],
@@ -254,6 +255,8 @@ def test_dynamic_columns_and_arrow_to_deephaven_conversion(
     )
     tbl = record_batches_to_arrow_table([b1, b2], dyn_spec)
     assert {"ExtraMetric", "DynBool", "DynNull", "DynStr"} <= set(tbl.column_names)
+    assert tbl.schema.field("DynNull").type == pa.float64()
+    assert tbl.schema.field("DynFloat").type == pa.string()
 
     empty_tbl = record_batches_to_arrow_table(
         [], dyn_spec, extra_fields=[pa.field("__PollId", pa.int64())]

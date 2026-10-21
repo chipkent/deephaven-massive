@@ -32,7 +32,7 @@ from deephaven_massive.engine.arrow_bridge import (
     SchemaSpec,
     flatten_dict,
 )
-from deephaven_massive.schemas.market import _first_present, _norm_symbol, _submap
+from deephaven_massive.schemas.market import _coalesce, _first_present, _norm_symbol, _submap
 
 if TYPE_CHECKING:
     from deephaven_massive.engine.symbols import SymbolNormalizer
@@ -368,10 +368,14 @@ def _normalize_ticker_details(
             "CompositeFigi": _first_present(row, "CompositeFigi", "composite_figi"),
             "MarketCap": _first_present(row, "MarketCap", "market_cap"),
             "PhoneNumber": _first_present(row, "PhoneNumber", "phone_number"),
-            "Address1": _first_present(row, "Address1") or _first_present(addr, "address1"),
-            "City": _first_present(row, "City") or _first_present(addr, "city"),
-            "State": _first_present(row, "State") or _first_present(addr, "state"),
-            "PostalCode": _first_present(row, "PostalCode") or _first_present(addr, "postal_code"),
+            "Address1": _coalesce(
+                _first_present(row, "Address1"), _first_present(addr, "address1")
+            ),
+            "City": _coalesce(_first_present(row, "City"), _first_present(addr, "city")),
+            "State": _coalesce(_first_present(row, "State"), _first_present(addr, "state")),
+            "PostalCode": _coalesce(
+                _first_present(row, "PostalCode"), _first_present(addr, "postal_code")
+            ),
             "Description": _first_present(row, "Description", "description"),
             "SicCode": _first_present(row, "SicCode", "sic_code"),
             "SicDescription": _first_present(row, "SicDescription", "sic_description"),
@@ -406,7 +410,7 @@ def _normalize_ticker_event(
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
         "EventType": _first_present(row, "EventType", "type"),
         "Date": _first_present(row, "Date", "date"),
-        "NewTicker": _first_present(row, "NewTicker") or _first_present(tc, "ticker"),
+        "NewTicker": _coalesce(_first_present(row, "NewTicker"), _first_present(tc, "ticker")),
     }
 
 
@@ -686,14 +690,20 @@ def _normalize_news(row: Mapping[str, Any], norm: SymbolNormalizer | None = None
         "PublishedUtc": _first_present(row, "PublishedUtc", "published_utc", "published"),
         "Title": _first_present(row, "Title", "title"),
         "Author": _first_present(row, "Author", "author"),
-        "PublisherName": _first_present(row, "PublisherName") or _first_present(pub, "name"),
+        "PublisherName": _coalesce(
+            _first_present(row, "PublisherName"), _first_present(pub, "name")
+        ),
         "ArticleUrl": _first_present(row, "ArticleUrl", "article_url", "url"),
         "Symbols": _first_present(row, "Symbols", "tickers"),
         "Description": _first_present(row, "Description", "description"),
         "Keywords": _first_present(row, "Keywords", "keywords"),
-        "Sentiment": _first_present(row, "Sentiment") or _first_present(first_insight, "sentiment"),
-        "SentimentReasoning": _first_present(row, "SentimentReasoning")
-        or _first_present(first_insight, "sentiment_reasoning"),
+        "Sentiment": _coalesce(
+            _first_present(row, "Sentiment"), _first_present(first_insight, "sentiment")
+        ),
+        "SentimentReasoning": _coalesce(
+            _first_present(row, "SentimentReasoning"),
+            _first_present(first_insight, "sentiment_reasoning"),
+        ),
     }
 
 

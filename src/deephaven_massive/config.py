@@ -8,7 +8,7 @@ S3 Flat File credentials, and micro-batching performance parameters.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 _FEED_HOST_MAP: dict[str, str] = {
     "realtime": "socket.massive.com",
@@ -67,11 +67,11 @@ class MassiveConfig:
             embedded `deephaven_server.Server` if none is running.
     """
 
-    api_key: str
+    api_key: str = field(repr=False)
     feed: str = "realtime"
     rest_base_url: str = "https://api.massive.com"
     s3_access_key_id: str | None = None
-    s3_secret_access_key: str | None = None
+    s3_secret_access_key: str | None = field(default=None, repr=False)
     s3_endpoint_url: str = "https://files.massive.com"
     s3_bucket: str = "flatfiles"
     flush_interval_ms: int = 50

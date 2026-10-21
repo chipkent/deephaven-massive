@@ -502,10 +502,19 @@ def test_reactive_watchlist_edge_cases_and_shutdown(dh_exec_ctx: Any) -> None:
     with ctrl._idle_condition:
         ctrl._pending_ops = 0
 
-    ctrl.apply_diff(["IBM"], [])
+    ctrl.apply_diff(["IBM", "IBM"], [])
     assert ctrl.active_symbols == frozenset({"IBM"})
-    ctrl.apply_diff([], ["IBM"])
+    ctrl.apply_diff(["IBM"], ["IBM"])  # net delta == 0
+    ctrl.apply_diff([], ["IBM"])  # multiplicity 2 -> 1 (still active)
+    assert ctrl.active_symbols == frozenset({"IBM"})
+    ctrl.apply_diff([], ["IBM", "UNKNOWN"])  # multiplicity 1 -> 0 + unknown removal
     assert ctrl.active_symbols == frozenset()
+    assert ctrl.last_error is None
+
+    ctrl.seed_fn = lambda _syms: (_ for _ in ()).throw(RuntimeError("seed boom"))
+    ctrl._apply_diff_safe(["ERR"], [])
+    assert isinstance(ctrl.last_error, RuntimeError)
+    ctrl.seed_fn = None
 
     ctrl.stop()
     ctrl.stop()  # idempotent second stop

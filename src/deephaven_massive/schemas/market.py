@@ -54,6 +54,14 @@ def _first_present(row: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
+def _coalesce(*vals: Any) -> Any:
+    """Return the first value in ``vals`` that is not ``None``."""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def _submap(row: Mapping[str, Any], *keys: str) -> Mapping[str, Any]:
     """Return the first nested ``Mapping`` found in ``row`` across ``keys``, or ``{}``."""
     val = _first_present(row, *keys)
@@ -169,11 +177,14 @@ def _normalize_quote(
         "ParticipantTimestamp": _first_present(
             src, "ParticipantTimestamp", "participant_timestamp", "y", "exchange_timestamp"
         ),
-        "BidPrice": _first_present(src, "BidPrice", "bid_price", "bp", "b", "bid"),
-        "BidSize": _first_present(src, "BidSize", "bid_size", "bs", "bidSize"),
+        "BidPrice": _coalesce(
+            _first_present(src, "BidPrice", "bid_price", "bp", "b", "bid"),
+            src.get("p") if not isinstance(src.get("p"), str) else None,
+        ),
+        "BidSize": _first_present(src, "BidSize", "bid_size", "bs", "s", "bidSize"),
         "BidExchange": _first_present(src, "BidExchange", "bid_exchange", "bx", "x"),
-        "AskPrice": _first_present(src, "AskPrice", "ask_price", "ap", "a", "ask"),
-        "AskSize": _first_present(src, "AskSize", "ask_size", "as", "askSize"),
+        "AskPrice": _first_present(src, "AskPrice", "ask_price", "ap", "P", "a", "ask"),
+        "AskSize": _first_present(src, "AskSize", "ask_size", "as", "S", "askSize"),
         "AskExchange": _first_present(src, "AskExchange", "ask_exchange", "ax"),
         "Conditions": _first_present(src, "Conditions", "conditions", "c"),
         "Indicators": _first_present(src, "Indicators", "indicators", "i"),
@@ -235,7 +246,11 @@ def _normalize_bar(row: Mapping[str, Any], norm: SymbolNormalizer | None = None)
     Returns:
         dict[str, Any]: Normalized row dictionary matching ``BARS_SCHEMA``.
     """
-    nested_bar = row.get("min") or row.get("day") or row.get("session")
+    span_ns = _first_present(row, "_span_ns", "span_ns")
+    if span_ns is not None and int(span_ns) >= 86_400_000_000_000:
+        nested_bar = row.get("day") or row.get("session") or row.get("min")
+    else:
+        nested_bar = row.get("min") or row.get("day") or row.get("session")
     src = (
         nested_bar
         if isinstance(nested_bar, Mapping) and "o" not in row and "open" not in row
@@ -250,7 +265,6 @@ def _normalize_bar(row: Mapping[str, Any], norm: SymbolNormalizer | None = None)
     if end_raw is not None:
         end_ns = to_utc_ns(end_raw)
     elif start_ns is not None:
-        span_ns = _first_present(row, "_span_ns", "span_ns")
         if span_ns is None and ("timespan" in row or "multiplier" in row):
             span_ns = _compute_bar_span_ns(
                 int(row.get("multiplier", 1)),
@@ -271,7 +285,7 @@ def _normalize_bar(row: Mapping[str, Any], norm: SymbolNormalizer | None = None)
         "Vwap": _first_present(src, "Vwap", "vw", "vwap"),
         "AccumulatedVolume": _first_present(src, "AccumulatedVolume", "av", "accumulated_volume"),
         "OfficialOpen": _first_present(src, "OfficialOpen", "op", "official_open"),
-        "Transactions": _first_present(src, "Transactions", "n", "z", "transactions"),
+        "Transactions": _first_present(src, "Transactions", "n", "transactions"),
         "IsOtc": _first_present(src, "IsOtc", "otc", "is_otc"),
     }
 
@@ -390,57 +404,100 @@ def _normalize_stock_snapshot(
 
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker", "sym", "T"),
-        "Timestamp": _first_present(row, "Timestamp", "updated", "last_updated")
-        or _first_present(lt_map, "t", "sip_timestamp")
-        or _first_present(lq_map, "t", "sip_timestamp"),
-        "DayOpen": _first_present(row, "DayOpen")
-        or _first_present(day, "o", "open")
-        or _first_present(sess, "open"),
-        "DayHigh": _first_present(row, "DayHigh")
-        or _first_present(day, "h", "high")
-        or _first_present(sess, "high"),
-        "DayLow": _first_present(row, "DayLow")
-        or _first_present(day, "l", "low")
-        or _first_present(sess, "low"),
-        "DayClose": _first_present(row, "DayClose")
-        or _first_present(day, "c", "close")
-        or _first_present(sess, "close")
-        or _first_present(row, "value"),
-        "DayVolume": _first_present(row, "DayVolume")
-        or _first_present(day, "v", "volume")
-        or _first_present(sess, "volume"),
-        "DayVwap": _first_present(row, "DayVwap") or _first_present(day, "vw", "vwap"),
-        "PrevDayClose": _first_present(row, "PrevDayClose")
-        or _first_present(prev_map, "c", "close")
-        or _first_present(sess, "previous_close"),
-        "PrevDayVolume": _first_present(row, "PrevDayVolume")
-        or _first_present(prev_map, "v", "volume"),
-        "Change": _first_present(row, "Change", "todaysChange", "todays_change")
-        or _first_present(sess, "change"),
-        "ChangePercent": _first_present(
-            row, "ChangePercent", "todaysChangePerc", "todays_change_perc"
-        )
-        or _first_present(sess, "change_percent"),
-        "LastTradePrice": _first_present(row, "LastTradePrice")
-        or _first_present(lt_map, "p", "price"),
-        "LastTradeSize": _first_present(row, "LastTradeSize")
-        or _first_present(lt_map, "s", "size"),
-        "LastTradeTimestamp": _first_present(row, "LastTradeTimestamp")
-        or _first_present(lt_map, "t", "sip_timestamp", "participant_timestamp"),
-        "BidPrice": _first_present(row, "BidPrice")
-        or _first_present(lq_map, "p", "bp", "bid", "bid_price"),
-        "BidSize": _first_present(row, "BidSize") or _first_present(lq_map, "s", "bs", "bid_size"),
-        "AskPrice": _first_present(row, "AskPrice")
-        or _first_present(lq_map, "P", "ap", "ask", "ask_price"),
-        "AskSize": _first_present(row, "AskSize") or _first_present(lq_map, "S", "as", "ask_size"),
-        "QuoteTimestamp": _first_present(row, "QuoteTimestamp")
-        or _first_present(lq_map, "t", "sip_timestamp", "last_updated"),
-        "MinOpen": _first_present(row, "MinOpen") or _first_present(min_bar, "o", "open"),
-        "MinHigh": _first_present(row, "MinHigh") or _first_present(min_bar, "h", "high"),
-        "MinLow": _first_present(row, "MinLow") or _first_present(min_bar, "l", "low"),
-        "MinClose": _first_present(row, "MinClose") or _first_present(min_bar, "c", "close"),
-        "MinVolume": _first_present(row, "MinVolume") or _first_present(min_bar, "v", "volume"),
-        "MinVwap": _first_present(row, "MinVwap") or _first_present(min_bar, "vw", "vwap"),
+        "Timestamp": _coalesce(
+            _first_present(row, "Timestamp", "updated", "last_updated"),
+            _first_present(lt_map, "t", "sip_timestamp"),
+            _first_present(lq_map, "t", "sip_timestamp"),
+        ),
+        "DayOpen": _coalesce(
+            _first_present(row, "DayOpen"),
+            _first_present(day, "o", "open"),
+            _first_present(sess, "open"),
+        ),
+        "DayHigh": _coalesce(
+            _first_present(row, "DayHigh"),
+            _first_present(day, "h", "high"),
+            _first_present(sess, "high"),
+        ),
+        "DayLow": _coalesce(
+            _first_present(row, "DayLow"),
+            _first_present(day, "l", "low"),
+            _first_present(sess, "low"),
+        ),
+        "DayClose": _coalesce(
+            _first_present(row, "DayClose"),
+            _first_present(day, "c", "close"),
+            _first_present(sess, "close"),
+            _first_present(row, "value"),
+        ),
+        "DayVolume": _coalesce(
+            _first_present(row, "DayVolume"),
+            _first_present(day, "v", "volume"),
+            _first_present(sess, "volume"),
+        ),
+        "DayVwap": _coalesce(
+            _first_present(row, "DayVwap"),
+            _first_present(day, "vw", "vwap"),
+        ),
+        "PrevDayClose": _coalesce(
+            _first_present(row, "PrevDayClose"),
+            _first_present(prev_map, "c", "close"),
+            _first_present(sess, "previous_close"),
+        ),
+        "PrevDayVolume": _coalesce(
+            _first_present(row, "PrevDayVolume"),
+            _first_present(prev_map, "v", "volume"),
+        ),
+        "Change": _coalesce(
+            _first_present(row, "Change", "todaysChange", "todays_change"),
+            _first_present(sess, "change"),
+        ),
+        "ChangePercent": _coalesce(
+            _first_present(row, "ChangePercent", "todaysChangePerc", "todays_change_perc"),
+            _first_present(sess, "change_percent"),
+        ),
+        "LastTradePrice": _coalesce(
+            _first_present(row, "LastTradePrice"),
+            _first_present(lt_map, "p", "price"),
+        ),
+        "LastTradeSize": _coalesce(
+            _first_present(row, "LastTradeSize"),
+            _first_present(lt_map, "s", "size"),
+        ),
+        "LastTradeTimestamp": _coalesce(
+            _first_present(row, "LastTradeTimestamp"),
+            _first_present(lt_map, "t", "sip_timestamp", "participant_timestamp"),
+        ),
+        "BidPrice": _coalesce(
+            _first_present(row, "BidPrice"),
+            _first_present(lq_map, "p", "bp", "b", "bid", "bid_price"),
+        ),
+        "BidSize": _coalesce(
+            _first_present(row, "BidSize"),
+            _first_present(lq_map, "s", "bs", "bid_size"),
+        ),
+        "AskPrice": _coalesce(
+            _first_present(row, "AskPrice"),
+            _first_present(lq_map, "P", "ap", "a", "ask", "ask_price"),
+        ),
+        "AskSize": _coalesce(
+            _first_present(row, "AskSize"),
+            _first_present(lq_map, "S", "as", "ask_size"),
+        ),
+        "QuoteTimestamp": _coalesce(
+            _first_present(row, "QuoteTimestamp"),
+            _first_present(lq_map, "t", "sip_timestamp", "last_updated"),
+        ),
+        "MinOpen": _coalesce(_first_present(row, "MinOpen"), _first_present(min_bar, "o", "open")),
+        "MinHigh": _coalesce(_first_present(row, "MinHigh"), _first_present(min_bar, "h", "high")),
+        "MinLow": _coalesce(_first_present(row, "MinLow"), _first_present(min_bar, "l", "low")),
+        "MinClose": _coalesce(
+            _first_present(row, "MinClose"), _first_present(min_bar, "c", "close")
+        ),
+        "MinVolume": _coalesce(
+            _first_present(row, "MinVolume"), _first_present(min_bar, "v", "volume")
+        ),
+        "MinVwap": _coalesce(_first_present(row, "MinVwap"), _first_present(min_bar, "vw", "vwap")),
         "FairMarketValue": _first_present(row, "FairMarketValue", "fmv"),
     }
 
@@ -469,56 +526,88 @@ def _normalize_option_chain_snapshot(
     lq = _submap(row, "last_quote")
     lt = _submap(row, "last_trade")
 
-    raw_sym = _first_present(row, "Symbol", "ticker") or _first_present(details, "ticker")
+    raw_sym = _coalesce(_first_present(row, "Symbol", "ticker"), _first_present(details, "ticker"))
     sym = (
         norm.canonical(str(raw_sym)) if (raw_sym and norm) else (str(raw_sym) if raw_sym else None)
     )
 
     return {
         "Symbol": sym,
-        "UnderlyingSymbol": _first_present(row, "UnderlyingSymbol")
-        or _first_present(underlying, "ticker"),
-        "UnderlyingPrice": _first_present(row, "UnderlyingPrice")
-        or _first_present(underlying, "price", "value"),
-        "ExpirationDate": _first_present(row, "ExpirationDate")
-        or _first_present(details, "expiration_date"),
-        "StrikePrice": _first_present(row, "StrikePrice")
-        or _first_present(details, "strike_price"),
-        "ContractType": _first_present(row, "ContractType")
-        or _first_present(details, "contract_type"),
-        "ExerciseStyle": _first_present(row, "ExerciseStyle")
-        or _first_present(details, "exercise_style"),
-        "SharesPerContract": _first_present(row, "SharesPerContract")
-        or _first_present(details, "shares_per_contract"),
+        "UnderlyingSymbol": _coalesce(
+            _first_present(row, "UnderlyingSymbol"),
+            _first_present(underlying, "ticker"),
+        ),
+        "UnderlyingPrice": _coalesce(
+            _first_present(row, "UnderlyingPrice"),
+            _first_present(underlying, "price", "value"),
+        ),
+        "ExpirationDate": _coalesce(
+            _first_present(row, "ExpirationDate"),
+            _first_present(details, "expiration_date"),
+        ),
+        "StrikePrice": _coalesce(
+            _first_present(row, "StrikePrice"),
+            _first_present(details, "strike_price"),
+        ),
+        "ContractType": _coalesce(
+            _first_present(row, "ContractType"),
+            _first_present(details, "contract_type"),
+        ),
+        "ExerciseStyle": _coalesce(
+            _first_present(row, "ExerciseStyle"),
+            _first_present(details, "exercise_style"),
+        ),
+        "SharesPerContract": _coalesce(
+            _first_present(row, "SharesPerContract"),
+            _first_present(details, "shares_per_contract"),
+        ),
         "BreakEvenPrice": _first_present(row, "BreakEvenPrice", "break_even_price"),
         "ImpliedVolatility": _first_present(row, "ImpliedVolatility", "implied_volatility"),
         "OpenInterest": _first_present(row, "OpenInterest", "open_interest"),
-        "Delta": _first_present(row, "Delta") or _first_present(greeks, "delta"),
-        "Gamma": _first_present(row, "Gamma") or _first_present(greeks, "gamma"),
-        "Theta": _first_present(row, "Theta") or _first_present(greeks, "theta"),
-        "Vega": _first_present(row, "Vega") or _first_present(greeks, "vega"),
-        "BidPrice": _first_present(row, "BidPrice") or _first_present(lq, "bid", "bid_price"),
-        "BidSize": _first_present(row, "BidSize") or _first_present(lq, "bid_size"),
-        "AskPrice": _first_present(row, "AskPrice") or _first_present(lq, "ask", "ask_price"),
-        "AskSize": _first_present(row, "AskSize") or _first_present(lq, "ask_size"),
-        "Midpoint": _first_present(row, "Midpoint") or _first_present(lq, "midpoint"),
-        "QuoteTimestamp": _first_present(row, "QuoteTimestamp")
-        or _first_present(lq, "last_updated", "sip_timestamp"),
-        "LastTradePrice": _first_present(row, "LastTradePrice") or _first_present(lt, "price"),
-        "LastTradeSize": _first_present(row, "LastTradeSize") or _first_present(lt, "size"),
-        "LastTradeTimestamp": _first_present(row, "LastTradeTimestamp")
-        or _first_present(lt, "sip_timestamp"),
-        "DayOpen": _first_present(row, "DayOpen") or _first_present(day, "open", "o"),
-        "DayHigh": _first_present(row, "DayHigh") or _first_present(day, "high", "h"),
-        "DayLow": _first_present(row, "DayLow") or _first_present(day, "low", "l"),
-        "DayClose": _first_present(row, "DayClose") or _first_present(day, "close", "c"),
-        "DayVolume": _first_present(row, "DayVolume") or _first_present(day, "volume", "v"),
-        "DayVwap": _first_present(row, "DayVwap") or _first_present(day, "vwap", "vw"),
-        "PrevDayClose": _first_present(row, "PrevDayClose")
-        or _first_present(day, "previous_close"),
-        "Change": _first_present(row, "Change") or _first_present(day, "change"),
-        "ChangePercent": _first_present(row, "ChangePercent")
-        or _first_present(day, "change_percent"),
+        "Delta": _coalesce(_first_present(row, "Delta"), _first_present(greeks, "delta")),
+        "Gamma": _coalesce(_first_present(row, "Gamma"), _first_present(greeks, "gamma")),
+        "Theta": _coalesce(_first_present(row, "Theta"), _first_present(greeks, "theta")),
+        "Vega": _coalesce(_first_present(row, "Vega"), _first_present(greeks, "vega")),
+        "BidPrice": _coalesce(
+            _first_present(row, "BidPrice"), _first_present(lq, "bid", "bid_price")
+        ),
+        "BidSize": _coalesce(_first_present(row, "BidSize"), _first_present(lq, "bid_size")),
+        "AskPrice": _coalesce(
+            _first_present(row, "AskPrice"), _first_present(lq, "ask", "ask_price")
+        ),
+        "AskSize": _coalesce(_first_present(row, "AskSize"), _first_present(lq, "ask_size")),
+        "Midpoint": _coalesce(_first_present(row, "Midpoint"), _first_present(lq, "midpoint")),
+        "QuoteTimestamp": _coalesce(
+            _first_present(row, "QuoteTimestamp"),
+            _first_present(lq, "last_updated", "sip_timestamp"),
+        ),
+        "LastTradePrice": _coalesce(
+            _first_present(row, "LastTradePrice"), _first_present(lt, "price")
+        ),
+        "LastTradeSize": _coalesce(
+            _first_present(row, "LastTradeSize"), _first_present(lt, "size")
+        ),
+        "LastTradeTimestamp": _coalesce(
+            _first_present(row, "LastTradeTimestamp"),
+            _first_present(lt, "sip_timestamp"),
+        ),
+        "DayOpen": _coalesce(_first_present(row, "DayOpen"), _first_present(day, "open", "o")),
+        "DayHigh": _coalesce(_first_present(row, "DayHigh"), _first_present(day, "high", "h")),
+        "DayLow": _coalesce(_first_present(row, "DayLow"), _first_present(day, "low", "l")),
+        "DayClose": _coalesce(_first_present(row, "DayClose"), _first_present(day, "close", "c")),
+        "DayVolume": _coalesce(
+            _first_present(row, "DayVolume"), _first_present(day, "volume", "v")
+        ),
+        "DayVwap": _coalesce(_first_present(row, "DayVwap"), _first_present(day, "vwap", "vw")),
+        "PrevDayClose": _coalesce(
+            _first_present(row, "PrevDayClose"),
+            _first_present(day, "previous_close"),
+        ),
+        "Change": _coalesce(_first_present(row, "Change"), _first_present(day, "change")),
+        "ChangePercent": _coalesce(
+            _first_present(row, "ChangePercent"),
+            _first_present(day, "change_percent"),
+        ),
         "FairMarketValue": _first_present(row, "FairMarketValue", "fmv"),
     }
 
@@ -548,42 +637,72 @@ def _normalize_futures_snapshot(
 
     return {
         "Symbol": _norm_symbol(row, norm, "Symbol", "ticker"),
-        "ProductCode": _first_present(row, "ProductCode", "product_code")
-        or _first_present(details, "product_code"),
-        "Name": _first_present(row, "Name", "name") or _first_present(details, "name"),
-        "Timestamp": _first_present(row, "Timestamp", "last_updated")
-        or _first_present(lt, "timestamp")
-        or _first_present(lq, "timestamp"),
-        "LastTradePrice": _first_present(row, "LastTradePrice") or _first_present(lt, "price"),
-        "LastTradeSize": _first_present(row, "LastTradeSize") or _first_present(lt, "size"),
-        "BidPrice": _first_present(row, "BidPrice") or _first_present(lq, "bid", "bid_price"),
-        "BidSize": _first_present(row, "BidSize") or _first_present(lq, "bid_size"),
-        "AskPrice": _first_present(row, "AskPrice") or _first_present(lq, "ask", "ask_price"),
-        "AskSize": _first_present(row, "AskSize") or _first_present(lq, "ask_size"),
-        "SessionOpen": _first_present(row, "SessionOpen")
-        or _first_present(sess, "open")
-        or _first_present(min_bar, "open"),
-        "SessionHigh": _first_present(row, "SessionHigh")
-        or _first_present(sess, "high")
-        or _first_present(min_bar, "high"),
-        "SessionLow": _first_present(row, "SessionLow")
-        or _first_present(sess, "low")
-        or _first_present(min_bar, "low"),
-        "SessionClose": _first_present(row, "SessionClose")
-        or _first_present(sess, "close")
-        or _first_present(min_bar, "close"),
-        "SessionVolume": _first_present(row, "SessionVolume")
-        or _first_present(sess, "volume")
-        or _first_present(min_bar, "volume"),
-        "SettlementPrice": _first_present(row, "SettlementPrice")
-        or _first_present(sess, "settlement_price"),
-        "PreviousSettlement": _first_present(row, "PreviousSettlement")
-        or _first_present(sess, "previous_settlement"),
-        "Change": _first_present(row, "Change") or _first_present(sess, "change"),
-        "ChangePercent": _first_present(row, "ChangePercent")
-        or _first_present(sess, "change_percent"),
-        "OpenInterest": _first_present(row, "OpenInterest")
-        or _first_present(details, "open_interest"),
+        "ProductCode": _coalesce(
+            _first_present(row, "ProductCode", "product_code"),
+            _first_present(details, "product_code"),
+        ),
+        "Name": _coalesce(_first_present(row, "Name", "name"), _first_present(details, "name")),
+        "Timestamp": _coalesce(
+            _first_present(row, "Timestamp", "last_updated"),
+            _first_present(lt, "timestamp"),
+            _first_present(lq, "timestamp"),
+        ),
+        "LastTradePrice": _coalesce(
+            _first_present(row, "LastTradePrice"), _first_present(lt, "price")
+        ),
+        "LastTradeSize": _coalesce(
+            _first_present(row, "LastTradeSize"), _first_present(lt, "size")
+        ),
+        "BidPrice": _coalesce(
+            _first_present(row, "BidPrice"), _first_present(lq, "bid", "bid_price")
+        ),
+        "BidSize": _coalesce(_first_present(row, "BidSize"), _first_present(lq, "bid_size")),
+        "AskPrice": _coalesce(
+            _first_present(row, "AskPrice"), _first_present(lq, "ask", "ask_price")
+        ),
+        "AskSize": _coalesce(_first_present(row, "AskSize"), _first_present(lq, "ask_size")),
+        "SessionOpen": _coalesce(
+            _first_present(row, "SessionOpen"),
+            _first_present(sess, "open"),
+            _first_present(min_bar, "open"),
+        ),
+        "SessionHigh": _coalesce(
+            _first_present(row, "SessionHigh"),
+            _first_present(sess, "high"),
+            _first_present(min_bar, "high"),
+        ),
+        "SessionLow": _coalesce(
+            _first_present(row, "SessionLow"),
+            _first_present(sess, "low"),
+            _first_present(min_bar, "low"),
+        ),
+        "SessionClose": _coalesce(
+            _first_present(row, "SessionClose"),
+            _first_present(sess, "close"),
+            _first_present(min_bar, "close"),
+        ),
+        "SessionVolume": _coalesce(
+            _first_present(row, "SessionVolume"),
+            _first_present(sess, "volume"),
+            _first_present(min_bar, "volume"),
+        ),
+        "SettlementPrice": _coalesce(
+            _first_present(row, "SettlementPrice"),
+            _first_present(sess, "settlement_price"),
+        ),
+        "PreviousSettlement": _coalesce(
+            _first_present(row, "PreviousSettlement"),
+            _first_present(sess, "previous_settlement"),
+        ),
+        "Change": _coalesce(_first_present(row, "Change"), _first_present(sess, "change")),
+        "ChangePercent": _coalesce(
+            _first_present(row, "ChangePercent"),
+            _first_present(sess, "change_percent"),
+        ),
+        "OpenInterest": _coalesce(
+            _first_present(row, "OpenInterest"),
+            _first_present(details, "open_interest"),
+        ),
     }
 
 
@@ -638,13 +757,15 @@ def _normalize_currency_conversion(
     sym = norm.canonical(str(raw_sym)) if (raw_sym and norm) else raw_sym
     return {
         "Symbol": sym,
-        "Timestamp": _first_present(row, "Timestamp") or _first_present(last_q, "timestamp"),
+        "Timestamp": _coalesce(
+            _first_present(row, "Timestamp"), _first_present(last_q, "timestamp")
+        ),
         "FromCurrency": from_curr,
         "ToCurrency": to_curr,
         "InitialAmount": _first_present(row, "InitialAmount", "initialAmount", "initial_amount"),
         "ConvertedAmount": _first_present(row, "ConvertedAmount", "converted"),
-        "BidPrice": _first_present(row, "BidPrice") or _first_present(last_q, "bid"),
-        "AskPrice": _first_present(row, "AskPrice") or _first_present(last_q, "ask"),
+        "BidPrice": _coalesce(_first_present(row, "BidPrice"), _first_present(last_q, "bid")),
+        "AskPrice": _coalesce(_first_present(row, "AskPrice"), _first_present(last_q, "ask")),
     }
 
 
