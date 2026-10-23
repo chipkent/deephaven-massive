@@ -7,15 +7,21 @@
 # avoid an endless loop.
 set -euo pipefail
 
-project_dir="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-
-active="$(python3 -I -c '
+# The hook payload is parsed with the system python3 in isolated mode (-I), not `uv run`:
+# parsing JSON needs no project dependencies, and uv would add a sync to every turn.
+read -r active cwd < <(python3 -I -c '
 import json, sys
-print("yes" if json.load(sys.stdin).get("stop_hook_active") else "no")
-')"
+payload = json.load(sys.stdin)
+print("yes" if payload.get("stop_hook_active") else "no", payload.get("cwd", ""))
+')
 [[ "$active" == "no" ]] || exit 0
 
-cd "$project_dir"
+# Resolve the checkout from the session's working directory (the payload's cwd), because
+# CLAUDE_PROJECT_DIR does not follow agent worktrees.
+root="$(git -C "${cwd:-.}" rev-parse --show-toplevel 2>/dev/null || echo "${CLAUDE_PROJECT_DIR:-}")"
+[[ -n "$root" && -x "$root/scripts/check.sh" ]] || exit 0
+
+cd "$root"
 if ! output="$(./scripts/check.sh fast --no-fix 2>&1)"; then
     echo "scripts/check.sh fast --no-fix failed; fix these problems before stopping:" >&2
     echo "$output" >&2

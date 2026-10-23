@@ -387,8 +387,10 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
     D-bump lands F4 (`py.typed`), `massive.*` (tag the latter with the marker `FORK-PY-TYPED` so
     that bump removes it).
   - Pytest 9 `[tool.pytest]`: `minversion = "9.0"`, `strict = true`, `filterwarnings = ["error"]`,
-    `addopts = ["-ra", "--import-mode=importlib"]`, `timeout = 60`,
-    `faulthandler_timeout = 120`, `faulthandler_exit_on_timeout = true`, `testpaths = ["tests"]`.
+    `addopts = ["-ra", "--import-mode=importlib"]`, `timeout = "60"`,
+    `faulthandler_timeout = "120"` (both strings: pytest and pytest-timeout declare these
+    options as strings and reject TOML numbers), `faulthandler_exit_on_timeout = true`,
+    `testpaths = ["tests"]`.
     No coverage flags in `addopts`.
   - Coverage: `source = ["deephaven_massive"]`, `branch = true`, `fail_under = 100`,
     `show_missing`, `exclude_also = ["if TYPE_CHECKING:", "@(typing\\.)?overload"]` only.
@@ -1292,7 +1294,7 @@ never add a probe for an unsupported endpoint (`/v1/summaries`, `/futures/{venue
 
 **Goal.** Move this repository's `[tool.uv.sources] massive.rev` to a `deephaven-fixes` commit
 whose CI is green, regenerate `uv.lock`, and remove any temporary accommodation that the newly
-included fork fixes make unnecessary.
+included fork fixes make unnecessary. The fork builds as version `0.0.0` (its packaging carries no release version), so nothing may check the installed `massive` version; `uv` accepts the source pin despite `massive>=2.9.0`.
 
 **DESIGN sections implemented.**
 [§ 19 SDK fork: fix list and responsibility split](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)
@@ -1407,7 +1409,7 @@ gh run list -R chipkent/massive-client-python -b deephaven-fixes --limit 3
 ```
 
 **Pitfalls.** Upstream's default branch may be `master`; confirm before scripting. The SDK uses
-`poetry` metadata (`Requires-Python >=3.10,<4.0`); keep its packaging untouched.
+`poetry` metadata (`Requires-Python >=3.10,<4.0`); keep its packaging untouched. The fork builds as version `0.0.0` (its packaging carries no release version), so nothing may check the installed `massive` version; `uv` accepts the source pin despite `massive>=2.9.0`.
 
 **Out of scope.** Any code fix. **Approval gates.** Fork creation and rulesets are owner steps.
 

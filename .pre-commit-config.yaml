@@ -12,9 +12,7 @@ repos:
         args: [--branch, main]
       - id: check-yaml
       - id: end-of-file-fixer
-        stages: [pre-commit]
       - id: trailing-whitespace
-        stages: [pre-commit]
 
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: b84c4a0a90bd58c7d82ae8f0d4d5e77b1ddd3ce6  # frozen: 0.12.5

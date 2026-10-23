@@ -1261,7 +1261,7 @@ from 16 threads against a fake server, concurrent `release()` and verb calls, an
 `RESTClient` use. The only free-threaded target is 3.14t, because pyarrow, numpy, and pandas no
 longer publish cp313t wheels. Wheel availability on 3.14t: `jpy 2.2.0`, `pyarrow`, `numpy`, and
 `pandas` ship cp314t wheels; `deephaven-core` is `py3-none-any`; `websockets 17.3` ships cp314t
-wheels. `orjson` free-threaded wheels are **UNVERIFIED**, so `orjson` is an optional extra and
+wheels. `orjson 3.13.0` publishes no free-threaded wheels, so `orjson` is an optional extra and
 the standard-library codec is the default. `PythonDeephavenSession.setVariable` carries the
 comment "relying on the GIL being kind to us"; the library never mutates script globals, so this
 does not affect it, but it is why the Deephaven integration tests must run on the free-threaded
@@ -1603,5 +1603,5 @@ before 1.0.
 | 9 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/test_ws.py`: 2,500 topics produce three frames | `tests/test_ws_integration.py`: a 1,000-topic frame is acknowledged |
 | 10 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/test_ws_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
 | 11 | Exact `max_connections` status text and timing | Any status `max_connections`, after the handshake or surfaced by the fork during it (F2.6), shows `WAITING_SLOT` | `tests/test_ws.py`: both placements | `tests/test_ws_integration.py`: two sessions with one individual key |
-| 12 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/test_config.py`: codec selection with and without `orjson` importable | CI: the 3.14t job installs the extra and reports |
+| 12 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/test_config.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
 | 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/test_flatfiles.py`: AUTO before and after the cutoff | `tests/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |

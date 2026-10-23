@@ -114,6 +114,17 @@ def test_unit_test_of_maps_live_tests_to_their_mirror(test_file: str, expected: 
     assert unit_test_of(PurePosixPath(test_file)) == PurePosixPath(expected)
 
 
+def test_every_module_below_the_package_is_private() -> None:
+    # The first path component below `deephaven_massive/` carries a leading underscore, so the
+    # public surface is `__init__.py` alone (DESIGN § 4.1).
+    public = [
+        str(module)
+        for module in _source_modules()
+        if module != PurePosixPath("__init__.py") and not module.parts[0].startswith("_")
+    ]
+    assert public == []
+
+
 def test_every_source_module_has_its_mirrored_test() -> None:
     missing = [
         f"{module} -> tests/{mirror_of(module)}"

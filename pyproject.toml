@@ -56,7 +56,19 @@ dev = [
 
 [tool.uv.sources]
 # The fork's `deephaven-fixes` integration branch, pinned by commit. Bumped only by D-bump PRs.
+# The fork builds as version 0.0.0, so no code or test may check the massive version.
 massive = { git = "https://github.com/chipkent/massive-client-python", rev = "9b0256a737f74f337e5641285e121154591ce8f1" }
+
+[tool.hatch.build.targets.sdist]
+# Development-only files stay out of the source distribution.
+exclude = [
+    ".claude",
+    ".github",
+    "plans",
+    ".pre-commit-config.yaml",
+    "AGENTS.md",
+    "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, deleted in P7
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deephaven_massive"]
@@ -129,6 +141,10 @@ ignore = [
     "D107",  # test docstrings are optional (any that exist must be well formed)
 ]
 
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Fixtures are the only interface tests/conftest.py offers to test modules (DESIGN § 4.2).
+"conftest".msg = "Request fixtures by name; never import conftest"
+
 [tool.ruff.lint.mccabe]
 max-complexity = 12
 
@@ -162,6 +178,7 @@ enable_error_code = [
 ]
 # `tests/` is not a package; module names are taken relative to these roots so that
 # `tests/_domains/test_init.py` and `tests/test_init.py` do not collide.
+files = ["src", "tests"]
 mypy_path = ["src", "tests"]
 explicit_package_bases = true
 exclude = [

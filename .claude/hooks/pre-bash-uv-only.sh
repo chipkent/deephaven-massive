@@ -6,6 +6,8 @@
 # call and returns the reason on stderr to the agent.
 set -euo pipefail
 
+# The check runs on the system python3 in isolated mode (-I), not `uv run`: it needs only the
+# standard library, runs before every Bash call, and must not itself be a `uv run` command.
 exec python3 -I -c '
 import json
 import re

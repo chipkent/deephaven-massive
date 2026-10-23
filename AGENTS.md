@@ -14,7 +14,7 @@ uv sync                                    # create .venv from uv.lock
 uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
 ./scripts/check.sh                         # full gate: lint, format, types, tests + coverage
 ./scripts/check.sh fast                    # lint and types only; fixes what ruff can fix
-./scripts/check.sh fast --no-fix           # report only (what CI and the git hooks run)
+./scripts/check.sh fast --no-fix           # report only (what CI's lint job and the commit hook run)
 uv run pytest tests/test_layout.py -q      # one file, no coverage, debugger-friendly
 uv build                                   # sdist and wheel
 ```
