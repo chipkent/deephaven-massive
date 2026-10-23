@@ -30,7 +30,7 @@ uv build                               # Build sdist and wheel
 
 ## 2. Non-Negotiable Quality Gates
 
-Every change **must** pass all four gates in [`scripts/pre-commit.sh`](scripts/pre-commit.sh) before committing:
+Every change **must** pass all gates in [`scripts/pre-commit.sh`](scripts/pre-commit.sh) before committing:
 
 1. **100.00% Statement & Branch Coverage**: `pytest` runs with `--cov=deephaven_massive --cov-branch --cov-fail-under=100`. Never introduce untested branches or dead defensive code.
 2. **Zero Ruff Errors & Formatting Diffs**: Enforces `E`, `W`, `F`, `I`, `B`, `UP`, `SIM`, `RUF`, and `D` (`pydocstyle` with `convention = "google"`).
@@ -38,6 +38,7 @@ Every change **must** pass all four gates in [`scripts/pre-commit.sh`](scripts/p
 4. **O'Reilly-Caliber Google Docstrings & Docs Sync**: All modules, classes, methods, and functions must have crystal-clear Google-style docstrings. Any change to public signatures, defaults, or table semantics must be reflected in [`README.md`](README.md).
 5. **Conventional Commits**: Commit messages and Pull Request titles must follow the [Conventional Commits v1.0.0](https://www.conventionalcommits.org/en/v1.0.0/) specification (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `ci:`, `chore:`), enforced by [`.github/workflows/conventional-pr-check.yml`](.github/workflows/conventional-pr-check.yml).
 6. **Never Work On or Push Directly to `main`**: All work **must** be done on a dedicated feature branch (`feat/...`, `fix/...`, `docs/...`, `refactor/...`) and submitted via a Pull Request so GitHub Actions CI (`ci.yml` and `conventional-pr-check.yml`) validates every change before merge. Direct commits on `main` are blocked by the local pre-commit hook.
+7. **Answer Every Review Comment**: When a pull request receives review comments (from people or bots), reply to each thread: either name the commit that addresses it and summarize the fix, or explain why no change is made. Never leave a thread unanswered, and never resolve a thread without a reply.
 
 ---
 
@@ -48,7 +49,7 @@ Do **not** read the entire codebase upfront. Consult only the files relevant to 
 | If your task involves... | Read these files first |
 | :--- | :--- |
 | **User-facing API, examples, or quickstart** | [`README.md`](README.md), [`src/deephaven_massive/session.py`](src/deephaven_massive/session.py), [`src/deephaven_massive/config.py`](src/deephaven_massive/config.py) |
-| **Full endpoint catalog & architectural rationale** | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) *(Note: all domain methods return `FeedBuilder`; only `m.flat_files.*` returns `Table` directly)* |
+| **Rework specification & execution plan** | [`plans/rework/DESIGN.md`](plans/rework/DESIGN.md) and [`plans/rework/PLAN.md`](plans/rework/PLAN.md) *(The rework replaces the current code; until P7 completes, the existing modules describe the legacy implementation.)* |
 | **Table delivery modes (`.latest`, `.history`, `.ring`, `.blink`, `.snapshot`, `.poll`, `.historical`)** | [`src/deephaven_massive/engine/builder.py`](src/deephaven_massive/engine/builder.py), [`tests/test_builder_and_base.py`](tests/test_builder_and_base.py) |
 | **Micro-batching, blink tables, or REST+WS startup seeding** | [`src/deephaven_massive/engine/publisher.py`](src/deephaven_massive/engine/publisher.py), [`src/deephaven_massive/engine/poller.py`](src/deephaven_massive/engine/poller.py), [`tests/test_publisher_and_poller.py`](tests/test_publisher_and_poller.py) |
 | **WebSocket multiplexing, auth, reconnects, or OPRA limits** | [`src/deephaven_massive/engine/ws_multiplexer.py`](src/deephaven_massive/engine/ws_multiplexer.py), [`tests/test_ws_multiplexer_and_watchlist.py`](tests/test_ws_multiplexer_and_watchlist.py) |
