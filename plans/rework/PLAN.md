@@ -158,6 +158,9 @@ These rules apply to every package in both repositories. Package sections only a
     table semantics updates `DESIGN.md` (owner decision required) and, after P7, `README.md`.
 13. **One package, one concern.** If a package needs a change to a file another package owns,
     land that change first in a small separate PR (`refactor:` or `chore:`), rebase, and continue.
+14. **Answer every review comment.** Reply to each review thread on a package's PR, from people
+    or bots: name the commit that addresses it and summarize the fix, or explain why no change
+    is made. No thread is left unanswered, and none is resolved without a reply.
 
 ---
 
@@ -430,7 +433,8 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
       was already deleted in P0; DESIGN.md supersedes it.)
 - [ ] **`AGENTS.md`** rewrite (≤ 150 lines): commands (`uv sync`, `./scripts/check.sh`,
       `uv run pre-commit install --hook-type pre-commit --hook-type pre-push`); the hard rules
-      (merges via PR, only the owner merges, branch naming, conventional commits, test layout,
+      (merges via PR, only the owner merges, answer every review comment, branch naming,
+      conventional commits, test layout,
       linter-ignore policy, coverage pragma policy, free-threaded CI is gating, no live testing
       in unit tests); the Deephaven invariants from DESIGN § 18 and § 6.1 rewritten as rules;
       JVM test gotchas; a "where to look" table pointing at `DESIGN.md` until P7. Drop every

@@ -30,7 +30,7 @@ uv build                               # Build sdist and wheel
 
 ## 2. Non-Negotiable Quality Gates
 
-Every change **must** pass all four gates in [`scripts/pre-commit.sh`](scripts/pre-commit.sh) before committing:
+Every change **must** pass all gates in [`scripts/pre-commit.sh`](scripts/pre-commit.sh) before committing:
 
 1. **100.00% Statement & Branch Coverage**: `pytest` runs with `--cov=deephaven_massive --cov-branch --cov-fail-under=100`. Never introduce untested branches or dead defensive code.
 2. **Zero Ruff Errors & Formatting Diffs**: Enforces `E`, `W`, `F`, `I`, `B`, `UP`, `SIM`, `RUF`, and `D` (`pydocstyle` with `convention = "google"`).
@@ -38,6 +38,7 @@ Every change **must** pass all four gates in [`scripts/pre-commit.sh`](scripts/p
 4. **O'Reilly-Caliber Google Docstrings & Docs Sync**: All modules, classes, methods, and functions must have crystal-clear Google-style docstrings. Any change to public signatures, defaults, or table semantics must be reflected in [`README.md`](README.md).
 5. **Conventional Commits**: Commit messages and Pull Request titles must follow the [Conventional Commits v1.0.0](https://www.conventionalcommits.org/en/v1.0.0/) specification (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `ci:`, `chore:`), enforced by [`.github/workflows/conventional-pr-check.yml`](.github/workflows/conventional-pr-check.yml).
 6. **Never Work On or Push Directly to `main`**: All work **must** be done on a dedicated feature branch (`feat/...`, `fix/...`, `docs/...`, `refactor/...`) and submitted via a Pull Request so GitHub Actions CI (`ci.yml` and `conventional-pr-check.yml`) validates every change before merge. Direct commits on `main` are blocked by the local pre-commit hook.
+7. **Answer Every Review Comment**: When a pull request receives review comments (from people or bots), reply to each thread: either name the commit that addresses it and summarize the fix, or explain why no change is made. Never leave a thread unanswered, and never resolve a thread without a reply.
 
 ---
 
