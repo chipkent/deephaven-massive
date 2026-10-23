@@ -9,7 +9,7 @@ on:
 
 jobs:
   pr-check:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
@@ -27,7 +27,7 @@ jobs:
           header: pr-title-lint-error
           message: |
             Pull Request titles must follow the [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0/).
-            Breaking changes that are expected to impact users must include "BREAKING CHANGE: <description>" at the end of the PR description. 
+            Breaking changes that are expected to impact users must include "BREAKING CHANGE: <description>" at the end of the PR description.
 
             Details:
 
