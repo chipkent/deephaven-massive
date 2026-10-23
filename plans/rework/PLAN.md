@@ -111,9 +111,10 @@ These rules apply to every package in both repositories. Package sections only a
 2. **Conventional commits.** Commit subjects and PR titles follow Conventional Commits v1.0.0
    (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `ci:`, `chore:`), with the PR title given in
    each package below. Commit bodies end with the attribution lines the harness supplies.
-3. **Check gate.** `./scripts/check.sh` (full tier) must be green before every push, and every CI
-   job must be green on the PR, including the free-threaded jobs (`3.13t`, `3.14t`,
-   `PYTHON_GIL=0`), which are required checks. Until P1 lands, the gate is the legacy
+3. **Check gate.** `./scripts/check.sh` (full tier) must be green before every push, and every
+   CI job must be green on the PR, including the free-threaded `3.14t` job (`PYTHON_GIL=0`),
+   which is a required check. 3.14t is the only free-threaded target: pyarrow, numpy, and pandas
+   no longer publish cp313t wheels. Until P1 lands, the gate is the legacy
    `scripts/pre-commit.sh`; from P1 on, hooks enforce it automatically.
 4. **Fresh-context implementers.** Each package is executed by a subagent whose only inputs are
    `DESIGN.md`, this file, `AGENTS.md`, and the code. If a package cannot be completed from those
@@ -409,8 +410,9 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
       `python|pytest|ruff|mypy|pip` not prefixed by `uv run`. Scripts live in `.claude/hooks/`.
 - [ ] **CI** (`ci.yml`): jobs `lock` (`uv lock --check`), `lint` (`check.sh fast --no-fix` with
       GitHub output format, plus `pyright src` with `continue-on-error: true`), `test` matrix
-      `["3.11", "3.12", "3.13", "3.13t", "3.14", "3.14t"]` with JDK 17, `uv sync --locked`,
-      `PYTHON_GIL=0` on the `t` entries, `pytest --cov --cov-report=xml`; `build` (`uv build`
+      `["3.11", "3.12", "3.13", "3.14", "3.14t"]` with JDK 17, `uv sync --locked`,
+      `PYTHON_GIL=0` on `3.14t` (the only free-threaded target: pyarrow, numpy, and pandas no
+      longer publish cp313t wheels), `pytest --cov --cov-report=xml`; `build` (`uv build`
       then `uv run --isolated --with dist/*.whl python -c "import deephaven_massive"`). Pin
       action SHAs as today.
 - [ ] **`tests/conftest.py`** rewrite: start the embedded `deephaven_server.Server` in
@@ -444,10 +446,11 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
       JVM test gotchas; a "where to look" table pointing at `DESIGN.md` until P7. Drop every
       count and every claim a tool now enforces.
 - [ ] PR description documents the manual owner step: GitHub ruleset on `main` requiring a PR,
-      the six required status checks (incl. `3.13t`, `3.14t`), no direct pushes.
+      the required status checks `test (3.11)` … `test (3.14)` and `test (3.14t)`, no direct
+      pushes.
 
 **Acceptance criteria.**
-- [ ] `./scripts/check.sh` (full) is green locally on 3.11; CI is green on all six Python jobs.
+- [ ] `./scripts/check.sh` (full) is green locally on 3.11; CI is green on all five Python jobs.
 - [ ] `uv sync --locked` succeeds from a clean checkout; `uv lock --check` passes.
 - [ ] `uv run pre-commit run --all-files` passes; `pre-push` stage runs the full tier.
 - [ ] Claude Code hooks fire: editing a `.py` file with a lint error surfaces it (exit 2); a
@@ -612,7 +615,7 @@ query classes and the type aliases are importable from `deephaven_massive._query
       a no-op with no second shutdown callback.
 - [ ] No `Literal[str]` in any public signature; every enum parameter rejects `str` with the
       documented `TypeError`.
-- [ ] `./scripts/check.sh` green; CI green on all six jobs including `3.13t`/`3.14t`.
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs including `3.14t`.
 
 **Verification.**
 ```bash
@@ -622,7 +625,7 @@ uv run pytest tests/test_init.py tests/test_config.py tests/test_session.py test
   tests/test_schema.py tests/test_timeunits.py tests/test_symbols.py tests/test_dates.py \
   tests/test_catalog.py tests/test_diagnostics.py tests/_domains -q
 uv run mypy src tests
-PYTHON_GIL=0 uv run --python 3.13t pytest tests/test_liveness.py tests/test_session.py -q
+PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_liveness.py tests/test_session.py -q
 ```
 
 **Pitfalls (Appendix E).** Unbounded `_post_attach_sigs` (E C1) — no per-row Python sets in any
@@ -740,14 +743,14 @@ hunks overlap).
       test reference in a comment.
 - [ ] Every host-decision branch in DESIGN § 13.2 has a fixture test naming it.
 - [ ] `poll(mode=REPLACE)` evicts keys absent from the latest cycle, including on an empty cycle.
-- [ ] `./scripts/check.sh` green; CI green on all six jobs.
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs.
 
 **Verification.**
 ```bash
 ./scripts/check.sh
 uv run pytest tests/test_rest.py tests/test_hosts.py tests/test_poll.py tests/test_catalog.py -q
 uv run python scripts/refresh_massive_catalog.py --check    # generated block is current
-PYTHON_GIL=0 uv run --python 3.13t pytest tests/test_rest.py tests/test_poll.py -q
+PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_rest.py tests/test_poll.py -q
 ```
 
 **Pitfalls (Appendices E, F, H).** Hand-rolled urllib3 client with its own retry loop (session
@@ -857,7 +860,7 @@ with.** P3, P5.
       DESIGN § 13.3 protocol table has a test; the fan-out benchmark (non-gating, `-m benchmark`,
       deselected by default) records rows/second for 1, 10, 100 streams; free-threaded stress:
       16 threads × concurrent subscribe/unsubscribe/release against the fake server, run on
-      `3.13t`/`3.14t`.
+      `3.14t`.
 
 **Acceptance criteria.**
 - [ ] A refused parameter fails only its streams; other streams on the same connection keep
@@ -867,13 +870,12 @@ with.** P3, P5.
 - [ ] Deferred option contracts subscribe automatically when capacity frees (test).
 - [ ] No Python per-row work per stream in the flush path (benchmark shows per-stream cost
       independent of row count in Python; recorded in the PR).
-- [ ] `./scripts/check.sh` green; CI green on all six jobs including the stress tests.
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs including the stress tests.
 
 **Verification.**
 ```bash
 ./scripts/check.sh
 uv run pytest tests/test_ws.py tests/test_stream.py tests/test_watchlist.py -q
-PYTHON_GIL=0 uv run --python 3.13t pytest tests/test_ws.py tests/test_stream.py tests/test_watchlist.py -q
 PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_ws.py tests/test_stream.py tests/test_watchlist.py -q
 uv run pytest -m benchmark tests/test_stream.py -q    # non-gating
 ```
@@ -1035,7 +1037,7 @@ needs a change, land it first in a separate `refactor:` PR.
 - [ ] `tests/test_timeunits.py` (P2) passes with the new specs: every timestamp-like field of
       every registered SDK model and flat-file header has a unit.
 - [ ] No fallback chains (`_first_present`, `row.get("a") or row.get("b")`) in the module.
-- [ ] `./scripts/check.sh` green; CI green on all six jobs.
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs.
 
 **Shared verification.**
 ```bash
@@ -1204,7 +1206,7 @@ material.
 - [ ] `git grep -n "engine/\|domains/\|schemas/\|LEGACY-EXCLUSION\|plans/rework"` returns only
       `_domains/` references.
 - [ ] All six README examples execute as tests in `tests/test_readme.py`.
-- [ ] `./scripts/check.sh` green; CI green on all six jobs; `uv build` wheel imports.
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs; `uv build` wheel imports.
 
 **Verification.**
 ```bash
@@ -1615,8 +1617,8 @@ endpoints if upstream maintains one.
 
 The rework is complete when all of the following hold on `main`:
 
-- [ ] `./scripts/check.sh` is green locally; every CI job is green, including `3.13t` and
-      `3.14t` with `PYTHON_GIL=0`.
+- [ ] `./scripts/check.sh` is green locally; every CI job is green, including `3.14t` with
+      `PYTHON_GIL=0`.
 - [ ] `tests/test_layout.py`, `tests/test_catalog.py`, and the 100% branch-coverage gate pass
       with no `LEGACY-EXCLUSION` and no unapproved `pragma: no cover`.
 - [ ] The README examples (DESIGN § 21) run in the embedded test JVM against the fake REST

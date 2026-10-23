@@ -53,10 +53,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.13t", "3.14", "3.14t"]
+        # 3.14t is the only free-threaded target: pyarrow, numpy, and pandas no longer publish
+        # cp313t wheels.
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.14t"]
     env:
-      # Free-threaded builds (the "t" entries) run with the GIL disabled; the others ignore it.
-      PYTHON_GIL: ${{ endsWith(matrix.python-version, 't') && '0' || '' }}
+      # The free-threaded build runs with the GIL disabled; an empty value is ignored.
+      PYTHON_GIL: ${{ matrix.python-version == '3.14t' && '0' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,14 +75,9 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
       - name: Sync dependencies
-        # mypy's ast-serialize publishes no cp313t wheel and its sdist does not build on 3.13t.
-        # The test job does not run mypy, so 3.13t skips installing it.
-        run: >-
-          uv sync --locked --python ${{ matrix.python-version }}
-          ${{ matrix.python-version == '3.13t' && '--no-install-package ast-serialize' || '' }}
+        run: uv sync --locked --python ${{ matrix.python-version }}
       - name: Pytest with 100% statement and branch coverage
-        # --no-sync keeps uv run from reinstalling what the sync step deliberately skipped.
-        run: uv run --no-sync pytest --cov --cov-report=xml
+        run: uv run pytest --cov --cov-report=xml
       - name: Upload coverage XML
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

@@ -36,8 +36,9 @@ environment, and the Claude Code hook blocks them.
 5. **Commits and PR titles** follow Conventional Commits v1.0.0 (`feat:`, `fix:`, `docs:`,
    `test:`, `refactor:`, `ci:`, `chore:`).
 6. **`scripts/check.sh` (full) is green before every push**, and every CI job is green on the
-   PR. The free-threaded jobs (`3.13t`, `3.14t`, run with `PYTHON_GIL=0`) are required checks,
-   not advisory ones. Locking must be correct without the GIL.
+   PR. The free-threaded `3.14t` job (run with `PYTHON_GIL=0`) is a required check, not an
+   advisory one. It is the only free-threaded target: pyarrow, numpy, and pandas no longer
+   publish cp313t wheels. Locking must be correct without the GIL.
 7. **Tests mirror the package.** `src/deephaven_massive/<path>/<name>.py` is tested by
    `tests/<path>/test_<name>.py`, with the leading underscore dropped from `<name>` and `<path>`
    copied as is; a package `__init__.py` is tested by `tests/<path>/test_init.py`. Live tests

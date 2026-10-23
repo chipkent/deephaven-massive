@@ -789,8 +789,9 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
 ## 11. Enums and types
 
 **Python floor:** `requires-python = ">=3.11"`. `StrEnum`, `datetime.UTC`, `typing.Self`,
-`tomllib`, and exception groups are native. The CI matrix is 3.11, 3.12, 3.13, 3.13t, 3.14, and
-3.14t; the `t` (free-threaded) jobs run with `PYTHON_GIL=0` and are required.
+`tomllib`, and exception groups are native. The CI matrix is 3.11, 3.12, 3.13, 3.14, and 3.14t;
+the free-threaded 3.14t job runs with `PYTHON_GIL=0` and is required. 3.14t is the only
+free-threaded target: pyarrow, numpy, and pandas no longer publish cp313t wheels.
 
 **Criterion.** Every closed set of values in a public signature is a `StrEnum` whose values are
 Massive's wire strings. Signatures take only the enum. There are no string `Literal`
@@ -1257,13 +1258,14 @@ registry deadlock. Verbs called on the UG thread raise `ValueError`.
 `PYTHON_GIL=0` jobs run the full suite, including the Deephaven integration tests (the embedded
 JVM starts in `pytest_configure`). Stress tests exercise concurrent subscribe and unsubscribe
 from 16 threads against a fake server, concurrent `release()` and verb calls, and concurrent
-`RESTClient` use. Wheel availability: `jpy 2.2.0` ships cp313t and cp314t wheels;
-`deephaven-core` is `py3-none-any`; `websockets 17.3` ships cp314t wheels and a pure-Python
-wheel (used on 3.13t). `orjson` free-threaded wheels are **UNVERIFIED**, so `orjson` is an
-optional extra and the standard-library codec is the default. `PythonDeephavenSession.setVariable`
-carries the comment "relying on the GIL being kind to us"; the library never mutates script
-globals, so this does not affect it, but it is why the Deephaven integration tests must run on
-the free-threaded builds rather than unit tests alone.
+`RESTClient` use. The only free-threaded target is 3.14t, because pyarrow, numpy, and pandas no
+longer publish cp313t wheels. Wheel availability on 3.14t: `jpy 2.2.0`, `pyarrow`, `numpy`, and
+`pandas` ship cp314t wheels; `deephaven-core` is `py3-none-any`; `websockets 17.3` ships cp314t
+wheels. `orjson` free-threaded wheels are **UNVERIFIED**, so `orjson` is an optional extra and
+the standard-library codec is the default. `PythonDeephavenSession.setVariable` carries the
+comment "relying on the GIL being kind to us"; the library never mutates script globals, so this
+does not affect it, but it is why the Deephaven integration tests must run on the free-threaded
+builds rather than unit tests alone.
 
 ## 19. SDK fork: fix list and responsibility split
 
@@ -1345,8 +1347,8 @@ diagnostics tables.
 
 ## 20. Quality gates
 
-Every change must pass `scripts/check.sh full`, and every CI job including the 3.13t and 3.14t
-jobs. The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
+Every change must pass `scripts/check.sh full`, and every CI job including the free-threaded
+3.14t job. The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
 
 - **Coverage:** 100% statement and branch coverage. `pragma: no cover` needs a written reason
   and owner approval.
@@ -1557,7 +1559,8 @@ document already reflects them.
 12. **Endpoint policy.** Everything documented is supported, plus endpoints that are new but lag
     in the documentation or SDK. Deprecated and sunset endpoints are excluded with a reason.
     Undocumented endpoints are unsupported.
-13. **Python 3.11 and above.** The CI matrix includes 3.13t and 3.14t as required jobs.
+13. **Python 3.11 and above.** The CI matrix includes 3.14t as a required job; it is the only
+    free-threaded target because pyarrow, numpy, and pandas no longer publish cp313t wheels.
 14. **Enums only.** Every closed categorical set is a `StrEnum` with wire-string values; a plain
     string raises `TypeError`. This gives one spelling per value, tab completion everywhere
     including the Deephaven web console, and typo safety at both type-check time and run time.
@@ -1600,5 +1603,5 @@ before 1.0.
 | 9 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/test_ws.py`: 2,500 topics produce three frames | `tests/test_ws_integration.py`: a 1,000-topic frame is acknowledged |
 | 10 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/test_ws_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
 | 11 | Exact `max_connections` status text and timing | Any status `max_connections`, after the handshake or surfaced by the fork during it (F2.6), shows `WAITING_SLOT` | `tests/test_ws.py`: both placements | `tests/test_ws_integration.py`: two sessions with one individual key |
-| 12 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/test_config.py`: codec selection with and without `orjson` importable | CI: the 3.13t and 3.14t jobs install the extra and report |
+| 12 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/test_config.py`: codec selection with and without `orjson` importable | CI: the 3.14t job installs the extra and reports |
 | 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/test_flatfiles.py`: AUTO before and after the cutoff | `tests/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |

@@ -58,16 +58,6 @@ dev = [
 # The fork's `deephaven-fixes` integration branch, pinned by commit. Bumped only by D-bump PRs.
 massive = { git = "https://github.com/chipkent/massive-client-python", rev = "9b0256a737f74f337e5641285e121154591ce8f1" }
 
-[tool.uv]
-# Lock-only constraints (not package metadata). These releases are the last that publish cp313t
-# wheels; later ones would be built from source on the free-threaded 3.13 CI job. No marker
-# distinguishes free-threaded builds, so each constraint covers all of 3.13.
-constraint-dependencies = [
-    "numpy<2.5; python_version == '3.13'",
-    "pandas<3; python_version == '3.13'",
-    "pyarrow<25; python_version == '3.13'",
-]
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/deephaven_massive"]
 
