@@ -1,108 +1,141 @@
-# AGENTS.md — `deephaven-massive`
+# AGENTS.md
 
-`deephaven-massive` is a Python library (`>=3.10`, managed with `uv`) that bridges **Massive.com** (formerly Polygon.io) real-time WebSocket streams, REST APIs, and S3 Flat Files (`files.massive.com`) into live and static **Deephaven** tables (`deephaven.table.Table`).
+`deephaven-massive` turns Massive.com (formerly Polygon.io) market data into live and static
+Deephaven tables. It is a Python library managed with `uv`. The code is being rewritten: until
+the rework finishes, `plans/rework/DESIGN.md` is the specification and `plans/rework/PLAN.md`
+is the schedule. Where this file and `DESIGN.md` disagree, `DESIGN.md` wins.
 
----
+## Commands
 
-## 1. Quick Commands & Pre-Commit Gate
-
-Run all commands from the repository root via `uv`:
+Run everything from the repository root. The test suite needs JDK 17 or later.
 
 ```bash
-# Install/sync environment (requires JDK 17+ for embedded deephaven-server)
-uv sync --all-extras --dev
-
-# Run the full pre-commit verification suite (Ruff check + format + Mypy + Pytest 100% cov)
-./scripts/pre-commit.sh
-
-# Install the local git pre-commit hook (.git/hooks/pre-commit -> scripts/pre-commit.sh)
-./scripts/install-hooks.sh
-
-# Individual checks during iterative development
-uv run ruff check src tests            # Lint (includes Google docstring D-rules)
-uv run ruff format src tests           # Auto-format (100-char line length)
-uv run mypy src tests                  # Strict static type check (37 files)
-uv run pytest                          # 113 tests + 100.00% statement & branch coverage gate
-uv build                               # Build sdist and wheel
+uv sync                                    # create .venv from uv.lock
+uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
+./scripts/check.sh                         # full gate: lint, format, types, tests + coverage
+./scripts/check.sh fast                    # lint and types only; fixes what ruff can fix
+./scripts/check.sh fast --no-fix           # report only (what CI's lint job and the commit hook run)
+uv run pytest tests/test_layout.py -q      # one file, no coverage, debugger-friendly
+uv build                                   # sdist and wheel
 ```
 
----
+Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
+environment, and the Claude Code hook blocks them.
 
-## 2. Non-Negotiable Quality Gates
+## Hard rules
 
-Every change **must** pass all gates in [`scripts/pre-commit.sh`](scripts/pre-commit.sh) before committing:
+1. **Every change lands through a pull request.** Never commit or push to `main`. Only the
+   owner merges; agents never run `gh pr merge` or merge into `main`.
+2. **Never bypass hooks.** No `--no-verify`, no `core.hooksPath` tricks, no skipping a failing
+   check. If a hook fails, fix the cause.
+3. **Answer every review comment**, from people and bots alike: name the commit that addresses
+   it and summarize the fix, or explain why nothing changes. Never resolve a thread without a
+   reply.
+4. **Branches** are named `<type>/<topic>` (`feat/`, `fix/`, `docs/`, `test/`, `refactor/`,
+   `ci/`, `chore/`), cut from `main`.
+5. **Commits and PR titles** follow Conventional Commits v1.0.0 (`feat:`, `fix:`, `docs:`,
+   `test:`, `refactor:`, `ci:`, `chore:`).
+6. **`scripts/check.sh` (full) is green before every push**, and every CI job is green on the
+   PR. The free-threaded `3.14t` job (run with `PYTHON_GIL=0`) is a required check, not an
+   advisory one. It is the only free-threaded target: pyarrow, numpy, and pandas no longer
+   publish cp313t wheels. Locking must be correct without the GIL.
+7. **Tests mirror the package.** `src/deephaven_massive/<path>/<name>.py` is tested by
+   `tests/<path>/test_<name>.py`, with the leading underscore dropped from `<name>` and `<path>`
+   copied as is; a package `__init__.py` is tested by `tests/<path>/test_init.py`. Live tests
+   end in `_integration.py`. The only other files allowed are `tests/conftest.py`,
+   `tests/test_layout.py`, `tests/test_catalog.py`, `tests/test_readme.py`, and the
+   `tests/_fakes/` package. `tests/test_layout.py` enforces this; a new exception needs owner
+   approval and a change to `DESIGN.md` § 4.2.
+8. **Linter ignores need a reason and, if new, owner approval.** Every entry in the ruff ignore
+   lists and every inline `# noqa` or `# type: ignore[code]` carries a reason comment. Adding a
+   rule to any ignore list, or a new `noqa` category, requires owner approval recorded in the
+   PR. Fix the code first.
+9. **Coverage is 100% statements and branches.** `# pragma: no cover` needs a reason on the same
+   line and owner approval in the PR. Never write a dead defensive branch to satisfy the gate;
+   delete the branch.
+10. **No live testing in unit tests.** Unit tests use the fake REST, WebSocket, and S3 servers in
+    `tests/_fakes/` and payload fixtures under `tests/data/<owner>/`. Only `_integration` tests
+    touch Massive, and only when `MASSIVE_API_KEY` is set.
+11. **Docstrings meet the documentation standard below.** A change to a public signature,
+    default, or table semantics updates `DESIGN.md` first (owner decision).
+12. **Dependencies** change only in dedicated `chore(deps):` PRs. `uv.lock` is committed.
 
-1. **100.00% Statement & Branch Coverage**: `pytest` runs with `--cov=deephaven_massive --cov-branch --cov-fail-under=100`. Never introduce untested branches or dead defensive code.
-2. **Zero Ruff Errors & Formatting Diffs**: Enforces `E`, `W`, `F`, `I`, `B`, `UP`, `SIM`, `RUF`, and `D` (`pydocstyle` with `convention = "google"`).
-3. **Zero Mypy Errors**: Enforced across both `src/` and `tests/`. Preserve [`src/deephaven_massive/py.typed`](src/deephaven_massive/py.typed) (PEP 561).
-4. **O'Reilly-Caliber Google Docstrings & Docs Sync**: All modules, classes, methods, and functions must have crystal-clear Google-style docstrings. Any change to public signatures, defaults, or table semantics must be reflected in [`README.md`](README.md).
-5. **Conventional Commits**: Commit messages and Pull Request titles must follow the [Conventional Commits v1.0.0](https://www.conventionalcommits.org/en/v1.0.0/) specification (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `ci:`, `chore:`), enforced by [`.github/workflows/conventional-pr-check.yml`](.github/workflows/conventional-pr-check.yml).
-6. **Never Work On or Push Directly to `main`**: All work **must** be done on a dedicated feature branch (`feat/...`, `fix/...`, `docs/...`, `refactor/...`) and submitted via a Pull Request so GitHub Actions CI (`ci.yml` and `conventional-pr-check.yml`) validates every change before merge. Direct commits on `main` are blocked by the local pre-commit hook.
-7. **Answer Every Review Comment**: When a pull request receives review comments (from people or bots), reply to each thread: either name the commit that addresses it and summarize the fix, or explain why no change is made. Never leave a thread unanswered, and never resolve a thread without a reply.
+## Documentation standard
 
----
+Docstrings are read by people in an IDE or the Deephaven console and by agents that know nothing
+but the code. Write them to be useful to both, in clear, edited prose. A one-line docstring on
+anything with behavior worth knowing is a defect, not brevity.
 
-## 3. Progressive Disclosure: Where to Look by Task
+- **Modules** state what the module is for, what it owns, and how it fits with its neighbors.
+  The package `__init__.py` is the front door: what the library does, the public API with a
+  short example, where to read next, and any status a reader must know.
+- **Classes** state the concept the class represents, its lifecycle, who creates it, and its
+  thread-safety. Public classes include a short example.
+- **Functions and methods** state what they do and why one would call them, then document every
+  argument (meaning, units, accepted values, default behavior), the return value (shape, columns
+  for a returned table), every exception raised and when, side effects (network calls, threads,
+  subscriptions, tables created), and blocking or threading constraints.
+- **Examples** are real code that runs against the documented API.
+- **Never** restate the signature in words, use filler ("This function…"), or leave a term
+  undefined. Ruff's `D` and `DOC` rules check form; reviewers check substance.
 
-Do **not** read the entire codebase upfront. Consult only the files relevant to your task:
+## Deephaven invariants
 
-| If your task involves... | Read these files first |
-| :--- | :--- |
-| **User-facing API, examples, or quickstart** | [`README.md`](README.md), [`src/deephaven_massive/session.py`](src/deephaven_massive/session.py), [`src/deephaven_massive/config.py`](src/deephaven_massive/config.py) |
-| **Rework specification & execution plan** | [`plans/rework/DESIGN.md`](plans/rework/DESIGN.md) and [`plans/rework/PLAN.md`](plans/rework/PLAN.md) *(The rework replaces the current code; until P7 completes, the existing modules describe the legacy implementation.)* |
-| **Table delivery modes (`.latest`, `.history`, `.ring`, `.blink`, `.snapshot`, `.poll`, `.historical`)** | [`src/deephaven_massive/engine/builder.py`](src/deephaven_massive/engine/builder.py), [`tests/test_builder_and_base.py`](tests/test_builder_and_base.py) |
-| **Micro-batching, blink tables, or REST+WS startup seeding** | [`src/deephaven_massive/engine/publisher.py`](src/deephaven_massive/engine/publisher.py), [`src/deephaven_massive/engine/poller.py`](src/deephaven_massive/engine/poller.py), [`tests/test_publisher_and_poller.py`](tests/test_publisher_and_poller.py) |
-| **WebSocket multiplexing, auth, reconnects, or OPRA limits** | [`src/deephaven_massive/engine/ws_multiplexer.py`](src/deephaven_massive/engine/ws_multiplexer.py), [`tests/test_ws_multiplexer_and_watchlist.py`](tests/test_ws_multiplexer_and_watchlist.py) |
-| **Reactive Deephaven `Table` watchlists & row eviction** | [`src/deephaven_massive/engine/watchlist.py`](src/deephaven_massive/engine/watchlist.py), [`tests/test_ws_multiplexer_and_watchlist.py`](tests/test_ws_multiplexer_and_watchlist.py) |
-| **PyArrow conversion, timestamps (`to_utc_ns`), or `ExecutionContext`** | [`src/deephaven_massive/engine/arrow_bridge.py`](src/deephaven_massive/engine/arrow_bridge.py), [`tests/test_arrow_bridge_and_schemas.py`](tests/test_arrow_bridge_and_schemas.py) |
-| **Symbol normalization across WS, REST, and S3 (`O:`, `I:`, `C:`, `X:`)** | [`src/deephaven_massive/engine/symbols.py`](src/deephaven_massive/engine/symbols.py), [`tests/test_symbols.py`](tests/test_symbols.py) |
-| **`PascalCase` schemas & JSON/CSV row normalizers** | [`src/deephaven_massive/schemas/market.py`](src/deephaven_massive/schemas/market.py), [`reference.py`](src/deephaven_massive/schemas/reference.py), [`economy.py`](src/deephaven_massive/schemas/economy.py), [`partners.py`](src/deephaven_massive/schemas/partners.py) |
-| **REST pagination, operator filters (`_gte`, `_any_of`), or domain endpoints** | [`src/deephaven_massive/domains/base.py`](src/deephaven_massive/domains/base.py) and per-domain modules (`stocks.py`, `options.py`, `futures.py`, `indices.py`, `forex.py`, `crypto.py`, `economy.py`, `partners.py`) |
-| **S3 Flat Files (`files.massive.com` `.csv.gz` streaming & pushdown)** | [`src/deephaven_massive/domains/flat_files.py`](src/deephaven_massive/domains/flat_files.py), [`tests/test_flat_files.py`](tests/test_flat_files.py) |
-| **Embedded Deephaven JVM test fixture & test helpers** | [`tests/conftest.py`](tests/conftest.py) |
+These are the rules that keep the library free of deadlocks and leaks (`DESIGN.md` § 6.1, § 18).
 
----
+- **Enter the execution context on every library thread.** The session captures the caller's
+  `ExecutionContext` at construction; every library thread enters it before any Deephaven call.
+  Without it, Deephaven raises `No execution context`.
+- **Lock order is the update-graph (UG) lock, then `_registry_lock`.** `_registry_lock` is a
+  leaf lock: while holding it, make no Deephaven call, no network call, and no blocking wait.
+  Table operations such as `where_in`, `last_by`, `Table.snapshot()`, and
+  `deephaven.arrow.to_table` may take the UG lock, so never run them under `_registry_lock`.
+- **Never block inside a table listener.** Listeners run on a UG thread with the UG lock held.
+  Compute the diff, hand it to a worker, and return. No table operations, no I/O, no waiting on
+  library threads. Verbs called on a UG thread raise `ValueError`.
+- **Every live result lives in its own liveness scope.** Create result tables inside the
+  result's `LivenessScope` on the caller thread. Never create a refreshing table outside an
+  explicit scope: the console's query scope would keep it alive for the life of the session.
+- **Stream teardown hangs off the blink table's `on_shutdown_callback`.** Topic reference counts
+  and flush routing are released there, not when a result record is released. The callback does
+  only a registry update and a `call_soon_threadsafe`; it never sends and never calls Java.
+- **Connection state is loop-confined.** Only a connection's client thread touches its
+  subscription sets; other threads reach it through `loop.call_soon_threadsafe` with plain data.
+- **Never rely on the atomicity of `dict`, `set`, or `list` operations.** Every shared container
+  is behind a lock or has a single owning thread.
 
-## 4. Critical Deephaven & Engine Invariants
+## Testing with the embedded JVM
 
-When modifying `src/deephaven_massive/engine/`, preserve these hard-won invariants:
+- `tests/conftest.py` starts one embedded Deephaven server per process in `pytest_configure`,
+  before collection, with a 25 ms update-graph cycle. Never start or stop another `Server`.
+  Test modules may import `deephaven` at module level.
+- `pytest_configure` runs `trylast` so the JVM installs its signal handlers after pytest's
+  faulthandler. The JVM raises SIGSEGV on purpose; in the other order the first one kills the
+  process. A `hs_err_pid*.log` file means the JVM crashed: investigate it, do not ignore it.
+- Do not remove the `os._exit` shutdown block in `tests/conftest.py`. On macOS, normal
+  interpreter shutdown after the JVM has run can segfault (exit code 139); the block exits with
+  pytest's own status once pytest is done.
+- Get the context, conversion helpers, and fakes from fixtures (`dh_exec_ctx`, `dh_to_pylist`,
+  `load_fixture`, `make_csv_gz`), never by importing `conftest.py`.
+- To delete rows from a keyed `input_table`, pass a static key table, never a live view derived
+  from the same table: that can hang against the update-graph refresh thread.
+- Drive state changes deterministically through the fakes and explicit flush or poll calls, not
+  with `time.sleep()`.
 
-### 4.1 Deephaven Concurrency & UpdateGraph (UG) Lock (`deephaven-core` PR #7457)
-- **Always bind `ExecutionContext` on background threads**: Calling `dh.arrow.to_table()`, `publisher.add()`, `input_table.add()`/`delete()`, or table operations from a background thread (`asyncio`, `Timer`, `ThreadPoolExecutor`) without an active context raises `DHError: No execution context`. Always wrap Deephaven calls in `with exec_ctx_scope(self._exec_ctx):` (from [`arrow_bridge.py`](src/deephaven_massive/engine/arrow_bridge.py)).
-- **Never block inside `table_listener` callbacks**: Callbacks passed to `deephaven.table_listener.listen(..., do_replay=True)` execute *on a Deephaven UpdateGraph thread while holding the UG lock*. Acquiring a lock held by a thread waiting on the UG lock, or performing synchronous network/REST I/O inside the callback, causes an immediate **AB-BA deadlock**. Always dispatch listener diffs asynchronously onto a worker outside the UG lock (see `_on_table_update` in [`watchlist.py`](src/deephaven_massive/engine/watchlist.py)).
-- **Serialize shared primitive mutations**: Guard `publisher.add()` (`MicroBatchPublisher._publish_lock`), `_active_subs` mutations (`ReactiveWatchlistController._op_lock`), and `SnapshotPoller` cycles (`SnapshotPoller._poll_lock` and `_lock`) with their dedicated locks *before* entering `exec_ctx_scope`.
+## Where to look
 
-### 4.2 Blink Table & Subscription Lifecycle Semantics
-- **`.latest()` is $O(N_{\text{keys}})$ RAM**: Built by applying `.last_by(key_cols)` directly to the upstream `table_publisher` blink table—never via `blink_to_append_only().last_by()`.
-- **Reactive Watchlist Subscribe/Unsubscribe Ordering**:
-  - *Subscribe*: Stamp `sub_ts = time.time_ns()`, insert `(Symbol, sub_ts)` into `_active_subs` **first**, then enable `Symbol` in `MicroBatchPublisher` (`enable_symbols`, ensuring all subsequent seeded and live rows have `__ReceivedAt >= sub_ts`), and subscribe on the WebSocket (`subscribe`).
-  - *Unsubscribe*: Remove `Symbol` from `MicroBatchPublisher` **first** (`disable_symbols`, blocking in-flight ticks), unsubscribe on the WebSocket (`ws_multiplexer.unsubscribe`), and then delete `Symbol` from `_active_subs` (immediately evicting the row from `.latest()` via the `natural_join` + `!isNull(SubscribedAt) && __ReceivedAt >= SubscribedAt` filter).
-- **`.poll(mode="replace")` Persistence**: `table_publisher` blink rows vanish after one UG cycle. To keep polled snapshots (like option chains, news, or top movers) continuously populated between poll intervals while physically evicting dropped keys (including on empty polls), `SnapshotPoller` backs `mode="replace"` with a keyed `input_table` and explicitly deletes stale keys via static Arrow key tables before adding the latest batch.
+`DESIGN.md` below means `plans/rework/DESIGN.md`.
 
-### 4.3 Shared Stream Multiplexing & Reference Counting
-- **Publisher Reuse**: `FeedBuilder._setup_streaming()` caches `(MicroBatchPublisher, finalize_seed)` in `MassiveSession._stream_registry` keyed by `(ws_url, ws_channel, tuple(canon_syms))`. Calling `.latest()`, `.history()`, `.ring()`, or `.blink()` on the same feed reuses the same upstream publisher.
-- **Consumer Reference Counting**: `MicroBatchPublisher` tracks downstream views via `acquire_consumer()` and `release_consumer()`. Calling `.stop()` on a `FeedBuilder` decrements the ref-count and only stops the underlying publisher and unregisters WebSocket topics when the last active consumer is released.
-- **Topic Ref-Counting & OPRA Limit**: `WebSocketMultiplexer` reference-counts `(ws_url, topic)` across publishers and enforces Massive's `MAX_OPTION_CONTRACTS = 1000` limit per OPRA options WebSocket connection (`OptionsClient._validate_contracts()`).
-
-### 4.4 Cross-Transport Normalization
-- **Unified `PascalCase` Schemas**: Every schema in `src/deephaven_massive/schemas/` normalizes WebSocket single-letter keys (`sym`, `p`, `s`, `t`), REST `snake_case`/`camelCase` payloads, and S3 CSV headers into identical `PascalCase` columns (`Symbol`, `Timestamp`, `Price`, `Size`, etc.).
-- **Type Narrowing Helper**: When extracting nested dictionaries in schema normalizers, use [`_submap(row, *keys)`](src/deephaven_massive/schemas/market.py#L57-L60) rather than inline `row.get("k") if isinstance(row.get("k"), Mapping) else {}` so Mypy narrows the return type to `Mapping[str, Any]`.
-- **S3 Flat File Streaming**: [`FlatFilesClient`](src/deephaven_massive/domains/flat_files.py) reads `.csv.gz` streams in 16 MB chunks via `pyarrow.csv.open_csv`, applies `Symbol` predicate pushdown (`pa.compute.is_in`) on each chunk immediately, and parses list columns (`Conditions`, `Indicators`) from strings only on surviving rows (since `pyarrow.csv` does not natively parse `pa.list_(pa.int32())`).
-
----
-
-## 5. Testing & Embedded JVM Gotchas
-
-When writing or debugging tests in `tests/`, follow these rules:
-
-1. **Single Embedded JVM per Process (`dh_exec_ctx`)**:
-   - [`tests/conftest.py`](tests/conftest.py) starts a single session-scoped `deephaven_server.Server` on port `10099` with `-DPeriodicUpdateGraph.defaultRefreshIntervalMillis=25`. Never start or stop another `Server` instance in tests.
-2. **Do Not Remove `_final_jvm_exit()` in `tests/conftest.py`**:
-   - On macOS with Python 3.11+, CPython shutdown after running an embedded JVM/jpy server can segfault (`exit code 139`) during C++ static destructor finalization. `pytest_terminal_summary(trylast=True)` + `atexit.register(_final_jvm_exit)` flushes stdio and calls `os._exit(_EXIT_STATUS)` cleanly *after* `pytest-cov` evaluates `--cov-fail-under=100`.
-3. **Never Pass a Live Self-Filtered View to `input_table.delete()`**:
-   - When deleting rows from a keyed Deephaven `input_table` in tests (e.g., testing `ReactiveWatchlistController`), **do not** call `wl.delete(wl.where("Symbol == 'MSFT'"))`—passing a live derived view of `wl` back into `wl.delete()` can race and hang against the 25ms `PeriodicUpdateGraph` refresh thread. Always pass a static key table:
-     ```python
-     wl.delete(arrow_to_deephaven_table(pa.table({"Symbol": ["MSFT"]}), dh_exec_ctx))
-     ```
-4. **Deterministic Tests Over `time.sleep()`**:
-   - Use `mock_session` (which configures `auto_flush=False`, `sleep_fn=lambda _: None`, and records outbound requests in `sess.recorded_requests`), and drive state transitions deterministically via `pub.flush_now()`, `poller.poll_once()`, `mux.handle_raw_message()`, and `wl_ctrl.wait_idle()`.
+| Task | Read first |
+|---|---|
+| Public API, exports, enums | `DESIGN.md` § 3, § 7, § 11 |
+| Package and test layout | `DESIGN.md` § 4 |
+| Session lifecycle and liveness | `DESIGN.md` § 6 |
+| Datasets per namespace | `DESIGN.md` § 8 |
+| Hosts, connections, subscriptions | `DESIGN.md` § 13 |
+| Publishers and fan-out | `DESIGN.md` § 14 |
+| Threads and locks | `DESIGN.md` § 18 |
+| SDK fork (`chipkent/massive-client-python`) | `DESIGN.md` § 19 |
+| Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
+| Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
+| Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `config.py`, `session.py`, `tests/legacy/`; every exclusion carries the grep-able legacy-exclusion marker |

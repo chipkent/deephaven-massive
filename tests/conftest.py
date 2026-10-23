@@ -1,183 +1,145 @@
-"""Shared pytest fixtures for deephaven-massive including an embedded Deephaven Server."""
+"""Test-suite configuration: the embedded Deephaven JVM and the shared fixtures.
+
+The embedded server starts in `pytest_configure`, before collection, so test modules can import
+`deephaven` at module level, exactly as the library does. This module itself is imported
+before `pytest_configure` runs, so it reaches `deephaven` only through `importlib` inside
+fixtures, never through a module-level import.
+
+Test modules never import from this file; they request its fixtures by name. Fakes from
+`tests/_fakes/` are handed to tests through thin fixtures defined here.
+"""
 
 from __future__ import annotations
 
 import atexit
 import gzip
-import io
+import importlib
 import os
 import sys
-from collections.abc import Callable, Iterator, Mapping
-from typing import Any, BinaryIO
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from deephaven_server import Server
 
-from deephaven_massive.session import MassiveSession, _ensure_deephaven_server
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-_EXIT_STATUS: int = 0
+    from deephaven.execution_context import ExecutionContext
+    from deephaven.table import Table
+
+collect_ignore_glob = ["legacy/*"]  # LEGACY-EXCLUSION: legacy tests, deleted in P7
+
+_DATA_DIR = Path(__file__).parent / "data"
+
+_JVM_ARGS = [
+    "-Xmx2g",
+    # A 25 ms update-graph cycle (default 1 s) keeps ticking-table tests fast.
+    "-DPeriodicUpdateGraph.defaultRefreshIntervalMillis=25",
+]
+
+
+# `trylast` matters: pytest's faulthandler plugin installs its SIGSEGV handler in its own
+# `pytest_configure`. The JVM must install its signal handlers after that, chaining to the
+# faulthandler, because the JVM raises SIGSEGV on purpose (implicit null checks, safepoints).
+# Started first, the JVM's handlers would be replaced and the first such signal would kill
+# the process.
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Start the embedded Deephaven server once per process, before collection.
+
+    Args:
+        config: The pytest configuration (unused; required by the hook signature).
+    """
+    # Port 0 asks the OS for an ephemeral port, so two test runs can share a machine.
+    Server(port=0, jvm_args=_JVM_ARGS).start()
+    atexit.register(_final_jvm_exit)
+
+
+# --- JVM shutdown workaround -------------------------------------------------------------------
+# On macOS with Python 3.11+, normal interpreter shutdown after an embedded JVM has run can
+# segfault (exit code 139) while C++ static destructors in jpy and the JVM are finalized. The
+# workaround: once pytest has finished (after pytest-cov has applied `fail_under` to the
+# session's exit status), flush stdio and leave through `os._exit` with pytest's own exit
+# status, skipping the finalizers. `atexit` handlers run last-in, first-out, so this one,
+# registered after the server's, runs first. Do not remove it without reproducing the crash.
+
+_SESSIONS: list[pytest.Session] = []
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Remember the session so the exit handler can read its final exit status.
+
+    Args:
+        session: The pytest session that is starting.
+    """
+    _SESSIONS.append(session)
 
 
 def _final_jvm_exit() -> None:
-    """Flush stdio and exit cleanly before JVM/jpy finalizer teardown segfaults on macOS."""
-    try:
-        sys.stdout.flush()
-        sys.stderr.flush()
-    except Exception:
-        pass
-    os._exit(_EXIT_STATUS)
+    """Flush stdio and exit with pytest's exit status, skipping JVM and jpy finalizers."""
+    status = int(_SESSIONS[-1].exitstatus) if _SESSIONS else int(pytest.ExitCode.INTERNAL_ERROR)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)
 
 
-@pytest.hookimpl(trylast=True)
-def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: Any) -> None:
-    """Record the final session exitstatus after pytest-cov evaluates --cov-fail-under.
-
-    Args:
-        terminalreporter: The pytest terminal reporter plugin instance.
-        exitstatus: The integer exit code reported by pytest.
-        config: The pytest Config object.
-    """
-    global _EXIT_STATUS
-    _EXIT_STATUS = int(getattr(terminalreporter._session, "exitstatus", exitstatus))
+# --- End of JVM shutdown workaround ------------------------------------------------------------
 
 
-@pytest.fixture(scope="session", autouse=True)
-def dh_exec_ctx() -> Any:
-    """Start the embedded Deephaven server once per test session with a fast 25ms UpdateGraph tick.
+@pytest.fixture(scope="session")
+def dh_exec_ctx() -> ExecutionContext:
+    """Return the embedded server's `ExecutionContext`.
 
     Returns:
-        The systemic Deephaven ExecutionContext bound to the embedded JVM server.
+        The execution context of the main thread's script session.
     """
-    ctx = _ensure_deephaven_server(
-        auto_start=True,
-        port=10099,
-        jvm_args=[
-            "-Xmx2g",
-            "-DPeriodicUpdateGraph.defaultRefreshIntervalMillis=25",
-        ],
-    )
-    atexit.register(_final_jvm_exit)
+    execution_context = importlib.import_module("deephaven.execution_context")
+    ctx: ExecutionContext = execution_context.get_exec_ctx()
     return ctx
 
 
-def dh_to_pydict(table: Any) -> dict[str, list[Any]]:
-    """Convert a Deephaven Table into a Python dict of column lists via PyArrow.
-
-    Args:
-        table: The Deephaven Table to convert.
+@pytest.fixture
+def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
+    """Return a function that snapshots a Deephaven table into a list of row dictionaries.
 
     Returns:
-        A dictionary mapping column names to Python lists of values.
+        A function mapping a table to one `{column: value}` dictionary per row.
     """
-    from deephaven import arrow as dh_arrow
+    dh_arrow = importlib.import_module("deephaven.arrow")
 
-    pa_tbl = dh_arrow.to_arrow(table)
-    return pa_tbl.to_pydict()
+    def to_pylist(table: Table) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = dh_arrow.to_arrow(table).to_pylist()
+        return rows
+
+    return to_pylist
 
 
-def dh_to_pylist(table: Any) -> list[dict[str, Any]]:
-    """Convert a Deephaven Table into a list of row dicts via PyArrow.
+@pytest.fixture
+def load_fixture() -> Callable[[str, str], bytes]:
+    """Return a function that reads a payload fixture from `tests/data/<owner>/<name>`.
 
-    Args:
-        table: The Deephaven Table to convert.
+    Each work package keeps its payloads under its own `owner` directory.
 
     Returns:
-        A list of dictionaries representing each row in the table.
+        A function mapping `(owner, name)` to the fixture file's bytes.
     """
-    from deephaven import arrow as dh_arrow
 
-    pa_tbl = dh_arrow.to_arrow(table)
-    return pa_tbl.to_pylist()
+    def load(owner: str, name: str) -> bytes:
+        return (_DATA_DIR / owner / name).read_bytes()
+
+    return load
 
 
-def make_csv_gz_stream(csv_text: str) -> BinaryIO:
-    """Compress CSV text into an in-memory `.csv.gz` binary stream.
-
-    Args:
-        csv_text: Uncompressed UTF-8 CSV content.
+@pytest.fixture
+def make_csv_gz() -> Callable[[str], bytes]:
+    """Return a function that gzip-compresses CSV text, as a flat file is stored in S3.
 
     Returns:
-        A binary stream containing the gzip-compressed bytes.
+        A function mapping CSV text to the bytes of a `.csv.gz` file.
     """
-    compressed = gzip.compress(csv_text.encode("utf-8"))
-    return io.BytesIO(compressed)
 
+    def compress(csv_text: str) -> bytes:
+        return gzip.compress(csv_text.encode())
 
-@pytest.fixture()
-def mock_session(dh_exec_ctx: Any) -> Iterator[Callable[..., MassiveSession]]:
-    """Factory fixture returning a configured MassiveSession with injectable HTTP and S3 handlers.
-
-    Every created session also exposes `sess.recorded_requests`, a list of
-    `(url, params_dict, headers_dict)` tuples capturing every outbound REST call.
-
-    Args:
-        dh_exec_ctx: Session-scoped Deephaven ExecutionContext fixture.
-
-    Yields:
-        A factory callable accepting optional `http_handler`, `s3_opener`, and config overrides.
-    """
-    created: list[MassiveSession] = []
-
-    def _create(
-        *,
-        http_handler: Callable[
-            [str, Mapping[str, Any] | None, Mapping[str, str]],
-            tuple[int, Any],
-        ]
-        | None = None,
-        s3_opener: Callable[[str, str], BinaryIO] | None = None,
-        s3_access_key_id: str | None = "test-s3-key",
-        s3_secret_access_key: str | None = "test-s3-secret",
-        flat_file_ticker_threshold: int = 3,
-        auto_flush: bool = False,
-    ) -> MassiveSession:
-        recorded_requests: list[tuple[str, dict[str, Any], dict[str, str]]] = []
-
-        def _default_http(
-            url: str,
-            params: Mapping[str, Any] | None,
-            headers: Mapping[str, str],
-        ) -> tuple[int, Any]:
-            return (
-                200,
-                {
-                    "status": "OK",
-                    "results": [
-                        {
-                            "ticker": "EURUSD",
-                            "p": 150.0,
-                            "s": 100,
-                            "t": 1800000000000000000,
-                        }
-                    ],
-                },
-            )
-
-        delegate = http_handler or _default_http
-
-        def _recording_http(
-            url: str,
-            params: Mapping[str, Any] | None,
-            headers: Mapping[str, str],
-        ) -> tuple[int, Any]:
-            recorded_requests.append((url, dict(params or {}), dict(headers)))
-            return delegate(url, params, headers)
-
-        sess = MassiveSession(
-            api_key="test-massive-key",
-            s3_access_key_id=s3_access_key_id,
-            s3_secret_access_key=s3_secret_access_key,
-            flat_file_ticker_threshold=flat_file_ticker_threshold,
-            auto_flush=auto_flush,
-            http_handler=_recording_http,
-            s3_opener=s3_opener,
-            ws_send_hook=lambda _u, _p: None,
-            sleep_fn=lambda _: None,
-        )
-        sess.recorded_requests = recorded_requests  # type: ignore[attr-defined]
-        created.append(sess)
-        return sess
-
-    yield _create
-
-    for s in created:
-        s.close()
+    return compress

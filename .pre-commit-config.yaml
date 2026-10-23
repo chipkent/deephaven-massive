@@ -1,9 +1,36 @@
+# Git hooks. Install both stages once per clone:
+#   uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+# The commit stage runs the fast check tier; the push stage runs the full tier.
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: no-commit-to-branch
+        args: [--branch, main]
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: b84c4a0a90bd58c7d82ae8f0d4d5e77b1ddd3ce6  # frozen: 0.12.5
+    hooks:
+      - id: uv-lock
+
   - repo: local
     hooks:
-      - id: deephaven-massive-pre-commit
-        name: Ruff + Mypy + Pytest (100% Coverage)
-        entry: ./scripts/pre-commit.sh
+      - id: check-fast
+        name: scripts/check.sh fast --no-fix
+        entry: scripts/check.sh fast --no-fix
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-full
+        name: scripts/check.sh full --no-fix
+        entry: scripts/check.sh full --no-fix
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

@@ -1,106 +1,247 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "deephaven-massive"
 version = "0.1.0"
-description = "Deephaven tables integration for Massive.com (formerly Polygon.io) real-time, historical, fundamental, macro, and flat-file market data feeds."
+description = "Live and static Deephaven tables for Massive.com (formerly Polygon.io) market data."
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
-authors = [
-    { name = "Deephaven Massive Contributors" }
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
 ]
 dependencies = [
-    "massive>=1.0.0",
-    "deephaven-core>=0.36.0",
-    "deephaven-server>=0.36.0",
-    "pyarrow>=14.0.0",
-    "boto3>=1.28.0",
-    "websockets>=11.0.0",
-    "urllib3>=2.0.0",
+    "massive>=2.9.0",
+    "deephaven-core>=42.0",
+    "pyarrow>=14",
+    "boto3>=1.28",
+    "websockets>=14",
 ]
 
 [project.optional-dependencies]
+orjson = ["orjson>=3.9"]
+
+[project.urls]
+Homepage = "https://github.com/chipkent/deephaven-massive"
+Repository = "https://github.com/chipkent/deephaven-massive"
+Issues = "https://github.com/chipkent/deephaven-massive/issues"
+
+[dependency-groups]
 dev = [
-    "mypy>=1.13.0",
-    "pre-commit>=4.0.0",
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=5.0.0",
-    "ruff>=0.8.0",
+    "ruff>=0.17.2",
+    "mypy>=2.4",
+    "types-boto3[s3]>=1.43",
+    "pytest>=9",
+    "pytest-cov>=7",
+    "pytest-timeout>=2.4",
+    "pyright>=1.1.414",
+    "pre-commit>=4.7",
+    "deephaven-server>=42.0",
+]
+
+[tool.uv.sources]
+# The fork's `deephaven-fixes` integration branch, pinned by commit. Bumped only by D-bump PRs.
+# The fork builds as version 0.0.0, so no code or test may check the massive version.
+massive = { git = "https://github.com/chipkent/massive-client-python", rev = "9b0256a737f74f337e5641285e121154591ce8f1" }
+
+[tool.hatch.build.targets.sdist]
+# Development-only files stay out of the source distribution.
+exclude = [
+    ".claude",
+    ".github",
+    "plans",
+    ".pre-commit-config.yaml",
+    "AGENTS.md",
+    "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, deleted in P7
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deephaven_massive"]
 
+# ---------------------------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------------------------
+
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = [
+    "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "src/deephaven_massive/config.py",  # LEGACY-EXCLUSION: replaced by _config.py in P2
+    "src/deephaven_massive/session.py",  # LEGACY-EXCLUSION: replaced by _session.py in P2
+    "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, deleted in P7
+]
 
 [tool.ruff.lint]
-select = [
-    "E",     # pycodestyle errors
-    "W",     # pycodestyle warnings
-    "F",     # Pyflakes
-    "I",     # isort import sorting
-    "UP",    # pyupgrade
-    "B",     # flake8-bugbear
-    "SIM",   # flake8-simplify
-    "FURB",  # refurb
-    "PIE",   # flake8-pie
-    "RUF",   # Ruff-specific rules
-    "D",     # pydocstyle (Google convention)
-]
+select = ["ALL", "DOC201", "DOC501", "DOC502"]
+# Preview is on only so the three DOC rules above can be selected by name; no other preview
+# rule is enabled.
+preview = true
+explicit-preview-rules = true
 ignore = [
-    "E501",  # line length handled by ruff format
+    # Rules that conflict with `ruff format` (ruff documents these as formatter conflicts).
+    "COM812",  # formatter manages trailing commas
+    "COM819",  # formatter manages trailing commas
+    "W191",  # formatter manages indentation
+    "E111",  # formatter manages indentation
+    "E114",  # formatter manages indentation
+    "E117",  # formatter manages indentation
+    "D206",  # formatter manages docstring indentation
+    "D300",  # formatter manages docstring quotes
+    "Q000",  # formatter manages quotes
+    "Q001",  # formatter manages quotes
+    "Q002",  # formatter manages quotes
+    "Q003",  # formatter manages quotes
+    # Project policy.
+    "TRY003",  # exception messages carry context inline; no exception subclass per message
+    "EM101",  # raising with a literal message is clearer than binding it to a variable first
+    "EM102",  # raising with an f-string message is clearer than binding it to a variable first
+    "PLR0913",  # keyword-only parameters are the API style; PLR0917 caps positional ones at 3
+    "FBT003",  # boolean positional values in calls to third-party APIs are outside our control
+    "CPY001",  # the license is declared once in LICENSE and pyproject.toml, not per file
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",  # pytest uses bare assert statements
+    "PLR2004",  # literal expected values in assertions are the point of a test
+    "INP001",  # tests are not a package; pytest runs with --import-mode=importlib
+    "SLF001",  # white-box tests may inspect private members
+    "ARG001",  # pytest fixtures are requested by parameter name even when unused
+    "ARG002",  # fake methods keep the signature of the interface they replace
+    "ARG005",  # stub lambdas keep the signature of the callback they replace
+    "FBT001",  # boolean parametrize arguments are positional by pytest's design
+    "FBT002",  # fake methods keep the boolean defaults of the interface they replace
+    "D100",  # test docstrings are optional (any that exist must be well formed)
+    "D101",  # test docstrings are optional (any that exist must be well formed)
+    "D102",  # test docstrings are optional (any that exist must be well formed)
+    "D103",  # test docstrings are optional (any that exist must be well formed)
+    "D104",  # test docstrings are optional (any that exist must be well formed)
+    "D105",  # test docstrings are optional (any that exist must be well formed)
+    "D106",  # test docstrings are optional (any that exist must be well formed)
+    "D107",  # test docstrings are optional (any that exist must be well formed)
+]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Fixtures are the only interface tests/conftest.py offers to test modules (DESIGN § 4.2).
+"conftest".msg = "Request fixtures by name; never import conftest"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.pylint]
+max-positional-args = 3
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
+docstring-code-format = true
+
+# ---------------------------------------------------------------------------------------------
+# Mypy
+# ---------------------------------------------------------------------------------------------
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+warn_unused_configs = true
+enable_error_code = [
+    "ignore-without-code",
+    "redundant-expr",
+    "truthy-bool",
+    "truthy-iterable",
+    "possibly-undefined",
+    "unused-awaitable",
+    "deprecated",
+    "explicit-override",
+]
+# `tests/` is not a package; module names are taken relative to these roots so that
+# `tests/_domains/test_init.py` and `tests/test_init.py` do not collide.
 files = ["src", "tests"]
-check_untyped_defs = true
-disallow_untyped_defs = true
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-strict_equality = true
+mypy_path = ["src", "tests"]
+explicit_package_bases = true
+exclude = [
+    '^src/deephaven_massive/(engine|domains|schemas)/',  # LEGACY-EXCLUSION: deleted in P7
+    '^src/deephaven_massive/(config|session)\.py$',  # LEGACY-EXCLUSION: replaced in P2
+    '^tests/legacy/',  # LEGACY-EXCLUSION: legacy tests, deleted in P7
+]
 
 [[tool.mypy.overrides]]
-module = [
-    "deephaven.*",
-    "pyarrow.*",
-    "boto3.*",
-    "botocore.*",
-    "massive.*",
-    "websockets.*",
-    "urllib3.*",
-]
+# pyarrow ships no type information.
+module = ["pyarrow.*"]
 ignore_missing_imports = true
 
-[tool.pytest.ini_options]
-pythonpath = ["."]
+[[tool.mypy.overrides]]
+# FORK-PY-TYPED: the fork ships no py.typed until F4 lands; the D-bump that pins F4 deletes
+# this override.
+module = ["massive.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------------------------
+# Pyright (non-gating second checker)
+# ---------------------------------------------------------------------------------------------
+
+[tool.pyright]
+include = ["src"]
+exclude = [
+    "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "src/deephaven_massive/config.py",  # LEGACY-EXCLUSION: replaced by _config.py in P2
+    "src/deephaven_massive/session.py",  # LEGACY-EXCLUSION: replaced by _session.py in P2
+]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+
+# ---------------------------------------------------------------------------------------------
+# Pytest and coverage
+# ---------------------------------------------------------------------------------------------
+
+[tool.pytest]
+minversion = "9.0"
+strict = true
+filterwarnings = ["error"]
+addopts = ["-ra", "--import-mode=importlib"]
 testpaths = ["tests"]
-asyncio_mode = "auto"
-addopts = "--cov=deephaven_massive --cov-branch --cov-report=term-missing --cov-fail-under=100"
+# Puts `tests/` on sys.path so tests/conftest.py can import the `_fakes` package under
+# --import-mode=importlib, which does not alter sys.path itself.
+pythonpath = ["tests"]
+timeout = "60"  # pytest-timeout declares this option as a string, so TOML needs one
+faulthandler_timeout = "120"  # pytest declares this option as a string, so TOML needs one
+faulthandler_exit_on_timeout = true
 
 [tool.coverage.run]
-source = ["src/deephaven_massive"]
+source = ["deephaven_massive"]
 branch = true
+omit = [
+    "*/deephaven_massive/engine/*",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "*/deephaven_massive/domains/*",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "*/deephaven_massive/schemas/*",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "*/deephaven_massive/config.py",  # LEGACY-EXCLUSION: replaced by _config.py in P2
+    "*/deephaven_massive/session.py",  # LEGACY-EXCLUSION: replaced by _session.py in P2
+]
 
 [tool.coverage.report]
 fail_under = 100
 show_missing = true
-exclude_lines = [
-    "pragma: no cover",
-    "if TYPE_CHECKING:",
-]
+exclude_also = ["if TYPE_CHECKING:", "@(typing\\.)?overload"]

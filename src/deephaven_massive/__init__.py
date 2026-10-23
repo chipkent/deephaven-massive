@@ -1,42 +1,41 @@
-"""Massive.com real-time, delayed, historical, fundamental, and flat-file feeds in Deephaven tables.
+"""Massive.com market data as live and static Deephaven tables.
 
-`deephaven-massive` bridges Massive.com's entire market data platform—WebSockets, REST
-endpoints, and S3-compatible `.csv.gz` Flat Files—directly into live and static
-Deephaven tables via a zero-dataclass PyArrow RecordBatch pipeline.
+`deephaven-massive` connects a Deephaven server to Massive.com (formerly Polygon.io). It turns
+Massive's three transports into ordinary Deephaven tables:
 
-Every domain endpoint returns a fluent `FeedBuilder` that lets you choose how the
-data should be materialized in Deephaven:
+- **WebSocket streams** (trades, quotes, bars, fair market value, index values, and more)
+  become refreshing tables: blink, append-only, ring, or one row per symbol.
+- **REST endpoints** (snapshots, reference data, fundamentals, filings, economy, and partner
+  datasets) become static tables, or refreshing tables that re-poll on an interval.
+- **S3 flat files** (full-day trades, quotes, and bars) become static historical tables.
 
-- `.latest()`: Live updating current-state table (`last_by(key_cols)`), seeded via REST before streaming.
-- `.history()`: Live updating append-only history table (`blink_to_append_only`).
-- `.ring(capacity)`: Bounded live history table retaining the most recent rows (`ring_table`).
-- `.blink()`: Raw stateless single-cycle Deephaven blink table.
-- `.snapshot()`: One-shot static point-in-time Deephaven table fetched via REST.
-- `.poll(interval_s, mode)`: Periodic background REST poller (`"replace"`, `"upsert"`, or `"append"`).
-- `.historical(start, end, source)`: Static historical Deephaven table via REST pagination or S3 Flat Files.
+Every dataset is a method on a namespace grouped by asset class (`stocks`, `options`,
+`futures`, `indices`, `forex`, `crypto`) or by topic (`reference`, `indicators`, `economy`,
+`partners`). Each method returns a query object, and a verb on that query picks the table shape
+(`blink()`, `append_only()`, `ring(n)`, `last_by()`, `fetch()`, `poll()`, `history()`). The same
+code runs on every Massive plan: the library finds the right WebSocket host for your key, and a
+dataset your plan lacks fails the table with a message that names the alternative. The library
+runs inside an existing Deephaven server; it never starts one.
+
+Status:
+    The library is being rebuilt from the specification in `plans/rework/DESIGN.md`, in the
+    work packages listed in `plans/rework/PLAN.md`. This release exposes only `__version__`;
+    `MassiveSession`, `MassiveConfig`, the enums, and the dataset namespaces arrive in the core
+    and transport packages. Until then, read `DESIGN.md` for the API and its semantics.
 
 Example:
-    ```python
-    from deephaven_massive import MassiveSession
+    The installed version, read from the package metadata::
 
-    m = MassiveSession()  # Reads MASSIVE_API_KEY / POLYGON_API_KEY from environment
-    quotes = m.stocks.quotes(["AAPL", "MSFT", "NVDA"]).latest()
-    trades = m.stocks.trades(["AAPL", "MSFT", "NVDA"]).ring(100_000)
-    ```
+        import deephaven_massive
+
+        print(deephaven_massive.__version__)
+
+Attributes:
+    __version__: The installed distribution's version string, such as `"0.1.0"`. It comes from
+        the package metadata (`importlib.metadata`), so it always matches what pip or uv
+        installed.
 """
 
-from __future__ import annotations
+from importlib.metadata import version
 
-from deephaven_massive.config import MassiveConfig, MassiveEntitlementError
-from deephaven_massive.engine.builder import FeedBuilder
-from deephaven_massive.session import MassiveSession
-
-__version__ = "0.1.0"
-
-__all__ = [
-    "FeedBuilder",
-    "MassiveConfig",
-    "MassiveEntitlementError",
-    "MassiveSession",
-    "__version__",
-]
+__version__: str = version("deephaven-massive")
