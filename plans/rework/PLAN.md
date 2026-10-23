@@ -349,8 +349,7 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
   (runner `ubuntu-latest`), `.github/dependabot.yml` (keep; now effective because `uv.lock` is
   committed), `AGENTS.md` (rewrite), `tests/conftest.py` (rewrite), `src/deephaven_massive/__init__.py`
   (minimal: `__version__` from `importlib.metadata` only).
-- Delete: `scripts/pre-commit.sh`, `scripts/install-hooks.sh`, `IMPLEMENTATION_PLAN.md`,
-  `tests/__init__.py`.
+- Delete: `scripts/pre-commit.sh`, `scripts/install-hooks.sh`, `tests/__init__.py`.
 - Move: `tests/test_*.py` (eight legacy files) → `tests/legacy/`.
 
 **Tasks.**
@@ -427,9 +426,8 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
 - [ ] **`tests/test_init.py`** + minimal `__init__.py`: `__version__` equals
       `importlib.metadata.version("deephaven-massive")`.
 - [ ] Move the eight legacy test files to `tests/legacy/`; delete `tests/__init__.py`.
-- [ ] Delete `scripts/pre-commit.sh`, `scripts/install-hooks.sh`, `IMPLEMENTATION_PLAN.md`
-      (its §6.2 column-provenance tables are superseded by DESIGN § 12 and the per-transport
-      key maps of DESIGN § 4.1 `_schema.py`; nothing else is worth keeping).
+- [ ] Delete `scripts/pre-commit.sh` and `scripts/install-hooks.sh`. (`IMPLEMENTATION_PLAN.md`
+      was already deleted in P0; DESIGN.md supersedes it.)
 - [ ] **`AGENTS.md`** rewrite (≤ 150 lines): commands (`uv sync`, `./scripts/check.sh`,
       `uv run pre-commit install --hook-type pre-commit --hook-type pre-push`); the hard rules
       (merges via PR, only the owner merges, branch naming, conventional commits, test layout,

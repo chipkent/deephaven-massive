@@ -48,7 +48,7 @@ Do **not** read the entire codebase upfront. Consult only the files relevant to 
 | If your task involves... | Read these files first |
 | :--- | :--- |
 | **User-facing API, examples, or quickstart** | [`README.md`](README.md), [`src/deephaven_massive/session.py`](src/deephaven_massive/session.py), [`src/deephaven_massive/config.py`](src/deephaven_massive/config.py) |
-| **Full endpoint catalog & architectural rationale** | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) *(Note: all domain methods return `FeedBuilder`; only `m.flat_files.*` returns `Table` directly)* |
+| **Rework specification & execution plan** | [`plans/rework/DESIGN.md`](plans/rework/DESIGN.md) and [`plans/rework/PLAN.md`](plans/rework/PLAN.md) *(The rework replaces the current code; until P7 completes, the existing modules describe the legacy implementation.)* |
 | **Table delivery modes (`.latest`, `.history`, `.ring`, `.blink`, `.snapshot`, `.poll`, `.historical`)** | [`src/deephaven_massive/engine/builder.py`](src/deephaven_massive/engine/builder.py), [`tests/test_builder_and_base.py`](tests/test_builder_and_base.py) |
 | **Micro-batching, blink tables, or REST+WS startup seeding** | [`src/deephaven_massive/engine/publisher.py`](src/deephaven_massive/engine/publisher.py), [`src/deephaven_massive/engine/poller.py`](src/deephaven_massive/engine/poller.py), [`tests/test_publisher_and_poller.py`](tests/test_publisher_and_poller.py) |
 | **WebSocket multiplexing, auth, reconnects, or OPRA limits** | [`src/deephaven_massive/engine/ws_multiplexer.py`](src/deephaven_massive/engine/ws_multiplexer.py), [`tests/test_ws_multiplexer_and_watchlist.py`](tests/test_ws_multiplexer_and_watchlist.py) |
