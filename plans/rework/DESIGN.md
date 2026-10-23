@@ -335,7 +335,8 @@ These facts are verified in `deephaven-core` `main`:
 ```python
 scope = LivenessScope()                       # library-owned, one per result
 with scope.open():                            # top of the thread-local stack during creation
-    result = shape(stream.blink)              # append_only / ring / last_by; or the blink table itself
+    result = shape(stream.blink)              # append_only / ring / last_by; for blink(), a fresh wrapper:
+                                              #   Table(stream.blink.j_table), then scope.manage(result)
 record = _ResultRecord(stream_id, scope, released=False,
                        ref=weakref.ref(result, _enqueue_release(record_id)))
 with m._registry_lock:
@@ -343,6 +344,12 @@ with m._registry_lock:
 return result
 ```
 
+- **Every result is a distinct Python object.** `blink()` never returns the stream's own blink
+  wrapper: each call wraps the same Java table in a new `Table(stream.blink.j_table)` and manages
+  it explicitly in the result scope (`scope.manage(result)`), because creating a wrapper creates
+  no liveness reference by itself. So `a = q.blink(); b = q.blink()` yields two records with
+  distinct `id(result)` values, and the stream never holds a wrapper it has handed out, so each
+  result's weakref can fire.
 - Because `scope` is at the top of the stack, `result` is managed by `scope`, not by the
   session's `queryScope`. Releasing `scope` drops the last liveness reference unless a
   user-derived table (`result.where(...)`), an open UI panel, or a user liveness scope also
@@ -1074,7 +1081,8 @@ logged once.
 - Each stream owns one
   `table_publisher(name=f"massive.{dataset}#{n}", col_defs=<dataset schema>, on_shutdown_callback=...)`,
   created inside the stream scope under the session's captured `ExecutionContext`. `blink()`
-  returns the blink table (managed into the result scope); `append_only()` is
+  returns a new wrapper of the blink table's Java object, managed in its own result scope
+  ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)); `append_only()` is
   `blink_to_append_only(blink)`; `ring(n)` is `ring_table(blink, n)`; `last_by()` is as in
   [section 7](#7-query-classes-and-verbs).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
@@ -1280,7 +1288,7 @@ owner approval. Evidence paths are relative to `site-packages/massive` in `massi
 
 | Item | Problem | Evidence | API change | Test |
 |---|---|---|---|---|
-| F2.1 merge pending subscriptions | on `ConnectionClosedError` the client runs `scheduled_subs = set(self.subs)`, dropping subscriptions scheduled but not yet applied | `:178` | `scheduled_subs |= subs` (keep pending) | schedule during an outage; after reconnect the server has both sets |
+| F2.1 keep the desired set across reconnects | on `ConnectionClosedError` the client runs `scheduled_subs = set(self.subs)`, dropping subscribes and resurrecting unsubscribes that were scheduled but not yet applied | `:178` | treat `scheduled_subs` as the authoritative desired set and leave it untouched; reset only `subs = set()` and set `schedule_resub = True`, so the new connection subscribes exactly the desired set (a union with `subs` would resurrect pending unsubscribes) | during an outage, schedule one subscribe and one unsubscribe; after reconnect the server holds the new topic and not the removed one |
 | F2.2 reconnect after a clean close | `ConnectionClosedOK` returns; a server-initiated clean close (after `max_connections` or a slow consumer) ends the client permanently | `:168-172` | reconnect unless close was requested (F2.5 sets the flag) | the fake server closes with 1000; the client reconnects; after `request_close()` it stops |
 | F2.3 configurable backoff | reconnects are immediate (the `connect()` iterator's delay resets after a success); the knowledge base requires at least 15 s | `:111-117`, `:183` | `reconnect_backoff: float = 15.0`, `max_reconnect_backoff: float = 120.0`, doubling with jitter; the client sleeps before re-entering the iterator | the time between reconnects is at least the backoff |
 | F2.4 `max_reconnects` semantics | `max_reconnects=5` is a lifetime total, so a long-running client eventually raises | `:106`, `:177-182` | count consecutive failed attempts, reset on `auth_success`; `None` means unlimited; docstring updated | six outages with successes between them do not raise |

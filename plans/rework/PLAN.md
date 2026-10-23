@@ -580,6 +580,8 @@ query classes and the type aliases are importable from `deephaven_massive._query
       verifies the weakref resolves to the same object. Tests run inside the embedded JVM with
       a `table_publisher` blink table and assert `on_shutdown_callback` fires after the last
       result is released, and does not fire while a derived table is alive.
+      Also assert that two `blink()` calls on one query return distinct wrappers with distinct
+      records, and that deleting one releases only its own record.
 - [ ] Implement `_diagnostics.py` in a session-owned `LivenessScope` released in `close()`.
 - [ ] Implement `_query.py` verbs' synchronous validation (`ALL` rules, exhausted generator,
       `ring(capacity)` bounds, `last_by` keys, `poll` interval) and the `ValueError` when called
@@ -1509,7 +1511,9 @@ status received during the handshake.
 - Handshake `max_connections` (F2.6): `:132-134` logs a `max_connections` status received
   with the auth reply and then the server closes; the caller only sees a disconnect.
 
-**Change.** `scheduled_subs |= subs` on reconnect (keep pending). Reconnect after
+**Change.** On reconnect, leave `scheduled_subs` (the authoritative desired set) untouched and
+reset only `subs = set()` with `schedule_resub = True`; a union with `subs` would resurrect
+unsubscribes that were pending when the connection dropped. Reconnect after
 `ConnectionClosedOK` unless `request_close()` was called; `request_close()` is synchronous and
 thread-safe (`call_soon_threadsafe` sets a flag and closes the socket); `close()` kept.
 `reconnect_backoff: float = 15.0`, `max_reconnect_backoff: float = 120.0`, doubling with ±20 %
@@ -1520,7 +1524,8 @@ exception or a flag, so a caller can distinguish it from a network drop. F2.6 is
 lands as the last commit of F2, kept minimal and separable so the upstream PR can drop it
 without touching the rest of F2; `deephaven-fixes` always carries it, because P4 relies on it.
 
-**Tests.** Schedule during an outage; after reconnect the server has both sets. Fake server
+**Tests.** During an outage, schedule one subscribe and one unsubscribe; after reconnect the
+server holds the new topic and not the removed one. Fake server
 closes with 1000; client reconnects; after `request_close()` it stops. Timestamps between
 reconnect attempts ≥ backoff and ≤ cap. Six outages with successes between do not raise.
 `request_close()` from another thread exits the loop within the close timeout. F2.6: the fake
