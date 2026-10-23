@@ -43,7 +43,7 @@ Issues = "https://github.com/chipkent/deephaven-massive/issues"
 
 [dependency-groups]
 dev = [
-    "ruff==0.17.2",
+    "ruff>=0.17.2",
     "mypy>=2.4",
     "types-boto3[s3]>=1.43",
     "pytest>=9",
@@ -78,7 +78,6 @@ packages = ["src/deephaven_massive"]
 # ---------------------------------------------------------------------------------------------
 
 [tool.ruff]
-required-version = "==0.17.2"
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]

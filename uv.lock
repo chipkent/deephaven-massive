@@ -354,7 +354,7 @@ dev = [
     { name = "pytest", specifier = ">=9" },
     { name = "pytest-cov", specifier = ">=7" },
     { name = "pytest-timeout", specifier = ">=2.4" },
-    { name = "ruff", specifier = "==0.17.2" },
+    { name = "ruff", specifier = ">=0.17.2" },
     { name = "types-boto3", extras = ["s3"], specifier = ">=1.43" },
 ]
 

@@ -56,10 +56,28 @@ environment, and the Claude Code hook blocks them.
 10. **No live testing in unit tests.** Unit tests use the fake REST, WebSocket, and S3 servers in
     `tests/_fakes/` and payload fixtures under `tests/data/<owner>/`. Only `_integration` tests
     touch Massive, and only when `MASSIVE_API_KEY` is set.
-11. **Docstrings** are Google style on every module, class, and function, public or private. A
-    change to a public signature, default, or table semantics updates `DESIGN.md` first (owner
-    decision).
+11. **Docstrings meet the documentation standard below.** A change to a public signature,
+    default, or table semantics updates `DESIGN.md` first (owner decision).
 12. **Dependencies** change only in dedicated `chore(deps):` PRs. `uv.lock` is committed.
+
+## Documentation standard
+
+Docstrings are read by people in an IDE or the Deephaven console and by agents that know nothing
+but the code. Write them to be useful to both, in clear, edited prose. A one-line docstring on
+anything with behavior worth knowing is a defect, not brevity.
+
+- **Modules** state what the module is for, what it owns, and how it fits with its neighbors.
+  The package `__init__.py` is the front door: what the library does, the public API with a
+  short example, where to read next, and any status a reader must know.
+- **Classes** state the concept the class represents, its lifecycle, who creates it, and its
+  thread-safety. Public classes include a short example.
+- **Functions and methods** state what they do and why one would call them, then document every
+  argument (meaning, units, accepted values, default behavior), the return value (shape, columns
+  for a returned table), every exception raised and when, side effects (network calls, threads,
+  subscriptions, tables created), and blocking or threading constraints.
+- **Examples** are real code that runs against the documented API.
+- **Never** restate the signature in words, use filler ("This function…"), or leave a term
+  undefined. Ruff's `D` and `DOC` rules check form; reviewers check substance.
 
 ## Deephaven invariants
 

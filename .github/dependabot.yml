@@ -8,7 +8,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    ignore:
-      # DESIGN § 20.1: ruff is pinned exactly; a bump is a dedicated PR that also updates
-      # `required-version` in pyproject.toml.
-      - dependency-name: "ruff"
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"

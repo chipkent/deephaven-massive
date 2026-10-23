@@ -158,8 +158,10 @@ These rules apply to every package in both repositories. Package sections only a
     the invariants it relies on in its PR description.
 11. **No live testing as design input** ([DESIGN § 22](DESIGN.md#22-decisions), item 19). Unit tests use fake REST/WS/S3 servers and
     fixtures shaped from SDK `from_dict` and documentation samples. Live tests are P8 only.
-12. **Docstrings and docs sync.** Google-style docstrings on every public and private module,
-    class, and function (`D` rules, `DOC201/501/502`). A change to a public signature, default, or
+12. **Docstrings and docs sync.** Every module, class, and function, public or private, has a
+    Google-style docstring that meets `AGENTS.md`'s documentation standard (purpose, arguments,
+    returns, raises, side effects, threading, and an example where it helps). Minimal docstrings
+    are a defect. `D` and `DOC201/501/502` check form; review checks substance. A change to a public signature, default, or
     table semantics updates `DESIGN.md` (owner decision required) and, after P7, `README.md`.
 13. **One package, one concern.** If a package needs a change to a file another package owns,
     land that change first in a small separate PR (`refactor:` or `chore:`), rebase, and continue.
@@ -333,7 +335,7 @@ them into `DESIGN.md`.
 | **Issue** | #12 |
 
 **Goal.** Replace the permissive, four-way-duplicated gate with one strict, agent-friendly
-toolchain: pinned ruff `ALL`, strict mypy, pytest 9 native config, a single `scripts/check.sh`
+toolchain: ruff `ALL` on the latest release, strict mypy, pytest 9 native config, a single `scripts/check.sh`
 entry point, git and Claude Code hooks, a CI matrix that includes free-threaded CPython, and a
 committed lockfile that pins the SDK fork. Legacy code is excluded from the gate until P7.
 
@@ -370,11 +372,11 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
   - `dependencies`: `massive>=2.9.0`, `deephaven-core>=42.0`, `pyarrow>=14`, `boto3>=1.28`,
     `websockets>=14`. `[tool.uv.sources] massive = { git = "https://github.com/chipkent/massive-client-python", rev = "<sha of deephaven-fixes>" }`.
     `orjson` as an optional extra (`[project.optional-dependencies] orjson = ["orjson>=3.9"]`).
-  - `[dependency-groups] dev`: `ruff==<exact>`, `mypy`, `types-boto3[s3]`, `pytest>=9`,
+  - `[dependency-groups] dev`: `ruff>=…` (floor only; latest via the lock and Dependabot), `mypy`, `types-boto3[s3]`, `pytest>=9`,
     `pytest-cov`, `pytest-timeout`, `pyright`, `pre-commit`, `deephaven-server>=42.0`. No
     `pytest-asyncio` ([DESIGN § 20.1](DESIGN.md#201-tooling-configuration)).
   - Ruff: `select = ["ALL", "DOC201", "DOC501", "DOC502"]`, `preview = true`,
-    `explicit-preview-rules = true`, `required-version`, global ignores exactly: `COM812`,
+    `explicit-preview-rules = true`, global ignores exactly: `COM812`,
     `COM819`, `W191`, `E111`, `E114`, `E117`, `D206`, `D300`, `Q000`–`Q003`, `TRY003`, `EM101`,
     `EM102`, `PLR0913`, `FBT003`, `CPY001`, each with a reason comment. **Keep enforced**: `E501`
     at 100, `ANN401`, `TC*`, `SLF001` in src, `C901` (`max-complexity = 12`), `PLR091x`,

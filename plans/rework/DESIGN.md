@@ -1352,7 +1352,7 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
 
 - **Coverage:** 100% statement and branch coverage. `pragma: no cover` needs a written reason
   and owner approval.
-- **Ruff:** `select = ["ALL"]` with a documented ignore list, pinned version, Google docstring
+- **Ruff:** `select = ["ALL"]` with a documented ignore list, latest version, Google docstring
   convention, `E501` at 100 columns, complexity limits enforced.
 - **Mypy:** `strict` plus `warn_unreachable` and the extra error codes; the only override is
   `ignore_missing_imports` for `pyarrow.*`. Pyright runs as a non-gating second checker.
@@ -1368,8 +1368,11 @@ This is the exact configuration the tooling work package applies. Every lint ign
 reason comment in `pyproject.toml`; adding one needs owner approval.
 
 - **Ruff.**
-  - `select = ["ALL"]`, with ruff pinned to an exact version (in the dev dependency group and in
-    `required-version`). Version bumps happen in dedicated pull requests.
+  - `select = ["ALL"]`. Linters and type checkers track their latest releases: the dev group
+    declares floors only (`ruff>=…`, `mypy>=…`, `pyright>=…`), `uv.lock` pins the exact versions
+    for reproducible runs, and Dependabot's weekly `uv` update moves the lock to the newest
+    releases. Because `ALL` enables new rules as they ship, an update PR may surface new
+    findings; that PR fixes them (or proposes an ignore for owner approval).
   - `preview = true` with `explicit-preview-rules = true`, enabling only `DOC201`, `DOC501`, and
     `DOC502` (docstring Returns and Raises sections must match the code).
   - Global ignores: the rules that conflict with `ruff format` (`COM812`, `COM819`, `W191`,
