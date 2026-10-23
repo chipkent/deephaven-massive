@@ -16,8 +16,8 @@ not link to it from docstrings or from `README.md`.
 
 - One GitHub issue per work package, all children of one parent tracking issue. Each issue
   carries the package's live checklist; the checklists below are the *initial* copy.
-- `Issue: TBD` placeholders below are replaced with issue links once the owner approves issue
-  creation (an owner-approval gate in P0).
+- Each package links its issue; the parent tracking issue is #37. Live progress is tracked in
+  the issues' checklists, not by ticking boxes in this file.
 - A package is **done** when its PR is merged by the owner and the issue is closed with a link to
   the merged PR. Agents never merge and never close issues on their own authority.
 - Packages are referred to by ID (`P3`, `F6`) in commit bodies and PR descriptions
@@ -55,7 +55,7 @@ not link to it from docstrings or from `README.md`.
 ```mermaid
 flowchart LR
     subgraph fork["Fork: chipkent/massive-client-python (7 upstream PRs)"]
-        F0["F0 fork setup<br/>deephaven-fixes from upstream main"]
+        F0["F0 fork setup<br/>deephaven-fixes from upstream master"]
         F7["F7 ci/free-threaded<br/>3.13t/3.14t, fake WS server, REST stress"]
         F1["F1 fix/ws-subscriptions<br/>thread-safe, wake-up, wildcard, set_subscriptions"]
         F2["F2 fix/ws-reconnect<br/>pending merge, OK-close, backoff, max_reconnects, request_close"]
@@ -100,7 +100,7 @@ while P1–P3 are in flight, so D1 should be ready by the time P2 merges.
 These rules apply to every package in both repositories. Package sections only add to them.
 
 1. **Branching.** One PR per package on a branch named `<type>/<topic>` off `main` in this
-   repository. In the fork, fix branches are cut from upstream `main` (stacked on F7 where noted)
+   repository. In the fork, fix branches are cut from upstream `master` (stacked on F7 where noted)
    and are the source of the upstream PRs; `deephaven-fixes` is an integration branch, not a PR
    target (see [Fork workflow](#fork-workflow)). Never commit directly on `main` or `master` in
    either repository. Never force-push a branch another agent may have checked out.
@@ -264,7 +264,7 @@ alone.
 | | |
 |---|---|
 | **Branch** | `docs/rework-design-plan` |
-| **Issue** | TBD (parent tracking issue; this package's own issue is TBD) |
+| **Issue** | Parent tracking issue #37 (P0 itself merged in #11) |
 
 **Goal.** Commit the approved specification and this execution plan so every later package has
 a stable source of truth, and open the tracking issues that hold the live checklists.
@@ -325,7 +325,7 @@ them into `DESIGN.md`.
 | | |
 |---|---|
 | **Branch** | `chore/tooling-foundation` |
-| **Issue** | TBD |
+| **Issue** | #12 |
 
 **Goal.** Replace the permissive, four-way-duplicated gate with one strict, agent-friendly
 toolchain: pinned ruff `ALL`, strict mypy, pytest 9 native config, a single `scripts/check.sh`
@@ -489,7 +489,7 @@ lists beyond those enumerated above.
 | | |
 |---|---|
 | **Branch** | `refactor/core-skeleton` |
-| **Issue** | TBD |
+| **Issue** | #13 |
 
 **Goal.** Create the new package layout with the public surface fixed (exports, config, session
 shell, query classes, enums, types, errors), the cross-cutting engines that transports and domains
@@ -644,7 +644,7 @@ DESIGN § 4.1 needs an owner decision first.
 | | |
 |---|---|
 | **Branch** | `feat/rest-transport` |
-| **Issue** | TBD |
+| **Issue** | #14 |
 
 **Goal.** Put every REST dataset on the official SDK: `RESTClient` wiring, paginated results
 streamed into bounded Arrow batches, filter validation against a generated parameter table,
@@ -771,7 +771,7 @@ from massive.com (read-only; no approval needed, note it in the PR).
 | | |
 |---|---|
 | **Branch** | `feat/websocket-layer` |
-| **Issue** | TBD |
+| **Issue** | #15 |
 
 **Goal.** Implement live streams on the forked `WebSocketClient(raw=True)`: one connection per
 URL, a reconcile loop with one in-flight step, acknowledgement parsing and watchdogs, the
@@ -898,7 +898,7 @@ fixtures only); live tests (P8).
 | | |
 |---|---|
 | **Branch** | `feat/flat-file-history` |
-| **Issue** | TBD |
+| **Issue** | #16 |
 
 **Goal.** Stream `.csv.gz` flat files from `files.massive.com` into static tables with pure-Arrow
 per-batch transforms, symbol pushdown, per-venue futures prefixes, partition-date rules, the
@@ -1055,7 +1055,7 @@ lines (F H3) — one name per dataset, no aliases; Benzinga transcripts never ex
 
 **Shared approval gates.** Opening the PR.
 
-### P6a — `feat: stocks datasets` — branch `feat/stocks-datasets` — Issue: TBD
+### P6a — `feat: stocks datasets` — branch `feat/stocks-datasets` — Issue: #17
 DESIGN [§ 8.1 `m.stocks`](DESIGN.md#81-mstocks). Owns `_domains/stocks.py`, including the
 nested `financials` and `filings` namespaces as inner classes (DESIGN § 4.1 fixes one module
 per namespace; splitting it would need an owner decision). Datasets: `trades`, `quotes`, `bars` (overloads;
@@ -1069,7 +1069,7 @@ risk_factor_taxonomy,disclosure_taxonomy}`. Filings paths are the SDK's
 `/stocks/filings/vX/{13-F,form-3,form-4}`, `/stocks/filings/8-K/vX/disclosures`,
 `/stocks/taxonomies/vX/*`.
 
-### P6b — `feat: options datasets` — branch `feat/options-datasets` — Issue: TBD
+### P6b — `feat: options datasets` — branch `feat/options-datasets` — Issue: #18
 DESIGN [§ 8.2 `m.options`](DESIGN.md#82-moptions). Owns `_domains/options.py`. Datasets: `trades` (latest), `quotes` (stream + history, no "last"),
 `bars`, `fmv`, `chain(underlying, contract_type: ContractType)`, `snapshots` (unified
 `/v3/snapshot?ticker.any_of=O:…` 250 per request; `Underlying` parsed; `ALL` allowed),
@@ -1077,7 +1077,7 @@ DESIGN [§ 8.2 `m.options`](DESIGN.md#82-moptions). Owns `_domains/options.py`. 
 parser in the domain). `/v3/snapshot/options/{u}/{o}` is recorded in the spec as *covered by*
 `snapshots`.
 
-### P6c — `feat: futures datasets` — branch `feat/futures-datasets` — Issue: TBD
+### P6c — `feat: futures datasets` — branch `feat/futures-datasets` — Issue: #19
 DESIGN [§ 8.3 `m.futures`](DESIGN.md#83-mfutures). Owns `_domains/futures.py`. Datasets: `trades(symbols, *, venue=None)`, `quotes(…, venue=None)`,
 `bars` (futures overloads: no `DAY`; `SESSION` allowed; `resolution = f"{multiplier}{unit}"`;
 WS `A` and `AM`), `snapshots(product_code)`, `contracts`, `products`, `exchanges`,
@@ -1085,27 +1085,27 @@ WS `A` and `AM`), `snapshots(product_code)`, `contracts`, `products`, `exchanges
 `_dates.py`; prefixes `us_futures_{venue}/{trades,quotes,minute_aggs,session_aggs}_v1`. Streams
 always `/futures`.
 
-### P6d — `feat: indices datasets` — branch `feat/indices-datasets` — Issue: TBD
+### P6d — `feat: indices datasets` — branch `feat/indices-datasets` — Issue: #20
 DESIGN [§ 8.4 `m.indices`](DESIGN.md#84-mindices). Owns `_domains/indices.py`. Datasets: `values` (WS `V` in the TICK family; `fetch()` projects
 `/v3/snapshot/indices` to `Value`/`Timestamp=last_updated`; history flat files only, REST →
 `ValueError`), `bars` (no `adjusted`), `snapshots`, `daily_open_close`. The `V` not-authorized
 reply fails the stream with a message naming `ws_hosts[AssetClass.INDICES]` and
 `business.massive.com` (fixture test for both replies).
 
-### P6e — `feat: forex datasets` — branch `feat/forex-datasets` — Issue: TBD
+### P6e — `feat: forex datasets` — branch `feat/forex-datasets` — Issue: #21
 DESIGN [§ 8.5 `m.forex`](DESIGN.md#85-mforex). Owns `_domains/forex.py`. Datasets: `quotes`
 (latest via `/v1/last_quote/currencies`, unit UNVERIFIED → ms with the `[1990, 2100]` guard),
 `bars` (`CAS`/`CA`; grouped `…/fx/{date}`), `fmv`, `snapshots` (`ALL` = all pairs), `movers`,
 `conversion(from_currency, to_currency, amount, precision)`. Pair forms `EUR/USD` ↔
 `C:EURUSD`. Forex has no daily open-close dataset, so P6e has no dependency on F6 or D2.
 
-### P6f — `feat: crypto datasets` — branch `feat/crypto-datasets` — Issue: TBD
+### P6f — `feat: crypto datasets` — branch `feat/crypto-datasets` — Issue: #22
 DESIGN [§ 8.6 `m.crypto`](DESIGN.md#86-mcrypto). Owns `_domains/crypto.py`. Datasets: `trades` (latest via `/v1/last/crypto`, unit UNVERIFIED),
 `quotes` (stream only), `bars` (`XAS`/`XA`; grouped), `fmv`, `snapshots`, `movers`,
 `daily_open_close` (`/v1/open-close/crypto/{from}/{to}/{date}` via the P3 shim until D2;
 `extra_params` declared in the spec). Pair forms `BTC-USD` ↔ `X:BTCUSD`.
 
-### P6g — `feat: reference, indicators, economy, and unified snapshots` — branch `feat/reference-datasets` — Issue: TBD
+### P6g — `feat: reference, indicators, economy, and unified snapshots` — branch `feat/reference-datasets` — Issue: #23
 DESIGN [§ 8.7 `m.reference`](DESIGN.md#87-mreference), [§ 8.8 `m.indicators`](DESIGN.md#88-mindicators),
 [§ 8.9 `m.economy`](DESIGN.md#89-meconomy), and [§ 8.11 `m.snapshots`](DESIGN.md#811-msnapshots).
 Owns `_domains/reference.py` (`tickers(market: Market, …)`, `ticker_details`, `ticker_types`,
@@ -1121,7 +1121,7 @@ record to `_catalog.py`; its tests for the unified snapshot go in `tests/test_se
 P6g is the only domain package that edits those two shared modules. `cusip` is typed `str` in
 the library regardless of the SDK hint.
 
-### P6h — `feat: partner datasets` — branch `feat/partner-datasets` — Issue: TBD
+### P6h — `feat: partner datasets` — branch `feat/partner-datasets` — Issue: #24
 DESIGN [§ 8.10 `m.partners`](DESIGN.md#810-mpartners). Owns `_domains/partners.py`, which
 holds the four vendor classes (`m.partners.benzinga`, `.etf_global`, `.tmx`, `.fable`), with
 `tests/_domains/test_partners.py` and `tests/data/partners/`. Benzinga: `analysts`,
@@ -1141,7 +1141,7 @@ holds the four vendor classes (`m.partners.benzinga`, `.etf_global`, `.tmx`, `.f
 | | |
 |---|---|
 | **Branch** | `chore/finish-rework` |
-| **Issue** | TBD |
+| **Issue** | #25 |
 
 **Goal.** Close the rework: prove 100% Massive coverage against the SDK and the docs with
 reviewed exclusions, delete the legacy code and every temporary exclusion, run the README
@@ -1227,7 +1227,7 @@ counts and the "commit messages are enforced" claim (the action lints PR titles 
 | | |
 |---|---|
 | **Branch** | `test/live-integration` |
-| **Issue** | TBD |
+| **Issue** | #26 |
 
 **Goal.** Add `*_integration.py` tests that run only with `MASSIVE_API_KEY` (and S3 keys) set,
 so the owner can retire every UNVERIFIED note in `DESIGN.md`/`README.md` with evidence: the base
@@ -1282,7 +1282,7 @@ never add a probe for an unsupported endpoint (`/v1/summaries`, `/futures/{venue
 | | |
 |---|---|
 | **Branch** | `chore/bump-massive-fork-<short-sha>` |
-| **Issue** | TBD (one issue per bump; D1 and D2 are planned, more may follow) |
+| **Issue** | D1 #27, D2 #28 (one issue per bump) |
 
 **Goal.** Move this repository's `[tool.uv.sources] massive.rev` to a `deephaven-fixes` commit
 whose CI is green, regenerate `uv.lock`, and remove any temporary accommodation that the newly
@@ -1328,12 +1328,12 @@ packages). Never pin a SHA whose fork CI is red.
 The fork exists to fix the SDK rather than work around it ([DESIGN § 19](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)). Its rules differ from
 this repository's in one respect: the integration branch is assembled by direct merges.
 
-- **Branches.** `main` tracks upstream `massive-com/client-python` `main` and is never edited.
+- **Branches.** `master` (the upstream default branch) tracks upstream `massive-com/client-python` `master` and is never edited.
   Each topic gets one `fix/<topic>`, `feat/<topic>`, or `ci/<topic>` branch cut from upstream
   `main`. F1 and F2 are cut from the F7 branch instead, because their tests use F7's fake
   server; their upstream PRs are opened as stacked PRs that note the dependency.
 - **`deephaven-fixes`** is the integration branch this repository pins by commit SHA. It is
-  rebuilt by merging every topic branch onto upstream `main`; when upstream moves, it is rebuilt
+  rebuilt by merging every topic branch onto upstream `master`; when upstream moves, it is rebuilt
   from the new `main`. Agents may merge topic branches into `deephaven-fixes` and push it, **only
   when the fork's CI is green on the result**. Nothing is ever committed directly on it; every
   change arrives by merging a topic branch.
@@ -1342,7 +1342,7 @@ this repository's in one respect: the integration branch is assembled by direct 
   requires owner approval each time. Upstream PR bodies state the defect, the evidence
   (file:line in v2.9.0), the change, and the test; they never mention Deephaven.
 - **Rebasing.** When upstream merges a PR, the corresponding topic branch is deleted and
-  `deephaven-fixes` is rebuilt from the new upstream `main` plus the remaining branches. A D-bump
+  `deephaven-fixes` is rebuilt from the new upstream `master` plus the remaining branches. A D-bump
   PR here moves the pin.
 - **Never in the fork:** connection sharing, ref-counting, publishers, failure semantics,
   reactive watchlists, tier detection, the options cap, schema mapping, S3 (DESIGN § 19,
@@ -1361,7 +1361,7 @@ were re-verified while writing this plan.
 | | |
 |---|---|
 | **Branch** | none (repository setup) |
-| **Issue** | TBD |
+| **Issue** | #29 |
 
 **Goal.** Make the fork ready to receive topic branches: `deephaven-fixes` exists at upstream
 `main`, CI runs on push to every branch, and `main`/`deephaven-fixes` are protected against
@@ -1378,18 +1378,18 @@ branches (no behaviour change otherwise).
 
 **Tasks.**
 - [ ] Owner: fork `massive-com/client-python` to `chipkent/massive-client-python` (if not done).
-- [ ] Create `deephaven-fixes` from upstream `main` (`git switch -c deephaven-fixes
-      upstream/main && git push origin deephaven-fixes`) — pushing this branch is allowed by the
+- [ ] Create `deephaven-fixes` from upstream `master` (`git switch -c deephaven-fixes
+      upstream/master && git push origin deephaven-fixes`) — pushing this branch is allowed by the
       fork rules.
-- [ ] If the upstream workflow runs only on `pull_request` or on `main`, add a topic branch
+- [ ] If the upstream workflow runs only on `pull_request` or on `master`, add a topic branch
       `ci/run-on-push` enabling `on: push` for all branches; merge it into `deephaven-fixes`
       (no upstream PR needed for a trigger change; note it in the F7 upstream PR instead).
-- [ ] Owner: ruleset on `main` and `deephaven-fixes` — no direct commits except merges of topic
+- [ ] Owner: ruleset on `master` and `deephaven-fixes` — no direct commits except merges of topic
       branches by the fork workflow above; document the ruleset in the F0 issue.
 - [ ] Record the `deephaven-fixes` SHA in the F0 issue; P1 pins it.
 
 **Acceptance criteria.**
-- [ ] `deephaven-fixes` exists, equals upstream `main` (plus the CI trigger if needed), CI green.
+- [ ] `deephaven-fixes` exists, equals upstream `master` (plus the CI trigger if needed), CI green.
 - [ ] A test commit on a throwaway branch triggers CI on push.
 
 **Verification.**
@@ -1429,7 +1429,7 @@ Shared rules for every fork fix package:
 - **Approval gates (all).** Opening the upstream PR. Merging into `deephaven-fixes` needs green CI
   only.
 
-### F7 — `ci: free-threaded CPython jobs and concurrency stress tests` — branch `ci/free-threaded` — Issue: TBD
+### F7 — `ci: free-threaded CPython jobs and concurrency stress tests` — branch `ci/free-threaded` — Issue: #30
 
 Listed first because F1 and F2 stack on it.
 
@@ -1455,7 +1455,7 @@ HTTP stub; assert no shared-state corruption).
 
 **Acceptance.** Fork CI green on both `t` jobs; helper is used by F1 and F2 tests.
 
-### F1 — `fix: thread-safe, prompt, and declarative WebSocket subscriptions` — branch `fix/ws-subscriptions` — Issue: TBD
+### F1 — `fix: thread-safe, prompt, and declarative WebSocket subscriptions` — branch `fix/ws-subscriptions` — Issue: #31
 
 **Goal.** Make `subscribe`/`unsubscribe` safe to call from any thread, apply them without waiting
 for the 1 s `recv` timeout, stop wildcard calls from discarding unrelated topics, and add a
@@ -1492,7 +1492,7 @@ emits a frame (captured by the fake server).
 
 **Acceptance.** All four tests pass on 3.11–3.14 and `3.13t`/`3.14t`; existing suite unchanged.
 
-### F2 — `fix: reconnect semantics (pending subscriptions, clean close, backoff, max_reconnects, thread-safe close, handshake max_connections)` — branch `fix/ws-reconnect` — Issue: TBD
+### F2 — `fix: reconnect semantics (pending subscriptions, clean close, backoff, max_reconnects, thread-safe close, handshake max_connections)` — branch `fix/ws-reconnect` — Issue: #32
 
 **Goal.** Make the client survive the outages Massive actually produces: keep subscriptions
 scheduled during an outage, reconnect after a server-initiated clean close unless the user asked
@@ -1542,7 +1542,7 @@ server sends `max_connections` in the auth reply and then closes; the caller obs
 **Acceptance.** Tests pass on all matrix entries; default behaviour change (≥ 15 s backoff) is
 called out in the upstream PR with the knowledge-base citation.
 
-### F3 — `fix: malformed logging call in _parse_subscription` — branch `fix/ws-logging-format` — Issue: TBD
+### F3 — `fix: malformed logging call in _parse_subscription` — branch `fix/ws-logging-format` — Issue: #33
 
 **Evidence.** `websocket/__init__.py:268` `logger.warning("invalid subscription:", s)` passes `s`
 as a format argument with no placeholder (logs "--- Logging error ---").
@@ -1553,7 +1553,7 @@ as a format argument with no placeholder (logs "--- Logging error ---").
 
 **Tasks.** - [ ] One-line fix, test, upstream PR.
 
-### F4 — `feat: ship py.typed and correct model and parameter type hints` — branch `feat/typing` — Issue: TBD
+### F4 — `feat: ship py.typed and correct model and parameter type hints` — branch `feat/typing` — Issue: #34
 
 **Goal.** Let strict mypy consumers use the SDK without `ignore_missing_imports`.
 
@@ -1573,7 +1573,7 @@ only where the fix is a pure annotation.
 
 **Tasks.** - [ ] `py.typed` + packaging include; - [ ] hint fixes; - [ ] mypy consumer check in CI.
 
-### F5 — `fix: BadResponse carries the HTTP status and body` — branch `fix/rest-bad-response-status` — Issue: TBD
+### F5 — `fix: BadResponse carries the HTTP status and body` — branch `fix/rest-bad-response-status` — Issue: #35
 
 **Evidence.** `rest/base.py:154-155` `raise BadResponse(resp.data.decode("utf-8"))`; the status
 code is lost, so 403 vs 429 vs 500 must be inferred from the body.
@@ -1586,7 +1586,7 @@ if upstream accepts it; otherwise split into a second commit the owner can drop.
 
 **Tasks.** - [ ] Exception change; - [ ] decode-failure commit (separable); - [ ] tests.
 
-### F6 — `feat: add funding-conditions and crypto daily open-close endpoints` — branch `feat/rest-missing-endpoints` — Issue: TBD
+### F6 — `feat: add funding-conditions and crypto daily open-close endpoints` — branch `feat/rest-missing-endpoints` — Issue: #36
 
 **Evidence.** `rest/economy.py` has exactly four `/fed/v1/*` URLs (`:56`, `:84`, `:123`,
 `:164`); `/fed/v1/funding-conditions` is documented. `rest/aggs.py:154` has only
