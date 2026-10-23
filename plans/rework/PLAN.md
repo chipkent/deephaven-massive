@@ -1522,8 +1522,9 @@ reset only `subs = set()` with `schedule_resub = True`; a union with `subs` woul
 unsubscribes that were pending when the connection dropped. Reconnect after
 `ConnectionClosedOK` unless `request_close()` was called; `request_close()` is synchronous and
 thread-safe (`call_soon_threadsafe` sets a flag and closes the socket); `close()` kept.
-`reconnect_backoff: float = 15.0`, `max_reconnect_backoff: float = 120.0`, doubling with ±20 %
-jitter, applied before re-entering the iterator. `max_reconnects` counts consecutive failed
+`reconnect_backoff: float = 15.0`, `max_reconnect_backoff: float = 120.0`, doubling, with
+upward-only jitter clamped to `[reconnect_backoff, max_reconnect_backoff]` (DESIGN § 19, F2.3),
+applied before re-entering the iterator. `max_reconnects` counts consecutive failed
 attempts, reset on `auth_success`; `None` = unlimited; docstring updated. F2.6:
 surface a `max_connections` status received during the handshake to the caller, as a distinct
 exception or a flag, so a caller can distinguish it from a network drop. F2.6 is in scope and
