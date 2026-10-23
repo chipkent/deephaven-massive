@@ -1332,18 +1332,20 @@ this repository's in one respect: the integration branch is assembled by direct 
   Each topic gets one `fix/<topic>`, `feat/<topic>`, or `ci/<topic>` branch cut from upstream
   `main`. F1 and F2 are cut from the F7 branch instead, because their tests use F7's fake
   server; their upstream PRs are opened as stacked PRs that note the dependency.
-- **`deephaven-fixes`** is the integration branch this repository pins by commit SHA. It is
-  rebuilt by merging every topic branch onto upstream `master`; when upstream moves, it is rebuilt
-  from the new `main`. Agents may merge topic branches into `deephaven-fixes` and push it, **only
-  when the fork's CI is green on the result**. Nothing is ever committed directly on it; every
-  change arrives by merging a topic branch.
+- **`deephaven-fixes`** is the integration branch this repository pins by commit SHA. It only
+  moves forward: topic branches are merged into it, and when upstream moves, the new upstream
+  `master` is merged into it. It is **never reset, rebased, or force-pushed**, because a rewritten
+  history could make a pinned SHA unreachable and break `uv sync` here. A ruleset on the fork
+  blocks deletion and force pushes on `master` and `deephaven-fixes`. Agents may merge into
+  `deephaven-fixes` and push it, **only when the fork's CI is green on the result**. Nothing is
+  ever committed directly on it; every change arrives by a merge.
 - **Upstream PRs.** Each topic branch is the source of exactly one PR to
   `massive-com/client-python` (seven in total, F1–F7; F0 has none). Opening an upstream PR
   requires owner approval each time. Upstream PR bodies state the defect, the evidence
   (file:line in v2.9.0), the change, and the test; they never mention Deephaven.
-- **Rebasing.** When upstream merges a PR, the corresponding topic branch is deleted and
-  `deephaven-fixes` is rebuilt from the new upstream `master` plus the remaining branches. A D-bump
-  PR here moves the pin.
+- **Upstream merges.** When upstream merges a PR, merge the new upstream `master` into
+  `deephaven-fixes` (resolving any conflict in favour of upstream's version of the fix) and
+  delete the corresponding topic branch. A D-bump PR here moves the pin.
 - **Never in the fork:** connection sharing, ref-counting, publishers, failure semantics,
   reactive watchlists, tier detection, the options cap, schema mapping, S3 (DESIGN § 19,
   "stays in this library").
