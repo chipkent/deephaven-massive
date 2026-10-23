@@ -1272,8 +1272,11 @@ branches, F1 to F7. Each branch is opened as one pull request to `massive-com/cl
 The fork's `deephaven-fixes` branch is assembled by direct merges of the seven branches (no
 pull requests into it); CI runs on every push to it; this project pins it by commit:
 `[tool.uv.sources] massive = { git = "<fork>", rev = "<sha>" }`, with `[project]` keeping
-`massive>=2.9.0`. Pushing branches and opening upstream pull requests happen only with explicit
-owner approval. Evidence paths are relative to `site-packages/massive` in `massive==2.9.0`.
+`massive>=2.9.0`. The branch only moves forward: when upstream moves, the new upstream `master`
+is merged into it. It is never reset or force-pushed, so every pinned commit stays reachable; a
+fork ruleset blocks deletion and force pushes. Agents may push topic branches, and may merge
+into `deephaven-fixes` and push it when the fork's CI is green; opening an upstream pull
+request needs explicit owner approval each time. Evidence paths are relative to `site-packages/massive` in `massive==2.9.0`.
 
 ### F1 `fix/ws-subscriptions`: thread-safe, prompt, isolated subscription handling
 
@@ -1574,8 +1577,8 @@ document already reflects them.
     fixture test; live tests come later and retire the UNVERIFIED notes.
 20. **All merges into `main` happen through pull requests, and only the owner merges.** In the
     fork, each topic branch goes upstream as one pull request; the fork's `deephaven-fixes`
-    branch is assembled by direct merges of those branches, with CI on every push, and is
-    pinned here by commit SHA.
+    branch is assembled by direct merges of those branches, with CI on every push, is never
+    reset or force-pushed, and is pinned here by commit SHA.
 
 ## 23. Open verification items
 
