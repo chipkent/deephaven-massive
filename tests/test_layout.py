@@ -32,8 +32,6 @@ LEGACY_PATHS = (  # LEGACY-EXCLUSION: emptied and deleted in P7
     PurePosixPath("src/deephaven_massive/engine"),
     PurePosixPath("src/deephaven_massive/domains"),
     PurePosixPath("src/deephaven_massive/schemas"),
-    PurePosixPath("src/deephaven_massive/config.py"),
-    PurePosixPath("src/deephaven_massive/session.py"),
     PurePosixPath("tests/legacy"),
 )
 

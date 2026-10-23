@@ -14,8 +14,10 @@ from __future__ import annotations
 import atexit
 import gzip
 import importlib
+import itertools
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,10 +25,16 @@ import pytest
 from deephaven_server import Server
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from deephaven.execution_context import ExecutionContext
+    from deephaven.stream.table_publisher import TablePublisher
     from deephaven.table import Table
+
+    from deephaven_massive import MassiveSession
+    from deephaven_massive._catalog import DatasetSpec
+    from deephaven_massive._liveness import StreamHandle
+    from deephaven_massive._query import Request
 
 collect_ignore_glob = ["legacy/*"]  # LEGACY-EXCLUSION: legacy tests, deleted in P7
 
@@ -143,3 +151,74 @@ def make_csv_gz() -> Callable[[str], bytes]:
         return gzip.compress(csv_text.encode())
 
     return compress
+
+
+# --- Session fixtures (P2) ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def massive_session() -> Iterator[MassiveSession]:
+    """Yield a `MassiveSession` with a test key, closed at teardown.
+
+    Yields:
+        An open session on the embedded server's execution context.
+    """
+    dm = importlib.import_module("deephaven_massive")
+    session: MassiveSession = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
+    yield session
+    session.close()
+
+
+class FakeStreamTransport:
+    """A WebSocket transport stand-in: each stream is a bare `table_publisher` blink table.
+
+    Records every stream it opens and every `on_shutdown_callback` that fires, so liveness tests
+    can observe exactly when Deephaven tears a stream down.
+    """
+
+    def __init__(self) -> None:
+        self.opened: list[tuple[str, str | None]] = []
+        self.publishers: dict[int, TablePublisher] = {}
+        self.shutdown: dict[int, threading.Event] = {}
+        self.shutdown_calls: dict[int, int] = {}
+        self._lock = threading.Lock()
+        self._ids = itertools.count(1)
+
+    def _on_shutdown(self, stream_id: int) -> None:
+        with self._lock:
+            self.shutdown_calls[stream_id] = self.shutdown_calls.get(stream_id, 0) + 1
+        self.shutdown[stream_id].set()
+
+    def open_stream(self, spec: DatasetSpec, request: Request, channel: str | None) -> StreamHandle:
+        liveness = importlib.import_module("deephaven_massive._liveness")
+        publisher_module = importlib.import_module("deephaven.stream.table_publisher")
+        assert spec.schema is not None
+        stream_id = next(self._ids)
+        self.shutdown[stream_id] = threading.Event()
+        scope = liveness.new_scope()
+        with scope.open():
+            blink, publisher = publisher_module.table_publisher(
+                f"test.{spec.name}#{stream_id}",
+                spec.schema.col_defs(),
+                on_shutdown_callback=lambda: self._on_shutdown(stream_id),
+            )
+        self.opened.append((spec.name, channel))
+        self.publishers[stream_id] = publisher
+        handle: StreamHandle = liveness.StreamHandle(
+            stream_id, blink, scope, "socket.test", "/stocks"
+        )
+        return handle
+
+
+@pytest.fixture
+def fake_streams(
+    massive_session: MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> FakeStreamTransport:
+    """Install a `FakeStreamTransport` as the session's WebSocket transport hook.
+
+    Returns:
+        The fake, for inspecting opened streams and shutdown callbacks.
+    """
+    fake = FakeStreamTransport()
+    monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake)
+    return fake
