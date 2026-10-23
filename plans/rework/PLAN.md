@@ -12,6 +12,10 @@ design**: P7 moves the durable parts (standards, invariants, workflow) into `REA
 `AGENTS.md`, then deletes `plans/rework/`. Nothing in this file is a long-term reference, so do
 not link to it from docstrings or from `README.md`.
 
+Citations of the form "Appendix B" through "Appendix I" refer to
+[`RESEARCH.md`](RESEARCH.md), the reference material gathered during planning: the data
+catalog, endpoint status, tooling research, and the bug lists for the current code.
+
 ## How progress is tracked
 
 - One GitHub issue per work package, all children of one parent tracking issue. Each issue
