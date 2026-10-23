@@ -16,7 +16,18 @@ import sys
 
 BARE = re.compile(r"(python[0-9.]*t?|pytest|py\.test|ruff|mypy|pip[0-9.]*)")
 SEPARATORS = {";", "&", "&&", "|", "||", "|&", "(", ")", "{", "}"}
-WRAPPERS = {"builtin", "command", "env", "exec", "nice", "nohup", "sudo", "time"}
+# Wrappers that run another command, with the options that take a separate argument. Their
+# options (for example `env -i` or `nice -n 5`) are skipped so the wrapped command is checked.
+WRAPPERS = {
+    "builtin": set(),
+    "command": set(),
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "exec": {"-a"},
+    "nice": {"-n", "--adjustment"},
+    "nohup": set(),
+    "sudo": {"-u", "--user", "-g", "--group", "-C", "-D", "-h", "-p", "-r", "-t", "-U"},
+    "time": {"-f", "--format", "-o", "--output"},
+}
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 
 command = json.load(sys.stdin).get("tool_input", {}).get("command", "")
@@ -30,13 +41,27 @@ except ValueError:
     tokens = text.split()
 
 at_start = True
+wrapper_options = None  # options of the wrapper just seen, while its options are being skipped
+skip_argument = False
 for token in tokens:
     if token in SEPARATORS:
-        at_start = True
+        at_start, wrapper_options, skip_argument = True, None, False
         continue
     if not at_start:
         continue
-    if ASSIGNMENT.fullmatch(token) or token in WRAPPERS:
+    if skip_argument:
+        skip_argument = False
+        continue
+    if wrapper_options is not None and token.startswith("-"):
+        if token == "--":
+            wrapper_options = None
+        elif token in wrapper_options:
+            skip_argument = True
+        continue
+    if ASSIGNMENT.fullmatch(token):
+        continue
+    if token in WRAPPERS:
+        wrapper_options = WRAPPERS[token]
         continue
     at_start = False
     name = token.rsplit("/", 1)[-1]

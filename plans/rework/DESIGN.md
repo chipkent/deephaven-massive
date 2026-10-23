@@ -1388,8 +1388,10 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Mypy.** `strict`, `warn_unreachable`, `warn_unused_configs`, and `enable_error_code =
   ["ignore-without-code", "redundant-expr", "truthy-bool", "truthy-iterable",
   "possibly-undefined", "unused-awaitable", "deprecated", "explicit-override"]`. The dev group
-  adds `types-boto3[s3]`. The only override is `ignore_missing_imports` for `pyarrow.*`; the fork
-  ships `py.typed` (F4). Pyright runs as a non-gating second checker.
+  adds `types-boto3[s3]`. Overrides are `ignore_missing_imports` for `pyarrow.*` (no type information
+  upstream) and, temporarily, for `massive.*`, tagged `FORK-PY-TYPED` in `pyproject.toml`. The
+  `massive.*` override is removed by the D-bump that pins a `deephaven-fixes` commit containing
+  F4, which ships `py.typed`; no other override is allowed. Pyright runs as a non-gating second checker.
 - **Pytest 9** (native `[tool.pytest]` table). `strict = true`, `filterwarnings = ["error"]`,
   `addopts = ["-ra", "--import-mode=importlib"]`, `faulthandler_timeout = 120` with
   `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Coverage is not in
