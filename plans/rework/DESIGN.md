@@ -61,8 +61,10 @@ There are no existing users. Backward compatibility with the previous code base 
 ### 2.1 Principles
 
 1. **Datasets are named by what they are, not how they travel.** One method per dataset. One
-   schema per dataset: the union of the SDK model fields across WebSocket, REST, and flat files,
-   flattened to PascalCase. A column that a transport does not supply is null. `Timestamp` is
+   schema per dataset kind: the union of the SDK model fields across asset classes and
+   transports (WebSocket, REST, and flat files), flattened to PascalCase. A column a class or
+   transport does not supply is null (crypto trades have no `Tape`; stock bars have no
+   `SettlementPrice`). `Timestamp` is
    the primary time column on every tick, bar, and value row. `Symbol` is the instrument on every
    instrument row.
 2. **Shape is the user's choice; transport and host are the library's.** Verbs name the
@@ -940,7 +942,7 @@ registered SDK model and flat-file header has an entry.
 
 | Transport and fields | Unit |
 |---|---|
-| WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); `LULD`/`NOI`; options `T`/`Q`; futures `T`/`Q`; indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` | ms (verified on each documentation page) |
+| WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); `LULD`/`NOI`; options `T`/`Q`; futures `T`/`Q`; indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` (`t`; `XT`/`XQ` received time `r`) | ms (verified on each documentation page) |
 | WebSocket `FMV` `t` | Documented as ns; the documentation sample is `1678220098130` (13 digits, ms). Rule, FMV only: `t >= 10**17` means ns, otherwise ms. Every ns value after 1973-03-03 is at least 10^17, and an ms value reaches 10^17 only in the year 3,170,000, so the rule cannot misclassify. Logged once; tested. |
 | REST `/v3/trades`, `/v3/quotes`, `/v2/last/trade`, `/v2/last/nbbo`; snapshot `last_updated`, `fmv_last_updated`; futures `/trades` and `/quotes` (`timestamp`, `bid_timestamp`, `ask_timestamp`); futures aggregates `window_start` (documented as "nanosecond Unix timestamp") | ns |
 | REST aggregates `t`; `/prev` `t`; indicators `timestamp`; futures snapshot `last_minute.last_updated` | ms |
@@ -952,7 +954,9 @@ registered SDK model and flat-file header has an entry.
 units fail loudly, never silently.
 
 **Canonical time columns:** `Timestamp`, `ParticipantTimestamp`, `TrfTimestamp`,
-`BidTimestamp`, `AskTimestamp`, `EndTimestamp` (bars), `LastUpdated` (snapshots).
+`BidTimestamp`, `AskTimestamp` (futures quotes), `ReceivedTimestamp` (crypto trades and
+quotes), `EndTimestamp` (bars), `LastUpdated` (snapshots). Calendar dates such as the futures
+`SessionEndDate` are `LocalDate`.
 
 **`history(start, end)` normalization.** Each bound converts independently to an `Instant`. The
 range is half-open: `[start, end)`. A `date` or `"YYYY-MM-DD"` `start` is that day's 00:00 in

@@ -237,6 +237,53 @@ def test_tick_schemas_lead_with_symbol_and_timestamp(tick: TickSchema) -> None:
     assert tick.schema.column_names[:2] == ("Symbol", "Timestamp")
 
 
+@pytest.mark.parametrize(
+    ("tick", "columns"),
+    [
+        (
+            TRADES,
+            {
+                "ReceivedTimestamp": ColumnType.INSTANT,
+                "SessionEndDate": ColumnType.LOCAL_DATE,
+                "Channel": ColumnType.INT,
+                "ReportSequence": ColumnType.LONG,
+            },
+        ),
+        (
+            QUOTES,
+            {
+                "Exchange": ColumnType.INT,
+                "ReceivedTimestamp": ColumnType.INSTANT,
+                "SessionEndDate": ColumnType.LOCAL_DATE,
+                "Channel": ColumnType.INT,
+                "ReportSequence": ColumnType.LONG,
+                "BidTimestamp": ColumnType.INSTANT,
+                "AskTimestamp": ColumnType.INSTANT,
+            },
+        ),
+        (
+            BARS,
+            {
+                "DollarVolume": ColumnType.DOUBLE,
+                "SessionEndDate": ColumnType.LOCAL_DATE,
+                "SettlementPrice": ColumnType.DOUBLE,
+            },
+        ),
+    ],
+)
+def test_tick_schemas_are_unions_across_asset_classes(
+    tick: TickSchema, columns: dict[str, ColumnType]
+) -> None:
+    # Crypto and futures fields are nullable columns of the shared schemas; the equity key
+    # maps leave them null.
+    types = {c.name: c.type for c in tick.schema.columns}
+    assert {name: types[name] for name in columns} == columns
+    for key_map in tick.key_maps.values():
+        assert not set(columns) & set(key_map.values())
+    row = tick.schema.to_arrow([{"Symbol": "AAPL"}]).to_pylist()[0]
+    assert all(row[name] is None for name in columns)
+
+
 class _WsModel(Protocol):
     from_dict: Callable[..., object]
 

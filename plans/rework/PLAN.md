@@ -926,11 +926,13 @@ for the implementer:
   `set_subscriptions(desired)` plus `resubscribe(*topics)`. Correct the DESIGN row in this
   package.
 
-**Open owner decision (due before P4 and P6): union-schema gaps.** Some wire fields have no
-column in the shared tick schemas: the crypto `XQ` and `XT` fields `x` and `r`, and the futures
-bar fields `dollar_volume`, `session_end_date`, and `settlement_price`, which `BARS` lacks. The
-owner decides whether they become columns of the shared schemas, of per-class schemas, or are
-dropped and documented.
+**Key maps for the other asset classes.** The owner decided (PR #46) that the shared tick
+schemas are the union across asset classes: P2 added the nullable columns `ReceivedTimestamp`
+(crypto `r`, ms), `SessionEndDate`, `Channel`, and `ReportSequence` to `TRADES` and `QUOTES`,
+a single `Exchange` and `BidTimestamp`/`AskTimestamp` to `QUOTES`, and `DollarVolume`,
+`SessionEndDate`, and `SettlementPrice` to `BARS`. This package maps the crypto `XT`/`XQ` keys
+(`x`, `r`) and the futures WebSocket keys (`dv` to `DollarVolume`) onto them, and declares the
+units of the new timestamp fields in the dataset specs.
 
 ---
 
@@ -1101,8 +1103,9 @@ lines (F H3) — one name per dataset, no aliases; Benzinga transcripts never ex
 datasets add `ColumnOverride`s, each with a test, for SDK hints that do not match the data:
 `OptionsContract.correction` is hinted `str` but carries an integer (P6b); the snapshot
 `LastQuoteAskSize` and `LastQuoteBidSize` columns are sizes, so `double` (P6a, P6g); and every
-`*Exchange` and `*Tape` column is an `int` id (DESIGN § 11), whatever its hint. The union-schema
-gaps recorded under P4 are an open owner decision that these packages also depend on.
+`*Exchange` and `*Tape` column is an `int` id (DESIGN § 11), whatever its hint. The futures and
+crypto packages (P6c, P6f) map their REST and flat-file fields onto the shared columns P2 added
+(see P4) and declare their timestamp units.
 
 ### P6a — `feat: stocks datasets` — branch `feat/stocks-datasets` — Issue: #17
 DESIGN [§ 8.1 `m.stocks`](DESIGN.md#81-mstocks). Owns `_domains/stocks.py`, including the

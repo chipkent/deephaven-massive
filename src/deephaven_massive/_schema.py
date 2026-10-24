@@ -1,8 +1,9 @@
 """The schema registry: column types, SDK-model flattening, and the four tick schemas.
 
-Every dataset has exactly one schema, the union of its fields across WebSocket, REST, and flat
-files, with PascalCase column names (DESIGN § 2.1). A column a transport does not supply is
-null. This module holds the machinery that builds and fills those schemas:
+Every dataset kind has exactly one schema, the union of its fields across asset classes and
+transports (WebSocket, REST, and flat files), with PascalCase column names (DESIGN § 2.1). A
+column a class or transport does not supply is null: crypto trades have no `Tape`, and stocks
+have no `SessionEndDate`. This module holds the machinery that builds and fills those schemas:
 
 - `ColumnType`, the closed set of column types (`Instant`, `LocalDate`, `double`, `long`,
   `int`, `String`, `boolean`, `int[]`), each with its Deephaven and Arrow type.
@@ -16,7 +17,8 @@ null. This module holds the machinery that builds and fills those schemas:
   WebSocket, REST, and flat-file forms of the tick datasets, each with explicit per-transport
   key maps (wire key, SDK field, or CSV header to column) for the equity form: the stocks and
   options WebSocket frames, the SDK REST models, and the documented flat-file headers. Other
-  asset classes declare their own key maps in their `DatasetSpec`.
+  asset classes declare their own key maps, and the units of their timestamp fields (crypto
+  `r` is milliseconds), in their `DatasetSpec` (P4 and P6).
 
 Timestamp *units* are not decided here: a field becomes an `Instant` column because its dataset
 declares a unit for it (`_timeunits.py`), and the transports convert values to nanoseconds
@@ -606,13 +608,14 @@ def _schema(name: str, columns: Mapping[str, ColumnType]) -> Schema:
     return Schema(name, tuple(Column(n, t) for n, t in columns.items()))
 
 
-_S, _D, _L, _I, _T, _A = (
+_S, _D, _L, _I, _T, _A, _LD = (
     ColumnType.STRING,
     ColumnType.DOUBLE,
     ColumnType.LONG,
     ColumnType.INT,
     ColumnType.INSTANT,
     ColumnType.INT_ARRAY,
+    ColumnType.LOCAL_DATE,
 )
 
 TRADES: Final = TickSchema(
@@ -633,6 +636,12 @@ TRADES: Final = TickSchema(
             "ParticipantTimestamp": _T,
             "TrfId": _I,
             "TrfTimestamp": _T,
+            # Other asset classes (null for stocks and options): crypto `r`, and the futures
+            # session date, feed channel, and report sequence.
+            "ReceivedTimestamp": _T,
+            "SessionEndDate": _LD,
+            "Channel": _I,
+            "ReportSequence": _L,
         },
     ),
     {
@@ -706,6 +715,16 @@ QUOTES: Final = TickSchema(
             "ParticipantTimestamp": _T,
             "TrfId": _I,
             "TrfTimestamp": _T,
+            # Other asset classes (null for stocks and options): the crypto quote's single
+            # exchange `x` and `r`, and the futures session date, feed channel, report
+            # sequence, and per-side timestamps.
+            "Exchange": _I,
+            "ReceivedTimestamp": _T,
+            "SessionEndDate": _LD,
+            "Channel": _I,
+            "ReportSequence": _L,
+            "BidTimestamp": _T,
+            "AskTimestamp": _T,
         },
     ),
     {
@@ -782,6 +801,11 @@ BARS: Final = TickSchema(
             "AggregateVwap": _D,
             "AverageSize": _D,
             "Otc": ColumnType.BOOLEAN,
+            # Futures (null for other classes): REST `dollar_volume` and WebSocket `dv`
+            # (`FuturesAgg.total_value`), the session date, and the settlement price.
+            "DollarVolume": _D,
+            "SessionEndDate": _LD,
+            "SettlementPrice": _D,
         },
     ),
     {
