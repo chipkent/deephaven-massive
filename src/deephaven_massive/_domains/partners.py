@@ -84,7 +84,10 @@ class _Partners(Namespace):
     Example:
         ::
 
-            m.partners.benzinga  # the Benzinga datasets
+            import deephaven_massive as dm
+
+            m = dm.MassiveSession()
+            m.partners.benzinga  # <MassiveSession #1 partners.benzinga>, the Benzinga datasets
     """
 
     __slots__ = ("_benzinga", "_etf_global", "_fable", "_tmx")

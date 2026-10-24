@@ -510,7 +510,9 @@ network code.
 
 **DESIGN sections implemented.** [§ 2 Principles and terms](DESIGN.md#2-principles-and-terms);
 [§ 3 Exports](DESIGN.md#3-exports); [§ 4 Package layout](DESIGN.md#4-package-layout) (every
-module exists after P2, as a stub where its transport or domain comes later);
+P2 module of § 4.1 exists after P2, the domain modules as stubs; the transport modules
+`_rest.py`, `_hosts.py`, `_poll.py`, `_ws.py`, `_stream.py`, `_watchlist.py`, and
+`_flatfiles.py` are created by P3, P4, and P5);
 [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig);
 [§ 6 `MassiveSession` and lifecycle](DESIGN.md#6-massivesession-and-lifecycle) including
 [§ 6.1 How a live table is kept alive and released](DESIGN.md#61-how-a-live-table-is-kept-alive-and-released);
@@ -748,6 +750,10 @@ hunks overlap).
       test reference in a comment.
 - [ ] Every host-decision branch in DESIGN § 13.2 has a fixture test naming it.
 - [ ] `poll(mode=REPLACE)` evicts keys absent from the latest cycle, including on an empty cycle.
+- [ ] A session that used this transport and was dropped without `close()` is collected when
+      unreferenced (`gc.collect()`), the `garbage-collected without close()` WARNING is logged,
+      and the transport's closer ran (model: `test_a_session_collected_unclosed_runs_its_closers`;
+      the closer and anything the transport keeps must hold the core weakly, DESIGN § 6).
 - [ ] `./scripts/check.sh` green; CI green on all five test jobs.
 
 **Verification.**
@@ -816,8 +822,10 @@ with.** P3, P5.
 - Create: `src/deephaven_massive/_ws.py` (connection registry keyed by URL, single-flight
   creation, client thread per connection running `WebSocketClient.connect`, reconcile loop, ack
   parser, watchdogs, verdict rule, the options contract cap, idle close after 30 s grace),
-  `_stream.py` (stream registry keyed by `(dataset, channel, symbol key)`, `table_publisher`
-  inside the stream scope, per-channel `SimpleQueue`s, flush thread, one Arrow→Java conversion
+  `_stream.py` (per-stream publisher, blink table, and stream scope created by
+  `StreamTransport.open_stream`; the session's registry from P2 already deduplicates streams
+  by key and owns each stream's record, so `_stream.py` keeps no second registry), per-channel
+  `SimpleQueue`s, flush thread, one Arrow→Java conversion
   per channel per flush, `where_in` fan-out with cached filter tables, cap deferral),
   `_watchlist.py` (`listen(..., do_replay=True)` on the symbol table; diffs dispatched off the
   UG thread; `last_by().where_in(symbol_table, "Symbol")`), `tests/test_ws.py`,
@@ -849,7 +857,8 @@ with.** P3, P5.
       `max_connections` → `State=WAITING_SLOT`, streams alive, whether it arrives as a raw frame
       after the handshake or is surfaced by the fork during the handshake (F2.6, in D1);
       reconnect states.
-- [ ] `_stream.py`: stream dedup by key; `table_publisher(name=f"massive.{dataset}#{n}",
+- [ ] `_stream.py`: `open_stream(spec, request, channel, *, stream_id)` creates
+      `table_publisher(name=f"massive.{dataset}#{stream_id}",
       col_defs=<schema>, on_shutdown_callback=…)` created in the stream's `LivenessScope` under
       the captured `ExecutionContext`; shutdown callback does only registry update under
       `registry_lock` and `loop.call_soon_threadsafe`; flush thread: drain → one Arrow batch →
@@ -876,6 +885,10 @@ with.** P3, P5.
 **Acceptance criteria.**
 - [ ] A refused parameter fails only its streams; other streams on the same connection keep
       ticking (test).
+- [ ] A session that used this transport and was dropped without `close()` is collected when
+      unreferenced (`gc.collect()`), the `garbage-collected without close()` WARNING is logged,
+      and the transport's closer ran (model: `test_a_session_collected_unclosed_runs_its_closers`;
+      the closer and anything the transport keeps must hold the core weakly, DESIGN § 6).
 - [ ] Releasing the last result of a stream unsubscribes its topics; a derived table keeps the
       stream alive (test under the embedded JVM).
 - [ ] Deferred option contracts subscribe automatically when capacity frees (test).
@@ -965,8 +978,10 @@ fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
   **documented** headers per prefix, e.g. `us_stocks_sip/trades_v1`:
   `conditions,correction,exchange,id,participant_timestamp,price,sequence_number,sip_timestamp,size,tape,ticker,trf_id,trf_timestamp`).
 - Modify: `tests/conftest.py` (one thin `fake_s3` fixture that builds the `tests/_fakes/s3.py`
-  opener), `_session.py` (S3 factory hook), `_query.py` (`history()` arbitration calls
-  `_flatfiles.choose_source` then dispatches), `_domains/base.py` (flat-file prefix helper).
+  opener), `_session.py` (S3 factory hook), `_domains/base.py` (flat-file prefix helper).
+  `_query.py` needs no change: `history()` already hands `source=AUTO` (and `FLAT_FILES`) to
+  `FlatFileTransport.history(..., source=...)`, which runs `choose_source` and calls
+  `core.rest_transport().history(...)` itself when REST is the better source.
 - Delete: none.
 
 **Tasks.**
@@ -1000,6 +1015,10 @@ fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
       multi-chunk fixture).
 - [ ] Every branch of DESIGN § 16 is covered by a named test; `./scripts/check.sh` green; CI
       green.
+- [ ] A session that used this transport and was dropped without `close()` is collected when
+      unreferenced (`gc.collect()`), the `garbage-collected without close()` WARNING is logged,
+      and the transport's closer ran (model: `test_a_session_collected_unclosed_runs_its_closers`;
+      the closer and anything the transport keeps must hold the core weakly, DESIGN § 6).
 
 **Verification.**
 ```bash
@@ -1069,6 +1088,11 @@ needs a change, land it first in a separate `refactor:` PR.
       `indices.values`, …).
 - [ ] For streamed datasets: a fake-server test that one data frame lands in `blink()` with the
       dataset schema; for flat-file datasets: a one-batch CSV fixture round trip.
+- [ ] Docstring examples: once the namespace's datasets exist, give the query classes in
+      `_query.py`, `MassiveSession` in `_session.py`, the enums in `_enums.py`, and
+      `EntitlementError` in `_errors.py` real examples that use them again (P2 removed or
+      reduced every example that used a dataset, because AGENTS.md requires examples that run
+      against the documented API).
 
 **Shared acceptance criteria.**
 - [ ] Every row of the namespace's table in DESIGN § 8 has a `DatasetSpec` and a test module

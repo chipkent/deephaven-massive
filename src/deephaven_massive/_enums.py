@@ -82,7 +82,10 @@ class Timespan(StrEnum):
     Example:
         ::
 
-            bars = m.stocks.bars(["AAPL"], dm.Timespan.MINUTE).append_only()
+            import deephaven_massive as dm
+
+            span = dm.Timespan("minute")  # text converts to a member
+            assert span is dm.Timespan.MINUTE
     """
 
     SECOND = "second"
@@ -107,7 +110,9 @@ class PollMode(StrEnum):
     Example:
         ::
 
-            news = m.reference.news(symbols=["AAPL"]).poll(60, mode=dm.PollMode.APPEND)
+            import deephaven_massive as dm
+
+            assert dm.PollMode("append") is dm.PollMode.APPEND
     """
 
     REPLACE = "replace"
@@ -126,9 +131,9 @@ class HistorySource(StrEnum):
     Example:
         ::
 
-            q = m.stocks.quotes(["AAPL"]).history(
-                "2025-03-03", "2025-03-03", source=dm.HistorySource.REST
-            )
+            import deephaven_massive as dm
+
+            assert dm.HistorySource("flat_files") is dm.HistorySource.FLAT_FILES
     """
 
     AUTO = "auto"
@@ -145,7 +150,9 @@ class FuturesVenue(StrEnum):
     Example:
         ::
 
-            es = m.futures.bars(dm.ALL, dm.Timespan.SESSION, venue=dm.FuturesVenue.CME)
+            import deephaven_massive as dm
+
+            assert dm.FuturesVenue("cme") is dm.FuturesVenue.CME
     """
 
     CME = "cme"
@@ -160,7 +167,9 @@ class Direction(StrEnum):
     Example:
         ::
 
-            gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
+            import deephaven_massive as dm
+
+            assert dm.Direction("gainers") is dm.Direction.GAINERS
     """
 
     GAINERS = "gainers"
@@ -173,7 +182,9 @@ class ContractType(StrEnum):
     Example:
         ::
 
-            calls = m.options.chain("NVDA", contract_type=dm.ContractType.CALL).fetch()
+            import deephaven_massive as dm
+
+            assert dm.ContractType("call") is dm.ContractType.CALL
     """
 
     CALL = "call"
@@ -187,7 +198,9 @@ class SeriesType(StrEnum):
     Example:
         ::
 
-            sma = m.indicators.sma(["AAPL"], 20, series_type=dm.SeriesType.CLOSE).fetch()
+            import deephaven_massive as dm
+
+            assert dm.SeriesType("close") is dm.SeriesType.CLOSE
     """
 
     OPEN = "open"
@@ -202,7 +215,9 @@ class Timeframe(StrEnum):
     Example:
         ::
 
-            ratios = m.stocks.financials.ratios(["AAPL"], timeframe=dm.Timeframe.ANNUAL).fetch()
+            import deephaven_massive as dm
+
+            assert dm.Timeframe("annual") is dm.Timeframe.ANNUAL
     """
 
     ANNUAL = "annual"
@@ -215,7 +230,9 @@ class Order(StrEnum):
     Example:
         ::
 
-            t = m.reference.news(symbols=["AAPL"], order=dm.Order.DESC, limit=10).fetch()
+            import deephaven_massive as dm
+
+            assert dm.Order("desc") is dm.Order.DESC
     """
 
     ASC = "asc"
@@ -228,7 +245,9 @@ class Market(StrEnum):
     Example:
         ::
 
-            otc = m.reference.tickers(market=dm.Market.OTC).fetch()
+            import deephaven_massive as dm
+
+            assert dm.Market("otc") is dm.Market.OTC
     """
 
     STOCKS = "stocks"
@@ -244,7 +263,9 @@ class Locale(StrEnum):
     Example:
         ::
 
-            us = m.reference.exchanges(locale=dm.Locale.US).fetch()
+            import deephaven_massive as dm
+
+            assert dm.Locale("us") is dm.Locale.US
     """
 
     US = "us"
@@ -257,7 +278,9 @@ class ConditionDataType(StrEnum):
     Example:
         ::
 
-            c = m.reference.conditions(data_type=dm.ConditionDataType.TRADE).fetch()
+            import deephaven_massive as dm
+
+            assert dm.ConditionDataType("trade") is dm.ConditionDataType.TRADE
     """
 
     TRADE = "trade"
@@ -273,7 +296,9 @@ class Sip(StrEnum):
     Example:
         ::
 
-            c = m.reference.conditions(sip=dm.Sip.OPRA).fetch()
+            import deephaven_massive as dm
+
+            assert dm.Sip("OPRA") is dm.Sip.OPRA
     """
 
     CTA = "CTA"

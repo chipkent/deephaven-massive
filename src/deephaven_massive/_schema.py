@@ -241,6 +241,8 @@ class Schema:
     Example:
         ::
 
+            from deephaven_massive._schema import Column, ColumnType, Schema
+
             schema = Schema(
                 "example",
                 (Column("Symbol", ColumnType.STRING), Column("Price", ColumnType.DOUBLE)),

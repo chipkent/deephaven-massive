@@ -122,19 +122,25 @@ class DatasetSpec:
     Example:
         ::
 
-            from massive.rest.models import Trade
+            from deephaven_massive import _schema
+            from deephaven_massive._catalog import DatasetSpec
+            from deephaven_massive._enums import AssetClass, Transport
+            from deephaven_massive._query import StreamHistoryLatestQuery
+            from deephaven_massive._timeunits import TimeUnit
 
+            ms, ns = TimeUnit.MILLISECONDS, TimeUnit.NANOSECONDS
             TRADES = DatasetSpec(
                 name="stocks.trades",
                 query_class=StreamHistoryLatestQuery,
                 asset_class=AssetClass.STOCKS,
                 schema=_schema.TRADES.schema,
-                key_maps=_schema.TRADES.key_maps,
+                key_maps={Transport.WS: _schema.TRADES.key_maps[Transport.WS]},
                 fetch_method="get_last_trade",
                 history_method="list_trades",
                 channels={None: "T"},
                 flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
-                time_units={(Transport.WS, "t"): TimeUnit.MILLISECONDS},
+                # Every key-map field that fills an Instant column needs a unit.
+                time_units={(Transport.WS, "t"): ms, (Transport.WS, "trft"): ms},
             )
 
     Attributes:

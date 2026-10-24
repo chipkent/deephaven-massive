@@ -190,7 +190,7 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 | `_dates.py` | `DateLike` parsing, class day zones, session-date rules, `[start, end)` normalization. |
 | `_liveness.py` | Result scopes, stream scopes, result records, the reaper queue and thread. |
 | `_rest.py` | `RESTClient` construction from config, pagination into bounded Arrow batches, 403/429 mapping, the two documented private-call shims. |
-| `_hosts.py` | Host resolution from REST evidence and the host-decision record ([section 13.2](#132-host-decision)). |
+| `_hosts.py` | Host resolution from REST evidence ([section 13.2](#132-host-decision)). The `HostDecision` record itself lives in `_query.py`, next to the transport protocols that return it (`RestTransport.resolve_host`). |
 | `_ws.py` | One connection per URL over the forked `WebSocketClient(raw=True)`: client thread, frame decoding, status routing, the reconcile loop, acknowledgement watchdogs, the explicit-verdict rule, the options contract cap. |
 | `_stream.py` | Streams, per-stream publishers, the per-connection flush thread, shared-batch fan-out ([section 14](#14-publishers-fan-out-and-failure-semantics)). |
 | `_watchlist.py` | Reactive symbol tables: the listener, the diff, and dispatch off the UG thread. |
@@ -264,13 +264,13 @@ defined in exactly one place: the field defaults of this class.
 |---|---|---|
 | `api_key: str` | `MASSIVE_API_KEY`, then `POLYGON_API_KEY` | Required. Absent raises `AuthenticationError` at construction. |
 | `s3_access_key_id: str \| None` | `MASSIVE_S3_ACCESS_KEY_ID` | Enables flat-file history. |
-| `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | |
+| `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | The two S3 credentials are both set or both absent; exactly one raises `ValueError`. |
 | `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. Hostname only; validated. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
 | `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic. |
 | `reconnect_backoff: float` | `30.0` seconds | The first wait before reconnecting after a connection that opened has closed, including a `max_connections` refusal (it arrives after a successful handshake); later waits double up to `max_reconnect_backoff`. Before a connection opens, a TCP failure, a timeout, or a retryable handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the connection's streams (§ 13.3, `raise_fatal_errors=True`). Must be positive (a base of 0 would never grow and retry in a hot loop); any positive value is accepted, so tests can use milliseconds. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
 | `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` (§19, F2.3). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
-| `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | A partition for day D counts as published from the first occurrence of this New York time after day D ends ([section 16](#16-historysourceauto)). The documentation says files land "by approximately 11:00 AM ET the following day". |
+| `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | A partition for day D counts as published from the first occurrence of this New York time after day D ends ([section 16](#16-historysourceauto)). The documentation says files land "by approximately 11:00 AM ET the following day". A naive `time` (a New York wall-clock time); one with `tzinfo` raises `ValueError`. |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
 | `flush_interval: float` | `0.05` seconds | WebSocket micro-batch flush into `TablePublisher.add`. |
 | `rest_base_url: str` | `https://api.massive.com` | Rarely changed. |
@@ -807,7 +807,9 @@ All return `Query`.
 `m.snapshots(symbols, *, …F) -> Query` calls the unified `/v3/snapshot`
 (`list_universal_snapshots`) with `ticker.any_of`, 250 tickers per request, any mix of asset
 classes. Rows are the union schema of the unified snapshot. `ALL` is not accepted here (the
-endpoint requires tickers).
+endpoint requires tickers). Its catalog record is named `reference.snapshots` and is declared
+in `_domains/reference.py` with `asset_class=None` (each ticker's prefix selects its class,
+§ 10), so `_catalog.datasets()` finds it; `m.streams()` and messages show that name.
 
 ### 8.12 Excluded endpoints
 
@@ -1403,7 +1405,8 @@ without the GIL.
 ### 18.2 Shared state and ownership
 
 - `SessionCore.registry_lock` (a `threading.RLock`) guards every mutable registry: streams
-  by key, results by id, connections by URL, topic reference counts, host decisions. It is a
+  by key, results by id, connections by URL, topic reference counts. (Host decisions are
+  cached by the REST transport under its own leaf lock, § 13.2.) It is a
   **leaf lock**: no Deephaven call, no network call, no blocking wait, and no wait on a
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
   atomically under the lock; readers copy references out and release the lock before working.

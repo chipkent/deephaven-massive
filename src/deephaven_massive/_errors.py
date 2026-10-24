@@ -84,9 +84,10 @@ class EntitlementError(MassiveError):
 
             import deephaven_massive as dm
 
-            m = dm.MassiveSession()
+            # A plan gap is a MassiveError, so one handler can catch every library failure.
+            assert issubclass(dm.EntitlementError, dm.MassiveError)
             try:
-                t = m.stocks.quotes(["AAPL"]).fetch()
+                raise dm.EntitlementError("NBBO quotes are not on this plan")
             except dm.EntitlementError as e:
                 print(f"not on this plan: {e}")
     """

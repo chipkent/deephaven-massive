@@ -119,6 +119,9 @@ class TimeUnitTable:
     Example:
         ::
 
+            from deephaven_massive._enums import Transport
+            from deephaven_massive._timeunits import TimeField, TimeUnit, TimeUnitTable, UnitRule
+
             trades_t = TimeField("stocks.trades", Transport.WS, "t")
             table = TimeUnitTable({trades_t: UnitRule(TimeUnit.MILLISECONDS)})
             table.to_epoch_ns(trades_t, 1_700_000_000_000)  # 1_700_000_000_000_000_000

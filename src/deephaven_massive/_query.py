@@ -380,11 +380,8 @@ class QueryBase:
 class Query(QueryBase):
     """A REST list or snapshot dataset: a static `fetch()` or a live `poll()`.
 
-    Example:
-        ::
-
-            snap = m.stocks.snapshots(["AAPL", "MSFT"]).poll(30)
-            divs = m.stocks.dividends(["AAPL"], start="2025-01-01").fetch()
+    The namespaces' dataset methods return these queries once the datasets are declared
+    (PLAN P6); until then no query can be built, so there is no example here yet.
     """
 
     __slots__ = ()
@@ -441,12 +438,8 @@ class StreamQuery(QueryBase):
     returns a new, distinct table held in its own liveness scope. The stream stays subscribed
     while any result, or any table derived from one, is alive.
 
-    Example:
-        ::
-
-            q = m.stocks.quotes(["AAPL", "MSFT"])
-            current = q.last_by()  # one row per symbol
-            history = q.append_only()  # shares the same stream
+    The namespaces' dataset methods return these queries once the datasets are declared
+    (PLAN P6); until then no query can be built, so there is no example here yet.
     """
 
     __slots__ = ()
@@ -605,10 +598,8 @@ class StreamQuery(QueryBase):
 class HistoryQuery(QueryBase):
     """A dataset with a historical retrieval path: `history(start, end)`.
 
-    Example:
-        ::
-
-            daily = m.stocks.bars(["AAPL"], dm.Timespan.DAY).history("2025-01-01", "2025-06-30")
+    The namespaces' dataset methods return these queries once the datasets are declared
+    (PLAN P6); until then no query can be built, so there is no example here yet.
     """
 
     __slots__ = ()
@@ -678,12 +669,8 @@ class HistoryQuery(QueryBase):
 class StreamHistoryQuery(StreamQuery, HistoryQuery):
     """A WebSocket dataset that also has history: the stream verbs plus `history()`.
 
-    Example:
-        ::
-
-            q = m.options.quotes(["O:SPY251219C00600000"])
-            live = q.append_only()
-            past = q.history("2025-06-02", "2025-06-06")
+    The namespaces' dataset methods return these queries once the datasets are declared
+    (PLAN P6); until then no query can be built, so there is no example here yet.
     """
 
     __slots__ = ()
@@ -692,11 +679,8 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
 class StreamHistoryLatestQuery(StreamHistoryQuery):
     """A stream-and-history dataset with a REST "last" endpoint, served by `fetch()`.
 
-    Example:
-        ::
-
-            q = m.stocks.trades(["AAPL", "MSFT"])
-            last = q.fetch()  # one row per symbol, in the stream schema
+    The namespaces' dataset methods return these queries once the datasets are declared
+    (PLAN P6); until then no query can be built, so there is no example here yet.
     """
 
     __slots__ = ()
@@ -723,10 +707,8 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
 class HistoryLatestQuery(HistoryQuery):
     """Daily bars: `history()` plus `fetch()` of the previous completed session's bar.
 
-    Example:
-        ::
-
-            prev = m.stocks.bars(["AAPL"], dm.Timespan.DAY).fetch()
+    The namespaces' dataset methods return these queries once the datasets are declared
+    (PLAN P6); until then no query can be built, so there is no example here yet.
     """
 
     __slots__ = ()

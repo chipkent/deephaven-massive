@@ -840,13 +840,14 @@ class MassiveSession:
             import deephaven_massive as dm
 
             m = dm.MassiveSession()  # MASSIVE_API_KEY from the environment
-            trades = m.stocks.trades(["AAPL", "MSFT"]).ring(10_000)
-            conns = m.connections()
-            m.release(trades)
             m  # <MassiveSession #1 open>
+            m.stocks  # <MassiveSession #1 stocks>, the namespace of stock datasets
+            conns = m.connections()  # live diagnostics: connections and host decisions
+            streams = m.streams()  # live diagnostics: one row per stream
+            m.close()  # live tables go static; verbs now raise MassiveError
 
-            with dm.MassiveSession() as m2:
-                bars = m2.stocks.bars(["AAPL"], dm.Timespan.DAY).history("2025-01-01", "2025-06-30")
+            with dm.MassiveSession() as m2:  # closes on exit
+                m2.partners.benzinga  # <MassiveSession #2 partners.benzinga>
     """
 
     __slots__ = (
