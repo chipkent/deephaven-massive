@@ -110,6 +110,23 @@ def test_to_arrow_reports_schema_mismatches() -> None:
         ALL_TYPES.to_arrow([{"LocalDate": "03/03/2025"}])
 
 
+def test_to_arrow_never_truncates_floats_in_integer_columns() -> None:
+    for column in ("Long", "Int"):
+        with pytest.raises(MassiveError, match=rf"schema mismatch in all\.{column}.*7140\.08"):
+            ALL_TYPES.to_arrow([{column: 7140.08}])
+        with pytest.raises(MassiveError, match=rf"schema mismatch in all\.{column}"):
+            ALL_TYPES.to_arrow([{column: float("nan")}])
+    values = ALL_TYPES.to_arrow([{"Long": 7140.0, "Int": 3.0}]).to_pylist()[0]
+    assert (values["Long"], values["Int"]) == (7140, 3)
+
+
+def test_to_arrow_reads_a_naive_datetime_as_utc() -> None:
+    aware = datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
+    naive = aware.replace(tzinfo=None)  # the same wall-clock time, without a timezone
+    values = ALL_TYPES.to_arrow([{"Instant": naive}, {"Instant": aware}]).column("Instant")
+    assert values[0] == values[1]
+
+
 def test_flatten_nested_models() -> None:
     snapshot = TickerSnapshot(
         ticker="AAPL",

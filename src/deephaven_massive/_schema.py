@@ -142,17 +142,23 @@ class Column:
     type: ColumnType
 
 
+_INTEGER_TYPES: Final = frozenset({ColumnType.LONG, ColumnType.INT})
+
+
 def _coerce(value: object, column_type: ColumnType) -> object:
     """Prepare one Python value for `pa.array` of the column's Arrow type.
 
-    Four conversions Arrow does not do by itself: an ISO `YYYY-MM-DD` string becomes a `date`
-    for a `LocalDate` column; an ISO-8601 date-time string (`2024-06-24T18:33:53Z`) becomes an
-    aware `datetime` for an `Instant` column, read as UTC when it carries no offset (Massive's
+    Five conversions Arrow does not do by itself: an ISO `YYYY-MM-DD` string becomes a `date`
+    for a `LocalDate` column; an ISO-8601 date-time string (`2024-06-24T18:33:53Z`) becomes
+    epoch nanoseconds for an `Instant` column, read as UTC when it carries no offset (Massive's
     ISO timestamps are UTC), keeping every fraction digit down to the nanosecond; a dict or list
     becomes its JSON text for a `String` column, nested SDK models included (used by
-    `ColumnOverride(type=ColumnType.STRING)` on composite SDK fields); and a single integer
-    becomes a one-element list for an `int[]` column (the WebSocket quote `c` is one condition
-    where REST sends a list). Everything else passes through for Arrow to check.
+    `ColumnOverride(type=ColumnType.STRING)` on composite SDK fields); a single integer becomes
+    a one-element list for an `int[]` column (the WebSocket quote `c` is one condition where
+    REST sends a list); and an integral `float` becomes an `int` for a `long` or `int` column,
+    while any other `float` there is rejected, because Arrow would silently truncate `7140.08`
+    to `7140`. Everything else passes through for Arrow to check; in particular a naive
+    `datetime` object in an `Instant` column is read as UTC, as Arrow reads it.
 
     Args:
         value: A non-null value from a row.
@@ -160,6 +166,10 @@ def _coerce(value: object, column_type: ColumnType) -> object:
 
     Returns:
         The value in a form `pa.array` accepts for that type.
+
+    Raises:
+        ValueError: If a `float` with a fractional part, or a NaN or infinity, fills a `long`
+            or `int` column (`Schema.to_arrow` reports it as a schema mismatch).
     """
     if column_type is ColumnType.LOCAL_DATE and isinstance(value, str):
         return date.fromisoformat(value)
@@ -169,6 +179,10 @@ def _coerce(value: object, column_type: ColumnType) -> object:
         return json.dumps(value, sort_keys=True, default=_jsonable)
     if column_type is ColumnType.INT_ARRAY and isinstance(value, int):
         return [value]
+    if column_type in _INTEGER_TYPES and isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(f"{value!r} is not an integer")
+        return int(value)
     return value
 
 
@@ -275,8 +289,10 @@ class Schema:
 
         A column missing from a row, or `None`, is null. Keys that are not columns are ignored,
         so a caller may pass rows that carry extra fields. Instant values must already be epoch
-        nanoseconds (or aware `datetime`s); the transports convert units with `_timeunits.py`
-        first. This runs on the calling thread and makes no Deephaven call.
+        nanoseconds or `datetime`s (a naive one is read as UTC); the transports convert units
+        with `_timeunits.py` first. A `float` with a fractional part in a `long` or `int`
+        column is a schema mismatch, never truncated. This runs on the calling thread and makes
+        no Deephaven call.
 
         Args:
             rows: The rows, each a mapping from column name to value.
