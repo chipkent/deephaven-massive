@@ -307,9 +307,8 @@ with MassiveSession() as m: ...   # __exit__ calls close(); for scripts whose re
 repr(m)  # "<MassiveSession #1 open>" or "<MassiveSession #1 closed>"; the label names the session in logs and errors
 ```
 
-`MassiveSession` exposes nothing beyond the names above (proposed, not yet settled by the
-owner; until then the code follows it and § 22 does not list it). In particular it has no
-`name` or `config` attribute: the session's label (`MassiveSession #1`, a per-process counter) appears in
+`MassiveSession` exposes nothing beyond the names above (§ 22, decision 21). In particular it
+has no `name` or `config` attribute: the session's label (`MassiveSession #1`, a per-process counter) appears in
 its repr, in the same-key WARNING, and in error messages, and nowhere else; the configuration is
 the `MassiveConfig` the caller passed (or `MassiveConfig()`), which the caller already holds. Not
 exposing the configuration keeps the API key one step further from console globals, which every
@@ -482,7 +481,7 @@ are immutable, hashable, and reusable. A query's repr names its class, its datas
 arguments that differ from their defaults, for example
 `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
 reactive table as `<reactive table>`. Queries have no other attributes: the verbs are their whole
-API (proposed with the session's rule in § 6, pending the owner's decision).
+API (§ 22, decision 21).
 
 ```python
 class Query:                               # REST list and snapshot datasets
@@ -1737,6 +1736,12 @@ document already reflects them.
     fork, each topic branch goes upstream as one pull request; the fork's `deephaven-fixes`
     branch is assembled by direct merges of those branches, with CI on every push, is never
     reset or force-pushed, and is tracked here by branch, with `uv.lock` recording the exact commit.
+21. **Sessions and queries expose no introspection attributes; their reprs are defined.**
+    `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
+    appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error
+    messages, and a query's dataset and arguments only in its repr. The public surface stays
+    exactly the verbs and namespaces, and the API key stays out of objects users routinely
+    leave in console globals.
 
 ## 23. Open verification items
 
