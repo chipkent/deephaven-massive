@@ -538,7 +538,7 @@ query classes and the type aliases are importable from `deephaven_massive._query
     `ValueError`; `ws_hosts` hostname-only).
   - `_session.py`: `MassiveSession`, namespaces, the `snapshots()` shell (P6g fills it),
     `connections()`, `streams()`, `release()`, `close()`, context manager, `registry_lock`,
-    reaper thread, the host-decision cache, the captured `ExecutionContext` with fail-fast,
+    reaper thread, the captured `ExecutionContext` with fail-fast,
     second-session WARNING, per-transport factory hooks (stubs).
   - `_query.py`: the six query classes and their verbs.
   - `_errors.py`: `MassiveError`, `AuthenticationError`, `EntitlementError`.
@@ -554,7 +554,7 @@ query classes and the type aliases are importable from `deephaven_massive._query
   - `_symbols.py`: normalization across WS/REST/S3 forms for every class; `Underlying` parsing.
   - `_dates.py`: `DateLike` parsing (tz required), class day zones, half-open `[start, end)`,
     futures session rules, `flat_file_publish_cutoff` logic (pure function).
-  - `_liveness.py`: result and stream scopes, `_ResultRecord`, weakref → reaper queue, once-only
+  - `_liveness.py`: result and stream scopes, `ResultRecord`, weakref → reaper queue, once-only
     `released` flag.
   - `_diagnostics.py`: `connections`/`streams` `input_table` definitions and update helpers
     (library threads only).
@@ -681,7 +681,7 @@ hunks overlap).
 **Files.**
 - Create: `src/deephaven_massive/_rest.py` (SDK client construction, `iter_rows`, `get_json`,
   Arrow batching, error mapping, rate-limit WARNING once), `_hosts.py` (host resolution and the
-  `HostDecision` record; the cache lives on the session under `registry_lock`), `_poll.py`
+  `HostDecision` cache, per session, kept by the REST transport under its own lock), `_poll.py`
   (REPLACE/UPSERT/APPEND pollers, reactive symbol snapshot per cycle, fan-out executor),
   `scripts/refresh_massive_catalog.py`, `tests/test_rest.py`, `tests/test_hosts.py`,
   `tests/test_poll.py`, `tests/_fakes/rest.py` (the fake REST transport),
@@ -723,8 +723,8 @@ hunks overlap).
       per class via public SDK methods with raw results; ordered timeframe fields excluding
       `underlying_asset`; DELAYED wins; the no-timeframe branches incl. the base-Business
       WARNING ([DESIGN § 13.2](DESIGN.md#132-host-decision)) and futures `UNKNOWN`; HTTP 403 → `EntitlementError`; transport error
-      → nothing cached. Synchronous on the calling thread, cached under `registry_lock`
-      (released before the call).
+      → nothing cached. Synchronous on the calling thread; the REST transport caches each
+      decision per session under its own leaf lock, released before the REST call.
 - [ ] `_poll.py`: one thread per `poll()` table; `REPLACE` and `UPSERT` on a keyed
       `input_table` with static Arrow key tables for deletes (incl. empty cycles); `APPEND` on a
       `table_publisher`; reactive symbols read with `Table.snapshot()` on the poller thread, never
@@ -776,7 +776,7 @@ test fixtures (P6); `HistorySource.AUTO` arbitration (P5, which owns `_flatfiles
 from massive.com (read-only; no approval needed, note it in the PR).
 
 **Follow-ups from the P2 review (PR #46).** `poll()` must handle a verb that races `close()`,
-as `SessionCore._acquire` does for streams: a `poll()` that passed the verb guard just before
+as `SessionCore._claim` does for streams: a `poll()` that passed the verb guard just before
 `close()` ran must not start a poller the session will never stop. Register the poller's
 cleanup through `SessionCore.on_close`, which runs it at once on a closed session, or recheck
 the closed flag under `registry_lock` before starting it.
@@ -922,9 +922,10 @@ for the implementer:
 - Forex and crypto frames carry `sym` in the wire spelling (`EUR/USD`, `BTC-USD`). Canonicalise
   it before the `where_in` fan-out, so it matches `canonical_view`'s `C:EURUSD` and `X:BTCUSD`.
 - The forex `C` channel sends `x` (the exchange id) as a quoted string; coerce it to `int`.
-- DESIGN § 13.3 names `set_subscriptions(D, resend=...)`; the fork's API is
-  `set_subscriptions(desired)` plus `resubscribe(*topics)`. Correct the DESIGN row in this
-  package.
+- `blink()` on a stream that failed during its open returns the failed table, but
+  `append_only()`, `ring()` and `last_by()` raise Deephaven's `DHError` ("Can not listen to
+  failed table") while shaping it (DESIGN § 6.1). Wrap that error in a `MassiveError` that
+  names the stream's failure.
 
 **Key maps for the other asset classes.** The owner decided (PR #46) that the shared tick
 schemas are the union across asset classes: P2 added the nullable columns `ReceivedTimestamp`

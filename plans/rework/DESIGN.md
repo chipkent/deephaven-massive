@@ -178,7 +178,7 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 |---|---|
 | `__init__.py` | The public names of [section 3](#3-exports), `__all__`, `__version__`. |
 | `_config.py` | `MassiveConfig` ([section 5](#5-massiveconfig)). |
-| `_session.py` | `MassiveSession`: namespaces, `snapshots`, `release`, `close`, the registry lock, the reaper thread, the host-decision cache ([section 6](#6-massivesession-and-lifecycle)). |
+| `_session.py` | `MassiveSession`: namespaces, `snapshots`, `release`, `close`, the registry lock, the reaper thread, the stream-id allocator ([section 6](#6-massivesession-and-lifecycle)). The host-decision cache belongs to the REST transport ([section 13.2](#132-host-decision)). |
 | `_query.py` | The six query classes and their verbs ([section 7](#7-query-classes-and-verbs)). |
 | `_enums.py` | The fourteen public enums and the internal `Recency`, `ChannelFamily`, and `Transport` enums; the `_require_enum` runtime check. |
 | `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases, and `override` (`typing_extensions.override` for the type checker, a no-op at run time, since `typing.override` needs Python 3.12). |
@@ -429,8 +429,11 @@ return result
   anything, even `KeyboardInterrupt`, the record is deleted, its key is unmapped, and the
   waiters wake and open the stream themselves. `m.close()` wakes the waiters, which raise
   `MassiveError`; the opener releases the stream when its open returns. A failure reported
-  during the open leaves the stream `FAILED`, and the open returns the failed table, exactly as
-  if the failure had arrived just after it.
+  during the open leaves the stream `FAILED`, and the open returns the stream as is, exactly as
+  if the failure had arrived just after it: `blink()` returns the failed table, while
+  `append_only()`, `ring()` and `last_by()` raise Deephaven's `DHError` ("Can not listen to
+  failed table") as they derive from it, with the hold released. P4 wraps that error in a
+  `MassiveError` naming the stream's failure.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
   either may come last. A stream's registry record is deleted only once both have happened:
@@ -918,7 +921,8 @@ console, and typo safety at both type-check time and run time.
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
 
-Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}` and `ChannelFamily {TICK, FMV}`.
+Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}`, `ChannelFamily {TICK, FMV}`,
+and `Transport {WS, REST, FLAT_FILES}`.
 
 **Dates.** Parameters accept an ISO-8601 `str`, a `date`, or a timezone-aware `datetime`. A
 naive `datetime`, or an ISO string with a time but no offset, raises
@@ -1000,7 +1004,9 @@ Resolution runs synchronously on the calling thread at the first stream verb for
 (class, family) and is cached in the session. The seam is
 `RestTransport.resolve_host(asset_class, family) -> HostDecision` (a protocol method defined in
 P2 and implemented in P3), where `HostDecision(host, recency, evidence)` is a frozen record.
-The WebSocket transport calls it; each new decision writes the pair's `Transport=REST` row of
+The WebSocket transport calls it. The REST transport is the one place the decision is
+cached: per session, for the session's life, under its own leaf lock (never `registry_lock`),
+released before the REST call. Each new decision writes the pair's `Transport=REST` row of
 `m.connections()`.
 
 ```
@@ -1216,8 +1222,12 @@ logged once.
   `SessionCore.update_streams({stream_id: StreamUpdate(rows_published=..., ...)})`, where
   `StreamUpdate` is a frozen keyword-only record whose fields left as None keep their values.
   One short critical section under `registry_lock`, about 20 times a second per connection at
-  the default `flush_interval`; it updates the rows of every stream still in the registry,
-  ignores ids that have left it, and never changes `State` (only `fail_stream` does).
+  the default `flush_interval`; it updates the rows of every stream still in the registry
+  (writing a row only once the stream has opened), ignores ids that have left it, and never
+  changes `State` (only `fail_stream` does). An `error` there is a warning, and
+  `StreamUpdate(clear_error=True)` sets `Error` back to null, for example once the options
+  contract cap no longer defers anything. `poll()` rows take their `StreamId` from the same
+  allocator, `SessionCore.next_stream_id()`, so the two kinds never collide.
 - A failure fails exactly the streams whose topics the server rejected. Nothing tears down a
   whole URL on an entitlement error. A failed stream's key is unregistered at once
   (`SessionCore.fail_stream`), so the next verb with the same key opens a fresh stream rather
@@ -1380,8 +1390,9 @@ without the GIL.
   diagnostics tables.
 - Row buffers are one `queue.SimpleQueue` per (connection, channel). The WS thread is the only
   producer; the flush thread is the only consumer.
-- The reaper queue is a `queue.SimpleQueue`. Weakref callbacks, `m.release`, and `m.close` are
-  producers.
+- The reaper queue is a `queue.SimpleQueue`. The producers are the result finalizers,
+  `m.release`, and the collection finalizer of an unclosed session (`_collect_session`);
+  `m.close` runs its closers on the calling thread and queues nothing.
 - No code relies on the atomicity of `dict`, `set`, or `list` operations. Every shared container
   is behind the lock or has a single owner.
 - `ExecutionContext` is captured at session construction. Every library thread enters it before
