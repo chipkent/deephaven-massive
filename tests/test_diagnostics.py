@@ -2,6 +2,7 @@
 
 import dataclasses
 import logging
+import threading
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -10,6 +11,7 @@ from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.execution_context import ExecutionContext
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive._diagnostics import (
@@ -156,7 +158,7 @@ def test_failed_writes_are_logged_and_the_writer_continues(
 ) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._diagnostics"):
-        diagnostics.write(_stream(dataset=cast("str", 5)))
+        diagnostics.write(_stream(stream_id=8, dataset=cast("str", 5)))
         diagnostics.write(STREAM)
         assert diagnostics.barrier().wait(TIMEOUT)
     assert "failed to write a streams row" in caplog.text
@@ -175,7 +177,7 @@ def test_release_applies_queued_rows_then_releases(
     diagnostics.release()
     diagnostics.release()  # idempotent
     assert diagnostics.barrier().is_set()  # nothing left to wait for
-    assert not diagnostics._thread.is_alive()
+    assert not diagnostics.thread.is_alive()
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
     diagnostics.write(_stream(stream_id=9))  # dropped: the writer has stopped
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
@@ -185,5 +187,39 @@ def test_release_applies_queued_rows_then_releases(
 def test_stop_does_not_wait(dh_exec_ctx: ExecutionContext) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
     diagnostics.stop()
-    diagnostics._thread.join(TIMEOUT)
-    assert not diagnostics._thread.is_alive()
+    diagnostics.thread.join(TIMEOUT)
+    assert not diagnostics.thread.is_alive()
+
+
+class CountingTable:
+    # Wraps an input table, counts `add` calls, and holds the first one until released, so
+    # rows queued meanwhile reach the writer as one batch.
+    def __init__(self, table: InputTable) -> None:
+        self.table = table
+        self.adds = 0
+        self.entered = threading.Event()
+        self.gate = threading.Event()
+
+    def add(self, rows: Table) -> None:
+        self.adds += 1
+        self.entered.set()
+        assert self.gate.wait(TIMEOUT)
+        self.table.add(rows)
+
+
+def test_queued_rows_are_coalesced_into_few_adds(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    counting = CountingTable(diagnostics.streams)
+    diagnostics._streams = cast("InputTable", counting)
+    diagnostics.write(STREAM)
+    assert counting.entered.wait(TIMEOUT)
+    for n in range(1_000):
+        diagnostics.write(_stream(stream_id=n % 10, held_results=n))
+    counting.gate.set()
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert counting.adds == 2  # the held first row, then one add for the other 1,000
+    rows = sorted(dh_to_pylist(counting.table), key=lambda r: r["StreamId"])
+    assert [(r["StreamId"], r["HeldResults"]) for r in rows] == [(n, 990 + n) for n in range(10)]
+    diagnostics.release()

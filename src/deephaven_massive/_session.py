@@ -124,23 +124,12 @@ def _on_update_graph(exec_ctx: ExecutionContext) -> bool:
     )
 
 
-def _require_not_update_graph(exec_ctx: ExecutionContext) -> None:
-    """Reject a library call made on an update-graph thread or under the update-graph lock.
-
-    Verbs create tables and take the registry lock; on a UG thread (for example inside a table
-    listener) that would deadlock against the update cycle (DESIGN § 18.3).
-
-    Args:
-        exec_ctx: The session's execution context.
-
-    Raises:
-        ValueError: If the calling thread is a UG thread or holds the UG lock.
-    """
-    if _on_update_graph(exec_ctx):
-        raise ValueError(
-            "deephaven_massive calls must not run on a Deephaven update-graph thread "
-            "(for example inside a table listener) or while holding the update-graph lock"
-        )
+_ON_UPDATE_GRAPH: Final = (
+    "deephaven_massive calls must not run on a Deephaven update-graph thread "
+    "(for example inside a table listener) or while holding the update-graph lock"
+)
+"""The `ValueError` text for a call on an update-graph thread: verbs create tables and take the
+registry lock, which would deadlock against the update cycle there (DESIGN § 18.3)."""
 
 
 def _next_label() -> str:
@@ -254,13 +243,19 @@ class SessionCore:
             raise MassiveError(f"{self.label} is closed")
 
     def require_verb_thread(self) -> None:
-        """The guard every verb runs first: the session is open and this is not a UG thread.
+        """The guard every verb runs first: this is not a UG thread, and the session is open.
 
-        A closed session raises `MassiveError` (see `require_open`); an update-graph thread, or
-        a thread holding the update-graph lock, raises `ValueError`.
+        The thread is checked first, so a verb on an update-graph thread raises `ValueError`
+        whether or not the session is closed (DESIGN § 6).
+
+        Raises:
+            ValueError: On an update-graph thread, or while holding the update-graph lock.
+            MassiveError: If the session is closed.
         """
-        self.require_open()
-        _require_not_update_graph(self.exec_ctx)
+        if _on_update_graph(self.exec_ctx):
+            raise ValueError(_ON_UPDATE_GRAPH)
+        if self.closed:
+            raise MassiveError(f"{self.label} is closed")
 
     # --- Transport factory hooks: one per transport, filled by the transport packages. -------
 
@@ -460,13 +455,35 @@ class SessionCore:
             if held:
                 self._streams[stream_id] = replace(state, row=row)
             else:
-                # The library no longer holds the stream: forget it with its key.
+                # The library no longer holds the stream: forget it, and its key unless the key
+                # already serves a newer stream (after `fail_stream`).
                 del self._streams[stream_id]
-                del self._stream_ids[state.key]
+                if self._stream_ids.get(state.key) == stream_id:
+                    del self._stream_ids[state.key]
             self.diagnostics.write(row)
         if not held:
             with entered(self.exec_ctx):
                 state.handle.scope.release()
+
+    def fail_stream(self, stream_id: int, error: str) -> None:
+        """Record that a stream failed and stop reusing it for new verbs.
+
+        Called by the transport after it fails the stream's table (`publish_failure`). The
+        stream's row becomes `FAILED` with `error`, and its key is unregistered, so the next
+        verb with the same key opens a fresh stream instead of returning the dead table. The
+        failed stream stays in the registry until its results are released.
+
+        Args:
+            stream_id: The failed stream.
+            error: The failure text for the `Error` column.
+        """
+        with self.registry_lock:
+            state = self._streams[stream_id]
+            row = replace(state.row, state=StreamState.FAILED, error=error)
+            self._streams[stream_id] = replace(state, row=row)
+            if self._stream_ids.get(state.key) == stream_id:
+                del self._stream_ids[state.key]
+            self.diagnostics.write(row)
 
     def close(self) -> None:
         """Close the session: run the closers, mark streams closed, release the diagnostics.
@@ -475,9 +492,13 @@ class SessionCore:
         and keep their contents. Results stay tracked, so garbage collection and `release()`
         still free them. Every stream the library still holds is marked `CLOSED` in
         `m.streams()`. Logs the number of live tables that became static: a WARNING when there
-        are any, INFO otherwise. A call on an update-graph thread raises `ValueError`.
+        are any, INFO otherwise.
+
+        Raises:
+            ValueError: On an update-graph thread, even when the session is already closed.
         """
-        _require_not_update_graph(self.exec_ctx)
+        if _on_update_graph(self.exec_ctx):
+            raise ValueError(_ON_UPDATE_GRAPH)
         with self.registry_lock:
             if self._closed:
                 return
@@ -552,8 +573,9 @@ class MassiveSession:
     def __init__(self, config: MassiveConfig | None = None) -> None:
         """Start a session.
 
-        `MassiveConfig()` (used when `config` is None) raises `AuthenticationError` when no API
-        key is configured, and a call on an update-graph thread raises `ValueError`.
+        When `config` is None, `MassiveConfig()` reads the environment and raises its own
+        `AuthenticationError` if no API key is configured (it is not repeated under Raises
+        because this method does not raise it itself).
 
         Args:
             config: The configuration; None means `MassiveConfig()`, which reads the API key
@@ -563,6 +585,7 @@ class MassiveSession:
             TypeError: If `config` is not a `MassiveConfig`.
             MassiveError: If no Deephaven `ExecutionContext` is active on this thread: the
                 session must be created inside a Deephaven worker.
+            ValueError: If called on an update-graph thread or under the update-graph lock.
         """
         if config is None:
             config = MassiveConfig()
@@ -576,7 +599,8 @@ class MassiveSession:
                 "console or an application script, or enter a context first "
                 "(with deephaven.execution_context.get_exec_ctx(): ...)."
             )
-        _require_not_update_graph(exec_ctx)
+        if _on_update_graph(exec_ctx):
+            raise ValueError(_ON_UPDATE_GRAPH)
         log_json_codec_once()
         core = SessionCore(config, exec_ctx, _next_label())
         _register(core)
@@ -731,18 +755,19 @@ class MassiveSession:
         away. The table keeps ticking only while something else holds it (a derived table, an
         open UI panel); once nothing does, its stream unsubscribes. Releasing a result twice
         does nothing, and `release()` keeps working after `close()`. Static results
-        (`fetch()`, `history()`) are not tracked, and a table that is not a live result of this
-        session raises `ValueError`.
+        (`fetch()`, `history()`) are not tracked.
 
         Args:
             table: A live table returned by a verb of this session.
 
         Raises:
             TypeError: If `table` is not a Deephaven `Table`.
+            ValueError: If `table` is not a live result of this session (checked by identity).
         """
         if not isinstance(table, Table):
             raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
-        self._core.results.release(table)
+        if not self._core.results.release(table):
+            raise ValueError("table is not a live result of this session")
 
     def close(self) -> None:
         """Close every connection and poller; live tables go static. Idempotent.
@@ -752,8 +777,13 @@ class MassiveSession:
         "session closed; N live tables are now static" is logged, at WARNING when N > 0. After
         `close()`, verbs, `connections()`, and `streams()` raise
         `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
-        and `release()` keep working. A call on an update-graph thread raises `ValueError`.
+        and `release()` keep working.
+
+        Raises:
+            ValueError: On an update-graph thread, even when the session is already closed.
         """
+        if _on_update_graph(self._core.exec_ctx):
+            raise ValueError(_ON_UPDATE_GRAPH)
         self._core.close()
 
     def __enter__(self) -> Self:

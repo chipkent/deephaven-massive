@@ -14,6 +14,7 @@ from deephaven import arrow as dh_arrow
 from deephaven import new_table, time_table
 from deephaven.column import string_col
 from deephaven.table_listener import listen
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _session
@@ -433,8 +434,8 @@ def test_a_session_closed_while_a_stream_opens(
 
 def test_background_threads_stop_when_the_session_is_collected() -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="k"))
-    reaper = m._core._reaper._thread
-    writer = m._core.diagnostics._thread
+    reaper = m._core._reaper.thread
+    writer = m._core.diagnostics.thread
     del m
     gc.collect()
     reaper.join(TIMEOUT)
@@ -456,7 +457,7 @@ def test_a_session_with_released_results_is_collected() -> None:
     # A weak reference, not a finalizer that sets an Event: garbage collection can run the
     # finalizer while this thread holds the Event's internal lock, which would deadlock.
     alive = weakref.ref(core)
-    reaper, writer = core._reaper._thread, core.diagnostics._thread
+    reaper, writer = core._reaper.thread, core.diagnostics.thread
     result = stream_query(m).blink()
     del result, core, m
     gc.collect()
@@ -501,7 +502,7 @@ def test_a_result_keeps_its_session_alive() -> None:
     core = m._core
     vars(core)["stream_transport"] = lambda: fake
     alive = weakref.ref(core)
-    reaper = core._reaper._thread
+    reaper = core._reaper.thread
     result = stream_query(m).append_only()
     del core, m
     gc.collect()
@@ -520,3 +521,72 @@ def test_a_result_keeps_its_session_alive() -> None:
     assert alive() is None
     reaper.join(TIMEOUT)
     assert not reaper.is_alive()
+
+
+def test_a_failed_stream_is_not_reused(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    q = stream_query(massive_session)
+    first = q.blink()
+    massive_session._core.fail_stream(1, "not authorized")
+    massive_session._core.fail_stream(1, "not authorized")  # its key is already unregistered
+    second = q.blink()
+    assert len(fake_streams.opened) == 2
+    rows = stream_rows()
+    assert [(r["StreamId"], r["State"], r["Error"]) for r in rows] == [
+        (1, "FAILED", "not authorized"),
+        (2, "RUNNING", None),
+    ]
+    massive_session.release(first)  # the failed stream's key already serves stream 2
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    third = q.append_only()
+    assert len(fake_streams.opened) == 2  # still served by stream 2
+    massive_session.release(second)
+    massive_session.release(third)
+    assert fake_streams.shutdown[2].wait(TIMEOUT)
+
+
+def test_the_update_graph_check_precedes_the_closed_check(
+    massive_session: dm.MassiveSession,
+) -> None:
+    q = stream_query(massive_session)
+    massive_session.close()
+    errors: list[BaseException] = []
+    seen = threading.Event()
+
+    def on_update(_update: object, _replay: bool) -> None:
+        if seen.is_set():
+            return
+        for call in (q.blink, massive_session.close, massive_session._core.close):
+            try:
+                call()
+            except ValueError as e:
+                errors.append(e)
+        seen.set()
+
+    scope = new_scope()
+    with scope.open():
+        handle = listen(time_table("PT0.01S"), on_update)
+    assert seen.wait(TIMEOUT)
+    handle.stop()
+    scope.release()
+    assert len(errors) == 3
+
+
+def test_calls_under_the_update_graph_lock_are_rejected(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # The same guard as on an update-graph thread, exercised on this thread (coverage tools
+    # on Python 3.11 do not see lines run on Deephaven's own threads).
+    update_graph = massive_session._core.exec_ctx.update_graph
+    with shared_lock(update_graph):
+        for call in (
+            lambda: dm.MassiveSession(dm.MassiveConfig(api_key="k")),
+            massive_session.close,
+            massive_session._core.close,
+        ):
+            with pytest.raises(ValueError, match="update-graph lock"):
+                call()
+    assert not massive_session._core.closed

@@ -328,7 +328,7 @@ scope is released, so a `connections()` or `streams()` table obtained before `cl
 unusable unless the caller holds it in a liveness scope of their own.
 
 Every verb raises `ValueError` when called on a UG thread (for example from inside a table
-listener). Verbs create tables and take the registry lock; both are forbidden on the UG thread
+listener), checked before anything else, so also on a closed session; `close()` likewise. Verbs create tables and take the registry lock; both are forbidden on the UG thread
 ([section 18](#18-concurrency-model)).
 
 ### 6.1 How a live table is kept alive and released
@@ -384,10 +384,12 @@ return result
 - **Collection finalizer.** A `weakref.finalize` on the result fires when the Python wrapper
   is collected. It holds the result registry and the record strongly, and through them the
   reaper and the session core, for exactly as long as the result lives, so a result that
-  outlives every reference to its session and query is still released. Under
-  `registry_lock` it flips the record's once-only `released` flag; if the flag was already set
-  it returns. Otherwise it puts `record_id` on the reaper queue (`queue.SimpleQueue`). It makes no
-  Java call.
+  outlives every reference to its session and query is still released. The finalizer takes
+  no lock and makes no Java call: it only puts a job on the reaper queue (`queue.SimpleQueue`).
+  Garbage collection can run it on any thread, including one that holds another library lock,
+  so taking `registry_lock` there could deadlock. The reaper job then flips the record's
+  once-only `released` flag under `registry_lock` and, if it was not already set, releases the
+  result.
 - **Reaper thread.** One daemon thread per session. It takes records off the queue, calls
   `scope.release()`, decrements the stream's held-result count, and at zero releases the stream
   scope. Each job runs inside `try`/`except Exception`; a failure is logged at ERROR and the
@@ -399,7 +401,9 @@ return result
 - **`m.release(table)`** delegates to `m._core.results.release(table)`, which looks up
   `id(table)` in the registry, verifies that the weakref resolves to
   that exact object (so a recycled id cannot match), flips the `released` flag under the lock,
-  and enqueues the same job. It raises `ValueError` if the table is not a verb result. It is
+  and enqueues the release. `m.release` raises `ValueError` if the table is not a verb result.
+  A release always notifies the owner (the stream's held-result count, or the poller), even if
+  releasing the result scope raised. It is
   deterministic: the table keeps ticking only while other holders (derived tables, open panels)
   exist.
 - **`m.close()`** closes every connection and poller and releases the session-owned diagnostics
@@ -1142,7 +1146,9 @@ logged once.
   and guarantees non-interleaved adds. `on_flush_callback` is not used (it blocks the update
   cycle).
 - A failure fails exactly the streams whose topics the server rejected. Nothing tears down a
-  whole URL on an entitlement error.
+  whole URL on an entitlement error. A failed stream's key is unregistered at once
+  (`SessionCore.fail_stream`), so the next verb with the same key opens a fresh stream rather
+  than returning the failed table; the failed stream stays until its results are released.
 - REST `poll()` tables use a per-table publisher (`APPEND`) or a keyed `input_table`
   (`REPLACE`, `UPSERT`), created in the result scope.
 
@@ -1209,7 +1215,9 @@ bound on `Timestamp` after partition selection.
 Both tables are keyed `input_table`s. They live in one session-owned `LivenessScope` that
 `m.close()` releases. They are written by one diagnostics writer thread per session, which
 applies immutable row snapshots from a queue in order; other threads only enqueue, never wait on
-the update graph for diagnostics, and never write from UG callbacks.
+the update graph for diagnostics, and never write from UG callbacks. Each time it wakes, the
+writer takes everything queued, keeps the latest row per key, and applies it with one `add` per
+table, so the queue stays bounded however fast rows arrive.
 
 **`m.connections()`**: one row per connection plus one `Transport=REST` row per resolved
 (class, family).
@@ -1270,7 +1278,7 @@ without the GIL.
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
-| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables, in order | anything else |
+| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release) | Deephaven | registry update under the registry lock; `call_soon_threadsafe` | sends; JVM calls; blocking |
 

@@ -7,8 +7,9 @@ tables, so they observe exactly when Deephaven runs a stream's `on_shutdown_call
 import gc
 import logging
 import threading
+import weakref
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import pytest
 from deephaven import empty_table
@@ -22,7 +23,9 @@ from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._domains.base import build_query
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._liveness import (
+    QueueWorker,
     Reaper,
+    ResultRecord,
     ResultRegistry,
     entered,
     make_result,
@@ -119,8 +122,8 @@ def test_reaper_runs_jobs_in_order_and_survives_failures(
     assert seen == [1, 2]
     assert "massive reaper job failed" in caplog.text
     reaper.stop()
-    reaper._thread.join(TIMEOUT)
-    assert not reaper._thread.is_alive()
+    reaper.thread.join(TIMEOUT)
+    assert not reaper.thread.is_alive()
 
 
 def test_registry_release_checks_identity(dh_exec_ctx: ExecutionContext) -> None:
@@ -131,14 +134,12 @@ def test_registry_release_checks_identity(dh_exec_ctx: ExecutionContext) -> None
     registry.track(table, scope, lambda: released.append("released"))
     assert registry.held() == 1
     other = empty_table(1)
-    with pytest.raises(ValueError, match="not a live result"):
-        registry.release(other)
+    assert not registry.release(other)
     # A record whose id now belongs to another object (a recycled id) does not match.
     registry._results[id(other)] = registry._results[id(table)]
-    with pytest.raises(ValueError, match="not a live result"):
-        registry.release(other)
-    registry.release(table)
-    registry.release(table)  # a second release is a no-op
+    assert not registry.release(other)
+    assert registry.release(table)
+    assert registry.release(table)  # a second release is a no-op
     # Collecting a wrapper whose id was re-registered leaves the newer record in place.
     collected, collected_scope = make_result(lambda: empty_table(1))
     registry.track(collected, collected_scope, lambda: released.append("collected"))
@@ -370,3 +371,67 @@ def test_entered_contexts_survive_overlapping_threads(dh_exec_ctx: ExecutionCont
 def _update_graph_class() -> str:
     j_update_graph = get_exec_ctx().update_graph.j_update_graph
     return str(j_update_graph.getClass().getSimpleName())
+
+
+def test_collection_takes_no_lock(dh_exec_ctx: ExecutionContext) -> None:
+    # Garbage collection can run the finalizer on a thread that holds another library lock, so
+    # it must not take registry_lock; it only queues the release on the reaper.
+    reaper = Reaper(dh_exec_ctx, "test-reaper")
+    lock = threading.RLock()
+    registry = ResultRegistry(lock, reaper)
+    released = threading.Event()
+    table, scope = make_result(lambda: empty_table(1))
+    registry.track(table, scope, released.set)
+    holding, done = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with lock:
+            holding.set()
+            done.wait(TIMEOUT)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert holding.wait(TIMEOUT)
+    del table
+    gc.collect()  # would block here if the finalizer took the held lock
+    assert not released.is_set()  # the reaper job is waiting for the lock
+    done.set()
+    holder.join(TIMEOUT)
+    assert released.wait(TIMEOUT)
+    reaper.stop()
+
+
+def test_a_failing_scope_release_still_notifies_the_owner() -> None:
+    class BrokenScope:
+        def release(self) -> None:
+            raise RuntimeError("cannot release")
+
+    notified: list[str] = []
+    record = ResultRecord(
+        1,
+        cast("LivenessScope", BrokenScope()),
+        lambda: notified.append("released"),
+        weakref.ref(empty_table(0)),
+    )
+    with pytest.raises(RuntimeError, match="cannot release"):
+        ResultRegistry._reap(record)
+    assert notified == ["released"]
+
+
+def test_queue_worker_runs_on_exit_and_logs_batch_failures(
+    dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
+) -> None:
+    exited = threading.Event()
+
+    def fail(batch: list[int]) -> None:
+        raise RuntimeError(f"bad batch {batch}")
+
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._liveness"):
+        worker: QueueWorker[int] = QueueWorker(
+            dh_exec_ctx, "test-worker", handle=fail, on_exit=exited.set
+        )
+        worker.put(1)
+        worker.stop()
+        worker.thread.join(TIMEOUT)
+    assert exited.is_set()
+    assert "test-worker failed on a batch" in caplog.text

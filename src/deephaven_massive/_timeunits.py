@@ -55,8 +55,6 @@ FMV_NS_THRESHOLD: Final = 10**17
 """FMV `t` values at or above this are nanoseconds; smaller values are milliseconds."""
 
 _NS_PER_MS: Final = 1_000_000
-_MIN_INT64: Final = -(2**63)
-_MAX_INT64: Final = 2**63 - 1
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _MIN_CHECKED_NS: Final = int((datetime(1990, 1, 1, tzinfo=UTC) - _EPOCH).total_seconds()) * 10**9
 _MAX_CHECKED_NS: Final = int((datetime(2101, 1, 1, tzinfo=UTC) - _EPOCH).total_seconds()) * 10**9
@@ -170,7 +168,10 @@ class TimeUnitTable:
     def to_epoch_ns(self, key: TimeField, value: int) -> int:
         """Convert one epoch value of a registered field to nanoseconds.
 
-        An unregistered field raises `LookupError` (see `rule`).
+        The scalar form of `to_epoch_ns_array`, which it calls, so both forms share one checked
+        conversion. An unregistered field raises `LookupError` (see `rule`); a value that
+        overflows 64-bit nanoseconds, or an unverified one outside 1990 to 2100, raises
+        `MassiveError("timestamp unit mismatch ...")` there.
 
         Args:
             key: The registered field.
@@ -180,28 +181,22 @@ class TimeUnitTable:
             Nanoseconds since the Unix epoch.
 
         Raises:
-            MassiveError: If the result does not fit 64-bit nanoseconds, or the rule is
-                unverified and the result lies outside 1990 to 2100.
+            MassiveError: If `value` itself does not fit a 64-bit integer.
         """
-        rule = self.rule(key)
-        nanos = value
-        if rule.unit is TimeUnit.MILLISECONDS:
-            nanos = value * _NS_PER_MS
-        elif rule.unit is TimeUnit.FMV_MAGNITUDE:
-            is_ns = value >= FMV_NS_THRESHOLD
-            _log_fmv_unit(TimeUnit.NANOSECONDS if is_ns else TimeUnit.MILLISECONDS)
-            nanos = value if is_ns else value * _NS_PER_MS
-        out_of_range = not _MIN_INT64 <= nanos <= _MAX_INT64
-        if out_of_range or (rule.unverified and not _MIN_CHECKED_NS <= nanos < _MAX_CHECKED_NS):
-            raise MassiveError(f"timestamp unit mismatch for {key.label}")
+        try:
+            values = pa.array([value], pa.int64())
+        except (OverflowError, pa.ArrowInvalid):
+            raise MassiveError(f"timestamp unit mismatch for {key.label}") from None
+        nanos: int = self.to_epoch_ns_array(key, values)[0].as_py()
         return nanos
 
     def to_epoch_ns_array(self, key: TimeField, values: pa.Array) -> pa.Array:
         """Convert a column of epoch values of a registered field to nanoseconds, in Arrow.
 
         The conversion is vectorized: no value becomes a Python object, so a flat-file chunk or
-        a WebSocket batch converts in one pass. Nulls stay null. An unregistered field raises
-        `LookupError` (see `rule`).
+        a WebSocket batch converts in one pass. Nulls stay null. Millisecond values, whether
+        declared or classified by the FMV magnitude rule, are scaled with overflow checking
+        (`_millis_to_nanos`). An unregistered field raises `LookupError` (see `rule`).
 
         Args:
             key: The registered field.
@@ -211,32 +206,46 @@ class TimeUnitTable:
             An `int64` Arrow array of nanoseconds since the Unix epoch.
 
         Raises:
-            MassiveError: If a converted value overflows 64-bit nanoseconds, or the rule is
-                unverified and any non-null result lies outside 1990 to 2100.
+            MassiveError: If the rule is unverified and any non-null result lies outside
+                1990 to 2100.
         """
         rule = self.rule(key)
         nanos = pc.cast(values, pa.int64())
         if rule.unit is TimeUnit.MILLISECONDS:
-            try:
-                nanos = pc.call_function("multiply_checked", [nanos, _NS_PER_MS])
-            except pa.ArrowInvalid:
-                raise MassiveError(f"timestamp unit mismatch for {key.label}") from None
+            nanos = _millis_to_nanos(key, nanos)
         elif rule.unit is TimeUnit.FMV_MAGNITUDE:
             is_ns = pc.call_function("greater_equal", [nanos, FMV_NS_THRESHOLD])
             any_ns = pc.call_function("any", [is_ns]).as_py()
             _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
-            # Only the millisecond values are scaled (nanosecond ones are masked to null), and
-            # with overflow checking: a millisecond value too large for 64-bit nanoseconds is a
-            # unit mismatch, never a silently wrapped timestamp.
+            # Only the millisecond values are scaled; the nanosecond ones are masked to null.
             millis = pc.call_function("if_else", [is_ns, None, nanos])
-            try:
-                scaled = pc.call_function("multiply_checked", [millis, _NS_PER_MS])
-            except pa.ArrowInvalid:
-                raise MassiveError(f"timestamp unit mismatch for {key.label}") from None
-            nanos = pc.call_function("if_else", [is_ns, nanos, scaled])
+            nanos = pc.call_function("if_else", [is_ns, nanos, _millis_to_nanos(key, millis)])
         if rule.unverified:
             bounds = pc.call_function("min_max", [nanos]).as_py()
             low, high = bounds["min"], bounds["max"]
             if low is not None and (low < _MIN_CHECKED_NS or high >= _MAX_CHECKED_NS):
                 raise MassiveError(f"timestamp unit mismatch for {key.label}")
         return nanos
+
+
+def _millis_to_nanos(key: TimeField, millis: pa.Array) -> pa.Array:
+    """Scale epoch milliseconds to nanoseconds, refusing to overflow.
+
+    The one millisecond conversion of the module. A value too large for 64-bit nanoseconds
+    (after the year 2262) cannot be a millisecond timestamp, so it is a unit mismatch, never a
+    silently wrapped value.
+
+    Args:
+        key: The field, for the error message.
+        millis: An `int64` array of epoch milliseconds; nulls stay null.
+
+    Returns:
+        The `int64` nanoseconds.
+
+    Raises:
+        MassiveError: If any value overflows 64-bit nanoseconds.
+    """
+    try:
+        return pc.call_function("multiply_checked", [millis, _NS_PER_MS])
+    except pa.ArrowInvalid:
+        raise MassiveError(f"timestamp unit mismatch for {key.label}") from None

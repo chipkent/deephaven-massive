@@ -10,10 +10,11 @@ Both are keyed Deephaven `input_table`s that the library writes and users read:
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
 thread and released by `m.close()`. One daemon writer thread per session applies every row: the
-rest of the library hands it immutable row snapshots through a `queue.SimpleQueue`, so no
-caller, reaper, or flush thread ever waits on the update graph for bookkeeping, and nothing is
-written from a Deephaven listener callback. Each row replaces the whole row for its key; the
-queue is first in, first out, and the session queues each snapshot while holding its
+rest of the library hands it immutable row snapshots through a queue, so no caller, reaper,
+or flush thread ever waits on the update graph for bookkeeping, and nothing is written from a
+Deephaven listener callback. The writer applies whatever is queued in one batch per table,
+keeping the latest row per key. Each row replaces the whole row for its key; the queue is first
+in, first out, and the session queues each snapshot while holding its
 `registry_lock`, so rows land in the order the registry changed. Once the writer is stopped,
 rows are no longer queued.
 """
@@ -21,16 +22,16 @@ rows are no longer queued.
 from __future__ import annotations
 
 import logging
-import queue
 import threading
 from dataclasses import dataclass, fields
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, TypeAlias
 
+import pyarrow as pa
 from deephaven import arrow as dh_arrow
 from deephaven import input_table
 
-from deephaven_massive._liveness import entered, new_scope
+from deephaven_massive._liveness import QueueWorker, new_scope
 from deephaven_massive._schema import Column, ColumnType, Schema, pascal_case
 from deephaven_massive._symbols import SymbolTable
 from deephaven_massive._types import _All
@@ -260,34 +261,28 @@ def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
     return len(symbols), f"{shown} (+{hidden} more)" if hidden > 0 else shown
 
 
-_Item: TypeAlias = "ConnectionRow | StreamRow | threading.Event | None"
+_Item: TypeAlias = "ConnectionRow | StreamRow | threading.Event"
 
 
 class Diagnostics:
     """The session's two diagnostics tables and the single thread that writes them.
 
     Created by `SessionCore` on the caller thread, inside the session's execution context, so
-    the tables live in a session-owned liveness scope. A daemon writer thread enters the same
-    execution context, takes row snapshots off a `queue.SimpleQueue` in order, and applies each
-    with `InputTable.add`; no other thread waits on the update graph for diagnostics. `write`
-    only enqueues and is safe from any thread, including one that holds the session's
-    `registry_lock`: its internal lock is a leaf held only around a non-blocking `put`. A failed
-    write is logged at ERROR and the thread carries on.
+    the tables live in a session-owned liveness scope. A daemon writer (`QueueWorker`) takes
+    row snapshots off its queue in batches: everything queued since it last woke is coalesced
+    to the latest row per key and applied with one `InputTable.add` per table, so the queue
+    cannot grow without bound when rows arrive faster than update-graph cycles. No other thread
+    waits on the update graph for diagnostics. `write` only enqueues and is safe from any
+    thread, including one that holds the session's `registry_lock`: its internal lock is a leaf
+    held only around a non-blocking `put`. A row that does not fit its schema is logged at ERROR
+    and skipped; the rest of its batch is applied.
 
     `release()` lets the writer apply the rows already queued, release the scope, and exit, and
-    waits for it; `stop()` does the same without waiting, for use from a finalizer.
+    waits for it; `stop()` does the same without waiting and without taking any lock, for use
+    from a finalizer.
     """
 
-    __slots__ = (
-        "_connections",
-        "_exec_ctx",
-        "_queue",
-        "_release_lock",
-        "_released",
-        "_scope",
-        "_streams",
-        "_thread",
-    )
+    __slots__ = ("_connections", "_release_lock", "_released", "_scope", "_streams", "_writer")
 
     def __init__(self, exec_ctx: ExecutionContext, name: str) -> None:
         """Create both input tables inside a new session-owned scope and start the writer.
@@ -296,10 +291,7 @@ class Diagnostics:
             exec_ctx: The session's execution context, entered by the writer thread.
             name: The writer thread's name, for thread dumps.
         """
-        self._exec_ctx = exec_ctx
-        # Reentrant: the session's finalizer calls `stop()` from garbage collection, which can
-        # run on a thread that is already inside `write()` holding this lock.
-        self._release_lock = threading.RLock()
+        self._release_lock = threading.Lock()
         self._released = False
         self._scope = new_scope()
         with self._scope.open():
@@ -307,9 +299,9 @@ class Diagnostics:
                 CONNECTIONS.col_defs(), key_cols=list(CONNECTION_KEYS)
             )
             self._streams: InputTable = input_table(STREAMS.col_defs(), key_cols=list(STREAM_KEYS))
-        self._queue: queue.SimpleQueue[_Item] = queue.SimpleQueue()
-        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
-        self._thread.start()
+        self._writer: QueueWorker[_Item] = QueueWorker(
+            exec_ctx, name, handle=self._apply, on_exit=self._scope.release
+        )
 
     @property
     def connections(self) -> InputTable:
@@ -321,89 +313,93 @@ class Diagnostics:
         """The table behind `m.streams()`."""
         return self._streams
 
+    @property
+    def thread(self) -> threading.Thread:
+        """The writer thread."""
+        return self._writer.thread
+
     def write(self, row: ConnectionRow | StreamRow) -> None:
         """Queue one row's full current state; it replaces the row with the same key.
 
-        Never blocks. After `release()` or `stop()` the row is not queued at all.
+        Never blocks. After `release()` the row is not queued at all.
 
         Args:
             row: An immutable snapshot of the row.
         """
         with self._release_lock:
             if not self._released:
-                self._queue.put(row)
+                self._writer.put(row)
 
     def barrier(self) -> threading.Event:
         """Return an event that is set once every row queued before this call is applied.
 
         Returns:
-            The event; already set when the writer has been stopped.
+            The event; already set when the writer has been released.
         """
         event = threading.Event()
         with self._release_lock:
             if self._released:
                 event.set()
             else:
-                self._queue.put(event)
+                self._writer.put(event)
         return event
 
-    def stop(self) -> bool:
+    def stop(self) -> None:
         """Ask the writer to apply the queued rows, release the tables, and exit; no wait.
 
-        Idempotent; used by the session's finalizer.
-
-        Returns:
-            True if this call stopped the writer, False if it was already stopping.
+        Takes no lock, so the session's finalizer can call it from garbage collection.
         """
-        with self._release_lock:
-            if self._released:
-                return False
-            self._released = True
-            self._queue.put(None)
-        return True
+        self._writer.stop()
 
     def release(self) -> None:
         """Apply the queued rows, release the tables' scope, and end the writer. Idempotent.
 
         Blocks until the writer has finished, so it must not run on an update-graph thread.
         """
-        self.stop()
-        self._thread.join()
+        with self._release_lock:
+            self._released = True
+        self._writer.stop()
+        self._writer.thread.join()
 
-    def _run(self) -> None:
-        """Writer loop: apply rows and set barriers until `stop()`, then release the scope."""
-        with entered(self._exec_ctx):
-            while self._apply_next():
-                pass
-            self._scope.release()
-
-    def _apply_next(self) -> bool:
-        """Take one item off the queue: apply a row or set a barrier.
-
-        The item is a local of this call, so nothing stays referenced while the thread blocks
-        for the next one.
-
-        Returns:
-            False when the item was the stop sentinel, True otherwise.
-        """
-        item = self._queue.get()
-        if item is None:
-            return False
-        if isinstance(item, threading.Event):
-            item.set()
-        else:
-            self._apply(item)
-        return True
-
-    def _apply(self, row: ConnectionRow | StreamRow) -> None:
-        """Add one row to its table, logging a failure instead of raising.
+    def _apply(self, items: list[_Item]) -> None:
+        """Apply one batch: the latest row per key, one `add` per table, then the barriers.
 
         Args:
-            row: The row to write.
+            items: Rows and barrier events, in queue order.
         """
-        stream = isinstance(row, StreamRow)
-        table, schema = (self._streams, STREAMS) if stream else (self._connections, CONNECTIONS)
+        streams: dict[int, StreamRow] = {}
+        connections: dict[tuple[str, str, str], ConnectionRow] = {}
+        barriers: list[threading.Event] = []
+        for item in items:
+            if isinstance(item, threading.Event):
+                barriers.append(item)
+            elif isinstance(item, StreamRow):
+                streams[item.stream_id] = item
+            else:
+                connections[item.transport, item.asset_class, item.family] = item
         try:
-            table.add(dh_arrow.to_table(schema.to_arrow([as_row(row)])))
-        except Exception:
-            logger.exception("diagnostics: failed to write a %s row", schema.name)
+            self._add(self._streams, STREAMS, list(streams.values()))
+            self._add(self._connections, CONNECTIONS, list(connections.values()))
+        finally:
+            for barrier in barriers:
+                barrier.set()
+
+    @staticmethod
+    def _add(
+        table: InputTable, schema: Schema, rows: list[ConnectionRow] | list[StreamRow]
+    ) -> None:
+        """Add rows to a table with one conversion and one `add`, skipping rows that do not fit.
+
+        Args:
+            table: The target table.
+            schema: Its schema.
+            rows: The rows, at most one per key.
+        """
+        batches = []
+        for row in rows:
+            try:
+                batches.append(schema.to_arrow([as_row(row)]))
+            except Exception:
+                logger.exception("diagnostics: failed to write a %s row", schema.name)
+        if batches:
+            table.add(dh_arrow.to_table(pa.concat_tables(batches)))

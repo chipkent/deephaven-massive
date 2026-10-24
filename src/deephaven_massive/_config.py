@@ -24,13 +24,24 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import time
-from types import MappingProxyType
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 from deephaven_massive._enums import AssetClass, _require_enum
 from deephaven_massive._errors import AuthenticationError, log_once
+from deephaven_massive._types import override
 
-__all__ = ["JsonCodec", "MassiveConfig", "json_codec", "log_json_codec_once"]
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+__all__ = [
+    "HostMap",
+    "JsonCodec",
+    "MassiveConfig",
+    "json_codec",
+    "log_json_codec_once",
+    "require_positive_int",
+    "require_positive_number",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -153,10 +164,12 @@ class MassiveConfig:
         """Validate every field and freeze `ws_hosts` into a read-only, lower-cased copy.
 
         A `ws_hosts` key that is not a `dm.AssetClass`, a host that is not a `str`, or a
-        numeric field of a non-numeric type also raises `TypeError`.
+        numeric field of a non-numeric type also raises `TypeError`, and a non-positive number
+        `ValueError` (`require_positive_number`, `require_positive_int`).
 
         Raises:
-            TypeError: If `api_key` is not a `str`.
+            TypeError: If `api_key` is not a `str` or `flat_file_publish_cutoff` is not a
+                `datetime.time`.
             AuthenticationError: If no API key was given and none is in the environment.
             ValueError: If `reconnect_backoff` is below 15 seconds, `max_reconnect_backoff`
                 is below `reconnect_backoff`, a timeout, interval, or count is not positive,
@@ -175,9 +188,9 @@ class MassiveConfig:
                 "(MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY)"
             )
         for name in ("ack_timeout", "reconnect_backoff", "max_reconnect_backoff", "flush_interval"):
-            _require_positive(name, getattr(self, name), integer=False)
+            require_positive_number(name, getattr(self, name))
         for name in ("flat_file_symbol_threshold", "max_concurrency"):
-            _require_positive(name, getattr(self, name), integer=True)
+            require_positive_int(name, getattr(self, name))
         if self.reconnect_backoff < MIN_RECONNECT_BACKOFF:
             raise ValueError(
                 f"reconnect_backoff must be at least {MIN_RECONNECT_BACKOFF:g} seconds "
@@ -185,32 +198,64 @@ class MassiveConfig:
             )
         if self.max_reconnect_backoff < self.reconnect_backoff:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
-        if self.flat_file_publish_cutoff.tzinfo is not None:
+        cutoff: object = self.flat_file_publish_cutoff  # checked at run time, whatever the hint
+        if not isinstance(cutoff, time):
+            kind = type(cutoff).__name__
+            raise TypeError(f"flat_file_publish_cutoff must be a datetime.time, not {kind}")
+        if cutoff.tzinfo is not None:
             raise ValueError("flat_file_publish_cutoff is a New York wall-clock time; drop tzinfo")
         object.__setattr__(self, "ws_hosts", _validate_ws_hosts(self.ws_hosts))
 
 
-def _require_positive(name: str, value: object, *, integer: bool) -> None:
-    """Check that a numeric field is a finite positive number of the right kind.
+def require_positive_int(name: str, value: object, *, maximum: int | None = None) -> int:
+    """Return an `int` argument after checking that it is positive (and at most `maximum`).
+
+    The one check behind every count-like parameter: `limit`, `multiplier`, `ring` capacity,
+    and the integer configuration fields.
 
     Args:
-        name: The field name, for messages.
-        value: The field's value.
-        integer: True if the field must be an `int`.
+        name: The parameter's name, for messages.
+        value: The argument as passed.
+        maximum: The largest accepted value, or None for no upper bound.
+
+    Returns:
+        `value`, narrowed to `int`.
 
     Raises:
-        TypeError: If the value is a `bool`, or not an `int` (or, unless `integer`, a `float`).
-        ValueError: If the value is not finite or not greater than zero.
+        TypeError: If `value` is not an `int` (a `bool` is not accepted).
+        ValueError: If `value` is below 1 or above `maximum`.
     """
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or (integer and not isinstance(value, int))
-    ):
-        kind = "an int" if integer else "a number"
-        raise TypeError(f"{name} must be {kind}, not {type(value).__name__}")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, not {type(value).__name__}")
+    if maximum is not None and not 1 <= value <= maximum:
+        raise ValueError(f"{name} must be between 1 and {maximum}, got {value}")
+    if value < 1:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
+def require_positive_number(name: str, value: object) -> float:
+    """Return a numeric argument as a `float` after checking that it is finite and positive.
+
+    The one check behind every duration-like parameter: the configuration timeouts and
+    intervals and the numeric form of `poll()`'s interval.
+
+    Args:
+        name: The parameter's name, for messages.
+        value: The argument as passed.
+
+    Returns:
+        `value` as a `float`.
+
+    Raises:
+        TypeError: If `value` is not an `int` or `float` (a `bool` is not accepted).
+        ValueError: If `value` is not finite or not greater than zero.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{name} must be a number, not {type(value).__name__}")
     if not (math.isfinite(value) and value > 0):
         raise ValueError(f"{name} must be positive, got {value!r}")
+    return float(value)
 
 
 def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
@@ -241,7 +286,73 @@ def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
                 f"'delayed.massive.com', got {value!r}"
             )
         hosts[asset_class] = host
-    return MappingProxyType(hosts)
+    return HostMap(hosts)
+
+
+class HostMap(Mapping[AssetClass, str]):
+    """The read-only, hashable `ws_hosts` mapping of a `MassiveConfig`.
+
+    `MassiveConfig` is a frozen dataclass compared and hashed by value, so its fields must be
+    hashable; a dict or `MappingProxyType` is not. Equal mappings hash equally.
+    """
+
+    __slots__ = ("_hosts",)
+
+    def __init__(self, hosts: Mapping[AssetClass, str]) -> None:
+        """Copy the validated hosts.
+
+        Args:
+            hosts: Hostname per asset class.
+        """
+        self._hosts: Mapping[AssetClass, str] = dict(hosts)
+
+    @override
+    def __getitem__(self, key: AssetClass) -> str:
+        """Return the host pinned for an asset class.
+
+        Args:
+            key: The asset class.
+
+        Returns:
+            The hostname.
+        """
+        return self._hosts[key]
+
+    @override
+    def __iter__(self) -> Iterator[AssetClass]:
+        """Iterate over the pinned asset classes.
+
+        Returns:
+            An iterator of asset classes.
+        """
+        return iter(self._hosts)
+
+    @override
+    def __len__(self) -> int:
+        """Count the pinned asset classes.
+
+        Returns:
+            How many hosts are pinned.
+        """
+        return len(self._hosts)
+
+    @override
+    def __hash__(self) -> int:
+        """Hash by content, so equal mappings hash equally.
+
+        Returns:
+            The hash of the frozen set of items.
+        """
+        return hash(frozenset(self._hosts.items()))
+
+    @override
+    def __repr__(self) -> str:
+        """Show the mapping as a dict literal.
+
+        Returns:
+            For example `{<AssetClass.STOCKS: 'stocks'>: 'delayed.massive.com'}`.
+        """
+        return repr(dict(self._hosts))
 
 
 class JsonCodec(Protocol):

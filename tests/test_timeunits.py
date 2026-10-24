@@ -154,3 +154,17 @@ def test_fmv_millisecond_overflow_is_rejected() -> None:
 def test_scalar_millisecond_overflow_is_rejected() -> None:
     with pytest.raises(MassiveError, match=r"timestamp unit mismatch for stocks\.trades\.t"):
         TABLE.to_epoch_ns(MS, 2**62)
+
+
+def test_fmv_millisecond_value_that_overflows_is_rejected_on_both_paths() -> None:
+    # Below the FMV threshold, so classified as milliseconds; 10**19 ns does not fit int64.
+    value = 10_000_000_000_000
+    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
+        TABLE.to_epoch_ns(FMV, value)
+    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
+        TABLE.to_epoch_ns_array(FMV, pa.array([value]))
+
+
+def test_values_beyond_64_bits_are_rejected() -> None:
+    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
+        TABLE.to_epoch_ns(NS, 2**64)

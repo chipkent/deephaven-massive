@@ -39,7 +39,7 @@ import threading
 import weakref
 from dataclasses import dataclass
 from itertools import count
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Generic, TypeVar
 
 from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
 __all__ = [
+    "QueueWorker",
     "Reaper",
     "ResultRecord",
     "ResultRegistry",
@@ -60,6 +61,8 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 # `LivenessScope.__init__` carries no annotations, so mypy --strict reports every direct call as
 # an untyped call. This alias gives the constructor its real signature.
@@ -176,72 +179,143 @@ class ResultRecord:
     released: bool = False
 
 
+class QueueWorker(Generic[_T]):
+    """A daemon thread that handles items from a `queue.SimpleQueue` in batches, in order.
+
+    The shared machinery of the session's background threads (the `Reaper` and the diagnostics
+    writer). `put` never blocks and is safe from any thread, including inside garbage
+    collection. The thread enters the session's execution context (a fresh wrapper, see
+    `entered`) for its whole life. Each time it wakes it takes every item queued so far, up to
+    a stop request, and hands them to `handle` as one list; an exception from `handle` is
+    logged at ERROR and the thread carries on. The batch is a local of one call, so nothing
+    stays referenced while the thread waits for more. After `stop()` the remaining items are
+    handled, `on_exit` runs inside the execution context, and the thread ends.
+
+    The thread holds no reference to its owner beyond `handle` and `on_exit`, so owners pass
+    callables that do not keep a session alive.
+    """
+
+    __slots__ = ("_exec_ctx", "_handle", "_on_exit", "_queue", "thread")
+
+    def __init__(
+        self,
+        exec_ctx: ExecutionContext,
+        name: str,
+        *,
+        handle: Callable[[list[_T]], None],
+        on_exit: Callable[[], None] | None = None,
+    ) -> None:
+        """Create and start the worker thread.
+
+        Args:
+            exec_ctx: The session's captured execution context, entered by the thread.
+            name: The thread's name, for thread dumps.
+            handle: Handles one batch of items, in queue order.
+            on_exit: Runs once after the last batch, inside the execution context.
+        """
+        self._exec_ctx = exec_ctx
+        self._handle = handle
+        self._on_exit = on_exit
+        self._queue: queue.SimpleQueue[_T | None] = queue.SimpleQueue()
+        self.thread: Final = threading.Thread(target=self._run, name=name, daemon=True)
+        self.thread.start()
+
+    def put(self, item: _T) -> None:
+        """Queue an item; it is handled after every item queued before it. Never blocks.
+
+        Args:
+            item: The item.
+        """
+        self._queue.put(item)
+
+    def stop(self) -> None:
+        """Handle what is queued, run `on_exit`, and end the thread. Does not wait; idempotent."""
+        self._queue.put(None)
+
+    def _run(self) -> None:
+        """Handle batches until `stop()`, then run `on_exit`."""
+        with entered(self._exec_ctx):
+            while self._next_batch():
+                pass
+            if self._on_exit is not None:
+                self._on_exit()
+
+    def _next_batch(self) -> bool:
+        """Wait for an item, take everything queued behind it, and handle the batch.
+
+        Returns:
+            False once the stop request was reached, True otherwise.
+        """
+        batch: list[_T] = []
+        item = self._queue.get()
+        while item is not None:
+            batch.append(item)
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+        if batch:
+            try:
+                self._handle(batch)
+            except Exception:
+                logger.exception("%s failed on a batch; continuing", self.thread.name)
+        return item is not None
+
+
 class Reaper:
     """One daemon thread per session that releases result scopes off the caller's thread.
 
-    Jobs are plain callables on a `queue.SimpleQueue`, which is safe to feed from weakref
-    callbacks running inside garbage collection. The thread enters the session's
-    `ExecutionContext` for every job, wraps each in `try`/`except Exception`, logs a failure at
-    ERROR, and continues. Jobs run in submission order, so a job submitted after others runs
-    after they have finished.
+    Jobs are plain callables, run in submission order by a `QueueWorker`; `submit` is safe from
+    any thread, including a finalizer running inside garbage collection. Each job runs in its
+    own `try`/`except Exception`: a failure is logged at ERROR and the next job still runs.
 
     The thread holds no reference to the session, so a session that is no longer used can be
     collected; the session then calls `stop()` (through `weakref.finalize`), which lets the
     queued jobs finish and ends the thread.
     """
 
-    __slots__ = ("_exec_ctx", "_queue", "_thread")
+    __slots__ = ("_worker",)
 
     def __init__(self, exec_ctx: ExecutionContext, name: str) -> None:
         """Create and start the reaper thread.
 
         Args:
-            exec_ctx: The session's captured execution context, entered for every job.
+            exec_ctx: The session's captured execution context, entered by the thread.
             name: The thread's name, for thread dumps.
         """
-        self._exec_ctx = exec_ctx
-        self._queue: queue.SimpleQueue[Callable[[], None] | None] = queue.SimpleQueue()
-        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
-        self._thread.start()
+        self._worker: QueueWorker[Callable[[], None]] = QueueWorker(
+            exec_ctx, name, handle=_run_jobs
+        )
+
+    @property
+    def thread(self) -> threading.Thread:
+        """The reaper's thread."""
+        return self._worker.thread
 
     def submit(self, job: Callable[[], None]) -> None:
         """Queue a job; it runs on the reaper thread after every job queued before it.
 
-        Safe from any thread, including a weakref callback during garbage collection.
-
         Args:
             job: The work to run, typically releasing one result scope.
         """
-        self._queue.put(job)
+        self._worker.put(job)
 
     def stop(self) -> None:
         """Let the queued jobs finish, then end the thread. Does not wait for it."""
-        self._queue.put(None)
+        self._worker.stop()
 
-    def _run(self) -> None:
-        """Run jobs until `stop()`."""
-        while self._run_next():
-            pass
 
-    def _run_next(self) -> bool:
-        """Take one job off the queue and run it.
+def _run_jobs(jobs: list[Callable[[], None]]) -> None:
+    """Run reaper jobs in order, each isolated from the others' failures.
 
-        The job is a local of this call, so it is dropped before the thread blocks for the next
-        one. A job holds its record, whose owner callback holds the session core; keeping it
-        referenced while waiting would keep a collected session's core alive forever.
-
-        Returns:
-            False when the job was the stop sentinel, True otherwise.
-        """
-        job = self._queue.get()
-        if job is None:
-            return False
+    Args:
+        jobs: The batch, in submission order.
+    """
+    for job in jobs:
         try:
-            with entered(self._exec_ctx):
-                job()
+            job()
         except Exception:
             logger.exception("massive reaper job failed; continuing")
-        return True
 
 
 class ResultRegistry:
@@ -249,7 +323,13 @@ class ResultRegistry:
 
     One instance per session. Its dictionary and every record's `released` flag are guarded
     by the session's `registry_lock`, which is a leaf lock: nothing here calls Deephaven while
-    holding it. Scope releases are submitted to the session's `Reaper`.
+    holding it. Releases run on the session's `Reaper`.
+
+    The collection finalizer takes no lock at all: it only submits a job to the reaper, which
+    takes the lock there. Garbage collection can run a finalizer on any thread at any
+    allocation, including one that holds another library lock, so a finalizer that took
+    `registry_lock` could deadlock against a thread holding `registry_lock` and waiting for
+    that other lock.
 
     A released record stays in the registry until its wrapper is collected, so a second
     `release()` of the same table finds it and does nothing.
@@ -296,7 +376,7 @@ class ResultRegistry:
             finalizer.atexit = False
         return record
 
-    def release(self, table: Table) -> None:
+    def release(self, table: Table) -> bool:
         """Release one live result now (`m.release(table)`).
 
         Deterministic: the result scope is released on the reaper thread right after any
@@ -304,20 +384,21 @@ class ResultRegistry:
         panels) exist. Releasing an already released result does nothing.
 
         Args:
-            table: A live result this session returned.
+            table: A table the caller believes is a live result of this session.
 
-        Raises:
-            ValueError: If `table` is not a live result of this session (checked by identity,
-                so a recycled `id` cannot match).
+        Returns:
+            False if `table` is not a live result of this session (checked by identity, so a
+            recycled `id` cannot match); True otherwise.
         """
         with self._lock:
             record = self._results.get(id(table))
             if record is None or record.ref() is not table:
-                raise ValueError("table is not a live result of this session")
+                return False
             first = not record.released
             record.released = True
         if first:
             self._reaper.submit(lambda: self._reap(record))
+        return True
 
     def held(self) -> int:
         """Count the results that have not been released.
@@ -329,10 +410,19 @@ class ResultRegistry:
             return sum(not record.released for record in tuple(self._results.values()))
 
     def _on_collected(self, record: ResultRecord, key: int) -> None:
-        """Finalizer: the result's wrapper was garbage-collected.
+        """Finalizer: the result's wrapper was garbage-collected. Takes no lock.
 
-        Runs on whatever thread collected the wrapper. Makes no Java call: under the lock it
-        removes the record and flips its flag, then queues the release if it was the first.
+        Runs on whatever thread collected the wrapper, possibly inside another lock, so it only
+        queues `_collected` on the reaper.
+
+        Args:
+            record: The collected result's record.
+            key: The `id` the result had.
+        """
+        self._reaper.submit(lambda: self._collected(record, key))
+
+    def _collected(self, record: ResultRecord, key: int) -> None:
+        """Reaper job for a collected result: forget it and release it if not yet released.
 
         Args:
             record: The collected result's record.
@@ -344,14 +434,16 @@ class ResultRegistry:
             first = not record.released
             record.released = True
         if first:
-            self._reaper.submit(lambda: self._reap(record))
+            self._reap(record)
 
     @staticmethod
     def _reap(record: ResultRecord) -> None:
-        """Reaper job: release the result scope, then notify the owner.
+        """Release the result scope, then notify the owner even if the release failed.
 
         Args:
             record: The record being released.
         """
-        record.scope.release()
-        record.on_released()
+        try:
+            record.scope.release()
+        finally:
+            record.on_released()

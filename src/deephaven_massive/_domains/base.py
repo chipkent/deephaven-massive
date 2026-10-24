@@ -28,6 +28,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from deephaven_massive._catalog import check_filters
+from deephaven_massive._config import require_positive_int
 from deephaven_massive._dates import parse_date_like
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._query import (
@@ -75,7 +76,10 @@ def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> 
 
     With `multiplier=1`, a timespan that has a WebSocket channel (`SECOND`, `MINUTE`) gives a
     `StreamHistoryQuery`, and `DAY` on a dataset with a previous-session endpoint gives a
-    `HistoryLatestQuery`. Every other combination is history only (`HistoryQuery`).
+    `HistoryLatestQuery`. Every other combination is history only (`HistoryQuery`). A
+    `timespan` that is not a `dm.Timespan` raises `TypeError` (`_require_enum`), and a
+    `multiplier` that is not a positive `int` raises `TypeError` or `ValueError`
+    (`require_positive_int`).
 
     Args:
         spec: The bars dataset.
@@ -86,24 +90,19 @@ def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> 
         The query class to instantiate.
 
     Raises:
-        TypeError: If `timespan` is not a `dm.Timespan` or `multiplier` is not an `int`.
-        ValueError: If `multiplier` is not positive, `Timespan.DAY` is used for futures (the
-            futures endpoint has no day unit; use `Timespan.SESSION`), or `Timespan.SESSION`
-            is used outside futures.
+        ValueError: If `Timespan.DAY` is used for futures (the futures endpoint has no day
+            unit; use `Timespan.SESSION`), or `Timespan.SESSION` is used outside futures.
     """
     span = _require_enum(timespan, Timespan, "timespan")
-    if isinstance(multiplier, bool) or not isinstance(multiplier, int):
-        raise TypeError(f"multiplier must be an int, not {type(multiplier).__name__}")
-    if multiplier < 1:
-        raise ValueError(f"multiplier must be positive, got {multiplier}")
+    count = require_positive_int("multiplier", multiplier)
     futures = spec.asset_class is AssetClass.FUTURES
     if futures and span is Timespan.DAY:
         raise ValueError("futures bars have no DAY timespan; use dm.Timespan.SESSION")
     if not futures and span is Timespan.SESSION:
         raise ValueError("Timespan.SESSION exists only for futures bars")
-    if multiplier == 1 and span in spec.channels:
+    if count == 1 and span in spec.channels:
         return StreamHistoryQuery
-    if multiplier == 1 and span is Timespan.DAY and spec.fetch_method is not None:
+    if count == 1 and span is Timespan.DAY and spec.fetch_method is not None:
         return HistoryLatestQuery
     return HistoryQuery
 
@@ -114,6 +113,8 @@ def list_params(
     """Validate the `sort`, `order`, and `limit` block of a REST list dataset.
 
     `limit` is a cap on the total number of rows across pages; the page size is internal.
+    An `order` that is not a `dm.Order` raises `TypeError`, and a `limit` that is not a
+    positive `int` raises `TypeError` or `ValueError` (`require_positive_int`).
 
     Args:
         sort: The SDK's sort field name, or None for the endpoint's default.
@@ -124,9 +125,7 @@ def list_params(
         The parameters that are set, by SDK name.
 
     Raises:
-        TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or `limit` is not
-            an `int`.
-        ValueError: If `limit` is not positive.
+        TypeError: If `sort` is not a `str`.
     """
     params: dict[str, ParamValue] = {}
     if sort is not None:
@@ -136,11 +135,7 @@ def list_params(
     if order is not None:
         params["order"] = _require_enum(order, Order, "order")
     if limit is not None:
-        if isinstance(limit, bool) or not isinstance(limit, int):
-            raise TypeError(f"limit must be an int, not {type(limit).__name__}")
-        if limit < 1:
-            raise ValueError(f"limit must be positive, got {limit}")
-        params["limit"] = limit
+        params["limit"] = require_positive_int("limit", limit)
     return params
 
 

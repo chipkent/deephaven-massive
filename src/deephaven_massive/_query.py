@@ -41,6 +41,7 @@ from deephaven.stream import blink_to_append_only
 from deephaven.table import Table
 from deephaven.table_factory import ring_table
 
+from deephaven_massive._config import require_positive_int, require_positive_number
 from deephaven_massive._dates import bounds, parse_date_like
 from deephaven_massive._enums import (
     AssetClass,
@@ -264,20 +265,21 @@ def _interval(value: object) -> timedelta:
     Returns:
         The interval as a `timedelta`.
 
+    A number that is not finite and positive, or not a number at all, raises the `ValueError`
+    or `TypeError` of `require_positive_number`.
+
     Raises:
-        TypeError: If `value` is a `bool` or not a number or `timedelta`.
-        ValueError: If the interval is not finite, or not positive once rounded to
+        ValueError: If the interval overflows `timedelta`, or is not positive once rounded to
             microseconds.
     """
     if isinstance(value, timedelta):
         period = value
-    elif isinstance(value, int | float) and not isinstance(value, bool):
-        try:
-            period = timedelta(seconds=value)
-        except (OverflowError, ValueError):  # inf, nan, or beyond timedelta's range
-            raise ValueError(f"interval must be a positive, finite time, got {value!r}") from None
     else:
-        raise TypeError(f"interval must be seconds or a timedelta, not {type(value).__name__}")
+        seconds = require_positive_number("interval", value)
+        try:
+            period = timedelta(seconds=seconds)
+        except OverflowError:  # beyond timedelta's range
+            raise ValueError(f"interval must be a positive, finite time, got {value!r}") from None
     if period <= timedelta(0):  # also an interval that rounds to zero microseconds
         raise ValueError(f"interval must be a positive, finite time, got {value!r}")
     return period
@@ -454,6 +456,9 @@ class StreamQuery(QueryBase):
     def ring(self, capacity: int) -> Table:
         """Return the most recent `capacity` rows received.
 
+        A `capacity` that is not an `int` raises `TypeError`, and one outside 1 to 2**31 - 1
+        raises `ValueError` (`require_positive_int`).
+
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -462,16 +467,9 @@ class StreamQuery(QueryBase):
 
         Returns:
             A live ring table in the dataset's schema.
-
-        Raises:
-            TypeError: If `capacity` is not an `int`.
-            ValueError: If `capacity` is out of range.
         """
-        if isinstance(capacity, bool) or not isinstance(capacity, int):
-            raise TypeError(f"capacity must be an int, not {type(capacity).__name__}")
-        if not 1 <= capacity <= MAX_RING_CAPACITY:
-            raise ValueError(f"capacity must be between 1 and {MAX_RING_CAPACITY}, got {capacity}")
-        return self._stream(lambda blink: ring_table(blink, capacity))
+        rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
+        return self._stream(lambda blink: ring_table(blink, rows))
 
     def last_by(self, *, by: str | Sequence[str] | None = None) -> Table:
         """Return the latest row per key, by default one row per `Symbol`.

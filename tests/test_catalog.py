@@ -7,7 +7,7 @@ import dataclasses
 import importlib
 import pkgutil
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -220,3 +220,13 @@ def test_filters_are_checked_against_the_sdk(monkeypatch: pytest.MonkeyPatch) ->
         check_filters(spec, {"price_gt": "x"})
     with pytest.raises(ValueError, match="takes a str value"):
         check_filters(spec, {"sort": 1})
+
+
+def test_date_filters_must_be_dates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_catalog, "SDK_PARAMS", {"list_trades": {"date": ParamKind.DATE}})
+    spec = _trades(history_method="list_trades")
+    check_filters(spec, {"date": "2025-01-02"})
+    check_filters(spec, {"date": date(2025, 1, 2)})
+    for bad in ("2025-01-02T00:00:00Z", "yesterday", datetime(2025, 1, 2, tzinfo=UTC)):
+        with pytest.raises(ValueError, match="takes a date value"):
+            check_filters(spec, {"date": bad})

@@ -222,3 +222,22 @@ def test_json_codec_is_logged_once(
 def test_api_key_must_be_a_string() -> None:
     with pytest.raises(TypeError, match="api_key must be a str, not NoneType"):
         MassiveConfig(api_key=cast("str", None))
+
+
+def test_configs_are_hashable_and_compare_by_value() -> None:
+    hosts = {AssetClass.STOCKS: "delayed.massive.com"}
+    a = MassiveConfig(api_key="k", ws_hosts=hosts)
+    b = MassiveConfig(api_key="k", ws_hosts=dict(hosts))
+    assert a == b
+    assert hash(a) == hash(b)
+    assert len({a, b, MassiveConfig(api_key="k")}) == 2
+    assert repr(a.ws_hosts) == repr(hosts)
+    assert len(a.ws_hosts) == 1
+    assert list(a.ws_hosts) == [AssetClass.STOCKS]
+
+
+def test_publish_cutoff_must_be_a_time(base: MassiveConfig) -> None:
+    with pytest.raises(
+        TypeError, match=r"flat_file_publish_cutoff must be a datetime\.time, not str"
+    ):
+        _replace(base, flat_file_publish_cutoff="11:30")

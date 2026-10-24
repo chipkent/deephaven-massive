@@ -254,7 +254,7 @@ def test_fetch_and_poll_delegate(massive_session: dm.MassiveSession, rest: Recor
 def test_poll_interval_values(
     massive_session: dm.MassiveSession, rest: Recorder, interval: object
 ) -> None:
-    with pytest.raises(ValueError, match="interval must be a positive, finite time"):
+    with pytest.raises(ValueError, match=r"interval must be (positive|a positive, finite)"):
         news(massive_session).poll(cast("float", interval))
 
 
@@ -262,7 +262,7 @@ def test_poll_interval_values(
 def test_poll_interval_types(
     massive_session: dm.MassiveSession, rest: Recorder, interval: object
 ) -> None:
-    with pytest.raises(TypeError, match="interval must be seconds or a timedelta"):
+    with pytest.raises(TypeError, match="interval must be a number"):
         news(massive_session).poll(cast("float", interval))
 
 

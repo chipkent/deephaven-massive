@@ -22,7 +22,7 @@ import functools
 import importlib
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
@@ -284,10 +284,33 @@ def check_filters(spec: DatasetSpec, filters: Mapping[str, object]) -> None:
         if kind is None:
             raise ValueError(f"{spec.name} has no filter {key!r}; valid filters: {sorted(params)}")
         wrong_bool = isinstance(value, bool) and kind is not ParamKind.BOOLEAN
-        if wrong_bool or not isinstance(value, _KINDS[kind]):
+        if wrong_bool or not isinstance(value, _KINDS[kind]) or not _is_date(kind, value):
             raise ValueError(
                 f"{spec.name} filter {key!r} takes a {kind.value} value, not {value!r}"
             )
+
+
+def _is_date(kind: ParamKind, value: object) -> bool:
+    """Tell whether a value fits a `DATE` parameter; other kinds pass.
+
+    A `DATE` takes a `date` (not a `datetime`) or a `YYYY-MM-DD` string.
+
+    Args:
+        kind: The parameter's kind.
+        value: The filter value.
+
+    Returns:
+        False only for a `DATE` value that is a `datetime` or text that is not an ISO date.
+    """
+    if kind is not ParamKind.DATE:
+        return True
+    if isinstance(value, str):
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            return False
+        return True
+    return not isinstance(value, datetime)
 
 
 @functools.cache
