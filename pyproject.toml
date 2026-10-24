@@ -57,7 +57,7 @@ dev = [
 [tool.uv.sources]
 # The fork's `deephaven-fixes` integration branch, pinned by commit. Bumped only by D-bump PRs.
 # The fork builds as version 0.0.0, so no code or test may check the massive version.
-massive = { git = "https://github.com/chipkent/massive-client-python", rev = "9b0256a737f74f337e5641285e121154591ce8f1" }
+massive = { git = "https://github.com/chipkent/massive-client-python", rev = "fd76d503f7e9729715fc9fee3bebbcc1915aa0d6" }
 
 [tool.hatch.build.targets.sdist]
 # Development-only files stay out of the source distribution.
@@ -191,11 +191,6 @@ exclude = [
 module = ["pyarrow.*"]
 ignore_missing_imports = true
 
-[[tool.mypy.overrides]]
-# FORK-PY-TYPED: the fork ships no py.typed until F4 lands; the D-bump that pins F4 deletes
-# this override.
-module = ["massive.*"]
-ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------------------------
 # Pyright (non-gating second checker)
