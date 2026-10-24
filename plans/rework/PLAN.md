@@ -775,6 +775,12 @@ test fixtures (P6); `HistorySource.AUTO` arbitration (P5, which owns `_flatfiles
 **Approval gates.** Opening the PR. Running `scripts/refresh_massive_catalog.py` fetches docs
 from massive.com (read-only; no approval needed, note it in the PR).
 
+**Follow-ups from the P2 review (PR #46).** `poll()` must handle a verb that races `close()`,
+as `SessionCore._acquire` does for streams: a `poll()` that passed the verb guard just before
+`close()` ran must not start a poller the session will never stop. Register the poller's
+cleanup through `SessionCore.on_close`, which runs it at once on a closed session, or recheck
+the closed flag under `registry_lock` before starting it.
+
 ---
 
 <a id="p4"></a>
@@ -900,6 +906,31 @@ for WS sends (`dumps` returns bytes, H §3) — decode only; `websockets` defaul
 fixtures only); live tests (P8).
 
 **Approval gates.** Opening the PR. The PR must link the D1 PR that bumped the fork SHA.
+
+**Follow-ups from the P2 review (PR #46).** The transport review of P2 (B1–B9) left these notes
+for the implementer:
+
+- Tighten `StreamTransport.open_stream`'s `channel` parameter from `str | None` to `str`: every
+  WebSocket dataset has a channel, and `None` only means "no channel" for REST datasets.
+- If `open_stream` raises after creating its stream scope or taking topic references, it must
+  release both itself before the exception propagates; the session never sees a handle for it.
+- The blink table's shutdown callback must catch the `RuntimeError` that
+  `loop.call_soon_threadsafe` raises once the connection's loop is closed, and only log it: the
+  callback can run long after the connection ended.
+- The flush builds Arrow columns directly from the WebSocket key maps, not through
+  `Schema.to_arrow`, whose per-row dictionaries are too slow for the flush path.
+- Forex and crypto frames carry `sym` in the wire spelling (`EUR/USD`, `BTC-USD`). Canonicalise
+  it before the `where_in` fan-out, so it matches `canonical_view`'s `C:EURUSD` and `X:BTCUSD`.
+- The forex `C` channel sends `x` (the exchange id) as a quoted string; coerce it to `int`.
+- DESIGN § 13.3 names `set_subscriptions(D, resend=...)`; the fork's API is
+  `set_subscriptions(desired)` plus `resubscribe(*topics)`. Correct the DESIGN row in this
+  package.
+
+**Open owner decision (due before P4 and P6): union-schema gaps.** Some wire fields have no
+column in the shared tick schemas: the crypto `XQ` and `XT` fields `x` and `r`, and the futures
+bar fields `dollar_volume`, `session_end_date`, and `settlement_price`, which `BARS` lacks. The
+owner decides whether they become columns of the shared schemas, of per-class schemas, or are
+dropped and documented.
 
 ---
 
@@ -1065,6 +1096,13 @@ lines (F H3) — one name per dataset, no aliases; Benzinga transcripts never ex
 **Shared out of scope.** Shared modules; README (P7); catalog exclusions (P7); live tests (P8).
 
 **Shared approval gates.** Opening the PR.
+
+**Follow-ups from the P2 review (PR #46): SDK hint overrides.** The packages that declare these
+datasets add `ColumnOverride`s, each with a test, for SDK hints that do not match the data:
+`OptionsContract.correction` is hinted `str` but carries an integer (P6b); the snapshot
+`LastQuoteAskSize` and `LastQuoteBidSize` columns are sizes, so `double` (P6a, P6g); and every
+`*Exchange` and `*Tape` column is an `int` id (DESIGN § 11), whatever its hint. The union-schema
+gaps recorded under P4 are an open owner decision that these packages also depend on.
 
 ### P6a — `feat: stocks datasets` — branch `feat/stocks-datasets` — Issue: #17
 DESIGN [§ 8.1 `m.stocks`](DESIGN.md#81-mstocks). Owns `_domains/stocks.py`, including the
@@ -1284,6 +1322,10 @@ never add a probe for an unsupported endpoint (`/v1/summaries`, `/futures/{venue
 **Out of scope.** Changing any behaviour (file a `fix:` package if a note turns out wrong).
 
 **Approval gates.** Opening the PR; the owner runs the suite.
+
+**Follow-ups from the P2 review (PR #46).** Regenerate `tests/data/_symbols/crypto_tickers.csv`
+from the live reference endpoint (`/v3/reference/tickers?market=crypto`) instead of the
+current fixture, and note the date of the snapshot in the PR.
 
 ---
 
