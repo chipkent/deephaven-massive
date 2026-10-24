@@ -314,8 +314,12 @@ user of a Deephaven worker can read.
 
 The session must be created inside a Deephaven worker: an `ExecutionContext` must be active.
 The library captures it at construction and enters it on every library thread before any
-Deephaven call. Construction without an active context raises `MassiveError`. The library never
-starts a JVM.
+Deephaven call. Construction without an active context raises `MassiveError`. The context's
+query scope must also be the Python script session's own (`ScriptSessionQueryScope`), because
+library formulas such as `canonical_view`'s `update_view` call Python functions through it; a
+context from `make_user_exec_ctx(freeze_vars=[...])` holds a frozen `StandaloneQueryScope`
+instead, so construction under it raises `MassiveError` naming the requirement. The library
+never starts a JVM.
 
 A second session with the same key in one process logs a WARNING naming the first. Individual
 plans allow one WebSocket connection per cluster per account.

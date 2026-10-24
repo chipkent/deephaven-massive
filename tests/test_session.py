@@ -13,6 +13,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import new_table, time_table
 from deephaven.column import string_col
+from deephaven.execution_context import make_user_exec_ctx
 from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
@@ -120,6 +121,14 @@ def test_labels_count_up() -> None:
 def test_config_must_be_a_massive_config() -> None:
     with pytest.raises(TypeError, match=r"config must be a dm\.MassiveConfig"):
         dm.MassiveSession(cast("dm.MassiveConfig", {"api_key": "k"}))
+
+
+def test_construction_under_a_frozen_query_scope_fails_fast() -> None:
+    frozen = make_user_exec_ctx(freeze_vars=["dm"])
+    with frozen, pytest.raises(dm.MassiveError, match="frozen copy"):
+        dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    with make_user_exec_ctx():  # an unfrozen user context shares the script session's scope
+        dm.MassiveSession(dm.MassiveConfig(api_key="k")).close()
 
 
 def test_construction_without_an_execution_context_fails_fast() -> None:

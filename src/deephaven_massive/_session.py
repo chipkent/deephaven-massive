@@ -89,6 +89,14 @@ logger = logging.getLogger(__name__)
 # only signal Deephaven offers for "no context is active".
 _POISONED_UPDATE_GRAPH: Final = "PoisonedUpdateGraph"
 
+# The query scope of a script session's context: formulas resolve names through the session's
+# live globals, which is how a formula such as `update_view("Symbol = canonical_symbol(...)")`
+# reaches a Python function the library defines. `make_user_exec_ctx(freeze_vars=[...])`
+# builds a StandaloneQueryScope holding only the frozen variables instead.
+_SCRIPT_QUERY_SCOPE: Final = (
+    "io.deephaven.engine.util.AbstractScriptSession$ScriptSessionQueryScope"
+)
+
 _keys_lock = threading.Lock()
 _session_numbers = itertools.count(1)
 _open_sessions: weakref.WeakSet[SessionCore] = weakref.WeakSet()
@@ -105,6 +113,20 @@ def _has_execution_context(exec_ctx: ExecutionContext) -> bool:
     """
     j_update_graph = exec_ctx.update_graph.j_update_graph
     return str(j_update_graph.getClass().getSimpleName()) != _POISONED_UPDATE_GRAPH
+
+
+def _has_script_query_scope(exec_ctx: ExecutionContext) -> bool:
+    """Tell whether formulas under an execution context can call the library's Python functions.
+
+    Args:
+        exec_ctx: The context `get_exec_ctx()` returned.
+
+    Returns:
+        True when the context's query scope is the Python script session's own scope, False
+        for a frozen copy (`make_user_exec_ctx(freeze_vars=[...])`).
+    """
+    j_query_scope = exec_ctx.j_exec_ctx.getQueryScope()
+    return str(j_query_scope.getClass().getName()) == _SCRIPT_QUERY_SCOPE
 
 
 def _on_update_graph(exec_ctx: ExecutionContext) -> bool:
@@ -666,8 +688,10 @@ class MassiveSession:
 
         Raises:
             TypeError: If `config` is not a `MassiveConfig`.
-            MassiveError: If no Deephaven `ExecutionContext` is active on this thread: the
-                session must be created inside a Deephaven worker.
+            MassiveError: If no Deephaven `ExecutionContext` is active on this thread (the
+                session must be created inside a Deephaven worker), or if the context's query
+                scope is not the Python script session's own, as with
+                `make_user_exec_ctx(freeze_vars=[...])`.
             ValueError: If called on an update-graph thread or under the update-graph lock.
         """
         if config is None:
@@ -684,6 +708,14 @@ class MassiveSession:
             )
         if _on_update_graph(exec_ctx):
             raise ValueError(_ON_UPDATE_GRAPH)
+        if not _has_script_query_scope(exec_ctx):
+            raise MassiveError(
+                "MassiveSession needs an ExecutionContext whose query scope is the Python script "
+                "session's own: the library's formulas call Python functions through it. A "
+                "context from make_user_exec_ctx(freeze_vars=[...]) has a frozen copy instead; "
+                "create the session from the console or an application script, or use "
+                "make_user_exec_ctx() without freeze_vars."
+            )
         log_json_codec_once()
         core = SessionCore(config, exec_ctx, _next_label())
         _register(core)
