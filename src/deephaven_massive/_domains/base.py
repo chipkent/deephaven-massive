@@ -243,6 +243,8 @@ def build_query(
     if venue is not None:
         _require_enum(venue, FuturesVenue, "venue")
     query_class = spec.query_class
+    if timespan is not None:
+        _require_enum(timespan, Timespan, "timespan")
     if timespan is not None and spec.is_bars:
         query_class = bar_query_class(spec, timespan, multiplier)
     request = Request(

@@ -283,6 +283,24 @@ def _interval(value: object) -> timedelta:
     return period
 
 
+def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
+    """Reject `dm.ALL` for a per-ticker `fetch()` endpoint (DESIGN § 7.2).
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments.
+
+    Raises:
+        ValueError: If the symbols are `dm.ALL`; the message names `snapshots(dm.ALL)`.
+    """
+    if request.symbols is ALL:
+        namespace = spec.name.split(".", 1)[0]
+        raise ValueError(
+            f"{spec.name}.fetch() needs explicit symbols; "
+            f"use m.{namespace}.snapshots(dm.ALL).fetch() for every symbol"
+        )
+
+
 @dataclass(frozen=True, repr=False, slots=True)
 class QueryBase:
     """The state every query class shares: the session, the dataset, and the arguments.
@@ -629,19 +647,13 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
+        Symbols of `dm.ALL` raise `ValueError` naming `snapshots(dm.ALL)`.
+
         Returns:
             A static table in the stream's schema.
-
-        Raises:
-            ValueError: If the symbols are `dm.ALL`; the message names `snapshots(dm.ALL)`.
         """
         self._check_thread()
-        if self._request.symbols is ALL:
-            namespace = self._spec.name.split(".", 1)[0]
-            raise ValueError(
-                f"{self._spec.name}.fetch() needs explicit symbols; "
-                f"use m.{namespace}.snapshots(dm.ALL).fetch() for every symbol"
-            )
+        _require_explicit_symbols(self._spec, self._request)
         return self._core.rest_transport().fetch(self._spec, self._request)
 
 
@@ -664,8 +676,12 @@ class HistoryLatestQuery(HistoryQuery):
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
+        The endpoint takes one ticker per request, so symbols of `dm.ALL` raise `ValueError`
+        naming `snapshots(dm.ALL)`; `history()` serves every symbol's daily bars.
+
         Returns:
             A static table in the bars schema.
         """
         self._check_thread()
+        _require_explicit_symbols(self._spec, self._request)
         return self._core.rest_transport().fetch(self._spec, self._request)

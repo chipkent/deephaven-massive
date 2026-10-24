@@ -215,3 +215,8 @@ def test_filters_go_through_the_sdk_check(
     build(massive_session, DIVIDENDS, filters={"pay_date_lte": "2025-12-31"})
     with pytest.raises(ValueError, match="has no filter 'frequency'"):
         build(massive_session, DIVIDENDS, filters={"frequency": 4})
+
+
+def test_timespan_is_an_enum_on_every_dataset(massive_session: dm.MassiveSession) -> None:
+    with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
+        build(massive_session, INDICATOR, timespan="day")

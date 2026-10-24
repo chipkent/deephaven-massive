@@ -264,10 +264,13 @@ def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
     Returns:
         The publication instant, aware.
     """
-    next_day = _midnight(partition + _ONE_DAY, zone).astimezone(NEW_YORK)
-    candidate = datetime.combine(next_day.date(), cutoff, tzinfo=NEW_YORK)
-    if candidate <= next_day:
-        candidate = datetime.combine(next_day.date() + _ONE_DAY, cutoff, tzinfo=NEW_YORK)
+    # Comparisons are made in UTC: Python compares two datetimes that share a tzinfo by their
+    # wall clocks, which is wrong across the repeated hour of a daylight-saving change.
+    start = _midnight(partition + _ONE_DAY, zone)
+    local = start.astimezone(NEW_YORK)
+    candidate = datetime.combine(local.date(), cutoff, tzinfo=NEW_YORK)
+    if candidate.astimezone(UTC) <= start:
+        candidate = datetime.combine(local.date() + _ONE_DAY, cutoff, tzinfo=NEW_YORK)
     return candidate
 
 
@@ -287,7 +290,8 @@ def flat_file_published(partition: date, *, now: datetime, zone: tzinfo, cutoff:
     Returns:
         True if the file can be expected to exist.
     """
-    return now >= publish_time(partition, zone=zone, cutoff=cutoff)
+    published = publish_time(partition, zone=zone, cutoff=cutoff)
+    return now.astimezone(UTC) >= published.astimezone(UTC)
 
 
 def bounds(spec: DatasetSpec, start: DateLike, end: DateLike) -> TimeRange | FuturesSessions:

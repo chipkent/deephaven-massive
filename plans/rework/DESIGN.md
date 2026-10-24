@@ -381,7 +381,10 @@ return result
   bound exclusively to the blink table's `on_shutdown_callback`. A derived table, an open UI
   panel, or a user scope therefore keeps the stream alive and subscribed, even after every
   library-held result has been released.
-- **Weakref callback.** It fires when the Python wrapper is collected. Under
+- **Collection finalizer.** A `weakref.finalize` on the result fires when the Python wrapper
+  is collected. It holds the result registry and the record strongly, and through them the
+  reaper and the session core, for exactly as long as the result lives, so a result that
+  outlives every reference to its session and query is still released. Under
   `registry_lock` it flips the record's once-only `released` flag; if the flag was already set
   it returns. Otherwise it puts `record_id` on the reaper queue (`queue.SimpleQueue`). It makes no
   Java call.
@@ -542,7 +545,8 @@ maxima are validated by the server (HTTP 400 becomes `MassiveError`).
 
 ### 7.2 Synchronous `ValueError`s for parameter values
 
-- `fetch()` with `ALL` on a `StreamHistoryLatestQuery`.
+- `fetch()` with `ALL` on a `StreamHistoryLatestQuery` or a `HistoryLatestQuery` (the "last"
+  and `/prev` endpoints take one ticker per request).
 - `history()` with `ALL` over REST, except daily bars (the grouped-daily endpoint).
 - `history(source=HistorySource.REST)` on `indices.values` (flat files only).
 - `history(source=HistorySource.FLAT_FILES)` when a flat-file constraint is violated

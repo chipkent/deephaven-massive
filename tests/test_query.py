@@ -529,3 +529,13 @@ def test_last_by_matches_non_canonical_spellings_in_a_reactive_table(
     watchlist.delete(new_table([string_col("Symbol", ["EUR/USD"])]))
     assert _wait_for(lambda: current.size == 0)
     massive_session.release(current)
+
+
+def test_previous_session_fetch_rejects_all(
+    massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    q = make(massive_session, BARS_SPEC, symbols=dm.ALL, timespan=Timespan.DAY)
+    assert isinstance(q, HistoryLatestQuery)
+    with pytest.raises(ValueError, match=r"forex\.bars\.fetch\(\) needs explicit symbols"):
+        q.fetch()
+    assert rest.calls == []

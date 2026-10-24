@@ -489,3 +489,34 @@ def test_a_closer_registered_after_close_runs_at_once(
     assert ran == ["late"]
     massive_session.close()  # idempotent: the late closer does not run again
     assert ran == ["late"]
+
+
+def test_a_result_keeps_its_session_alive() -> None:
+    # A result that outlives every reference to its session and query must still be released
+    # when it is collected: the release path (registry, reaper, core) lives as long as it does.
+    # An independent fake is needed for the same reason as in the test above.
+    fakes = importlib.import_module("_fakes.stream")
+    fake = fakes.FakeStreamTransport()
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="outliving-result"))
+    core = m._core
+    vars(core)["stream_transport"] = lambda: fake
+    alive = weakref.ref(core)
+    reaper = core._reaper._thread
+    result = stream_query(m).append_only()
+    del core, m
+    gc.collect()
+    assert alive() is not None
+    assert reaper.is_alive()
+    assert not fake.shutdown[1].is_set()
+    del result
+    gc.collect()
+    assert fake.shutdown[1].wait(TIMEOUT)
+    pause = threading.Event()  # never set; only paces the bounded wait below
+    for _ in range(200):
+        gc.collect()
+        if alive() is None:
+            break
+        pause.wait(0.05)
+    assert alive() is None
+    reaper.join(TIMEOUT)
+    assert not reaper.is_alive()

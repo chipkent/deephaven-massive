@@ -71,6 +71,8 @@ KeyMap = typing.Mapping[str, str]
 
 _DATE_FIELD: Final = re.compile(r"^(date|.*_date)$")
 _UTC_FIELD: Final = re.compile(r"^.+_utc$")
+_ISO_FRACTION: Final = re.compile(r"\.(\d+)")
+_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 class ColumnType(StrEnum):
@@ -146,8 +148,8 @@ def _coerce(value: object, column_type: ColumnType) -> object:
     Four conversions Arrow does not do by itself: an ISO `YYYY-MM-DD` string becomes a `date`
     for a `LocalDate` column; an ISO-8601 date-time string (`2024-06-24T18:33:53Z`) becomes an
     aware `datetime` for an `Instant` column, read as UTC when it carries no offset (Massive's
-    ISO timestamps are UTC; digits below the microsecond are truncated, since `datetime`
-    resolves microseconds); a dict or list becomes its JSON text for a `String` column (used by
+    ISO timestamps are UTC), keeping every fraction digit down to the nanosecond; a dict or list
+    becomes its JSON text for a `String` column, nested SDK models included (used by
     `ColumnOverride(type=ColumnType.STRING)` on composite SDK fields); and a single integer
     becomes a one-element list for an `int[]` column (the WebSocket quote `c` is one condition
     where REST sends a list). Everything else passes through for Arrow to check.
@@ -162,13 +164,53 @@ def _coerce(value: object, column_type: ColumnType) -> object:
     if column_type is ColumnType.LOCAL_DATE and isinstance(value, str):
         return date.fromisoformat(value)
     if column_type is ColumnType.INSTANT and isinstance(value, str):
-        moment = datetime.fromisoformat(value)
-        return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+        return _iso_to_epoch_ns(value)
     if column_type is ColumnType.STRING and isinstance(value, dict | list):
-        return json.dumps(value, sort_keys=True)
+        return json.dumps(value, sort_keys=True, default=_jsonable)
     if column_type is ColumnType.INT_ARRAY and isinstance(value, int):
         return [value]
     return value
+
+
+def _iso_to_epoch_ns(text: str) -> int:
+    """Convert ISO-8601 date-time text to exact epoch nanoseconds.
+
+    `datetime` resolves only microseconds, so the fraction is taken apart first: the text
+    without it is parsed by `datetime.fromisoformat`, and up to nine fraction digits are added
+    as nanoseconds (digits beyond the nanosecond are dropped). Text without an offset is UTC.
+
+    Args:
+        text: For example `2024-06-24T18:33:53.123456789Z`.
+
+    Returns:
+        Nanoseconds since the Unix epoch.
+    """
+    match = _ISO_FRACTION.search(text)
+    fraction = match.group(1) if match else ""
+    whole = text[: match.start()] + text[match.end() :] if match else text
+    moment = datetime.fromisoformat(whole)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    delta = moment - _EPOCH
+    seconds = delta.days * 86_400 + delta.seconds
+    return seconds * 10**9 + int(fraction[:9].ljust(9, "0"))
+
+
+def _jsonable(value: object) -> object:
+    """Make a nested SDK model JSON-serializable, for `json.dumps(default=...)`.
+
+    Args:
+        value: An object `json` cannot encode by itself.
+
+    Returns:
+        The dictionary of a dataclass instance (nested models included).
+
+    Raises:
+        TypeError: If the value is not a dataclass instance.
+    """
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
 
 
 @dataclass(frozen=True, slots=True)

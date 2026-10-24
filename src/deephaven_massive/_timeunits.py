@@ -55,6 +55,8 @@ FMV_NS_THRESHOLD: Final = 10**17
 """FMV `t` values at or above this are nanoseconds; smaller values are milliseconds."""
 
 _NS_PER_MS: Final = 1_000_000
+_MIN_INT64: Final = -(2**63)
+_MAX_INT64: Final = 2**63 - 1
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _MIN_CHECKED_NS: Final = int((datetime(1990, 1, 1, tzinfo=UTC) - _EPOCH).total_seconds()) * 10**9
 _MAX_CHECKED_NS: Final = int((datetime(2101, 1, 1, tzinfo=UTC) - _EPOCH).total_seconds()) * 10**9
@@ -178,7 +180,8 @@ class TimeUnitTable:
             Nanoseconds since the Unix epoch.
 
         Raises:
-            MassiveError: If the rule is unverified and the result lies outside 1990 to 2100.
+            MassiveError: If the result does not fit 64-bit nanoseconds, or the rule is
+                unverified and the result lies outside 1990 to 2100.
         """
         rule = self.rule(key)
         nanos = value
@@ -188,7 +191,8 @@ class TimeUnitTable:
             is_ns = value >= FMV_NS_THRESHOLD
             _log_fmv_unit(TimeUnit.NANOSECONDS if is_ns else TimeUnit.MILLISECONDS)
             nanos = value if is_ns else value * _NS_PER_MS
-        if rule.unverified and not _MIN_CHECKED_NS <= nanos < _MAX_CHECKED_NS:
+        out_of_range = not _MIN_INT64 <= nanos <= _MAX_INT64
+        if out_of_range or (rule.unverified and not _MIN_CHECKED_NS <= nanos < _MAX_CHECKED_NS):
             raise MassiveError(f"timestamp unit mismatch for {key.label}")
         return nanos
 
@@ -221,8 +225,14 @@ class TimeUnitTable:
             is_ns = pc.call_function("greater_equal", [nanos, FMV_NS_THRESHOLD])
             any_ns = pc.call_function("any", [is_ns]).as_py()
             _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
-            # Unchecked: the products of nanosecond values may wrap, but if_else discards them.
-            scaled = pc.call_function("multiply", [nanos, _NS_PER_MS])
+            # Only the millisecond values are scaled (nanosecond ones are masked to null), and
+            # with overflow checking: a millisecond value too large for 64-bit nanoseconds is a
+            # unit mismatch, never a silently wrapped timestamp.
+            millis = pc.call_function("if_else", [is_ns, None, nanos])
+            try:
+                scaled = pc.call_function("multiply_checked", [millis, _NS_PER_MS])
+            except pa.ArrowInvalid:
+                raise MassiveError(f"timestamp unit mismatch for {key.label}") from None
             nanos = pc.call_function("if_else", [is_ns, nanos, scaled])
         if rule.unverified:
             bounds = pc.call_function("min_max", [nanos]).as_py()

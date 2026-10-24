@@ -12,7 +12,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes
 from massive.rest.models import Agg, LastTrade, Quote, Ticker, TickerSnapshot, Trade
-from massive.rest.models.contracts import OptionsContract
+from massive.rest.models.contracts import OptionsContract, Underlying
 from massive.rest.models.snapshot import OptionContractSnapshot
 from massive.websocket.models import EquityAgg, EquityQuote, EquityTrade, IndexValue
 
@@ -338,7 +338,43 @@ def test_flattened_names_that_collide_are_rejected() -> None:
         model_schema("x.y", Outer)
 
 
-def test_iso_text_below_the_microsecond_is_truncated() -> None:
+def test_iso_text_keeps_nanoseconds() -> None:
     schema = Schema("x", (Column("At", ColumnType.INSTANT),))
-    batch = schema.to_arrow([{"At": "2024-06-24T18:33:53.123456789Z"}])
-    assert batch.column("At").cast(pa.int64()).to_pylist() == [1719254033123456000]
+    batch = schema.to_arrow(
+        [
+            {"At": "2024-06-24T18:33:53.123456789Z"},
+            {"At": "2024-06-24T14:33:53.000000001-04:00"},
+            {"At": "2024-06-24T18:33:53.5"},
+            {"At": "2024-06-24T18:33:53.123456789999+00:00"},  # beyond ns: truncated
+            {"At": "2024-06-24T18:33:53Z"},
+        ]
+    )
+    assert batch.column("At").cast(pa.int64()).to_pylist() == [
+        1719254033123456789,
+        1719254033000000001,
+        1719254033500000000,
+        1719254033123456789,
+        1719254033000000000,
+    ]
+
+
+def test_string_overrides_serialize_nested_models() -> None:
+    derived = model_schema(
+        "options.contracts",
+        OptionsContract,
+        overrides={"additional_underlyings": ColumnOverride(type=ColumnType.STRING)},
+    )
+    contract = OptionsContract(
+        ticker="O:AAPL250117C00150000",
+        additional_underlyings=[Underlying(amount=100.0, type="equity", underlying="AAPL")],
+    )
+    batch = derived.schema.to_arrow([derived.row(contract)])
+    assert batch.column("AdditionalUnderlyings").to_pylist() == [
+        '[{"amount": 100.0, "type": "equity", "underlying": "AAPL"}]'
+    ]
+
+
+def test_string_overrides_reject_values_json_cannot_encode() -> None:
+    schema = Schema("x", (Column("S", ColumnType.STRING),))
+    with pytest.raises(MassiveError, match=r"schema mismatch in x\.S"):
+        schema.to_arrow([{"S": {"a": {1, 2}}}])

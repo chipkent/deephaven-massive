@@ -9,9 +9,9 @@ that one table, and is tracked by a `ResultRecord`:
 1. `make_result` opens a fresh scope on the caller thread, builds the table inside it, and, for
    a new wrapper of an existing Java table (`blink()`), manages the wrapper explicitly.
 2. `ResultRegistry.track` records the result under the session's registry lock, keyed by
-   `id(result)`, with a weak reference whose callback fires when the Python wrapper is
+   `id(result)`, with a `weakref.finalize` that fires when the Python wrapper is
    garbage-collected.
-3. Release happens exactly once per record, by whichever comes first: the weakref callback
+3. Release happens exactly once per record, by whichever comes first: the finalizer
    (garbage collection), `ResultRegistry.release` (`m.release(table)`). Each flips the
    record's once-only `released` flag under the registry lock and, if it was the first,
    submits a job to the `Reaper`.
@@ -285,14 +285,15 @@ class ResultRegistry:
         """
         with self._lock:
             key = id(result)
-
-            def collected(_ref: weakref.ref[Table]) -> None:
-                self._on_collected(record, key)
-
-            record = ResultRecord(
-                next(self._ids), scope, on_released, weakref.ref(result, collected)
-            )
+            record = ResultRecord(next(self._ids), scope, on_released, weakref.ref(result))
             self._results[key] = record
+            # The finalizer, not the registry, roots the release path: it holds this registry
+            # (and through it the reaper) and the record (whose owner callback holds the
+            # session core) for exactly as long as the result lives, so a result that outlives
+            # every reference to its session is still released when it is collected. Nothing
+            # refers to the result strongly, so no cycle keeps anything alive beyond it.
+            finalizer = weakref.finalize(result, self._on_collected, record, key)
+            finalizer.atexit = False
         return record
 
     def release(self, table: Table) -> None:
@@ -328,7 +329,7 @@ class ResultRegistry:
             return sum(not record.released for record in tuple(self._results.values()))
 
     def _on_collected(self, record: ResultRecord, key: int) -> None:
-        """Weakref callback: the result's wrapper was garbage-collected.
+        """Finalizer: the result's wrapper was garbage-collected.
 
         Runs on whatever thread collected the wrapper. Makes no Java call: under the lock it
         removes the record and flips its flag, then queues the release if it was the first.

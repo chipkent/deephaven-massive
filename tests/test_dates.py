@@ -248,3 +248,15 @@ def test_partition_dates_across_the_spring_dst_change() -> None:
         date(2025, 3, 9),
         date(2025, 3, 10),
     )
+
+
+def test_publication_compares_instants_across_the_fall_back_hour() -> None:
+    cutoff = time(1, 30)
+    published = publish_time(date(2025, 11, 1), zone=NEW_YORK, cutoff=cutoff)
+    assert published.astimezone(UTC) == datetime(2025, 11, 2, 5, 30, tzinfo=UTC)  # 01:30 EDT
+    # 01:15 EST (fold=1) is 06:15Z, 45 minutes after publication, though its wall clock reads
+    # earlier than 01:30.
+    later = datetime(2025, 11, 2, 1, 15, tzinfo=NEW_YORK, fold=1)
+    assert flat_file_published(date(2025, 11, 1), now=later, zone=NEW_YORK, cutoff=cutoff)
+    earlier = datetime(2025, 11, 2, 1, 15, tzinfo=NEW_YORK, fold=0)
+    assert not flat_file_published(date(2025, 11, 1), now=earlier, zone=NEW_YORK, cutoff=cutoff)

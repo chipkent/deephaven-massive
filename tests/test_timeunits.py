@@ -69,7 +69,7 @@ def test_fmv_rule_at_the_boundary(
     monkeypatch.setattr(_errors, "_logged", set())
     with caplog.at_level(logging.INFO, logger="deephaven_massive._timeunits"):
         assert TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD) == FMV_NS_THRESHOLD
-        assert TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD - 1) == (FMV_NS_THRESHOLD - 1) * 10**6
+        # Just below the threshold is milliseconds; such a value overflows (see the test below).
         # The documentation sample, 13 digits: milliseconds.
         assert TABLE.to_epoch_ns(FMV, 1678220098130) == 1678220098130 * 10**6
     detected = [r for r in caplog.records if "FMV timestamps detected" in r.getMessage()]
@@ -141,3 +141,16 @@ def test_every_declared_timestamp_field_of_every_dataset_has_a_unit() -> None:
                     assert TimeField(spec.name, key_map_transport, key) in table
     for field in unit_rules(datasets()):
         assert field in table
+
+
+def test_fmv_millisecond_overflow_is_rejected() -> None:
+    # Just below the threshold is milliseconds; times 10**6 it exceeds a 64-bit nanosecond.
+    with pytest.raises(MassiveError, match=r"timestamp unit mismatch for stocks\.fmv\.t"):
+        TABLE.to_epoch_ns_array(FMV, pa.array([FMV_NS_THRESHOLD, FMV_NS_THRESHOLD - 1]))
+    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
+        TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD - 1)
+
+
+def test_scalar_millisecond_overflow_is_rejected() -> None:
+    with pytest.raises(MassiveError, match=r"timestamp unit mismatch for stocks\.trades\.t"):
+        TABLE.to_epoch_ns(MS, 2**62)
