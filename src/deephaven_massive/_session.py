@@ -44,7 +44,7 @@ from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
-from deephaven_massive._config import MassiveConfig, log_json_codec_once
+from deephaven_massive._config import MassiveConfig, log_json_codec_once, require_positive_int
 from deephaven_massive._diagnostics import (
     Diagnostics,
     StreamRow,
@@ -1015,7 +1015,9 @@ class MassiveSession:
             ValueError: If `symbols` is `dm.ALL`.
             NotImplementedError: Always, until the unified snapshot dataset is implemented.
         """
-        list_params(sort=sort, order=order, limit=limit)
+        list_params(sort=sort, order=order)
+        if limit is not None:
+            require_positive_int("limit", limit)
         if symbols is ALL:
             raise ValueError(
                 "m.snapshots() needs tickers; use a class's snapshots(dm.ALL), such as "

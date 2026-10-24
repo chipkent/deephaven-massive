@@ -30,7 +30,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
-from deephaven_massive._schema import BARS, INDEX_VALUES, TRADES
+from deephaven_massive._schema import BARS, INDEX_VALUES, TRADES, Column, ColumnType, Schema
 from deephaven_massive._symbols import SymbolTable
 
 TIMEOUT = 30.0
@@ -66,11 +66,18 @@ VALUES_SPEC = DatasetSpec(
 NEWS_SPEC = DatasetSpec(
     name="economy.inflation",
     query_class=Query,
+    schema=Schema("economy.inflation", (Column("Date", ColumnType.LOCAL_DATE),)),
     fetch_method="list_inflation",
     poll_mode=PollMode.APPEND,
     poll_keys=("Date",),
 )
-HISTORY_SPEC = DatasetSpec(name="economy.yields", query_class=HistoryQuery, history_method="x")
+HISTORY_SPEC = DatasetSpec(
+    name="economy.yields",
+    query_class=HistoryQuery,
+    schema=Schema("economy.yields", (Column("Date", ColumnType.LOCAL_DATE),)),
+    poll_keys=("Date",),
+    history_method="x",
+)
 FUTURES_SPEC = DatasetSpec(
     name="futures.trades",
     query_class=StreamHistoryQuery,

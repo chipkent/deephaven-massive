@@ -203,6 +203,39 @@ def test_crypto_quotes_cover_the_vendored_tickers(
     assert list(CRYPTO_QUOTES) == sorted(CRYPTO_QUOTES, key=len, reverse=True)
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("aapl", "AAPL"),
+        ("O:AAPL250117C00150000", "O:AAPL250117C00150000"),
+        ("i:spx", "I:SPX"),
+        ("C:EUR/USD", "C:EURUSD"),
+        ("x:btc-usd", "X:BTCUSD"),
+        ("ESZ5", "ESZ5"),
+    ],
+)
+def test_canonical_without_a_class_selects_it_by_prefix(raw: str, expected: str) -> None:
+    assert canonical(None, raw) == expected
+    assert normalize(None, [raw]) == (expected,)
+
+
+def test_the_prefix_message_names_the_rule() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^'X:BTCUSD' carries the prefix of another asset class; stocks symbols have no "
+        r"prefix$",
+    ):
+        canonical(AssetClass.STOCKS, "X:BTCUSD")
+    with pytest.raises(
+        ValueError,
+        match=r"^'C:EURUSD' carries the prefix of another asset class; crypto symbols use the "
+        r"X: prefix$",
+    ):
+        canonical(AssetClass.CRYPTO, "C:EURUSD")
+    with pytest.raises(ValueError, match="crypto symbols use the X: prefix"):
+        canonical(None, "X:C:BTCUSD")
+
+
 @pytest.mark.parametrize(("asset_class", "raw", "expected"), CANONICAL_FORMS)
 def test_canonical_is_idempotent(asset_class: AssetClass, raw: str, expected: str) -> None:
     assert canonical(asset_class, canonical(asset_class, raw)) == expected

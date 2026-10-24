@@ -16,9 +16,11 @@ import pytest
 from deephaven_massive import _catalog, _domains
 from deephaven_massive._catalog import (
     DOMAIN_MODULES,
+    SCHEMA_FROM_MODEL,
     SDK_PARAMS,
     DatasetSpec,
     ParamKind,
+    SymbolParam,
     check_filters,
     datasets,
     filter_params,
@@ -28,7 +30,7 @@ from deephaven_massive._catalog import (
 )
 from deephaven_massive._enums import AssetClass, Timespan, Transport
 from deephaven_massive._query import Query, StreamHistoryLatestQuery
-from deephaven_massive._schema import TRADES
+from deephaven_massive._schema import TRADES, ColumnOverride, ColumnType
 from deephaven_massive._timeunits import TimeField, TimeUnit, UnitRule
 
 
@@ -118,10 +120,64 @@ def test_spec_validation() -> None:
         _trades(unverified_time_units=frozenset({(Transport.WS, "q")}))
     with pytest.raises(ValueError, match=r"poll_keys \['Ticker'\]"):
         _trades(poll_keys=("Ticker",))
-    # A REST dataset may derive its schema later; a WebSocket dataset may not.
-    assert _trades(schema=None, channels={}, poll_keys=("Ticker",)).schema is None
+    with pytest.raises(ValueError, match="give exactly one of schema and rest_model"):
+        _trades(schema=SCHEMA_FROM_MODEL, channels={})
+    with pytest.raises(ValueError, match="give exactly one of schema and rest_model"):
+        _dividends(schema=TRADES.schema)  # a second, conflicting schema
     with pytest.raises(ValueError, match=r"test\.trades: a WebSocket dataset .* needs a schema"):
-        _trades(schema=None)
+        _trades(schema=SCHEMA_FROM_MODEL, rest_model=_Dividend)
+    with pytest.raises(ValueError, match=r"test\.trades: a WebSocket dataset .* needs a class"):
+        _trades(asset_class=None)
+    for name in ("trades.", ".trades"):  # an empty half of the name, on either side
+        with pytest.raises(ValueError, match=r"must be '<namespace>\.<dataset>'"):
+            _trades(name=name)
+
+
+@dataclasses.dataclass
+class _Dividend:
+    # A stand-in SDK model: a REST dataset's schema is derived from such a class.
+    ticker: str | None = None
+    ex_dividend_date: str | None = None
+    cash_amount: float | None = None
+    last_updated: int | None = None
+
+
+def _dividends(**changes: object) -> DatasetSpec:
+    spec = DatasetSpec(
+        name="stocks.dividends",
+        query_class=Query,
+        asset_class=AssetClass.STOCKS,
+        rest_model=_Dividend,
+        overrides={"ticker": ColumnOverride(name="Symbol")},
+        time_units={(Transport.REST, "last_updated"): TimeUnit.NANOSECONDS},
+        symbol_param=SymbolParam.TICKER,
+        per_symbol=True,
+    )
+    return dataclasses.replace(spec, **cast("dict[str, Any]", changes))
+
+
+def test_a_rest_dataset_derives_its_schema_from_its_model() -> None:
+    spec = _dividends()
+    columns = {c.name: c.type for c in spec.schema.columns}
+    assert columns == {
+        "Symbol": ColumnType.STRING,
+        "ExDividendDate": ColumnType.LOCAL_DATE,
+        "CashAmount": ColumnType.DOUBLE,
+        "LastUpdated": ColumnType.INSTANT,  # it has a REST time unit
+    }
+    assert spec.rest_columns == {
+        "ticker": "Symbol",
+        "ex_dividend_date": "ExDividendDate",
+        "cash_amount": "CashAmount",
+        "last_updated": "LastUpdated",
+    }
+    assert spec.symbol_param is SymbolParam.TICKER
+    assert _trades().rest_columns == {}  # a hand-written schema has no model columns
+    # The import-time checks now run for REST datasets too.
+    with pytest.raises(ValueError, match=r"poll_keys \['Ticker'\]"):
+        _dividends(poll_keys=("Ticker",))
+    with pytest.raises(ValueError, match="has no fields"):
+        _dividends(overrides={"nope": ColumnOverride(name="Nope")})
 
 
 def test_every_instant_field_of_a_key_map_needs_a_time_unit() -> None:

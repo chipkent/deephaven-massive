@@ -114,6 +114,9 @@ class Request:
         end: The upper bound of the dataset's time axis, or of `history()`.
         params: The dataset's other typed parameters, by SDK parameter name, sorted by name.
         filters: The `filters` mapping, by SDK parameter name, sorted by name.
+        limit: The cap on the total number of rows across pages, or None for every row. It is
+            not an SDK parameter: the page size is internal (`DatasetSpec.page_size`), and
+            the REST transport stops paging once `limit` rows have arrived.
     """
 
     symbols: NormalizedSymbols | None = None
@@ -124,6 +127,7 @@ class Request:
     end: date | datetime | None = None
     params: tuple[tuple[str, ParamValue], ...] = ()
     filters: tuple[tuple[str, ParamValue], ...] = ()
+    limit: int | None = None
 
     def symbol_key(self) -> NormalizedSymbols:
         """Return the symbol part of a stream key.
@@ -546,7 +550,7 @@ class StreamQuery(QueryBase):
         if not isinstance(symbols, SymbolTable):
             return self._stream(lambda blink: blink.last_by(list(keys)))
         watch = symbols.table
-        asset_class = self._spec.asset_class or AssetClass.STOCKS
+        asset_class = self._spec.asset_class
         if "Symbol" in keys:
             # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
             return self._stream(
@@ -589,7 +593,7 @@ class StreamQuery(QueryBase):
         repeated = sorted({str(key) for key in keys if keys.count(key) > 1})
         if repeated:
             raise ValueError(f"by names {repeated} more than once")
-        columns = self._spec.schema.column_names if self._spec.schema is not None else ()
+        columns = self._spec.schema.column_names
         unknown = [key for key in keys if key not in columns]
         if unknown:
             raise ValueError(

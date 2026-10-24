@@ -15,6 +15,10 @@ input form to the *canonical* form, which is Massive's REST ticker, and that is 
 | forex   | `EUR/USD`, `EUR-USD`, `EURUSD`, `C:EURUSD` | `C:EURUSD`              |
 | crypto  | `BTC-USD`, `BTC/USD`, `X:BTCUSD`           | `X:BTCUSD`              |
 
+Datasets that span asset classes (indicators, reference data, the unified snapshot) pass no
+class: the prefix then selects the class (`O:` options, `I:` indices, `C:` forex, `X:`
+crypto), a symbol without one is a stock, and that class's rules apply unchanged.
+
 `ws_symbol` turns a canonical symbol back into the WebSocket form, and `underlying` parses the
 underlying ticker out of an OCC option symbol (the `Underlying` column of options rows).
 
@@ -89,6 +93,7 @@ _PREFIXES: Final[dict[AssetClass, str]] = {
     AssetClass.FOREX: "C:",
     AssetClass.CRYPTO: "X:",
 }
+_CLASS_BY_PREFIX: Final[dict[str, AssetClass]] = {p: c for c, p in _PREFIXES.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,11 +143,13 @@ def _split_pair(body: str, raw: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def canonical(asset_class: AssetClass, raw: object) -> str:
+def canonical(asset_class: AssetClass | None, raw: object) -> str:
     """Return the canonical Massive form of one symbol of an asset class.
 
     Args:
-        asset_class: The class whose rules apply.
+        asset_class: The class whose rules apply, or None for a dataset that spans classes:
+            the symbol's prefix then selects the class (`O:`, `I:`, `C:`, `X:`), and a symbol
+            without one is a stock.
         raw: The symbol in any accepted input form (see the module table). Surrounding
             whitespace is ignored and letters are upper-cased.
 
@@ -152,20 +159,16 @@ def canonical(asset_class: AssetClass, raw: object) -> str:
     Raises:
         TypeError: If `raw` is not a `str`.
         ValueError: If `raw` is empty, contains characters no Massive symbol has (spaces,
-            commas), carries another class's prefix (`X:` on a stock, `C:` on crypto), is not
+            commas), carries another class's prefix (`X:` on a stock, `C:` on crypto; the
+            message says which prefix, if any, the class uses), carries an unknown prefix
+            when no class is given, is not
             a valid OCC symbol for options, is not a readable pair for forex, or is not a
             crypto pair that ends in one of `CRYPTO_QUOTES` (checked here, so the WebSocket
             form can always be recovered).
     """
     if not isinstance(raw, str):
         raise TypeError(f"a symbol must be a str, not {type(raw).__name__}")
-    text = raw.strip().upper()
-    if not _PLAIN.match(text):
-        raise ValueError(f"{raw!r} is not a symbol")
-    prefix = _PREFIXES.get(asset_class, "")
-    body = text.removeprefix(prefix) if prefix else text
-    if ":" in body:
-        raise ValueError(f"{raw!r} has a class prefix that is not {asset_class.value}'s")
+    asset_class, prefix, body = _class_and_body(asset_class, raw)
     if asset_class is AssetClass.OPTIONS:
         symbol = f"O:{body}"
         if not _OCC.match(symbol):
@@ -187,6 +190,35 @@ def canonical(asset_class: AssetClass, raw: object) -> str:
             raise ValueError(f"{raw!r} does not split back unambiguously; write it as BASE-QUOTE")
         return f"X:{base}{quote}"
     return f"{prefix}{body}"
+
+
+def _class_and_body(asset_class: AssetClass | None, raw: str) -> tuple[AssetClass, str, str]:
+    """Check a raw symbol's characters and prefix, and split it into class, prefix, and body.
+
+    Args:
+        asset_class: The dataset's class, or None to select it by the symbol's prefix.
+        raw: The symbol as the caller wrote it.
+
+    Returns:
+        `(class, prefix, body)`: the class whose rules apply, its prefix (empty for classes
+        without one), and the upper-cased symbol without that prefix.
+
+    Raises:
+        ValueError: If `raw` is not a plain symbol, or carries another class's prefix.
+    """
+    text = raw.strip().upper()
+    if not _PLAIN.match(text):
+        raise ValueError(f"{raw!r} is not a symbol")
+    if asset_class is None:
+        asset_class = _CLASS_BY_PREFIX.get(text[:2], AssetClass.STOCKS)
+    prefix = _PREFIXES.get(asset_class, "")
+    body = text.removeprefix(prefix) if prefix else text
+    if ":" in body:
+        rule = f"use the {prefix} prefix" if prefix else "have no prefix"
+        raise ValueError(
+            f"{raw!r} carries the prefix of another asset class; {asset_class.value} symbols {rule}"
+        )
+    return asset_class, prefix, body
 
 
 def _split_crypto(body: str, raw: str) -> tuple[str, str]:
@@ -252,7 +284,9 @@ def underlying(option_symbol: str) -> str:
     return match["root"]
 
 
-def symbol_canonicalizer(asset_class: AssetClass) -> Callable[[str | None], str | None]:
+def symbol_canonicalizer(
+    asset_class: AssetClass | None,
+) -> Callable[[str | None], str | None]:
     """Return the per-row canonicalizer applied to a reactive symbol table's `Symbol` column.
 
     The returned function maps each row's symbol to its canonical form with `canonical`, so a
@@ -262,11 +296,13 @@ def symbol_canonicalizer(asset_class: AssetClass) -> Callable[[str | None], str 
     that one log record and takes no lock but the log-once guard.
 
     Args:
-        asset_class: The class whose symbol rules apply.
+        asset_class: The class whose rules apply, or None to select it by each symbol's
+            prefix (see `canonical`).
 
     Returns:
         A function from a raw symbol to its canonical form or None.
     """
+    kind = "any-class" if asset_class is None else asset_class.value
 
     def canonical_symbol(symbol: str | None) -> str | None:
         if symbol is None:
@@ -276,10 +312,10 @@ def symbol_canonicalizer(asset_class: AssetClass) -> Callable[[str | None], str 
         except (TypeError, ValueError):
             log_once(
                 logger,
-                f"invalid-table-symbol:{asset_class.value}",
+                f"invalid-table-symbol:{kind}",
                 "a symbol table holds %r, which is not a valid %s symbol; such rows are ignored",
                 symbol,
-                asset_class.value,
+                kind,
                 level=logging.WARNING,
             )
             return None
@@ -287,7 +323,7 @@ def symbol_canonicalizer(asset_class: AssetClass) -> Callable[[str | None], str 
     return canonical_symbol
 
 
-def canonical_view(asset_class: AssetClass, table: Table) -> Table:
+def canonical_view(asset_class: AssetClass | None, table: Table) -> Table:
     """Return a view of a reactive symbol table whose `Symbol` column is canonical.
 
     Every consumer of a reactive symbol table reads it through this view, so the canonical
@@ -298,7 +334,7 @@ def canonical_view(asset_class: AssetClass, table: Table) -> Table:
     call's local variables.
 
     Args:
-        asset_class: The class whose symbol rules apply.
+        asset_class: The class whose symbol rules apply, or None to select it by prefix.
         table: The user's table with a `Symbol` column.
 
     Returns:
@@ -308,7 +344,7 @@ def canonical_view(asset_class: AssetClass, table: Table) -> Table:
     return table.update_view([f"Symbol = {canonical_symbol.__name__}(Symbol)"])
 
 
-def normalize(asset_class: AssetClass, symbols: Symbols) -> NormalizedSymbols:
+def normalize(asset_class: AssetClass | None, symbols: Symbols) -> NormalizedSymbols:
     """Normalize a `Symbols` argument when a query is built.
 
     Rules (DESIGN § 10): `dm.ALL` passes through; a Deephaven `Table` must have a `Symbol`
@@ -320,7 +356,8 @@ def normalize(asset_class: AssetClass, symbols: Symbols) -> NormalizedSymbols:
     alternative to name.
 
     Args:
-        asset_class: The class whose symbol rules apply.
+        asset_class: The class whose symbol rules apply, or None for a dataset that spans
+            classes (each symbol's prefix selects its class; see `canonical`).
         symbols: The argument as the user passed it.
 
     Returns:

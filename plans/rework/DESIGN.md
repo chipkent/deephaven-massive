@@ -183,7 +183,7 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 | `_enums.py` | The fourteen public enums and the internal `Recency`, `ChannelFamily`, and `Transport` enums; the `_require_enum` runtime check. |
 | `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases, and `override` (`typing_extensions.override` for the type checker, a no-op at run time, since `typing.override` needs Python 3.12). |
 | `_errors.py` | `MassiveError`, `AuthenticationError`, `EntitlementError`. |
-| `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST method, `start`/`end` parameter pair, poll default, flat-file prefix). Also the generated `SDK_PARAMS` table ([section 9](#9-filters)). |
+| `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST method, `start`/`end` parameter pair, poll default, flat-file prefix, how symbols reach a REST request (`SymbolParam`: `ticker`, `tickers`, `ticker.any_of`, path segment, `from`/`to` pair)). A REST dataset gives its SDK model (`rest_model`) and the record derives its schema from it at construction, so the poll-key and time-unit checks run at import for every dataset; exactly one of a hand-written schema and a model is given, and a WebSocket dataset always has a hand-written schema and an asset class. Also the generated `SDK_PARAMS` table ([section 9](#9-filters)). |
 | `_schema.py` | The schema registry: SDK-model flattening, PascalCase naming, the dtype override table, the four hand-written tick schemas (trades, quotes, bars, index values) with per-transport key maps. |
 | `_timeunits.py` | The `(dataset, transport, field) -> unit` table and the conversion rules ([section 12](#12-timestamp-units-and-day-boundaries)). |
 | `_symbols.py` | Symbol normalization and the `Symbol`/`Underlying` rule ([section 10](#10-symbols-and-all)). |
@@ -640,7 +640,9 @@ Notation:
 - `…T` is `start: DateLike | None = None, end: DateLike | None = None` followed by `…F`. It
   exists only on datasets whose row has a named time axis (shown as "axis"). `start` and `end`
   address that axis with the day rules of [section 12](#12-timestamp-units-and-day-boundaries).
-- `limit` is a total-row cap. Page size is internal. Every docstring says so.
+- `limit` is a total-row cap. Page size is internal. Every docstring says so. The cap is
+  stored apart from the SDK parameters, in `Request.limit`, so it can never be forwarded as
+  the SDK's page-size `limit`; the page size is `DatasetSpec.page_size`.
 - The REST column names the path and, in parentheses, the SDK `RESTClient` method.
 
 ### 8.1 `m.stocks`
@@ -878,7 +880,14 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   `"O:AAPL250117C00150000"`; `"BTC-USD"` and `"X:BTCUSD"`; `"I:SPX"` and `"SPX"` (an index
   symbol without its prefix gets `I:`); `"ESZ5"`. The `Symbol` column always holds the canonical
   Massive form. A crypto pair must end in a known quote currency, so its WebSocket form
-  (`BTC-USD`) can always be recovered; others raise `ValueError` at construction.
+  (`BTC-USD`) can always be recovered; others raise `ValueError` at construction. A symbol
+  with another class's prefix raises `ValueError` saying which prefix, if any, the class uses
+  (`'X:BTCUSD' carries the prefix of another asset class; stocks symbols have no prefix`).
+- **Datasets that span asset classes** (indicators, reference data, the unified
+  `m.snapshots()`) declare no asset class. Each symbol's prefix then selects its class (`O:`
+  options, `I:` indices, `C:` forex, `X:` crypto), a symbol without one is a stock, and that
+  class's rules apply unchanged: `["X:BTCUSD", "i:spx", "aapl"]` normalizes to
+  `("AAPL", "I:SPX", "X:BTCUSD")`. A WebSocket dataset always declares its class.
 - A `Table` must have a `Symbol` column. Streams listen to it and subscribe or unsubscribe as
   rows are added or removed. Polls re-read it each cycle. Its rows may use any accepted input
   form: every consumer reads the table through one canonicalized view

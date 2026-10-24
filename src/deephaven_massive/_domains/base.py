@@ -11,8 +11,9 @@ module does the work they share when a dataset method is called:
 - `bar_query_class` is the run-time half of the `bars()` overloads (DESIGN § 7.1): it picks the
   most specific query class for the actual timespan and multiplier and rejects the timespans
   the asset class's endpoint does not accept.
-- `list_params` validates the `sort`, `order`, and `limit` block (`…F`) shared by the REST list
-  datasets.
+- `list_params` validates the `sort` and `order` parameters of the `…F` block shared by the
+  REST list datasets; its `limit` goes to `build_query(limit=...)` (`Request.limit`), because
+  it is a total-row cap, not the SDK's page-size parameter.
 
 Filter keys and value kinds are checked against the generated SDK parameter table
 (`_catalog.check_filters`) synchronously at construction, as DESIGN § 9 requires; the check
@@ -107,19 +108,16 @@ def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> 
     return HistoryQuery
 
 
-def list_params(
-    *, sort: str | None, order: Order | None, limit: int | None
-) -> dict[str, ParamValue]:
-    """Validate the `sort`, `order`, and `limit` block of a REST list dataset.
+def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValue]:
+    """Validate the `sort` and `order` parameters of a REST list dataset.
 
-    `limit` is a cap on the total number of rows across pages; the page size is internal.
-    An `order` that is not a `dm.Order` raises `TypeError`, and a `limit` that is not a
-    positive `int` raises `TypeError` or `ValueError` (`require_positive_int`).
+    The third member of the `…F` block, `limit`, is not an SDK parameter: it caps the total
+    number of rows across pages and goes to `build_query(limit=...)`, which stores it in
+    `Request.limit`. An `order` that is not a `dm.Order` raises `TypeError`.
 
     Args:
         sort: The SDK's sort field name, or None for the endpoint's default.
         order: The sort direction, or None for the endpoint's default.
-        limit: The maximum number of rows, or None for every row.
 
     Returns:
         The parameters that are set, by SDK name.
@@ -134,8 +132,6 @@ def list_params(
         params["sort"] = sort
     if order is not None:
         params["order"] = _require_enum(order, Order, "order")
-    if limit is not None:
-        params["limit"] = require_positive_int("limit", limit)
     return params
 
 
@@ -215,6 +211,7 @@ def build_query(
     end: DateLike | None = None,
     params: Mapping[str, object] | None = None,
     filters: Mapping[str, FilterValue] | None = None,
+    limit: int | None = None,
 ) -> QueryBase:
     """Validate one dataset call and return its query.
 
@@ -232,6 +229,8 @@ def build_query(
         end: The upper bound of the dataset's time axis, or None.
         params: The dataset's other typed parameters by SDK name; None values are dropped.
         filters: The `filters` mapping by SDK parameter name.
+        limit: The cap on the total number of rows (`Request.limit`), or None for every row;
+            a positive `int`.
 
     Returns:
         An instance of the spec's query class (or of the class `bar_query_class` picks).
@@ -241,10 +240,9 @@ def build_query(
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
     or `ValueError` of the helper that checks them (`_symbols.normalize`, `_require_enum`,
-    `_dates.parse_date_like`, `bar_query_class`).
+    `_dates.parse_date_like`, `bar_query_class`, `require_positive_int` for `limit`).
     """
-    asset_class = spec.asset_class or AssetClass.STOCKS
-    normalized = None if symbols is None else normalize(asset_class, symbols)
+    normalized = None if symbols is None else normalize(spec.asset_class, symbols)
     if isinstance(normalized, _All) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; use {all_alternative}")
     if venue is not None:
@@ -263,6 +261,7 @@ def build_query(
         end=None if end is None else parse_date_like(end, "end"),
         params=tuple(sorted((k, _value(k, v)) for k, v in (params or {}).items() if v is not None)),
         filters=() if filters is None else _filters(spec, filters),
+        limit=None if limit is None else require_positive_int("limit", limit),
     )
     check_filters(spec, dict(request.filters))
     return query_class(core, spec, request)

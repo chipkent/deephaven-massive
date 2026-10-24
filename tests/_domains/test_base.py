@@ -17,7 +17,9 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
-from deephaven_massive._schema import BARS, TRADES
+from deephaven_massive._schema import BARS, TRADES, Column, ColumnType, Schema
+
+S, LD = ColumnType.STRING, ColumnType.LOCAL_DATE
 
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
@@ -58,10 +60,16 @@ DIVIDENDS = DatasetSpec(
     name="stocks.dividends",
     query_class=Query,
     asset_class=AssetClass.STOCKS,
+    schema=Schema("stocks.dividends", (Column("Symbol", S), Column("ExDividendDate", LD))),
     fetch_method="list_stocks_dividends",
     time_axis=("ex_dividend_date_gte", "ex_dividend_date_lte"),
 )
-INDICATOR = DatasetSpec(name="indicators.sma", query_class=Query, fetch_method="get_sma")
+INDICATOR = DatasetSpec(
+    name="indicators.sma",
+    query_class=Query,
+    schema=Schema("indicators.sma", (Column("Symbol", S), Column("Value", ColumnType.DOUBLE))),
+    fetch_method="get_sma",
+)
 
 
 def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
@@ -102,22 +110,35 @@ def test_bar_timespan_rules() -> None:
 
 
 def test_list_params() -> None:
-    assert list_params(sort=None, order=None, limit=None) == {}
-    assert list_params(sort="ticker", order=Order.DESC, limit=10) == {
-        "sort": "ticker",
-        "order": Order.DESC,
-        "limit": 10,
-    }
+    assert list_params(sort=None, order=None) == {}
+    assert list_params(sort="ticker", order=Order.DESC) == {"sort": "ticker", "order": Order.DESC}
     with pytest.raises(TypeError, match="sort must be a str"):
-        list_params(sort=cast("str", 1), order=None, limit=None)
+        list_params(sort=cast("str", 1), order=None)
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        list_params(sort=None, order=cast("Order", "desc"), limit=None)
+        list_params(sort=None, order=cast("Order", "desc"))
+
+
+def test_limit_is_a_row_cap_not_an_sdk_parameter(massive_session: dm.MassiveSession) -> None:
+    # The total-row cap is kept apart from the SDK parameters, whose `limit` is a page size.
+    q = build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=5)
+    assert q._request.limit == 5
+    assert "limit" not in dict(q._request.params)
+    assert "limit=5" in repr(q)
+    assert build(massive_session, DIVIDENDS, symbols=["AAPL"])._request.limit is None
     with pytest.raises(TypeError, match="limit must be an int"):
-        list_params(sort=None, order=None, limit=cast("int", "10"))
+        build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=cast("int", "10"))
     with pytest.raises(TypeError, match="limit must be an int"):
-        list_params(sort=None, order=None, limit=True)
+        build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=True)
     with pytest.raises(ValueError, match="limit must be positive"):
-        list_params(sort=None, order=None, limit=0)
+        build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=0)
+
+
+def test_a_dataset_without_a_class_takes_any_class_by_prefix(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # Indicators, reference data, and the unified snapshot span asset classes (DESIGN § 8.8).
+    q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "i:spx", "aapl", "C:EURUSD"])
+    assert q._request.symbols == ("AAPL", "C:EURUSD", "I:SPX", "X:BTCUSD")
 
 
 def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) -> None:
@@ -152,9 +173,14 @@ def test_build_query_without_symbols_or_axis(massive_session: dm.MassiveSession)
 
 
 def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> None:
-    fx = DatasetSpec(name="forex.quotes", query_class=StreamQuery, asset_class=AssetClass.FOREX)
+    fx = DatasetSpec(
+        name="forex.quotes",
+        query_class=StreamQuery,
+        asset_class=AssetClass.FOREX,
+        schema=TRADES.schema,
+    )
     assert build(massive_session, fx, symbols="EUR/USD")._request.symbols == ("C:EURUSD",)
-    # Datasets without an asset class take stock-style tickers.
+    # A dataset without an asset class reads the class from each prefix; none is a stock.
     assert build(massive_session, INDICATOR, symbols="aapl")._request.symbols == ("AAPL",)
 
 

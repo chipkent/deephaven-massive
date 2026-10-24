@@ -22,6 +22,7 @@ from deephaven_massive._dates import (
 )
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._query import HistoryQuery
+from deephaven_massive._schema import TRADES
 
 
 @pytest.mark.parametrize(
@@ -200,7 +201,9 @@ def test_flat_file_day_zone_is_the_class_zone() -> None:
 
 
 def _spec(asset_class: AssetClass | None) -> DatasetSpec:
-    return DatasetSpec(name="x.history", query_class=HistoryQuery, asset_class=asset_class)
+    return DatasetSpec(
+        name="x.history", query_class=HistoryQuery, asset_class=asset_class, schema=TRADES.schema
+    )
 
 
 def test_bounds_follow_the_class_day_zone() -> None:

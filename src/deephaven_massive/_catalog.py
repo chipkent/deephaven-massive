@@ -28,20 +28,22 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._dates import require_aware
 from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan, Transport
-from deephaven_massive._schema import ColumnType
+from deephaven_massive._schema import ColumnType, Schema, model_schema
 from deephaven_massive._timeunits import TimeField, TimeUnit, TimeUnitTable, UnitRule
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._query import QueryBase
-    from deephaven_massive._schema import ColumnOverride, KeyMap, Schema
+    from deephaven_massive._schema import ColumnOverride, KeyMap
 
 __all__ = [
     "DOMAIN_MODULES",
+    "SCHEMA_FROM_MODEL",
     "SDK_PARAMS",
     "DatasetSpec",
     "ParamKind",
+    "SymbolParam",
     "check_filters",
     "datasets",
     "filter_params",
@@ -82,6 +84,31 @@ class ParamKind(StrEnum):
     STRING_SEQUENCE = "Sequence[str]"
 
 
+SCHEMA_FROM_MODEL: Final = Schema("<derived from rest_model>", ())
+"""The `DatasetSpec.schema` default: the schema is derived from `rest_model` at construction."""
+
+
+class SymbolParam(StrEnum):
+    """How a REST dataset's symbols reach its SDK request (internal).
+
+    Declared on each `DatasetSpec` so that the REST transport can build every request from the
+    spec alone, without a second table keyed by SDK method name.
+    """
+
+    NONE = "none"
+    """The dataset takes no symbols (economy data, most partner datasets)."""
+    TICKER = "ticker"
+    """One symbol per request in the `ticker` parameter (`list_trades`); see `per_symbol`."""
+    TICKERS = "tickers"
+    """A list of symbols in one `tickers` parameter (`get_snapshot_all`)."""
+    TICKER_ANY_OF = "ticker.any_of"
+    """A list of symbols in the `ticker.any_of` filter (`list_universal_snapshots`)."""
+    PATH = "path"
+    """One symbol per request as a path segment (`get_ticker_details`)."""
+    PAIR = "pair"
+    """A forex or crypto pair split into `from_` and `to` (`get_last_forex_quote`)."""
+
+
 @dataclass(frozen=True, kw_only=True, eq=False, slots=True)
 class DatasetSpec:
     """The declarative description of one dataset, shared by every transport.
@@ -119,9 +146,15 @@ class DatasetSpec:
         is_bars: True for a `bars()` dataset: its `channels` and `flat_file_prefixes` are keyed
             by `Timespan`, and the factory picks the query class from the timespan and
             multiplier (DESIGN § 7.1). False datasets key them by None.
-        schema: The dataset's union schema, or None when the REST transport derives it from
-            `rest_model`.
+        schema: The dataset's union schema. Leave it out for a REST dataset with a
+            `rest_model`: the schema is then derived from the model at construction
+            (`_schema.model_schema`, with the dataset's REST time units and `overrides`), so
+            every check below runs at import for REST datasets too. Exactly one of `schema` and
+            `rest_model` is given.
         rest_model: The SDK model class whose fields define the REST columns.
+        rest_columns: Set at construction from `rest_model`: the column each flattened SDK
+            field path fills (`ModelSchema.columns_by_path`), for the REST transport's rows;
+            empty for a dataset with an explicit `schema`.
         key_maps: Per transport, which wire key, SDK field path, or CSV header fills each
             column (tick datasets).
         overrides: Corrections to the columns derived from `rest_model`, keyed by field path.
@@ -147,6 +180,7 @@ class DatasetSpec:
         poll_keys: The key columns of a keyed (`REPLACE`, `UPSERT`) `poll()` table.
         per_symbol: True when the endpoint takes one symbol per request, so a symbol list fans
             out to one request per symbol.
+        symbol_param: How the symbols reach the SDK request (`SymbolParam`).
         page_size: The REST page size requested; `limit` is a separate total-row cap.
         extra_params: Filter parameters the SDK method lacks (the two documented SDK gaps).
     """
@@ -155,8 +189,9 @@ class DatasetSpec:
     query_class: type[QueryBase]
     asset_class: AssetClass | None = None
     is_bars: bool = False
-    schema: Schema | None = None
+    schema: Schema = SCHEMA_FROM_MODEL
     rest_model: type | None = None
+    rest_columns: Mapping[str, str] = field(init=False, default_factory=dict)
     key_maps: Mapping[Transport, KeyMap] = field(default_factory=dict)
     overrides: Mapping[str, ColumnOverride] = field(default_factory=dict)
     fetch_method: str | None = None
@@ -173,6 +208,7 @@ class DatasetSpec:
     poll_mode: PollMode = PollMode.REPLACE
     poll_keys: tuple[str, ...] = ("Symbol",)
     per_symbol: bool = False
+    symbol_param: SymbolParam = SymbolParam.NONE
     page_size: int | None = None
     extra_params: Mapping[str, ParamKind] = field(default_factory=dict)
 
@@ -181,10 +217,14 @@ class DatasetSpec:
 
         Raises:
             ValueError: If the name is not `"<namespace>.<dataset>"`, the keys of `channels`
-                or `flat_file_prefixes` do not match `is_bars`, a WebSocket dataset (one with
-                `channels`) has no `schema`, an unverified unit is not among `time_units`, a
-                key map fills an `Instant` column from a field with no `time_units` entry, or
-                a key column is not in `schema`.
+                or `flat_file_prefixes` do not match `is_bars`, not exactly one of `schema` and
+                `rest_model` is given, a WebSocket dataset (one with `channels`) has a
+                `rest_model` instead of a hand-written schema or no `asset_class`, an
+                unverified unit is not among `time_units`, a key map fills an `Instant` column
+                from a field with no `time_units` entry, or a key column is not in `schema`.
+
+        Deriving the schema from `rest_model` raises the `TypeError` or `ValueError` of
+        `_schema.model_schema` (an unmapped SDK hint, an unknown override path).
         """
         namespace, _, dataset = self.name.partition(".")
         if not namespace or not dataset:
@@ -195,30 +235,45 @@ class DatasetSpec:
             raise ValueError(
                 f"{self.name}: channels and flat_file_prefixes must be keyed by {kind}"
             )
-        if self.channels and self.schema is None:
-            # The stream verbs build every shape from the schema (`last_by` validates its keys
-            # against it), so a WebSocket dataset without one would fail at the first verb.
+        given = self.schema is not SCHEMA_FROM_MODEL
+        if not given and self.rest_model is None:
+            raise ValueError(f"{self.name}: give exactly one of schema and rest_model")
+        if self.channels and self.rest_model is not None:
+            # The stream verbs build every shape from the hand-written tick schema and its key
+            # maps (`last_by` validates its keys against it).
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a schema")
+        if self.channels and self.asset_class is None:
+            raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
+        if self.rest_model is not None:
+            rest_units = {f for (t, f) in self.time_units if t is Transport.REST}
+            model = model_schema(
+                self.name, self.rest_model, instant_fields=rest_units, overrides=self.overrides
+            )
+            # A copy made with `dataclasses.replace` passes the derived schema back in; any
+            # other schema next to a `rest_model` is a second, conflicting definition.
+            if given and self.schema != model.schema:
+                raise ValueError(f"{self.name}: give exactly one of schema and rest_model")
+            object.__setattr__(self, "schema", model.schema)
+            object.__setattr__(self, "rest_columns", model.columns_by_path)
         stray = sorted(
             f"{t.value}:{f}" for t, f in self.unverified_time_units - set(self.time_units)
         )
         if stray:
             raise ValueError(f"{self.name}: unverified units {stray} are not in time_units")
-        if self.schema is not None:
-            missing = sorted(set(self.poll_keys) - set(self.schema.column_names))
-            if missing:
-                raise ValueError(f"{self.name}: poll_keys {missing} are not columns")
-            instants = {c.name for c in self.schema.columns if c.type is ColumnType.INSTANT}
-            unitless = sorted(
-                f"{transport.value}:{key}"
-                for transport, key_map in self.key_maps.items()
-                for key, column in key_map.items()
-                if column in instants and (transport, key) not in self.time_units
-            )
-            if unitless:
-                # Caught here, at import, rather than as a LookupError on a transport thread
-                # at the first frame or page.
-                raise ValueError(f"{self.name}: Instant fields {unitless} have no time_units")
+        missing = sorted(set(self.poll_keys) - set(self.schema.column_names))
+        if missing:
+            raise ValueError(f"{self.name}: poll_keys {missing} are not columns")
+        instants = {c.name for c in self.schema.columns if c.type is ColumnType.INSTANT}
+        unitless = sorted(
+            f"{transport.value}:{key}"
+            for transport, key_map in self.key_maps.items()
+            for key, column in key_map.items()
+            if column in instants and (transport, key) not in self.time_units
+        )
+        if unitless:
+            # Caught here, at import, rather than as a LookupError on a transport thread at
+            # the first frame or page.
+            raise ValueError(f"{self.name}: Instant fields {unitless} have no time_units")
 
 
 # --- BEGIN GENERATED SDK_PARAMS ---------------------------------------------------------------
