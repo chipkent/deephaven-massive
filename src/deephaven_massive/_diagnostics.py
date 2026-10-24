@@ -289,6 +289,9 @@ class Diagnostics:
     def __init__(self, exec_ctx: ExecutionContext, name: str) -> None:
         """Create both input tables inside a new session-owned scope and start the writer.
 
+        If creating a table or starting the writer fails, the scope (with any table already
+        created in it) is released and the exception propagates.
+
         Args:
             exec_ctx: The session's execution context, entered by the writer thread.
             name: The writer thread's name, for thread dumps.
@@ -296,14 +299,20 @@ class Diagnostics:
         self._release_lock = threading.Lock()
         self._released = False
         self._scope = new_scope()
-        with self._scope.open():
-            self._connections: InputTable = input_table(
-                CONNECTIONS.col_defs(), key_cols=list(CONNECTION_KEYS)
+        try:
+            with self._scope.open():
+                self._connections: InputTable = input_table(
+                    CONNECTIONS.col_defs(), key_cols=list(CONNECTION_KEYS)
+                )
+                self._streams: InputTable = input_table(
+                    STREAMS.col_defs(), key_cols=list(STREAM_KEYS)
+                )
+            self._writer: QueueWorker[_Item] = QueueWorker(
+                exec_ctx, name, handle=self._apply, on_exit=self._scope.release
             )
-            self._streams: InputTable = input_table(STREAMS.col_defs(), key_cols=list(STREAM_KEYS))
-        self._writer: QueueWorker[_Item] = QueueWorker(
-            exec_ctx, name, handle=self._apply, on_exit=self._scope.release
-        )
+        except BaseException:  # also KeyboardInterrupt: the scope must not leak
+            self._scope.release()
+            raise
 
     @property
     def connections(self) -> InputTable:

@@ -323,13 +323,25 @@ plans allow one WebSocket connection per cluster per account.
 After `close()`: `close()` itself is idempotent; verbs, `m.connections()`, and `m.streams()`
 raise `MassiveError("MassiveSession #1 is closed")`; `m.release(table)` keeps working, and so
 does garbage-collection release of results; building queries and reaching namespaces never fail;
-live results stop updating and keep their rows. The diagnostics tables are the exception: their
+live results stop updating and keep their rows. A verb that passed the closed check just before
+`close()` ran also raises `MassiveError`: the stream registry is checked again under
+`registry_lock`, so a closed stream is never reused. The diagnostics tables are the exception: their
 scope is released, so a `connections()` or `streams()` table obtained before `close()` becomes
 unusable unless the caller holds it in a liveness scope of their own.
 
 Every verb raises `ValueError` when called on a UG thread (for example from inside a table
-listener), checked before anything else, so also on a closed session; `close()` likewise. Verbs create tables and take the registry lock; both are forbidden on the UG thread
-([section 18](#18-concurrency-model)).
+listener), checked before anything else, so also on a closed session; `close()` likewise. The
+closed check comes next, still before any argument is validated, so `q.ring(0)` on a closed
+session raises `MassiveError`. Verbs create tables and take the registry lock; both are
+forbidden on the UG thread ([section 18](#18-concurrency-model)).
+
+A session that is garbage-collected without `close()` is cleaned up by a finalizer on its core
+(not run at interpreter exit). The finalizer takes no lock and makes no Deephaven call: it hands
+the registered closers (connections, pollers) to the reaper, which logs a WARNING ("MassiveSession
+#1 was garbage-collected without close(); closing its connections and pollers") and runs them,
+then stops the reaper and the diagnostics writer. `close()` empties the closer list, so a closed
+session's closers never run twice. A closer must not refer to the core strongly, or the core
+could never be collected.
 
 ### 6.1 How a live table is kept alive and released
 
@@ -359,8 +371,8 @@ with scope.open():                            # top of the thread-local stack du
                                               #   Table(stream.blink.j_table), then scope.manage(result)
 m._core.results.track(result, scope, on_released)
     # ResultRegistry.track: under registry_lock, a ResultRecord(scope, on_released,
-    # ref=weakref.ref(result, <enqueue release>), released=False) keyed by id(result);
-    # the key is checked against the weakref on use
+    # finalizer=weakref.finalize(result, <enqueue release>), released=False) keyed by
+    # id(result); the key is checked against finalizer.peek() on use
 return result
 ```
 
@@ -393,7 +405,8 @@ return result
 - **Reaper thread.** One daemon thread per session. It takes records off the queue, calls
   `scope.release()`, decrements the stream's held-result count, and at zero releases the stream
   scope. Each job runs inside `try`/`except Exception`; a failure is logged at ERROR and the
-  thread continues. The reaper does nothing else.
+  thread continues. The reaper does nothing else, except run the closers of a session collected
+  without `close()` ([section 6](#6-massivesession-and-lifecycle)).
 - **Shutdown callback.** It usually runs on the reaper thread, but it may run on a UG thread or a
   gRPC thread if the UI held the last reference. It does exactly two things:
   `SessionCore.stream_shut_down(stream_id)`, which drops the stream's registry record under
@@ -483,9 +496,15 @@ listener. Fan-out endpoints issue one request per symbol per cycle under `max_co
 `m.streams()` shows `RequestsPerCycle`.
 
 **`last_by()`.** Returns `blink.last_by(keys)` with the default key `Symbol`. With a reactive
-`Table` as symbols the result is `blink.last_by(keys).where_in(symbol_table, "Symbol")`, so rows
-of removed symbols are evicted from the result. The underlying `last_by` state keeps every symbol
-ever seen: a symbol that is removed and re-added shows its stale row until its next tick.
+`Table` as symbols and `Symbol` among the keys, the result is
+`blink.last_by(keys).where_in(symbol_table, "Symbol")`, so rows of removed symbols are evicted
+from the result. The underlying `last_by` state keeps every symbol ever seen: a symbol that is
+removed and re-added shows its stale row until its next tick. With keys that span symbols (for
+example `by="Exchange"`) the filter comes first, `blink.where_in(symbol_table,
+"Symbol").last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
+latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
+watched when the row arrived, and keeps it after that symbol is removed until a watched symbol
+ticks in the group.
 `last_by()` never seeds from REST. The "last" endpoints are absent from Starter and base Business
 plans, so a seed would behave differently per tier; `snapshots(symbols).poll(n)` is the
 tier-identical way to get current state.

@@ -7,7 +7,6 @@ tables, so they observe exactly when Deephaven runs a stream's `on_shutdown_call
 import gc
 import logging
 import threading
-import weakref
 from collections.abc import Callable
 from typing import Any, Protocol, cast
 
@@ -101,6 +100,13 @@ def test_make_result_releases_the_scope_on_failure(
     with pytest.raises(RuntimeError, match="boom"):
         make_result(fail)
     assert scopes[0].j_scope is None  # released
+
+    def interrupted() -> Table:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        make_result(interrupted)
+    assert scopes[1].j_scope is None  # released on an interrupt too
 
 
 def test_reaper_runs_jobs_in_order_and_survives_failures(
@@ -283,6 +289,21 @@ def test_a_failed_build_drops_its_hold(
     assert core._stream_ids == {}
 
 
+def test_an_interrupted_build_drops_its_hold(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    core = massive_session._core
+    q = query(massive_session)
+
+    def interrupted(_blink: Table) -> Table:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        core.stream_result(SPEC, q._request, channel="T", build=interrupted)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    assert core._stream_ids == {}
+
+
 def test_streams_are_shared_then_reopened(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
@@ -408,10 +429,7 @@ def test_a_failing_scope_release_still_notifies_the_owner() -> None:
 
     notified: list[str] = []
     record = ResultRecord(
-        1,
-        cast("LivenessScope", BrokenScope()),
-        lambda: notified.append("released"),
-        weakref.ref(empty_table(0)),
+        1, cast("LivenessScope", BrokenScope()), lambda: notified.append("released")
     )
     with pytest.raises(RuntimeError, match="cannot release"):
         ResultRegistry._reap(record)

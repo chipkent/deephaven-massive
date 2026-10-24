@@ -250,7 +250,9 @@ def test_fetch_and_poll_delegate(massive_session: dm.MassiveSession, rest: Recor
     ]
 
 
-@pytest.mark.parametrize("interval", [0, -1, float("inf"), float("nan"), timedelta(0), 1e-9, 1e300])
+@pytest.mark.parametrize(
+    "interval", [0, -1, float("inf"), float("nan"), timedelta(0), 1e-9, 1e300, 10**400]
+)
 def test_poll_interval_values(
     massive_session: dm.MassiveSession, rest: Recorder, interval: object
 ) -> None:
@@ -494,6 +496,15 @@ def test_verbs_raise_after_close(massive_session: dm.MassiveSession) -> None:
         q.blink()
 
 
+def test_the_guard_runs_before_argument_checks(massive_session: dm.MassiveSession) -> None:
+    q = trades(massive_session)
+    massive_session.close()
+    with pytest.raises(dm.MassiveError, match="is closed"):
+        q.ring(0)
+    with pytest.raises(dm.MassiveError, match="is closed"):
+        q.last_by(by="Nope")
+
+
 FOREX_SPEC = DatasetSpec(
     name="forex.quotes",
     query_class=StreamQuery,
@@ -528,6 +539,28 @@ def test_last_by_matches_non_canonical_spellings_in_a_reactive_table(
     # Removing the spelling from the watchlist evicts the canonical row.
     watchlist.delete(new_table([string_col("Symbol", ["EUR/USD"])]))
     assert _wait_for(lambda: current.size == 0)
+    massive_session.release(current)
+
+
+def test_last_by_over_groups_of_symbols_filters_before_aggregating(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
+    current = trades(massive_session, watchlist).last_by(by="Exchange")
+    watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
+    assert _wait_for(lambda: watchlist.size == 1)
+    # A late MSFT trade on exchange 4 must not hide AAPL's latest trade there.
+    rows = TRADES.schema.to_arrow(
+        [
+            {"Symbol": "AAPL", "Exchange": 4, "Price": 200.0},
+            {"Symbol": "MSFT", "Exchange": 4, "Price": 400.0},
+        ]
+    )
+    fake_streams.publishers[1].add(dh_arrow.to_table(rows))
+    assert _wait_for(lambda: current.size == 1)
+    shown = dh_arrow.to_arrow(current).select(["Symbol", "Exchange"]).to_pylist()
+    assert shown == [{"Symbol": "AAPL", "Exchange": 4}]
     massive_session.release(current)
 
 

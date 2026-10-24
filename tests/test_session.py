@@ -363,6 +363,75 @@ def test_close_marks_a_released_but_held_stream_closed(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
+def test_a_verb_racing_close_does_not_reuse_the_closed_stream(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = massive_session._core
+    q = stream_query(massive_session)
+    first = q.blink()
+    guard = core.require_verb_thread
+
+    def guard_then_close() -> None:
+        # The verb passes the guard, then another thread closes the session.
+        guard()
+        core.close()
+
+    monkeypatch.setattr(core, "require_verb_thread", guard_then_close)
+    with pytest.raises(dm.MassiveError, match=f"^{label(massive_session)} is closed$"):
+        q.append_only()
+    assert len(fake_streams.opened) == 1
+    assert core.results.held() == 1  # no hold was taken on the closed stream
+    massive_session.release(first)
+
+
+def test_a_session_collected_unclosed_runs_its_closers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ran: list[str] = []
+
+    def broken() -> None:
+        raise RuntimeError("cannot close")
+
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-unclosed"))
+    name = label(m)
+    m._core.on_close(broken)
+    m._core.on_close(lambda: ran.append("closed"))
+    reaper = m._core._reaper.thread
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+        del m
+        gc.collect()
+        reaper.join(TIMEOUT)
+    assert not reaper.is_alive()
+    assert ran == ["closed"]
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            f"{name} was garbage-collected without close(); closing its connections and pollers",
+        ),
+        (logging.ERROR, f"{name}: a transport failed to close"),
+    ]
+
+
+def test_a_closed_session_does_not_run_its_closers_again_when_collected(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ran: list[str] = []
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-closed"))
+    m._core.on_close(lambda: ran.append("closed"))
+    reaper = m._core._reaper.thread
+    m.close()
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+        del m
+        gc.collect()
+        reaper.join(TIMEOUT)
+    assert not reaper.is_alive()
+    assert ran == ["closed"]
+    assert caplog.records == []
+
+
 def test_close_with_no_live_tables_logs_info(
     massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:

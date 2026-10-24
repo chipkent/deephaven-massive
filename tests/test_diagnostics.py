@@ -7,9 +7,11 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
-from deephaven import new_table
+from deephaven import input_table, new_table
 from deephaven.column import string_col
+from deephaven.dtypes import DType
 from deephaven.execution_context import ExecutionContext
+from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 from deephaven.table_factory import InputTable
 
@@ -182,6 +184,32 @@ def test_release_applies_queued_rows_then_releases(
     diagnostics.write(_stream(stream_id=9))  # dropped: the writer has stopped
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
     keeper.release()
+
+
+def test_a_failed_table_creation_releases_the_scope(
+    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scopes: list[LivenessScope] = []
+    real_scope = new_scope
+    real_table = input_table
+    created: list[InputTable] = []
+
+    def tracking_scope() -> LivenessScope:
+        scope = real_scope()
+        scopes.append(scope)
+        return scope
+
+    def second_fails(col_defs: dict[str, DType], *, key_cols: list[str]) -> InputTable:
+        if created:
+            raise RuntimeError("no second table")
+        created.append(real_table(col_defs, key_cols=key_cols))
+        return created[0]
+
+    monkeypatch.setattr("deephaven_massive._diagnostics.new_scope", tracking_scope)
+    monkeypatch.setattr("deephaven_massive._diagnostics.input_table", second_fails)
+    with pytest.raises(RuntimeError, match="no second table"):
+        Diagnostics(dh_exec_ctx, "test diagnostics")
+    assert scopes[0].j_scope is None  # released, with the first table in it
 
 
 def test_stop_does_not_wait(dh_exec_ctx: ExecutionContext) -> None:

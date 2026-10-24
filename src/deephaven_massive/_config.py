@@ -245,13 +245,20 @@ def require_positive_number(name: str, value: object) -> float:
 
     Raises:
         TypeError: If `value` is not an `int` or `float` (a `bool` is not accepted).
-        ValueError: If `value` is not finite or not greater than zero.
+        ValueError: If `value` is not finite, not greater than zero, or an `int` too large
+            for a `float`.
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{name} must be a number, not {type(value).__name__}")
-    if not (math.isfinite(value) and value > 0):
+    try:
+        number = float(value)
+    except OverflowError:  # an int beyond the float range
+        raise ValueError(
+            f"{name} must be positive and finite, got an int too large for a float"
+        ) from None
+    if not (math.isfinite(number) and number > 0):
         raise ValueError(f"{name} must be positive, got {value!r}")
-    return float(value)
+    return number
 
 
 def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:

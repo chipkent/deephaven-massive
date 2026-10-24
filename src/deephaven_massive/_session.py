@@ -169,15 +169,47 @@ def _register(core: SessionCore) -> None:
         )
 
 
-def _stop_threads(reaper: Reaper, diagnostics: Diagnostics) -> None:
-    """Finalizer of a collected session: end its reaper and diagnostics writer, without waiting.
+def _collect_session(
+    label: str, reaper: Reaper, diagnostics: Diagnostics, *, closers: list[Callable[[], None]]
+) -> None:
+    """Finalizer of a session collected without `close()`: clean up, without waiting.
+
+    The closers (connections, pollers) are handed to the reaper, which runs them and then
+    ends; the diagnostics writer ends too. Garbage collection can run this on any thread at
+    any allocation, so it takes no lock and makes no Deephaven call. The closer list needs no
+    lock here: the core is unreachable, so no other thread can reach the list, and `close()`
+    empties it, so a closed session's closers never run twice.
 
     Args:
+        label: The session's label, for the WARNING.
         reaper: The session's reaper.
         diagnostics: The session's diagnostics.
+        closers: The session's registered closers; emptied here.
     """
+    pending = tuple(closers)
+    closers.clear()
+    if pending:
+        reaper.submit(functools.partial(_close_collected, label, pending))
     reaper.stop()
     diagnostics.stop()
+
+
+def _close_collected(label: str, closers: tuple[Callable[[], None], ...]) -> None:
+    """Reaper job of a session collected without `close()`: log a WARNING and run its closers.
+
+    Args:
+        label: The session's label.
+        closers: The closers, run in registration order; one that raises is logged at ERROR
+            and the rest still run.
+    """
+    logger.warning(
+        "%s was garbage-collected without close(); closing its connections and pollers", label
+    )
+    for closer in closers:
+        try:
+            closer()
+        except Exception:
+            logger.exception("%s: a transport failed to close", label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,11 +257,17 @@ class SessionCore:
         self.diagnostics: Final = Diagnostics(exec_ctx, f"{label} diagnostics")
         self._reaper = Reaper(exec_ctx, f"{label} reaper")
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
-        weakref.finalize(self, _stop_threads, self._reaper, self.diagnostics)
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamState] = {}
+        # Shared with the finalizer, which runs the closers of a session collected unclosed.
         self._closers: list[Callable[[], None]] = []
         self._closed = False
+        # Not at interpreter exit: stopping the threads then would call into a JVM that may
+        # already be shutting down.
+        finalizer = weakref.finalize(
+            self, _collect_session, label, self._reaper, self.diagnostics, closers=self._closers
+        )
+        finalizer.atexit = False
 
     @property
     def closed(self) -> bool:
@@ -294,13 +332,20 @@ class SessionCore:
 
         If the session is already closed (a transport that passed `require_open` just before
         `close()` ran), the closer runs at once, on this thread and outside the lock, so it is
-        still cleaned up. Either way it runs exactly once.
+        still cleaned up. If the session is garbage-collected without `close()`, its closers
+        run on the reaper thread after a WARNING. Either way each closer runs exactly once.
+
+        The closer must not refer to the session's core strongly (hold it through
+        `weakref.ref` if needed): the closers live as long as the core, and the finalizer
+        that runs them keeps them alive, so a strong reference would keep the core from ever
+        being collected.
 
         Args:
             closer: Called once, without any lock held: on the thread that closes the session,
-                or here when the session is already closed. An exception it raises during
-                `close()` is logged at ERROR and the remaining closers still run; raised here,
-                it propagates to the caller.
+                here when the session is already closed, or on the reaper thread when the
+                session is collected unclosed. An exception it raises during `close()` or
+                collection is logged at ERROR and the remaining closers still run; raised
+                here, it propagates to the caller.
         """
         with self.registry_lock:
             closed = self._closed
@@ -342,7 +387,7 @@ class SessionCore:
         try:
             with entered(self.exec_ctx):
                 result, scope = make_result(lambda: build(blink), wrap=wrap)
-        except Exception:
+        except BaseException:  # also KeyboardInterrupt: the hold must not leak
             self._release_hold(handle.stream_id)
             raise
         self.results.track(result, scope, functools.partial(self._release_hold, handle.stream_id))
@@ -370,8 +415,14 @@ class SessionCore:
 
         Returns:
             The stream's handle, or None when no stream with that key is open.
+
+        Raises:
+            MassiveError: If the session is closed (a verb that passed the guard just before
+                `close()` ran); a closed stream is never reused.
         """
         with self.registry_lock:
+            if self._closed:
+                raise MassiveError(f"{self.label} is closed")
             stream_id = self._stream_ids.get(key)
             if stream_id is None:
                 return None
@@ -535,6 +586,7 @@ class SessionCore:
                 return
             self._closed = True
             closers = tuple(self._closers)
+            self._closers.clear()  # the collection finalizer must not run them again
             closed = {
                 stream_id: replace(state, row=replace(state.row, state=StreamState.CLOSED))
                 for stream_id, state in self._streams.items()
@@ -808,13 +860,9 @@ class MassiveSession:
         "session closed; N live tables are now static" is logged, at WARNING when N > 0. After
         `close()`, verbs, `connections()`, and `streams()` raise
         `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
-        and `release()` keep working.
-
-        Raises:
-            ValueError: On an update-graph thread, even when the session is already closed.
+        and `release()` keep working. On an update-graph thread it raises `ValueError`, even
+        when the session is already closed.
         """
-        if _on_update_graph(self._core.exec_ctx):
-            raise ValueError(_ON_UPDATE_GRAPH)
         self._core.close()
 
     def __enter__(self) -> Self:

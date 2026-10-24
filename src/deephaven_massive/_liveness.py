@@ -37,7 +37,7 @@ import logging
 import queue
 import threading
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import count
 from typing import TYPE_CHECKING, Final, Generic, TypeVar
 
@@ -105,7 +105,8 @@ def make_result(build: Callable[[], Table], *, wrap: bool = False) -> tuple[Tabl
     Must run on the caller thread: Deephaven's liveness scope stack is thread-local, and the
     tables `build` creates are managed by whichever scope is on top of it. `build` runs with
     the new scope on top, so the result is managed by that scope and not by the console's query
-    scope. If `build` raises, the scope is released and the exception propagates.
+    scope. If `build` raises, even `KeyboardInterrupt`, the scope is released and the exception
+    propagates.
 
     Args:
         build: Creates the result, for example `lambda: blink_to_append_only(stream.blink)`.
@@ -122,7 +123,7 @@ def make_result(build: Callable[[], Table], *, wrap: bool = False) -> tuple[Tabl
             result = build()
         if wrap:
             scope.manage(result)
-    except Exception:
+    except BaseException:  # also KeyboardInterrupt: the scope must not leak
         scope.release()
         raise
     return result, scope
@@ -168,15 +169,16 @@ class ResultRecord:
         on_released: Runs on the reaper thread after the scope is released: for a stream it
             decrements the stream's held-result count, for a `poll()` table it stops the
             poller.
-        ref: A weak reference to the result's Python wrapper; it resolves to None once the
-            wrapper is collected.
+        finalizer: The collection finalizer on the result's Python wrapper, set by `track`
+            right after the record is created; `finalizer.peek()` yields the wrapper while it
+            is alive and None once it is collected.
         released: The once-only release flag.
     """
 
     record_id: int
     scope: LivenessScope
     on_released: Callable[[], None]
-    ref: weakref.ref[Table]
+    finalizer: weakref.finalize[[ResultRecord, int], Table] = field(init=False)
     released: bool = False
 
 
@@ -366,15 +368,15 @@ class ResultRegistry:
         """
         with self._lock:
             key = id(result)
-            record = ResultRecord(next(self._ids), scope, on_released, weakref.ref(result))
+            record = ResultRecord(next(self._ids), scope, on_released)
             self._results[key] = record
             # The finalizer, not the registry, roots the release path: it holds this registry
             # (and through it the reaper) and the record (whose owner callback holds the
             # session core) for exactly as long as the result lives, so a result that outlives
             # every reference to its session is still released when it is collected. Nothing
             # refers to the result strongly, so no cycle keeps anything alive beyond it.
-            finalizer = weakref.finalize(result, self._on_collected, record, key)
-            finalizer.atexit = False
+            record.finalizer = weakref.finalize(result, self._on_collected, record, key)
+            record.finalizer.atexit = False
         return record
 
     def release(self, table: Table) -> bool:
@@ -393,7 +395,8 @@ class ResultRegistry:
         """
         with self._lock:
             record = self._results.get(id(table))
-            if record is None or record.ref() is not table:
+            alive = None if record is None else record.finalizer.peek()
+            if record is None or alive is None or alive[0] is not table:
                 return False
             first = not record.released
             record.released = True

@@ -140,4 +140,4 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | SDK fork (`chipkent/massive-client-python`) | `DESIGN.md` § 19 |
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
 | Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
-| Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `config.py`, `session.py`, `tests/legacy/`; every exclusion carries the grep-able legacy-exclusion marker |
+| Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `tests/legacy/`; every exclusion carries the grep-able legacy-exclusion marker |

@@ -329,10 +329,6 @@ class QueryBase:
         suffix = f" {described}" if described else ""
         return f"<{type(self).__name__} {self._spec.name}{suffix}>"
 
-    def _check_thread(self) -> None:
-        """Run the session's verb guard (closed session, update-graph thread)."""
-        self._core.require_verb_thread()
-
 
 class Query(QueryBase):
     """A REST list or snapshot dataset: a static `fetch()` or a live `poll()`.
@@ -360,7 +356,7 @@ class Query(QueryBase):
         Returns:
             A static table.
         """
-        self._check_thread()
+        self._core.require_verb_thread()
         return self._core.rest_transport().fetch(self._spec, self._request)
 
     def poll(self, interval: float | timedelta, *, mode: PollMode | None = None) -> Table:
@@ -383,7 +379,7 @@ class Query(QueryBase):
         Returns:
             A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`.
         """
-        self._check_thread()
+        self._core.require_verb_thread()
         period = _interval(interval)
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")
         return self._core.rest_transport().poll(
@@ -423,7 +419,6 @@ class StreamQuery(QueryBase):
         Returns:
             The tracked live result.
         """
-        self._check_thread()
         return self._core.stream_result(
             self._spec, self._request, channel=self._channel, build=build, wrap=wrap
         )
@@ -440,6 +435,7 @@ class StreamQuery(QueryBase):
         Returns:
             A live blink table in the dataset's schema.
         """
+        self._core.require_verb_thread()
         return self._stream(lambda blink: Table(j_table=blink.j_table), wrap=True)
 
     def append_only(self) -> Table:
@@ -453,6 +449,7 @@ class StreamQuery(QueryBase):
         Returns:
             A live append-only table in the dataset's schema.
         """
+        self._core.require_verb_thread()
         return self._stream(blink_to_append_only)
 
     def ring(self, capacity: int) -> Table:
@@ -470,16 +467,21 @@ class StreamQuery(QueryBase):
         Returns:
             A live ring table in the dataset's schema.
         """
+        self._core.require_verb_thread()
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(lambda blink: ring_table(blink, rows))
 
     def last_by(self, *, by: str | Sequence[str] | None = None) -> Table:
         """Return the latest row per key, by default one row per `Symbol`.
 
-        The underlying state keeps every key ever seen. With a reactive symbol table, rows of
-        symbols removed from it are filtered out; a symbol removed and re-added shows its last
-        row until it ticks again. The table may hold any accepted spelling (`EUR/USD` for
-        `C:EURUSD`): it is matched through `_symbols.canonical_view`. `last_by()` never seeds
+        The underlying state keeps every key ever seen. With a reactive symbol table and
+        `Symbol` among the keys, rows of symbols removed from it are filtered out; a symbol
+        removed and re-added shows its last row until it ticks again. With keys that span
+        symbols (`by="Exchange"`), rows are filtered before the aggregation, so each group's
+        row is the latest from a symbol that was watched when it arrived; a group keeps that
+        row after the symbol is removed, until a watched symbol ticks in the group. The table
+        may hold any accepted spelling (`EUR/USD` for `C:EURUSD`): it is matched through
+        `_symbols.canonical_view`. `last_by()` never seeds
         from REST: use `snapshots(symbols).poll(n)` for current state on every plan. A `by`
         that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
         unknown column raises `ValueError`.
@@ -493,17 +495,26 @@ class StreamQuery(QueryBase):
         Returns:
             A live table with one row per key, in the dataset's schema.
         """
+        self._core.require_verb_thread()
         keys = self._last_by_keys(by)
         symbols = self._request.symbols
-        if isinstance(symbols, SymbolTable):
-            watch = symbols.table
-            asset_class = self._spec.asset_class or AssetClass.STOCKS
+        if not isinstance(symbols, SymbolTable):
+            return self._stream(lambda blink: blink.last_by(list(keys)))
+        watch = symbols.table
+        asset_class = self._spec.asset_class or AssetClass.STOCKS
+        if "Symbol" in keys:
+            # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
             return self._stream(
                 lambda blink: blink.last_by(list(keys)).where_in(
                     canonical_view(asset_class, watch), "Symbol"
                 )
             )
-        return self._stream(lambda blink: blink.last_by(list(keys)))
+        # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
+        return self._stream(
+            lambda blink: blink.where_in(canonical_view(asset_class, watch), "Symbol").last_by(
+                list(keys)
+            )
+        )
 
     def _last_by_keys(self, by: object) -> tuple[str, ...]:
         """Validate the `by` argument of `last_by`.
@@ -578,7 +589,7 @@ class HistoryQuery(QueryBase):
         Returns:
             A static table in the dataset's schema.
         """
-        self._check_thread()
+        self._core.require_verb_thread()
         chosen = _require_enum(source, HistorySource, "source")
         first, last = parse_date_like(start, "start"), parse_date_like(end, "end")
         window = bounds(self._spec, first, last)
@@ -652,7 +663,7 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
         Returns:
             A static table in the stream's schema.
         """
-        self._check_thread()
+        self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
         return self._core.rest_transport().fetch(self._spec, self._request)
 
@@ -682,6 +693,6 @@ class HistoryLatestQuery(HistoryQuery):
         Returns:
             A static table in the bars schema.
         """
-        self._check_thread()
+        self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
         return self._core.rest_transport().fetch(self._spec, self._request)
