@@ -1148,7 +1148,10 @@ logged once.
 - A failure fails exactly the streams whose topics the server rejected. Nothing tears down a
   whole URL on an entitlement error. A failed stream's key is unregistered at once
   (`SessionCore.fail_stream`), so the next verb with the same key opens a fresh stream rather
-  than returning the failed table; the failed stream stays until its results are released.
+  than returning the failed table; the failed stream stays until its results are released. A
+  failure for a stream the library no longer holds (its last result was released, but a
+  derived table still keeps the publisher alive until `on_shutdown_callback`) needs no
+  bookkeeping: `publish_failure` fails the live table, and the stream's key is already free.
 - REST `poll()` tables use a per-table publisher (`APPEND`) or a keyed `input_table`
   (`REPLACE`, `UPSERT`), created in the result scope.
 

@@ -590,3 +590,27 @@ def test_calls_under_the_update_graph_lock_are_rejected(
             with pytest.raises(ValueError, match="update-graph lock"):
                 call()
     assert not massive_session._core.closed
+
+
+def test_a_failure_after_the_last_release_is_tolerated(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # The library released its last result, but a derived table keeps the blink table, and so
+    # the publisher, alive; the transport can still report a failure for that stream.
+    q = stream_query(massive_session)
+    result = q.append_only()
+    user_scope = new_scope()
+    with user_scope.open():
+        derived = result.tail(1)
+    massive_session.release(result)
+    assert [r["State"] for r in stream_rows()] == ["RELEASED"]
+    massive_session._core.fail_stream(1, "not authorized")  # no KeyError, no bookkeeping
+    assert [(r["State"], r["Error"]) for r in stream_rows()] == [("RELEASED", None)]
+    assert derived.is_refreshing
+    again = q.blink()  # the released stream's key was already free: a fresh stream opens
+    assert len(fake_streams.opened) == 2
+    massive_session.release(again)
+    user_scope.release()
+    assert fake_streams.shutdown[1].wait(TIMEOUT)

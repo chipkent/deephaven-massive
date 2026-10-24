@@ -473,12 +473,20 @@ class SessionCore:
         verb with the same key opens a fresh stream instead of returning the dead table. The
         failed stream stays in the registry until its results are released.
 
+        A stream whose last library-held result was already released has left the registry
+        (and its key), though a derived table or an open panel may still keep its publisher
+        alive until the blink table shuts down. A failure reported for such a stream needs no
+        bookkeeping: the transport's `publish_failure` already fails the live table, and no
+        new verb can reuse the stream. The call then does nothing.
+
         Args:
             stream_id: The failed stream.
             error: The failure text for the `Error` column.
         """
         with self.registry_lock:
-            state = self._streams[stream_id]
+            state = self._streams.get(stream_id)
+            if state is None:
+                return
             row = replace(state.row, state=StreamState.FAILED, error=error)
             self._streams[stream_id] = replace(state, row=row)
             if self._stream_ids.get(state.key) == stream_id:
