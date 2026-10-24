@@ -35,7 +35,14 @@ from deephaven_massive._domains.partners import _Benzinga, _EtfGlobal, _Fable, _
 from deephaven_massive._domains.reference import _Reference
 from deephaven_massive._domains.stocks import _Stocks
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._liveness import Reaper, ResultRegistry, StreamHandle, new_scope
+from deephaven_massive._liveness import (
+    Reaper,
+    ResultRegistry,
+    StreamHandle,
+    entered,
+    make_result,
+    new_scope,
+)
 from deephaven_massive._query import Request, StreamQuery
 from deephaven_massive._schema import TRADES
 
@@ -332,9 +339,13 @@ def _when_waiting(
     claim = core._claim
 
     def spying(
-        spec: DatasetSpec, request: Request, key: StreamKey
+        spec: DatasetSpec,
+        request: Request,
+        key: StreamKey,
+        *,
+        opening: list[tuple[int, threading.Event]],
     ) -> StreamHandle | threading.Event | int:
-        found = claim(spec, request, key)
+        found = claim(spec, request, key, opening=opening)
         if isinstance(found, threading.Event):
             waiting.set()
         return found
@@ -462,6 +473,62 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
     massive_session.release(first)
     massive_session.release(second)
     assert fake_streams.shutdown[2].wait(TIMEOUT)
+
+
+def test_an_interrupt_before_the_open_starts_leaves_no_opening_record(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A KeyboardInterrupt landing after the claim registered the record and before the open
+    # began: the record must be deleted and readied, or every later verb on the key would wait
+    # for ever.
+    core = massive_session._core
+    opened = core._open
+
+    def interrupted(*_args: object, **_kwargs: object) -> StreamHandle:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(core, "_open", interrupted)
+    q = stream_query(massive_session)
+    with pytest.raises(KeyboardInterrupt):
+        q.blink()
+    assert core._streams == {}
+    assert core._stream_ids == {}
+    monkeypatch.setattr(core, "_open", opened)
+    with ThreadPoolExecutor(1) as pool:  # a later verb on the key opens at once
+        result = pool.submit(q.blink).result(TIMEOUT)
+    assert list(core._streams) == [2]
+    massive_session.release(result)
+
+
+def test_an_interrupt_after_the_open_releases_the_stream(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A KeyboardInterrupt inside the open, after the transport returned and the registry was
+    # updated: the waiters wake and the opener's hold is released with the stream's scope.
+    core = massive_session._core
+    write = Diagnostics.write
+    interrupted: list[bool] = []
+
+    def interrupting(self: Diagnostics, row: ConnectionRow | StreamRow) -> None:
+        if not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt
+        write(self, row)
+
+    monkeypatch.setattr(Diagnostics, "write", interrupting)
+    q = stream_query(massive_session)
+    with pytest.raises(KeyboardInterrupt):
+        q.blink()
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the opener's hold was released
+    assert core._streams == {}
+    assert core._stream_ids == {}
+    with ThreadPoolExecutor(1) as pool:
+        result = pool.submit(q.blink).result(TIMEOUT)  # no verb waits on the dead open
+    massive_session.release(result)
 
 
 @pytest.mark.parametrize("report", ["fail", "update"])
@@ -1089,6 +1156,36 @@ def test_an_interrupt_while_tracking_releases_the_scope_and_the_hold(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     assert core._streams == {}
     assert core.results.held() == 0
+
+
+def test_a_result_that_outlives_its_session_is_still_released() -> None:
+    # A result whose release callback does not hold the core (a future poll() table's
+    # poller, for example) can outlive the session. The reaper must outlive it too, or the
+    # result's scope would never be released once it is collected.
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="outliving-poll"))
+    core = m._core
+    released = threading.Event()
+    with entered(core.exec_ctx):
+        result, scope = make_result(lambda: time_table("PT1S"))
+    core.results.track(result, scope, released.set)  # the callback holds nothing of the core
+    alive = weakref.ref(core)
+    reaper = core._reaper.thread
+    del core, m
+    pause = threading.Event()  # never set; only paces the bounded waits below
+    for _ in range(200):
+        gc.collect()
+        if alive() is None:
+            break
+        pause.wait(0.05)
+    assert alive() is None  # the session is gone
+    pause.wait(0.2)
+    assert reaper.is_alive()  # but its reaper waits for the result
+    assert result.is_refreshing
+    del result
+    gc.collect()
+    assert released.wait(TIMEOUT)
+    reaper.join(TIMEOUT)
+    assert not reaper.is_alive()  # and ends with the last result
 
 
 def test_an_unclosed_core_is_collected_by_the_cyclic_collector() -> None:

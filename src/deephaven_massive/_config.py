@@ -128,9 +128,10 @@ class MassiveConfig:
             once.
         reconnect_backoff: Seconds of the first wait before reconnecting after a connection
             that opened has closed (including a `max_connections` refusal); later waits double
-            up to `max_reconnect_backoff`. A connect that fails before the connection opens
-            retries on the websockets library's own schedule (up to 5 s, growing to 90 s).
-            Any positive value is accepted (tests use
+            up to `max_reconnect_backoff`. Before a connection opens, a TCP failure, a
+            timeout, or a retryable handshake failure (HTTP 500/502/503/504) retries on the
+            websockets library's own schedule (up to 5 s, growing to 90 s), and any other
+            handshake error is fatal. Any positive value is accepted (tests use
             milliseconds). The 30-second default waits out the "roughly 10 to 30 seconds"
             Massive's knowledge base says the server takes to release a dropped connection;
             an earlier retry can be refused for holding the allowance it just lost.

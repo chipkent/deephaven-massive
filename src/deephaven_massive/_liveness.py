@@ -351,7 +351,7 @@ class ResultRegistry:
     `release()` of the same table finds it and does nothing.
     """
 
-    __slots__ = ("_ids", "_lock", "_reaper", "_results")
+    __slots__ = ("_ids", "_lock", "_reaper", "_results", "_retired")
 
     def __init__(self, lock: threading.RLock, reaper: Reaper) -> None:
         """Create an empty registry.
@@ -364,6 +364,7 @@ class ResultRegistry:
         self._reaper = reaper
         self._results: dict[int, ResultRecord] = {}
         self._ids = count(1)
+        self._retired = False
 
     def track(
         self, result: Table, scope: LivenessScope, on_released: Callable[[], None]
@@ -436,6 +437,26 @@ class ResultRegistry:
         with self._lock:
             return sum(not record.released for record in tuple(self._results.values()))
 
+    def retire(self) -> None:
+        """Stop the reaper once no tracked result remains; called when the session is collected.
+
+        A tracked result whose owner callback does not hold the session core (a `poll()`
+        table's poller, for example) can outlive the session. Stopping the reaper with the
+        session would leave such a result unreleased when it is collected, so the reaper is
+        stopped only once the registry is empty: now if it already is, otherwise by the job
+        that forgets the last collected result. Takes no lock and makes no Java call (it runs
+        in a garbage-collection finalizer): it only queues a job on the reaper.
+        """
+        self._reaper.submit(self._retire)
+
+    def _retire(self) -> None:
+        """Reaper job of `retire`: mark the registry retired and stop the reaper if it is empty."""
+        with self._lock:
+            self._retired = True
+            idle = not self._results
+        if idle:
+            self._reaper.stop()
+
     def _on_collected(self, record: ResultRecord, key: int) -> None:
         """Finalizer: the result's wrapper was garbage-collected. Takes no lock.
 
@@ -460,8 +481,13 @@ class ResultRegistry:
                 del self._results[key]
             first = not record.released
             record.released = True
-        if first:
-            self._reap(record)
+            idle = self._retired and not self._results
+        try:
+            if first:
+                self._reap(record)
+        finally:
+            if idle:  # the session is gone and this was its last result
+                self._reaper.stop()
 
     @staticmethod
     def _reap(record: ResultRecord) -> None:

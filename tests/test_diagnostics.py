@@ -3,9 +3,10 @@
 import dataclasses
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
+import pyarrow as pa
 import pytest
 from deephaven import input_table, new_table
 from deephaven.column import string_col
@@ -30,6 +31,7 @@ from deephaven_massive._diagnostics import (
 )
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Transport
 from deephaven_massive._liveness import new_scope
+from deephaven_massive._schema import Schema
 from deephaven_massive._symbols import SymbolTable
 
 Rows = Callable[[Table], list[dict[str, Any]]]
@@ -183,6 +185,68 @@ def test_failed_writes_are_logged_and_the_writer_continues(
         assert diagnostics.barrier().wait(TIMEOUT)
     assert "failed to write a streams row" in caplog.text
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
+    diagnostics.release()
+
+
+class _BrokenTable:
+    # A diagnostics table whose add fails.
+    def add(self, rows: Table) -> None:
+        raise RuntimeError("the streams table is broken")
+
+
+def test_a_failing_table_does_not_cost_the_other_its_rows(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics._streams = cast("InputTable", _BrokenTable())
+    connection = ConnectionRow(
+        transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
+    )
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._diagnostics"):
+        diagnostics.write(STREAM)
+        diagnostics.write(connection)
+        assert diagnostics.barrier().wait(TIMEOUT)
+    assert "failed to update the streams table" in caplog.text
+    assert len(dh_to_pylist(diagnostics.connections)) == 1  # applied despite the failure
+    diagnostics.release()
+
+
+def test_a_batch_is_converted_once(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+    to_arrow = Schema.to_arrow
+
+    def counting(self: Schema, rows: Sequence[Mapping[str, object]]) -> pa.Table:
+        calls.append(len(rows))
+        return to_arrow(self, rows)
+
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    monkeypatch.setattr(Schema, "to_arrow", counting)
+    diagnostics.write(STREAM)  # the writer may take this one alone; then the rest as one batch
+    assert diagnostics.barrier().wait(TIMEOUT)
+    calls.clear()
+    counting_table = CountingTable(diagnostics.streams)
+    diagnostics._streams = cast("InputTable", counting_table)
+    diagnostics.write(_stream(stream_id=100))
+    assert counting_table.entered.wait(TIMEOUT)  # the writer now holds its next batch back
+    for n in range(3):
+        diagnostics.write(_stream(stream_id=n))
+    counting_table.gate.set()
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert calls == [1, 3]  # one conversion per batch, never one per row
+    diagnostics.release()
+
+
+def test_a_batch_of_rows_that_do_not_fit_adds_nothing(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._diagnostics"):
+        diagnostics.write(_stream(stream_id=8, dataset=cast("str", 5)))
+        assert diagnostics.barrier().wait(TIMEOUT)
+    assert "failed to write a streams row" in caplog.text
+    assert dh_to_pylist(diagnostics.streams) == []
     diagnostics.release()
 
 

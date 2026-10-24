@@ -267,7 +267,7 @@ defined in exactly one place: the field defaults of this class.
 | `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | |
 | `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. Hostname only; validated. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
 | `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic. |
-| `reconnect_backoff: float` | `30.0` seconds | The first wait before reconnecting after a connection that opened has closed, including a `max_connections` refusal (it arrives after a successful handshake); later waits double up to `max_reconnect_backoff`. A connect that fails before the connection opens (TCP or handshake failure) retries on the websockets library's own schedule instead: up to 5 s at first, growing to 90 s. Must be positive (a base of 0 would never grow and retry in a hot loop); any positive value is accepted, so tests can use milliseconds. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
+| `reconnect_backoff: float` | `30.0` seconds | The first wait before reconnecting after a connection that opened has closed, including a `max_connections` refusal (it arrives after a successful handshake); later waits double up to `max_reconnect_backoff`. Before a connection opens, a TCP failure, a timeout, or a retryable handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the connection's streams (§ 13.3, `raise_fatal_errors=True`). Must be positive (a base of 0 would never grow and retry in a hot loop); any positive value is accepted, so tests can use milliseconds. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
 | `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` (§19, F2.3). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
 | `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | A partition for day D counts as published from the first occurrence of this New York time after day D ends ([section 16](#16-historysourceauto)). The documentation says files land "by approximately 11:00 AM ET the following day". |
@@ -345,7 +345,9 @@ A session that is garbage-collected without `close()` is cleaned up by a finaliz
 (not run at interpreter exit). The finalizer takes no lock and makes no Deephaven call: it hands
 the registered closers (connections, pollers) to the reaper, which logs a WARNING ("MassiveSession
 #1 was garbage-collected without close(); closing its connections and pollers") and runs them,
-then stops the reaper and the diagnostics writer. `close()` empties the closer list, so a closed
+and stops the diagnostics writer. The reaper keeps running while results are still tracked (a
+result whose release path does not hold the core, such as a `poll()` table, can outlive its
+session) and stops once the last one has been collected and released. `close()` empties the closer list, so a closed
 session's closers never run twice. A closer must not refer to the core strongly, or the core
 could never be collected. Even so, an unclosed session's core is collected by the cyclic garbage
 collector, not promptly by reference counting: each result record's `on_released` callback (a
@@ -425,7 +427,10 @@ return result
   reports while the open is still running finds the record. No row is written until the open
   returns (`m.streams()` has no `OPENING` state). A second verb on the same key finds the
   record still opening and waits for the open to finish, on the caller thread and outside every
-  lock, then reuses the stream; one open per key, never a wasted publisher. If the open raises
+  lock, then reuses the stream; one open per key, never a wasted publisher. The opener's claim
+  and open run inside one `try`/`finally`, so whatever interrupts them (even a
+  `KeyboardInterrupt` landing between the two, or after the open returned) the record is
+  readied and, unless the verb got the stream, the opener's hold is released. If the open raises
   anything, even `KeyboardInterrupt`, the record is deleted, its key is unmapped, and the
   waiters wake and open the stream themselves. `m.close()` wakes the waiters, which raise
   `MassiveError`; the opener releases the stream when its open returns. A failure reported
@@ -998,9 +1003,11 @@ timezone-aware `datetime` is used as is.
    (including a `max_connections` refusal, which arrives after a successful handshake) waits at
    least `reconnect_backoff` (30 s by default, the upper end of the 10–30 s the knowledge base
    gives the server to release a dropped connection); the wait doubles up to
-   `max_reconnect_backoff`, with upward-only jitter clamped to that range. A connect that fails
-   before the connection opens (TCP or handshake failure) retries on the websockets library's
-   own schedule: up to 5 s at first, growing to 90 s.
+   `max_reconnect_backoff`, with upward-only jitter clamped to that range. Before a connection
+   opens, a TCP failure, a timeout, or a retryable handshake failure (HTTP 500/502/503/504)
+   retries on the websockets library's own schedule (up to 5 s at first, growing to 90 s); any
+   other handshake error is fatal and fails the connection's streams (§ 13.3,
+   `raise_fatal_errors=True`).
 5. Futures streams always use `/futures`. `/futures/{venue}` is undocumented and unsupported.
 
 ### 13.2 Host decision
@@ -1114,7 +1121,7 @@ Responsibilities:
 | Open the socket, read `connected`, send auth, read the auth reply | fork client |
 | `auth_failed` | The fork raises `AuthError` out of `connect()`. The library marks the session failed and fails every stream on the path with `AuthenticationError`. |
 | `max_connections` status before a server close | Received as a raw frame after the handshake; during the handshake the fork surfaces it to the caller (fork item F2.6), so the library can tell it from a network drop. The fork reconnects after backoff; the library shows `State=WAITING_SLOT`; streams stay alive. |
-| Reconnect after any close unless `request_close()` was called; merge pending subscriptions; after a connection that opened closes (including a `max_connections` refusal), a backoff of at least `reconnect_backoff`, doubling to `max_reconnect_backoff`; a TCP or handshake failure retries on the websockets library's schedule (up to 5 s, growing to 90 s) | fork |
+| Reconnect after any close unless `request_close()` was called; merge pending subscriptions; after a connection that opened closes (including a `max_connections` refusal), a backoff of at least `reconnect_backoff`, doubling to `max_reconnect_backoff`; before a connection opens, a TCP failure, a timeout, or a retryable handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the connection's streams (§ 13.3, `raise_fatal_errors=True`) | fork |
 | Desired topic set, reference counts, single in-flight step | library |
 | Sending the subscribe and unsubscribe frames for a step | fork `set_subscriptions(desired, resend=...)` |
 | Per-topic acknowledgement parsing, watchdog, re-send | library, from the status frames |

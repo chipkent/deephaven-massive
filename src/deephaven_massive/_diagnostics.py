@@ -31,6 +31,7 @@ import pyarrow as pa
 from deephaven import arrow as dh_arrow
 from deephaven import input_table
 
+from deephaven_massive._errors import MassiveError
 from deephaven_massive._liveness import QueueWorker, new_scope
 from deephaven_massive._schema import Column, ColumnType, Schema, pascal_case
 from deephaven_massive._symbols import SymbolTable
@@ -445,8 +446,14 @@ class Diagnostics:
             else:
                 connections[item.transport, item.asset_class, item.family] = item
         try:
-            self._add(self._streams, STREAMS, list(streams.values()))
-            self._add(self._connections, CONNECTIONS, list(connections.values()))
+            for table, schema, rows in (
+                (self._streams, STREAMS, list(streams.values())),
+                (self._connections, CONNECTIONS, list(connections.values())),
+            ):
+                try:  # one table's failure never costs the other its rows
+                    self._add(table, schema, rows)
+                except Exception:
+                    logger.exception("diagnostics: failed to update the %s table", schema.name)
         finally:
             for barrier in barriers:
                 barrier.set()
@@ -457,16 +464,27 @@ class Diagnostics:
     ) -> None:
         """Add rows to a table with one conversion and one `add`, skipping rows that do not fit.
 
+        The whole batch is converted at once; only if that fails is each row converted on its
+        own, so the rows that fit are still added and each one that does not is logged.
+
         Args:
             table: The target table.
             schema: Its schema.
             rows: The rows, at most one per key.
         """
-        batches = []
-        for row in rows:
-            try:
-                batches.append(schema.to_arrow([as_row(row)]))
-            except Exception:
-                logger.exception("diagnostics: failed to write a %s row", schema.name)
-        if batches:
-            table.add(dh_arrow.to_table(pa.concat_tables(batches)))
+        if not rows:
+            return
+        dicts = [as_row(row) for row in rows]
+        try:
+            batch = schema.to_arrow(dicts)
+        except MassiveError:  # a row does not fit: find it, keep the others
+            batches = []
+            for one in dicts:
+                try:
+                    batches.append(schema.to_arrow([one]))
+                except Exception:
+                    logger.exception("diagnostics: failed to write a %s row", schema.name)
+            if not batches:
+                return
+            batch = pa.concat_tables(batches)
+        table.add(dh_arrow.to_table(batch))
