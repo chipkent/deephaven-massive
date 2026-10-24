@@ -174,6 +174,7 @@ def test_release_applies_queued_rows_then_releases(
     diagnostics.write(STREAM)
     diagnostics.release()
     diagnostics.release()  # idempotent
+    assert diagnostics.barrier().is_set()  # nothing left to wait for
     assert not diagnostics._thread.is_alive()
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
     diagnostics.write(_stream(stream_id=9))  # dropped: the writer has stopped

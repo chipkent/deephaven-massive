@@ -302,8 +302,9 @@ def bounds(spec: DatasetSpec, start: DateLike, end: DateLike) -> TimeRange | Fut
 
     Args:
         spec: The dataset.
-        start: The first day or instant.
-        end: The last day, or the first instant excluded.
+        start: The first day or instant, as passed or already parsed by `parse_date_like`
+            (parsed bounds pass through unchanged).
+        end: The last day, or the first instant excluded, in the same forms.
 
     Returns:
         The sessions for date-bounded futures, otherwise the instant range.

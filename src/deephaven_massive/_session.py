@@ -11,8 +11,10 @@ queries and namespaces share. The core owns:
   thread;
 - `registry_lock`, the one leaf lock that guards every session registry (DESIGN § 18): no
   Deephaven call, network call, or blocking wait happens while it is held;
-- the stream registry, one open stream per `(dataset, channel, symbols)`, each with its count of
-  library-held results and its diagnostics row;
+- the stream registry: every stream the library still holds, one per `(dataset, channel,
+  symbols)`, each with its diagnostics row (which carries its count of library-held results);
+  every diagnostics row is queued while `registry_lock` is held, so rows reach the tables in
+  the order the registry changed;
 - the result registry and the reaper thread (`_liveness.py`);
 - the diagnostics tables and their writer thread (`_diagnostics.py`);
 - one factory hook per transport (`rest_transport`, `stream_transport`,
@@ -190,18 +192,19 @@ def _stop_threads(reaper: Reaper, diagnostics: Diagnostics) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _StreamState:
-    """One stream in the registry; replaced, never mutated, under `registry_lock`.
+    """One stream the library holds; replaced, never mutated, under `registry_lock`.
+
+    A stream stays in the registry while it has at least one library-held result
+    (`row.held_results`) and is removed when the last one is released.
 
     Attributes:
         key: The stream's key.
         handle: What the WebSocket transport returned.
-        held: Library-held results of the stream; 0 once released.
-        row: The stream's current diagnostics row.
+        row: The stream's current diagnostics row, including its held-result count.
     """
 
     key: StreamKey
     handle: StreamHandle
-    held: int
     row: StreamRow
 
 
@@ -224,9 +227,11 @@ class SessionCore:
         self.exec_ctx: Final = exec_ctx
         self.label: Final = label
         self.registry_lock: Final = threading.RLock()
+        # The diagnostics come first: creating their tables is the step that can fail, and
+        # nothing has started a thread yet if it does.
+        self.diagnostics: Final = Diagnostics(exec_ctx, f"{label} diagnostics")
         self._reaper = Reaper(exec_ctx, f"{label} reaper")
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
-        self.diagnostics: Final = Diagnostics(exec_ctx, f"{label} diagnostics")
         weakref.finalize(self, _stop_threads, self._reaper, self.diagnostics)
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamState] = {}
@@ -345,8 +350,8 @@ class SessionCore:
             The stream's handle and its updated row.
         """
         state = self._streams[stream_id]
-        row = replace(state.row, held_results=state.held + 1)
-        self._streams[stream_id] = replace(state, held=state.held + 1, row=row)
+        row = replace(state.row, held_results=state.row.held_results + 1)
+        self._streams[stream_id] = replace(state, row=row)
         return state.handle, row
 
     def _acquire(self, key: StreamKey) -> StreamHandle | None:
@@ -363,7 +368,7 @@ class SessionCore:
             if stream_id is None:
                 return None
             handle, row = self._hold(stream_id)
-        self.diagnostics.write(row)
+            self.diagnostics.write(row)
         return handle
 
     def _open(
@@ -409,17 +414,18 @@ class SessionCore:
                 handle = opened
             elif existing is not None:
                 handle, row = self._hold(existing)
+                self.diagnostics.write(row)
             else:
                 handle = opened
                 self._stream_ids[key] = opened.stream_id
-                self._streams[opened.stream_id] = _StreamState(key, opened, 1, row)
+                self._streams[opened.stream_id] = _StreamState(key, opened, row)
+                self.diagnostics.write(row)
         if closed or existing is not None:
             logger.debug("%s: releasing an unused stream for %s", self.label, spec.name)
             with self.exec_ctx:
                 opened.scope.release()
         if closed:
             raise MassiveError(f"{self.label} was closed while a stream was opening")
-        self.diagnostics.write(row)
         return handle
 
     def _release_hold(self, stream_id: int) -> None:
@@ -435,29 +441,32 @@ class SessionCore:
         """
         with self.registry_lock:
             state = self._streams[stream_id]
-            held = state.held - 1
+            held = state.row.held_results - 1
             released = not held and state.row.state is StreamState.RUNNING
             row = replace(
                 state.row,
                 held_results=held,
                 state=StreamState.RELEASED if released else state.row.state,
             )
-            self._streams[stream_id] = replace(state, held=held, row=row)
-            if not held:
-                # A key maps to its open stream until that stream's last hold is dropped.
+            if held:
+                self._streams[stream_id] = replace(state, row=row)
+            else:
+                # The library no longer holds the stream: forget it with its key.
+                del self._streams[stream_id]
                 del self._stream_ids[state.key]
+            self.diagnostics.write(row)
         if not held:
             with self.exec_ctx:
                 state.handle.scope.release()
-        self.diagnostics.write(row)
 
     def close(self) -> None:
         """Close the session: run the closers, mark streams closed, release the diagnostics.
 
         Idempotent. Publishers are not failed: live tables stop receiving rows and go static,
         and keep their contents. Results stay tracked, so garbage collection and `release()`
-        still free them. Logs one WARNING with the number of live tables that became static.
-        A call on an update-graph thread raises `ValueError`.
+        still free them. Every stream the library still holds is marked `CLOSED` in
+        `m.streams()`. Logs the number of live tables that became static: a WARNING when there
+        are any, INFO otherwise. A call on an update-graph thread raises `ValueError`.
         """
         _require_not_update_graph(self.exec_ctx)
         with self.registry_lock:
@@ -465,20 +474,22 @@ class SessionCore:
                 return
             self._closed = True
             closers = tuple(self._closers)
-            rows = []
-            for stream_id, state in self._streams.items():
-                row = replace(state.row, state=StreamState.CLOSED)
-                self._streams[stream_id] = replace(state, row=row)
-                rows.append(row)
+            closed = {
+                stream_id: replace(state, row=replace(state.row, state=StreamState.CLOSED))
+                for stream_id, state in self._streams.items()
+            }
+            self._streams.update(closed)
+            for state in closed.values():
+                self.diagnostics.write(state.row)
         for closer in closers:
             try:
                 closer()
             except Exception:
                 logger.exception("%s: a transport failed to close", self.label)
-        for row in rows:
-            self.diagnostics.write(row)
         self.diagnostics.release()
-        logger.warning("session closed; %d live tables are now static", self.results.held())
+        live = self.results.held()
+        level = logging.WARNING if live else logging.INFO
+        logger.log(level, "session closed; %d live tables are now static", live)
 
 
 class MassiveSession:
@@ -724,7 +735,7 @@ class MassiveSession:
 
         Publishers are not failed, so live tables keep their rows and stop updating;
         `m.streams()` shows every stream `CLOSED` before the diagnostics tables are released.
-        One WARNING is logged: "session closed; N live tables are now static". After
+        "session closed; N live tables are now static" is logged, at WARNING when N > 0. After
         `close()`, verbs, `connections()`, and `streams()` raise
         `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
         and `release()` keep working. A call on an update-graph thread raises `ValueError`.

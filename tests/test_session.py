@@ -272,7 +272,9 @@ def test_all_and_reactive_symbols_in_stream_rows(
 def test_a_racing_open_reuses_the_registered_stream(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
+    *,
     monkeypatch: pytest.MonkeyPatch,
+    stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     q = stream_query(massive_session)
     inner: list[Table] = []
@@ -294,8 +296,8 @@ def test_a_racing_open_reuses_the_registered_stream(
     outer = q.blink()
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # the losing stream was released
     assert not fake_streams.shutdown[2].is_set()
-    assert massive_session._core._streams[2].held == 2
-    assert 1 not in massive_session._core._streams
+    # The losing stream never reached the diagnostics; the winner holds both results.
+    assert [(r["StreamId"], r["HeldResults"]) for r in stream_rows()] == [(2, 2)]
     massive_session.release(outer)
     massive_session.release(inner[0])
     assert fake_streams.shutdown[2].wait(TIMEOUT)
@@ -321,9 +323,21 @@ def test_close_marks_streams_closed_and_warns_once(
         massive_session.close()
         massive_session.close()
     assert caplog.messages == ["session closed; 1 live tables are now static"]
-    assert {r["State"] for r in dh_arrow.to_arrow(streams).to_pylist()} == {"CLOSED"}
+    # Only the stream the library still holds is closed; the released one keeps its last row.
+    rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
+    assert [r["State"] for r in rows] == ["CLOSED", "RELEASED"]
     keeper.release()
     massive_session.release(live)  # release() keeps working after close()
+
+
+def test_close_with_no_live_tables_logs_info(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._session"):
+        massive_session.close()
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, "session closed; 0 live tables are now static")
+    ]
 
 
 def test_after_close(massive_session: dm.MassiveSession) -> None:

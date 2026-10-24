@@ -176,9 +176,11 @@ def test_ambiguous_crypto_pairs_are_rejected() -> None:
 def test_crypto_quotes_cover_the_vendored_tickers(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
-    rows = list(
-        csv.DictReader(io.StringIO(load_fixture("_symbols", "crypto_tickers.csv").decode()))
-    )
+    # The fixture is assembled from well-known pairs, not from a live listing (no API key was
+    # available). The live-testing package (P8) must regenerate it from
+    # /v3/reference/tickers?market=crypto and widen CRYPTO_QUOTES if this test then fails.
+    text = load_fixture("_symbols", "crypto_tickers.csv").decode()
+    rows = list(csv.DictReader(io.StringIO(text)))
     assert len(rows) > 20
     for row in rows:
         assert canonical(CRY, row["ticker"]) == row["ticker"]

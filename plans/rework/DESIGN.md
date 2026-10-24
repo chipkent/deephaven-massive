@@ -109,7 +109,7 @@ There are no existing users. Backward compatibility with the previous code base 
 | blink table | A Deephaven table whose rows exist for exactly one update cycle. `TablePublisher` produces one. |
 | result scope | A library-owned `LivenessScope` that holds exactly one result. |
 | stream scope | A library-owned `LivenessScope` that holds one stream's blink table and publisher. |
-| registry lock | `MassiveSession._registry_lock`, the one lock that guards every session-level registry. |
+| registry lock | `SessionCore.registry_lock`, the one lock that guards every session-level registry. |
 
 ## 3. Exports
 
@@ -179,7 +179,7 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 | `_session.py` | `MassiveSession`: namespaces, `snapshots`, `release`, `close`, the registry lock, the reaper thread, the host-decision cache ([section 6](#6-massivesession-and-lifecycle)). |
 | `_query.py` | The six query classes and their verbs ([section 7](#7-query-classes-and-verbs)). |
 | `_enums.py` | The fourteen public enums and the internal `Recency`, `ChannelFamily`, and `Transport` enums; the `_require_enum` runtime check. |
-| `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases. |
+| `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases, and `override` (`typing_extensions.override` for the type checker, a no-op at run time, since `typing.override` needs Python 3.12). |
 | `_errors.py` | `MassiveError`, `AuthenticationError`, `EntitlementError`. |
 | `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST method, `start`/`end` parameter pair, poll default, flat-file prefix). Also the generated `SDK_PARAMS` table ([section 9](#9-filters)). |
 | `_schema.py` | The schema registry: SDK-model flattening, PascalCase naming, the dtype override table, the four hand-written tick schemas (trades, quotes, bars, index values) with per-transport key maps. |
@@ -357,7 +357,7 @@ with scope.open():                            # top of the thread-local stack du
                                               #   Table(stream.blink.j_table), then scope.manage(result)
 record = _ResultRecord(stream_id, scope, released=False,
                        ref=weakref.ref(result, _enqueue_release(record_id)))
-with m._registry_lock:
+with m._core.registry_lock:
     m._results[id(result)] = record           # keyed by Python object id; checked against the weakref on use
 return result
 ```
@@ -380,7 +380,7 @@ return result
   panel, or a user scope therefore keeps the stream alive and subscribed, even after every
   library-held result has been released.
 - **Weakref callback.** It fires when the Python wrapper is collected. Under
-  `_registry_lock` it flips the record's once-only `released` flag; if the flag was already set
+  `registry_lock` it flips the record's once-only `released` flag; if the flag was already set
   it returns. Otherwise it puts `record_id` on the reaper queue (`queue.SimpleQueue`). It makes no
   Java call.
 - **Reaper thread.** One daemon thread per session. It takes records off the queue, calls
@@ -389,7 +389,7 @@ return result
   thread continues. The reaper does nothing else.
 - **Shutdown callback.** It usually runs on the reaper thread, but it may run on a UG thread or a
   gRPC thread if the UI held the last reference. It does exactly two things: a registry update
-  under `_registry_lock`, and `loop.call_soon_threadsafe(...)` to the connection's loop so the
+  under `registry_lock`, and `loop.call_soon_threadsafe(...)` to the connection's loop so the
   topic reference counts are decremented there. Never a send, never a Deephaven call.
 - **`m.release(table)`** looks up `id(table)` in `_results`, verifies that the weakref resolves to
   that exact object (so a recycled id cannot match), flips the `released` flag under the lock,
@@ -397,8 +397,10 @@ return result
   deterministic: the table keeps ticking only while other holders (derived tables, open panels)
   exist.
 - **`m.close()`** closes every connection and poller and releases the session-owned diagnostics
-  scope. Publishers are not failed; live tables go static. `m.streams()` flips every stream to
-  `State=CLOSED` and one WARNING is logged: "session closed; N live tables are now static".
+  scope. Publishers are not failed; live tables go static. `m.streams()` flips every stream the
+  library still holds to `State=CLOSED` (streams whose results were all released have already
+  left the registry) and one message is logged: "session closed; N live tables are now static",
+  at WARNING when N > 0 and at INFO when N is 0.
 
 Two documented behaviours that users will notice:
 
@@ -777,8 +779,8 @@ m.options.contracts(underlying="NVDA",
 Validation is synchronous at query construction. `_catalog.py` holds a generated table
 `SDK_PARAMS[method] = {name: kind}`, keyed by SDK `RESTClient` method name and produced by
 `scripts/refresh_massive_catalog.py` from `inspect.signature(RESTClient.<method>)`; a dataset's
-accepted filters are the union over its methods plus its `extra_params`. An unknown key or a value of the wrong kind raises
-`ValueError` naming the valid keys. A test asserts that the vendored table equals the installed
+accepted filters are the union over its methods plus its `extra_params`. An unknown key or a
+value of the wrong kind raises `ValueError` naming the valid keys. A test asserts that the vendored table equals the installed
 SDK's signatures, so an SDK upgrade that adds a filter fails CI until the table is regenerated.
 
 `start` and `end` map to the SDK parameter pair recorded per dataset in the catalog
@@ -852,6 +854,10 @@ Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}` and `ChannelFamil
 **Dates.** Parameters accept an ISO-8601 `str`, a `date`, or a timezone-aware `datetime`. A
 naive `datetime`, or an ISO string with a time but no offset, raises
 `ValueError("timezone required")`.
+
+**ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
+becomes an `Instant`; text without a UTC offset is read as UTC. SDK fields named `*_utc` map to
+`Instant` automatically; any other text timestamp needs an explicit override.
 
 **Column types.** `Instant` for timestamps, `LocalDate` for calendar dates, `double`, `long`,
 `int`, `String`, `boolean`, and `int[]` for condition lists. Each union column has exactly one
@@ -1211,7 +1217,9 @@ the update graph for diagnostics, and never write from UG callbacks.
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant` |
 | `LastError` | text |
 
-**`m.streams()`**: one row per stream.
+**`m.streams()`**: one row per stream. A row is written when the stream opens and on every
+change while the library holds the stream; its last row (`RELEASED`, or `CLOSED` for every stream
+the library still holds at `m.close()`) stays in the table.
 
 | Column | Meaning |
 |---|---|
@@ -1255,7 +1263,7 @@ without the GIL.
 
 ### 18.2 Shared state and ownership
 
-- `MassiveSession._registry_lock` (a `threading.RLock`) guards every mutable registry: streams
+- `SessionCore.registry_lock` (a `threading.RLock`) guards every mutable registry: streams
   by key, results by id, connections by URL, topic reference counts, host decisions. It is a
   **leaf lock**: no Deephaven call, no network call, no blocking wait, and no wait on a
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
@@ -1279,10 +1287,10 @@ without the GIL.
 
 ### 18.3 Lock order
 
-The order is **UG lock, then `_registry_lock`**. Listeners run on the UG thread while the UG
-lock is held and may take `_registry_lock`. Therefore no library thread acquires the UG lock,
+The order is **UG lock, then `registry_lock`**. Listeners run on the UG thread while the UG
+lock is held and may take `registry_lock`. Therefore no library thread acquires the UG lock,
 directly or through auto-locking in `Table.snapshot()`, `where_in`, `last_by`, or
-`deephaven.arrow.to_table`, while holding `_registry_lock`. That single rule prevents the UG and
+`deephaven.arrow.to_table`, while holding `registry_lock`. That single rule prevents the UG and
 registry deadlock. Verbs called on the UG thread raise `ValueError`.
 
 ### 18.4 Free-threaded specifics

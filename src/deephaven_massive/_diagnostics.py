@@ -13,8 +13,9 @@ thread and released by `m.close()`. One daemon writer thread per session applies
 rest of the library hands it immutable row snapshots through a `queue.SimpleQueue`, so no
 caller, reaper, or flush thread ever waits on the update graph for bookkeeping, and nothing is
 written from a Deephaven listener callback. Each row replaces the whole row for its key; the
-queue is first in, first out, so a snapshot taken later (under the session's registry lock)
-always lands later. Rows queued after the tables are released are dropped.
+queue is first in, first out, and the session queues each snapshot while holding its
+`registry_lock`, so rows land in the order the registry changed. Once the writer is stopped,
+rows are no longer queued.
 """
 
 from __future__ import annotations
@@ -269,8 +270,9 @@ class Diagnostics:
     the tables live in a session-owned liveness scope. A daemon writer thread enters the same
     execution context, takes row snapshots off a `queue.SimpleQueue` in order, and applies each
     with `InputTable.add`; no other thread waits on the update graph for diagnostics. `write`
-    only enqueues and is safe from any thread. A failed write is logged at ERROR and the thread
-    carries on.
+    only enqueues and is safe from any thread, including one that holds the session's
+    `registry_lock`: its internal lock is a leaf held only around a non-blocking `put`. A failed
+    write is logged at ERROR and the thread carries on.
 
     `release()` lets the writer apply the rows already queued, release the scope, and exit, and
     waits for it; `stop()` does the same without waiting, for use from a finalizer.
@@ -320,36 +322,49 @@ class Diagnostics:
     def write(self, row: ConnectionRow | StreamRow) -> None:
         """Queue one row's full current state; it replaces the row with the same key.
 
-        Never blocks. A row queued after `release()` or `stop()` is dropped.
+        Never blocks. After `release()` or `stop()` the row is not queued at all.
 
         Args:
             row: An immutable snapshot of the row.
         """
-        self._queue.put(row)
+        with self._release_lock:
+            if not self._released:
+                self._queue.put(row)
 
     def barrier(self) -> threading.Event:
         """Return an event that is set once every row queued before this call is applied.
 
         Returns:
-            The event.
+            The event; already set when the writer has been stopped.
         """
         event = threading.Event()
-        self._queue.put(event)
+        with self._release_lock:
+            if self._released:
+                event.set()
+            else:
+                self._queue.put(event)
         return event
 
-    def stop(self) -> None:
-        """Ask the writer to apply the queued rows, release the tables, and exit; no wait."""
-        self._queue.put(None)
+    def stop(self) -> bool:
+        """Ask the writer to apply the queued rows, release the tables, and exit; no wait.
+
+        Idempotent; used by the session's finalizer.
+
+        Returns:
+            True if this call stopped the writer, False if it was already stopping.
+        """
+        with self._release_lock:
+            if self._released:
+                return False
+            self._released = True
+            self._queue.put(None)
+        return True
 
     def release(self) -> None:
         """Apply the queued rows, release the tables' scope, and end the writer. Idempotent.
 
         Blocks until the writer has finished, so it must not run on an update-graph thread.
         """
-        with self._release_lock:
-            if self._released:
-                return
-            self._released = True
         self.stop()
         self._thread.join()
 

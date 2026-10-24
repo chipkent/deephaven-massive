@@ -86,10 +86,10 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 - **Enter the execution context on every library thread.** The session captures the caller's
   `ExecutionContext` at construction; every library thread enters it before any Deephaven call.
   Without it, Deephaven raises `No execution context`.
-- **Lock order is the update-graph (UG) lock, then `_registry_lock`.** `_registry_lock` is a
+- **Lock order is the update-graph (UG) lock, then `registry_lock`.** `registry_lock` is a
   leaf lock: while holding it, make no Deephaven call, no network call, and no blocking wait.
   Table operations such as `where_in`, `last_by`, `Table.snapshot()`, and
-  `deephaven.arrow.to_table` may take the UG lock, so never run them under `_registry_lock`.
+  `deephaven.arrow.to_table` may take the UG lock, so never run them under `registry_lock`.
 - **Never block inside a table listener.** Listeners run on a UG thread with the UG lock held.
   Compute the diff, hand it to a worker, and return. No table operations, no I/O, no waiting on
   library threads. Verbs called on a UG thread raise `ValueError`.

@@ -547,10 +547,9 @@ class HistoryQuery(QueryBase):
         """
         self._check_thread()
         chosen = _require_enum(source, HistorySource, "source")
-        window = bounds(self._spec, start, end)
-        request = replace(
-            self._request, start=parse_date_like(start, "start"), end=parse_date_like(end, "end")
-        )
+        first, last = parse_date_like(start, "start"), parse_date_like(end, "end")
+        window = bounds(self._spec, first, last)
+        request = replace(self._request, start=first, end=last)
         if chosen is HistorySource.REST:
             self._check_rest_history()
             return self._core.rest_transport().history(self._spec, request, window)

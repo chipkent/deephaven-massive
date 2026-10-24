@@ -47,17 +47,9 @@ if TYPE_CHECKING:
 else:
 
     def override(method: _F) -> _F:
-        """Mark a method as overriding its base, for the type checker only.
+        """Return `method` unchanged: `typing.override` exists only from Python 3.12.
 
-        `typing.override` exists from Python 3.12 and the library supports 3.11, so mypy reads
-        `typing_extensions.override` and at run time the decorator returns the method
-        unchanged (the standard one only sets `__override__`).
-
-        Args:
-            method: The overriding method.
-
-        Returns:
-            `method` itself.
+        mypy reads `typing_extensions.override` instead, so overrides stay checked.
         """
         return method
 

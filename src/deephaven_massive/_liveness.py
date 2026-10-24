@@ -26,7 +26,7 @@ it the stream: topic reference counts are bound to the blink table's `on_shutdow
 never to result records.
 
 Threading: `make_result` runs on the caller thread (liveness scopes are thread-local). The
-registry's state is guarded by the session's `_registry_lock`, a leaf lock under which no
+registry's state is guarded by the session's `registry_lock`, a leaf lock under which no
 Deephaven call is made. Scope releases happen on the reaper thread inside the session's
 `ExecutionContext`.
 """
@@ -212,7 +212,7 @@ class ResultRegistry:
     """The session's live results, by `id(result)`, and their single release path.
 
     One instance per session. Its dictionary and every record's `released` flag are guarded
-    by the session's `_registry_lock`, which is a leaf lock: nothing here calls Deephaven while
+    by the session's `registry_lock`, which is a leaf lock: nothing here calls Deephaven while
     holding it. Scope releases are submitted to the session's `Reaper`.
 
     A released record stays in the registry until its wrapper is collected, so a second
@@ -225,7 +225,7 @@ class ResultRegistry:
         """Create an empty registry.
 
         Args:
-            lock: The session's `_registry_lock`.
+            lock: The session's `registry_lock`.
             reaper: The session's reaper.
         """
         self._lock = lock

@@ -8,10 +8,11 @@ import gc
 import logging
 import threading
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, Protocol
 
 import pytest
 from deephaven import empty_table
+from deephaven.dherror import DHError
 from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
@@ -243,7 +244,7 @@ def test_close_releases_the_diagnostics_and_keeps_results_usable(
     massive_session.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
         massive_session.streams()
-    with pytest.raises(Exception, match=r"LivenessStateException|no longer live|failed"):
+    with pytest.raises(DHError, match="LivenessStateException"):
         streams.tail(1)
     # Live tables went static but remain usable. (A formula operation such as where() would
     # capture this frame's locals in the query scope and keep `result` alive, so use tail().)
@@ -296,7 +297,9 @@ def test_streams_are_shared_then_reopened(
 def test_concurrent_verbs_share_one_stream(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreams,
+    *,
     drain: Callable[[], None],
+    stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     q = query(massive_session)
     results: list[Table] = []
@@ -318,9 +321,8 @@ def test_concurrent_verbs_share_one_stream(
     assert len(results) == 16
     # Opens are optimistic: racing verbs may each open a stream, but exactly one is registered
     # and holds all sixteen results; every other one is released at once.
-    core = massive_session._core
-    (winner,) = core._stream_ids.values()
-    assert core._streams[winner].held == 16
+    ((winner, held),) = [(r["StreamId"], r["HeldResults"]) for r in stream_rows()]
+    assert held == 16
     losers = set(fake_streams.shutdown) - {winner}
     for loser in losers:
         assert fake_streams.shutdown[loser].wait(TIMEOUT)
