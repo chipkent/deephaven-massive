@@ -370,7 +370,7 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
     `authors = [{name = "Chip Kent", email = "chipkent@illumon.com"}]`; `[project.urls]` to
     `github.com/chipkent/deephaven-massive`; `Typing :: Typed`.
   - `dependencies`: `massive>=2.9.0`, `deephaven-core>=42.0`, `pyarrow>=14`, `boto3>=1.28`,
-    `websockets>=14`. `[tool.uv.sources] massive = { git = "https://github.com/chipkent/massive-client-python", rev = "<sha of deephaven-fixes>" }`.
+    `websockets>=14`. `[tool.uv.sources] massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }` (`uv.lock` records the commit).
     `orjson` as an optional extra (`[project.optional-dependencies] orjson = ["orjson>=3.9"]`).
   - `[dependency-groups] dev`: `ruff>=…` (floor only; latest via the lock and Dependabot), `mypy`, `types-boto3[s3]`, `pytest>=9`,
     `pytest-cov`, `pytest-timeout`, `pyright`, `pre-commit`, `deephaven-server>=42.0`. No
@@ -1342,10 +1342,11 @@ this repository's in one respect: the integration branch is assembled by direct 
   Each topic gets one `fix/<topic>`, `feat/<topic>`, or `ci/<topic>` branch cut from upstream
   `main`. F1 and F2 are cut from the F7 branch instead, because their tests use F7's fake
   server; their upstream PRs are opened as stacked PRs that note the dependency.
-- **`deephaven-fixes`** is the integration branch this repository pins by commit SHA. It only
+- **`deephaven-fixes`** is the integration branch this repository tracks by branch; `uv.lock`
+  records the exact commit. It only
   moves forward: topic branches are merged into it, and when upstream moves, the new upstream
   `master` is merged into it. It is **never reset, rebased, or force-pushed**, because a rewritten
-  history could make a pinned SHA unreachable and break `uv sync` here. A ruleset on the fork
+  history could make a locked commit unreachable and break `uv sync` here. A ruleset on the fork
   blocks deletion and force pushes on `master` and `deephaven-fixes`. Agents may merge into
   `deephaven-fixes` and push it, **only when the fork's CI is green on the result**. Nothing is
   ever committed directly on it; every change arrives by a merge.
@@ -1355,7 +1356,8 @@ this repository's in one respect: the integration branch is assembled by direct 
   (file:line in v2.9.0), the change, and the test; they never mention Deephaven.
 - **Upstream merges.** When upstream merges a PR, merge the new upstream `master` into
   `deephaven-fixes` (resolving any conflict in favour of upstream's version of the fix) and
-  delete the corresponding topic branch. A D-bump PR here moves the pin.
+  delete the corresponding topic branch. A D-bump PR here refreshes the lock with
+  `uv lock --upgrade-package massive`.
 - **Never in the fork:** connection sharing, ref-counting, publishers, failure semantics,
   reactive watchlists, tier detection, the options cap, schema mapping, S3 (DESIGN § 19,
   "stays in this library").

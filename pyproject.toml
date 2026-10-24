@@ -55,9 +55,10 @@ dev = [
 ]
 
 [tool.uv.sources]
-# The fork's `deephaven-fixes` integration branch, pinned by commit. Bumped only by D-bump PRs.
+# The fork's `deephaven-fixes` integration branch. uv.lock records the exact commit, so installs
+# are reproducible; `uv lock --upgrade-package massive` moves the lock to the branch's latest.
 # The fork builds as version 0.0.0, so no code or test may check the massive version.
-massive = { git = "https://github.com/chipkent/massive-client-python", rev = "fd76d503f7e9729715fc9fee3bebbcc1915aa0d6" }
+massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }
 
 [tool.hatch.build.targets.sdist]
 # Development-only files stay out of the source distribution.

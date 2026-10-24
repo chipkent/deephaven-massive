@@ -1276,10 +1276,12 @@ builds rather than unit tests alone.
 Fork: `github.com/chipkent/massive-client-python`. The fixes are grouped into seven topic
 branches, F1 to F7. Each branch is opened as one pull request to `massive-com/client-python`.
 The fork's `deephaven-fixes` branch is assembled by direct merges of the seven branches (no
-pull requests into it); CI runs on every push to it; this project pins it by commit:
-`[tool.uv.sources] massive = { git = "<fork>", rev = "<sha>" }`, with `[project]` keeping
-`massive>=2.9.0`. The branch only moves forward: when upstream moves, the new upstream `master`
-is merged into it. It is never reset or force-pushed, so every pinned commit stays reachable; a
+pull requests into it); CI runs on every push to it. This project tracks the branch:
+`[tool.uv.sources] massive = { git = "<fork>", branch = "deephaven-fixes" }`, with `[project]`
+keeping `massive>=2.9.0`. `uv.lock` records the exact commit, so every install is reproducible,
+and `uv lock --upgrade-package massive` moves the lock to the branch's latest commit. The branch
+only moves forward: when upstream moves, the new upstream `master` is merged into it. It is
+never reset or force-pushed, so every commit a lock has recorded stays reachable; a
 fork ruleset blocks deletion and force pushes. Agents may push topic branches, and may merge
 into `deephaven-fixes` and push it when the fork's CI is green; opening an upstream pull
 request needs explicit owner approval each time. Evidence paths are relative to `site-packages/massive` in `massive==2.9.0`.
@@ -1417,8 +1419,8 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Packaging.** `uv.lock` is committed and CI runs `uv sync --locked`. Development dependencies
   use a PEP 735 `[dependency-groups]` table; license metadata follows PEP 639. `__version__`
   comes from `importlib.metadata`. `deephaven-server` is a development dependency only.
-  `websockets>=14`. `[project]` declares `massive>=2.9.0`, and `[tool.uv.sources]` pins the fork's
-  `deephaven-fixes` branch by commit SHA. `.gitignore` lists only the files this project
+  `websockets>=14`. `[project]` declares `massive>=2.9.0`, and `[tool.uv.sources]` tracks the fork's
+  `deephaven-fixes` branch, with `uv.lock` recording the exact commit. `.gitignore` lists only the files this project
   produces.
 - **Metadata.** `authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]`; repository
   `https://github.com/chipkent/deephaven-massive`. Not published to PyPI until the fork fixes are
@@ -1589,7 +1591,7 @@ document already reflects them.
 20. **All merges into `main` happen through pull requests, and only the owner merges.** In the
     fork, each topic branch goes upstream as one pull request; the fork's `deephaven-fixes`
     branch is assembled by direct merges of those branches, with CI on every push, is never
-    reset or force-pushed, and is pinned here by commit SHA.
+    reset or force-pushed, and is tracked here by branch, with `uv.lock` recording the exact commit.
 
 ## 23. Open verification items
 
