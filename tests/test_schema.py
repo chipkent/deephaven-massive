@@ -111,11 +111,9 @@ def test_to_arrow_reports_schema_mismatches() -> None:
 
 
 def test_flatten_nested_models() -> None:
-    snapshot = TickerSnapshot.from_dict(
-        {
-            "ticker": "AAPL",
-            "lastTrade": {"p": 189.5, "s": 100, "t": 1_700_000_000_000_000_000},
-        }
+    snapshot = TickerSnapshot(
+        ticker="AAPL",
+        last_trade=LastTrade(price=189.5, size=100, sip_timestamp=1_700_000_000_000_000_000),
     )
     flat = flatten(snapshot)
     assert flat["ticker"] == "AAPL"
