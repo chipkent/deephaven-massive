@@ -99,7 +99,10 @@ _SCRIPT_QUERY_SCOPE: Final = (
 
 _keys_lock = threading.Lock()
 _session_numbers = itertools.count(1)
-_open_sessions: weakref.WeakSet[SessionCore] = weakref.WeakSet()
+# Plain weak references without callbacks, pruned only in `_register` under `_keys_lock`. A
+# WeakSet removes entries from garbage-collection callbacks, which run on any thread at any
+# allocation and could change the set while `_register` iterates it.
+_open_sessions: list[weakref.ref[SessionCore]] = []
 
 
 def _has_execution_context(exec_ctx: ExecutionContext) -> bool:
@@ -176,12 +179,14 @@ def _register(core: SessionCore) -> None:
         core: The new session's core.
     """
     with _keys_lock:
+        alive = [other for other in (ref() for ref in _open_sessions) if other is not None]
+        _open_sessions[:] = [weakref.ref(other) for other in alive]
+        _open_sessions.append(weakref.ref(core))
         others = sorted(
             other.label
-            for other in _open_sessions
+            for other in alive
             if other.config.api_key == core.config.api_key and not other.closed
         )
-        _open_sessions.add(core)
     if others:
         logger.warning(
             "%s uses the same API key as %s; individual plans allow one WebSocket connection "

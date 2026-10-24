@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from _fakes.stream import FakeStreamTransport
+    from deephaven_massive._session import SessionCore
 
 TIMEOUT = 30.0
 
@@ -194,14 +195,18 @@ def test_a_second_session_with_the_same_key_warns(caplog: pytest.LogCaptureFixtu
     other.close()
 
 
+def _open_cores() -> list[SessionCore]:
+    return [core for core in (ref() for ref in _session._open_sessions) if core is not None]
+
+
 def test_collected_sessions_leave_the_registry() -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-key"))
     core = m._core
-    assert core in _session._open_sessions
+    assert core in _open_cores()
     m.close()
     del m, core
     gc.collect()
-    assert all(c.config.api_key != "collected-key" for c in _session._open_sessions)
+    assert all(c.config.api_key != "collected-key" for c in _open_cores())
 
 
 def test_namespaces(massive_session: dm.MassiveSession) -> None:
