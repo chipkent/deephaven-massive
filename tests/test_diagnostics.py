@@ -107,6 +107,14 @@ def test_stream_updates_set_only_the_given_fields() -> None:
     assert StreamUpdate(host="delayed.massive.com", error="slow").apply(row).error == "slow"
 
 
+def test_stream_updates_can_clear_a_warning() -> None:
+    # The options contract cap no longer defers anything: the warning goes back to null.
+    row = _stream(deferred=234, error="over capacity: 1234/1000; 234 deferred")
+    cleared = StreamUpdate(deferred=0, clear_error=True).apply(row)
+    assert (cleared.deferred, cleared.error, cleared.state) == (0, None, StreamState.RUNNING)
+    assert StreamUpdate(error="new", clear_error=True).apply(row).error is None
+
+
 def test_rows_map_fields_to_columns() -> None:
     assert list(as_row(STREAM)) == list(STREAMS.column_names)
     connection = ConnectionRow(

@@ -158,9 +158,10 @@ def _coerce(value: object, column_type: ColumnType) -> object:
     `ColumnOverride(type=ColumnType.STRING)` on composite SDK fields); a single integer becomes
     a one-element list for an `int[]` column (the WebSocket quote `c` is one condition where
     REST sends a list); and an integral `float` becomes an `int` for a `long` or `int` column,
-    while any other `float` there is rejected, because Arrow would silently truncate `7140.08`
-    to `7140`. Everything else passes through for Arrow to check; in particular a naive
-    `datetime` object in an `Instant` column is read as UTC, as Arrow reads it.
+    and for each element of an `int[]` list, while any other `float` there is rejected,
+    because Arrow would silently truncate `7140.08` to `7140`. Everything else passes through
+    for Arrow to check; in particular a naive `datetime` object in an `Instant` column is read
+    as UTC, as Arrow reads it.
 
     Args:
         value: A non-null value from a row.
@@ -171,7 +172,8 @@ def _coerce(value: object, column_type: ColumnType) -> object:
 
     Raises:
         ValueError: If a `float` with a fractional part, or a NaN or infinity, fills a `long`
-            or `int` column (`Schema.to_arrow` reports it as a schema mismatch).
+            or `int` column or an element of an `int[]` list (`Schema.to_arrow` reports it as
+            a schema mismatch).
     """
     if column_type is ColumnType.LOCAL_DATE and isinstance(value, str):
         return date.fromisoformat(value)
@@ -179,8 +181,9 @@ def _coerce(value: object, column_type: ColumnType) -> object:
         return _iso_to_epoch_ns(value)
     if column_type is ColumnType.STRING and isinstance(value, dict | list):
         return json.dumps(value, sort_keys=True, default=_jsonable)
-    if column_type is ColumnType.INT_ARRAY and isinstance(value, int):
-        return [value]
+    if column_type is ColumnType.INT_ARRAY and isinstance(value, int | list):
+        items: list[object] = value if isinstance(value, list) else [value]
+        return [None if v is None else _coerce(v, ColumnType.INT) for v in items]
     if column_type in _INTEGER_TYPES and isinstance(value, float):
         if not value.is_integer():
             raise ValueError(f"{value!r} is not an integer")
@@ -312,7 +315,13 @@ class Schema:
             try:
                 prepared = [None if v is None else _coerce(v, column.type) for v in values]
                 arrays.append(pa.array(prepared, type=column.type.arrow_type))
-            except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError) as e:
+            except (
+                pa.ArrowInvalid,
+                pa.ArrowTypeError,
+                OverflowError,  # an int beyond the column's range, such as 2**63 in a long
+                TypeError,
+                ValueError,
+            ) as e:
                 raise MassiveError(
                     f"schema mismatch in {self.name}.{column.name} "
                     f"(expected {column.type.value}): {e}"

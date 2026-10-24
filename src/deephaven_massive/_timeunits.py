@@ -216,7 +216,8 @@ class TimeUnitTable:
         elif rule.unit is TimeUnit.FMV_MAGNITUDE:
             is_ns = pc.call_function("greater_equal", [nanos, FMV_NS_THRESHOLD])
             any_ns = pc.call_function("any", [is_ns]).as_py()
-            _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
+            if any_ns is not None:  # None: every value was null, so nothing was classified
+                _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
             # Only the millisecond values are scaled; the nanosecond ones are masked to null.
             millis = pc.call_function("if_else", [is_ns, None, nanos])
             nanos = pc.call_function("if_else", [is_ns, nanos, _millis_to_nanos(key, millis)])

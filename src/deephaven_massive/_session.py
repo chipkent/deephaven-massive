@@ -312,10 +312,14 @@ class SessionCore:
         self.exec_ctx: Final = exec_ctx
         self.label: Final = label
         self.registry_lock: Final = threading.RLock()
-        # The diagnostics come first: creating their tables is the step that can fail, and
-        # nothing has started a thread yet if it does.
+        # The diagnostics come first: creating their tables is the step most likely to fail,
+        # and nothing has started a thread yet if it does.
         self.diagnostics: Final = Diagnostics(exec_ctx, f"{label} diagnostics")
-        self._reaper = Reaper(exec_ctx, f"{label} reaper")
+        try:
+            self._reaper = Reaper(exec_ctx, f"{label} reaper")
+        except BaseException:  # the writer is running: stop it, or it holds the tables forever
+            self.diagnostics.stop()
+            raise
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamState] = {}
@@ -433,7 +437,10 @@ class SessionCore:
         that garbage collection or `release()` frees it. If building or tracking the result
         raises anything, even `KeyboardInterrupt`, the result scope and the stream hold are
         released before the exception propagates. A stream that failed while it was opening
-        still serves the result: the table is failed, and `m.streams()` shows `FAILED`.
+        (or between the claim and the build) still serves `blink()`, as a failed table;
+        `append_only()`, `ring()` and `last_by()` then raise Deephaven's `DHError` ("Can not
+        listen to failed table") while shaping, with the hold released. Either way
+        `m.streams()` shows `FAILED`.
 
         Args:
             spec: The dataset.
@@ -533,7 +540,9 @@ class SessionCore:
         anything, even `KeyboardInterrupt`, the opener's hold is dropped, which deletes the
         never-opened record and unmaps its key, and the exception propagates; a waiting verb
         then opens the stream itself. A failure or a shutdown the transport reported during
-        the open has already been recorded on the record, and the stream is returned as is.
+        the open has already been recorded on the record, and the stream is returned as is:
+        `blink()` returns the failed table, and the other shapes raise `DHError` while the
+        caller builds them.
 
         Args:
             spec: The dataset.
@@ -555,8 +564,10 @@ class SessionCore:
                 )
         except BaseException:
             ready = self._streams_ready(stream_id)
-            self._release_hold(stream_id)
-            ready.set()
+            try:
+                self._release_hold(stream_id)
+            finally:
+                ready.set()  # waiters must wake whatever happens
             raise
         with self.registry_lock:
             state = self._streams[stream_id]
@@ -633,8 +644,9 @@ class SessionCore:
         has shut down.
 
         A failure is shown whenever the record still exists: while the stream is opening (the
-        open then returns the failed table), after the library's last result was released
-        while a derived table or an open panel keeps the publisher alive (the row moves from
+        `FAILED` row is written when the open returns, and none if the open raises), after the
+        library's last result was released while a derived table or an open panel keeps the
+        publisher alive (the row moves from
         `RELEASED` to `FAILED`), and after the blink table shut down while results are still
         held. A failure for a stream that has left the registry is only logged at DEBUG, since
         no table can show it.
@@ -650,11 +662,25 @@ class SessionCore:
                 self._streams[stream_id] = replace(state, row=row)
                 if self._stream_ids.get(state.key) == stream_id:
                     del self._stream_ids[state.key]
-                self.diagnostics.write(row)
+                if state.handle is not None:  # an opening stream's row is written by _open
+                    self.diagnostics.write(row)
         if state is None:
             logger.debug(
                 "%s: stream %d failed after it left the registry: %s", self.label, stream_id, error
             )
+
+    def next_stream_id(self) -> int:
+        """Return a new process-unique stream id, the `StreamId` of an `m.streams()` row.
+
+        The one allocator of stream ids: WebSocket streams get theirs when the session
+        registers them, and the REST transport calls this for each `poll()` table's row, so
+        the two kinds never collide. Thread-safe; takes only a leaf lock of its own, so it may
+        be called with or without `registry_lock` held.
+
+        Returns:
+            The id, numbered from 1 within the process.
+        """
+        return _next_stream_id()
 
     def update_streams(self, changes: Mapping[int, StreamUpdate]) -> None:
         """Apply the flush thread's row changes (row counts, deferrals, hosts) to `m.streams()`.
@@ -663,8 +689,10 @@ class SessionCore:
         `publisher.add` calls, never under any other lock; at the default `flush_interval` that
         is about 20 times a second per connection. One short critical section under
         `registry_lock`: every listed stream still in the registry (opening, running, released,
-        failed, or shut down but still held) gets its row updated and written; an id that has
-        left the registry is ignored. No Deephaven call, no wait. It never changes `State`.
+        failed, or shut down but still held) gets its row updated, and written once the stream
+        has opened (an opening stream's row is first written when its open returns, so an open
+        that raises leaves no row behind); an id that has left the registry is ignored. No
+        Deephaven call, no wait. It never changes `State`.
 
         Args:
             changes: The update of each stream, by stream id.
@@ -676,7 +704,8 @@ class SessionCore:
                     continue
                 row = update.apply(state.row)
                 self._streams[stream_id] = replace(state, row=row)
-                self.diagnostics.write(row)
+                if state.handle is not None:  # an opening stream's row is written by _open
+                    self.diagnostics.write(row)
 
     def stream_shut_down(self, stream_id: int) -> None:
         """Record that a stream's blink table has shut down.

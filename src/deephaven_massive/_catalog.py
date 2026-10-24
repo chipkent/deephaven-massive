@@ -27,6 +27,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan, Transport
+from deephaven_massive._schema import ColumnType
 from deephaven_massive._timeunits import TimeField, TimeUnit, TimeUnitTable, UnitRule
 
 if TYPE_CHECKING:
@@ -179,8 +180,10 @@ class DatasetSpec:
 
         Raises:
             ValueError: If the name is not `"<namespace>.<dataset>"`, the keys of `channels`
-                or `flat_file_prefixes` do not match `is_bars`, an unverified unit is not among
-                `time_units`, or a key column is not in `schema`.
+                or `flat_file_prefixes` do not match `is_bars`, a WebSocket dataset (one with
+                `channels`) has no `schema`, an unverified unit is not among `time_units`, a
+                key map fills an `Instant` column from a field with no `time_units` entry, or
+                a key column is not in `schema`.
         """
         namespace, _, dataset = self.name.partition(".")
         if not namespace or not dataset:
@@ -191,6 +194,10 @@ class DatasetSpec:
             raise ValueError(
                 f"{self.name}: channels and flat_file_prefixes must be keyed by {kind}"
             )
+        if self.channels and self.schema is None:
+            # The stream verbs build every shape from the schema (`last_by` validates its keys
+            # against it), so a WebSocket dataset without one would fail at the first verb.
+            raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a schema")
         stray = sorted(
             f"{t.value}:{f}" for t, f in self.unverified_time_units - set(self.time_units)
         )
@@ -200,6 +207,17 @@ class DatasetSpec:
             missing = sorted(set(self.poll_keys) - set(self.schema.column_names))
             if missing:
                 raise ValueError(f"{self.name}: poll_keys {missing} are not columns")
+            instants = {c.name for c in self.schema.columns if c.type is ColumnType.INSTANT}
+            unitless = sorted(
+                f"{transport.value}:{key}"
+                for transport, key_map in self.key_maps.items()
+                for key, column in key_map.items()
+                if column in instants and (transport, key) not in self.time_units
+            )
+            if unitless:
+                # Caught here, at import, rather than as a LookupError on a transport thread
+                # at the first frame or page.
+                raise ValueError(f"{self.name}: Instant fields {unitless} have no time_units")
 
 
 # --- BEGIN GENERATED SDK_PARAMS ---------------------------------------------------------------

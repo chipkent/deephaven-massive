@@ -118,7 +118,21 @@ def test_spec_validation() -> None:
         _trades(unverified_time_units=frozenset({(Transport.WS, "q")}))
     with pytest.raises(ValueError, match=r"poll_keys \['Ticker'\]"):
         _trades(poll_keys=("Ticker",))
-    assert _trades(schema=None, poll_keys=("Ticker",)).schema is None
+    # A REST dataset may derive its schema later; a WebSocket dataset may not.
+    assert _trades(schema=None, channels={}, poll_keys=("Ticker",)).schema is None
+    with pytest.raises(ValueError, match=r"test\.trades: a WebSocket dataset .* needs a schema"):
+        _trades(schema=None)
+
+
+def test_every_instant_field_of_a_key_map_needs_a_time_unit() -> None:
+    key_maps = {
+        Transport.WS: {"sym": "Symbol", "t": "Timestamp", "p": "Price"},
+        Transport.FLAT_FILES: {"ticker": "Symbol", "sip_timestamp": "Timestamp"},
+    }
+    with pytest.raises(ValueError, match=r"Instant fields \['FLAT_FILES:sip_timestamp'\]"):
+        _trades(key_maps=key_maps)
+    units = {**BASE.time_units, (Transport.FLAT_FILES, "sip_timestamp"): TimeUnit.NANOSECONDS}
+    assert _trades(key_maps=key_maps, time_units=units).key_maps == key_maps
 
 
 def test_specs_are_identity_hashed() -> None:
@@ -179,8 +193,15 @@ def test_bar_channels_and_prefixes_are_keyed_by_timespan() -> None:
         _trades(flat_file_prefixes={Timespan.DAY: "us_stocks_sip/day_aggs_v1"})
 
 
-def test_filters_are_accepted_until_the_table_is_generated() -> None:
-    check_filters(_trades(history_method="list_trades"), {"anything": 1})
+def test_filters_are_accepted_until_the_table_is_generated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _trades(history_method="list_trades")
+    assert dict(SDK_PARAMS) == {}
+    check_filters(spec, {"anything": 1})  # accepted: there is no table to check against yet
+    monkeypatch.setattr(_catalog, "SDK_PARAMS", {"list_trades": {"limit": ParamKind.INTEGER}})
+    with pytest.raises(ValueError, match="has no filter 'anything'"):
+        check_filters(spec, {"anything": 1})  # the same filter, once the table exists
 
 
 def test_filters_are_checked_against_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -30,7 +30,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
-from deephaven_massive._schema import BARS, TRADES
+from deephaven_massive._schema import BARS, INDEX_VALUES, TRADES
 from deephaven_massive._symbols import SymbolTable
 
 TIMEOUT = 30.0
@@ -59,6 +59,7 @@ VALUES_SPEC = DatasetSpec(
     name="indices.values",
     query_class=StreamHistoryLatestQuery,
     asset_class=AssetClass.INDICES,
+    schema=INDEX_VALUES.schema,
     channels={None: "V"},
     flat_file_prefixes={None: "us_indices/values_v1"},
 )
@@ -406,13 +407,6 @@ def test_last_by_keys(
     error, message = expected
     with pytest.raises(error, match=message):
         trades(massive_session).last_by(by=cast("str", by))
-
-
-def test_last_by_needs_a_schema(massive_session: dm.MassiveSession) -> None:
-    values = make(massive_session, VALUES_SPEC, symbols=["I:SPX"])
-    assert isinstance(values, StreamQuery)
-    with pytest.raises(ValueError, match="has no columns"):
-        values.last_by()
 
 
 def test_stream_verbs_build_results(

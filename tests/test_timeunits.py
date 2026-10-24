@@ -77,6 +77,19 @@ def test_fmv_rule_at_the_boundary(
     assert "in ns" in detected[0].getMessage()
 
 
+def test_fmv_rule_logs_only_a_decided_unit(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_errors, "_logged", set())
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._timeunits"):
+        nulls = pa.array([None, None], type=pa.int64())
+        assert TABLE.to_epoch_ns_array(FMV, nulls).to_pylist() == [None, None]
+        assert not [r for r in caplog.records if "FMV timestamps detected" in r.getMessage()]
+        TABLE.to_epoch_ns_array(FMV, pa.array([1678220098130]))
+    detected = [r.getMessage() for r in caplog.records if "FMV timestamps" in r.getMessage()]
+    assert detected == ["FMV timestamps detected in ms (magnitude rule)"]
+
+
 def test_unverified_range_check() -> None:
     assert TABLE.to_epoch_ns(FOREX_LAST, SECONDS * 1_000) == SECONDS * 10**9
     # Nanoseconds registered as milliseconds land far after 2100.

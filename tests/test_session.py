@@ -35,7 +35,7 @@ from deephaven_massive._domains.partners import _Benzinga, _EtfGlobal, _Fable, _
 from deephaven_massive._domains.reference import _Reference
 from deephaven_massive._domains.stocks import _Stocks
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._liveness import ResultRegistry, StreamHandle, new_scope
+from deephaven_massive._liveness import Reaper, ResultRegistry, StreamHandle, new_scope
 from deephaven_massive._query import Request, StreamQuery
 from deephaven_massive._schema import TRADES
 
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     import functools
     from collections.abc import Callable
 
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
     from _fakes.stream import FakeStreamTransport
@@ -463,6 +464,74 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
     assert fake_streams.shutdown[2].wait(TIMEOUT)
 
 
+@pytest.mark.parametrize("report", ["fail", "update"])
+def test_an_open_that_raises_leaves_no_row(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    report: str,
+) -> None:
+    # The transport reports on the stream (a server rejection, or a flush) and then its open
+    # raises: the record is deleted, and no row, stale for ever, is left in m.streams().
+    core = massive_session._core
+
+    class ReportThenRaise:
+        def open_stream(
+            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+        ) -> StreamHandle:
+            if report == "fail":
+                core.fail_stream(stream_id, "not authorized")
+            else:
+                core.update_streams({stream_id: StreamUpdate(rows_published=3)})
+            raise RuntimeError("socket closed")
+
+    monkeypatch.setattr(core, "stream_transport", ReportThenRaise)
+    with pytest.raises(RuntimeError, match="socket closed"):
+        stream_query(massive_session).blink()
+    assert core._streams == {}
+    assert stream_rows() == []
+
+
+def test_an_update_made_during_the_open_is_kept(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # A reactive stream's seed reported by the transport before its open returns.
+    core = massive_session._core
+
+    class UpdatingDuringOpen:
+        def open_stream(
+            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+        ) -> StreamHandle:
+            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+            core.update_streams({stream_id: StreamUpdate(symbol_count=7, rows_published=3)})
+            return handle
+
+    monkeypatch.setattr(core, "stream_transport", UpdatingDuringOpen)
+    result = stream_query(massive_session).append_only()
+    columns = ("StreamId", "SymbolCount", "RowsPublished", "Host", "State")
+    assert [tuple(r[c] for c in columns) for r in stream_rows()] == [
+        (1, 7, 3, "socket.test", "RUNNING")
+    ]
+    massive_session.release(result)
+
+
+def test_stream_ids_come_from_one_allocator(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
+) -> None:
+    core = massive_session._core
+    assert core.next_stream_id() == 1  # a poll() row's id, as P3 will mint it
+    result = stream_query(massive_session).blink()
+    assert list(core._streams) == [2]  # the WebSocket stream never reuses it
+    assert core.next_stream_id() == 3
+    massive_session.release(result)
+
+
 # --- Record lifetime: holds and the shutdown callback, in any order (DESIGN § 6.1) ----------
 
 
@@ -786,6 +855,29 @@ def test_a_session_closed_while_a_stream_opens(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
+def test_a_reaper_that_cannot_start_stops_the_diagnostics_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[Diagnostics] = []
+    real = Diagnostics
+
+    def spying(exec_ctx: ExecutionContext, name: str) -> Diagnostics:
+        diagnostics = real(exec_ctx, name)
+        created.append(diagnostics)
+        return diagnostics
+
+    def no_thread(exec_ctx: ExecutionContext, name: str) -> Reaper:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(_session, "Diagnostics", spying)
+    monkeypatch.setattr(_session, "Reaper", no_thread)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    (diagnostics,) = created
+    diagnostics.thread.join(TIMEOUT)
+    assert not diagnostics.thread.is_alive()  # stopped, with its tables released
+
+
 def test_background_threads_stop_when_the_session_is_collected() -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="k"))
     reaper = m._core._reaper.thread
@@ -1002,7 +1094,10 @@ def test_an_interrupt_while_tracking_releases_the_scope_and_the_hold(
 def test_an_unclosed_core_is_collected_by_the_cyclic_collector() -> None:
     # Each result record's owner callback refers back to the core (record -> partial -> core
     # -> results -> record), so an unclosed core is collected by the cyclic collector, not
-    # by reference counting (DESIGN § 6).
+    # by reference counting (DESIGN § 6). The fake is imported directly, not taken from the
+    # `fake_streams` fixture: that fixture is bound to the fixture session, whose core the
+    # fixture and monkeypatch hold until teardown, and this test must own the only reference
+    # to the core it watches being collected.
     fakes = importlib.import_module("_fakes.stream")
     m = dm.MassiveSession(dm.MassiveConfig(api_key="cyclic-core"))
     core = m._core

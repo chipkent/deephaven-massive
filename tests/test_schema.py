@@ -120,6 +120,19 @@ def test_to_arrow_never_truncates_floats_in_integer_columns() -> None:
     assert (values["Long"], values["Int"]) == (7140, 3)
 
 
+def test_to_arrow_reports_integers_beyond_the_column_range() -> None:
+    for value in (2**63, -(2**63) - 1, 1e20):
+        with pytest.raises(MassiveError, match=r"schema mismatch in all\.Long"):
+            ALL_TYPES.to_arrow([{"Long": value}])
+
+
+def test_to_arrow_never_truncates_floats_in_integer_lists() -> None:
+    with pytest.raises(MassiveError, match=r"schema mismatch in all\.IntArray.*7140\.08"):
+        ALL_TYPES.to_arrow([{"IntArray": [7140.08]}])
+    values = ALL_TYPES.to_arrow([{"IntArray": [1.0, None, 3]}]).column("IntArray")
+    assert values.to_pylist() == [[1, None, 3]]
+
+
 def test_to_arrow_reads_a_naive_datetime_as_utc() -> None:
     aware = datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
     naive = aware.replace(tzinfo=None)  # the same wall-clock time, without a timezone

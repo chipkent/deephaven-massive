@@ -377,13 +377,10 @@ def test_concurrent_verbs_share_one_stream(
     for thread in threads:
         thread.join(TIMEOUT)
     assert len(results) == 16
-    # Opens are optimistic: racing verbs may each open a stream, but exactly one is registered
-    # and holds all sixteen results; every other one is released at once.
+    # One open per key: the racing verbs wait for the first open and share its stream.
+    assert len(fake_streams.opened) == 1
     ((winner, held),) = [(r["StreamId"], r["HeldResults"]) for r in stream_rows()]
     assert held == 16
-    losers = set(fake_streams.shutdown) - {winner}
-    for loser in losers:
-        assert fake_streams.shutdown[loser].wait(TIMEOUT)
     workers = [threading.Thread(target=massive_session.release, args=(t,)) for t in results]
     for thread in workers:
         thread.start()

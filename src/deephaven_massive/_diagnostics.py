@@ -238,7 +238,9 @@ class StreamUpdate:
 
     Built by the WebSocket transport's flush thread after each flush; every field left as None
     keeps the row's current value. It never changes `State`: only `SessionCore.fail_stream`
-    fails a stream, so an `error` here is a warning shown in the `Error` column.
+    fails a stream, so an `error` here is a warning shown in the `Error` column, and
+    `clear_error=True` removes it again (for example once the options contract cap no longer
+    defers anything).
 
     Attributes:
         rows_published: The stream's total rows published so far.
@@ -247,6 +249,7 @@ class StreamUpdate:
         host: The serving host.
         path: The cluster path.
         error: Warning text for the `Error` column.
+        clear_error: True to set `Error` back to null; takes precedence over `error`.
     """
 
     rows_published: int | None = None
@@ -255,6 +258,7 @@ class StreamUpdate:
     host: str | None = None
     path: str | None = None
     error: str | None = None
+    clear_error: bool = False
 
     def apply(self, row: StreamRow) -> StreamRow:
         """Return `row` with the fields this update sets; the others keep their values.
@@ -274,7 +278,7 @@ class StreamUpdate:
             symbol_count=row.symbol_count if self.symbol_count is None else self.symbol_count,
             host=row.host if self.host is None else self.host,
             path=row.path if self.path is None else self.path,
-            error=row.error if self.error is None else self.error,
+            error=None if self.clear_error else row.error if self.error is None else self.error,
         )
 
 
