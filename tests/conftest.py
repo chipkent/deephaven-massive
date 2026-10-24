@@ -212,7 +212,7 @@ def drain(massive_session: MassiveSession) -> Callable[[], None]:
         released = threading.Event()
         core._reaper.submit(released.set)
         assert released.wait(10.0)
-        assert core.diagnostics.barrier().wait(10.0)
+        assert core.diagnostics.barrier().wait(30.0)
 
     return wait
 

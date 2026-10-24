@@ -344,6 +344,11 @@ class Diagnostics:
     def barrier(self) -> threading.Event:
         """Return an event that is set once every row queued before this call is applied.
 
+        Only for a live session's diagnostics, whose writer is running (tests use it to wait
+        for rows). After `release()` the event comes back already set. After `stop()` (the
+        finalizer of a collected session) the writer may already have exited, so the event
+        might never be set: do not call it then.
+
         Returns:
             The event; already set when the writer has been released.
         """
