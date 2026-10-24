@@ -1,5 +1,6 @@
 """Tests for date parsing and the day rules (DESIGN § 12, § 16)."""
 
+import re
 from datetime import UTC, date, datetime, time, timedelta
 from typing import cast
 
@@ -44,8 +45,19 @@ def test_parse_date_like(value: str | date, expected: date) -> None:
     "value", ["2025-03-03T09:30:00", datetime.fromisoformat("2025-03-03T09:30")]
 )
 def test_naive_times_are_rejected(value: str | datetime) -> None:
-    with pytest.raises(ValueError, match=r"^timezone required$"):
+    # The message names the parameter, the value as passed, and the fix.
+    expected = f"start={value!r} needs a timezone: pass an aware datetime or a date"
+    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
         parse_date_like(value, "start")
+
+
+def test_the_naive_time_message_matches_the_design() -> None:
+    with pytest.raises(ValueError, match="needs a timezone") as caught:
+        parse_date_like(datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None), "start")
+    assert str(caught.value) == (
+        "start=datetime.datetime(2025, 1, 2, 9, 30) needs a timezone: "
+        "pass an aware datetime or a date"
+    )
 
 
 def test_unparseable_and_wrong_types() -> None:
@@ -220,7 +232,7 @@ def test_bounds_of_futures_datetimes_filter_timestamps() -> None:
 def test_bounds_reject_bad_ranges() -> None:
     with pytest.raises(ValueError, match="must not be after end"):
         bounds(_spec(AssetClass.FUTURES), "2025-03-05", "2025-03-03")
-    with pytest.raises(ValueError, match="timezone required"):
+    with pytest.raises(ValueError, match=r"start='2025-03-03T09:30' needs a timezone"):
         bounds(_spec(AssetClass.STOCKS), "2025-03-03T09:30", "2025-03-04")
 
 

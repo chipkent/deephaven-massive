@@ -369,7 +369,7 @@ def test_history_argument_errors(massive_session: dm.MassiveSession, flat: Recor
     q = trades(massive_session)
     with pytest.raises(TypeError, match=r"source must be dm\.HistorySource"):
         q.history("2025-03-03", "2025-03-03", source=cast("HistorySource", "rest"))
-    with pytest.raises(ValueError, match="timezone required"):
+    with pytest.raises(ValueError, match="needs a timezone: pass an aware datetime or a date"):
         q.history("2025-03-03T09:30", "2025-03-04")
     with pytest.raises(ValueError, match="must be before end"):
         q.history("2025-03-04", "2025-03-03")
@@ -391,6 +391,28 @@ def test_ring_types(massive_session: dm.MassiveSession, capacity: object) -> Non
         trades(massive_session).ring(cast("int", capacity))
 
 
+def test_last_by_takes_its_keys_positionally(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    # As Deephaven's Table.last_by(by): q.last_by("Exchange") and q.last_by(by="Exchange").
+    q = trades(massive_session)
+    positional = q.last_by("Exchange")
+    keyword = q.last_by(by=["Exchange"])
+    assert positional.is_refreshing
+    assert keyword.is_refreshing
+    assert len(fake_streams.opened) == 1
+    massive_session.release(positional)
+    massive_session.release(keyword)
+
+
+def test_duplicate_last_by_keys_open_no_stream(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    with pytest.raises(ValueError, match="more than once"):
+        trades(massive_session).last_by(["Exchange", "Exchange"])
+    assert fake_streams.opened == []  # rejected synchronously, before any stream opens
+
+
 @pytest.mark.parametrize(
     ("by", "expected"),
     [
@@ -399,6 +421,7 @@ def test_ring_types(massive_session: dm.MassiveSession, capacity: object) -> Non
         (["Symbol", "Nope"], (ValueError, "Nope")),
         ([1], (TypeError, "only column names")),
         ({"Symbol"}, (TypeError, "by must be a str or a sequence of str")),
+        (["Symbol", "Exchange", "Symbol"], (ValueError, r"by names \['Symbol'\] more than once")),
     ],
 )
 def test_last_by_keys(

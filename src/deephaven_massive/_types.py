@@ -87,7 +87,8 @@ DateLike: TypeAlias = str | date | datetime
 """A time-axis bound: an ISO-8601 string, a `date`, or a timezone-aware `datetime`.
 
 A naive `datetime`, or an ISO string with a time but no UTC offset, raises
-`ValueError("timezone required")`. A date-only value is a whole day in the asset class's day
+a `ValueError` that names the parameter and the fix ("needs a timezone: pass an aware
+datetime or a date"). A date-only value is a whole day in the asset class's day
 zone (DESIGN § 12).
 """
 

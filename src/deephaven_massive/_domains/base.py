@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 from deephaven_massive._catalog import check_filters
 from deephaven_massive._config import require_positive_int
-from deephaven_massive._dates import parse_date_like
+from deephaven_massive._dates import parse_date_like, require_aware
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._query import (
     HistoryLatestQuery,
@@ -151,12 +151,24 @@ def _value(name: str, value: object) -> ParamValue:
 
     Raises:
         TypeError: If the value is not a `str`, `int`, `float`, `bool`, `date`, `datetime`,
-            enum member, or a sequence of `str`.
+            enum member, or a sequence of `str`; for a list or tuple, the message names the
+            first element that is not a `str`.
+
+    A naive `datetime` raises the `ValueError` of `_dates.require_aware`, the same message as
+    a naive time bound (DESIGN § 11).
     """
+    if isinstance(value, datetime):
+        require_aware(name, value, value)
     if isinstance(value, str | int | float | date | datetime):
         return value
-    if isinstance(value, list | tuple) and all(isinstance(item, str) for item in value):
-        return tuple(str(item) for item in value)
+    if isinstance(value, list | tuple):
+        bad = next(((i, item) for i, item in enumerate(value) if not isinstance(item, str)), None)
+        if bad is None:
+            return tuple(str(item) for item in value)
+        index, item = bad
+        raise TypeError(
+            f"{name}: element {index} of the sequence is {type(item).__name__}, not str"
+        )
     raise TypeError(
         f"{name} must be a str, int, float, bool, date, datetime, or sequence of str; "
         f"got {type(value).__name__}"

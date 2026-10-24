@@ -514,7 +514,7 @@ class StreamQuery(QueryBase):
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(lambda blink: ring_table(blink, rows))
 
-    def last_by(self, *, by: str | Sequence[str] | None = None) -> Table:
+    def last_by(self, by: str | Sequence[str] | None = None) -> Table:
         """Return the latest row per key, by default one row per `Symbol`.
 
         The underlying state keeps every key ever seen. With a reactive symbol table and
@@ -533,7 +533,9 @@ class StreamQuery(QueryBase):
         `MassiveError` once the session is closed.
 
         Args:
-            by: The key column or columns; None means `"Symbol"`.
+            by: The key column or columns, positionally or by keyword as in Deephaven's
+                `Table.last_by` (`q.last_by("Exchange")`); None means `"Symbol"`. Each column
+                may appear once.
 
         Returns:
             A live table with one row per key, in the dataset's schema.
@@ -584,6 +586,9 @@ class StreamQuery(QueryBase):
             raise ValueError("by must name at least one column")
         if not all(isinstance(key, str) for key in keys):
             raise TypeError("by must contain only column names (str)")
+        repeated = sorted({str(key) for key in keys if keys.count(key) > 1})
+        if repeated:
+            raise ValueError(f"by names {repeated} more than once")
         columns = self._spec.schema.column_names if self._spec.schema is not None else ()
         unknown = [key for key in keys if key not in columns]
         if unknown:

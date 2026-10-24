@@ -241,6 +241,11 @@ def test_filters_are_checked_against_the_sdk(monkeypatch: pytest.MonkeyPatch) ->
         check_filters(spec, {"price_gt": "x"})
     with pytest.raises(ValueError, match="takes a str value"):
         check_filters(spec, {"sort": 1})
+    naive = datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
+    with pytest.raises(
+        ValueError, match=r"^timestamp_gte=datetime\.datetime\(2025, 1, 2, 9, 30\) needs a timezone"
+    ):
+        check_filters(spec, {"timestamp_gte": naive})
 
 
 def test_date_filters_must_be_dates(monkeypatch: pytest.MonkeyPatch) -> None:

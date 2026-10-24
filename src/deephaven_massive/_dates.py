@@ -2,7 +2,8 @@
 
 Every time bound a user passes is a `DateLike`: an ISO-8601 string, a `date`, or a
 timezone-aware `datetime`. A bound with a time of day but no timezone is ambiguous across the
-three day zones Massive uses, so it is rejected with `ValueError("timezone required")`.
+three day zones Massive uses, so it is rejected with a `ValueError` that names the
+parameter, the value, and the fix (`require_aware`).
 
 A date-only bound means a whole day in the asset class's *day zone*:
 
@@ -52,6 +53,7 @@ __all__ = [
     "history_range",
     "parse_date_like",
     "publish_time",
+    "require_aware",
 ]
 
 logger = logging.getLogger(__name__)
@@ -91,8 +93,9 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
 
     Raises:
         TypeError: If `value` is not a `str`, `date`, or `datetime`.
-        ValueError: `ValueError("timezone required")` for a naive `datetime` or a string with
-            a time but no offset; otherwise if a string is not ISO-8601.
+        ValueError: For a naive `datetime` or a string with a time but no offset (the message
+            names the parameter, the value, and the fix; `require_aware`), or a string that
+            is not ISO-8601.
     """
     if isinstance(value, datetime):
         parsed = value
@@ -108,9 +111,29 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
             raise ValueError(f"{name}={value!r} is not an ISO-8601 date or datetime") from None
     else:
         raise TypeError(f"{name} must be a str, date, or datetime, not {type(value).__name__}")
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("timezone required")
+    require_aware(name, value, parsed)
     return parsed
+
+
+def require_aware(name: str, raw: object, moment: datetime) -> None:
+    """Reject a time without a timezone (DESIGN § 11).
+
+    Massive's day boundaries depend on the asset class's zone, so a naive time cannot be
+    placed on the time axis. Shared by the time bounds and the `filters` and parameter checks,
+    so every naive time gets the same message.
+
+    Args:
+        name: The parameter's name, such as `"start"` or a filter name.
+        raw: The value as the caller passed it, for the message.
+        moment: The value as a `datetime`.
+
+    Raises:
+        ValueError: If `moment` has no timezone, with a message naming the parameter, the
+            value, and the fix, such as `start=datetime.datetime(2025, 1, 2, 9, 30) needs a
+            timezone: pass an aware datetime or a date`.
+    """
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError(f"{name}={raw!r} needs a timezone: pass an aware datetime or a date")
 
 
 def _midnight(day: date, zone: tzinfo) -> datetime:

@@ -26,6 +26,7 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
+from deephaven_massive._dates import require_aware
 from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan, Transport
 from deephaven_massive._schema import ColumnType
 from deephaven_massive._timeunits import TimeField, TimeUnit, TimeUnitTable, UnitRule
@@ -292,12 +293,15 @@ def check_filters(spec: DatasetSpec, filters: Mapping[str, object]) -> None:
 
     Raises:
         ValueError: If a key is not a parameter of the dataset's SDK methods (the message lists
-            the valid keys), or a value is of the wrong kind.
+            the valid keys), or a value is of the wrong kind. A naive `datetime` raises the
+            `ValueError` of `_dates.require_aware`.
     """
     if not SDK_PARAMS:
         return
     params = filter_params(spec)
     for key, value in filters.items():
+        if isinstance(value, datetime):
+            require_aware(key, value, value)
         kind = params.get(key)
         if kind is None:
             raise ValueError(f"{spec.name} has no filter {key!r}; valid filters: {sorted(params)}")

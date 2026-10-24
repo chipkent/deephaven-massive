@@ -188,15 +188,31 @@ def test_filter_validation(massive_session: dm.MassiveSession) -> None:
         build(massive_session, DIVIDENDS, filters={1: "a"})
     with pytest.raises(TypeError, match="sequence of str; got dict"):
         build(massive_session, DIVIDENDS, filters={"a": {"b": 1}})
-    with pytest.raises(TypeError, match="sequence of str; got list"):
-        build(massive_session, DIVIDENDS, filters={"a": [1, 2]})
+    with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str$"):
+        build(massive_session, DIVIDENDS, filters={"a": ["A", 1]})
     # A dataset without a time axis accepts any filter name.
     assert build(massive_session, INDICATOR, filters={"timestamp_gte": "x"})._request.filters
 
 
 def test_time_bounds_must_be_aware(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match="timezone required"):
+    with pytest.raises(ValueError, match=r"^start='2025-01-01T09:30' needs a timezone"):
         build(massive_session, DIVIDENDS, start="2025-01-01T09:30")
+
+
+def test_naive_datetime_filters_and_params_are_rejected(
+    massive_session: dm.MassiveSession,
+) -> None:
+    naive = datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
+    message = (
+        r"^updated_gte=datetime\.datetime\(2025, 1, 2, 9, 30\) needs a timezone: "
+        r"pass an aware datetime or a date$"
+    )
+    with pytest.raises(ValueError, match=message):
+        build(massive_session, INDICATOR, filters={"updated_gte": naive})
+    with pytest.raises(ValueError, match=message):
+        build(massive_session, INDICATOR, params={"updated_gte": naive})
+    aware = naive.replace(tzinfo=UTC)
+    assert build(massive_session, INDICATOR, filters={"updated_gte": aware})._request.filters
 
 
 def test_namespaces_hold_the_core(massive_session: dm.MassiveSession) -> None:
