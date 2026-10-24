@@ -436,6 +436,34 @@ def test_a_failing_scope_release_still_notifies_the_owner() -> None:
     assert notified == ["released"]
 
 
+class _Fatal(BaseException):
+    # A BaseException, like KeyboardInterrupt, that a worker's batch handler does not catch.
+    pass
+
+
+def test_queue_worker_logs_a_fatal_exit_before_dying(
+    dh_exec_ctx: ExecutionContext,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    escaped: list[threading.ExceptHookArgs] = []
+    # The thread's exception must still escape; collect it instead of pytest's warning.
+    monkeypatch.setattr(threading, "excepthook", escaped.append)
+
+    def fatal(_batch: list[int]) -> None:
+        raise _Fatal
+
+    with caplog.at_level(logging.CRITICAL, logger="deephaven_massive._liveness"):
+        worker: QueueWorker[int] = QueueWorker(dh_exec_ctx, "fatal-worker", handle=fatal)
+        worker.put(1)
+        worker.thread.join(TIMEOUT)
+    assert not worker.thread.is_alive()
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.CRITICAL, "fatal-worker died; its queue is no longer handled")
+    ]
+    assert [args.exc_type for args in escaped] == [_Fatal]
+
+
 def test_queue_worker_runs_on_exit_and_logs_batch_failures(
     dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
 ) -> None:

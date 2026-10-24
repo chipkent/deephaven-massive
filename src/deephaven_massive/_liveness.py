@@ -236,12 +236,25 @@ class QueueWorker(Generic[_T]):
         self._queue.put(None)
 
     def _run(self) -> None:
-        """Handle batches until `stop()`, then run `on_exit`."""
-        with entered(self._exec_ctx):
-            while self._next_batch():
-                pass
-            if self._on_exit is not None:
-                self._on_exit()
+        """Handle batches until `stop()`, then run `on_exit`.
+
+        A batch's `Exception` is logged and the thread carries on (`_next_batch`). Anything
+        else that escapes, such as a `KeyboardInterrupt` or `SystemExit` raised by `handle` or
+        an exception from `on_exit`, ends the thread: it is logged at CRITICAL first, because
+        nothing would handle the queue again and the owner (the reaper or the diagnostics
+        writer) would otherwise stop silently, and then re-raised.
+        """
+        try:
+            with entered(self._exec_ctx):
+                while self._next_batch():
+                    pass
+                if self._on_exit is not None:
+                    self._on_exit()
+        except BaseException:
+            logger.critical(
+                "%s died; its queue is no longer handled", self.thread.name, exc_info=True
+            )
+            raise
 
     def _next_batch(self) -> bool:
         """Wait for an item, take everything queued behind it, and handle the batch.
