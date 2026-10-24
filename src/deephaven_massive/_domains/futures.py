@@ -15,7 +15,7 @@ Status: the datasets are declared by the namespace's own work package. Until it 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._domains.base import Namespace
 
@@ -38,3 +38,4 @@ class _Futures(Namespace):
     """
 
     __slots__ = ()
+    _path: ClassVar[str] = "futures"

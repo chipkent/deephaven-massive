@@ -49,3 +49,9 @@ def test_bars_overload_aliases_are_enum_literals() -> None:
     assert typing.get_args(DaySpan) == (dm.Timespan.DAY,)
     futures = set(typing.get_args(FuturesSpan))
     assert futures == set(dm.Timespan) - {dm.Timespan.DAY}
+
+
+def test_all_shows_its_public_name() -> None:
+    assert repr(ALL) == "dm.ALL"
+    assert str(ALL) == "ALL"
+    assert f"{ALL}" == "ALL"

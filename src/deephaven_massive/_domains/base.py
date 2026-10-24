@@ -26,11 +26,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from datetime import date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from deephaven_massive._catalog import check_filters
 from deephaven_massive._config import require_positive_int
-from deephaven_massive._dates import parse_date_like, require_aware
+from deephaven_massive._dates import check_order, parse_date_like, require_aware
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._query import (
     HistoryLatestQuery,
@@ -40,7 +40,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
 )
 from deephaven_massive._symbols import normalize
-from deephaven_massive._types import _All
+from deephaven_massive._types import _All, override
 
 if TYPE_CHECKING:
     from deephaven_massive._catalog import DatasetSpec
@@ -63,6 +63,9 @@ class Namespace:
 
     __slots__ = ("_core",)
 
+    _path: ClassVar[str] = ""
+    """The namespace's path from the session, such as `"stocks"` or `"partners.benzinga"`."""
+
     def __init__(self, core: SessionCore) -> None:
         """Bind the namespace to its session.
 
@@ -70,6 +73,15 @@ class Namespace:
             core: The session's internal core.
         """
         self._core = core
+
+    @override
+    def __repr__(self) -> str:
+        """Name the session and the namespace's path.
+
+        Returns:
+            For example `<MassiveSession #1 stocks>` or `<MassiveSession #1 partners.tmx>`.
+        """
+        return f"<{self._core.label} {self._path}>"
 
 
 def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[QueryBase]:
@@ -252,13 +264,17 @@ def build_query(
         _require_enum(timespan, Timespan, "timespan")
     if timespan is not None and spec.is_bars:
         query_class = bar_query_class(spec, timespan, multiplier)
+    first = None if start is None else parse_date_like(start, "start")
+    last = None if end is None else parse_date_like(end, "end")
+    if first is not None and last is not None:
+        check_order(first, last)
     request = Request(
         symbols=normalized,
         timespan=timespan,
         multiplier=multiplier,
         venue=venue,
-        start=None if start is None else parse_date_like(start, "start"),
-        end=None if end is None else parse_date_like(end, "end"),
+        start=first,
+        end=last,
         params=tuple(sorted((k, _value(k, v)) for k, v in (params or {}).items() if v is not None)),
         filters=() if filters is None else _filters(spec, filters),
         limit=None if limit is None else require_positive_int("limit", limit),

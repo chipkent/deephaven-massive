@@ -262,3 +262,45 @@ def test_filters_go_through_the_sdk_check(
 def test_timespan_is_an_enum_on_every_dataset(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
         build(massive_session, INDICATOR, timespan="day")
+
+
+def test_namespaces_repr_as_their_path(massive_session: dm.MassiveSession) -> None:
+    label = repr(massive_session).removeprefix("<").split(" open")[0]
+    m = massive_session
+    namespaces = {
+        "stocks": m.stocks,
+        "options": m.options,
+        "futures": m.futures,
+        "indices": m.indices,
+        "forex": m.forex,
+        "crypto": m.crypto,
+        "reference": m.reference,
+        "indicators": m.indicators,
+        "economy": m.economy,
+        "partners": m.partners,
+        "partners.benzinga": m.partners.benzinga,
+        "partners.etf_global": m.partners.etf_global,
+        "partners.tmx": m.partners.tmx,
+        "partners.fable": m.partners.fable,
+    }
+    for path, namespace in namespaces.items():
+        assert repr(namespace) == f"<{label} {path}>"
+
+
+def test_a_time_axis_must_not_end_before_it_starts(massive_session: dm.MassiveSession) -> None:
+    with pytest.raises(ValueError, match="must be before end"):
+        build(massive_session, DIVIDENDS, start="2025-02-01", end="2025-01-01")
+    with pytest.raises(ValueError, match="must be before end"):
+        build(
+            massive_session,
+            DIVIDENDS,
+            start=datetime(2025, 1, 2, 10, tzinfo=UTC),
+            end=datetime(2025, 1, 2, 9, tzinfo=UTC),
+        )
+    with pytest.raises(ValueError, match="must be before end"):
+        build(massive_session, DIVIDENDS, start="2025-01-03", end=datetime(2025, 1, 2, tzinfo=UTC))
+    # One whole day, an open-ended axis, and a datetime within the end day are all valid.
+    assert build(massive_session, DIVIDENDS, start="2025-01-02", end="2025-01-02")._request.end
+    assert build(massive_session, DIVIDENDS, start="2025-01-02")._request.end is None
+    same_day = datetime(2025, 1, 2, 9, tzinfo=UTC)
+    assert build(massive_session, DIVIDENDS, start="2025-01-02", end=same_day)._request.start

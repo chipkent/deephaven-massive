@@ -19,7 +19,7 @@ empty and the vendor classes have no dataset methods.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._domains.base import Namespace
 
@@ -42,6 +42,7 @@ class _Benzinga(Namespace):
     """
 
     __slots__ = ()
+    _path: ClassVar[str] = "partners.benzinga"
 
 
 class _EtfGlobal(Namespace):
@@ -51,6 +52,7 @@ class _EtfGlobal(Namespace):
     """
 
     __slots__ = ()
+    _path: ClassVar[str] = "partners.etf_global"
 
 
 class _Tmx(Namespace):
@@ -60,6 +62,7 @@ class _Tmx(Namespace):
     """
 
     __slots__ = ()
+    _path: ClassVar[str] = "partners.tmx"
 
 
 class _Fable(Namespace):
@@ -69,6 +72,7 @@ class _Fable(Namespace):
     """
 
     __slots__ = ()
+    _path: ClassVar[str] = "partners.fable"
 
 
 class _Partners(Namespace):
@@ -84,6 +88,7 @@ class _Partners(Namespace):
     """
 
     __slots__ = ("_benzinga", "_etf_global", "_fable", "_tmx")
+    _path: ClassVar[str] = "partners"
 
     def __init__(self, core: SessionCore) -> None:
         """Create the four vendor namespaces.

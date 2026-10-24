@@ -64,6 +64,24 @@ class _All(Enum):
 
     ALL = "ALL"
 
+    @override
+    def __repr__(self) -> str:
+        """Show the public spelling, so the console prints `dm.ALL`, not the private class.
+
+        Returns:
+            `"dm.ALL"`.
+        """
+        return "dm.ALL"
+
+    @override
+    def __str__(self) -> str:
+        """Render as `ALL` in messages and logs, as a query's `repr` does.
+
+        Returns:
+            `"ALL"`.
+        """
+        return "ALL"
+
 
 ALL: Final = _All.ALL
 """Every symbol: the `<channel>.*` stream topic, a whole flat file, or a full-market snapshot.

@@ -48,6 +48,7 @@ __all__ = [
     "FuturesSessions",
     "TimeRange",
     "bounds",
+    "check_order",
     "flat_file_published",
     "futures_sessions",
     "history_range",
@@ -134,6 +135,31 @@ def require_aware(name: str, raw: object, moment: datetime) -> None:
     """
     if moment.tzinfo is None or moment.utcoffset() is None:
         raise ValueError(f"{name}={raw!r} needs a timezone: pass an aware datetime or a date")
+
+
+def check_order(start: date | datetime, end: date | datetime) -> None:
+    """Reject a time-axis range of a `…T` dataset whose end comes before its start.
+
+    The same rule as `history()`, without a day zone (the dataset's API applies its own): two
+    dates are whole days, so `end` may equal `start`; two datetimes are a half-open range, so
+    `end` must be later; a date and a datetime compare by calendar day.
+
+    Args:
+        start: The parsed lower bound.
+        end: The parsed upper bound.
+
+    Raises:
+        ValueError: `start (...) must be before end (...)` if the range is empty.
+    """
+    both_times = isinstance(start, datetime) and isinstance(end, datetime)
+    if both_times:
+        empty = start >= end
+    else:
+        first = start.date() if isinstance(start, datetime) else start
+        last = end.date() if isinstance(end, datetime) else end
+        empty = first > last
+    if empty:
+        raise ValueError(f"start ({start!r}) must be before end ({end!r})")
 
 
 def _midnight(day: date, zone: tzinfo) -> datetime:

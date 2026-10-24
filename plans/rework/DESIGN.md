@@ -305,6 +305,7 @@ m.release(table: Table) -> None   # deterministic teardown of one result
 m.close() -> None             # closes every connection, stops every poller; live tables go static
 with MassiveSession() as m: ...   # __exit__ calls close(); for scripts whose results are static
 repr(m)  # "<MassiveSession #1 open>" or "<MassiveSession #1 closed>"; the label names the session in logs and errors
+repr(m.stocks)  # "<MassiveSession #1 stocks>"; vendors "<MassiveSession #1 partners.benzinga>"
 ```
 
 `MassiveSession` exposes nothing beyond the names above (§ 22, decision 21). In particular it
@@ -640,6 +641,9 @@ Notation:
 - `…T` is `start: DateLike | None = None, end: DateLike | None = None` followed by `…F`. It
   exists only on datasets whose row has a named time axis (shown as "axis"). `start` and `end`
   address that axis with the day rules of [section 12](#12-timestamp-units-and-day-boundaries).
+  A range that ends before it starts raises `ValueError` at construction, as `history()` does
+  (two dates may be equal: whole days; two datetimes are half-open; a date and a datetime
+  compare by day).
 - `limit` is a total-row cap. Page size is internal. Every docstring says so. The cap is
   stored apart from the SDK parameters, in `Request.limit`, so it can never be forwarded as
   the SDK's page-size `limit`; the page size is `DatasetSpec.page_size`.
@@ -867,7 +871,7 @@ SDK's signatures, so an SDK upgrade that adds a filter fails CI until the table 
 ## 10. Symbols and `ALL`
 
 ```python
-Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All instance
+Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All instance; repr "dm.ALL", str "ALL"
 ```
 
 - A `str` is one symbol. A `Sequence[str]` is materialized to a tuple at construction. An
