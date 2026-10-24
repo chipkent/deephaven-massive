@@ -167,13 +167,18 @@ Every module below `deephaven_massive/` other than `__init__.py` is private. The
 first path component below the package has a leading underscore. A module inside a private
 subpackage needs no underscore of its own.
 
+Inside the private modules, a name used by other modules is bare (`QueryBase`, `SessionCore`,
+`check_filters`), and a leading underscore marks a helper local to its module. The exceptions are
+names this document fixes with an underscore: `_All`, `_require_enum`, and the namespace classes
+(`_Stocks`, `_Partners`, ...), whose underscore keeps them out of users' completion lists.
+
 | Module | Contents |
 |---|---|
 | `__init__.py` | The public names of [section 3](#3-exports), `__all__`, `__version__`. |
 | `_config.py` | `MassiveConfig` ([section 5](#5-massiveconfig)). |
 | `_session.py` | `MassiveSession`: namespaces, `snapshots`, `release`, `close`, the registry lock, the reaper thread, the host-decision cache ([section 6](#6-massivesession-and-lifecycle)). |
 | `_query.py` | The six query classes and their verbs ([section 7](#7-query-classes-and-verbs)). |
-| `_enums.py` | The fourteen public enums and the internal `Recency` and `ChannelFamily` enums; the `_require_enum` runtime check. |
+| `_enums.py` | The fourteen public enums and the internal `Recency`, `ChannelFamily`, and `Transport` enums; the `_require_enum` runtime check. |
 | `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases. |
 | `_errors.py` | `MassiveError`, `AuthenticationError`, `EntitlementError`. |
 | `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST method, `start`/`end` parameter pair, poll default, flat-file prefix). Also the generated `SDK_PARAMS` table ([section 9](#9-filters)). |
@@ -297,7 +302,15 @@ m.streams() -> Table          # live diagnostics: one row per stream
 m.release(table: Table) -> None   # deterministic teardown of one result
 m.close() -> None             # closes every connection, stops every poller; live tables go static
 with MassiveSession() as m: ...   # __exit__ calls close(); for scripts whose results are static
+repr(m)  # "<MassiveSession #1 open>" or "<MassiveSession #1 closed>"; the label names the session in logs and errors
 ```
+
+`MassiveSession` exposes nothing beyond the names above. In particular it has no `name` or
+`config` attribute: the session's label (`MassiveSession #1`, a per-process counter) appears in
+its repr, in the same-key WARNING, and in error messages, and nowhere else; the configuration is
+the `MassiveConfig` the caller passed (or `MassiveConfig()`), which the caller already holds. Not
+exposing the configuration keeps the API key one step further from console globals, which every
+user of a Deephaven worker can read.
 
 The session must be created inside a Deephaven worker: an `ExecutionContext` must be active.
 The library captures it at construction and enters it on every library thread before any
@@ -306,6 +319,11 @@ starts a JVM.
 
 A second session with the same key in one process logs a WARNING naming the first. Individual
 plans allow one WebSocket connection per cluster per account.
+
+After `close()`: `close()` itself is idempotent; verbs, `m.connections()`, and `m.streams()`
+raise `MassiveError("MassiveSession #1 is closed")`; `m.release(table)` keeps working, and so
+does garbage-collection release of results; building queries and reaching namespaces never fail;
+live tables stop updating and keep their rows.
 
 Every verb raises `ValueError` when called on a UG thread (for example from inside a table
 listener). Verbs create tables and take the registry lock; both are forbidden on the UG thread
@@ -399,7 +417,11 @@ There is no `stop()` on queries. Release is automatic (garbage collection) or ex
 ## 7. Query classes and verbs
 
 Six classes, defined in `_query.py`. Nothing touches the network until a verb is called. Queries
-are immutable, hashable, and reusable.
+are immutable, hashable, and reusable. A query's repr names its class, its dataset, and the
+arguments that differ from their defaults, for example
+`<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
+reactive table as `<reactive table>`. Queries have no other attributes: the verbs are their whole
+API.
 
 ```python
 class Query:                               # REST list and snapshot datasets
@@ -753,8 +775,9 @@ m.options.contracts(underlying="NVDA",
 ```
 
 Validation is synchronous at query construction. `_catalog.py` holds a generated table
-`SDK_PARAMS[dataset] = {name: kind}`, produced by `scripts/refresh_massive_catalog.py` from
-`inspect.signature(RESTClient.<method>)`. An unknown key or a value of the wrong kind raises
+`SDK_PARAMS[method] = {name: kind}`, keyed by SDK `RESTClient` method name and produced by
+`scripts/refresh_massive_catalog.py` from `inspect.signature(RESTClient.<method>)`; a dataset's
+accepted filters are the union over its methods plus its `extra_params`. An unknown key or a value of the wrong kind raises
 `ValueError` naming the valid keys. A test asserts that the vendored table equals the installed
 SDK's signatures, so an SDK upgrade that adds a filter fails CI until the table is regenerated.
 
@@ -777,8 +800,10 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   (full market, all pairs, all contracts), and by `history()` when a flat file or a grouped-daily
   REST path exists. Everywhere else `ALL` raises `ValueError` naming the alternative.
 - Input forms are normalized: `"EUR/USD"` and `"C:EURUSD"`; `"AAPL250117C00150000"` and
-  `"O:AAPL250117C00150000"`; `"BTC-USD"` and `"X:BTCUSD"`; `"I:SPX"`; `"ESZ5"`. The `Symbol`
-  column always holds the canonical Massive form.
+  `"O:AAPL250117C00150000"`; `"BTC-USD"` and `"X:BTCUSD"`; `"I:SPX"` and `"SPX"` (an index
+  symbol without its prefix gets `I:`); `"ESZ5"`. The `Symbol` column always holds the canonical
+  Massive form. A crypto pair must end in a known quote currency, so its WebSocket form
+  (`BTC-USD`) can always be recovered; others raise `ValueError` at construction.
 - A `Table` must have a `Symbol` column. Streams listen to it and subscribe or unsubscribe as
   rows are added or removed. Polls re-read it each cycle.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
@@ -1165,7 +1190,9 @@ bound on `Timestamp` after partition selection.
 ## 17. Diagnostics
 
 Both tables are keyed `input_table`s. They live in one session-owned `LivenessScope` that
-`m.close()` releases. They are updated only from library threads, never from UG callbacks.
+`m.close()` releases. They are written by one diagnostics writer thread per session, which
+applies immutable row snapshots from a queue in order; other threads only enqueue, never wait on
+the update graph for diagnostics, and never write from UG callbacks.
 
 **`m.connections()`**: one row per connection plus one `Transport=REST` row per resolved
 (class, family).
@@ -1222,6 +1249,7 @@ without the GIL.
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, diagnostics updates | touch loop-owned state directly |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
+| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables, in order | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release) | Deephaven | registry update under the registry lock; `call_soon_threadsafe` | sends; JVM calls; blocking |
 
@@ -1591,6 +1619,11 @@ document already reflects them.
     fork, each topic branch goes upstream as one pull request; the fork's `deephaven-fixes`
     branch is assembled by direct merges of those branches, with CI on every push, is never
     reset or force-pushed, and is pinned here by commit SHA.
+21. **Sessions and queries expose no introspection attributes.** `MassiveSession` has no `name`
+    or `config`, and queries have no `dataset`: a session's label appears only in its repr, the
+    same-key WARNING, and error messages, and a query's dataset and arguments only in its repr.
+    The public surface stays exactly the verbs and namespaces, and the API key stays out of
+    objects users routinely leave in console globals.
 
 ## 23. Open verification items
 
