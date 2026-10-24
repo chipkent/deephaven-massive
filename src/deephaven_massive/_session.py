@@ -521,6 +521,7 @@ class SessionCore:
                 if isinstance(claim, int):
                     claim = self._open(spec, request, channel=channel, stream_id=claim)
                 handle = claim
+                return handle
             finally:
                 for stream_id, ready in opening:
                     try:
@@ -528,7 +529,6 @@ class SessionCore:
                             self._release_hold(stream_id)
                     finally:
                         ready.set()  # waiters must wake whatever happens
-            return handle
 
     def _claim(
         self,
