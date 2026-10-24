@@ -175,7 +175,7 @@ def fake_streams(
         The fake, for inspecting opened streams and shutdown callbacks.
     """
     stream = importlib.import_module("_fakes.stream")
-    fake: FakeStreamTransport = stream.FakeStreamTransport()
+    fake: FakeStreamTransport = stream.FakeStreamTransport(massive_session._core)
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake)
     return fake
 

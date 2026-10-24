@@ -223,7 +223,9 @@ class StreamTransport(Protocol):
         """Create a new stream: its publisher and blink table in a new stream scope.
 
         Runs on the caller thread; may resolve the host with one REST call. Must not hold the
-        session's registry lock while calling Deephaven.
+        session's registry lock while calling Deephaven. The blink table's
+        `on_shutdown_callback` must first call `SessionCore.stream_shut_down(stream_id)`, which
+        drops the stream's registry record, and only then release the stream's topics.
 
         Args:
             spec: The dataset.

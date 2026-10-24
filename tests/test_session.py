@@ -311,9 +311,10 @@ def test_a_racing_open_reuses_the_registered_stream(
 # --- close() ---------------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("fake_streams")
 def test_close_marks_streams_closed_and_warns_once(
     massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
     stream_rows: Callable[[], list[dict[str, Any]]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -321,6 +322,7 @@ def test_close_marks_streams_closed_and_warns_once(
     released = stream_query(massive_session, ["MSFT"]).blink()
     massive_session.release(released)
     assert [r["State"] for r in stream_rows()] == ["RUNNING", "RELEASED"]
+    assert fake_streams.shutdown[2].wait(TIMEOUT)  # the released stream left the registry
     keeper = new_scope()  # keeps the diagnostics table readable after close() releases it
     streams = massive_session.streams()
     keeper.manage(streams)
@@ -328,11 +330,37 @@ def test_close_marks_streams_closed_and_warns_once(
         massive_session.close()
         massive_session.close()
     assert caplog.messages == ["session closed; 1 live tables are now static"]
-    # Only the stream the library still holds is closed; the released one keeps its last row.
+    # Only the stream still in the registry is closed; the shut-down one keeps its last row.
     rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
     assert [r["State"] for r in rows] == ["CLOSED", "RELEASED"]
     keeper.release()
     massive_session.release(live)  # release() keeps working after close()
+
+
+def test_close_marks_a_released_but_held_stream_closed(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # A derived table keeps a released stream's blink table alive, so the stream is still in
+    # the registry when the session closes, and its row becomes CLOSED.
+    result = stream_query(massive_session).append_only()
+    user_scope = new_scope()
+    with user_scope.open():
+        derived = result.tail(1)
+    massive_session.release(result)
+    assert [(r["State"], r["HeldResults"]) for r in stream_rows()] == [("RELEASED", 0)]
+    keeper = new_scope()  # keeps the diagnostics table readable after close() releases it
+    streams = massive_session.streams()
+    keeper.manage(streams)
+    massive_session.close()
+    rows = dh_arrow.to_arrow(streams).to_pylist()
+    assert [(r["State"], r["HeldResults"]) for r in rows] == [("CLOSED", 0)]
+    assert derived.is_refreshing
+    assert not fake_streams.shutdown[1].is_set()
+    keeper.release()
+    user_scope.release()
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
 def test_close_with_no_live_tables_logs_info(
@@ -450,9 +478,9 @@ def test_a_session_with_released_results_is_collected() -> None:
     # A second, independent fake is needed here because the `fake_streams` fixture is bound to
     # the fixture session, and monkeypatch would hold this session's core until teardown.
     fakes = importlib.import_module("_fakes.stream")
-    fake = fakes.FakeStreamTransport()
     m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-session"))
     core = m._core
+    fake = fakes.FakeStreamTransport(core)
     vars(core)["stream_transport"] = lambda: fake
     # A weak reference, not a finalizer that sets an Event: garbage collection can run the
     # finalizer while this thread holds the Event's internal lock, which would deadlock.
@@ -497,9 +525,9 @@ def test_a_result_keeps_its_session_alive() -> None:
     # when it is collected: the release path (registry, reaper, core) lives as long as it does.
     # An independent fake is needed for the same reason as in the test above.
     fakes = importlib.import_module("_fakes.stream")
-    fake = fakes.FakeStreamTransport()
     m = dm.MassiveSession(dm.MassiveConfig(api_key="outliving-result"))
     core = m._core
+    fake = fakes.FakeStreamTransport(core)
     vars(core)["stream_transport"] = lambda: fake
     alive = weakref.ref(core)
     reaper = core._reaper.thread
@@ -592,7 +620,7 @@ def test_calls_under_the_update_graph_lock_are_rejected(
     assert not massive_session._core.closed
 
 
-def test_a_failure_after_the_last_release_is_tolerated(
+def test_a_failure_after_the_last_release_is_shown(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
     stream_rows: Callable[[], list[dict[str, Any]]],
@@ -606,11 +634,28 @@ def test_a_failure_after_the_last_release_is_tolerated(
         derived = result.tail(1)
     massive_session.release(result)
     assert [r["State"] for r in stream_rows()] == ["RELEASED"]
-    massive_session._core.fail_stream(1, "not authorized")  # no KeyError, no bookkeeping
-    assert [(r["State"], r["Error"]) for r in stream_rows()] == [("RELEASED", None)]
+    massive_session._core.fail_stream(1, "not authorized")
+    assert [(r["State"], r["Error"], r["HeldResults"]) for r in stream_rows()] == [
+        ("FAILED", "not authorized", 0)
+    ]
     assert derived.is_refreshing
     again = q.blink()  # the released stream's key was already free: a fresh stream opens
     assert len(fake_streams.opened) == 2
+    assert list(fake_streams.shutdown) == [1, 2]  # the new verb opened stream 2
     massive_session.release(again)
     user_scope.release()
     assert fake_streams.shutdown[1].wait(TIMEOUT)
+    # The stream has shut down and left the registry: a failure now is only logged.
+    massive_session._core.fail_stream(1, "later")
+    rows = sorted(stream_rows(), key=lambda r: r["StreamId"])
+    assert [(r["StreamId"], r["State"], r["Error"]) for r in rows] == [
+        (1, "FAILED", "not authorized"),
+        (2, "RELEASED", None),
+    ]
+
+
+def test_a_shutdown_of_an_unknown_stream_is_ignored(massive_session: dm.MassiveSession) -> None:
+    # Called on this thread so that coverage sees it on every Python version; a blink table's
+    # shutdown callback runs on a Deephaven thread.
+    massive_session._core.stream_shut_down(99)
+    assert massive_session._core._streams == {}

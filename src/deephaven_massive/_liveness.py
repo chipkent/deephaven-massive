@@ -133,8 +133,9 @@ class StreamHandle:
     """A live stream as the WebSocket transport hands it to the session.
 
     The transport creates the stream's `TablePublisher` and blink table inside `scope` (the
-    stream scope) and registers the blink table's `on_shutdown_callback`, where topic reference
-    counts are released. The session holds the handle while any result of the stream is held
+    stream scope) and registers the blink table's `on_shutdown_callback`, where the stream's
+    registry record is dropped (`SessionCore.stream_shut_down`) and topic reference counts are
+    released. The session holds the handle while any result of the stream is held
     and releases `scope` when the last one is released.
 
     Attributes:

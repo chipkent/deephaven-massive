@@ -80,6 +80,8 @@ class StreamState(StrEnum):
 
     `RELEASED` means the library holds no result of the stream any more; the stream keeps
     publishing until its blink table dies (a derived table or an open panel may hold it).
+    `FAILED` can follow `RUNNING` or `RELEASED`; a failed stream's row keeps `FAILED` when its
+    last result is released.
     """
 
     RUNNING = "RUNNING"

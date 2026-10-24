@@ -11,8 +11,9 @@ queries and namespaces share. The core owns:
   thread;
 - `registry_lock`, the one leaf lock that guards every session registry (DESIGN § 18): no
   Deephaven call, network call, or blocking wait happens while it is held;
-- the stream registry: every stream the library still holds, one per `(dataset, channel,
-  symbols)`, each with its diagnostics row (which carries its count of library-held results);
+- the stream registry: every stream whose blink table has not shut down, each with its
+  diagnostics row (which carries its count of library-held results), and the key index that
+  maps each `(dataset, channel, symbols)` to the one held, unfailed stream that serves it;
   every diagnostics row is queued while `registry_lock` is held, so rows reach the tables in
   the order the registry changed;
 - the result registry and the reaper thread (`_liveness.py`);
@@ -181,10 +182,13 @@ def _stop_threads(reaper: Reaper, diagnostics: Diagnostics) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _StreamState:
-    """One stream the library holds; replaced, never mutated, under `registry_lock`.
+    """One stream of the registry; replaced, never mutated, under `registry_lock`.
 
-    A stream stays in the registry while it has at least one library-held result
-    (`row.held_results`) and is removed when the last one is released.
+    The record stays in the registry until the stream's blink table shuts down
+    (`SessionCore.stream_shut_down`), which can be long after the library's last result was
+    released when a derived table or an open panel still keeps the publisher alive; meanwhile
+    its row keeps reporting row counts and a late failure. Its key maps to it only while the
+    stream has at least one library-held result (`row.held_results`) and has not failed.
 
     Attributes:
         key: The stream's key.
@@ -436,9 +440,11 @@ class SessionCore:
         """Drop one hold on a stream; at zero, unregister its key and release its stream scope.
 
         Runs on the reaper thread when a result is released, or on the caller thread when
-        building a result failed. Releasing the stream scope drops the library's reference to
-        the blink table; the table dies, and its shutdown callback releases the topics, when
-        nothing else (a derived table, an open panel) refers to it.
+        building a result failed. At zero holds a running stream's row becomes `RELEASED` (a
+        failed or closed one keeps its state), and the record stays in the registry. Releasing
+        the stream scope drops the library's reference to the blink table; the table dies, and
+        its shutdown callback drops the record (`stream_shut_down`) and releases the topics,
+        when nothing else (a derived table, an open panel) refers to it.
 
         Args:
             stream_id: The stream whose result was released.
@@ -452,14 +458,11 @@ class SessionCore:
                 held_results=held,
                 state=StreamState.RELEASED if released else state.row.state,
             )
-            if held:
-                self._streams[stream_id] = replace(state, row=row)
-            else:
-                # The library no longer holds the stream: forget it, and its key unless the key
-                # already serves a newer stream (after `fail_stream`).
-                del self._streams[stream_id]
-                if self._stream_ids.get(state.key) == stream_id:
-                    del self._stream_ids[state.key]
+            self._streams[stream_id] = replace(state, row=row)
+            if not held and self._stream_ids.get(state.key) == stream_id:
+                # No new verb may reuse a stream the library no longer holds. The key may
+                # already serve a newer stream (after `fail_stream`); then it stays.
+                del self._stream_ids[state.key]
             self.diagnostics.write(row)
         if not held:
             with entered(self.exec_ctx):
@@ -471,13 +474,13 @@ class SessionCore:
         Called by the transport after it fails the stream's table (`publish_failure`). The
         stream's row becomes `FAILED` with `error`, and its key is unregistered, so the next
         verb with the same key opens a fresh stream instead of returning the dead table. The
-        failed stream stays in the registry until its results are released.
+        failed stream's record stays in the registry until its blink table shuts down.
 
-        A stream whose last library-held result was already released has left the registry
-        (and its key), though a derived table or an open panel may still keep its publisher
-        alive until the blink table shuts down. A failure reported for such a stream needs no
-        bookkeeping: the transport's `publish_failure` already fails the live table, and no
-        new verb can reuse the stream. The call then does nothing.
+        A released stream that a derived table or an open panel still keeps alive is still in
+        the registry, so a failure reported after the library's last result was released is
+        shown too: its row moves from `RELEASED` to `FAILED`. A stream whose blink table has
+        already shut down (the failure raced the shutdown callback) has left the registry; its
+        failure is only logged at DEBUG, since no table can show it.
 
         Args:
             stream_id: The failed stream.
@@ -485,21 +488,41 @@ class SessionCore:
         """
         with self.registry_lock:
             state = self._streams.get(stream_id)
-            if state is None:
-                return
-            row = replace(state.row, state=StreamState.FAILED, error=error)
-            self._streams[stream_id] = replace(state, row=row)
-            if self._stream_ids.get(state.key) == stream_id:
-                del self._stream_ids[state.key]
-            self.diagnostics.write(row)
+            if state is not None:
+                row = replace(state.row, state=StreamState.FAILED, error=error)
+                self._streams[stream_id] = replace(state, row=row)
+                if self._stream_ids.get(state.key) == stream_id:
+                    del self._stream_ids[state.key]
+                self.diagnostics.write(row)
+        if state is None:
+            logger.debug(
+                "%s: stream %d failed after it shut down: %s", self.label, stream_id, error
+            )
+
+    def stream_shut_down(self, stream_id: int) -> None:
+        """Drop a stream's record once its blink table has shut down.
+
+        The WebSocket transport calls this first from the blink table's `on_shutdown_callback`,
+        before it releases the stream's topics. That callback runs on whichever thread drops
+        the last reference to the table: the reaper, an update-graph thread, or a gRPC thread.
+        It takes only `registry_lock`, makes no Deephaven call, and writes no row: the stream's
+        last row (`RELEASED`, `FAILED`, or `CLOSED`) stays in `m.streams()`. An unknown id,
+        such as that of a stream that lost an open race and was never registered, is ignored.
+
+        Args:
+            stream_id: The stream whose blink table shut down.
+        """
+        with self.registry_lock:
+            self._streams.pop(stream_id, None)
 
     def close(self) -> None:
         """Close the session: run the closers, mark streams closed, release the diagnostics.
 
         Idempotent. Publishers are not failed: live tables stop receiving rows and go static,
         and keep their contents. Results stay tracked, so garbage collection and `release()`
-        still free them. Every stream the library still holds is marked `CLOSED` in
-        `m.streams()`. Logs the number of live tables that became static: a WARNING when there
+        still free them. Every stream still in the registry is marked `CLOSED` in
+        `m.streams()`, including a released stream that a derived table or an open panel still
+        keeps alive. Logs the number of live tables that became static: a WARNING when there
         are any, INFO otherwise.
 
         Raises:
