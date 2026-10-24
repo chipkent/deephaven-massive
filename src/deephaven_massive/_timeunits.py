@@ -20,15 +20,12 @@ Two rules guard the declarations that could not be verified from the documentati
   `MassiveError("timestamp unit mismatch for <dataset>.<field>")`. A wrong unit fails loudly.
 
 The module is pure: it knows nothing about datasets beyond the names it is given, so the
-catalog can import it without a cycle. `Transport` lives here because it is one axis of the
-lookup; the schema and diagnostics modules use it too.
+catalog can import it without a cycle.
 """
 
 from __future__ import annotations
 
 import logging
-import re
-import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -37,19 +34,19 @@ from typing import TYPE_CHECKING, Final, NamedTuple
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import MassiveError, log_once
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from deephaven_massive._enums import Transport
 
 __all__ = [
     "FMV_NS_THRESHOLD",
     "TimeField",
     "TimeUnit",
     "TimeUnitTable",
-    "Transport",
     "UnitRule",
-    "is_timestamp_like",
 ]
 
 logger = logging.getLogger(__name__)
@@ -61,22 +58,6 @@ _NS_PER_MS: Final = 1_000_000
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _MIN_CHECKED_NS: Final = int((datetime(1990, 1, 1, tzinfo=UTC) - _EPOCH).total_seconds()) * 10**9
 _MAX_CHECKED_NS: Final = int((datetime(2101, 1, 1, tzinfo=UTC) - _EPOCH).total_seconds()) * 10**9
-
-# Field names that hold a timestamp: `t`, `timestamp`, `*_timestamp`, `updated`, `*_updated`,
-# `window_start`, `window_end`, and the single-letter bar bounds `s` and `e` are not included
-# because they are ambiguous across models; datasets register those explicitly.
-_TIMESTAMP_LIKE: Final = re.compile(r"^(t|timestamp|.*_timestamp|updated|.*_updated|window_.*)$")
-
-
-class Transport(StrEnum):
-    """The transport a row arrived on.
-
-    The values are the spellings of the diagnostics tables' `Transport` column.
-    """
-
-    WS = "WS"
-    REST = "REST"
-    FLAT_FILES = "FLAT_FILES"
 
 
 class TimeUnit(StrEnum):
@@ -102,36 +83,13 @@ class UnitRule:
     unverified: bool = False
 
 
-_fmv_log_lock = threading.Lock()
-_fmv_logged = threading.Event()
-
-
-def _log_fmv_unit_once(unit: TimeUnit) -> None:
+def _log_fmv_unit(unit: TimeUnit) -> None:
     """Log, once per process, which unit the FMV magnitude rule detected.
 
     Args:
         unit: The unit the first classified FMV value was found to be in.
     """
-    with _fmv_log_lock:
-        if _fmv_logged.is_set():
-            return
-        _fmv_logged.set()
-    logger.info("FMV timestamps detected in %s (magnitude rule, DESIGN § 12)", unit.value)
-
-
-def is_timestamp_like(field: str) -> bool:
-    """Tell whether a field name looks like an epoch timestamp and so needs a declared unit.
-
-    The catalog test uses this predicate to assert that every timestamp-like field of every
-    registered SDK model and flat-file header has an entry in the unit table.
-
-    Args:
-        field: An SDK model field name, a WebSocket key, or a flat-file header, in snake case.
-
-    Returns:
-        True for `t`, `timestamp`, `*_timestamp`, `updated`, `*_updated`, and `window_*`.
-    """
-    return _TIMESTAMP_LIKE.match(field) is not None
+    log_once(logger, "fmv-unit", "FMV timestamps detected in %s (magnitude rule)", unit.value)
 
 
 class TimeField(NamedTuple):
@@ -175,14 +133,6 @@ class TimeUnitTable:
             rules: The unit of each declared field.
         """
         self._rules: Mapping[TimeField, UnitRule] = dict(rules)
-
-    def __len__(self) -> int:
-        """Return the number of declared fields.
-
-        Returns:
-            How many fields the table holds a unit for.
-        """
-        return len(self._rules)
 
     def __contains__(self, key: object) -> bool:
         """Tell whether a field has a declared unit.
@@ -236,7 +186,7 @@ class TimeUnitTable:
             nanos = value * _NS_PER_MS
         elif rule.unit is TimeUnit.FMV_MAGNITUDE:
             is_ns = value >= FMV_NS_THRESHOLD
-            _log_fmv_unit_once(TimeUnit.NANOSECONDS if is_ns else TimeUnit.MILLISECONDS)
+            _log_fmv_unit(TimeUnit.NANOSECONDS if is_ns else TimeUnit.MILLISECONDS)
             nanos = value if is_ns else value * _NS_PER_MS
         if rule.unverified and not _MIN_CHECKED_NS <= nanos < _MAX_CHECKED_NS:
             raise MassiveError(f"timestamp unit mismatch for {key.label}")
@@ -270,7 +220,7 @@ class TimeUnitTable:
         elif rule.unit is TimeUnit.FMV_MAGNITUDE:
             is_ns = pc.greater_equal(nanos, FMV_NS_THRESHOLD)
             any_ns = pc.any(is_ns).as_py()
-            _log_fmv_unit_once(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
+            _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
             # Unchecked: the products of nanosecond values may wrap, but if_else discards them.
             nanos = pc.if_else(is_ns, nanos, pc.multiply(nanos, _NS_PER_MS))
         if rule.unverified:

@@ -7,6 +7,7 @@ import dataclasses
 import importlib
 import pkgutil
 from collections.abc import Iterator
+from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,16 +19,17 @@ from deephaven_massive._catalog import (
     SDK_PARAMS,
     DatasetSpec,
     ParamKind,
+    check_filters,
     datasets,
     filter_params,
     sdk_params,
     time_units,
     unit_rules,
 )
-from deephaven_massive._enums import AssetClass, Timespan
+from deephaven_massive._enums import AssetClass, Timespan, Transport
 from deephaven_massive._query import Query, StreamHistoryLatestQuery
 from deephaven_massive._schema import TRADES
-from deephaven_massive._timeunits import TimeField, TimeUnit, Transport, UnitRule
+from deephaven_massive._timeunits import TimeField, TimeUnit, UnitRule
 
 
 @pytest.fixture
@@ -95,7 +97,7 @@ def test_time_units_compose_the_specs(fresh_catalog: None, monkeypatch: pytest.M
     stocks = importlib.import_module("deephaven_massive._domains.stocks")
     monkeypatch.setattr(stocks, "DATASETS", (_trades(),))
     table = time_units()
-    assert len(table) == 2
+    assert TimeField("test.trades", Transport.WS, "t") in table
     assert table.rule(TimeField("test.trades", Transport.WS, "t")) == UnitRule(
         TimeUnit.MILLISECONDS
     )
@@ -166,7 +168,55 @@ def test_filter_params_merge_methods_and_extras(monkeypatch: pytest.MonkeyPatch)
 
 def test_bar_channels_and_prefixes_are_keyed_by_timespan() -> None:
     spec = _trades(
+        is_bars=True,
         channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
         flat_file_prefixes={Timespan.MINUTE: "us_stocks_sip/minute_aggs_v1"},
     )
     assert spec.channels[Timespan.MINUTE] == "AM"
+    with pytest.raises(ValueError, match="must be keyed by Timespan"):
+        _trades(is_bars=True)
+    with pytest.raises(ValueError, match="must be keyed by None"):
+        _trades(flat_file_prefixes={Timespan.DAY: "us_stocks_sip/day_aggs_v1"})
+
+
+def test_filters_are_accepted_until_the_table_is_generated() -> None:
+    check_filters(_trades(history_method="list_trades"), {"anything": 1})
+
+
+def test_filters_are_checked_against_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        _catalog,
+        "SDK_PARAMS",
+        {
+            "list_trades": {
+                "timestamp_gte": ParamKind.DATETIME,
+                "limit": ParamKind.INTEGER,
+                "price_gt": ParamKind.NUMBER,
+                "ticker_any_of": ParamKind.STRING_SEQUENCE,
+                "otc": ParamKind.BOOLEAN,
+                "date": ParamKind.DATE,
+                "sort": ParamKind.STRING,
+            }
+        },
+    )
+    spec = _trades(history_method="list_trades")
+    check_filters(
+        spec,
+        {
+            "timestamp_gte": "2025-01-01",
+            "limit": 5,
+            "price_gt": 1,
+            "ticker_any_of": ("A", "B"),
+            "otc": False,
+            "date": date(2025, 1, 1),
+            "sort": "price",
+        },
+    )
+    with pytest.raises(ValueError, match=r"has no filter 'nope'; valid filters: \['date'"):
+        check_filters(spec, {"nope": 1})
+    with pytest.raises(ValueError, match="takes a int value, not True"):
+        check_filters(spec, {"limit": True})
+    with pytest.raises(ValueError, match=r"takes a float value, not 'x'"):
+        check_filters(spec, {"price_gt": "x"})
+    with pytest.raises(ValueError, match="takes a str value"):
+        check_filters(spec, {"sort": 1})

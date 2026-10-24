@@ -6,22 +6,23 @@ from typing import Any, cast
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._catalog import DatasetSpec
+from deephaven_massive._catalog import DatasetSpec, ParamKind
 from deephaven_massive._domains.base import Namespace, bar_query_class, build_query, list_params
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
     Query,
+    QueryBase,
     StreamHistoryQuery,
     StreamQuery,
-    _QueryBase,
 )
 from deephaven_massive._schema import BARS, TRADES
 
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
     query_class=HistoryQuery,
+    is_bars=True,
     asset_class=AssetClass.STOCKS,
     schema=BARS.schema,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
@@ -31,6 +32,7 @@ STOCK_BARS = DatasetSpec(
 FUTURES_BARS = DatasetSpec(
     name="futures.bars",
     query_class=HistoryQuery,
+    is_bars=True,
     asset_class=AssetClass.FUTURES,
     schema=BARS.schema,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
@@ -40,6 +42,7 @@ FUTURES_BARS = DatasetSpec(
 INDEX_BARS = DatasetSpec(
     name="indices.bars",
     query_class=HistoryQuery,
+    is_bars=True,
     asset_class=AssetClass.INDICES,
     schema=BARS.schema,
     flat_file_prefixes={Timespan.MINUTE: "us_indices/minute_aggs_v1"},
@@ -61,7 +64,7 @@ DIVIDENDS = DatasetSpec(
 INDICATOR = DatasetSpec(name="indicators.sma", query_class=Query, fetch_method="get_sma")
 
 
-def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> _QueryBase:
+def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
     return build_query(session._core, spec, **cast("dict[str, Any]", kwargs))
 
 
@@ -196,8 +199,19 @@ def test_time_bounds_must_be_aware(massive_session: dm.MassiveSession) -> None:
         build(massive_session, DIVIDENDS, start="2025-01-01T09:30")
 
 
-def test_namespaces_build_queries(massive_session: dm.MassiveSession) -> None:
+def test_namespaces_hold_the_core(massive_session: dm.MassiveSession) -> None:
     namespace = Namespace(massive_session._core)
-    q = namespace._query(TRADES_SPEC, symbols=["AAPL"], all_alternative="m.stocks.snapshots")
-    assert isinstance(q, StreamQuery)
-    assert q._core is massive_session._core
+    assert namespace._core is massive_session._core
+    assert not hasattr(namespace, "_query")
+
+
+def test_filters_go_through_the_sdk_check(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "deephaven_massive._catalog.SDK_PARAMS",
+        {"list_stocks_dividends": {"pay_date_lte": ParamKind.DATE}},
+    )
+    build(massive_session, DIVIDENDS, filters={"pay_date_lte": "2025-12-31"})
+    with pytest.raises(ValueError, match="has no filter 'frequency'"):
+        build(massive_session, DIVIDENDS, filters={"frequency": 4})

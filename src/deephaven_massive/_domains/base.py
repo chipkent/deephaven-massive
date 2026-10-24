@@ -3,8 +3,8 @@
 Each namespace class (`_Stocks`, `_Options`, ...) is a thin set of typed factory methods; this
 module does the work they share when a dataset method is called:
 
-- `Namespace` is the base class: it holds the session core and offers `_query`, which turns a
-  `DatasetSpec` and the call's arguments into the right immutable query object.
+- `Namespace` is the base class of the namespace classes; it holds the session core, which
+  each factory method passes to `build_query`.
 - `build_query` normalizes symbols (`_symbols.normalize`), rejects `dm.ALL` where the dataset
   cannot serve it (naming the alternative), parses the time-axis bounds, and normalizes the
   typed parameters and the `filters` mapping into a hashable `Request`.
@@ -14,8 +14,9 @@ module does the work they share when a dataset method is called:
 - `list_params` validates the `sort`, `order`, and `limit` block (`…F`) shared by the REST list
   datasets.
 
-Validation of filter *keys and value kinds* against the SDK's parameter table belongs to the
-REST transport, which owns that generated table. Everything here runs synchronously on the
+Filter keys and value kinds are checked against the generated SDK parameter table
+(`_catalog.check_filters`) synchronously at construction, as DESIGN § 9 requires; the check
+is active once that table has been generated. Everything here runs synchronously on the
 calling thread, makes no network call, and creates no table.
 """
 
@@ -26,14 +27,15 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
+from deephaven_massive._catalog import check_filters
 from deephaven_massive._dates import parse_date_like
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
+    QueryBase,
     Request,
     StreamHistoryQuery,
-    _QueryBase,
 )
 from deephaven_massive._symbols import normalize
 from deephaven_massive._types import _All
@@ -67,43 +69,8 @@ class Namespace:
         """
         self._core = core
 
-    def _query(
-        self,
-        spec: DatasetSpec,
-        *,
-        symbols: Symbols | None = None,
-        all_alternative: str | None = None,
-        timespan: Timespan | None = None,
-        multiplier: int = 1,
-        venue: FuturesVenue | None = None,
-        start: DateLike | None = None,
-        end: DateLike | None = None,
-        params: Mapping[str, object] | None = None,
-        filters: Mapping[str, FilterValue] | None = None,
-    ) -> _QueryBase:
-        """Build this session's query for one call of a dataset method.
 
-        See `build_query` for the arguments, return value, and errors.
-
-        Returns:
-            The query.
-        """
-        return build_query(
-            self._core,
-            spec,
-            symbols=symbols,
-            all_alternative=all_alternative,
-            timespan=timespan,
-            multiplier=multiplier,
-            venue=venue,
-            start=start,
-            end=end,
-            params=params,
-            filters=filters,
-        )
-
-
-def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[_QueryBase]:
+def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[QueryBase]:
     """Pick the query class of a `bars()` call from its actual timespan and multiplier.
 
     With `multiplier=1`, a timespan that has a WebSocket channel (`SECOND`, `MINUTE`) gives a
@@ -241,7 +208,7 @@ def build_query(
     end: DateLike | None = None,
     params: Mapping[str, object] | None = None,
     filters: Mapping[str, FilterValue] | None = None,
-) -> _QueryBase:
+) -> QueryBase:
     """Validate one dataset call and return its query.
 
     Args:
@@ -250,8 +217,8 @@ def build_query(
         symbols: The instruments, or None for datasets without them.
         all_alternative: None when the dataset accepts `dm.ALL`; otherwise the alternative to
             name in the `ValueError`, such as `"m.stocks.snapshots(dm.ALL)"`.
-        timespan: The bar timespan; for bars datasets (those with per-timespan channels or
-            prefixes) it also selects the query class through `bar_query_class`.
+        timespan: The bar timespan; for a bars dataset (`DatasetSpec.is_bars`) it also selects
+            the query class through `bar_query_class`.
         multiplier: The bar multiplier.
         venue: The futures venue, or None for every venue.
         start: The lower bound of the dataset's time axis, or None.
@@ -276,8 +243,7 @@ def build_query(
     if venue is not None:
         _require_enum(venue, FuturesVenue, "venue")
     query_class = spec.query_class
-    is_bars = any(key is not None for key in (*spec.channels, *spec.flat_file_prefixes))
-    if timespan is not None and is_bars:
+    if timespan is not None and spec.is_bars:
         query_class = bar_query_class(spec, timespan, multiplier)
     request = Request(
         symbols=normalized,
@@ -289,4 +255,5 @@ def build_query(
         params=tuple(sorted((k, _value(k, v)) for k, v in (params or {}).items() if v is not None)),
         filters=() if filters is None else _filters(spec, filters),
     )
+    check_filters(spec, dict(request.filters))
     return query_class(core, spec, request)

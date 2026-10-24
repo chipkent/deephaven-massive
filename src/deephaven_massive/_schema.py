@@ -32,15 +32,15 @@ import re
 import types
 import typing
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 from deephaven import dtypes
 
+from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
-from deephaven_massive._timeunits import Transport
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable, Mapping, Sequence
@@ -70,6 +70,7 @@ KeyMap = typing.Mapping[str, str]
 """Maps a wire key, SDK field path, or flat-file header to the column it fills."""
 
 _DATE_FIELD: Final = re.compile(r"^(date|.*_date)$")
+_UTC_FIELD: Final = re.compile(r"^.+_utc$")
 
 
 class ColumnType(StrEnum):
@@ -140,9 +141,11 @@ class Column:
 def _coerce(value: object, column_type: ColumnType) -> object:
     """Prepare one Python value for `pa.array` of the column's Arrow type.
 
-    Three conversions Arrow does not do by itself: an ISO `YYYY-MM-DD` string becomes a `date`
-    for a `LocalDate` column; a dict or list becomes its JSON text for a `String` column (used
-    by `ColumnOverride(type=ColumnType.STRING)` on composite SDK fields); and a single integer
+    Four conversions Arrow does not do by itself: an ISO `YYYY-MM-DD` string becomes a `date`
+    for a `LocalDate` column; an ISO-8601 date-time string (`2024-06-24T18:33:53Z`) becomes an
+    aware `datetime` for an `Instant` column, read as UTC when it carries no offset (Massive's
+    ISO timestamps are UTC); a dict or list becomes its JSON text for a `String` column (used by
+    `ColumnOverride(type=ColumnType.STRING)` on composite SDK fields); and a single integer
     becomes a one-element list for an `int[]` column (the WebSocket quote `c` is one condition
     where REST sends a list). Everything else passes through for Arrow to check.
 
@@ -155,6 +158,9 @@ def _coerce(value: object, column_type: ColumnType) -> object:
     """
     if column_type is ColumnType.LOCAL_DATE and isinstance(value, str):
         return date.fromisoformat(value)
+    if column_type is ColumnType.INSTANT and isinstance(value, str):
+        moment = datetime.fromisoformat(value)
+        return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
     if column_type is ColumnType.STRING and isinstance(value, dict | list):
         return json.dumps(value, sort_keys=True)
     if column_type is ColumnType.INT_ARRAY and isinstance(value, int):
@@ -260,6 +266,11 @@ class ColumnOverride:
     automatic mapping (unions, lists of strings, dictionaries). Each override is tested by the
     dataset that declares it.
 
+    Without an override, `model_schema` maps a `str` field named `date` or `*_date` to
+    `LocalDate`, a `str` field named `*_utc` (an ISO-8601 timestamp such as `published_utc`)
+    to `Instant`, and an `int` field the dataset declares a time unit for to `Instant`. An
+    override with `type=ColumnType.INSTANT` on any other `str` field parses ISO-8601 text.
+
     Attributes:
         type: The column type to use instead of the one the hint implies.
         name: The column name to use instead of the PascalCase of the field path.
@@ -321,9 +332,9 @@ def _column_type(path: str, hint: object, *, instant: bool) -> ColumnType:
         instant: True when the dataset declares a time unit for this field.
 
     Returns:
-        `INSTANT` for a declared timestamp, `LOCAL_DATE` for a `str` field named `date` or
-        `*_date`, `INT_ARRAY` for `List[int]`, and the scalar mapping otherwise (`bool`,
-        `int` to `long`, `float` to `double`, `str`).
+        `INSTANT` for a declared timestamp or a `str` field named `*_utc`, `LOCAL_DATE` for a
+        `str` field named `date` or `*_date`, `INT_ARRAY` for `List[int]`, and the scalar
+        mapping otherwise (`bool`, `int` to `long`, `float` to `double`, `str`).
 
     Raises:
         TypeError: If the hint has no automatic mapping (a union, a list of anything but
@@ -331,7 +342,10 @@ def _column_type(path: str, hint: object, *, instant: bool) -> ColumnType:
     """
     if instant:
         return ColumnType.INSTANT
-    if hint is str and _DATE_FIELD.match(path.rsplit(".", 1)[-1]):
+    name = path.rsplit(".", 1)[-1]
+    if hint is str and _UTC_FIELD.match(name):
+        return ColumnType.INSTANT
+    if hint is str and _DATE_FIELD.match(name):
         return ColumnType.LOCAL_DATE
     if typing.get_origin(hint) is list and typing.get_args(hint) == (int,):
         return ColumnType.INT_ARRAY

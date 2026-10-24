@@ -1,23 +1,31 @@
 """Tests for the declared timestamp units and their conversions (DESIGN § 12, § 23 items 1-2)."""
 
 import logging
-import threading
+import re
 
 import pyarrow as pa
 import pytest
 
-from deephaven_massive import _timeunits
-from deephaven_massive._catalog import datasets, time_units
+from deephaven_massive import _errors
+from deephaven_massive._catalog import datasets, time_units, unit_rules
+from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._timeunits import (
     FMV_NS_THRESHOLD,
     TimeField,
     TimeUnit,
     TimeUnitTable,
-    Transport,
     UnitRule,
-    is_timestamp_like,
 )
+
+# Field names that hold an epoch timestamp and so need a declared unit. The single-letter bar
+# bounds `s` and `e` are ambiguous across models, so datasets register those explicitly.
+_TIMESTAMP_LIKE = re.compile(r"^(t|timestamp|.*_timestamp|updated|.*_updated|window_.*)$")
+
+
+def is_timestamp_like(field: str) -> bool:
+    return _TIMESTAMP_LIKE.match(field) is not None
+
 
 MS = TimeField("stocks.trades", Transport.WS, "t")
 NS = TimeField("stocks.trades", Transport.REST, "sip_timestamp")
@@ -37,9 +45,9 @@ TABLE = TimeUnitTable(
 SECONDS = 1_700_000_000
 
 
-def test_table_size_and_membership() -> None:
-    assert len(TABLE) == 4
+def test_table_membership() -> None:
     assert MS in TABLE
+    assert FOREX_LAST in TABLE
     assert TimeField("x.y", Transport.WS, "t") not in TABLE
 
 
@@ -58,7 +66,7 @@ def test_unregistered_fields_are_refused() -> None:
 def test_fmv_rule_at_the_boundary(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_timeunits, "_fmv_logged", threading.Event())
+    monkeypatch.setattr(_errors, "_logged", set())
     with caplog.at_level(logging.INFO, logger="deephaven_massive._timeunits"):
         assert TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD) == FMV_NS_THRESHOLD
         assert TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD - 1) == (FMV_NS_THRESHOLD - 1) * 10**6
@@ -131,4 +139,5 @@ def test_every_declared_timestamp_field_of_every_dataset_has_a_unit() -> None:
             for key in key_map:
                 if is_timestamp_like(key):
                     assert TimeField(spec.name, key_map_transport, key) in table
-    assert len(table) == sum(len(spec.time_units) for spec in datasets().values())
+    for field in unit_rules(datasets()):
+        assert field in table

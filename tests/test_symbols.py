@@ -1,14 +1,25 @@
 """Tests for symbol normalization (DESIGN § 10)."""
 
+import csv
+import io
+from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from deephaven import new_table
 from deephaven.column import string_col
+from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._symbols import SymbolTable, canonical, normalize, underlying, ws_symbol
+from deephaven_massive._symbols import (
+    CRYPTO_QUOTES,
+    SymbolTable,
+    canonical,
+    normalize,
+    underlying,
+    ws_symbol,
+)
 
 if TYPE_CHECKING:
     from deephaven_massive._types import Symbols
@@ -61,6 +72,11 @@ def test_canonical_forms(asset_class: AssetClass, raw: str, expected: str) -> No
         (FX, "EUR/USD/JPY"),
         (FX, "EUR/"),
         (CRY, "BTC--USD"),
+        (CRY, "BTC-XYZ"),
+        (CRY, "X:BTCXYZ"),
+        (CRY, "USD"),
+        (FX, "EURO/USD"),
+        (FX, "EU/USD"),
     ],
 )
 def test_invalid_symbols(asset_class: AssetClass, raw: str) -> None:
@@ -137,8 +153,37 @@ def test_normalize_tables(dh_exec_ctx: object) -> None:
     boxed = normalize(STK, table)
     assert isinstance(boxed, SymbolTable)
     assert boxed.table is table
-    # Boxes compare by identity, unlike Deephaven wrappers of one Java table.
+    # Boxes of one wrapper are equal; boxes of two wrappers of one Java table are not.
     again = normalize(STK, table)
-    assert boxed != again
+    assert boxed == again
+    assert hash(boxed) == hash(again)
+    twin = Table(j_table=table.j_table)
+    assert twin == table
+    other = normalize(STK, twin)
+    assert other != boxed
     with pytest.raises(ValueError, match="Symbol column"):
         normalize(STK, new_table([string_col("Ticker", ["AAPL"])]))
+
+
+def test_ambiguous_crypto_pairs_are_rejected() -> None:
+    # "ABC-USDT" joins to X:ABCUSDT, which splits back as ABC-USDT; but a base ending in a
+    # quote currency written with a shorter quote would split differently.
+    assert canonical(CRY, "ABC-USDT") == "X:ABCUSDT"
+    with pytest.raises(ValueError, match="does not split back unambiguously"):
+        canonical(CRY, "ABCUS-DT")
+
+
+def test_crypto_quotes_cover_the_vendored_tickers(
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    rows = list(
+        csv.DictReader(io.StringIO(load_fixture("_symbols", "crypto_tickers.csv").decode()))
+    )
+    assert len(rows) > 20
+    for row in rows:
+        assert canonical(CRY, row["ticker"]) == row["ticker"]
+        assert ws_symbol(CRY, row["ticker"]) == row["websocket"]
+        assert canonical(CRY, row["websocket"]) == row["ticker"]
+    quotes = {row["websocket"].split("-")[1] for row in rows}
+    assert quotes <= set(CRYPTO_QUOTES)
+    assert list(CRYPTO_QUOTES) == sorted(CRYPTO_QUOTES, key=len, reverse=True)

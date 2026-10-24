@@ -4,18 +4,19 @@ import dataclasses
 import inspect
 import re
 from collections.abc import Callable
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Protocol, cast
 
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes
-from massive.rest.models import Agg, LastTrade, Quote, TickerSnapshot, Trade
+from massive.rest.models import Agg, LastTrade, Quote, Ticker, TickerSnapshot, Trade
 from massive.rest.models.contracts import OptionsContract
 from massive.rest.models.snapshot import OptionContractSnapshot
 from massive.websocket.models import EquityAgg, EquityQuote, EquityTrade, IndexValue
 
+from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._schema import (
     BARS,
@@ -31,7 +32,6 @@ from deephaven_massive._schema import (
     model_schema,
     pascal_case,
 )
-from deephaven_massive._timeunits import Transport
 
 ALL_TYPES = Schema("all", tuple(Column(t.name.title().replace("_", ""), t) for t in ColumnType))
 
@@ -298,3 +298,27 @@ def test_tick_rows_fill_the_schema(dh_exec_ctx: object) -> None:
     row["Timestamp"] = cast("int", row["Timestamp"]) * 1_000_000
     table = dh_arrow.to_table(TRADES.schema.to_arrow([row]))
     assert {c.name: c.data_type for c in table.columns} == TRADES.schema.col_defs()
+
+
+def test_iso_timestamps_become_instants(dh_exec_ctx: object) -> None:
+    derived = model_schema("reference.tickers", Ticker)
+    columns = {c.name: c.type for c in derived.schema.columns}
+    assert columns["LastUpdatedUtc"] is ColumnType.INSTANT
+    assert columns["DelistedUtc"] is ColumnType.INSTANT
+    rows = [
+        derived.row(Ticker(ticker="AAPL", last_updated_utc="2024-06-24T18:33:53Z")),
+        derived.row(Ticker(ticker="MSFT", last_updated_utc="2024-06-24T18:33:53.5")),
+        derived.row(Ticker(ticker="NVDA", last_updated_utc="2024-06-24T14:33:53-04:00")),
+    ]
+    table = dh_arrow.to_table(derived.schema.to_arrow(rows))
+    values = [r["LastUpdatedUtc"] for r in dh_arrow.to_arrow(table).to_pylist()]
+    expected = datetime(2024, 6, 24, 18, 33, 53, tzinfo=UTC)
+    assert values == [expected, expected.replace(microsecond=500_000), expected]
+
+
+def test_instant_overrides_parse_iso_text() -> None:
+    schema = Schema("x", (Column("At", ColumnType.INSTANT),))
+    batch = schema.to_arrow([{"At": "2025-03-03T09:30:00-05:00"}, {"At": 1}])
+    assert batch.column("At").to_pylist()[0] == datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
+    with pytest.raises(MassiveError, match=r"schema mismatch in x\.At"):
+        schema.to_arrow([{"At": "not a time"}])

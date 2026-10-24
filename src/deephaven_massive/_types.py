@@ -6,6 +6,7 @@
 - `ALL` (`dm.ALL`) means every symbol on the stream (the `<channel>.*` topic), in the flat file,
   or in the snapshot. It is the only instance of `_All`.
 - `DateLike` and `FilterValue` type the time-axis bounds and the `filters` mapping.
+- `override` marks the few dunder methods the library overrides, on every supported Python.
 - `StreamSpan`, `DaySpan`, and `FuturesSpan` are the `Literal` timespan sets the typed `bars()`
   overloads use to pick a query class statically (DESIGN § 7.1). They are `Literal`s of enum
   members, never of strings.
@@ -20,7 +21,7 @@ import logging
 from collections.abc import Sequence
 from datetime import date, datetime
 from enum import Enum
-from typing import Final, Literal, TypeAlias
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias, TypeVar
 
 from deephaven.table import Table
 
@@ -34,9 +35,31 @@ __all__ = [
     "FuturesSpan",
     "StreamSpan",
     "Symbols",
+    "override",
 ]
 
 logger = logging.getLogger(__name__)
+
+_F = TypeVar("_F")
+
+if TYPE_CHECKING:
+    from typing_extensions import override
+else:
+
+    def override(method: _F) -> _F:
+        """Mark a method as overriding its base, for the type checker only.
+
+        `typing.override` exists from Python 3.12 and the library supports 3.11, so mypy reads
+        `typing_extensions.override` and at run time the decorator returns the method
+        unchanged (the standard one only sets `__override__`).
+
+        Args:
+            method: The overriding method.
+
+        Returns:
+            `method` itself.
+        """
+        return method
 
 
 class _All(Enum):

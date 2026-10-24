@@ -123,7 +123,11 @@ def test_text_converts_with_the_constructor() -> None:
 
 
 def test_module_exports() -> None:
-    assert set(_enums.__all__) == {e.__name__ for e in DESIGN_VALUES} | {"Recency", "ChannelFamily"}
+    assert set(_enums.__all__) == {e.__name__ for e in DESIGN_VALUES} | {
+        "Recency",
+        "ChannelFamily",
+        "Transport",
+    }
 
 
 # --- The enums-only rule: no Literal of strings in any public signature. ---------------------

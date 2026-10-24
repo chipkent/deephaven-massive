@@ -22,16 +22,17 @@ import functools
 import importlib
 import logging
 from dataclasses import dataclass, field
+from datetime import date
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan
-from deephaven_massive._timeunits import TimeField, TimeUnit, TimeUnitTable, Transport, UnitRule
+from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan, Transport
+from deephaven_massive._timeunits import TimeField, TimeUnit, TimeUnitTable, UnitRule
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from deephaven_massive._query import _QueryBase
+    from deephaven_massive._query import QueryBase
     from deephaven_massive._schema import ColumnOverride, KeyMap, Schema
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "SDK_PARAMS",
     "DatasetSpec",
     "ParamKind",
+    "check_filters",
     "datasets",
     "filter_params",
     "sdk_params",
@@ -112,6 +114,9 @@ class DatasetSpec:
             class; the overload selection in `_domains/base.py` narrows it by timespan.
         asset_class: The instruments' asset class, or None for datasets without instruments
             (economy, most partner datasets).
+        is_bars: True for a `bars()` dataset: its `channels` and `flat_file_prefixes` are keyed
+            by `Timespan`, and the factory picks the query class from the timespan and
+            multiplier (DESIGN § 7.1). False datasets key them by None.
         schema: The dataset's union schema, or None when the REST transport derives it from
             `rest_model`.
         rest_model: The SDK model class whose fields define the REST columns.
@@ -145,8 +150,9 @@ class DatasetSpec:
     """
 
     name: str
-    query_class: type[_QueryBase]
+    query_class: type[QueryBase]
     asset_class: AssetClass | None = None
+    is_bars: bool = False
     schema: Schema | None = None
     rest_model: type | None = None
     key_maps: Mapping[Transport, KeyMap] = field(default_factory=dict)
@@ -172,12 +178,19 @@ class DatasetSpec:
         """Check the spec's internal consistency.
 
         Raises:
-            ValueError: If the name is not `"<namespace>.<dataset>"`, an unverified unit is
-                not among `time_units`, or a key column is not in `schema`.
+            ValueError: If the name is not `"<namespace>.<dataset>"`, the keys of `channels`
+                or `flat_file_prefixes` do not match `is_bars`, an unverified unit is not among
+                `time_units`, or a key column is not in `schema`.
         """
         namespace, _, dataset = self.name.partition(".")
         if not namespace or not dataset:
             raise ValueError(f"dataset name {self.name!r} must be '<namespace>.<dataset>'")
+        keys = {*self.channels, *self.flat_file_prefixes}
+        if any((key is None) == self.is_bars for key in keys):
+            kind = "Timespan" if self.is_bars else "None"
+            raise ValueError(
+                f"{self.name}: channels and flat_file_prefixes must be keyed by {kind}"
+            )
         stray = sorted(
             f"{t.value}:{f}" for t, f in self.unverified_time_units - set(self.time_units)
         )
@@ -235,6 +248,46 @@ def filter_params(spec: DatasetSpec) -> Mapping[str, ParamKind]:
             params.update(sdk_params(method))
     params.update(spec.extra_params)
     return params
+
+
+_KINDS: Final[Mapping[ParamKind, tuple[type, ...]]] = {
+    ParamKind.STRING: (str,),
+    ParamKind.INTEGER: (int,),
+    ParamKind.NUMBER: (int, float),
+    ParamKind.BOOLEAN: (bool,),
+    ParamKind.DATE: (date, str),
+    ParamKind.DATETIME: (date, str),
+    ParamKind.STRING_SEQUENCE: (tuple, str),
+}
+
+
+def check_filters(spec: DatasetSpec, filters: Mapping[str, object]) -> None:
+    """Validate a `filters` mapping against the dataset's SDK parameters (DESIGN § 9).
+
+    Runs synchronously when the query is built. The parameter table is generated from the SDK
+    (`SDK_PARAMS`); until it has been generated it is empty and the check accepts every key.
+    Values are already normalized (sequences are tuples).
+
+    Args:
+        spec: The dataset.
+        filters: The normalized filters by SDK parameter name.
+
+    Raises:
+        ValueError: If a key is not a parameter of the dataset's SDK methods (the message lists
+            the valid keys), or a value is of the wrong kind.
+    """
+    if not SDK_PARAMS:
+        return
+    params = filter_params(spec)
+    for key, value in filters.items():
+        kind = params.get(key)
+        if kind is None:
+            raise ValueError(f"{spec.name} has no filter {key!r}; valid filters: {sorted(params)}")
+        wrong_bool = isinstance(value, bool) and kind is not ParamKind.BOOLEAN
+        if wrong_bool or not isinstance(value, _KINDS[kind]):
+            raise ValueError(
+                f"{spec.name} filter {key!r} takes a {kind.value} value, not {value!r}"
+            )
 
 
 @functools.cache

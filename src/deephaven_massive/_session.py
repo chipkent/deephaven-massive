@@ -1,31 +1,33 @@
 """`MassiveSession`, the user's entry point, and `SessionCore`, its internal engine.
 
-`MassiveSession` is what users create: it holds the configuration, exposes the dataset
-namespaces (`m.stocks`, `m.options`, ...), the diagnostics tables, and the lifecycle verbs
-`release()` and `close()` (DESIGN § 6). It delegates everything stateful to a `SessionCore`,
-which queries and namespaces share. The core owns:
+`MassiveSession` is what users create: it exposes the dataset namespaces (`m.stocks`,
+`m.options`, ...), the diagnostics tables, and the lifecycle verbs `release()` and `close()`
+(DESIGN § 6), and nothing else. It delegates everything stateful to a `SessionCore`, which
+queries and namespaces share. The core owns:
 
-- the captured Deephaven `ExecutionContext`, entered on every library thread;
+- the session's label (`MassiveSession #1`, a per-process counter), used in its `repr`, the
+  same-key WARNING, and error messages;
+- the configuration and the captured Deephaven `ExecutionContext`, entered on every library
+  thread;
 - `registry_lock`, the one leaf lock that guards every session registry (DESIGN § 18): no
   Deephaven call, network call, or blocking wait happens while it is held;
-- the stream registry, one stream per `(dataset, channel, symbol key)`, each with its count of
-  library-held results;
+- the stream registry, one open stream per `(dataset, channel, symbols)`, each with its count of
+  library-held results and its diagnostics row;
 - the result registry and the reaper thread (`_liveness.py`);
-- the diagnostics tables (`_diagnostics.py`);
+- the diagnostics tables and their writer thread (`_diagnostics.py`);
 - one factory hook per transport (`rest_transport`, `stream_transport`,
   `flat_file_transport`), which the transport work packages fill in. Until then each raises
   `NotImplementedError`, so the verbs that need it do too.
 
-Lock order: the update-graph (UG) lock, then `registry_lock`. The core also has two non-leaf
-locks taken *before* either: `_open_lock`, which makes stream creation single-flight, and
-`_publish_lock`, which serializes diagnostics writes so the last write carries the latest state.
-Neither is ever taken on a UG thread or while `registry_lock` is held.
+Lock order: the update-graph (UG) lock, then `registry_lock`. Stream creation takes no lock
+while the transport works: it opens optimistically and registers under `registry_lock`; if
+another thread registered the same key meanwhile, the new stream is released and the
+registered one is used (a rare, harmless, wasted publisher).
 """
 
 from __future__ import annotations
 
 import functools
-import hashlib
 import itertools
 import logging
 import threading
@@ -51,10 +53,10 @@ from deephaven_massive._domains.options import _Options
 from deephaven_massive._domains.partners import _Partners
 from deephaven_massive._domains.reference import _Reference
 from deephaven_massive._domains.stocks import _Stocks
+from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._liveness import Reaper, ResultRegistry, make_result
-from deephaven_massive._timeunits import Transport
-from deephaven_massive._types import ALL
+from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -79,19 +81,18 @@ __all__ = ["MassiveSession", "SessionCore"]
 
 logger = logging.getLogger(__name__)
 
+# A thread with no execution context gets Deephaven's empty default context, whose update graph
+# is a PoisonedUpdateGraph: creating any refreshing table under it fails. That class is the
+# only signal Deephaven offers for "no context is active".
 _POISONED_UPDATE_GRAPH: Final = "PoisonedUpdateGraph"
-"""The update graph Deephaven gives a thread that has no execution context."""
 
-_session_numbers = itertools.count(1)
 _keys_lock = threading.Lock()
-_sessions_by_key: dict[str, list[weakref.ref[SessionCore]]] = {}
+_session_numbers = itertools.count(1)
+_open_sessions: weakref.WeakSet[SessionCore] = weakref.WeakSet()
 
 
 def _has_execution_context(exec_ctx: ExecutionContext) -> bool:
     """Tell whether an execution context is a real one, not the thread's empty default.
-
-    A thread without a context gets Deephaven's default context, whose update graph is a
-    `PoisonedUpdateGraph` on which no refreshing table can be created.
 
     Args:
         exec_ctx: The context `get_exec_ctx()` returned.
@@ -140,55 +141,68 @@ def _require_not_update_graph(exec_ctx: ExecutionContext) -> None:
         )
 
 
-def _key_digest(api_key: str) -> str:
-    """Return a digest of an API key, so the in-process session registry holds no secret.
-
-    Args:
-        api_key: The key.
+def _next_label() -> str:
+    """Return the next session label of the process.
 
     Returns:
-        Its SHA-256 hex digest.
+        `"MassiveSession #<n>"`, numbered from 1.
     """
-    return hashlib.sha256(api_key.encode()).hexdigest()
+    with _keys_lock:
+        return f"MassiveSession #{next(_session_numbers)}"
 
 
-def _register_key(core: SessionCore) -> None:
-    """Record a new session's key and warn if another open session already uses it.
+def _register(core: SessionCore) -> None:
+    """Record a new open session and warn if another open session uses the same key.
 
     Individual Massive plans allow one WebSocket connection per cluster per account, so a
-    second session with the same key would make the two fight over connection slots.
+    second session with the same key would make the two compete for connection slots. Sessions
+    are held weakly; closed and collected ones do not count.
 
     Args:
         core: The new session's core.
     """
-    digest = _key_digest(core.config.api_key)
     with _keys_lock:
-        refs = [ref for ref in _sessions_by_key.get(digest, []) if ref() is not None]
-        others = [other for ref in refs if (other := ref()) is not None and not other.closed]
-        refs.append(weakref.ref(core))
-        _sessions_by_key[digest] = refs
+        others = sorted(
+            other.label
+            for other in _open_sessions
+            if other.config.api_key == core.config.api_key and not other.closed
+        )
+        _open_sessions.add(core)
     if others:
         logger.warning(
             "%s uses the same API key as %s; individual plans allow one WebSocket connection "
             "per cluster per account, so the sessions will compete for connection slots",
-            core.name,
-            others[0].name,
+            core.label,
+            others[0],
         )
+
+
+def _stop_threads(reaper: Reaper, diagnostics: Diagnostics) -> None:
+    """Finalizer of a collected session: end its reaper and diagnostics writer, without waiting.
+
+    Args:
+        reaper: The session's reaper.
+        diagnostics: The session's diagnostics.
+    """
+    reaper.stop()
+    diagnostics.stop()
 
 
 @dataclass(frozen=True, slots=True)
 class _StreamState:
-    """One open stream in the registry; replaced, never mutated, under `registry_lock`.
+    """One stream in the registry; replaced, never mutated, under `registry_lock`.
 
     Attributes:
         key: The stream's key.
         handle: What the WebSocket transport returned.
-        held: Library-held results of the stream (at least 1 while registered).
+        held: Library-held results of the stream; 0 once released.
+        row: The stream's current diagnostics row.
     """
 
     key: StreamKey
     handle: StreamHandle
     held: int
+    row: StreamRow
 
 
 class SessionCore:
@@ -198,27 +212,24 @@ class SessionCore:
     active. Thread-safe: every mutable registry is guarded by `registry_lock`.
     """
 
-    def __init__(self, config: MassiveConfig, exec_ctx: ExecutionContext, name: str) -> None:
-        """Create the core, its reaper thread, and the diagnostics tables.
+    def __init__(self, config: MassiveConfig, exec_ctx: ExecutionContext, label: str) -> None:
+        """Create the core, its reaper thread, and the diagnostics tables and writer.
 
         Args:
             config: The validated configuration.
             exec_ctx: The caller's execution context, captured for library threads.
-            name: The session's display name, such as `"MassiveSession#1"`.
+            label: The session's label, such as `"MassiveSession #1"`.
         """
         self.config: Final = config
         self.exec_ctx: Final = exec_ctx
-        self.name: Final = name
+        self.label: Final = label
         self.registry_lock: Final = threading.RLock()
-        self._open_lock = threading.Lock()
-        self._publish_lock = threading.Lock()
-        self._reaper = Reaper(exec_ctx, f"{name}-reaper")
-        weakref.finalize(self, self._reaper.stop)
+        self._reaper = Reaper(exec_ctx, f"{label} reaper")
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
-        self.diagnostics: Final = Diagnostics()
+        self.diagnostics: Final = Diagnostics(exec_ctx, f"{label} diagnostics")
+        weakref.finalize(self, _stop_threads, self._reaper, self.diagnostics)
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamState] = {}
-        self._rows: dict[int, StreamRow] = {}
         self._closers: list[Callable[[], None]] = []
         self._closed = False
 
@@ -228,25 +239,22 @@ class SessionCore:
         with self.registry_lock:
             return self._closed
 
-    def require_verb_thread(self) -> None:
-        """The guard every verb runs first.
-
-        On an update-graph thread (for example inside a table listener), or while holding the
-        update-graph lock, it raises `ValueError` through `require_not_update_graph`: verbs
-        create tables and take the registry lock, which would deadlock there.
+    def require_open(self) -> None:
+        """Reject a call on a closed session.
 
         Raises:
-            MassiveError: If the session is closed.
+            MassiveError: `MassiveError("MassiveSession #1 is closed")` after `close()`.
         """
         if self.closed:
-            raise MassiveError(f"{self.name} is closed")
-        self.require_not_update_graph()
+            raise MassiveError(f"{self.label} is closed")
 
-    def require_not_update_graph(self) -> None:
-        """Reject a call from an update-graph thread, or one holding the update-graph lock.
+    def require_verb_thread(self) -> None:
+        """The guard every verb runs first: the session is open and this is not a UG thread.
 
-        Raises `ValueError` in that case (see `_require_not_update_graph`).
+        A closed session raises `MassiveError` (see `require_open`); an update-graph thread, or
+        a thread holding the update-graph lock, raises `ValueError`.
         """
+        self.require_open()
         _require_not_update_graph(self.exec_ctx)
 
     # --- Transport factory hooks: one per transport, filled by the transport packages. -------
@@ -275,7 +283,7 @@ class SessionCore:
         """
         raise NotImplementedError("the flat-file transport is not implemented yet")
 
-    # --- Lifecycle ------------------------------------------------------------------------
+    # --- Streams --------------------------------------------------------------------------
 
     def on_close(self, closer: Callable[[], None]) -> None:
         """Register a transport's cleanup (close connections, stop pollers) for `close()`.
@@ -300,10 +308,10 @@ class SessionCore:
         """Create one live result over the stream of `(spec, channel, symbols)`.
 
         The stream is reused when one with the same key is open; otherwise the WebSocket
-        transport opens it (single-flight per session). The result is built from the stream's
-        blink table in its own result scope on this thread, inside the session's execution
-        context, and tracked so that garbage collection or `release()` frees it. If the
-        session closes while the stream is opening, the call raises `MassiveError`.
+        transport opens it. The result is built from the stream's blink table in its own result
+        scope on this thread, inside the session's execution context, and tracked so that
+        garbage collection or `release()` frees it. If the session closes while the stream is
+        opening, the call raises `MassiveError`.
 
         Args:
             spec: The dataset.
@@ -316,10 +324,7 @@ class SessionCore:
             The live result, a distinct Python object per call.
         """
         key: StreamKey = (spec.name, channel, request.symbol_key())
-        handle = self._acquire(key)
-        if handle is None:
-            with self._open_lock:
-                handle = self._acquire(key) or self._open(spec, request, channel=channel, key=key)
+        handle = self._acquire(key) or self._open(spec, request, channel=channel, key=key)
         blink = handle.blink
         try:
             with self.exec_ctx:
@@ -329,6 +334,20 @@ class SessionCore:
             raise
         self.results.track(result, scope, functools.partial(self._release_hold, handle.stream_id))
         return result
+
+    def _hold(self, stream_id: int) -> tuple[StreamHandle, StreamRow]:
+        """Take one more hold on a registered stream. Call with `registry_lock` held.
+
+        Args:
+            stream_id: An open stream.
+
+        Returns:
+            The stream's handle and its updated row.
+        """
+        state = self._streams[stream_id]
+        row = replace(state.row, held_results=state.held + 1)
+        self._streams[stream_id] = replace(state, held=state.held + 1, row=row)
+        return state.handle, row
 
     def _acquire(self, key: StreamKey) -> StreamHandle | None:
         """Take one more hold on the open stream with `key`, if there is one.
@@ -343,18 +362,18 @@ class SessionCore:
             stream_id = self._stream_ids.get(key)
             if stream_id is None:
                 return None
-            state = self._streams[stream_id]
-            self._streams[stream_id] = replace(state, held=state.held + 1)
-            self._rows[stream_id] = replace(self._rows[stream_id], held_results=state.held + 1)
-        self._publish(stream_id)
-        return state.handle
+            handle, row = self._hold(stream_id)
+        self.diagnostics.write(row)
+        return handle
 
     def _open(
         self, spec: DatasetSpec, request: Request, *, channel: str | None, key: StreamKey
     ) -> StreamHandle:
         """Open a new stream through the WebSocket transport and register it with one hold.
 
-        Called with `_open_lock` held and `registry_lock` free.
+        Runs with no lock held while the transport works. If another thread registered the
+        same key in the meantime, the new stream's scope is released (its publisher is wasted;
+        this is rare) and a hold is taken on the registered stream instead.
 
         Args:
             spec: The dataset.
@@ -363,41 +382,48 @@ class SessionCore:
             key: The stream key.
 
         Returns:
-            The new stream's handle.
+            The handle of the stream that now serves `key`.
 
         Raises:
             MassiveError: If the session was closed while the transport opened the stream; the
                 new stream's scope is released.
         """
         with self.exec_ctx:
-            handle = self.stream_transport().open_stream(spec, request, channel)
-        count, text = describe_symbols(request.symbols) if request.symbols else (None, "")
+            opened = self.stream_transport().open_stream(spec, request, channel)
+        count, text = describe_symbols(request.symbol_key())
         row = StreamRow(
-            stream_id=handle.stream_id,
+            stream_id=opened.stream_id,
             dataset=spec.name,
             symbol_count=count,
             symbols=text,
             held_results=1,
-            transport=Transport.WS.value,
-            host=handle.host,
-            path=handle.path,
+            transport=Transport.WS,
+            host=opened.host,
+            path=opened.path,
             created_at=time.time_ns(),
         )
         with self.registry_lock:
             closed = self._closed
-            if not closed:
-                self._stream_ids[key] = handle.stream_id
-                self._streams[handle.stream_id] = _StreamState(key, handle, 1)
-                self._rows[handle.stream_id] = row
-        if closed:
+            existing = self._stream_ids.get(key)
+            if closed:
+                handle = opened
+            elif existing is not None:
+                handle, row = self._hold(existing)
+            else:
+                handle = opened
+                self._stream_ids[key] = opened.stream_id
+                self._streams[opened.stream_id] = _StreamState(key, opened, 1, row)
+        if closed or existing is not None:
+            logger.debug("%s: releasing an unused stream for %s", self.label, spec.name)
             with self.exec_ctx:
-                handle.scope.release()
-            raise MassiveError(f"{self.name} was closed while a stream was opening")
-        self._publish(handle.stream_id)
+                opened.scope.release()
+        if closed:
+            raise MassiveError(f"{self.label} was closed while a stream was opening")
+        self.diagnostics.write(row)
         return handle
 
     def _release_hold(self, stream_id: int) -> None:
-        """Drop one hold on a stream; at zero, forget it and release its stream scope.
+        """Drop one hold on a stream; at zero, unregister its key and release its stream scope.
 
         Runs on the reaper thread when a result is released, or on the caller thread when
         building a result failed. Releasing the stream scope drops the library's reference to
@@ -410,33 +436,20 @@ class SessionCore:
         with self.registry_lock:
             state = self._streams[stream_id]
             held = state.held - 1
-            row = self._rows[stream_id]
-            if held:
-                self._streams[stream_id] = replace(state, held=held)
-            else:
-                # A key maps to its open stream until that stream's last hold is dropped.
-                del self._streams[stream_id]
-                del self._stream_ids[state.key]
-            released = not held and row.state is StreamState.RUNNING
-            self._rows[stream_id] = replace(
-                row, held_results=held, state=StreamState.RELEASED if released else row.state
+            released = not held and state.row.state is StreamState.RUNNING
+            row = replace(
+                state.row,
+                held_results=held,
+                state=StreamState.RELEASED if released else state.row.state,
             )
+            self._streams[stream_id] = replace(state, held=held, row=row)
+            if not held:
+                # A key maps to its open stream until that stream's last hold is dropped.
+                del self._stream_ids[state.key]
         if not held:
             with self.exec_ctx:
                 state.handle.scope.release()
-        self._publish(stream_id)
-
-    def _publish(self, stream_id: int) -> None:
-        """Write a stream's current row to `m.streams()`.
-
-        Args:
-            stream_id: The stream.
-        """
-        with self._publish_lock:
-            with self.registry_lock:
-                row = self._rows[stream_id]
-            with self.exec_ctx:
-                self.diagnostics.write_stream(row)
+        self.diagnostics.write(row)
 
     def close(self) -> None:
         """Close the session: run the closers, mark streams closed, release the diagnostics.
@@ -446,22 +459,24 @@ class SessionCore:
         still free them. Logs one WARNING with the number of live tables that became static.
         A call on an update-graph thread raises `ValueError`.
         """
-        self.require_not_update_graph()
+        _require_not_update_graph(self.exec_ctx)
         with self.registry_lock:
             if self._closed:
                 return
             self._closed = True
             closers = tuple(self._closers)
-            stream_ids = tuple(self._rows)
-            for stream_id in stream_ids:
-                self._rows[stream_id] = replace(self._rows[stream_id], state=StreamState.CLOSED)
+            rows = []
+            for stream_id, state in self._streams.items():
+                row = replace(state.row, state=StreamState.CLOSED)
+                self._streams[stream_id] = replace(state, row=row)
+                rows.append(row)
         for closer in closers:
             try:
                 closer()
             except Exception:
-                logger.exception("%s: a transport failed to close", self.name)
-        for stream_id in stream_ids:
-            self._publish(stream_id)
+                logger.exception("%s: a transport failed to close", self.label)
+        for row in rows:
+            self.diagnostics.write(row)
         self.diagnostics.release()
         logger.warning("session closed; %d live tables are now static", self.results.held())
 
@@ -471,7 +486,9 @@ class MassiveSession:
 
     Create it inside a Deephaven worker (a server console, an application script, or anywhere
     an `ExecutionContext` is active); the library captures that context for its own threads and
-    never starts a JVM. Configuration comes only from `MassiveConfig`.
+    never starts a JVM. Configuration comes only from `MassiveConfig`, and the session does not
+    expose it again: keeping the API key out of the session's attributes keeps it one step
+    further from console globals that every user of a worker can read.
 
     Dataset methods hang off the namespaces (`m.stocks.trades(...)`) and return queries; verbs
     on a query return Deephaven tables. Live results are released automatically when garbage
@@ -479,8 +496,9 @@ class MassiveSession:
     side with `m.close()`. As a context manager the session closes on exit, which suits
     scripts whose results are static.
 
-    Creating a second session with the same key in one process logs a WARNING: individual
-    plans allow one WebSocket connection per cluster per account. Thread-safe.
+    The session's label (`MassiveSession #1`, a per-process counter) appears in its `repr`, in
+    the WARNING logged when a second open session uses the same key (individual plans allow
+    one WebSocket connection per cluster per account), and in error messages. Thread-safe.
 
     Example:
         ::
@@ -491,6 +509,7 @@ class MassiveSession:
             trades = m.stocks.trades(["AAPL", "MSFT"]).ring(10_000)
             conns = m.connections()
             m.release(trades)
+            m  # <MassiveSession #1 open>
 
             with dm.MassiveSession() as m2:
                 bars = m2.stocks.bars(["AAPL"], dm.Timespan.DAY).history("2025-01-01", "2025-06-30")
@@ -539,8 +558,8 @@ class MassiveSession:
             )
         _require_not_update_graph(exec_ctx)
         log_json_codec_once()
-        core = SessionCore(config, exec_ctx, f"MassiveSession#{next(_session_numbers)}")
-        _register_key(core)
+        core = SessionCore(config, exec_ctx, _next_label())
+        _register(core)
         self._core = core
         self._stocks = _Stocks(core)
         self._options = _Options(core)
@@ -553,15 +572,15 @@ class MassiveSession:
         self._economy = _Economy(core)
         self._partners = _Partners(core)
 
-    @property
-    def name(self) -> str:
-        """The session's name in logs and warnings, such as `"MassiveSession#1"`."""
-        return self._core.name
+    @override
+    def __repr__(self) -> str:
+        """Show the session's label and whether it is open.
 
-    @property
-    def config(self) -> MassiveConfig:
-        """The session's configuration."""
-        return self._core.config
+        Returns:
+            `"<MassiveSession #1 open>"` or `"<MassiveSession #1 closed>"`.
+        """
+        state = "closed" if self._core.closed else "open"
+        return f"<{self._core.label} {state}>"
 
     @property
     def stocks(self) -> _Stocks:
@@ -658,32 +677,26 @@ class MassiveSession:
 
         One row per WebSocket connection plus one `Transport=REST` row per resolved (asset
         class, channel family), with the host, recency, evidence, state, topic counts, and the
-        last error. The table is the session's; do not edit it.
+        last error. The table is the session's; do not edit it. After `close()` this raises
+        `MassiveError` (see `SessionCore.require_open`).
 
         Returns:
             The keyed `connections` table (columns in DESIGN § 17).
-
-        Raises:
-            MassiveError: If the session is closed.
         """
-        if self._core.closed:
-            raise MassiveError(f"{self.name} is closed")
+        self._core.require_open()
         return self._core.diagnostics.connections
 
     def streams(self) -> Table:
         """Return the live diagnostics table of streams and `poll()` tables.
 
         One row per stream: dataset, symbols, `HeldResults`, deferred option contracts,
-        host, rows published, requests per poll cycle, state, and error.
+        host, rows published, requests per poll cycle, state, and error. After `close()` this
+        raises `MassiveError`.
 
         Returns:
             The keyed `streams` table (columns in DESIGN § 17).
-
-        Raises:
-            MassiveError: If the session is closed.
         """
-        if self._core.closed:
-            raise MassiveError(f"{self.name} is closed")
+        self._core.require_open()
         return self._core.diagnostics.streams
 
     def release(self, table: Table) -> None:
@@ -692,8 +705,9 @@ class MassiveSession:
         The library's hold on the table is released on the session's reaper thread, right
         away. The table keeps ticking only while something else holds it (a derived table, an
         open UI panel); once nothing does, its stream unsubscribes. Releasing a result twice
-        does nothing. Static results (`fetch()`, `history()`) are not tracked, and a table
-        that is not a live result of this session raises `ValueError`.
+        does nothing, and `release()` keeps working after `close()`. Static results
+        (`fetch()`, `history()`) are not tracked, and a table that is not a live result of this
+        session raises `ValueError`.
 
         Args:
             table: A live table returned by a verb of this session.
@@ -711,9 +725,9 @@ class MassiveSession:
         Publishers are not failed, so live tables keep their rows and stop updating;
         `m.streams()` shows every stream `CLOSED` before the diagnostics tables are released.
         One WARNING is logged: "session closed; N live tables are now static". After
-        `close()`, verbs and the diagnostics accessors raise `MassiveError`.
-
-        A call on an update-graph thread raises `ValueError`.
+        `close()`, verbs, `connections()`, and `streams()` raise
+        `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
+        and `release()` keep working. A call on an update-graph thread raises `ValueError`.
         """
         self._core.close()
 

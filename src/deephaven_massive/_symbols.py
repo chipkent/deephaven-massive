@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 from deephaven.table import Table
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from deephaven_massive._types import Symbols
 
 __all__ = [
+    "CRYPTO_QUOTES",
     "NormalizedSymbols",
     "SymbolTable",
     "canonical",
@@ -55,10 +56,28 @@ _PLAIN: Final = re.compile(r"^[A-Z0-9.:/\-]+$")
 _PAIR_SEPARATORS: Final = re.compile(r"[/\-]")
 _CURRENCY: Final = re.compile(r"^[A-Z0-9]+$")
 _PAIR_PARTS: Final = 2
-_FOREX_PAIR_LENGTH: Final = 6  # two three-letter ISO 4217 codes
-# Quote currencies of Massive's crypto pairs, longest first so `USDT` wins over `USD`. Used only
-# to split a canonical `X:` ticker, which has no separator, back into the WebSocket form.
-_CRYPTO_QUOTES: Final = ("USDT", "USDC", "USD", "EUR", "GBP", "JPY", "BTC", "ETH")
+_CURRENCY_CODE_LENGTH: Final = 3  # ISO 4217
+CRYPTO_QUOTES: Final = (
+    "USDT",
+    "USDC",
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "AUD",
+    "CAD",
+    "CHF",
+    "SGD",
+    "HKD",
+    "BTC",
+    "ETH",
+)
+"""The quote currencies of Massive's crypto pairs, longest first so `USDT` wins over `USD`.
+
+A canonical crypto ticker (`X:BTCUSD`) has no separator, so the WebSocket form (`BTC-USD`) is
+recovered by matching one of these suffixes. `canonical` accepts only pairs that split back
+unambiguously, so `ws_symbol` cannot fail. The list is checked against the vendored ticker
+fixture `tests/data/_symbols/crypto_tickers.csv`."""
 _PREFIXES: Final[dict[AssetClass, str]] = {
     AssetClass.OPTIONS: "O:",
     AssetClass.INDICES: "I:",
@@ -67,20 +86,27 @@ _PREFIXES: Final[dict[AssetClass, str]] = {
 }
 
 
-@dataclass(frozen=True, eq=False, slots=True)
+@dataclass(frozen=True, slots=True)
 class SymbolTable:
     """A reactive symbol table, compared and hashed by the identity of its Python wrapper.
 
     Deephaven `Table` wrappers compare equal when they wrap the same Java table, but DESIGN
     § 14 keys a reactive stream by `id(table)`: two wrappers of one Java table are two streams.
-    Holding the table in this identity-keyed box keeps query equality and the stream key in
-    agreement. The box holds the wrapper strongly, so its `id` stays valid.
+    Two boxes are equal exactly when they hold the same wrapper, which keeps query equality and
+    the stream key in agreement. The box holds the wrapper strongly, so its `id` stays valid
+    for as long as a query or stream key holds the box.
 
     Attributes:
         table: The user's table; it has a `Symbol` column.
+        table_id: `id(table)`, the box's identity for equality and hashing.
     """
 
-    table: Table
+    table: Table = field(compare=False)
+    table_id: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Record the wrapper's identity."""
+        object.__setattr__(self, "table_id", id(self.table))
 
 
 NormalizedSymbols: TypeAlias = tuple[str, ...] | _All | SymbolTable
@@ -121,8 +147,9 @@ def canonical(asset_class: AssetClass, raw: object) -> str:
     Raises:
         TypeError: If `raw` is not a `str`.
         ValueError: If `raw` is empty, contains characters no Massive symbol has (spaces,
-            commas), is not a valid OCC symbol for options, or is not a readable pair for
-            forex or crypto.
+            commas), is not a valid OCC symbol for options, is not a readable pair for forex,
+            or is not a crypto pair that ends in one of `CRYPTO_QUOTES` (checked here, so the
+            WebSocket form can always be recovered).
     """
     if not isinstance(raw, str):
         raise TypeError(f"a symbol must be a str, not {type(raw).__name__}")
@@ -136,23 +163,50 @@ def canonical(asset_class: AssetClass, raw: object) -> str:
         if not _OCC.match(symbol):
             raise ValueError(f"{raw!r} is not an OCC option symbol such as O:AAPL250117C00150000")
         return symbol
-    if asset_class is AssetClass.FOREX and _PAIR_SEPARATORS.search(body) is None:
-        if len(body) != _FOREX_PAIR_LENGTH:
+    if asset_class is AssetClass.FOREX:
+        pair = _split_pair(body, raw) if _PAIR_SEPARATORS.search(body) else (body[:3], body[3:])
+        if any(len(code) != _CURRENCY_CODE_LENGTH for code in pair):
             raise ValueError(f"cannot read {raw!r} as a currency pair; write it as BASE/QUOTE")
-        return f"C:{body}"
-    if asset_class in {AssetClass.FOREX, AssetClass.CRYPTO}:
+        return f"C:{pair[0]}{pair[1]}"
+    if asset_class is AssetClass.CRYPTO:
         if _PAIR_SEPARATORS.search(body) is None:
-            return f"{prefix}{body}"
+            _split_crypto(body, raw)
+            return f"X:{body}"
         base, quote = _split_pair(body, raw)
-        return f"{prefix}{base}{quote}"
+        if _split_crypto(base + quote, raw) != (base, quote):
+            raise ValueError(f"{raw!r} does not split back unambiguously; write it as BASE-QUOTE")
+        return f"X:{base}{quote}"
     return f"{prefix}{body}"
+
+
+def _split_crypto(body: str, raw: str) -> tuple[str, str]:
+    """Split a separator-free crypto pair at its quote currency.
+
+    Args:
+        body: The pair without prefix or separator, such as `BTCUSDT`.
+        raw: The symbol as the caller wrote it, for the error message.
+
+    Returns:
+        `(base, quote)`, with the longest matching quote currency.
+
+    Raises:
+        ValueError: If no quote currency of `CRYPTO_QUOTES` ends the pair.
+    """
+    for quote in CRYPTO_QUOTES:
+        if body.endswith(quote) and len(body) > len(quote):
+            return body[: -len(quote)], quote
+    raise ValueError(
+        f"cannot read {raw!r} as a crypto pair whose quote currency is one of "
+        f"{', '.join(CRYPTO_QUOTES)}; write it as BASE-QUOTE"
+    )
 
 
 def ws_symbol(asset_class: AssetClass, symbol: str) -> str:
     """Return the WebSocket spelling of a canonical symbol, as topics and frames use it.
 
     Forex becomes `BASE/QUOTE` (`C:EURUSD` to `EUR/USD`) and crypto `BASE-QUOTE` (`X:BTCUSD`
-    to `BTC-USD`); every other class uses the canonical form unchanged.
+    to `BTC-USD`); every other class uses the canonical form unchanged. Every symbol
+    `canonical` returns converts; a crypto ticker it would reject raises its `ValueError`.
 
     Args:
         asset_class: The symbol's class.
@@ -160,23 +214,13 @@ def ws_symbol(asset_class: AssetClass, symbol: str) -> str:
 
     Returns:
         The WebSocket form.
-
-    Raises:
-        ValueError: If a crypto ticker does not end in a known quote currency, so it cannot
-            be split into base and quote.
     """
     if asset_class is AssetClass.FOREX:
         body = symbol.removeprefix("C:")
-        half = _FOREX_PAIR_LENGTH // 2
-        return f"{body[:half]}/{body[half:]}"
+        return f"{body[:_CURRENCY_CODE_LENGTH]}/{body[_CURRENCY_CODE_LENGTH:]}"
     if asset_class is AssetClass.CRYPTO:
-        body = symbol.removeprefix("X:")
-        for quote in _CRYPTO_QUOTES:
-            if body.endswith(quote) and len(body) > len(quote):
-                return f"{body[: -len(quote)]}-{quote}"
-        raise ValueError(
-            f"cannot split {symbol!r} into base and quote currencies; write it as BASE-QUOTE"
-        )
+        base, quote = _split_crypto(symbol.removeprefix("X:"), symbol)
+        return f"{base}-{quote}"
     return symbol
 
 

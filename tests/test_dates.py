@@ -2,23 +2,25 @@
 
 from datetime import UTC, date, datetime, time, timedelta
 from typing import cast
-from zoneinfo import ZoneInfo
 
 import pytest
 
+from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._dates import (
     CHICAGO,
     DAY_ZONES,
     NEW_YORK,
+    FuturesSessions,
     TimeRange,
+    bounds,
     flat_file_published,
     futures_sessions,
     history_range,
     parse_date_like,
+    publish_time,
 )
 from deephaven_massive._enums import AssetClass
-
-UTC_ZONE = ZoneInfo("UTC")
+from deephaven_massive._query import HistoryQuery
 
 
 @pytest.mark.parametrize(
@@ -59,10 +61,10 @@ def test_day_zones() -> None:
     assert DAY_ZONES[AssetClass.STOCKS] is NEW_YORK
     assert DAY_ZONES[AssetClass.OPTIONS] is NEW_YORK
     assert DAY_ZONES[AssetClass.INDICES] is NEW_YORK
-    assert DAY_ZONES[AssetClass.FOREX] == UTC_ZONE
-    assert DAY_ZONES[AssetClass.CRYPTO] == UTC_ZONE
-    assert DAY_ZONES[AssetClass.FUTURES] is CHICAGO
-    assert set(DAY_ZONES) == set(AssetClass)
+    assert DAY_ZONES[AssetClass.FOREX] == UTC
+    assert DAY_ZONES[AssetClass.CRYPTO] == UTC
+    # A futures date names a session, not a calendar day.
+    assert set(DAY_ZONES) == set(AssetClass) - {AssetClass.FUTURES}
 
 
 def test_whole_days_are_inclusive_in_new_york() -> None:
@@ -79,7 +81,7 @@ def test_daylight_saving_days() -> None:
 
 
 def test_utc_days_and_datetimes() -> None:
-    window = history_range("2025-03-03", datetime(2025, 3, 3, 12, tzinfo=UTC), UTC_ZONE)
+    window = history_range("2025-03-03", datetime(2025, 3, 3, 12, tzinfo=UTC), UTC)
     assert window == TimeRange(
         datetime(2025, 3, 3, tzinfo=UTC), datetime(2025, 3, 3, 12, tzinfo=UTC)
     )
@@ -128,6 +130,35 @@ def test_futures_session_widening() -> None:
 CUTOFF = time(11, 30)
 
 
+def test_publish_time_in_new_york() -> None:
+    assert publish_time(date(2025, 3, 3), zone=NEW_YORK, cutoff=CUTOFF) == datetime(
+        2025, 3, 4, 11, 30, tzinfo=NEW_YORK
+    )
+
+
+def test_publish_time_in_utc() -> None:
+    # March 4 00:00 UTC is March 3 19:00 in New York; the first 11:30 after it is March 4.
+    assert publish_time(date(2025, 3, 3), zone=UTC, cutoff=CUTOFF) == datetime(
+        2025, 3, 4, 11, 30, tzinfo=NEW_YORK
+    )
+    # A cutoff later than 19:00 New York time falls on the same New York evening.
+    late = time(20, 0)
+    assert publish_time(date(2025, 3, 3), zone=UTC, cutoff=late) == datetime(
+        2025, 3, 3, 20, 0, tzinfo=NEW_YORK
+    )
+    early = time(18, 0)
+    assert publish_time(date(2025, 3, 3), zone=UTC, cutoff=early) == datetime(
+        2025, 3, 4, 18, 0, tzinfo=NEW_YORK
+    )
+
+
+def test_publish_time_is_strictly_after_the_day_starts() -> None:
+    # A cutoff at exactly the New York midnight that starts the next day is not "after" it.
+    assert publish_time(date(2025, 3, 3), zone=NEW_YORK, cutoff=time(0, 0)) == datetime(
+        2025, 3, 5, 0, 0, tzinfo=NEW_YORK
+    )
+
+
 def _published(partition: date, now: datetime) -> bool:
     return flat_file_published(partition, now=now, zone=NEW_YORK, cutoff=CUTOFF)
 
@@ -145,11 +176,49 @@ def test_flat_file_publish_cutoff() -> None:
 
 
 def test_flat_file_day_zone_is_the_class_zone() -> None:
-    # 01:00 UTC on March 4 is still March 3 in New York but March 4 in UTC, so March 3 is
-    # "today" for a New York class and "yesterday" for a UTC class. The cutoff compares the
-    # New York time of day (20:00 on March 3), exactly as DESIGN § 16 states the predicate.
+    # 01:00 UTC on March 4 is 20:00 New York time on March 3. For a UTC class, March 3's file
+    # lands at 11:30 New York time on March 4, so it is not published yet.
     now = datetime(2025, 3, 4, 1, tzinfo=UTC)
     march_3 = date(2025, 3, 3)
     assert not flat_file_published(march_3, now=now, zone=NEW_YORK, cutoff=CUTOFF)
-    assert flat_file_published(march_3, now=now, zone=UTC_ZONE, cutoff=CUTOFF)
-    assert not flat_file_published(date(2025, 3, 4), now=now, zone=UTC_ZONE, cutoff=CUTOFF)
+    assert not flat_file_published(march_3, now=now, zone=UTC, cutoff=CUTOFF)
+    assert flat_file_published(date(2025, 3, 2), now=now, zone=UTC, cutoff=CUTOFF)
+    later = datetime(2025, 3, 4, 11, 30, tzinfo=NEW_YORK)
+    assert flat_file_published(march_3, now=later, zone=UTC, cutoff=CUTOFF)
+
+
+def _spec(asset_class: AssetClass | None) -> DatasetSpec:
+    return DatasetSpec(name="x.history", query_class=HistoryQuery, asset_class=asset_class)
+
+
+def test_bounds_follow_the_class_day_zone() -> None:
+    stocks = bounds(_spec(AssetClass.STOCKS), "2025-03-03", "2025-03-03")
+    assert stocks == history_range("2025-03-03", "2025-03-03", NEW_YORK)
+    crypto = bounds(_spec(AssetClass.CRYPTO), "2025-03-03", "2025-03-03")
+    assert isinstance(crypto, TimeRange)
+    assert crypto.start == datetime(2025, 3, 3, tzinfo=UTC)
+    unclassed = bounds(_spec(None), "2025-03-03", "2025-03-03")
+    assert unclassed == stocks
+
+
+def test_bounds_of_futures_dates_are_sessions() -> None:
+    sessions = bounds(_spec(AssetClass.FUTURES), "2025-03-03", date(2025, 3, 5))
+    assert isinstance(sessions, FuturesSessions)
+    assert (sessions.first, sessions.last) == (date(2025, 3, 3), date(2025, 3, 5))
+    assert sessions == futures_sessions(date(2025, 3, 3), date(2025, 3, 5))
+
+
+def test_bounds_of_futures_datetimes_filter_timestamps() -> None:
+    moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
+    window = bounds(_spec(AssetClass.FUTURES), "2025-03-03", moment)
+    assert window == TimeRange(datetime(2025, 3, 3, 6, tzinfo=UTC), moment)
+    window = bounds(_spec(AssetClass.FUTURES), moment, "2025-03-03")
+    assert window == TimeRange(moment, datetime(2025, 3, 4, 6, tzinfo=UTC))
+    assert CHICAGO.key == "America/Chicago"
+
+
+def test_bounds_reject_bad_ranges() -> None:
+    with pytest.raises(ValueError, match="must not be after end"):
+        bounds(_spec(AssetClass.FUTURES), "2025-03-05", "2025-03-03")
+    with pytest.raises(ValueError, match="timezone required"):
+        bounds(_spec(AssetClass.STOCKS), "2025-03-03T09:30", "2025-03-04")

@@ -15,9 +15,10 @@ A date-only bound means a whole day in the asset class's *day zone*:
 Ranges are half-open, `[start, end)`. A date `start` is that day's midnight; a date `end` is the
 *next* day's midnight, so `history("2025-03-03", "2025-03-03")` is the whole of March 3.
 
-`flat_file_published` decides whether a day's flat file can exist yet: files land "by
-approximately 11:00 AM ET the following day", so yesterday's file counts as published only after
-the configured cutoff.
+`bounds` applies these rules to a dataset's `history()` arguments. `flat_file_published` decides
+whether a day's flat file can exist yet: files land "by approximately 11:00 AM ET the following
+day", so a day's file counts as published from the first configured cutoff (New York time) after
+the next day starts in the class's day zone.
 
 Every function is pure (the current time is a parameter) and thread-safe.
 """
@@ -27,7 +28,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo
 
@@ -36,6 +37,7 @@ from deephaven_massive._enums import AssetClass
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from deephaven_massive._catalog import DatasetSpec
     from deephaven_massive._types import DateLike
 
 __all__ = [
@@ -44,10 +46,12 @@ __all__ = [
     "NEW_YORK",
     "FuturesSessions",
     "TimeRange",
+    "bounds",
     "flat_file_published",
     "futures_sessions",
     "history_range",
     "parse_date_like",
+    "publish_time",
 ]
 
 logger = logging.getLogger(__name__)
@@ -58,15 +62,17 @@ NEW_YORK: Final = ZoneInfo("America/New_York")
 CHICAGO: Final = ZoneInfo("America/Chicago")
 """The zone in which futures bar requests are widened around session dates."""
 
-DAY_ZONES: Final[Mapping[AssetClass, ZoneInfo]] = {
+DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
     AssetClass.STOCKS: NEW_YORK,
     AssetClass.OPTIONS: NEW_YORK,
     AssetClass.INDICES: NEW_YORK,
-    AssetClass.FOREX: ZoneInfo("UTC"),
-    AssetClass.CRYPTO: ZoneInfo("UTC"),
-    AssetClass.FUTURES: CHICAGO,
+    AssetClass.FOREX: UTC,
+    AssetClass.CRYPTO: UTC,
 }
-"""The zone whose midnights bound a date-only `start` or `end`, per asset class."""
+"""The zone whose midnights bound a date-only `start` or `end`, per asset class.
+
+Futures are absent: a futures date names a trading session, not a calendar day (see `bounds`
+and `futures_sessions`). Datasets without an asset class use New York."""
 
 _DATE_ONLY: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ONE_DAY: Final = timedelta(days=1)
@@ -107,7 +113,7 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
     return parsed
 
 
-def _midnight(day: date, zone: ZoneInfo) -> datetime:
+def _midnight(day: date, zone: tzinfo) -> datetime:
     """Return the instant a calendar day starts in a zone, in UTC.
 
     Args:
@@ -142,7 +148,7 @@ class TimeRange:
         """`end` as nanoseconds since the Unix epoch."""
         return _epoch_ns(self.end)
 
-    def partition_dates(self, zone: ZoneInfo) -> tuple[date, ...]:
+    def partition_dates(self, zone: tzinfo) -> tuple[date, ...]:
         """Return the calendar dates the range touches in a zone, oldest first.
 
         These are the flat-file partitions to read: every date from the date of `start` to the
@@ -172,7 +178,7 @@ def _epoch_ns(moment: datetime) -> int:
     return (delta.days * 86_400 + delta.seconds) * 10**9 + delta.microseconds * 1_000
 
 
-def history_range(start: DateLike, end: DateLike, zone: ZoneInfo) -> TimeRange:
+def history_range(start: DateLike, end: DateLike, zone: tzinfo) -> TimeRange:
     """Normalize the bounds of `history()` (or of a `…T` time axis) to a half-open range.
 
     Each bound converts independently: a date `start` is that day's midnight in `zone`, a date
@@ -243,12 +249,34 @@ def futures_sessions(start: date, end: date) -> FuturesSessions:
     return FuturesSessions(start, end, window)
 
 
-def flat_file_published(partition: date, *, now: datetime, zone: ZoneInfo, cutoff: time) -> bool:
+def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
+    """Return the instant a day's flat file counts as published (DESIGN § 16).
+
+    That is the first `cutoff` in New York strictly after the start of the next day,
+    `partition + 1 day`, in the class's day zone. For a New York class it is the cutoff on the
+    following day; for a UTC class it is the first cutoff after the following UTC midnight.
+
+    Args:
+        partition: The file's partition date.
+        zone: The asset class's day zone.
+        cutoff: `MassiveConfig.flat_file_publish_cutoff`, a New York wall-clock time.
+
+    Returns:
+        The publication instant, aware.
+    """
+    next_day = _midnight(partition + _ONE_DAY, zone).astimezone(NEW_YORK)
+    candidate = datetime.combine(next_day.date(), cutoff, tzinfo=NEW_YORK)
+    if candidate <= next_day:
+        candidate = datetime.combine(next_day.date() + _ONE_DAY, cutoff, tzinfo=NEW_YORK)
+    return candidate
+
+
+def flat_file_published(partition: date, *, now: datetime, zone: tzinfo, cutoff: time) -> bool:
     """Tell whether a day's flat file should exist yet (DESIGN § 16).
 
-    A file is published when its date is before today in the class's day zone, and either
-    before yesterday or the time in New York has reached the cutoff (files land around
-    11:00 ET the following day).
+    Files land "by approximately 11:00 AM ET the following day", so a partition counts as
+    published once `now` reaches `publish_time(partition)`. Full instants are compared, which
+    keeps the rule correct in every day zone.
 
     Args:
         partition: The file's partition date.
@@ -259,7 +287,32 @@ def flat_file_published(partition: date, *, now: datetime, zone: ZoneInfo, cutof
     Returns:
         True if the file can be expected to exist.
     """
-    today = now.astimezone(zone).date()
-    if partition >= today:
-        return False
-    return partition < today - _ONE_DAY or now.astimezone(NEW_YORK).time() >= cutoff
+    return now >= publish_time(partition, zone=zone, cutoff=cutoff)
+
+
+def bounds(spec: DatasetSpec, start: DateLike, end: DateLike) -> TimeRange | FuturesSessions:
+    """Normalize the bounds of a dataset's `history()` call by its asset class's day rules.
+
+    Futures with two date bounds name trading sessions and get `FuturesSessions` (trades and
+    quotes filter `session_end_date`; bars use the widened window). Every other case is a
+    half-open `TimeRange`: date bounds are midnights in the class day zone (New York for
+    datasets without a class, Chicago for a futures range given with a `datetime` bound, where
+    futures filter on `Timestamp`). Unparseable, naive, or empty bounds raise the `ValueError`
+    of `parse_date_like`, `history_range`, or `futures_sessions`.
+
+    Args:
+        spec: The dataset.
+        start: The first day or instant.
+        end: The last day, or the first instant excluded.
+
+    Returns:
+        The sessions for date-bounded futures, otherwise the instant range.
+    """
+    first = parse_date_like(start, "start")
+    last = parse_date_like(end, "end")
+    if spec.asset_class is AssetClass.FUTURES:
+        if isinstance(first, datetime) or isinstance(last, datetime):
+            return history_range(first, last, CHICAGO)
+        return futures_sessions(first, last)
+    zone = NEW_YORK if spec.asset_class is None else DAY_ZONES[spec.asset_class]
+    return history_range(first, last, zone)

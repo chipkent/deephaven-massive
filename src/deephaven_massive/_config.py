@@ -21,19 +21,14 @@ import logging
 import math
 import os
 import re
-import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import time
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import Final, Protocol
 
 from deephaven_massive._enums import AssetClass, _require_enum
-from deephaven_massive._errors import AuthenticationError
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-    from types import ModuleType
+from deephaven_massive._errors import AuthenticationError, log_once
 
 __all__ = ["JsonCodec", "MassiveConfig", "json_codec", "log_json_codec_once"]
 
@@ -260,21 +255,16 @@ class JsonCodec(Protocol):
         """
 
 
-def _select_json_codec(
-    import_module: Callable[[str], ModuleType] = importlib.import_module,
-) -> tuple[str, JsonCodec]:
+def _select_json_codec() -> tuple[str, JsonCodec]:
     """Pick the JSON decoder: `orjson` when it can be imported, otherwise the standard library.
 
     `orjson` is an optional extra because it publishes no free-threaded wheels.
-
-    Args:
-        import_module: The import function; tests replace it to simulate a missing `orjson`.
 
     Returns:
         `("orjson", orjson.loads)` or `("json", json.loads)`.
     """
     try:
-        orjson = import_module("orjson")
+        orjson = importlib.import_module("orjson")
     except ImportError:
         return "json", json.loads
     loads: JsonCodec = orjson.loads
@@ -282,8 +272,6 @@ def _select_json_codec(
 
 
 _CODEC: Final = _select_json_codec()
-_codec_log_lock = threading.Lock()
-_codec_logged = threading.Event()
 
 
 def json_codec() -> tuple[str, JsonCodec]:
@@ -300,8 +288,4 @@ def json_codec() -> tuple[str, JsonCodec]:
 
 def log_json_codec_once() -> None:
     """Log the JSON codec choice at INFO, the first time any session starts in the process."""
-    with _codec_log_lock:
-        if _codec_logged.is_set():
-            return
-        _codec_logged.set()
-    logger.info("JSON codec: %s", _CODEC[0])
+    log_once(logger, "json-codec", "JSON codec: %s", _CODEC[0])

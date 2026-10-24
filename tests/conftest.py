@@ -14,7 +14,6 @@ from __future__ import annotations
 import atexit
 import gzip
 import importlib
-import itertools
 import os
 import sys
 import threading
@@ -28,13 +27,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from deephaven.execution_context import ExecutionContext
-    from deephaven.stream.table_publisher import TablePublisher
     from deephaven.table import Table
 
+    from _fakes.stream import FakeStreamTransport
     from deephaven_massive import MassiveSession
-    from deephaven_massive._catalog import DatasetSpec
-    from deephaven_massive._liveness import StreamHandle
-    from deephaven_massive._query import Request
 
 collect_ignore_glob = ["legacy/*"]  # LEGACY-EXCLUSION: legacy tests, deleted in P7
 
@@ -169,56 +165,56 @@ def massive_session() -> Iterator[MassiveSession]:
     session.close()
 
 
-class FakeStreamTransport:
-    """A WebSocket transport stand-in: each stream is a bare `table_publisher` blink table.
-
-    Records every stream it opens and every `on_shutdown_callback` that fires, so liveness tests
-    can observe exactly when Deephaven tears a stream down.
-    """
-
-    def __init__(self) -> None:
-        self.opened: list[tuple[str, str | None]] = []
-        self.publishers: dict[int, TablePublisher] = {}
-        self.shutdown: dict[int, threading.Event] = {}
-        self.shutdown_calls: dict[int, int] = {}
-        self._lock = threading.Lock()
-        self._ids = itertools.count(1)
-
-    def _on_shutdown(self, stream_id: int) -> None:
-        with self._lock:
-            self.shutdown_calls[stream_id] = self.shutdown_calls.get(stream_id, 0) + 1
-        self.shutdown[stream_id].set()
-
-    def open_stream(self, spec: DatasetSpec, request: Request, channel: str | None) -> StreamHandle:
-        liveness = importlib.import_module("deephaven_massive._liveness")
-        publisher_module = importlib.import_module("deephaven.stream.table_publisher")
-        assert spec.schema is not None
-        stream_id = next(self._ids)
-        self.shutdown[stream_id] = threading.Event()
-        scope = liveness.new_scope()
-        with scope.open():
-            blink, publisher = publisher_module.table_publisher(
-                f"test.{spec.name}#{stream_id}",
-                spec.schema.col_defs(),
-                on_shutdown_callback=lambda: self._on_shutdown(stream_id),
-            )
-        self.opened.append((spec.name, channel))
-        self.publishers[stream_id] = publisher
-        handle: StreamHandle = liveness.StreamHandle(
-            stream_id, blink, scope, "socket.test", "/stocks"
-        )
-        return handle
-
-
 @pytest.fixture
 def fake_streams(
     massive_session: MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> FakeStreamTransport:
-    """Install a `FakeStreamTransport` as the session's WebSocket transport hook.
+    """Install a `FakeStreamTransport` (`tests/_fakes/stream.py`) as the stream factory hook.
 
     Returns:
         The fake, for inspecting opened streams and shutdown callbacks.
     """
-    fake = FakeStreamTransport()
+    stream = importlib.import_module("_fakes.stream")
+    fake: FakeStreamTransport = stream.FakeStreamTransport()
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake)
     return fake
+
+
+@pytest.fixture
+def drain(massive_session: MassiveSession) -> Callable[[], None]:
+    """Return a function that waits until the session's background work has caught up.
+
+    It waits for every reaper job queued so far (result releases), then for every diagnostics
+    row queued so far, so a test can read `m.streams()` deterministically.
+
+    Returns:
+        The waiting function; it fails the test after 10 seconds.
+    """
+
+    def wait() -> None:
+        core = massive_session._core
+        released = threading.Event()
+        core._reaper.submit(released.set)
+        assert released.wait(10.0)
+        assert core.diagnostics.barrier().wait(10.0)
+
+    return wait
+
+
+@pytest.fixture
+def stream_rows(
+    massive_session: MassiveSession,
+    drain: Callable[[], None],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[], list[dict[str, Any]]]:
+    """Return a function that drains the session and reads `m.streams()`, sorted by stream.
+
+    Returns:
+        A function returning one dictionary per `m.streams()` row, ordered by `StreamId`.
+    """
+
+    def rows() -> list[dict[str, Any]]:
+        drain()
+        return sorted(dh_to_pylist(massive_session.streams()), key=lambda r: r["StreamId"])
+
+    return rows

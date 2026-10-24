@@ -33,15 +33,16 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, fields, replace
 from datetime import date, datetime, timedelta
+from enum import Enum
 from typing import TYPE_CHECKING, Final, Protocol, TypeAlias
 
 from deephaven.stream import blink_to_append_only
 from deephaven.table import Table
 from deephaven.table_factory import ring_table
 
-from deephaven_massive._dates import DAY_ZONES, NEW_YORK, history_range
+from deephaven_massive._dates import bounds, parse_date_like
 from deephaven_massive._enums import (
     FuturesVenue,
     HistorySource,
@@ -50,14 +51,14 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._symbols import SymbolTable
-from deephaven_massive._types import ALL, _All
+from deephaven_massive._types import ALL, _All, override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from enum import StrEnum
 
     from deephaven_massive._catalog import DatasetSpec
-    from deephaven_massive._dates import TimeRange
+    from deephaven_massive._dates import FuturesSessions, TimeRange
     from deephaven_massive._liveness import StreamHandle
     from deephaven_massive._session import SessionCore
     from deephaven_massive._symbols import NormalizedSymbols
@@ -69,6 +70,7 @@ __all__ = [
     "HistoryQuery",
     "ParamValue",
     "Query",
+    "QueryBase",
     "Request",
     "RestTransport",
     "StreamHistoryLatestQuery",
@@ -86,9 +88,10 @@ MAX_RING_CAPACITY: Final = 2**31 - 1
 ParamValue: TypeAlias = "str | int | float | bool | date | datetime | StrEnum | tuple[str, ...]"
 """A normalized parameter or filter value, as a `Request` stores it (sequences become tuples)."""
 
-StreamKey: TypeAlias = "tuple[str, str | None, tuple[str, ...] | _All | int]"
-"""The identity of a stream: `(dataset name, channel, symbol key)`, where the symbol key is the
-sorted tuple of canonical symbols, `ALL`, or `id(table)` of a reactive symbol table."""
+StreamKey: TypeAlias = "tuple[str, str | None, NormalizedSymbols]"
+"""The identity of a stream: `(dataset name, channel, symbols)`. The symbols are the sorted
+tuple of canonical symbols, `ALL`, or a `SymbolTable` box, which compares by the identity of the
+reactive table's wrapper and holds it strongly while the key exists."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,20 +121,55 @@ class Request:
     params: tuple[tuple[str, ParamValue], ...] = ()
     filters: tuple[tuple[str, ParamValue], ...] = ()
 
-    def symbol_key(self) -> tuple[str, ...] | _All | int:
+    def symbol_key(self) -> NormalizedSymbols:
         """Return the symbol part of a stream key.
 
         Returns:
-            The sorted symbol tuple, `ALL`, or `id()` of the reactive table's wrapper.
+            The sorted symbol tuple, `ALL`, or the reactive table's `SymbolTable` box.
 
         Raises:
             ValueError: If the request has no symbols (a stream always has some).
         """
-        if isinstance(self.symbols, SymbolTable):
-            return id(self.symbols.table)
         if self.symbols is None:
             raise ValueError("a stream needs symbols")
         return self.symbols
+
+    def describe(self) -> str:
+        """Render the fields that differ from their defaults, for a query's `repr`.
+
+        Returns:
+            Space-separated `name=value` pairs, such as `symbols=('AAPL', 'MSFT')`; `ALL`
+            renders as `ALL`, a reactive table as `<reactive table>`, enums by member name,
+            dates in ISO form, and parameters and filters as dictionaries.
+        """
+        parts = []
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if value != f.default:
+                parts.append(f"{f.name}={_render(value)}")
+        return " ".join(parts)
+
+
+def _render(value: object) -> str:
+    """Render one request value for a `repr`.
+
+    Args:
+        value: A field value of a `Request`.
+
+    Returns:
+        Its display form.
+    """
+    if value is ALL:
+        return "ALL"
+    if isinstance(value, SymbolTable):
+        return "<reactive table>"
+    if isinstance(value, Enum):
+        return f"{type(value).__name__}.{value.name}"
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, tuple) and value and isinstance(value[0], tuple):
+        return "{" + ", ".join(f"{k!r}: {_render(v)}" for k, v in value) + "}"
+    return repr(value)
 
 
 class RestTransport(Protocol):
@@ -161,13 +199,16 @@ class RestTransport(Protocol):
             mode: How cycles combine.
         """
 
-    def history(self, spec: DatasetSpec, request: Request, window: TimeRange) -> Table:
+    def history(
+        self, spec: DatasetSpec, request: Request, window: TimeRange | FuturesSessions
+    ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, static.
 
         Args:
             spec: The dataset.
-            request: The normalized arguments, with `start` and `end` set.
-            window: The half-open range.
+            request: The normalized arguments, with the raw `start` and `end` bounds.
+            window: The bounds under the class's day rules: a half-open `TimeRange`, or the
+                `FuturesSessions` of date-bounded futures.
         """
 
 
@@ -191,14 +232,20 @@ class FlatFileTransport(Protocol):
     """The flat-file transport, provided by `SessionCore.flat_file_transport()`."""
 
     def history(
-        self, spec: DatasetSpec, request: Request, window: TimeRange, *, source: HistorySource
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: TimeRange | FuturesSessions,
+        *,
+        source: HistorySource,
     ) -> Table:
         """Return history from flat files (or, under `AUTO`, from the chosen source), static.
 
         Args:
             spec: The dataset.
-            request: The normalized arguments, with `start` and `end` set.
-            window: The half-open range.
+            request: The normalized arguments, with the raw `start` and `end` bounds.
+            window: The bounds under the class's day rules: a half-open `TimeRange`, or the
+                `FuturesSessions` of date-bounded futures.
             source: `FLAT_FILES` or `AUTO`.
         """
 
@@ -227,29 +274,36 @@ def _interval(value: object) -> timedelta:
     return timedelta(seconds=seconds)
 
 
-@dataclass(frozen=True, slots=True)
-class _QueryBase:
+@dataclass(frozen=True, repr=False, slots=True)
+class QueryBase:
     """The state every query class shares: the session, the dataset, and the arguments.
 
     Frozen and hashable; equality includes the concrete class, so a `StreamQuery` never equals
-    a `HistoryQuery`.
+    a `HistoryQuery`. Queries have no public attributes: the verbs are the whole API, and the
+    `repr` names the class, the dataset, and the arguments that differ from their defaults.
     """
 
-    _core: SessionCore = field(repr=False)
-    _spec: DatasetSpec = field(repr=False)
+    _core: SessionCore
+    _spec: DatasetSpec
     _request: Request
 
-    @property
-    def dataset(self) -> str:
-        """The dataset's name, such as `"stocks.trades"`."""
-        return self._spec.name
+    @override
+    def __repr__(self) -> str:
+        """Show the query class, the dataset, and the non-default arguments.
+
+        Returns:
+            For example `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`.
+        """
+        described = self._request.describe()
+        suffix = f" {described}" if described else ""
+        return f"<{type(self).__name__} {self._spec.name}{suffix}>"
 
     def _check_thread(self) -> None:
         """Run the session's verb guard (closed session, update-graph thread)."""
         self._core.require_verb_thread()
 
 
-class Query(_QueryBase):
+class Query(QueryBase):
     """A REST list or snapshot dataset: a static `fetch()` or a live `poll()`.
 
     Example:
@@ -306,7 +360,7 @@ class Query(_QueryBase):
         )
 
 
-class StreamQuery(_QueryBase):
+class StreamQuery(QueryBase):
     """A WebSocket dataset: four live shapes over one shared stream.
 
     Every verb of an equal query reuses one stream (one subscription, one publisher); each call
@@ -446,11 +500,13 @@ class StreamQuery(_QueryBase):
         columns = self._spec.schema.column_names if self._spec.schema is not None else ()
         unknown = [key for key in keys if key not in columns]
         if unknown:
-            raise ValueError(f"{self.dataset} has no columns {unknown}; columns: {list(columns)}")
+            raise ValueError(
+                f"{self._spec.name} has no columns {unknown}; columns: {list(columns)}"
+            )
         return tuple(str(key) for key in keys)
 
 
-class HistoryQuery(_QueryBase):
+class HistoryQuery(QueryBase):
     """A dataset with a historical retrieval path: `history(start, end)`.
 
     Example:
@@ -491,10 +547,10 @@ class HistoryQuery(_QueryBase):
         """
         self._check_thread()
         chosen = _require_enum(source, HistorySource, "source")
-        asset_class = self._spec.asset_class
-        zone = NEW_YORK if asset_class is None else DAY_ZONES[asset_class]
-        window = history_range(start, end, zone)
-        request = replace(self._request, start=window.start, end=window.end)
+        window = bounds(self._spec, start, end)
+        request = replace(
+            self._request, start=parse_date_like(start, "start"), end=parse_date_like(end, "end")
+        )
         if chosen is HistorySource.REST:
             self._check_rest_history()
             return self._core.rest_transport().history(self._spec, request, window)
@@ -567,9 +623,9 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
         """
         self._check_thread()
         if self._request.symbols is ALL:
-            namespace = self.dataset.split(".", 1)[0]
+            namespace = self._spec.name.split(".", 1)[0]
             raise ValueError(
-                f"{self.dataset}.fetch() needs explicit symbols; "
+                f"{self._spec.name}.fetch() needs explicit symbols; "
                 f"use m.{namespace}.snapshots(dm.ALL).fetch() for every symbol"
             )
         return self._core.rest_transport().fetch(self._spec, self._request)

@@ -9,42 +9,49 @@ Both are keyed Deephaven `input_table`s that the library writes and users read:
   table. Keyed by `StreamId`.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
-thread and released by `m.close()`. They are written only by library code, never from a
-Deephaven listener callback (which runs on an update-graph thread). Each write replaces the
-whole row for its key with the current state, and writes are serialized by a lock that is never
-taken while the session's registry lock is held, so the last write always carries the latest
-state. Writes after the scope is released are ignored.
+thread and released by `m.close()`. One daemon writer thread per session applies every row: the
+rest of the library hands it immutable row snapshots through a `queue.SimpleQueue`, so no
+caller, reaper, or flush thread ever waits on the update graph for bookkeeping, and nothing is
+written from a Deephaven listener callback. Each row replaces the whole row for its key; the
+queue is first in, first out, so a snapshot taken later (under the session's registry lock)
+always lands later. Rows queued after the tables are released are dropped.
 """
 
 from __future__ import annotations
 
 import logging
+import queue
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 from deephaven import arrow as dh_arrow
 from deephaven import input_table
 
 from deephaven_massive._liveness import new_scope
-from deephaven_massive._schema import Column, ColumnType, Schema
+from deephaven_massive._schema import Column, ColumnType, Schema, pascal_case
 from deephaven_massive._symbols import SymbolTable
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
 
+    from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Transport
     from deephaven_massive._symbols import NormalizedSymbols
 
 __all__ = [
     "CONNECTIONS",
+    "CONNECTION_KEYS",
     "STREAMS",
+    "STREAM_KEYS",
     "ConnectionRow",
     "ConnectionState",
     "Diagnostics",
     "StreamRow",
     "StreamState",
+    "as_row",
     "describe_symbols",
 ]
 
@@ -109,6 +116,7 @@ CONNECTIONS: Final = Schema(
 """The columns of `m.connections()`."""
 
 CONNECTION_KEYS: Final = ("Transport", "AssetClass", "Family")
+"""The key columns of `m.connections()`."""
 
 STREAMS: Final = Schema(
     "streams",
@@ -135,6 +143,7 @@ STREAMS: Final = Schema(
 """The columns of `m.streams()`."""
 
 STREAM_KEYS: Final = ("StreamId",)
+"""The key column of `m.streams()`."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -142,12 +151,12 @@ class ConnectionRow:
     """One row of `m.connections()`. Timestamps are epoch nanoseconds; None is null.
 
     Attributes:
-        transport: `"WS"` for a connection, `"REST"` for a host-decision row.
-        asset_class: The asset class value, such as `"stocks"`.
-        family: `"TICK"` or `"FMV"`.
+        transport: `WS` for a connection, `REST` for a host-decision row.
+        asset_class: The asset class.
+        family: The channel family, `TICK` or `FMV`.
         host: The resolved host.
         path: The cluster path, such as `"/stocks"`.
-        recency: `"REALTIME"`, `"DELAYED"`, or `"UNKNOWN"`.
+        recency: `REALTIME`, `DELAYED`, or `UNKNOWN`.
         evidence: The host decision's evidence string.
         state: The connection state.
         topics: Topics desired on the connection.
@@ -161,12 +170,12 @@ class ConnectionRow:
         last_error: The last error text.
     """
 
-    transport: str
-    asset_class: str
-    family: str
+    transport: Transport
+    asset_class: AssetClass
+    family: ChannelFamily
     host: str | None = None
     path: str | None = None
-    recency: str | None = None
+    recency: Recency | None = None
     evidence: str | None = None
     state: ConnectionState = ConnectionState.RESOLVING
     topics: int = 0
@@ -178,32 +187,6 @@ class ConnectionRow:
     next_reconnect_at: int | None = None
     updated_at: int | None = None
     last_error: str | None = None
-
-    def as_row(self) -> dict[str, object]:
-        """Return the row keyed by column name.
-
-        Returns:
-            A `{column: value}` mapping for `CONNECTIONS`.
-        """
-        return {
-            "Transport": self.transport,
-            "AssetClass": self.asset_class,
-            "Family": self.family,
-            "Host": self.host,
-            "Path": self.path,
-            "Recency": self.recency,
-            "Evidence": self.evidence,
-            "State": self.state.value,
-            "Topics": self.topics,
-            "AckedTopics": self.acked_topics,
-            "PendingTopics": self.pending_topics,
-            "NoAckTopics": self.no_ack_topics,
-            "Reconnects": self.reconnects,
-            "LastMessageAt": self.last_message_at,
-            "NextReconnectAt": self.next_reconnect_at,
-            "UpdatedAt": self.updated_at,
-            "LastError": self.last_error,
-        }
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -218,7 +201,7 @@ class StreamRow:
         symbols: A truncated, readable list of the symbols.
         held_results: Results of the stream the library still holds.
         deferred: Options contracts deferred by the contract cap.
-        transport: `"WS"` or `"REST"`.
+        transport: `WS` or `REST`.
         host: The serving host.
         path: The cluster path.
         rows_published: Rows published so far.
@@ -234,7 +217,7 @@ class StreamRow:
     symbols: str
     held_results: int
     deferred: int = 0
-    transport: str
+    transport: Transport
     host: str | None = None
     path: str | None = None
     rows_published: int = 0
@@ -243,28 +226,17 @@ class StreamRow:
     error: str | None = None
     created_at: int
 
-    def as_row(self) -> dict[str, object]:
-        """Return the row keyed by column name.
 
-        Returns:
-            A `{column: value}` mapping for `STREAMS`.
-        """
-        return {
-            "StreamId": self.stream_id,
-            "Dataset": self.dataset,
-            "SymbolCount": self.symbol_count,
-            "Symbols": self.symbols,
-            "HeldResults": self.held_results,
-            "Deferred": self.deferred,
-            "Transport": self.transport,
-            "Host": self.host,
-            "Path": self.path,
-            "RowsPublished": self.rows_published,
-            "RequestsPerCycle": self.requests_per_cycle,
-            "State": self.state.value,
-            "Error": self.error,
-            "CreatedAt": self.created_at,
-        }
+def as_row(row: ConnectionRow | StreamRow) -> dict[str, object]:
+    """Return a row keyed by column name: each field's name in PascalCase.
+
+    Args:
+        row: A connection or stream row.
+
+    Returns:
+        A `{column: value}` mapping for `CONNECTIONS` or `STREAMS`.
+    """
+    return {pascal_case(f.name): getattr(row, f.name) for f in fields(row)}
 
 
 def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
@@ -287,22 +259,43 @@ def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
     return len(symbols), f"{shown} (+{hidden} more)" if hidden > 0 else shown
 
 
-class Diagnostics:
-    """The session's two diagnostics tables and the only code that writes them.
+_Item: TypeAlias = "ConnectionRow | StreamRow | threading.Event | None"
 
-    Created by `MassiveSession.__init__` on the caller thread, inside the session's execution
-    context; the tables live in a session-owned liveness scope until `release()`. Writes are
-    synchronous `input_table.add` calls (about a millisecond: the input table requests an
-    update-graph refresh) serialized by an internal lock. Callers must not hold the session's
-    registry lock, and must not be on an update-graph thread, while writing. Thread-safe
-    otherwise.
+
+class Diagnostics:
+    """The session's two diagnostics tables and the single thread that writes them.
+
+    Created by `SessionCore` on the caller thread, inside the session's execution context, so
+    the tables live in a session-owned liveness scope. A daemon writer thread enters the same
+    execution context, takes row snapshots off a `queue.SimpleQueue` in order, and applies each
+    with `InputTable.add`; no other thread waits on the update graph for diagnostics. `write`
+    only enqueues and is safe from any thread. A failed write is logged at ERROR and the thread
+    carries on.
+
+    `release()` lets the writer apply the rows already queued, release the scope, and exit, and
+    waits for it; `stop()` does the same without waiting, for use from a finalizer.
     """
 
-    __slots__ = ("_connections", "_lock", "_released", "_scope", "_streams")
+    __slots__ = (
+        "_connections",
+        "_exec_ctx",
+        "_queue",
+        "_release_lock",
+        "_released",
+        "_scope",
+        "_streams",
+        "_thread",
+    )
 
-    def __init__(self) -> None:
-        """Create both input tables inside a new session-owned scope."""
-        self._lock = threading.Lock()
+    def __init__(self, exec_ctx: ExecutionContext, name: str) -> None:
+        """Create both input tables inside a new session-owned scope and start the writer.
+
+        Args:
+            exec_ctx: The session's execution context, entered by the writer thread.
+            name: The writer thread's name, for thread dumps.
+        """
+        self._exec_ctx = exec_ctx
+        self._release_lock = threading.Lock()
         self._released = False
         self._scope = new_scope()
         with self._scope.open():
@@ -310,6 +303,9 @@ class Diagnostics:
                 CONNECTIONS.col_defs(), key_cols=list(CONNECTION_KEYS)
             )
             self._streams: InputTable = input_table(STREAMS.col_defs(), key_cols=list(STREAM_KEYS))
+        self._queue: queue.SimpleQueue[_Item] = queue.SimpleQueue()
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._thread.start()
 
     @property
     def connections(self) -> InputTable:
@@ -321,41 +317,61 @@ class Diagnostics:
         """The table behind `m.streams()`."""
         return self._streams
 
-    def write_connection(self, row: ConnectionRow) -> None:
-        """Insert or replace one connection row.
+    def write(self, row: ConnectionRow | StreamRow) -> None:
+        """Queue one row's full current state; it replaces the row with the same key.
+
+        Never blocks. A row queued after `release()` or `stop()` is dropped.
 
         Args:
-            row: The row's full current state.
+            row: An immutable snapshot of the row.
         """
-        self._write(self._connections, CONNECTIONS, row.as_row())
+        self._queue.put(row)
 
-    def write_stream(self, row: StreamRow) -> None:
-        """Insert or replace one stream row.
+    def barrier(self) -> threading.Event:
+        """Return an event that is set once every row queued before this call is applied.
 
-        Args:
-            row: The row's full current state.
+        Returns:
+            The event.
         """
-        self._write(self._streams, STREAMS, row.as_row())
+        event = threading.Event()
+        self._queue.put(event)
+        return event
+
+    def stop(self) -> None:
+        """Ask the writer to apply the queued rows, release the tables, and exit; no wait."""
+        self._queue.put(None)
 
     def release(self) -> None:
-        """Release the tables' scope (`m.close()`); later writes are ignored. Idempotent."""
-        with self._lock:
+        """Apply the queued rows, release the tables' scope, and end the writer. Idempotent.
+
+        Blocks until the writer has finished, so it must not run on an update-graph thread.
+        """
+        with self._release_lock:
             if self._released:
                 return
             self._released = True
+        self.stop()
+        self._thread.join()
+
+    def _run(self) -> None:
+        """Writer loop: apply rows and set barriers until `stop()`, then release the scope."""
+        with self._exec_ctx:
+            while (item := self._queue.get()) is not None:
+                if isinstance(item, threading.Event):
+                    item.set()
+                else:
+                    self._apply(item)
             self._scope.release()
 
-    def _write(self, table: InputTable, schema: Schema, row: dict[str, object]) -> None:
-        """Add one row to an input table, unless the tables were released.
+    def _apply(self, row: ConnectionRow | StreamRow) -> None:
+        """Add one row to its table, logging a failure instead of raising.
 
         Args:
-            table: The target table.
-            schema: Its schema.
-            row: The row keyed by column name.
+            row: The row to write.
         """
-        static = dh_arrow.to_table(schema.to_arrow([row]))
-        with self._lock:
-            if self._released:
-                logger.debug("diagnostics released; dropping %s row", schema.name)
-                return
-            table.add(static)
+        stream = isinstance(row, StreamRow)
+        table, schema = (self._streams, STREAMS) if stream else (self._connections, CONNECTIONS)
+        try:
+            table.add(dh_arrow.to_table(schema.to_arrow([as_row(row)])))
+        except Exception:
+            logger.exception("diagnostics: failed to write a %s row", schema.name)

@@ -16,12 +16,18 @@ Static verbs (`fetch()`, `history()`) raise these exceptions directly. Live tabl
 through `TablePublisher.publish_failure`, so the table fails where Deephaven users look, and the
 failure is also logged at ERROR and shown in `m.streams()`.
 
+The module also holds `log_once`, the one helper for facts that are logged a single time per
+process (a codec choice, a detected unit, rate-limit advice).
+
 The public names are re-exported by `deephaven_massive/__init__.py`; this module is private.
 """
 
 from __future__ import annotations
 
-__all__ = ["AuthenticationError", "EntitlementError", "MassiveError"]
+import logging
+import threading
+
+__all__ = ["AuthenticationError", "EntitlementError", "MassiveError", "log_once"]
 
 
 class MassiveError(Exception):
@@ -84,3 +90,30 @@ class EntitlementError(MassiveError):
             except dm.EntitlementError as e:
                 print(f"not on this plan: {e}")
     """
+
+
+_logged_lock = threading.Lock()
+_logged: set[str] = set()
+
+
+def log_once(
+    log: logging.Logger, key: str, message: str, *args: object, level: int = logging.INFO
+) -> None:
+    """Log a message the first time `key` is seen in the process, and never again.
+
+    For facts worth stating once rather than per event: the JSON codec chosen, the unit the
+    FMV magnitude rule detected, the rate-limit advice. Thread-safe: concurrent first calls
+    log exactly once.
+
+    Args:
+        log: The logger to write to.
+        key: Identifies the fact; later calls with the same key do nothing.
+        message: The `%`-style message.
+        *args: The message's arguments.
+        level: The logging level; INFO by default.
+    """
+    with _logged_lock:
+        if key in _logged:
+            return
+        _logged.add(key)
+    log.log(level, message, *args)

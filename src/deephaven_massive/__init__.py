@@ -16,11 +16,13 @@ shape: `blink()`, `append_only()`, `ring(n)`, `last_by()`, `fetch()`, `poll(inte
 `history(start, end)`. The same code runs on every Massive plan: the library finds the right
 WebSocket host for your key, and a dataset your plan lacks fails the table with a message that
 names the alternative. The library runs inside an existing Deephaven server (it needs an active
-`ExecutionContext`) and never starts one, so import it from a Deephaven console or application.
+`ExecutionContext`) and never starts one. Importing it requires a running Deephaven JVM: import
+it inside a Deephaven worker, or after starting `deephaven_server.Server`.
 
 Public API:
-    - `MassiveSession(config=None)`: the entry point; namespaces, `connections()`,
-      `streams()`, `release(table)`, `close()`, and use as a context manager.
+    - `MassiveSession(config=None)`: the entry point; namespaces, `snapshots()`,
+      `connections()`, `streams()`, `release(table)`, `close()`, and use as a context
+      manager.
     - `MassiveConfig`: the frozen configuration; `MassiveConfig()` reads `MASSIVE_API_KEY`.
     - `MassiveError`, `AuthenticationError`, `EntitlementError`: the exceptions.
     - `ALL`: every symbol on a stream, in a flat file, or in a snapshot.
@@ -45,7 +47,7 @@ Example:
 
         cfg = dm.MassiveConfig(ws_hosts={dm.AssetClass.STOCKS: "delayed.massive.com"})
         m = dm.MassiveSession(cfg)
-        print(m.name, dm.__version__)
+        print(m, dm.__version__)  # <MassiveSession #1 open> 0.1.0
         m.close()
 
 Attributes:

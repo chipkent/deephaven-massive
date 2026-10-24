@@ -1,15 +1,16 @@
 """Tests for `MassiveSession` and `SessionCore` (DESIGN § 6, § 17, § 18)."""
 
+from __future__ import annotations
+
 import gc
 import logging
 import threading
-from collections.abc import Callable
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from deephaven import arrow as dh_arrow
 from deephaven import new_table, time_table
 from deephaven.column import string_col
-from deephaven.table import Table
 from deephaven.table_listener import listen
 
 import deephaven_massive as dm
@@ -27,12 +28,19 @@ from deephaven_massive._domains.partners import _Benzinga, _EtfGlobal, _Fable, _
 from deephaven_massive._domains.reference import _Reference
 from deephaven_massive._domains.stocks import _Stocks
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._liveness import new_scope
+from deephaven_massive._liveness import StreamHandle, new_scope
 from deephaven_massive._query import Request, StreamQuery
 from deephaven_massive._schema import TRADES
 
+if TYPE_CHECKING:
+    # Type only: the instance comes from the `fake_streams` fixture.
+    from collections.abc import Callable
+
+    from deephaven.table import Table
+
+    from _fakes.stream import FakeStreamTransport
+
 TIMEOUT = 10.0
-Rows = Callable[[Table], list[dict[str, Any]]]
 
 SPEC = DatasetSpec(
     name="test.trades",
@@ -43,34 +51,65 @@ SPEC = DatasetSpec(
 )
 
 
-class FakeStreams(Protocol):
-    # What the tests use from the `fake_streams` fixture (tests/conftest.py).
-    opened: list[tuple[str, str | None]]
-    shutdown: dict[int, threading.Event]
-
-    def open_stream(self, spec: DatasetSpec, request: Request, channel: str | None) -> object: ...
-
-
 def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> StreamQuery:
     q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
     assert isinstance(q, StreamQuery)
     return q
 
 
-def drain(session: dm.MassiveSession) -> None:
-    done = threading.Event()
-    session._core._reaper.submit(done.set)
-    assert done.wait(TIMEOUT)
+def label(session: dm.MassiveSession) -> str:
+    return session._core.label
 
 
-# --- Construction ----------------------------------------------------------------------------
+# --- Construction and public surface ---------------------------------------------------------
 
 
 def test_default_config_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MASSIVE_API_KEY", "env-key")
     with dm.MassiveSession() as m:
-        assert m.config.api_key == "env-key"
-        assert m.name.startswith("MassiveSession#")
+        assert m._core.config.api_key == "env-key"
+        assert label(m).startswith("MassiveSession #")
+
+
+def test_the_session_exposes_no_introspection_attributes(
+    massive_session: dm.MassiveSession,
+) -> None:
+    public = sorted(name for name in dir(massive_session) if not name.startswith("_"))
+    assert public == [
+        "close",
+        "connections",
+        "crypto",
+        "economy",
+        "forex",
+        "futures",
+        "indicators",
+        "indices",
+        "options",
+        "partners",
+        "reference",
+        "release",
+        "snapshots",
+        "stocks",
+        "streams",
+    ]
+
+
+def test_repr_shows_the_label_and_state() -> None:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    number = label(m).removeprefix("MassiveSession #")
+    assert repr(m) == f"<MassiveSession #{number} open>"
+    m.close()
+    assert repr(m) == f"<MassiveSession #{number} closed>"
+    assert "k" not in repr(m).replace("closed", "")
+
+
+def test_labels_count_up() -> None:
+    a = dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    b = dm.MassiveSession(dm.MassiveConfig(api_key="other"))
+    first = int(label(a).removeprefix("MassiveSession #"))
+    assert label(b) == f"MassiveSession #{first + 1}"
+    a.close()
+    b.close()
 
 
 def test_config_must_be_a_massive_config() -> None:
@@ -127,8 +166,8 @@ def test_a_second_session_with_the_same_key_warns(caplog: pytest.LogCaptureFixtu
     warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
     assert warnings == [
         (
-            f"{second.name} uses the same API key as {first.name}; individual plans allow one "
-            "WebSocket connection per cluster per account, so the sessions will compete for "
+            f"{label(second)} uses the same API key as {label(first)}; individual plans allow "
+            "one WebSocket connection per cluster per account, so the sessions will compete for "
             "connection slots"
         )
     ]
@@ -141,10 +180,14 @@ def test_a_second_session_with_the_same_key_warns(caplog: pytest.LogCaptureFixtu
     other.close()
 
 
-def test_the_key_registry_holds_no_secret() -> None:
-    with dm.MassiveSession(dm.MassiveConfig(api_key="plain-key")):
-        assert "plain-key" not in _session._sessions_by_key
-        assert _session._key_digest("plain-key") in _session._sessions_by_key
+def test_collected_sessions_leave_the_registry() -> None:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-key"))
+    core = m._core
+    assert core in _session._open_sessions
+    m.close()
+    del m, core
+    gc.collect()
+    assert all(c.config.api_key != "collected-key" for c in _session._open_sessions)
 
 
 def test_namespaces(massive_session: dm.MassiveSession) -> None:
@@ -184,13 +227,14 @@ def test_unified_snapshots_shell(massive_session: dm.MassiveSession) -> None:
 # --- Diagnostics -----------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("fake_streams")
 def test_stream_rows_follow_the_holds(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams, dh_to_pylist: Rows
+    massive_session: dm.MassiveSession, stream_rows: Callable[[], list[dict[str, Any]]]
 ) -> None:
     q = stream_query(massive_session, ["MSFT", "AAPL"])
     a = q.append_only()
     b = q.blink()
-    rows = dh_to_pylist(massive_session.streams())
+    rows = stream_rows()
     assert len(rows) == 1
     row = rows[0]
     assert (row["StreamId"], row["Dataset"], row["HeldResults"], row["State"]) == (
@@ -203,21 +247,20 @@ def test_stream_rows_follow_the_holds(
     assert (row["Host"], row["Path"]) == ("socket.test", "/stocks")
     assert row["CreatedAt"] is not None
     massive_session.release(a)
-    drain(massive_session)
-    assert dh_to_pylist(massive_session.streams())[0]["HeldResults"] == 1
+    assert stream_rows()[0]["HeldResults"] == 1
     massive_session.release(b)
-    drain(massive_session)
-    final = dh_to_pylist(massive_session.streams())[0]
+    final = stream_rows()[0]
     assert (final["HeldResults"], final["State"]) == (0, "RELEASED")
-    assert dh_to_pylist(massive_session.connections()) == []
+    assert massive_session.connections().size == 0
 
 
+@pytest.mark.usefixtures("fake_streams")
 def test_all_and_reactive_symbols_in_stream_rows(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams, dh_to_pylist: Rows
+    massive_session: dm.MassiveSession, stream_rows: Callable[[], list[dict[str, Any]]]
 ) -> None:
     every = stream_query(massive_session, dm.ALL).blink()
     watch = stream_query(massive_session, new_table([string_col("Symbol", ["A"])])).blink()
-    rows = sorted(dh_to_pylist(massive_session.streams()), key=lambda r: r["StreamId"])
+    rows = stream_rows()
     assert [(r["SymbolCount"], r["Symbols"]) for r in rows] == [
         (None, "ALL"),
         (None, "reactive table"),
@@ -226,28 +269,76 @@ def test_all_and_reactive_symbols_in_stream_rows(
     massive_session.release(watch)
 
 
+def test_a_racing_open_reuses_the_registered_stream(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    q = stream_query(massive_session)
+    inner: list[Table] = []
+
+    class Racing:
+        # While the outer verb is opening, another verb on the same key opens and registers
+        # its own stream first.
+        def open_stream(
+            self, spec: DatasetSpec, request: Request, channel: str | None
+        ) -> StreamHandle:
+            handle = fake_streams.open_stream(spec, request, channel)
+            if not inner:
+                monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake_streams)
+                inner.append(q.append_only())
+            return handle
+
+    racing = Racing()
+    monkeypatch.setattr(massive_session._core, "stream_transport", lambda: racing)
+    outer = q.blink()
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the losing stream was released
+    assert not fake_streams.shutdown[2].is_set()
+    assert massive_session._core._streams[2].held == 2
+    assert 1 not in massive_session._core._streams
+    massive_session.release(outer)
+    massive_session.release(inner[0])
+    assert fake_streams.shutdown[2].wait(TIMEOUT)
+
+
+# --- close() ---------------------------------------------------------------------------------
+
+
 @pytest.mark.usefixtures("fake_streams")
 def test_close_marks_streams_closed_and_warns_once(
-    massive_session: dm.MassiveSession, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
+    massive_session: dm.MassiveSession,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     live = stream_query(massive_session).append_only()
     released = stream_query(massive_session, ["MSFT"]).blink()
     massive_session.release(released)
-    drain(massive_session)
+    assert [r["State"] for r in stream_rows()] == ["RUNNING", "RELEASED"]
     keeper = new_scope()  # keeps the diagnostics table readable after close() releases it
-    keeper.manage(massive_session.streams())
     streams = massive_session.streams()
+    keeper.manage(streams)
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
         massive_session.close()
         massive_session.close()
     assert caplog.messages == ["session closed; 1 live tables are now static"]
-    assert {r["State"] for r in dh_to_pylist(streams)} == {"CLOSED"}
-    with pytest.raises(dm.MassiveError, match="is closed"):
-        massive_session.connections()
-    massive_session.release(live)
-    drain(massive_session)
-    assert {r["State"] for r in dh_to_pylist(streams)} == {"CLOSED"}
+    assert {r["State"] for r in dh_arrow.to_arrow(streams).to_pylist()} == {"CLOSED"}
     keeper.release()
+    massive_session.release(live)  # release() keeps working after close()
+
+
+def test_after_close(massive_session: dm.MassiveSession) -> None:
+    q = stream_query(massive_session)
+    massive_session.close()
+    message = f"^{label(massive_session)} is closed$"
+    with pytest.raises(dm.MassiveError, match=message):
+        massive_session.connections()
+    with pytest.raises(dm.MassiveError, match=message):
+        massive_session.streams()
+    with pytest.raises(dm.MassiveError, match=message):
+        q.append_only()
+    # Building queries and reaching namespaces never fail.
+    assert isinstance(stream_query(massive_session), StreamQuery)
+    assert isinstance(massive_session.stocks, _Stocks)
 
 
 def test_closers_run_and_failures_are_logged(
@@ -304,11 +395,13 @@ def test_release_argument_errors(massive_session: dm.MassiveSession) -> None:
 
 def test_a_session_closed_while_a_stream_opens(
     massive_session: dm.MassiveSession,
-    fake_streams: FakeStreams,
+    fake_streams: FakeStreamTransport,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Closing:
-        def open_stream(self, spec: DatasetSpec, request: Request, channel: str | None) -> object:
+        def open_stream(
+            self, spec: DatasetSpec, request: Request, channel: str | None
+        ) -> StreamHandle:
             handle = fake_streams.open_stream(spec, request, channel)
             massive_session.close()
             return handle
@@ -320,11 +413,13 @@ def test_a_session_closed_while_a_stream_opens(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
-def test_the_reaper_stops_when_the_session_is_collected() -> None:
+def test_background_threads_stop_when_the_session_is_collected() -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="k"))
-    thread = m._core._reaper._thread
-    m.close()
+    reaper = m._core._reaper._thread
+    writer = m._core.diagnostics._thread
     del m
     gc.collect()
-    thread.join(TIMEOUT)
-    assert not thread.is_alive()
+    reaper.join(TIMEOUT)
+    writer.join(TIMEOUT)
+    assert not reaper.is_alive()
+    assert not writer.is_alive()

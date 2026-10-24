@@ -7,6 +7,7 @@ tables, so they observe exactly when Deephaven runs a stream's `on_shutdown_call
 import gc
 import logging
 import threading
+from collections.abc import Callable
 from typing import Protocol
 
 import pytest
@@ -40,13 +41,6 @@ SPEC = DatasetSpec(
     schema=TRADES.schema,
     channels={None: "T"},
 )
-
-
-def drain(session: dm.MassiveSession) -> None:
-    # Reaper jobs run in order, so a job queued now runs after every earlier release.
-    done = threading.Event()
-    session._core._reaper.submit(done.set)
-    assert done.wait(TIMEOUT)
 
 
 def query(session: dm.MassiveSession, symbols: list[str] | None = None) -> StreamQuery:
@@ -157,28 +151,32 @@ def test_registry_release_checks_identity(dh_exec_ctx: ExecutionContext) -> None
 
 
 def test_shutdown_runs_after_the_last_result_is_released(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    drain: Callable[[], None],
 ) -> None:
     q = query(massive_session)
     a = q.append_only()
     b = q.last_by()
     assert len(fake_streams.opened) == 1
     massive_session.release(a)
-    drain(massive_session)
+    drain()
     assert not fake_streams.shutdown[1].is_set()
     massive_session.release(b)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
 def test_a_derived_table_keeps_the_stream_alive(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    drain: Callable[[], None],
 ) -> None:
     result = query(massive_session).append_only()
     user_scope = new_scope()
     with user_scope.open():
         derived = result.where("Price > 0")
     massive_session.release(result)
-    drain(massive_session)
+    drain()
     assert not fake_streams.shutdown[1].is_set()
     assert derived.is_refreshing
     user_scope.release()
@@ -186,7 +184,9 @@ def test_a_derived_table_keeps_the_stream_alive(
 
 
 def test_blink_returns_distinct_wrappers_and_records(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    drain: Callable[[], None],
 ) -> None:
     q = query(massive_session)
     a = q.blink()
@@ -198,7 +198,7 @@ def test_blink_returns_distinct_wrappers_and_records(
     record_b = records[id(b)]
     del a
     gc.collect()
-    drain(massive_session)
+    drain()
     assert not record_b.released
     assert not fake_streams.shutdown[1].is_set()
     assert b.is_refreshing
@@ -207,19 +207,23 @@ def test_blink_returns_distinct_wrappers_and_records(
 
 
 def test_garbage_collection_releases(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    drain: Callable[[], None],
 ) -> None:
     result = query(massive_session).ring(10)
     assert massive_session._core.results.held() == 1
     del result
     gc.collect()
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    drain(massive_session)
+    drain()
     assert massive_session._core.results.held() == 0
 
 
 def test_double_release_runs_one_shutdown(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    drain: Callable[[], None],
 ) -> None:
     result = query(massive_session).append_only()
     massive_session.release(result)
@@ -227,7 +231,7 @@ def test_double_release_runs_one_shutdown(
     del result
     gc.collect()
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    drain(massive_session)
+    drain()
     assert fake_streams.shutdown_calls == {1: 1}
 
 
@@ -268,7 +272,7 @@ def test_a_failed_build_drops_its_hold(
     with pytest.raises(RuntimeError, match="cannot shape"):
         core.stream_result(SPEC, q._request, channel="T", build=broken)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    assert core._streams == {}
+    assert core._stream_ids == {}
 
 
 def test_streams_are_shared_then_reopened(
@@ -290,7 +294,9 @@ def test_streams_are_shared_then_reopened(
 
 
 def test_concurrent_verbs_share_one_stream(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    drain: Callable[[], None],
 ) -> None:
     q = query(massive_session)
     results: list[Table] = []
@@ -310,13 +316,19 @@ def test_concurrent_verbs_share_one_stream(
     for thread in threads:
         thread.join(TIMEOUT)
     assert len(results) == 16
-    assert len(fake_streams.opened) == 1
-    assert massive_session._core._streams[1].held == 16
+    # Opens are optimistic: racing verbs may each open a stream, but exactly one is registered
+    # and holds all sixteen results; every other one is released at once.
+    core = massive_session._core
+    (winner,) = core._stream_ids.values()
+    assert core._streams[winner].held == 16
+    losers = set(fake_streams.shutdown) - {winner}
+    for loser in losers:
+        assert fake_streams.shutdown[loser].wait(TIMEOUT)
     workers = [threading.Thread(target=massive_session.release, args=(t,)) for t in results]
     for thread in workers:
         thread.start()
     for thread in workers:
         thread.join(TIMEOUT)
-    assert fake_streams.shutdown[1].wait(TIMEOUT)
-    drain(massive_session)
-    assert fake_streams.shutdown_calls == {1: 1}
+    assert fake_streams.shutdown[winner].wait(TIMEOUT)
+    drain()
+    assert fake_streams.shutdown_calls == dict.fromkeys(fake_streams.shutdown, 1)

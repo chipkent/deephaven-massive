@@ -1,7 +1,7 @@
 """Tests for the query classes and the verbs' synchronous validation (DESIGN § 7)."""
 
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol, cast
 
 import pytest
@@ -13,7 +13,7 @@ from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._catalog import DatasetSpec
-from deephaven_massive._dates import TimeRange
+from deephaven_massive._dates import FuturesSessions, TimeRange
 from deephaven_massive._domains.base import build_query
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
 from deephaven_massive._liveness import new_scope
@@ -21,11 +21,11 @@ from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
     Query,
+    QueryBase,
     Request,
     StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
-    _QueryBase,
 )
 from deephaven_massive._schema import BARS, TRADES
 from deephaven_massive._symbols import SymbolTable
@@ -46,6 +46,7 @@ BARS_SPEC = DatasetSpec(
     query_class=HistoryQuery,
     asset_class=AssetClass.FOREX,
     schema=BARS.schema,
+    is_bars=True,
     channels={Timespan.SECOND: "CAS", Timespan.MINUTE: "CA"},
     fetch_method="get_previous_close_agg",
     history_method="list_aggs",
@@ -66,6 +67,14 @@ NEWS_SPEC = DatasetSpec(
     poll_keys=("Date",),
 )
 HISTORY_SPEC = DatasetSpec(name="economy.yields", query_class=HistoryQuery, history_method="x")
+FUTURES_SPEC = DatasetSpec(
+    name="futures.trades",
+    query_class=StreamHistoryQuery,
+    asset_class=AssetClass.FUTURES,
+    schema=TRADES.schema,
+    channels={None: "T"},
+    history_method="list_futures_trades",
+)
 
 
 class FakeStreams(Protocol):
@@ -94,7 +103,7 @@ class Recorder:
         self,
         spec: DatasetSpec,
         request: Request,
-        window: TimeRange,
+        window: TimeRange | FuturesSessions,
         *,
         source: HistorySource | None = None,
     ) -> Table:
@@ -115,7 +124,7 @@ def flat(massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) ->
     return recorder
 
 
-def make(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> _QueryBase:
+def make(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
     return build_query(session._core, spec, **cast("dict[str, Any]", kwargs))
 
 
@@ -139,20 +148,56 @@ def test_queries_are_immutable_hashable_and_typed(massive_session: dm.MassiveSes
     b = trades(massive_session, ["AAPL", "MSFT"])
     assert a == b
     assert hash(a) == hash(b)
-    assert a.dataset == "stocks.trades"
     assert a != make(massive_session, HISTORY_SPEC)
     assert isinstance(a, StreamQuery)
     assert isinstance(a, HistoryQuery)
-    assert "AAPL" in repr(a)
+    assert not hasattr(a, "dataset")
+    assert [name for name in dir(a) if not name.startswith("_")] == [
+        "append_only",
+        "blink",
+        "fetch",
+        "history",
+        "last_by",
+        "ring",
+    ]
     with pytest.raises(AttributeError):
         a.__setattr__("_spec", None)
+
+
+def test_query_repr(massive_session: dm.MassiveSession) -> None:
+    assert repr(trades(massive_session, ["MSFT", "AAPL"])) == (
+        "<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>"
+    )
+    assert (
+        repr(trades(massive_session, dm.ALL))
+        == "<StreamHistoryLatestQuery stocks.trades symbols=ALL>"
+    )
+    watchlist = new_table([string_col("Symbol", ["A"])])
+    assert repr(trades(massive_session, watchlist)) == (
+        "<StreamHistoryLatestQuery stocks.trades symbols=<reactive table>>"
+    )
+    assert repr(make(massive_session, NEWS_SPEC)) == "<Query economy.inflation>"
+    bars = make(
+        massive_session,
+        BARS_SPEC,
+        symbols=["EUR/USD"],
+        timespan=Timespan.MINUTE,
+        multiplier=5,
+        start="2025-01-02",
+        params={"adjusted": False},
+        filters={"limit": 3},
+    )
+    assert repr(bars) == (
+        "<HistoryQuery forex.bars symbols=('C:EURUSD',) timespan=Timespan.MINUTE multiplier=5 "
+        "start=2025-01-02 params={'adjusted': False} filters={'limit': 3}>"
+    )
 
 
 def test_symbol_keys(dh_exec_ctx: object) -> None:
     assert Request(symbols=("A",)).symbol_key() == ("A",)
     assert Request(symbols=dm.ALL).symbol_key() is dm.ALL
     table = new_table([string_col("Symbol", ["A"])])
-    assert Request(symbols=SymbolTable(table)).symbol_key() == id(table)
+    assert Request(symbols=SymbolTable(table)).symbol_key() == SymbolTable(table)
     with pytest.raises(ValueError, match="needs symbols"):
         Request().symbol_key()
 
@@ -248,7 +293,19 @@ def test_history_rest_passes_the_window(massive_session: dm.MassiveSession, rest
     assert verb == "history"
     assert window.start == datetime(2025, 3, 3, 5, tzinfo=UTC)
     assert window.end == datetime(2025, 3, 5, 5, tzinfo=UTC)
-    assert (request.start, request.end) == (window.start, window.end)
+    # Transports receive the raw bounds as well as the window.
+    assert (request.start, request.end) == (date(2025, 3, 3), date(2025, 3, 4))
+
+
+def test_history_of_futures_dates_passes_sessions(
+    massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    q = make(massive_session, FUTURES_SPEC, symbols=["ESZ5"])
+    assert isinstance(q, HistoryQuery)
+    q.history("2025-03-03", "2025-03-05", source=HistorySource.REST)
+    window = rest.calls[0][3]["window"]
+    assert isinstance(window, FuturesSessions)
+    assert (window.first, window.last) == (date(2025, 3, 3), date(2025, 3, 5))
 
 
 def test_history_day_zone_per_class(massive_session: dm.MassiveSession, rest: Recorder) -> None:
