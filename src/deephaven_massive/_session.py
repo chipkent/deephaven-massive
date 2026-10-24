@@ -45,7 +45,13 @@ from deephaven.table import Table
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
 from deephaven_massive._config import MassiveConfig, log_json_codec_once
-from deephaven_massive._diagnostics import Diagnostics, StreamRow, StreamState, describe_symbols
+from deephaven_massive._diagnostics import (
+    Diagnostics,
+    StreamRow,
+    StreamState,
+    StreamUpdate,
+    describe_symbols,
+)
 from deephaven_massive._domains.base import list_params
 from deephaven_massive._domains.crypto import _Crypto
 from deephaven_massive._domains.economy import _Economy
@@ -649,6 +655,28 @@ class SessionCore:
             logger.debug(
                 "%s: stream %d failed after it left the registry: %s", self.label, stream_id, error
             )
+
+    def update_streams(self, changes: Mapping[int, StreamUpdate]) -> None:
+        """Apply the flush thread's row changes (row counts, deferrals, hosts) to `m.streams()`.
+
+        The WebSocket transport's flush thread calls this once per flush, after its
+        `publisher.add` calls, never under any other lock; at the default `flush_interval` that
+        is about 20 times a second per connection. One short critical section under
+        `registry_lock`: every listed stream still in the registry (opening, running, released,
+        failed, or shut down but still held) gets its row updated and written; an id that has
+        left the registry is ignored. No Deephaven call, no wait. It never changes `State`.
+
+        Args:
+            changes: The update of each stream, by stream id.
+        """
+        with self.registry_lock:
+            for stream_id, update in changes.items():
+                state = self._streams.get(stream_id)
+                if state is None:
+                    continue
+                row = update.apply(state.row)
+                self._streams[stream_id] = replace(state, row=row)
+                self.diagnostics.write(row)
 
     def stream_shut_down(self, stream_id: int) -> None:
         """Record that a stream's blink table has shut down.

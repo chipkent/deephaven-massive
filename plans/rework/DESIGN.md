@@ -994,7 +994,11 @@ timezone-aware `datetime` is used as is.
 ### 13.2 Host decision
 
 Resolution runs synchronously on the calling thread at the first stream verb for a
-(class, family) and is cached in the session.
+(class, family) and is cached in the session. The seam is
+`RestTransport.resolve_host(asset_class, family) -> HostDecision` (a protocol method defined in
+P2 and implemented in P3), where `HostDecision(host, recency, evidence)` is a frozen record.
+The WebSocket transport calls it; each new decision writes the pair's `Transport=REST` row of
+`m.connections()`.
 
 ```
 resolve(asset_class, family) -> HostDecision(host, recency, evidence)
@@ -1205,6 +1209,12 @@ logged once.
 - `TablePublisher.add` is safe from the flush thread: the Java side snapshots the static batch
   and guarantees non-interleaved adds. `on_flush_callback` is not used (it blocks the update
   cycle).
+- After its `add` calls, each flush reports to the session once:
+  `SessionCore.update_streams({stream_id: StreamUpdate(rows_published=..., ...)})`, where
+  `StreamUpdate` is a frozen keyword-only record whose fields left as None keep their values.
+  One short critical section under `registry_lock`, about 20 times a second per connection at
+  the default `flush_interval`; it updates the rows of every stream still in the registry,
+  ignores ids that have left it, and never changes `State` (only `fail_stream` does).
 - A failure fails exactly the streams whose topics the server rejected. Nothing tears down a
   whole URL on an entitlement error. A failed stream's key is unregistered at once
   (`SessionCore.fail_stream`), so the next verb with the same key opens a fresh stream rather

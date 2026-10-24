@@ -22,7 +22,7 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive import _session
 from deephaven_massive._catalog import DatasetSpec
-from deephaven_massive._diagnostics import ConnectionRow, Diagnostics, StreamRow
+from deephaven_massive._diagnostics import ConnectionRow, Diagnostics, StreamRow, StreamUpdate
 from deephaven_massive._domains.base import build_query
 from deephaven_massive._domains.crypto import _Crypto
 from deephaven_massive._domains.economy import _Economy
@@ -1022,6 +1022,35 @@ def test_an_unclosed_core_is_collected_by_the_cyclic_collector() -> None:
             break
         pause.wait(0.05)
     assert alive() is None
+
+
+def test_update_streams_reaches_every_stream_still_registered(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    drain: Callable[[], None],
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    core = massive_session._core
+    result = stream_query(massive_session).append_only()
+    # Shut down while still held: the record stays, so the flush can still report on it.
+    fake_streams.publishers[1].publish_failure(RuntimeError("gone"))
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    core.update_streams(
+        {
+            1: StreamUpdate(rows_published=5, host="socket.other", error="slow consumer"),
+            99: StreamUpdate(rows_published=1),  # left the registry: ignored
+        }
+    )
+    columns = ("StreamId", "State", "RowsPublished", "Host", "Error")
+    assert [tuple(r[c] for c in columns) for r in stream_rows()] == [
+        (1, "RUNNING", 5, "socket.other", "slow consumer")  # an update never fails a stream
+    ]
+    massive_session.release(result)
+    drain()
+    assert core._streams == {}
+    core.update_streams({1: StreamUpdate(rows_published=6)})  # deleted: nothing changes
+    assert [r["RowsPublished"] for r in stream_rows()] == [5]
 
 
 def test_a_shutdown_of_an_unknown_stream_is_ignored(massive_session: dm.MassiveSession) -> None:

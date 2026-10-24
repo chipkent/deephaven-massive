@@ -45,9 +45,11 @@ from deephaven_massive._config import require_positive_int, require_positive_num
 from deephaven_massive._dates import bounds, parse_date_like
 from deephaven_massive._enums import (
     AssetClass,
+    ChannelFamily,
     FuturesVenue,
     HistorySource,
     PollMode,
+    Recency,
     Timespan,
     _require_enum,
 )
@@ -69,6 +71,7 @@ __all__ = [
     "FlatFileTransport",
     "HistoryLatestQuery",
     "HistoryQuery",
+    "HostDecision",
     "ParamValue",
     "Query",
     "QueryBase",
@@ -173,12 +176,45 @@ def _render(value: object) -> str:
     return repr(value)
 
 
+@dataclass(frozen=True, slots=True)
+class HostDecision:
+    """Which WebSocket host serves a (asset class, channel family), and why (DESIGN § 13.2).
+
+    Returned by `RestTransport.resolve_host`; immutable, so it can be cached and shared between
+    threads.
+
+    Attributes:
+        host: The hostname, such as `"delayed.massive.com"`.
+        recency: Whether the host serves real-time or delayed data, or `UNKNOWN` when the
+            evidence did not say (only then may a server verdict re-route the connection).
+        evidence: Why: a human-readable account of the decision, shown in `m.connections()`.
+    """
+
+    host: str
+    recency: Recency
+    evidence: str
+
+
 class RestTransport(Protocol):
     """The REST transport, provided by `SessionCore.rest_transport()`.
 
     Every method runs synchronously on the calling thread and raises `EntitlementError` on
     HTTP 403 and `MassiveError` on other failures; `poll()` instead fails its live table.
     """
+
+    def resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
+        """Decide the WebSocket host of a (class, family), once per session (DESIGN § 13.2).
+
+        Called by the WebSocket transport on the caller thread at the first stream verb for the
+        pair. The first call may make one REST request; the decision is then cached for the
+        life of the session, so later calls return it without a request. Each new decision
+        writes the pair's `Transport=REST` row of `m.connections()` (host, recency, evidence).
+
+        Args:
+            asset_class: The asset class of the stream.
+            family: The channel family, `TICK` or `FMV`.
+        """
+        ...
 
     def fetch(self, spec: DatasetSpec, request: Request) -> Table:
         """Return every row the dataset's `fetch` endpoint returns for the request, static.

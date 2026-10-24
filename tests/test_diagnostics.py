@@ -24,6 +24,7 @@ from deephaven_massive._diagnostics import (
     Diagnostics,
     StreamRow,
     StreamState,
+    StreamUpdate,
     as_row,
     describe_symbols,
 )
@@ -95,6 +96,15 @@ def test_column_sets() -> None:
         "FAILED",
         "CLOSED",
     ]
+
+
+def test_stream_updates_set_only_the_given_fields() -> None:
+    row = _stream(host="socket.massive.com", rows_published=3, error="old")
+    assert StreamUpdate().apply(row) == row
+    updated = StreamUpdate(rows_published=10, deferred=2, symbol_count=5, path="/stocks").apply(row)
+    assert (updated.rows_published, updated.deferred, updated.symbol_count) == (10, 2, 5)
+    assert (updated.host, updated.path, updated.error) == ("socket.massive.com", "/stocks", "old")
+    assert StreamUpdate(host="delayed.massive.com", error="slow").apply(row).error == "slow"
 
 
 def test_rows_map_fields_to_columns() -> None:
