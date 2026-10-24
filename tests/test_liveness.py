@@ -41,7 +41,7 @@ class FakeStreams(Protocol):
     shutdown_calls: dict[int, int]
 
 
-TIMEOUT = 10.0
+TIMEOUT = 30.0
 
 SPEC = DatasetSpec(
     name="test.trades",

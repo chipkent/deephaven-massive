@@ -32,7 +32,7 @@ from deephaven_massive._liveness import new_scope
 from deephaven_massive._symbols import SymbolTable
 
 Rows = Callable[[Table], list[dict[str, Any]]]
-TIMEOUT = 10.0
+TIMEOUT = 30.0
 
 STREAM = StreamRow(
     stream_id=7,

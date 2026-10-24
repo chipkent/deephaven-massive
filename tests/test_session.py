@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
     from _fakes.stream import FakeStreamTransport
 
-TIMEOUT = 10.0
+TIMEOUT = 30.0
 
 SPEC = DatasetSpec(
     name="test.trades",

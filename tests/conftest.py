@@ -36,10 +36,14 @@ collect_ignore_glob = ["legacy/*"]  # LEGACY-EXCLUSION: legacy tests, deleted in
 
 _DATA_DIR = Path(__file__).parent / "data"
 
+_CYCLE_MILLIS = 25
+"""The update-graph cycle of the test JVM, in milliseconds (Deephaven's default is 1000)."""
+
 _JVM_ARGS = [
     "-Xmx2g",
-    # A 25 ms update-graph cycle (default 1 s) keeps ticking-table tests fast.
-    "-DPeriodicUpdateGraph.defaultRefreshIntervalMillis=25",
+    # A short update-graph cycle keeps ticking-table tests fast. pytest_configure checks that
+    # the JVM applied it: an unknown property is silently ignored.
+    f"-DPeriodicUpdateGraph.targetCycleDurationMillis={_CYCLE_MILLIS}",
 ]
 
 
@@ -52,12 +56,24 @@ _JVM_ARGS = [
 def pytest_configure(config: pytest.Config) -> None:
     """Start the embedded Deephaven server once per process, before collection.
 
+    Then check that the update graph runs the 25 ms cycle the tests are written for.
+
     Args:
         config: The pytest configuration (unused; required by the hook signature).
+
+    Raises:
+        pytest.UsageError: If the JVM did not apply the cycle property.
     """
     # Port 0 asks the OS for an ephemeral port, so two test runs can share a machine.
     Server(port=0, jvm_args=_JVM_ARGS).start()
     atexit.register(_final_jvm_exit)
+    jpy = importlib.import_module("jpy")
+    execution_context = importlib.import_module("deephaven.execution_context")
+    periodic = jpy.get_type("io.deephaven.engine.updategraph.impl.PeriodicUpdateGraph")
+    j_update_graph = execution_context.get_exec_ctx().update_graph.j_update_graph
+    cycle = int(jpy.cast(j_update_graph, periodic).getTargetCycleDurationMillis())
+    if cycle != _CYCLE_MILLIS:
+        raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {_CYCLE_MILLIS} ms")
 
 
 # --- JVM shutdown workaround -------------------------------------------------------------------

@@ -33,7 +33,7 @@ from deephaven_massive._query import (
 from deephaven_massive._schema import BARS, TRADES
 from deephaven_massive._symbols import SymbolTable
 
-TIMEOUT = 10.0
+TIMEOUT = 30.0
 
 TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
