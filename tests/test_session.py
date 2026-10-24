@@ -97,12 +97,14 @@ def test_the_session_exposes_no_introspection_attributes(
 
 
 def test_repr_shows_the_label_and_state() -> None:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    hidden = "api-hidden-value"
+    m = dm.MassiveSession(dm.MassiveConfig(api_key=hidden))
     number = label(m).removeprefix("MassiveSession #")
     assert repr(m) == f"<MassiveSession #{number} open>"
+    assert hidden not in repr(m)
     m.close()
     assert repr(m) == f"<MassiveSession #{number} closed>"
-    assert "k" not in repr(m).replace("closed", "")
+    assert hidden not in repr(m)
 
 
 def test_labels_count_up() -> None:
@@ -476,3 +478,14 @@ def test_a_session_with_released_results_is_collected() -> None:
 def test_repr_of_a_session_whose_construction_failed() -> None:
     partial = object.__new__(dm.MassiveSession)
     assert repr(partial) == "<MassiveSession (not started)>"
+
+
+def test_a_closer_registered_after_close_runs_at_once(
+    massive_session: dm.MassiveSession,
+) -> None:
+    ran: list[str] = []
+    massive_session.close()
+    massive_session._core.on_close(lambda: ran.append("late"))
+    assert ran == ["late"]
+    massive_session.close()  # idempotent: the late closer does not run again
+    assert ran == ["late"]

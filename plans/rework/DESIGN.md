@@ -810,7 +810,11 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   Massive form. A crypto pair must end in a known quote currency, so its WebSocket form
   (`BTC-USD`) can always be recovered; others raise `ValueError` at construction.
 - A `Table` must have a `Symbol` column. Streams listen to it and subscribe or unsubscribe as
-  rows are added or removed. Polls re-read it each cycle.
+  rows are added or removed. Polls re-read it each cycle. Its rows may use any accepted input
+  form: every consumer reads the table through one canonicalized view
+  (`_symbols.canonical_view`), so `last_by()`'s `where_in` filter and the subscribed topics
+  agree on `C:EURUSD` whether the row says `EUR/USD` or `C:EURUSD`. A row that is not a valid
+  symbol for the class matches nothing and is logged once at WARNING.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
   instrument, it is `Underlying` on every options row (from `underlying_ticker` or
   `underlying_asset.ticker`) and on `related_companies` rows. Non-instrument fan-out keys use

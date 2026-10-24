@@ -2,21 +2,26 @@
 
 import csv
 import io
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.table import Table
 
 import deephaven_massive as dm
+from deephaven_massive import _errors
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._symbols import (
     CRYPTO_QUOTES,
     SymbolTable,
     canonical,
+    canonical_view,
     normalize,
+    symbol_canonicalizer,
     underlying,
     ws_symbol,
 )
@@ -34,28 +39,28 @@ STK, OPT, FUT, IDX, FX, CRY = (
 )
 
 
-@pytest.mark.parametrize(
-    ("asset_class", "raw", "expected"),
-    [
-        (STK, "AAPL", "AAPL"),
-        (STK, " brk.a ", "BRK.A"),
-        (OPT, "AAPL250117C00150000", "O:AAPL250117C00150000"),
-        (OPT, "O:AAPL250117C00150000", "O:AAPL250117C00150000"),
-        (OPT, "o:spxw251219p05000000", "O:SPXW251219P05000000"),
-        (FUT, "ESZ5", "ESZ5"),
-        (IDX, "I:SPX", "I:SPX"),
-        (IDX, "SPX", "I:SPX"),
-        (FX, "EUR/USD", "C:EURUSD"),
-        (FX, "EUR-USD", "C:EURUSD"),
-        (FX, "EURUSD", "C:EURUSD"),
-        (FX, "C:EURUSD", "C:EURUSD"),
-        (FX, "C:EUR-USD", "C:EURUSD"),
-        (CRY, "BTC-USD", "X:BTCUSD"),
-        (CRY, "BTC/USD", "X:BTCUSD"),
-        (CRY, "X:BTCUSD", "X:BTCUSD"),
-        (CRY, "doge-usdt", "X:DOGEUSDT"),
-    ],
-)
+CANONICAL_FORMS = [
+    (STK, "AAPL", "AAPL"),
+    (STK, " brk.a ", "BRK.A"),
+    (OPT, "AAPL250117C00150000", "O:AAPL250117C00150000"),
+    (OPT, "O:AAPL250117C00150000", "O:AAPL250117C00150000"),
+    (OPT, "o:spxw251219p05000000", "O:SPXW251219P05000000"),
+    (FUT, "ESZ5", "ESZ5"),
+    (IDX, "I:SPX", "I:SPX"),
+    (IDX, "SPX", "I:SPX"),
+    (FX, "EUR/USD", "C:EURUSD"),
+    (FX, "EUR-USD", "C:EURUSD"),
+    (FX, "EURUSD", "C:EURUSD"),
+    (FX, "C:EURUSD", "C:EURUSD"),
+    (FX, "C:EUR-USD", "C:EURUSD"),
+    (CRY, "BTC-USD", "X:BTCUSD"),
+    (CRY, "BTC/USD", "X:BTCUSD"),
+    (CRY, "X:BTCUSD", "X:BTCUSD"),
+    (CRY, "doge-usdt", "X:DOGEUSDT"),
+]
+
+
+@pytest.mark.parametrize(("asset_class", "raw", "expected"), CANONICAL_FORMS)
 def test_canonical_forms(asset_class: AssetClass, raw: str, expected: str) -> None:
     assert canonical(asset_class, raw) == expected
 
@@ -72,6 +77,11 @@ def test_canonical_forms(asset_class: AssetClass, raw: str, expected: str) -> No
         (FX, "EUR/USD/JPY"),
         (FX, "EUR/"),
         (CRY, "BTC--USD"),
+        (CRY, "BTC.USD"),
+        (CRY, "C:BTCUSD"),
+        (IDX, "X:SPX"),
+        (STK, "O:AAPL"),
+        (FUT, "X:ESZ5"),
         (CRY, "X:X:BTCUSD"),
         (FX, "EU:USD"),
         (CRY, "BTC-XYZ"),
@@ -82,7 +92,7 @@ def test_canonical_forms(asset_class: AssetClass, raw: str, expected: str) -> No
     ],
 )
 def test_invalid_symbols(asset_class: AssetClass, raw: str) -> None:
-    with pytest.raises(ValueError, match=r"symbol|pair"):
+    with pytest.raises(ValueError, match=r"symbol|pair|prefix"):
         canonical(asset_class, raw)
 
 
@@ -191,3 +201,28 @@ def test_crypto_quotes_cover_the_vendored_tickers(
     quotes = {row["websocket"].split("-")[1] for row in rows}
     assert quotes <= set(CRYPTO_QUOTES)
     assert list(CRYPTO_QUOTES) == sorted(CRYPTO_QUOTES, key=len, reverse=True)
+
+
+@pytest.mark.parametrize(("asset_class", "raw", "expected"), CANONICAL_FORMS)
+def test_canonical_is_idempotent(asset_class: AssetClass, raw: str, expected: str) -> None:
+    assert canonical(asset_class, canonical(asset_class, raw)) == expected
+
+
+def test_symbol_canonicalizer(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_errors, "_logged", set())
+    to_canonical = symbol_canonicalizer(FX)
+    assert to_canonical("EUR/USD") == "C:EURUSD"
+    assert to_canonical(None) is None
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._symbols"):
+        assert to_canonical("not a pair") is None
+        assert to_canonical("EURUSDX") is None
+    assert len(caplog.records) == 1
+    assert "'not a pair', which is not a valid forex symbol" in caplog.text
+
+
+def test_canonical_view(dh_exec_ctx: object) -> None:
+    table = new_table([string_col("Symbol", ["btc-usd", "X:ETHUSD", "??"])])
+    view = canonical_view(CRY, table)
+    assert dh_arrow.to_arrow(view).column("Symbol").to_pylist() == ["X:BTCUSD", "X:ETHUSD", None]

@@ -222,3 +222,29 @@ def test_bounds_reject_bad_ranges() -> None:
         bounds(_spec(AssetClass.FUTURES), "2025-03-05", "2025-03-03")
     with pytest.raises(ValueError, match="timezone required"):
         bounds(_spec(AssetClass.STOCKS), "2025-03-03T09:30", "2025-03-04")
+
+
+def test_futures_window_across_the_spring_dst_change() -> None:
+    sessions = futures_sessions(date(2025, 3, 8), date(2025, 3, 10))
+    assert sessions.window.start == datetime(2025, 3, 7, 6, tzinfo=UTC)  # CST, UTC-6
+    assert sessions.window.end == datetime(2025, 3, 12, 5, tzinfo=UTC)  # CDT, UTC-5
+
+
+def test_publish_time_across_the_spring_dst_change() -> None:
+    published = publish_time(date(2025, 3, 8), zone=UTC, cutoff=time(11, 30))
+    assert published == datetime(2025, 3, 9, 11, 30, tzinfo=NEW_YORK)
+    assert published.astimezone(UTC) == datetime(2025, 3, 9, 15, 30, tzinfo=UTC)
+
+
+def test_the_fall_dst_day_is_25_hours() -> None:
+    window = history_range("2025-11-02", "2025-11-02", NEW_YORK)
+    assert window.end - window.start == timedelta(hours=25)
+
+
+def test_partition_dates_across_the_spring_dst_change() -> None:
+    window = history_range("2025-03-08", "2025-03-10", NEW_YORK)
+    assert window.partition_dates(NEW_YORK) == (
+        date(2025, 3, 8),
+        date(2025, 3, 9),
+        date(2025, 3, 10),
+    )

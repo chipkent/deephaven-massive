@@ -5,6 +5,7 @@ import importlib
 import inspect
 import typing
 from enum import Enum, StrEnum
+from pathlib import Path
 
 import pytest
 from deephaven.table import Table
@@ -229,3 +230,46 @@ def test_namespaces_are_reached_by_the_walk() -> None:
 def test_literal_detection_ignores_enum_members() -> None:
     assert _literal_strings(typing.Literal[dm.Timespan.DAY]) == []
     assert _literal_strings(typing.Literal["a", 1] | None) == ["a"]
+
+
+# Every public parameter typed with an enum, by `Class.method.parameter`. Each one must reject a
+# plain string through `_require_enum`, and each has a test that says so (named alongside). A new
+# enum parameter fails `test_enum_parameters_are_the_allowlist` until it is added here together
+# with its own rejection test.
+ENUM_PARAMETERS = {
+    "MassiveConfig.__init__.ws_hosts": "test_config.py::test_ws_hosts_types",
+    "MassiveSession.snapshots.order": "test_session.py::test_unified_snapshots_shell",
+    "Query.poll.mode": "test_query.py::test_poll_mode_is_an_enum",
+    "HistoryQuery.history.source": "test_query.py::test_history_argument_errors",
+    "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
+    "StreamHistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
+    "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
+}
+
+
+def _enum_types(annotation: object) -> set[type]:
+    # The StrEnum classes in an annotation, looking through unions and mapping keys.
+    if isinstance(annotation, type) and issubclass(annotation, StrEnum):
+        return {annotation}
+    found: set[type] = set()
+    for arg in typing.get_args(annotation):
+        found |= _enum_types(arg)
+    return found
+
+
+def test_enum_parameters_are_the_allowlist() -> None:
+    namespace = _resolution_namespace()
+    found = set()
+    for name, function in _public_callables():
+        hints = typing.get_type_hints(function, namespace)
+        for parameter, hint in hints.items():
+            if parameter != "return" and _enum_types(hint):
+                found.add(f"{name}.{parameter}")
+    assert found == set(ENUM_PARAMETERS)
+
+
+def test_every_enum_parameter_names_an_existing_rejection_test() -> None:
+    tests = Path(__file__).parent
+    for location in ENUM_PARAMETERS.values():
+        file_name, test_name = location.split("::")
+        assert f"def {test_name}(" in (tests / file_name).read_text(), location

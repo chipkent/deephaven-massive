@@ -1,6 +1,7 @@
 """Tests for the public surface of `deephaven_massive` (DESIGN § 3)."""
 
 import importlib.metadata
+import types
 from enum import StrEnum
 
 import deephaven_massive as dm
@@ -63,3 +64,12 @@ def test_exception_hierarchy() -> None:
     assert issubclass(dm.AuthenticationError, dm.MassiveError)
     assert issubclass(dm.EntitlementError, dm.MassiveError)
     assert issubclass(dm.MassiveError, Exception)
+
+
+def test_no_public_names_outside_all() -> None:
+    public = {
+        name
+        for name, value in vars(dm).items()
+        if not name.startswith("_") and not isinstance(value, types.ModuleType)
+    }
+    assert public == set(dm.__all__) - {"__version__"}

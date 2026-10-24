@@ -43,13 +43,14 @@ from deephaven.table_factory import ring_table
 
 from deephaven_massive._dates import bounds, parse_date_like
 from deephaven_massive._enums import (
+    AssetClass,
     FuturesVenue,
     HistorySource,
     PollMode,
     Timespan,
     _require_enum,
 )
-from deephaven_massive._symbols import SymbolTable
+from deephaven_massive._symbols import SymbolTable, canonical_view
 from deephaven_massive._types import ALL, _All, override
 
 if TYPE_CHECKING:
@@ -459,10 +460,11 @@ class StreamQuery(QueryBase):
 
         The underlying state keeps every key ever seen. With a reactive symbol table, rows of
         symbols removed from it are filtered out; a symbol removed and re-added shows its last
-        row until it ticks again. `last_by()` never seeds from REST: use
-        `snapshots(symbols).poll(n)` for current state on every plan. A `by` that is not a
-        `str` or a sequence of `str` raises `TypeError`; an empty `by` or an unknown column
-        raises `ValueError`.
+        row until it ticks again. The table may hold any accepted spelling (`EUR/USD` for
+        `C:EURUSD`): it is matched through `_symbols.canonical_view`. `last_by()` never seeds
+        from REST: use `snapshots(symbols).poll(n)` for current state on every plan. A `by`
+        that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
+        unknown column raises `ValueError`.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -477,7 +479,12 @@ class StreamQuery(QueryBase):
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
             watch = symbols.table
-            return self._stream(lambda blink: blink.last_by(list(keys)).where_in(watch, "Symbol"))
+            asset_class = self._spec.asset_class or AssetClass.STOCKS
+            return self._stream(
+                lambda blink: blink.last_by(list(keys)).where_in(
+                    canonical_view(asset_class, watch), "Symbol"
+                )
+            )
         return self._stream(lambda blink: blink.last_by(list(keys)))
 
     def _last_by_keys(self, by: object) -> tuple[str, ...]:

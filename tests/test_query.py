@@ -1,12 +1,15 @@
 """Tests for the query classes and the verbs' synchronous validation (DESIGN § 7)."""
 
 import threading
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol, cast
 
 import pytest
-from deephaven import empty_table, new_table, time_table
+from deephaven import arrow as dh_arrow
+from deephaven import dtypes, empty_table, input_table, new_table, time_table
 from deephaven.column import string_col
+from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
@@ -80,6 +83,7 @@ FUTURES_SPEC = DatasetSpec(
 class FakeStreams(Protocol):
     # What the tests read from the `fake_streams` fixture (tests/conftest.py).
     opened: list[tuple[str, str | None]]
+    publishers: dict[int, TablePublisher]
 
 
 class Recorder:
@@ -488,3 +492,40 @@ def test_verbs_raise_after_close(massive_session: dm.MassiveSession) -> None:
     massive_session.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
         q.blink()
+
+
+FOREX_SPEC = DatasetSpec(
+    name="forex.quotes",
+    query_class=StreamQuery,
+    asset_class=AssetClass.FOREX,
+    schema=TRADES.schema,
+    channels={None: "C"},
+)
+
+
+def _wait_for(condition: Callable[[], bool]) -> bool:
+    # Bounded wait for an update-graph cycle to apply a change.
+    pause = threading.Event()  # never set; only paces the loop
+    for _ in range(200):
+        if condition():
+            return True
+        pause.wait(0.05)
+    return condition()
+
+
+def test_last_by_matches_non_canonical_spellings_in_a_reactive_table(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["EUR/USD", "not a pair"])]))
+    q = make(massive_session, FOREX_SPEC, symbols=watchlist)
+    assert isinstance(q, StreamQuery)
+    current = q.last_by()
+    row = TRADES.schema.to_arrow([{"Symbol": "C:EURUSD", "Price": 1.08}])
+    fake_streams.publishers[1].add(dh_arrow.to_table(row))
+    assert _wait_for(lambda: current.size == 1)
+    assert dh_arrow.to_arrow(current).column("Symbol").to_pylist() == ["C:EURUSD"]
+    # Removing the spelling from the watchlist evicts the canonical row.
+    watchlist.delete(new_table([string_col("Symbol", ["EUR/USD"])]))
+    assert _wait_for(lambda: current.size == 0)
+    massive_session.release(current)

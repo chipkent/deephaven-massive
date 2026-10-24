@@ -293,13 +293,22 @@ class SessionCore:
     def on_close(self, closer: Callable[[], None]) -> None:
         """Register a transport's cleanup (close connections, stop pollers) for `close()`.
 
+        If the session is already closed (a transport that passed `require_open` just before
+        `close()` ran), the closer runs at once, on this thread and outside the lock, so it is
+        still cleaned up. Either way it runs exactly once.
+
         Args:
-            closer: Called once, on the thread that closes the session, without any lock
-                held. An exception it raises is logged at ERROR and the remaining closers
-                still run.
+            closer: Called once, without any lock held: on the thread that closes the session,
+                or here when the session is already closed. An exception it raises during
+                `close()` is logged at ERROR and the remaining closers still run; raised here,
+                it propagates to the caller.
         """
         with self.registry_lock:
-            self._closers.append(closer)
+            closed = self._closed
+            if not closed:
+                self._closers.append(closer)
+        if closed:
+            closer()
 
     def stream_result(
         self,

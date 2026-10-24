@@ -56,7 +56,7 @@ Attributes:
         installed.
 """
 
-from importlib.metadata import version
+from importlib.metadata import version as _version
 
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._enums import (
@@ -103,4 +103,4 @@ __all__ = [
     "__version__",
 ]
 
-__version__: str = version("deephaven-massive")
+__version__: str = _version("deephaven-massive")

@@ -34,9 +34,12 @@ from typing import TYPE_CHECKING, Final, TypeAlias
 from deephaven.table import Table
 
 from deephaven_massive._enums import AssetClass
+from deephaven_massive._errors import log_once
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from deephaven_massive._types import Symbols
 
 __all__ = [
@@ -44,7 +47,9 @@ __all__ = [
     "NormalizedSymbols",
     "SymbolTable",
     "canonical",
+    "canonical_view",
     "normalize",
+    "symbol_canonicalizer",
     "underlying",
     "ws_symbol",
 ]
@@ -147,9 +152,10 @@ def canonical(asset_class: AssetClass, raw: object) -> str:
     Raises:
         TypeError: If `raw` is not a `str`.
         ValueError: If `raw` is empty, contains characters no Massive symbol has (spaces,
-            commas), is not a valid OCC symbol for options, is not a readable pair for forex,
-            or is not a crypto pair that ends in one of `CRYPTO_QUOTES` (checked here, so the
-            WebSocket form can always be recovered).
+            commas), carries another class's prefix (`X:` on a stock, `C:` on crypto), is not
+            a valid OCC symbol for options, is not a readable pair for forex, or is not a
+            crypto pair that ends in one of `CRYPTO_QUOTES` (checked here, so the WebSocket
+            form can always be recovered).
     """
     if not isinstance(raw, str):
         raise TypeError(f"a symbol must be a str, not {type(raw).__name__}")
@@ -158,6 +164,8 @@ def canonical(asset_class: AssetClass, raw: object) -> str:
         raise ValueError(f"{raw!r} is not a symbol")
     prefix = _PREFIXES.get(asset_class, "")
     body = text.removeprefix(prefix) if prefix else text
+    if ":" in body:
+        raise ValueError(f"{raw!r} has a class prefix that is not {asset_class.value}'s")
     if asset_class is AssetClass.OPTIONS:
         symbol = f"O:{body}"
         if not _OCC.match(symbol):
@@ -242,6 +250,62 @@ def underlying(option_symbol: str) -> str:
     if match is None:
         raise ValueError(f"{option_symbol!r} is not an OCC option symbol")
     return match["root"]
+
+
+def symbol_canonicalizer(asset_class: AssetClass) -> Callable[[str | None], str | None]:
+    """Return the per-row canonicalizer applied to a reactive symbol table's `Symbol` column.
+
+    The returned function maps each row's symbol to its canonical form with `canonical`, so a
+    watchlist may hold any accepted spelling (`EUR/USD`, `BTC-USD`, `SPX`). A null stays null;
+    a row that is not a valid symbol of the class becomes null, so it matches nothing, and is
+    logged once per class at WARNING. It runs on update-graph threads, so it does no I/O beyond
+    that one log record and takes no lock but the log-once guard.
+
+    Args:
+        asset_class: The class whose symbol rules apply.
+
+    Returns:
+        A function from a raw symbol to its canonical form or None.
+    """
+
+    def canonical_symbol(symbol: str | None) -> str | None:
+        if symbol is None:
+            return None
+        try:
+            return canonical(asset_class, symbol)
+        except (TypeError, ValueError):
+            log_once(
+                logger,
+                f"invalid-table-symbol:{asset_class.value}",
+                "a symbol table holds %r, which is not a valid %s symbol; such rows are ignored",
+                symbol,
+                asset_class.value,
+                level=logging.WARNING,
+            )
+            return None
+
+    return canonical_symbol
+
+
+def canonical_view(asset_class: AssetClass, table: Table) -> Table:
+    """Return a view of a reactive symbol table whose `Symbol` column is canonical.
+
+    Every consumer of a reactive symbol table reads it through this view, so the canonical
+    form is decided in one place: `last_by` filters the stream's rows (which carry canonical
+    symbols) with `where_in` against it, and the WebSocket layer subscribes the topics it
+    lists. Must be called inside the liveness scope that should own the view, on a thread
+    with the session's execution context. Deephaven resolves the formula's function from this
+    call's local variables.
+
+    Args:
+        asset_class: The class whose symbol rules apply.
+        table: The user's table with a `Symbol` column.
+
+    Returns:
+        A refreshing view with the same rows and a canonical (or null) `Symbol` column.
+    """
+    canonical_symbol = symbol_canonicalizer(asset_class)
+    return table.update_view([f"Symbol = {canonical_symbol.__name__}(Symbol)"])
 
 
 def normalize(asset_class: AssetClass, symbols: Symbols) -> NormalizedSymbols:

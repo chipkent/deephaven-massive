@@ -146,7 +146,8 @@ def _coerce(value: object, column_type: ColumnType) -> object:
     Four conversions Arrow does not do by itself: an ISO `YYYY-MM-DD` string becomes a `date`
     for a `LocalDate` column; an ISO-8601 date-time string (`2024-06-24T18:33:53Z`) becomes an
     aware `datetime` for an `Instant` column, read as UTC when it carries no offset (Massive's
-    ISO timestamps are UTC); a dict or list becomes its JSON text for a `String` column (used by
+    ISO timestamps are UTC; digits below the microsecond are truncated, since `datetime`
+    resolves microseconds); a dict or list becomes its JSON text for a `String` column (used by
     `ColumnOverride(type=ColumnType.STRING)` on composite SDK fields); and a single integer
     becomes a one-element list for an `int[]` column (the WebSocket quote `c` is one condition
     where REST sends a list). Everything else passes through for Arrow to check.

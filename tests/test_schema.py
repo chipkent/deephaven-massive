@@ -322,3 +322,23 @@ def test_instant_overrides_parse_iso_text() -> None:
     assert batch.column("At").to_pylist()[0] == datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
     with pytest.raises(MassiveError, match=r"schema mismatch in x\.At"):
         schema.to_arrow([{"At": "not a time"}])
+
+
+def test_flattened_names_that_collide_are_rejected() -> None:
+    @dataclasses.dataclass
+    class Inner:
+        b: int | None = None
+
+    @dataclasses.dataclass
+    class Outer:
+        a_b: int | None = None
+        a: Inner | None = None
+
+    with pytest.raises(ValueError, match=r"repeats columns \['AB'\]"):
+        model_schema("x.y", Outer)
+
+
+def test_iso_text_below_the_microsecond_is_truncated() -> None:
+    schema = Schema("x", (Column("At", ColumnType.INSTANT),))
+    batch = schema.to_arrow([{"At": "2024-06-24T18:33:53.123456789Z"}])
+    assert batch.column("At").cast(pa.int64()).to_pylist() == [1719254033123456000]
