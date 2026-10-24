@@ -338,7 +338,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.28" },
     { name = "deephaven-core", specifier = ">=42.0" },
-    { name = "massive", git = "https://github.com/chipkent/massive-client-python?rev=9b0256a737f74f337e5641285e121154591ce8f1" },
+    { name = "massive", git = "https://github.com/chipkent/massive-client-python?branch=deephaven-fixes" },
     { name = "orjson", marker = "extra == 'orjson'", specifier = ">=3.9" },
     { name = "pyarrow", specifier = ">=14" },
     { name = "websockets", specifier = ">=14" },
@@ -615,7 +615,7 @@ wheels = [
 [[package]]
 name = "massive"
 version = "0.0.0"
-source = { git = "https://github.com/chipkent/massive-client-python?rev=9b0256a737f74f337e5641285e121154591ce8f1#9b0256a737f74f337e5641285e121154591ce8f1" }
+source = { git = "https://github.com/chipkent/massive-client-python?branch=deephaven-fixes#fd76d503f7e9729715fc9fee3bebbcc1915aa0d6" }
 dependencies = [
     { name = "certifi" },
     { name = "urllib3" },
