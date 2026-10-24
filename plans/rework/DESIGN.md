@@ -263,7 +263,7 @@ defined in exactly one place: the field defaults of this class.
 | `reconnect_backoff: float` | `15.0` seconds | Minimum wait before any reconnect. Values below 15 raise `ValueError` (Massive's knowledge base requires at least 15 seconds). |
 | `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` (§19, F2.3). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
-| `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | Before this time, yesterday's flat file is treated as not yet published. The documentation says files land "by approximately 11:00 AM ET the following day". |
+| `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | A partition for day D counts as published from the first occurrence of this New York time after day D ends ([section 16](#16-historysourceauto)). The documentation says files land "by approximately 11:00 AM ET the following day". |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
 | `flush_interval: float` | `0.05` seconds | WebSocket micro-batch flush into `TablePublisher.add`. |
 | `rest_base_url: str` | `https://api.massive.com` | Rarely changed. |
@@ -1132,8 +1132,7 @@ S3 possible   iff S3 credentials are configured
                                   and (multiplier, timespan) in {(1, MINUTE), (1, DAY)}
                                       or, for futures, (1, SESSION)))
               and every partition date is published:
-                    date < today(day zone)
-                    and (date < yesterday(day zone) or now(ET) >= flat_file_publish_cutoff)
+                    now >= publish_time(date)
 REST possible iff the dataset has a REST history endpoint
               and (symbols is not ALL or (bars and (1, DAY)))        # grouped daily
 none possible -> ValueError listing, per source, the violated constraint
@@ -1141,8 +1140,13 @@ one possible  -> use it
 both          -> S3 if symbols is ALL or len(symbols) >= flat_file_symbol_threshold, else REST
 ```
 
-`today` and `yesterday` use the class day zone of
-[section 12](#12-timestamp-units-and-day-boundaries). `indices.values` is flat-file only.
+`publish_time(date)` is the first `flat_file_publish_cutoff` (New York time) strictly after the
+start of the next day, `date + 1 day`, in the class day zone of
+[section 12](#12-timestamp-units-and-day-boundaries). For stocks, options, and indices that is
+11:30 New York time on the following day. For forex and crypto, whose days are UTC, it is the
+first 11:30 New York time after the following UTC midnight. A partition is published once `now`
+reaches that instant; comparing full instants, not a time of day, keeps the rule correct for
+every day zone. `indices.values` is flat-file only.
 `indices.bars` has no `adjusted`, so the predicate is satisfied.
 
 Each `history()` logs `source=S3 files=<n> skipped=<dates>` or `source=REST requests=<n>`.
