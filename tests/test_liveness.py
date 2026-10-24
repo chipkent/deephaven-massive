@@ -13,7 +13,7 @@ from typing import Any, Protocol
 import pytest
 from deephaven import empty_table
 from deephaven.dherror import DHError
-from deephaven.execution_context import ExecutionContext
+from deephaven.execution_context import ExecutionContext, get_exec_ctx
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 
@@ -21,7 +21,13 @@ import deephaven_massive as dm
 from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._domains.base import build_query
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._liveness import Reaper, ResultRegistry, make_result, new_scope
+from deephaven_massive._liveness import (
+    Reaper,
+    ResultRegistry,
+    entered,
+    make_result,
+    new_scope,
+)
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._schema import TRADES
 
@@ -308,7 +314,7 @@ def test_concurrent_verbs_share_one_stream(
 
     def worker() -> None:
         start.wait(TIMEOUT)
-        with massive_session._core.exec_ctx:
+        with entered(massive_session._core.exec_ctx):
             table = q.blink()
         with lock:
             results.append(table)
@@ -334,3 +340,33 @@ def test_concurrent_verbs_share_one_stream(
     assert fake_streams.shutdown[winner].wait(TIMEOUT)
     drain()
     assert fake_streams.shutdown_calls == dict.fromkeys(fake_streams.shutdown, 1)
+
+
+def test_entered_contexts_survive_overlapping_threads(dh_exec_ctx: ExecutionContext) -> None:
+    # Regression: one shared ExecutionContext wrapper entered on two threads at once made the
+    # first thread to exit install the other thread's previous (empty) context on itself.
+    poisoned = "PoisonedUpdateGraph"
+    worker_in = threading.Event()
+    main_out = threading.Event()
+    seen: list[str] = []
+
+    def worker() -> None:
+        with entered(dh_exec_ctx):
+            worker_in.set()
+            main_out.wait(TIMEOUT)
+            seen.append(_update_graph_class())
+
+    thread = threading.Thread(target=worker)
+    with entered(dh_exec_ctx):
+        thread.start()
+        assert worker_in.wait(TIMEOUT)
+    main_out.set()
+    thread.join(TIMEOUT)
+    assert _update_graph_class() != poisoned
+    assert seen != [poisoned]
+    assert len(seen) == 1
+
+
+def _update_graph_class() -> str:
+    j_update_graph = get_exec_ctx().update_graph.j_update_graph
+    return str(j_update_graph.getClass().getSimpleName())

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import gc
+import importlib
 import logging
 import threading
+import weakref
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -437,3 +439,40 @@ def test_background_threads_stop_when_the_session_is_collected() -> None:
     writer.join(TIMEOUT)
     assert not reaper.is_alive()
     assert not writer.is_alive()
+
+
+def test_a_session_with_released_results_is_collected() -> None:
+    # Regression: a background loop that kept its last job or row referenced while waiting
+    # for the next one kept the SessionCore alive, so its finalizer never stopped the threads.
+    # A second, independent fake is needed here because the `fake_streams` fixture is bound to
+    # the fixture session, and monkeypatch would hold this session's core until teardown.
+    fakes = importlib.import_module("_fakes.stream")
+    fake = fakes.FakeStreamTransport()
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-session"))
+    core = m._core
+    vars(core)["stream_transport"] = lambda: fake
+    # A weak reference, not a finalizer that sets an Event: garbage collection can run the
+    # finalizer while this thread holds the Event's internal lock, which would deadlock.
+    alive = weakref.ref(core)
+    reaper, writer = core._reaper._thread, core.diagnostics._thread
+    result = stream_query(m).blink()
+    del result, core, m
+    gc.collect()
+    assert fake.shutdown[1].wait(TIMEOUT)
+    # The reaper finishes its job just after the shutdown callback; collect until it lets go.
+    pause = threading.Event()  # never set; only paces the bounded wait below
+    for _ in range(200):
+        gc.collect()
+        if alive() is None:
+            break
+        pause.wait(0.05)
+    assert alive() is None
+    reaper.join(TIMEOUT)
+    writer.join(TIMEOUT)
+    assert not reaper.is_alive()
+    assert not writer.is_alive()
+
+
+def test_repr_of_a_session_whose_construction_failed() -> None:
+    partial = object.__new__(dm.MassiveSession)
+    assert repr(partial) == "<MassiveSession (not started)>"

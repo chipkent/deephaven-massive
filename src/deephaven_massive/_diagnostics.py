@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Final, TypeAlias
 from deephaven import arrow as dh_arrow
 from deephaven import input_table
 
-from deephaven_massive._liveness import new_scope
+from deephaven_massive._liveness import entered, new_scope
 from deephaven_massive._schema import Column, ColumnType, Schema, pascal_case
 from deephaven_massive._symbols import SymbolTable
 from deephaven_massive._types import _All
@@ -297,7 +297,9 @@ class Diagnostics:
             name: The writer thread's name, for thread dumps.
         """
         self._exec_ctx = exec_ctx
-        self._release_lock = threading.Lock()
+        # Reentrant: the session's finalizer calls `stop()` from garbage collection, which can
+        # run on a thread that is already inside `write()` holding this lock.
+        self._release_lock = threading.RLock()
         self._released = False
         self._scope = new_scope()
         with self._scope.open():
@@ -370,13 +372,28 @@ class Diagnostics:
 
     def _run(self) -> None:
         """Writer loop: apply rows and set barriers until `stop()`, then release the scope."""
-        with self._exec_ctx:
-            while (item := self._queue.get()) is not None:
-                if isinstance(item, threading.Event):
-                    item.set()
-                else:
-                    self._apply(item)
+        with entered(self._exec_ctx):
+            while self._apply_next():
+                pass
             self._scope.release()
+
+    def _apply_next(self) -> bool:
+        """Take one item off the queue: apply a row or set a barrier.
+
+        The item is a local of this call, so nothing stays referenced while the thread blocks
+        for the next one.
+
+        Returns:
+            False when the item was the stop sentinel, True otherwise.
+        """
+        item = self._queue.get()
+        if item is None:
+            return False
+        if isinstance(item, threading.Event):
+            item.set()
+        else:
+            self._apply(item)
+        return True
 
     def _apply(self, row: ConnectionRow | StreamRow) -> None:
         """Add one row to its table, logging a failure instead of raising.

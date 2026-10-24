@@ -32,7 +32,6 @@ construct them.
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, fields, replace
 from datetime import date, datetime, timedelta
 from enum import Enum
@@ -186,6 +185,7 @@ class RestTransport(Protocol):
             spec: The dataset.
             request: The normalized arguments.
         """
+        ...
 
     def poll(
         self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
@@ -198,6 +198,7 @@ class RestTransport(Protocol):
             interval: The time between cycles.
             mode: How cycles combine.
         """
+        ...
 
     def history(
         self, spec: DatasetSpec, request: Request, window: TimeRange | FuturesSessions
@@ -210,6 +211,7 @@ class RestTransport(Protocol):
             window: The bounds under the class's day rules: a half-open `TimeRange`, or the
                 `FuturesSessions` of date-bounded futures.
         """
+        ...
 
 
 class StreamTransport(Protocol):
@@ -226,6 +228,7 @@ class StreamTransport(Protocol):
             request: The normalized arguments.
             channel: The WebSocket channel.
         """
+        ...
 
 
 class FlatFileTransport(Protocol):
@@ -248,6 +251,7 @@ class FlatFileTransport(Protocol):
                 `FuturesSessions` of date-bounded futures.
             source: `FLAT_FILES` or `AUTO`.
         """
+        ...
 
 
 def _interval(value: object) -> timedelta:
@@ -261,17 +265,21 @@ def _interval(value: object) -> timedelta:
 
     Raises:
         TypeError: If `value` is a `bool` or not a number or `timedelta`.
-        ValueError: If the interval is not finite and positive.
+        ValueError: If the interval is not finite, or not positive once rounded to
+            microseconds.
     """
     if isinstance(value, timedelta):
-        seconds = value.total_seconds()
+        period = value
     elif isinstance(value, int | float) and not isinstance(value, bool):
-        seconds = float(value)
+        try:
+            period = timedelta(seconds=value)
+        except (OverflowError, ValueError):  # inf, nan, or beyond timedelta's range
+            raise ValueError(f"interval must be a positive, finite time, got {value!r}") from None
     else:
         raise TypeError(f"interval must be seconds or a timedelta, not {type(value).__name__}")
-    if not (math.isfinite(seconds) and seconds > 0):
-        raise ValueError(f"interval must be positive, got {value!r}")
-    return timedelta(seconds=seconds)
+    if period <= timedelta(0):  # also an interval that rounds to zero microseconds
+        raise ValueError(f"interval must be a positive, finite time, got {value!r}")
+    return period
 
 
 @dataclass(frozen=True, repr=False, slots=True)

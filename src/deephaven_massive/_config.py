@@ -153,15 +153,18 @@ class MassiveConfig:
         """Validate every field and freeze `ws_hosts` into a read-only, lower-cased copy.
 
         A `ws_hosts` key that is not a `dm.AssetClass`, a host that is not a `str`, or a
-        numeric field of a non-numeric type raises `TypeError`.
+        numeric field of a non-numeric type also raises `TypeError`.
 
         Raises:
+            TypeError: If `api_key` is not a `str`.
             AuthenticationError: If no API key was given and none is in the environment.
             ValueError: If `reconnect_backoff` is below 15 seconds, `max_reconnect_backoff`
                 is below `reconnect_backoff`, a timeout, interval, or count is not positive,
                 `flat_file_publish_cutoff` carries a timezone, only one of the two S3
                 credentials is set, or a `ws_hosts` value is not a bare hostname.
         """
+        if not isinstance(self.api_key, str):
+            raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
         if not self.api_key.strip():
             raise AuthenticationError(
                 "no Massive API key: pass MassiveConfig(api_key=...) or set MASSIVE_API_KEY"

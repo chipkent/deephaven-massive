@@ -41,12 +41,12 @@ from dataclasses import dataclass
 from itertools import count
 from typing import TYPE_CHECKING, Final
 
+from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
 __all__ = [
@@ -54,6 +54,7 @@ __all__ = [
     "ResultRecord",
     "ResultRegistry",
     "StreamHandle",
+    "entered",
     "make_result",
     "new_scope",
 ]
@@ -63,6 +64,25 @@ logger = logging.getLogger(__name__)
 # `LivenessScope.__init__` carries no annotations, so mypy --strict reports every direct call as
 # an untyped call. This alias gives the constructor its real signature.
 _LIVENESS_SCOPE: Final[Callable[[], LivenessScope]] = LivenessScope
+
+
+def entered(exec_ctx: ExecutionContext) -> ExecutionContext:
+    """Return a fresh wrapper of an execution context, for one `with` block on this thread.
+
+    `deephaven.execution_context.ExecutionContext.__enter__` stores the handle that restores the
+    previous context on the wrapper object itself. If two threads enter one shared wrapper at
+    once, the first to exit closes the other's handle and installs that thread's previous
+    context (usually none) on its own thread, which silently loses its context. Every library
+    thread therefore enters the session's context through its own wrapper:
+    `with entered(exec_ctx): ...`.
+
+    Args:
+        exec_ctx: The context to enter, such as the session's captured one.
+
+    Returns:
+        A new wrapper of the same Java context; enter it once, on one thread.
+    """
+    return ExecutionContext(j_exec_ctx=exec_ctx.j_exec_ctx)
 
 
 def new_scope() -> LivenessScope:
@@ -200,12 +220,28 @@ class Reaper:
 
     def _run(self) -> None:
         """Run jobs until `stop()`."""
-        while (job := self._queue.get()) is not None:
-            try:
-                with self._exec_ctx:
-                    job()
-            except Exception:
-                logger.exception("massive reaper job failed; continuing")
+        while self._run_next():
+            pass
+
+    def _run_next(self) -> bool:
+        """Take one job off the queue and run it.
+
+        The job is a local of this call, so it is dropped before the thread blocks for the next
+        one. A job holds its record, whose owner callback holds the session core; keeping it
+        referenced while waiting would keep a collected session's core alive forever.
+
+        Returns:
+            False when the job was the stop sentinel, True otherwise.
+        """
+        job = self._queue.get()
+        if job is None:
+            return False
+        try:
+            with entered(self._exec_ctx):
+                job()
+        except Exception:
+            logger.exception("massive reaper job failed; continuing")
+        return True
 
 
 class ResultRegistry:

@@ -246,11 +246,11 @@ def test_fetch_and_poll_delegate(massive_session: dm.MassiveSession, rest: Recor
     ]
 
 
-@pytest.mark.parametrize("interval", [0, -1, float("inf"), float("nan"), timedelta(0)])
+@pytest.mark.parametrize("interval", [0, -1, float("inf"), float("nan"), timedelta(0), 1e-9, 1e300])
 def test_poll_interval_values(
     massive_session: dm.MassiveSession, rest: Recorder, interval: object
 ) -> None:
-    with pytest.raises(ValueError, match="interval must be positive"):
+    with pytest.raises(ValueError, match="interval must be a positive, finite time"):
         news(massive_session).poll(cast("float", interval))
 
 

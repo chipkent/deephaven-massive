@@ -323,7 +323,9 @@ plans allow one WebSocket connection per cluster per account.
 After `close()`: `close()` itself is idempotent; verbs, `m.connections()`, and `m.streams()`
 raise `MassiveError("MassiveSession #1 is closed")`; `m.release(table)` keeps working, and so
 does garbage-collection release of results; building queries and reaching namespaces never fail;
-live tables stop updating and keep their rows.
+live results stop updating and keep their rows. The diagnostics tables are the exception: their
+scope is released, so a `connections()` or `streams()` table obtained before `close()` becomes
+unusable unless the caller holds it in a liveness scope of their own.
 
 Every verb raises `ValueError` when called on a UG thread (for example from inside a table
 listener). Verbs create tables and take the registry lock; both are forbidden on the UG thread
@@ -355,10 +357,10 @@ scope = LivenessScope()                       # library-owned, one per result
 with scope.open():                            # top of the thread-local stack during creation
     result = shape(stream.blink)              # append_only / ring / last_by; for blink(), a fresh wrapper:
                                               #   Table(stream.blink.j_table), then scope.manage(result)
-record = _ResultRecord(stream_id, scope, released=False,
-                       ref=weakref.ref(result, _enqueue_release(record_id)))
-with m._core.registry_lock:
-    m._results[id(result)] = record           # keyed by Python object id; checked against the weakref on use
+m._core.results.track(result, scope, on_released)
+    # ResultRegistry.track: under registry_lock, a ResultRecord(scope, on_released,
+    # ref=weakref.ref(result, <enqueue release>), released=False) keyed by id(result);
+    # the key is checked against the weakref on use
 return result
 ```
 
@@ -391,14 +393,15 @@ return result
   gRPC thread if the UI held the last reference. It does exactly two things: a registry update
   under `registry_lock`, and `loop.call_soon_threadsafe(...)` to the connection's loop so the
   topic reference counts are decremented there. Never a send, never a Deephaven call.
-- **`m.release(table)`** looks up `id(table)` in `_results`, verifies that the weakref resolves to
+- **`m.release(table)`** delegates to `m._core.results.release(table)`, which looks up
+  `id(table)` in the registry, verifies that the weakref resolves to
   that exact object (so a recycled id cannot match), flips the `released` flag under the lock,
   and enqueues the same job. It raises `ValueError` if the table is not a verb result. It is
   deterministic: the table keeps ticking only while other holders (derived tables, open panels)
   exist.
 - **`m.close()`** closes every connection and poller and releases the session-owned diagnostics
-  scope. Publishers are not failed; live tables go static. `m.streams()` flips every stream the
-  library still holds to `State=CLOSED` (streams whose results were all released have already
+  scope. Publishers are not failed; live tables go static. Before the release, the streams
+  table flips every stream the library still holds to `State=CLOSED` (streams whose results were all released have already
   left the registry) and one message is logged: "session closed; N live tables are now static",
   at WARNING when N > 0 and at INFO when N is 0.
 
@@ -1218,8 +1221,10 @@ the update graph for diagnostics, and never write from UG callbacks.
 | `LastError` | text |
 
 **`m.streams()`**: one row per stream. A row is written when the stream opens and on every
-change while the library holds the stream; its last row (`RELEASED`, or `CLOSED` for every stream
-the library still holds at `m.close()`) stays in the table.
+change while the library holds the stream; its last row (`RELEASED`) stays in the table while the
+session is open. At `m.close()` every stream the library still holds is written `CLOSED` and then
+the diagnostics scope is released, so those `CLOSED` rows are readable only through a table the
+caller kept alive in a liveness scope of their own.
 
 | Column | Meaning |
 |---|---|
@@ -1254,7 +1259,7 @@ without the GIL.
 |---|---|---|---|
 | caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation | hold the registry lock while calling Deephaven |
 | WS client, one per connection | library | `asyncio.run(client.connect(on_frame))`; decode each frame once; route status frames; append rows to per-channel `SimpleQueue`s; the reconcile loop; idle close | any JVM call; blocking waits |
-| flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, diagnostics updates | touch loop-owned state directly |
+| flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables, in order | anything else |
@@ -1271,8 +1276,9 @@ without the GIL.
 - Per-connection mutable state (desired, acknowledged, and pending sets; the in-flight step;
   watchdogs; the client object) is **loop-confined**: only the connection's client thread touches
   it. Other threads reach it through `loop.call_soon_threadsafe` with plain data (tuples of topic
-  strings). Nothing reads loop state across threads; diagnostics are pushed from the loop thread
-  to the flush thread's queue.
+  strings). Nothing reads loop state across threads; the loop thread enqueues diagnostics row
+  snapshots on the diagnostics writer's queue, and the writer is the only thread that writes the
+  diagnostics tables.
 - Row buffers are one `queue.SimpleQueue` per (connection, channel). The WS thread is the only
   producer; the flush thread is the only consumer.
 - The reaper queue is a `queue.SimpleQueue`. Weakref callbacks, `m.release`, and `m.close` are
@@ -1280,7 +1286,10 @@ without the GIL.
 - No code relies on the atomicity of `dict`, `set`, or `list` operations. Every shared container
   is behind the lock or has a single owner.
 - `ExecutionContext` is captured at session construction. Every library thread enters it before
-  any Deephaven call.
+  any Deephaven call, each time through a fresh Python wrapper of the captured Java context
+  (`_liveness.entered`). The `deephaven` wrapper stores its restore handle on the wrapper object,
+  so two threads entering one shared wrapper at once make the first to exit install the other
+  thread's previous (empty) context on itself.
 - `LivenessScopeStack` is thread-local, so result scopes are opened and closed on the caller
   thread. `release()` runs on the reaper thread, which is allowed: the tracker is synchronized and
   drains on the releasing thread.

@@ -57,7 +57,7 @@ from deephaven_massive._domains.reference import _Reference
 from deephaven_massive._domains.stocks import _Stocks
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
-from deephaven_massive._liveness import Reaper, ResultRegistry, make_result
+from deephaven_massive._liveness import Reaper, ResultRegistry, entered, make_result
 from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
@@ -332,7 +332,7 @@ class SessionCore:
         handle = self._acquire(key) or self._open(spec, request, channel=channel, key=key)
         blink = handle.blink
         try:
-            with self.exec_ctx:
+            with entered(self.exec_ctx):
                 result, scope = make_result(lambda: build(blink), wrap=wrap)
         except Exception:
             self._release_hold(handle.stream_id)
@@ -393,7 +393,7 @@ class SessionCore:
             MassiveError: If the session was closed while the transport opened the stream; the
                 new stream's scope is released.
         """
-        with self.exec_ctx:
+        with entered(self.exec_ctx):
             opened = self.stream_transport().open_stream(spec, request, channel)
         count, text = describe_symbols(request.symbol_key())
         row = StreamRow(
@@ -422,7 +422,7 @@ class SessionCore:
                 self.diagnostics.write(row)
         if closed or existing is not None:
             logger.debug("%s: releasing an unused stream for %s", self.label, spec.name)
-            with self.exec_ctx:
+            with entered(self.exec_ctx):
                 opened.scope.release()
         if closed:
             raise MassiveError(f"{self.label} was closed while a stream was opening")
@@ -456,7 +456,7 @@ class SessionCore:
                 del self._stream_ids[state.key]
             self.diagnostics.write(row)
         if not held:
-            with self.exec_ctx:
+            with entered(self.exec_ctx):
                 state.handle.scope.release()
 
     def close(self) -> None:
@@ -588,10 +588,15 @@ class MassiveSession:
         """Show the session's label and whether it is open.
 
         Returns:
-            `"<MassiveSession #1 open>"` or `"<MassiveSession #1 closed>"`.
+            `"<MassiveSession #1 open>"` or `"<MassiveSession #1 closed>"`, or
+            `"<MassiveSession (not started)>"` for an object whose `__init__` raised (tracebacks
+            show such objects).
         """
-        state = "closed" if self._core.closed else "open"
-        return f"<{self._core.label} {state}>"
+        core: SessionCore | None = getattr(self, "_core", None)
+        if core is None:  # __init__ raised before the session existed
+            return "<MassiveSession (not started)>"
+        state = "closed" if core.closed else "open"
+        return f"<{core.label} {state}>"
 
     @property
     def stocks(self) -> _Stocks:

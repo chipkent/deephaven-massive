@@ -217,3 +217,8 @@ def test_json_codec_is_logged_once(
         log_json_codec_once()
         log_json_codec_once()
     assert [r.getMessage() for r in caplog.records] == [f"JSON codec: {json_codec()[0]}"]
+
+
+def test_api_key_must_be_a_string() -> None:
+    with pytest.raises(TypeError, match="api_key must be a str, not NoneType"):
+        MassiveConfig(api_key=cast("str", None))

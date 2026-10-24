@@ -72,6 +72,8 @@ def test_canonical_forms(asset_class: AssetClass, raw: str, expected: str) -> No
         (FX, "EUR/USD/JPY"),
         (FX, "EUR/"),
         (CRY, "BTC--USD"),
+        (CRY, "X:X:BTCUSD"),
+        (FX, "EU:USD"),
         (CRY, "BTC-XYZ"),
         (CRY, "X:BTCXYZ"),
         (CRY, "USD"),

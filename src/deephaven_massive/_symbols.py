@@ -165,11 +165,13 @@ def canonical(asset_class: AssetClass, raw: object) -> str:
         return symbol
     if asset_class is AssetClass.FOREX:
         pair = _split_pair(body, raw) if _PAIR_SEPARATORS.search(body) else (body[:3], body[3:])
-        if any(len(code) != _CURRENCY_CODE_LENGTH for code in pair):
+        if any(len(code) != _CURRENCY_CODE_LENGTH or not _CURRENCY.match(code) for code in pair):
             raise ValueError(f"cannot read {raw!r} as a currency pair; write it as BASE/QUOTE")
         return f"C:{pair[0]}{pair[1]}"
     if asset_class is AssetClass.CRYPTO:
         if _PAIR_SEPARATORS.search(body) is None:
+            if not _CURRENCY.match(body):
+                raise ValueError(f"{raw!r} is not a crypto pair; write it as BASE-QUOTE")
             _split_crypto(body, raw)
             return f"X:{body}"
         base, quote = _split_pair(body, raw)

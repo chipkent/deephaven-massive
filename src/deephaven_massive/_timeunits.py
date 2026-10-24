@@ -214,17 +214,18 @@ class TimeUnitTable:
         nanos = pc.cast(values, pa.int64())
         if rule.unit is TimeUnit.MILLISECONDS:
             try:
-                nanos = pc.multiply_checked(nanos, _NS_PER_MS)
+                nanos = pc.call_function("multiply_checked", [nanos, _NS_PER_MS])
             except pa.ArrowInvalid:
                 raise MassiveError(f"timestamp unit mismatch for {key.label}") from None
         elif rule.unit is TimeUnit.FMV_MAGNITUDE:
-            is_ns = pc.greater_equal(nanos, FMV_NS_THRESHOLD)
-            any_ns = pc.any(is_ns).as_py()
+            is_ns = pc.call_function("greater_equal", [nanos, FMV_NS_THRESHOLD])
+            any_ns = pc.call_function("any", [is_ns]).as_py()
             _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
             # Unchecked: the products of nanosecond values may wrap, but if_else discards them.
-            nanos = pc.if_else(is_ns, nanos, pc.multiply(nanos, _NS_PER_MS))
+            scaled = pc.call_function("multiply", [nanos, _NS_PER_MS])
+            nanos = pc.call_function("if_else", [is_ns, nanos, scaled])
         if rule.unverified:
-            bounds = pc.min_max(nanos).as_py()
+            bounds = pc.call_function("min_max", [nanos]).as_py()
             low, high = bounds["min"], bounds["max"]
             if low is not None and (low < _MIN_CHECKED_NS or high >= _MAX_CHECKED_NS):
                 raise MassiveError(f"timestamp unit mismatch for {key.label}")

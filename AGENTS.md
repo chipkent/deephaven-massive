@@ -84,8 +84,10 @@ anything with behavior worth knowing is a defect, not brevity.
 These are the rules that keep the library free of deadlocks and leaks (`DESIGN.md` § 6.1, § 18).
 
 - **Enter the execution context on every library thread.** The session captures the caller's
-  `ExecutionContext` at construction; every library thread enters it before any Deephaven call.
-  Without it, Deephaven raises `No execution context`.
+  `ExecutionContext` at construction; every library thread enters it before any Deephaven call,
+  through a fresh wrapper (`with entered(exec_ctx):`), never a shared one: a shared wrapper entered
+  on two threads at once loses one thread's context. Without it, Deephaven raises
+  `No execution context`.
 - **Lock order is the update-graph (UG) lock, then `registry_lock`.** `registry_lock` is a
   leaf lock: while holding it, make no Deephaven call, no network call, and no blocking wait.
   Table operations such as `where_in`, `last_by`, `Table.snapshot()`, and

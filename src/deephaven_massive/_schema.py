@@ -94,7 +94,7 @@ class ColumnType(StrEnum):
     @property
     def dh_type(self) -> dtypes.DType:
         """The Deephaven column type, for `table_publisher` and `input_table` definitions."""
-        return _DH_TYPES[self]
+        return typing.cast("dtypes.DType", _DH_TYPES[self])
 
     @property
     def arrow_type(self) -> pa.DataType:
@@ -102,7 +102,9 @@ class ColumnType(StrEnum):
         return _ARROW_TYPES[self]
 
 
-_DH_TYPES: Final[Mapping[ColumnType, dtypes.DType]] = {
+# `dtypes.Instant` and `dtypes.LocalDate` are annotated as `type` by deephaven-core although
+# they are `DType` instances, so the table is typed by value and narrowed on lookup.
+_DH_TYPES: Final[Mapping[ColumnType, object]] = {
     ColumnType.INSTANT: dtypes.Instant,
     ColumnType.LOCAL_DATE: dtypes.LocalDate,
     ColumnType.DOUBLE: dtypes.double,
