@@ -537,7 +537,7 @@ query classes and the type aliases are importable from `deephaven_massive._query
     (`reconnect_backoff` positive and `max_reconnect_backoff >= reconnect_backoff`, else
     `ValueError`; `ws_hosts` hostname-only).
   - `_session.py`: `MassiveSession`, namespaces, the `snapshots()` shell (P6g fills it),
-    `connections()`, `streams()`, `release()`, `close()`, context manager, `_registry_lock`,
+    `connections()`, `streams()`, `release()`, `close()`, context manager, `registry_lock`,
     reaper thread, the host-decision cache, the captured `ExecutionContext` with fail-fast,
     second-session WARNING, per-transport factory hooks (stubs).
   - `_query.py`: the six query classes and their verbs.
@@ -592,7 +592,7 @@ query classes and the type aliases are importable from `deephaven_massive._query
       `_domains/`.
 - [ ] Implement `_liveness.py` and the reaper in `_session.py` exactly per DESIGN § 6.1:
       scope per result, `manage`, weakref callback enqueues only, reaper wraps each job in
-      try/except with ERROR log, once-only flag flipped under `_registry_lock`, `release()`
+      try/except with ERROR log, once-only flag flipped under `registry_lock`, `release()`
       verifies the weakref resolves to the same object. Tests run inside the embedded JVM with
       a `table_publisher` blink table and assert `on_shutdown_callback` fires after the last
       result is released, and does not fire while a derived table is alive.
@@ -681,7 +681,7 @@ hunks overlap).
 **Files.**
 - Create: `src/deephaven_massive/_rest.py` (SDK client construction, `iter_rows`, `get_json`,
   Arrow batching, error mapping, rate-limit WARNING once), `_hosts.py` (host resolution and the
-  `HostDecision` record; the cache lives on the session under `_registry_lock`), `_poll.py`
+  `HostDecision` record; the cache lives on the session under `registry_lock`), `_poll.py`
   (REPLACE/UPSERT/APPEND pollers, reactive symbol snapshot per cycle, fan-out executor),
   `scripts/refresh_massive_catalog.py`, `tests/test_rest.py`, `tests/test_hosts.py`,
   `tests/test_poll.py`, `tests/_fakes/rest.py` (the fake REST transport),
@@ -723,7 +723,7 @@ hunks overlap).
       per class via public SDK methods with raw results; ordered timeframe fields excluding
       `underlying_asset`; DELAYED wins; the no-timeframe branches incl. the base-Business
       WARNING ([DESIGN § 13.2](DESIGN.md#132-host-decision)) and futures `UNKNOWN`; HTTP 403 → `EntitlementError`; transport error
-      → nothing cached. Synchronous on the calling thread, cached under `_registry_lock`
+      → nothing cached. Synchronous on the calling thread, cached under `registry_lock`
       (released before the call).
 - [ ] `_poll.py`: one thread per `poll()` table; `REPLACE` and `UPSERT` on a keyed
       `input_table` with static Arrow key tables for deletes (incl. empty cycles); `APPEND` on a
@@ -852,7 +852,7 @@ with.** P3, P5.
 - [ ] `_stream.py`: stream dedup by key; `table_publisher(name=f"massive.{dataset}#{n}",
       col_defs=<schema>, on_shutdown_callback=…)` created in the stream's `LivenessScope` under
       the captured `ExecutionContext`; shutdown callback does only registry update under
-      `_registry_lock` and `loop.call_soon_threadsafe`; flush thread: drain → one Arrow batch →
+      `registry_lock` and `loop.call_soon_threadsafe`; flush thread: drain → one Arrow batch →
       `to_table` once → per stream `add(batch)` or `add(batch.where_in(filter_table, "Symbol"))`;
       `on_flush_callback` unused; schema mismatch → `publish_failure` + ERROR.
 - [ ] Options cap: count parameters per `/options` connection; static over-cap → `ValueError`
@@ -861,7 +861,7 @@ with.** P3, P5.
 - [ ] `_watchlist.py`: listener computes adds/removes only; dispatches to a session worker;
       subscribe order: insert, enable, subscribe; unsubscribe order: disable, unsubscribe,
       delete; symbol table held strongly by the stream in its scope.
-- [ ] Library threads never take the UG lock while holding `_registry_lock`; verbs on the UG
+- [ ] Library threads never take the UG lock while holding `registry_lock`; verbs on the UG
       thread raise `ValueError` (P2 helper).
 - [ ] Idle connection close in the connection loop (30 s grace), not the reaper.
 - [ ] Tests: the `fake_ws_server` fixture (`tests/_fakes/ws.py`) speaking the Massive protocol
