@@ -45,9 +45,6 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-MIN_RECONNECT_BACKOFF: Final = 15.0
-"""Massive's knowledge base requires at least 15 seconds before any reconnect."""
-
 _HOSTNAME: Final = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
 )
@@ -129,7 +126,11 @@ class MassiveConfig:
             or path. The FMV family is never pinned; it is always `business.massive.com`.
         ack_timeout: Seconds to wait for a subscription acknowledgement before re-sending it
             once.
-        reconnect_backoff: Minimum seconds before any reconnect; at least 15.
+        reconnect_backoff: Seconds of the first wait before a reconnect; later waits double up
+            to `max_reconnect_backoff`. Any positive value is accepted (tests use
+            milliseconds). The 30-second default waits out the "roughly 10 to 30 seconds"
+            Massive's knowledge base says the server takes to release a dropped connection;
+            an earlier retry can be refused for holding the allowance it just lost.
         max_reconnect_backoff: Cap, in seconds, of the doubling reconnect backoff. Jitter only
             lengthens a wait, so every wait lies in `[reconnect_backoff,
             max_reconnect_backoff]`.
@@ -150,7 +151,7 @@ class MassiveConfig:
     s3_secret_access_key: str | None = field(default_factory=_env_s3_secret_access_key, repr=False)
     ws_hosts: Mapping[AssetClass, str] = field(default_factory=dict)
     ack_timeout: float = 5.0
-    reconnect_backoff: float = MIN_RECONNECT_BACKOFF
+    reconnect_backoff: float = 30.0
     max_reconnect_backoff: float = 120.0
     flat_file_symbol_threshold: int = 50
     flat_file_publish_cutoff: time = time(11, 30)
@@ -171,8 +172,8 @@ class MassiveConfig:
             TypeError: If `api_key` is not a `str` or `flat_file_publish_cutoff` is not a
                 `datetime.time`.
             AuthenticationError: If no API key was given and none is in the environment.
-            ValueError: If `reconnect_backoff` is below 15 seconds, `max_reconnect_backoff`
-                is below `reconnect_backoff`, a timeout, interval, or count is not positive,
+            ValueError: If `max_reconnect_backoff` is below `reconnect_backoff`, a timeout,
+                backoff, interval, or count is not positive,
                 `flat_file_publish_cutoff` carries a timezone, only one of the two S3
                 credentials is set, or a `ws_hosts` value is not a bare hostname.
         """
@@ -191,11 +192,6 @@ class MassiveConfig:
             require_positive_number(name, getattr(self, name))
         for name in ("flat_file_symbol_threshold", "max_concurrency"):
             require_positive_int(name, getattr(self, name))
-        if self.reconnect_backoff < MIN_RECONNECT_BACKOFF:
-            raise ValueError(
-                f"reconnect_backoff must be at least {MIN_RECONNECT_BACKOFF:g} seconds "
-                f"(Massive requires it), got {self.reconnect_backoff:g}"
-            )
         if self.max_reconnect_backoff < self.reconnect_backoff:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
         cutoff: object = self.flat_file_publish_cutoff  # checked at run time, whatever the hint

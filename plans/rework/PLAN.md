@@ -534,7 +534,8 @@ query classes and the type aliases are importable from `deephaven_massive._query
 - Create under `src/deephaven_massive/`:
   - `__init__.py` (rewrite): exactly the names of DESIGN § 3, `__all__`, and `__version__`.
   - `_config.py`: frozen `MassiveConfig`; `MassiveConfig()` reads the environment; validation
-    (`reconnect_backoff < 15` → `ValueError`; `ws_hosts` hostname-only).
+    (`reconnect_backoff` positive and `max_reconnect_backoff >= reconnect_backoff`, else
+    `ValueError`; `ws_hosts` hostname-only).
   - `_session.py`: `MassiveSession`, namespaces, the `snapshots()` shell (P6g fills it),
     `connections()`, `streams()`, `release()`, `close()`, context manager, `_registry_lock`,
     reaper thread, the host-decision cache, the captured `ExecutionContext` with fail-fast,
@@ -1432,7 +1433,9 @@ Shared rules for every fork fix package:
   fixture, following the upstream suite's conventions).
 - **Backwards compatibility.** Upstream users must see no behaviour change unless the old
   behaviour was a defect; new parameters have defaults that reproduce prior behaviour where it
-  was not a defect (F2's backoff is a deliberate exception: the knowledge base requires ≥ 15 s).
+  was not a defect (F2's backoff is opt-in: its defaults keep upstream's immediate reconnect;
+  this library passes its own values because the knowledge base says the server takes "roughly
+  10 to 30 seconds" to release a dropped connection and an instant retry "can be refused").
 - **Verification (all).**
   ```bash
   cd <fork> && poetry install && poetry run pytest -q          # or the suite's documented command
@@ -1508,7 +1511,7 @@ emits a frame (captured by the fake server).
 
 **Goal.** Make the client survive the outages Massive actually produces: keep subscriptions
 scheduled during an outage, reconnect after a server-initiated clean close unless the user asked
-to close, wait ≥ 15 s with doubling backoff and jitter, count only consecutive failures toward
+to close, wait an opt-in doubling backoff with jitter, count only consecutive failures toward
 `max_reconnects`, provide a thread-safe `request_close()`, and surface a `max_connections`
 status received during the handshake.
 
@@ -1519,7 +1522,8 @@ status received during the handshake.
   after a server-side clean close (sent after `max_connections`/slow consumer).
 - Backoff: `:111-117` `connect(..., process_exception=lambda exc: None)` reconnects via the
   iterator's own schedule, which resets after each success; `:183` `continue` re-enters
-  immediately. The knowledge base requires ≥ 15 s.
+  immediately. The knowledge base says the server takes "roughly 10 to 30 seconds" to release
+  a dropped connection and an instant retry "can be refused".
 - `max_reconnects`: `:106` counter is a lifetime total; `:177-182` raises once exceeded even
   with successes in between.
 - Close: `:321-332` `close()` is a coroutine touching `self.websocket` from any thread; during
@@ -1532,10 +1536,11 @@ reset only `subs = set()` with `schedule_resub = True`; a union with `subs` woul
 unsubscribes that were pending when the connection dropped. Reconnect after
 `ConnectionClosedOK` unless `request_close()` was called; `request_close()` is synchronous and
 thread-safe (`call_soon_threadsafe` sets a flag and closes the socket); `close()` kept.
-`reconnect_backoff: float = 15.0`, `max_reconnect_backoff: float = 120.0`, doubling, with
-upward-only jitter clamped to `[reconnect_backoff, max_reconnect_backoff]` (DESIGN § 19, F2.3),
+Opt-in `reconnect_backoff: float = 0.0` (the default keeps upstream's immediate reconnect) and
+`max_reconnect_backoff: float = 120.0`, doubling, with upward-only jitter clamped to
+`[reconnect_backoff, max_reconnect_backoff]` and still jittered at the cap (DESIGN § 19, F2.3),
 applied before re-entering the iterator. `max_reconnects` counts consecutive failed
-attempts, reset on `auth_success`; `None` = unlimited; docstring updated. F2.6:
+attempts, reset only after a connection has stayed up for a minimum uptime; `None` = unlimited; docstring updated. F2.6:
 surface a `max_connections` status received during the handshake to the caller, as a distinct
 exception or a flag, so a caller can distinguish it from a network drop. F2.6 is in scope and
 lands as the last commit of F2, kept minimal and separable so the upstream PR can drop it
@@ -1552,8 +1557,9 @@ server sends `max_connections` in the auth reply and then closes; the caller obs
 - [ ] One commit per sub-fix in the order above; F2.6 last and cleanly separable.
 - [ ] Tests above using the F7 fake server; docstrings.
 
-**Acceptance.** Tests pass on all matrix entries; default behaviour change (≥ 15 s backoff) is
-called out in the upstream PR with the knowledge-base citation.
+**Acceptance.** Tests pass on all matrix entries; the opt-in backoff is
+called out in the upstream PR with the knowledge-base citation (the server takes "roughly 10 to
+30 seconds" to release a dropped connection).
 
 ### F3 — `fix: malformed logging call in _parse_subscription` — branch `fix/ws-logging-format` — Issue: #33
 

@@ -265,8 +265,8 @@ defined in exactly one place: the field defaults of this class.
 | `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | |
 | `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. Hostname only; validated. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
 | `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic. |
-| `reconnect_backoff: float` | `15.0` seconds | Minimum wait before any reconnect. Values below 15 raise `ValueError` (Massive's knowledge base requires at least 15 seconds). |
-| `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` (§19, F2.3). |
+| `reconnect_backoff: float` | `30.0` seconds | The first wait before a reconnect; later waits double up to `max_reconnect_backoff`. Must be positive (a base of 0 would never grow and retry in a hot loop); any positive value is accepted, so tests can use milliseconds. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
+| `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` (§19, F2.3). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
 | `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | A partition for day D counts as published from the first occurrence of this New York time after day D ends ([section 16](#16-historysourceauto)). The documentation says files land "by approximately 11:00 AM ET the following day". |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
@@ -932,8 +932,10 @@ timezone-aware `datetime` is used as is.
    [section 13.3](#133-connection-and-subscription-protocol), which acts on a server statement,
    never on silence.
 3. No connection is ever opened to test anything.
-4. Connects are single-flight. At least 15 seconds pass before any reconnect; the wait doubles
-   up to `max_reconnect_backoff`, with upward-only jitter clamped to that range.
+4. Connects are single-flight. Every reconnect waits at least `reconnect_backoff` (30 s by
+   default, the upper end of the 10–30 s the knowledge base gives the server to release a
+   dropped connection); the wait doubles up to `max_reconnect_backoff`, with upward-only jitter
+   clamped to that range.
 5. Futures streams always use `/futures`. `/futures/{venue}` is undocumented and unsupported.
 
 ### 13.2 Host decision
@@ -1041,7 +1043,7 @@ Responsibilities:
 | Open the socket, read `connected`, send auth, read the auth reply | fork client |
 | `auth_failed` | The fork raises `AuthError` out of `connect()`. The library marks the session failed and fails every stream on the path with `AuthenticationError`. |
 | `max_connections` status before a server close | Received as a raw frame after the handshake; during the handshake the fork surfaces it to the caller (fork item F2.6), so the library can tell it from a network drop. The fork reconnects after backoff; the library shows `State=WAITING_SLOT`; streams stay alive. |
-| Reconnect after any close unless `request_close()` was called; merge pending subscriptions; backoff of at least 15 s, doubling | fork |
+| Reconnect after any close unless `request_close()` was called; merge pending subscriptions; backoff of at least `reconnect_backoff`, doubling to `max_reconnect_backoff` | fork |
 | Desired topic set, reference counts, single in-flight step | library |
 | Sending the subscribe and unsubscribe frames for a step | fork `set_subscriptions(desired, resend=...)` |
 | Per-topic acknowledgement parsing, watchdog, re-send | library, from the status frames |
@@ -1359,12 +1361,16 @@ request needs explicit owner approval each time. Evidence paths are relative to 
 
 ### F2 `fix/ws-reconnect`: reconnect semantics
 
+Every F2 change that goes beyond fixing a defect is opt-in: a new keyword argument defaults to
+upstream's behaviour, so upstream users see no change, and this library passes its own values
+(`MassiveConfig.reconnect_backoff`, `MassiveConfig.max_reconnect_backoff`).
+
 | Item | Problem | Evidence | API change | Test |
 |---|---|---|---|---|
 | F2.1 keep the desired set across reconnects | on `ConnectionClosedError` the client runs `scheduled_subs = set(self.subs)`, dropping subscribes and resurrecting unsubscribes that were scheduled but not yet applied | `:178` | treat `scheduled_subs` as the authoritative desired set and leave it untouched; reset only `subs = set()` and set `schedule_resub = True`, so the new connection subscribes exactly the desired set (a union with `subs` would resurrect pending unsubscribes) | during an outage, schedule one subscribe and one unsubscribe; after reconnect the server holds the new topic and not the removed one |
 | F2.2 reconnect after a clean close | `ConnectionClosedOK` returns; a server-initiated clean close (after `max_connections` or a slow consumer) ends the client permanently | `:168-172` | reconnect unless close was requested (F2.5 sets the flag) | the fake server closes with 1000; the client reconnects; after `request_close()` it stops |
-| F2.3 configurable backoff | reconnects are immediate (the `connect()` iterator's delay resets after a success); the knowledge base requires at least 15 s | `:111-117`, `:183` | `reconnect_backoff: float = 15.0`, `max_reconnect_backoff: float = 120.0`, doubling; the n-th consecutive wait is `uniform(b, min(1.2 * b, max_reconnect_backoff))` with `b = min(reconnect_backoff * 2**n, max_reconnect_backoff)`, so jitter only lengthens a wait and never leaves `[reconnect_backoff, max_reconnect_backoff]`; the client sleeps before re-entering the iterator | every measured wait lies in `[reconnect_backoff, max_reconnect_backoff]`, including at the cap |
-| F2.4 `max_reconnects` semantics | `max_reconnects=5` is a lifetime total, so a long-running client eventually raises | `:106`, `:177-182` | count consecutive failed attempts, reset on `auth_success`; `None` means unlimited; docstring updated | six outages with successes between them do not raise |
+| F2.3 configurable backoff | reconnects are immediate (the `connect()` iterator's delay resets after a success); the knowledge base says the server takes "roughly 10 to 30 seconds" to release a dropped connection and an instant retry "can be refused" | `:111-117`, `:183` | opt-in keyword arguments `reconnect_backoff: float = 0.0` and `max_reconnect_backoff: float = 120.0`; the defaults keep upstream's immediate reconnect, and `0 <= reconnect_backoff <= max_reconnect_backoff` is checked. The wait doubles: with `b = reconnect_backoff * 2**n` for the n-th consecutive failure, the wait is `uniform(b, 1.2 * b)` while `1.2 * b` is within the cap, and `uniform(max(reconnect_backoff, max_reconnect_backoff / 1.2), max_reconnect_backoff)` once it is not, so jitter only lengthens a wait, never leaves `[reconnect_backoff, max_reconnect_backoff]`, and stays jittered at the cap; the client sleeps before re-entering the iterator | defaults reconnect at once; with a backoff set, every measured wait lies in `[reconnect_backoff, max_reconnect_backoff]`, and the waits at the cap differ |
+| F2.4 `max_reconnects` semantics | `max_reconnects=5` is a lifetime total, so a long-running client eventually raises | `:106`, `:177-182` | the default stays 5; count consecutive failed attempts, and reset the count only after a connection has stayed up for a minimum uptime (an opt-in keyword argument), so a connection that authenticates and drops at once still counts as a failure; `None` means unlimited; docstring updated | six outages with long enough uptime between them do not raise; repeated drops right after `auth_success` do |
 | F2.5 thread-safe close | `close()` is a coroutine that touches `self.websocket` from any thread | `:321-332` | `request_close()` (synchronous, thread-safe, through `call_soon_threadsafe`) sets the close flag; `close()` kept | called from another thread; the loop exits |
 | F2.6 surface handshake `max_connections` (the last commit of F2, separable so the upstream PR can drop it) | a `max_connections` status in the auth reply is only logged; the library sees a disconnect and a reconnect | `:132-133` | surface the status to the caller (for example a distinct exception or a flag) so the library can show `WAITING_SLOT` immediately | the fake server sends `max_connections` in the auth reply; the caller observes it |
 

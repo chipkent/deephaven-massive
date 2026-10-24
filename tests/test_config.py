@@ -83,7 +83,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.s3_secret_access_key is None
     assert dict(base.ws_hosts) == {}
     assert base.ack_timeout == 5.0
-    assert base.reconnect_backoff == 15.0
+    assert base.reconnect_backoff == 30.0
     assert base.max_reconnect_backoff == 120.0
     assert base.flat_file_symbol_threshold == 50
     assert base.flat_file_publish_cutoff == time(11, 30)
@@ -117,10 +117,10 @@ def test_frozen_and_secrets_hidden() -> None:
     assert "s3_access_key_id='id'" in text
 
 
-def test_reconnect_backoff_floor(base: MassiveConfig) -> None:
-    with pytest.raises(ValueError, match="at least 15 seconds"):
-        _replace(base, reconnect_backoff=14.9)
-    assert _replace(base, reconnect_backoff=15).reconnect_backoff == 15
+def test_reconnect_backoff_bounds(base: MassiveConfig) -> None:
+    assert _replace(base, reconnect_backoff=0.01).reconnect_backoff == 0.01
+    with pytest.raises(ValueError, match="reconnect_backoff"):
+        _replace(base, reconnect_backoff=0)
     with pytest.raises(ValueError, match="max_reconnect_backoff must not be below"):
         _replace(base, reconnect_backoff=30.0, max_reconnect_backoff=20.0)
 
