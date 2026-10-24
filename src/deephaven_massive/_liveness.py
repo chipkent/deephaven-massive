@@ -140,8 +140,8 @@ class StreamHandle:
     and releases `scope` when the last one is released.
 
     Attributes:
-        stream_id: The stream's identifier, unique within the process (the `StreamId` column
-            of `m.streams()`).
+        stream_id: The stream's identifier, minted by the session before the open and unique
+            within the process (the `StreamId` column of `m.streams()`).
         blink: The stream's own blink-table wrapper. It is never handed to users: `blink()`
             returns a new wrapper of the same Java table.
         scope: The stream scope that manages `blink` and the publisher.
@@ -370,6 +370,11 @@ class ResultRegistry:
     ) -> ResultRecord:
         """Record a live result so that garbage collection or `release` frees its scope.
 
+        The record is complete (its finalizer exists) before it is registered, so `release`
+        never sees a half-built record. If anything raises, even `KeyboardInterrupt`, nothing
+        is registered and the finalizer is detached, so the result is never released by the
+        library: the caller still owns `scope` and must release it.
+
         Args:
             result: The result, as returned to the user. It must be a distinct Python object
                 per result (each `blink()` call returns its own wrapper).
@@ -379,17 +384,22 @@ class ResultRegistry:
         Returns:
             The new record.
         """
+        key = id(result)
         with self._lock:
-            key = id(result)
             record = ResultRecord(next(self._ids), scope, on_released)
-            self._results[key] = record
-            # The finalizer, not the registry, roots the release path: it holds this registry
-            # (and through it the reaper) and the record (whose owner callback holds the
-            # session core) for exactly as long as the result lives, so a result that outlives
-            # every reference to its session is still released when it is collected. Nothing
-            # refers to the result strongly, so no cycle keeps anything alive beyond it.
-            record.finalizer = weakref.finalize(result, self._on_collected, record, key)
+        # The finalizer, not the registry, roots the release path: it holds this registry (and
+        # through it the reaper) and the record (whose owner callback holds the session core)
+        # for exactly as long as the result lives, so a result that outlives every reference
+        # to its session is still released when it is collected. Nothing refers to the result
+        # strongly, so no cycle keeps anything alive beyond it.
+        record.finalizer = weakref.finalize(result, self._on_collected, record, key)
+        try:
             record.finalizer.atexit = False
+            with self._lock:
+                self._results[key] = record
+        except BaseException:  # nothing is registered: the finalizer must not release it
+            record.finalizer.detach()
+            raise
         return record
 
     def release(self, table: Table) -> bool:

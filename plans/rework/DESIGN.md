@@ -400,6 +400,10 @@ return result
   bound exclusively to the blink table's `on_shutdown_callback`. A derived table, an open UI
   panel, or a user scope therefore keeps the stream alive and subscribed, even after every
   library-held result has been released.
+- **Tracking is all or nothing.** `ResultRegistry.track` builds the record and its finalizer
+  before it registers the record; if anything raises, even `KeyboardInterrupt`, it detaches
+  the finalizer and registers nothing, and the verb releases the result scope and the stream
+  hold itself. A result is never released twice and never leaked.
 - **Collection finalizer.** A `weakref.finalize` on the result fires when the Python wrapper
   is collected. It holds the result registry and the record strongly, and through them the
   reaper and the session core, for exactly as long as the result lives, so a result that
@@ -414,13 +418,31 @@ return result
   scope. Each job runs inside `try`/`except Exception`; a failure is logged at ERROR and the
   thread continues. The reaper does nothing else, except run the closers of a session collected
   without `close()` ([section 6](#6-massivesession-and-lifecycle)).
+- **Opening a stream.** The session mints the stream id (a process-wide counter) and
+  registers the stream's record, `OPENING`, with one hold for the opener, before it calls
+  `StreamTransport.open_stream(..., stream_id=)`; so a failure or a shutdown the transport
+  reports while the open is still running finds the record. No row is written until the open
+  returns (`m.streams()` has no `OPENING` state). A second verb on the same key finds the
+  record still opening and waits for the open to finish, on the caller thread and outside every
+  lock, then reuses the stream; one open per key, never a wasted publisher. If the open raises
+  anything, even `KeyboardInterrupt`, the record is deleted, its key is unmapped, and the
+  waiters wake and open the stream themselves. `m.close()` wakes the waiters, which raise
+  `MassiveError`; the opener releases the stream when its open returns. A failure reported
+  during the open leaves the stream `FAILED`, and the open returns the failed table, exactly as
+  if the failure had arrived just after it.
+- **Record lifetime.** Holds and the shutdown callback run on different clocks (a
+  `publish_failure` shuts the blink table down at once, while results are still held), so
+  either may come last. A stream's registry record is deleted only once both have happened:
+  its holds have reached zero and its blink table has shut down. Until then `m.streams()` keeps
+  showing its row count and a late failure, even for a released stream a derived table keeps
+  alive. Its key maps to it only while it is opening or held, not failed, and not shut down,
+  so no verb ever reuses a dead table.
 - **Shutdown callback.** It usually runs on the reaper thread, but it may run on a UG thread or a
   gRPC thread if the UI held the last reference. It does exactly two things:
-  `SessionCore.stream_shut_down(stream_id)`, which drops the stream's registry record under
-  `registry_lock` (the record outlives the library's last hold so that `m.streams()` can still
-  show a failure or a row count for a stream a derived table keeps alive), and
-  `loop.call_soon_threadsafe(...)` to the connection's loop so the topic reference counts are
-  decremented there. Never a send, never a Deephaven call.
+  `SessionCore.stream_shut_down(stream_id)`, which under `registry_lock` unmaps the stream's
+  key and deletes its record if no hold is left, or marks it shut down so that the last hold
+  deletes it, and `loop.call_soon_threadsafe(...)` to the connection's loop so the topic
+  reference counts are decremented there. Never a send, never a Deephaven call.
 - **`m.release(table)`** delegates to `m._core.results.release(table)`, which looks up
   `id(table)` in the registry, verifies that the weakref resolves to
   that exact object (so a recycled id cannot match), flips the `released` flag under the lock,
@@ -433,8 +455,9 @@ return result
   scope. Publishers are not failed; live tables go static. Before the release, the streams
   table flips every stream still in the registry to `State=CLOSED`, including a released
   stream that a derived table or panel still keeps alive (a stream leaves the registry only
-  when its blink table shuts down), and one message is logged: "session closed; N live tables are now static",
-  at WARNING when N > 0 and at INFO when N is 0.
+  once its holds are released and its blink table has shut down), and one message is logged:
+  "session closed; N live tables are now static", at WARNING when N > 0 and at INFO when N
+  is 0.
 
 Two documented behaviours that users will notice:
 
@@ -1158,8 +1181,13 @@ logged once.
   tables are created only on the caller thread inside a result scope or a stream scope, and in
   the session's diagnostics scope. The flush thread creates only static tables.
 - Each stream owns one
-  `table_publisher(name=f"massive.{dataset}#{n}", col_defs=<dataset schema>, on_shutdown_callback=...)`,
-  created inside the stream scope under the session's captured `ExecutionContext`. `blink()`
+  `table_publisher(name=f"massive.{dataset}#{stream_id}", col_defs=<dataset schema>, on_shutdown_callback=...)`,
+  created inside the stream scope under the session's captured `ExecutionContext` by
+  `StreamTransport.open_stream(spec, request, channel, *, stream_id)`. The session mints
+  `stream_id` and has registered the stream before the call, so the transport may call
+  `SessionCore.fail_stream(stream_id, ...)` as soon as the publisher exists; the callback calls
+  `SessionCore.stream_shut_down(stream_id)` before it releases the topics; the returned
+  `StreamHandle` carries `stream_id`. `blink()`
   returns a new wrapper of the blink table's Java object, managed in its own result scope
   ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)); `append_only()` is
   `blink_to_append_only(blink)`; `ring(n)` is `ring_table(blink, n)`; `last_by()` is as in
@@ -1180,11 +1208,13 @@ logged once.
 - A failure fails exactly the streams whose topics the server rejected. Nothing tears down a
   whole URL on an entitlement error. A failed stream's key is unregistered at once
   (`SessionCore.fail_stream`), so the next verb with the same key opens a fresh stream rather
-  than returning the failed table. A stream's registry record lives until its blink table's
-  `on_shutdown_callback` (`SessionCore.stream_shut_down`), so a failure reported after the
-  library's last result was released, while a derived table or an open panel still keeps the
-  publisher alive, is shown too: the row moves from `RELEASED` to `FAILED` with its `Error`. A
-  failure reported for a stream that has already shut down is only logged.
+  than returning the failed table. A stream's registry record lives until its holds are
+  released and its blink table's `on_shutdown_callback` (`SessionCore.stream_shut_down`) has
+  run ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), so a failure is shown
+  whenever it is reported: during the open, after the library's last result was released
+  while a derived table or an open panel still keeps the publisher alive (the row moves from
+  `RELEASED` to `FAILED` with its `Error`), or after the blink table shut down while results
+  are still held. A failure reported for a stream that has left the registry is only logged.
 - REST `poll()` tables use a per-table publisher (`APPEND`) or a keyed `input_table`
   (`REPLACE`, `UPSERT`), created in the result scope.
 
@@ -1272,10 +1302,11 @@ table, so the queue stays bounded however fast rows arrive.
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant` |
 | `LastError` | text |
 
-**`m.streams()`**: one row per stream. A row is written when the stream opens and on every
-change until its blink table shuts down, so a released stream still kept alive by a derived
-table keeps reporting `RowsPublished` and a late failure; its last row (`RELEASED`, or `FAILED`
-if the stream failed) stays in the table while the session is open. At `m.close()` every stream
+**`m.streams()`**: one row per stream. A row is written when the stream has opened and on
+every change until the stream leaves the registry (its holds released and its blink table shut
+down), so a released stream still kept alive by a derived table keeps reporting
+`RowsPublished` and a late failure; its last row (`RELEASED`, or `FAILED` if the stream failed)
+stays in the table while the session is open. At `m.close()` every stream
 still in the registry is written `CLOSED` and then
 the diagnostics scope is released, so those `CLOSED` rows are readable only through a table the
 caller kept alive in a liveness scope of their own.
@@ -1312,14 +1343,14 @@ without the GIL.
 
 | Thread | Created by | Does | Must not |
 |---|---|---|---|
-| caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation | hold the registry lock while calling Deephaven |
+| caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key | hold the registry lock while calling Deephaven or waiting |
 | WS client, one per connection | library | `asyncio.run(client.connect(on_frame))`; decode each frame once; route status frames; append rows to per-channel `SimpleQueue`s; the reconcile loop; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
-| Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (drops the stream's record under the registry lock); `call_soon_threadsafe` | sends; JVM calls; blocking |
+| Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (under the registry lock: unmaps the key; deletes the record, or marks it for the last hold to delete); `call_soon_threadsafe` | sends; JVM calls; blocking |
 
 ### 18.2 Shared state and ownership
 

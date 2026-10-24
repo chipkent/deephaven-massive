@@ -10,7 +10,6 @@ the `fake_streams` fixture in `tests/conftest.py`, after the embedded JVM has st
 
 from __future__ import annotations
 
-import itertools
 import threading
 import weakref
 from typing import TYPE_CHECKING
@@ -39,7 +38,6 @@ class FakeStreamTransport:
         self.shutdown: dict[int, threading.Event] = {}
         self.shutdown_calls: dict[int, int] = {}
         self._lock = threading.Lock()
-        self._ids = itertools.count(1)
 
     def _on_shutdown(self, stream_id: int) -> None:
         core = self._core()
@@ -49,15 +47,16 @@ class FakeStreamTransport:
             self.shutdown_calls[stream_id] = self.shutdown_calls.get(stream_id, 0) + 1
         self.shutdown[stream_id].set()
 
-    def open_stream(self, spec: DatasetSpec, request: Request, channel: str | None) -> StreamHandle:
+    def open_stream(
+        self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+    ) -> StreamHandle:
         assert spec.schema is not None
         with self._lock:
-            stream_id = next(self._ids)
             self.shutdown[stream_id] = threading.Event()
         scope = new_scope()
         with scope.open():
             blink, publisher = table_publisher(
-                f"test.{spec.name}#{stream_id}",
+                f"massive.{spec.name}#{stream_id}",
                 spec.schema.col_defs(),
                 on_shutdown_callback=lambda: self._on_shutdown(stream_id),
             )

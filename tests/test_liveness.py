@@ -32,6 +32,7 @@ from deephaven_massive._liveness import (
 )
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._schema import TRADES
+from deephaven_massive._types import override
 
 
 class FakeStreams(Protocol):
@@ -158,6 +159,35 @@ def test_registry_release_checks_identity(dh_exec_ctx: ExecutionContext) -> None
     assert done.wait(TIMEOUT)
     assert released == ["released", "collected"]
     assert registry.held() == 0
+    reaper.stop()
+
+
+class _Interrupting(dict[int, ResultRecord]):
+    # A registry dictionary whose insertion is interrupted, like a KeyboardInterrupt delivered
+    # while `track` registers a record.
+    @override
+    def __setitem__(self, key: int, value: ResultRecord) -> None:
+        raise KeyboardInterrupt
+
+
+def test_an_interrupted_track_registers_nothing_and_never_releases(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    reaper = Reaper(dh_exec_ctx, "test-reaper")
+    registry = ResultRegistry(threading.RLock(), reaper)
+    registry._results = _Interrupting()
+    released: list[str] = []
+    table, scope = make_result(lambda: empty_table(1))
+    with pytest.raises(KeyboardInterrupt):
+        registry.track(table, scope, lambda: released.append("released"))
+    assert registry.held() == 0
+    del table
+    gc.collect()  # the detached finalizer queues nothing
+    done = threading.Event()
+    reaper.submit(done.set)
+    assert done.wait(TIMEOUT)
+    assert released == []  # the caller still owns the scope
+    scope.release()
     reaper.stop()
 
 

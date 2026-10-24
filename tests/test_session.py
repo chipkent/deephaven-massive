@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import gc
 import importlib
+import itertools
 import logging
 import threading
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -20,6 +22,7 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive import _session
 from deephaven_massive._catalog import DatasetSpec
+from deephaven_massive._diagnostics import ConnectionRow, Diagnostics, StreamRow
 from deephaven_massive._domains.base import build_query
 from deephaven_massive._domains.crypto import _Crypto
 from deephaven_massive._domains.economy import _Economy
@@ -32,17 +35,20 @@ from deephaven_massive._domains.partners import _Benzinga, _EtfGlobal, _Fable, _
 from deephaven_massive._domains.reference import _Reference
 from deephaven_massive._domains.stocks import _Stocks
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._liveness import StreamHandle, new_scope
+from deephaven_massive._liveness import ResultRegistry, StreamHandle, new_scope
 from deephaven_massive._query import Request, StreamQuery
 from deephaven_massive._schema import TRADES
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
+    import functools
     from collections.abc import Callable
 
     from deephaven.table import Table
 
     from _fakes.stream import FakeStreamTransport
+    from deephaven_massive._liveness import ResultRecord
+    from deephaven_massive._query import StreamKey
     from deephaven_massive._session import SessionCore
 
 TIMEOUT = 30.0
@@ -288,38 +294,275 @@ def test_all_and_reactive_symbols_in_stream_rows(
     massive_session.release(watch)
 
 
-def test_a_racing_open_reuses_the_registered_stream(
+# --- Opening a stream: registered first, one open per key (DESIGN § 6.1) ------------------
+
+
+class _Gated:
+    # A stream transport whose first open blocks until `gate` is set and then, with
+    # `fail_first`, raises that exception instead of opening.
+
+    def __init__(
+        self, fake: FakeStreamTransport, *, fail_first: BaseException | None = None
+    ) -> None:
+        self.fake = fake
+        self.fail_first = fail_first
+        self.entered = threading.Event()
+        self.gate = threading.Event()
+        self.calls = 0
+
+    def open_stream(
+        self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+    ) -> StreamHandle:
+        self.calls += 1
+        if self.calls == 1:
+            self.entered.set()
+            assert self.gate.wait(TIMEOUT)
+            if self.fail_first is not None:
+                raise self.fail_first
+        return self.fake.open_stream(spec, request, channel, stream_id=stream_id)
+
+
+def _when_waiting(
+    core: _session.SessionCore, monkeypatch: pytest.MonkeyPatch, then: Callable[[], None]
+) -> threading.Thread:
+    # Once a verb has found the stream still opening (it is about to wait), run `then` on a
+    # helper thread.
+    waiting = threading.Event()
+    claim = core._claim
+
+    def spying(
+        spec: DatasetSpec, request: Request, key: StreamKey
+    ) -> StreamHandle | threading.Event | int:
+        found = claim(spec, request, key)
+        if isinstance(found, threading.Event):
+            waiting.set()
+        return found
+
+    monkeypatch.setattr(core, "_claim", spying)
+
+    def run() -> None:
+        assert waiting.wait(TIMEOUT)
+        then()
+
+    helper = threading.Thread(target=run)
+    helper.start()
+    return helper
+
+
+def test_concurrent_verbs_on_one_key_share_one_open(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
     *,
     monkeypatch: pytest.MonkeyPatch,
     stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
+    core = massive_session._core
+    gated = _Gated(fake_streams)
+    monkeypatch.setattr(core, "stream_transport", lambda: gated)
     q = stream_query(massive_session)
-    inner: list[Table] = []
+    with ThreadPoolExecutor(1) as pool:
+        opener = pool.submit(q.blink)
+        assert gated.entered.wait(TIMEOUT)
+        helper = _when_waiting(core, monkeypatch, gated.gate.set)
+        waiter = q.append_only()  # waits for the open, then reuses the stream
+        first = opener.result(TIMEOUT)
+    helper.join(TIMEOUT)
+    assert gated.calls == 1
+    assert [(r["StreamId"], r["HeldResults"]) for r in stream_rows()] == [(1, 2)]
+    massive_session.release(first)
+    massive_session.release(waiter)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
 
-    class Racing:
-        # While the outer verb is opening, another verb on the same key opens and registers
-        # its own stream first.
+
+@pytest.mark.parametrize("failure", [RuntimeError("refused"), KeyboardInterrupt()])
+def test_a_waiter_opens_the_stream_when_the_opener_fails(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    failure: BaseException,
+) -> None:
+    core = massive_session._core
+    gated = _Gated(fake_streams, fail_first=failure)
+    monkeypatch.setattr(core, "stream_transport", lambda: gated)
+    q = stream_query(massive_session)
+    with ThreadPoolExecutor(1) as pool:
+        opener = pool.submit(q.blink)
+        assert gated.entered.wait(TIMEOUT)
+        helper = _when_waiting(core, monkeypatch, gated.gate.set)
+        waiter = q.append_only()  # wakes when the open fails, then opens the stream itself
+        assert opener.exception(TIMEOUT) is failure
+    helper.join(TIMEOUT)
+    assert gated.calls == 2
+    # The failed open left nothing behind: no row, no record; the waiter's stream is id 2.
+    assert [(r["StreamId"], r["HeldResults"]) for r in stream_rows()] == [(2, 1)]
+    assert list(core._streams) == [2]
+    massive_session.release(waiter)
+    assert fake_streams.shutdown[2].wait(TIMEOUT)
+
+
+def test_close_during_an_open_wakes_the_waiters(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = massive_session._core
+    gated = _Gated(fake_streams)
+    monkeypatch.setattr(core, "stream_transport", lambda: gated)
+    q = stream_query(massive_session)
+
+    def close_then_open() -> None:
+        core.close()
+        gated.gate.set()
+
+    with ThreadPoolExecutor(1) as pool:
+        opener = pool.submit(q.blink)
+        assert gated.entered.wait(TIMEOUT)
+        helper = _when_waiting(core, monkeypatch, close_then_open)
+        with pytest.raises(dm.MassiveError, match=r"is closed$"):
+            q.append_only()
+        error = opener.exception(TIMEOUT)
+    helper.join(TIMEOUT)
+    assert isinstance(error, dm.MassiveError)
+    assert "was closed while a stream was opening" in str(error)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the opener released the new stream
+    assert core._streams == {}
+
+
+def test_a_failure_during_the_open_is_shown_and_never_reused(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    core = massive_session._core
+
+    class FailingDuringOpen:
+        # The server's rejection arrives on the WebSocket thread before the open returns.
         def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str | None
+            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
         ) -> StreamHandle:
-            handle = fake_streams.open_stream(spec, request, channel)
-            if not inner:
-                monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake_streams)
-                inner.append(q.append_only())
+            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+            if stream_id == 1:
+                core.fail_stream(stream_id, "not authorized")
             return handle
 
-    racing = Racing()
-    monkeypatch.setattr(massive_session._core, "stream_transport", lambda: racing)
-    outer = q.blink()
-    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the losing stream was released
-    assert not fake_streams.shutdown[2].is_set()
-    # The losing stream never reached the diagnostics; the winner holds both results.
-    assert [(r["StreamId"], r["HeldResults"]) for r in stream_rows()] == [(2, 2)]
-    massive_session.release(outer)
-    massive_session.release(inner[0])
+    monkeypatch.setattr(core, "stream_transport", FailingDuringOpen)
+    q = stream_query(massive_session)
+    first = q.blink()  # the failed table, as if the failure had come just after the open
+    second = q.blink()  # a fresh stream: the failed one is never reused
+    rows = sorted(stream_rows(), key=lambda r: r["StreamId"])
+    assert [(r["StreamId"], r["State"], r["Error"]) for r in rows] == [
+        (1, "FAILED", "not authorized"),
+        (2, "RUNNING", None),
+    ]
+    massive_session.release(first)
+    massive_session.release(second)
     assert fake_streams.shutdown[2].wait(TIMEOUT)
+
+
+# --- Record lifetime: holds and the shutdown callback, in any order (DESIGN § 6.1) ----------
+
+
+def test_a_failure_that_shuts_the_stream_down_while_held(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    drain: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    q = stream_query(massive_session)
+    first = q.append_only()
+    core = massive_session._core
+    # publish_failure shuts the blink table down at once, while the result is still held.
+    fake_streams.publishers[1].publish_failure(RuntimeError("entitlement"))
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    with core.registry_lock:
+        assert core._streams[1].shut_down
+        assert core._stream_ids == {}  # the dead stream is never reused
+    core.fail_stream(1, "entitlement")  # still shown: the record outlives the shutdown
+    second = q.blink()  # a fresh stream, no KeyError
+    caplog.set_level(logging.ERROR)
+    massive_session.release(first)
+    drain()
+    assert caplog.records == []  # the reaper job succeeded
+    with core.registry_lock:
+        assert list(core._streams) == [2]  # the last hold deleted the shut-down record
+    rows = sorted(stream_rows(), key=lambda r: r["StreamId"])
+    assert [(r["StreamId"], r["State"], r["Error"], r["HeldResults"]) for r in rows] == [
+        (1, "FAILED", "entitlement", 0),
+        (2, "RUNNING", None, 1),
+    ]
+    massive_session.release(second)
+
+
+_EVENTS = ("release", "fail", "shut_down", "close")
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(_EVENTS)))
+def test_record_lifetime_in_any_order(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    drain: Callable[[], None],
+    order: tuple[str, ...],
+) -> None:
+    core = massive_session._core
+    written: list[tuple[int, str]] = []
+    write = Diagnostics.write
+
+    def spying(self: Diagnostics, row: ConnectionRow | StreamRow) -> None:
+        if isinstance(row, StreamRow):
+            written.append((row.stream_id, row.state.value))
+        write(self, row)
+
+    monkeypatch.setattr(Diagnostics, "write", spying)
+    q = stream_query(massive_session)
+    result = q.append_only()
+    key = next(iter(core._stream_ids))
+    user_scope = new_scope()  # keeps the blink table alive: shutdown happens only on demand
+    with user_scope.open():
+        derived = result.tail(1)
+    # The model: what the registry must hold after each event.
+    present, held, shut, mapped, state = True, 1, False, True, "RUNNING"
+    for event in order:
+        written.clear()
+        expect_row = present
+        if event == "release":
+            massive_session.release(result)
+            drain()
+            held, mapped = 0, False
+            state = "RELEASED" if state == "RUNNING" else state
+            present = not shut
+            expect_row = True
+        elif event == "fail":
+            core.fail_stream(1, "boom")
+            mapped = False
+            state = "FAILED" if present else state
+        elif event == "shut_down":
+            core.stream_shut_down(1)  # what the blink table's shutdown callback does
+            expect_row = False
+            mapped = False
+            shut = present and held > 0
+            present = present and held > 0
+        else:
+            core.close()
+            state = "CLOSED" if present else state
+        with core.registry_lock:
+            assert (1 in core._streams) is present, event
+            assert (core._stream_ids.get(key) == 1) is mapped, event
+            if present:
+                assert core._streams[1].row.state.value == state, event
+                assert core._streams[1].shut_down is shut, event
+        assert written == ([(1, state)] if expect_row else []), event
+    user_scope.release()
+    del derived
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    assert core._streams == {}
 
 
 # --- close() ---------------------------------------------------------------------------------
@@ -530,9 +773,9 @@ def test_a_session_closed_while_a_stream_opens(
 ) -> None:
     class Closing:
         def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str | None
+            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
         ) -> StreamHandle:
-            handle = fake_streams.open_stream(spec, request, channel)
+            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
             massive_session.close()
             return handle
 
@@ -735,6 +978,50 @@ def test_a_failure_after_the_last_release_is_shown(
         (1, "FAILED", "not authorized"),
         (2, "RELEASED", None),
     ]
+
+
+def test_an_interrupt_while_tracking_releases_the_scope_and_the_hold(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = massive_session._core
+
+    def interrupted(*_args: object) -> ResultRecord:
+        raise KeyboardInterrupt  # delivered on the caller thread right after make_result
+
+    monkeypatch.setattr(ResultRegistry, "track", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session).append_only()
+    # The result scope and the stream hold were both released, so the stream shut down.
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    assert core._streams == {}
+    assert core.results.held() == 0
+
+
+def test_an_unclosed_core_is_collected_by_the_cyclic_collector() -> None:
+    # Each result record's owner callback refers back to the core (record -> partial -> core
+    # -> results -> record), so an unclosed core is collected by the cyclic collector, not
+    # by reference counting (DESIGN § 6).
+    fakes = importlib.import_module("_fakes.stream")
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="cyclic-core"))
+    core = m._core
+    fake = fakes.FakeStreamTransport(core)
+    vars(core)["stream_transport"] = lambda: fake
+    result = stream_query(m).append_only()
+    with core.registry_lock:
+        record = next(iter(core.results._results.values()))
+    callback = cast("functools.partial[None]", record.on_released)
+    assert getattr(callback.func, "__self__", None) is core
+    alive = weakref.ref(core)
+    del record, callback, core, m, result
+    pause = threading.Event()  # never set; only paces the bounded wait below
+    for _ in range(200):
+        gc.collect()
+        if alive() is None:
+            break
+        pause.wait(0.05)
+    assert alive() is None
 
 
 def test_a_shutdown_of_an_unknown_stream_is_ignored(massive_session: dm.MassiveSession) -> None:

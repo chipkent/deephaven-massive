@@ -219,18 +219,25 @@ class RestTransport(Protocol):
 class StreamTransport(Protocol):
     """The WebSocket transport, provided by `SessionCore.stream_transport()`."""
 
-    def open_stream(self, spec: DatasetSpec, request: Request, channel: str | None) -> StreamHandle:
+    def open_stream(
+        self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+    ) -> StreamHandle:
         """Create a new stream: its publisher and blink table in a new stream scope.
 
         Runs on the caller thread; may resolve the host with one REST call. Must not hold the
-        session's registry lock while calling Deephaven. The blink table's
-        `on_shutdown_callback` must first call `SessionCore.stream_shut_down(stream_id)`, which
-        drops the stream's registry record, and only then release the stream's topics.
+        session's registry lock while calling Deephaven. The session has already registered
+        the stream under `stream_id` (DESIGN § 6.1), so `SessionCore.fail_stream(stream_id,
+        ...)` and `SessionCore.stream_shut_down(stream_id)` may be called from the moment the
+        publisher exists, even before this method returns. The publisher is named
+        `massive.{dataset}#{stream_id}`, and the blink table's `on_shutdown_callback` must
+        first call `SessionCore.stream_shut_down(stream_id)` and only then release the stream's
+        topics. The returned handle carries `stream_id`.
 
         Args:
             spec: The dataset.
             request: The normalized arguments.
             channel: The WebSocket channel.
+            stream_id: The id the session minted for the stream.
         """
         ...
 

@@ -181,6 +181,18 @@ def massive_session() -> Iterator[MassiveSession]:
     session.close()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Number each test's streams from 1, so tests can name them by id.
+
+    Stream ids are process-unique in the library (a module-level counter in `_session.py`);
+    each test gets a fresh counter.
+    """
+    session = importlib.import_module("deephaven_massive._session")
+    itertools = importlib.import_module("itertools")
+    monkeypatch.setattr(session, "_stream_numbers", itertools.count(1))
+
+
 @pytest.fixture
 def fake_streams(
     massive_session: MassiveSession, monkeypatch: pytest.MonkeyPatch
