@@ -596,3 +596,11 @@ def test_previous_session_fetch_rejects_all(
     with pytest.raises(ValueError, match=r"forex\.bars\.fetch\(\) needs explicit symbols"):
         q.fetch()
     assert rest.calls == []
+
+
+def test_ring_accepts_its_lower_bound(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    result = trades(massive_session).ring(1)
+    assert result.is_refreshing
+    massive_session.release(result)

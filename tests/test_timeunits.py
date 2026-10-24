@@ -2,6 +2,7 @@
 
 import logging
 import re
+from datetime import UTC, datetime
 
 import pyarrow as pa
 import pytest
@@ -181,3 +182,21 @@ def test_fmv_millisecond_value_that_overflows_is_rejected_on_both_paths() -> Non
 def test_values_beyond_64_bits_are_rejected() -> None:
     with pytest.raises(MassiveError, match="timestamp unit mismatch"):
         TABLE.to_epoch_ns(NS, 2**64)
+
+
+def test_fmv_threshold_is_ten_to_the_seventeenth() -> None:
+    assert FMV_NS_THRESHOLD == 10**17  # DESIGN § 12
+
+
+def test_unverified_range_boundaries() -> None:
+    key = TimeField("x.y", Transport.REST, "timestamp")
+    table = TimeUnitTable({key: UnitRule(TimeUnit.NANOSECONDS, unverified=True)})
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    low = int((datetime(1990, 1, 1, tzinfo=UTC) - epoch).total_seconds()) * 10**9
+    high = int((datetime(2101, 1, 1, tzinfo=UTC) - epoch).total_seconds()) * 10**9
+    assert table.to_epoch_ns(key, low) == low  # 1990-01-01T00:00Z is inside
+    assert table.to_epoch_ns(key, high - 1) == high - 1  # the last nanosecond of 2100 too
+    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
+        table.to_epoch_ns(key, low - 1)
+    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
+        table.to_epoch_ns(key, high)

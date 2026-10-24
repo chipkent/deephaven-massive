@@ -275,3 +275,12 @@ def test_publication_compares_instants_across_the_fall_back_hour() -> None:
     assert flat_file_published(date(2025, 11, 1), now=later, zone=NEW_YORK, cutoff=cutoff)
     earlier = datetime(2025, 11, 2, 1, 15, tzinfo=NEW_YORK, fold=0)
     assert not flat_file_published(date(2025, 11, 1), now=earlier, zone=NEW_YORK, cutoff=cutoff)
+
+
+def test_epoch_ns_of_a_mid_day_instant() -> None:
+    window = TimeRange(
+        datetime(2025, 3, 3, 14, 30, 15, 250_000, tzinfo=UTC), datetime(2025, 3, 3, 15, tzinfo=UTC)
+    )
+    # 2025-03-03T00:00Z is 1_740_960_000 s; 14:30:15.25 is 52_215.25 s later, 15:00 is 54_000.
+    assert window.start_ns == 1_741_012_215_250_000_000
+    assert window.end_ns == 1_741_014_000_000_000_000

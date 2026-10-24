@@ -241,3 +241,8 @@ def test_publish_cutoff_must_be_a_time(base: MassiveConfig) -> None:
         TypeError, match=r"flat_file_publish_cutoff must be a datetime\.time, not str"
     ):
         _replace(base, flat_file_publish_cutoff="11:30")
+
+
+def test_equal_backoffs_are_accepted() -> None:
+    cfg = MassiveConfig(api_key="k", reconnect_backoff=30.0, max_reconnect_backoff=30.0)
+    assert cfg.max_reconnect_backoff == cfg.reconnect_backoff == 30.0

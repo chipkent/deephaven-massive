@@ -15,13 +15,15 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import new_table, time_table
 from deephaven.column import string_col
+from deephaven.dherror import DHError
 from deephaven.execution_context import make_user_exec_ctx
 from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _session
+from deephaven_massive import _errors, _session
 from deephaven_massive._catalog import DatasetSpec
+from deephaven_massive._config import json_codec
 from deephaven_massive._diagnostics import ConnectionRow, Diagnostics, StreamRow, StreamUpdate
 from deephaven_massive._domains.base import build_query
 from deephaven_massive._domains.crypto import _Crypto
@@ -1250,3 +1252,144 @@ def test_a_shutdown_of_an_unknown_stream_is_ignored(massive_session: dm.MassiveS
     # shutdown callback runs on a Deephaven thread.
     massive_session._core.stream_shut_down(99)
     assert massive_session._core._streams == {}
+
+
+def test_a_closer_registered_after_close_never_runs_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ran: list[str] = []
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="late-closer"))
+    reaper = m._core._reaper.thread
+    m.close()
+    m._core.on_close(lambda: ran.append("late"))
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+        del m
+        gc.collect()
+        reaper.join(TIMEOUT)
+    assert ran == ["late"]  # once, at registration; the collection finalizer runs nothing
+    assert caplog.records == []
+
+
+def test_close_wakes_a_waiter_before_the_open_finishes(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = massive_session._core
+    gated = _Gated(fake_streams)
+    monkeypatch.setattr(core, "stream_transport", lambda: gated)
+    q = stream_query(massive_session)
+    waiting = threading.Event()
+    helper = _when_waiting(core, monkeypatch, waiting.set)
+    with ThreadPoolExecutor(2) as pool:
+        opener = pool.submit(q.blink)
+        assert gated.entered.wait(TIMEOUT)
+        waiter = pool.submit(q.append_only)
+        assert waiting.wait(TIMEOUT)
+        core.close()
+        # close() alone must release the waiter: the open is still blocked on the gate.
+        with pytest.raises(dm.MassiveError, match="is closed"):
+            waiter.result(TIMEOUT)
+        gated.gate.set()
+        assert isinstance(opener.exception(TIMEOUT), dm.MassiveError)
+    helper.join(TIMEOUT)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+
+
+def test_close_during_an_open_writes_no_row_for_the_opening_stream(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = massive_session._core
+    gated = _Gated(fake_streams)
+    monkeypatch.setattr(core, "stream_transport", lambda: gated)
+    keeper = new_scope()  # keeps the diagnostics table readable after close() releases it
+    streams = massive_session.streams()
+    keeper.manage(streams)
+    q = stream_query(massive_session)
+    with ThreadPoolExecutor(1) as pool:
+        opener = pool.submit(q.blink)
+        assert gated.entered.wait(TIMEOUT)
+        massive_session.close()
+        gated.gate.set()
+        assert isinstance(opener.exception(TIMEOUT), dm.MassiveError)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    assert dh_arrow.to_arrow(streams).to_pylist() == []  # m.streams() has no OPENING state
+    keeper.release()
+
+
+def test_a_failure_after_the_stream_left_the_registry_is_logged(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    core = massive_session._core
+    result = stream_query(massive_session).blink()
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._session"):
+        core.fail_stream(1, "shown")  # in the registry: shown in m.streams(), not logged
+        core.fail_stream(42, "late")  # never registered: only logged
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.DEBUG, f"{core.label}: stream 42 failed after it left the registry: late")
+    ]
+    massive_session.release(result)
+
+
+def test_verbs_work_from_a_thread_without_an_execution_context(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
+) -> None:
+    # The library enters the session's context itself (DESIGN § 18); the caller need not.
+    q = stream_query(massive_session)
+    reactive = stream_query(massive_session, new_table([string_col("Symbol", ["AAPL"])]))
+    with ThreadPoolExecutor(1) as pool:  # a plain thread: no execution context of its own
+        results = [
+            pool.submit(q.append_only).result(TIMEOUT),
+            pool.submit(q.ring, 5).result(TIMEOUT),
+            pool.submit(reactive.last_by).result(TIMEOUT),
+        ]
+    assert all(result.is_refreshing for result in results)
+    for result in results:
+        massive_session.release(result)
+
+
+def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    drain: Callable[[], None],
+) -> None:
+    # blink() returns the failed table; the other shapes raise Deephaven's DHError while
+    # deriving from it (DESIGN § 6.1), and the hold is released either way.
+    core = massive_session._core
+
+    class FailingDuringOpen:
+        def open_stream(
+            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+        ) -> StreamHandle:
+            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+            fake_streams.publishers[stream_id].publish_failure(RuntimeError("entitlement"))
+            assert fake_streams.shutdown[stream_id].wait(TIMEOUT)
+            core.fail_stream(stream_id, "entitlement")
+            return handle
+
+    monkeypatch.setattr(core, "stream_transport", FailingDuringOpen)
+    with pytest.raises(DHError, match="failed table"):
+        stream_query(massive_session).append_only()
+    drain()
+    assert core.results.held() == 0
+    assert core._streams == {}
+    assert core._stream_ids == {}
+
+
+def test_a_session_start_logs_the_json_codec_once(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_errors, "_logged", set())
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._config"):
+        dm.MassiveSession(dm.MassiveConfig(api_key="codec-1")).close()
+        dm.MassiveSession(dm.MassiveConfig(api_key="codec-2")).close()
+    codec = json_codec()[0]
+    assert [r.getMessage() for r in caplog.records if "JSON codec" in r.getMessage()] == [
+        f"JSON codec: {codec}"
+    ]

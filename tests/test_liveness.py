@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any, Protocol, cast
 
 import pytest
-from deephaven import empty_table
+from deephaven import empty_table, time_table
 from deephaven.dherror import DHError
 from deephaven.execution_context import ExecutionContext, get_exec_ctx
 from deephaven.liveness_scope import LivenessScope
@@ -74,12 +74,25 @@ def test_make_result_manages_the_result(dh_exec_ctx: object) -> None:
     scope.release()
 
 
+def _alive(table: Table) -> bool:
+    # Whether the Java table can still be retained, that is, has not been released for good.
+    if table.j_table.tryRetainReference():
+        table.j_table.dropReference()
+        return True
+    return False
+
+
 def test_make_result_wraps_and_manages(dh_exec_ctx: object) -> None:
-    source = empty_table(1)
+    user = new_scope()
+    with user.open():
+        source = time_table("PT1S")  # refreshing, so its liveness is observable
     result, scope = make_result(lambda: Table(j_table=source.j_table), wrap=True)
     assert result is not source
     assert result == source
+    user.release()
+    assert _alive(result)  # the result scope now holds the only reference
     scope.release()
+    assert not _alive(result)
 
 
 def test_make_result_releases_the_scope_on_failure(
@@ -508,3 +521,33 @@ def test_queue_worker_runs_on_exit_and_logs_batch_failures(
         worker.thread.join(TIMEOUT)
     assert exited.is_set()
     assert "test-worker failed on a batch" in caplog.text
+
+
+def test_collection_removes_the_record_and_keeps_a_newer_one(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    reaper = Reaper(dh_exec_ctx, "test-reaper")
+    registry = ResultRegistry(threading.RLock(), reaper)
+    table, scope = make_result(lambda: empty_table(1))
+    key = id(table)
+    registry.track(table, scope, lambda: None)
+    del table
+    gc.collect()
+    done = threading.Event()
+    reaper.submit(done.set)
+    assert done.wait(TIMEOUT)
+    assert key not in registry._results  # a collected result leaves no record behind
+    # A recycled id: the collected wrapper's key now belongs to a newer record.
+    old, old_scope = make_result(lambda: empty_table(1))
+    registry.track(old, old_scope, lambda: None)
+    newer, newer_scope = make_result(lambda: empty_table(1))
+    newer_record = registry.track(newer, newer_scope, lambda: None)
+    recycled = id(old)
+    registry._results[recycled] = newer_record
+    del old
+    gc.collect()
+    done = threading.Event()
+    reaper.submit(done.set)
+    assert done.wait(TIMEOUT)
+    assert registry._results.get(recycled) is newer_record  # the newer record stays
+    reaper.stop()

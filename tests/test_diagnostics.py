@@ -333,3 +333,56 @@ def test_queued_rows_are_coalesced_into_few_adds(
     rows = sorted(dh_to_pylist(counting.table), key=lambda r: r["StreamId"])
     assert [(r["StreamId"], r["HeldResults"]) for r in rows] == [(n, 990 + n) for n in range(10)]
     diagnostics.release()
+
+
+def test_describe_symbols_at_the_truncation_boundary() -> None:
+    twenty = tuple(f"S{i:02}" for i in range(20))
+    assert describe_symbols(twenty) == (20, ", ".join(twenty))  # exactly 20: no suffix
+    count, text = describe_symbols((*twenty, "S20"))
+    assert (count, text) == (21, ", ".join(twenty) + " (+1 more)")
+
+
+def test_fresh_rows_start_at_zero() -> None:
+    connection = as_row(
+        ConnectionRow(
+            transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
+        )
+    )
+    counts = ("Topics", "AckedTopics", "PendingTopics", "NoAckTopics", "Reconnects")
+    assert {name: connection[name] for name in counts} == dict.fromkeys(counts, 0)
+    assert connection["State"] == "RESOLVING"
+    stream = as_row(STREAM)
+    assert (stream["Deferred"], stream["RowsPublished"], stream["State"], stream["Error"]) == (
+        0,
+        0,
+        "RUNNING",
+        None,
+    )
+
+
+def test_writes_after_release_are_not_queued(dh_exec_ctx: ExecutionContext) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics.release()
+    diagnostics.write(STREAM)
+    assert diagnostics._writer._queue.empty()  # nothing would ever drain it
+
+
+def test_connection_rows_replace_by_their_key(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    tick = ConnectionRow(
+        transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
+    )
+    diagnostics.write(dataclasses.replace(tick, state=ConnectionState.CONNECTING))
+    diagnostics.write(dataclasses.replace(tick, state=ConnectionState.CONNECTED, reconnects=1))
+    diagnostics.write(
+        dataclasses.replace(tick, family=ChannelFamily.FMV, state=ConnectionState.FAILED)
+    )
+    assert diagnostics.barrier().wait(TIMEOUT)
+    rows = sorted(dh_to_pylist(diagnostics.connections), key=lambda r: r["Family"])
+    assert [(r["Family"], r["State"], r["Reconnects"]) for r in rows] == [
+        ("FMV", "FAILED", 0),
+        ("TICK", "CONNECTED", 1),
+    ]
+    diagnostics.release()
