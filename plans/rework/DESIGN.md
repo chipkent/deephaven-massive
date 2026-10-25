@@ -189,7 +189,7 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 | `_symbols.py` | Symbol normalization and the `Symbol`/`Underlying` rule ([section 10](#10-symbols-and-all)). |
 | `_dates.py` | `DateLike` parsing, class day zones, session-date rules, `[start, end)` normalization. |
 | `_liveness.py` | Result scopes, stream scopes, result records, the reaper queue and thread. |
-| `_rest.py` | `RESTClient` construction from config, pagination into bounded Arrow batches, 403/429 mapping, the two documented private-call shims. |
+| `_rest.py` | `RESTClient` construction from config, pagination into bounded Arrow batches, 403/429 mapping. Public SDK methods only, no private-call shims: the pinned fork carries `list_funding_conditions` and `get_daily_open_close_crypto` (fork item F6, since #45). |
 | `_hosts.py` | Host resolution from REST evidence ([section 13.2](#132-host-decision)). The `HostDecision` record itself lives in `_query.py`, next to the transport protocols that return it (`RestTransport.resolve_host`). |
 | `_ws.py` | One connection per URL over the forked `WebSocketClient(raw=True)`: client thread, frame decoding, status routing, the reconcile loop, acknowledgement watchdogs, the explicit-verdict rule, the options contract cap. |
 | `_stream.py` | Streams, per-stream publishers, the per-connection flush thread, shared-batch fan-out ([section 14](#14-publishers-fan-out-and-failure-semantics)). |
