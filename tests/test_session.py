@@ -1592,6 +1592,9 @@ def test_an_interrupt_while_a_reactive_key_is_hashed_leaves_no_record(
         massive_session.release(reactive.blink())
     monkeypatch.setattr(SymbolTable, "__hash__", real_hash)
     if not fired:
+        # Only 3.14+ caches the tuple's hash; on 3.11 and 3.13 the hash must fire, so a refactor
+        # that stops minting through _next_stream_id fails there instead of skipping everywhere.
+        assert sys.version_info >= (3, 14)
         pytest.skip("this Python caches the key tuple's hash: no Python code runs in the stores")
     assert core._streams == {}
     assert core._stream_ids == {}

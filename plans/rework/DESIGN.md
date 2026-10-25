@@ -408,7 +408,7 @@ return result
   before it registers the record; if anything raises, even `KeyboardInterrupt`, it marks the
   record released and removes it, and the verb releases the result scope and the stream hold
   itself (also when the interrupt lands between `make_result` and `track`). A result is never
-  released twice and never leaked, within the best-effort boundary above.
+  released twice and never leaked, within the best-effort boundary below (see **Opening a stream**).
 - **Collection finalizer.** A `weakref.finalize` on the result fires when the Python wrapper
   is collected. It holds the result registry and the record strongly, and through them the
   reaper and the session core, for exactly as long as the result lives, so a result that
