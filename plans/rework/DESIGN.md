@@ -1118,10 +1118,10 @@ client = WebSocketClient(api_key, feed=host, market=path, raw=True,
                          max_reconnects=None,
                          reconnect_backoff=cfg.reconnect_backoff,
                          max_reconnect_backoff=cfg.max_reconnect_backoff,
-                         reconnect_on_close=True,           # reconnect after a server close
-                         raise_fatal_errors=True,           # a non-retryable handshake error ends the client
-                         max_size=None)                     # websockets frame cap off
-thread.run(lambda: asyncio.run(client.connect(conn.on_frame)))
+                         reconnect_on_close=True,           # section 19.2
+                         raise_fatal_errors=True)           # section 19.2
+thread.run(lambda: asyncio.run(
+    client.connect(conn.on_frame, max_size=None)))         # websockets frame cap off
 ```
 
 In raw mode the SDK consumes only the handshake frames (`connected`, the auth reply) and passes

@@ -1195,10 +1195,10 @@ SeriesType`; symbol prefix selects the class; axis `timestamp` ms), and `_domain
 (`treasury_yields`, `inflation`, `inflation_expectations`, `labor_market`,
 `funding_conditions` via the P3 shim until D2). It also fills `MassiveSession.snapshots()` in
 `_session.py` (`m.snapshots(symbols, …F)`: `/v3/snapshot`, 250 per request, mixed classes,
-per-ticker `NOT_ENTITLED` rows keep `Error`/`Message` and log once) and declares that
-dataset's record, `reference.snapshots` (`asset_class=None`), in `_domains/reference.py`
-(DESIGN § 8.11); its tests for the unified snapshot go in `tests/test_session.py`. P6g is the
-only domain package that edits `_session.py`. `cusip` is typed `str` in
+per-ticker `NOT_ENTITLED` rows keep `Error`/`Message` and log once) and adds that dataset's
+record, `reference.snapshots` (`asset_class=None`), to `_domains/reference.py` (DESIGN § 8.11),
+not `_catalog.py`; its tests for the unified snapshot go in `tests/test_session.py`. P6g is
+the only domain package that edits `_session.py`. `cusip` is typed `str` in
 the library regardless of the SDK hint.
 
 ### P6h — `feat: partner datasets` — branch `feat/partner-datasets` — Issue: #24
