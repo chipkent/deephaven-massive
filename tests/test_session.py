@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import importlib
 import itertools
@@ -51,7 +52,7 @@ from deephaven_massive._schema import TRADES
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
     import functools
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
@@ -345,9 +346,9 @@ def _when_waiting(
         request: Request,
         key: StreamKey,
         *,
-        opening: list[tuple[int, threading.Event]],
+        holds: list[tuple[int, threading.Event | None]],
     ) -> StreamHandle | threading.Event | int:
-        found = claim(spec, request, key, opening=opening)
+        found = claim(spec, request, key, holds=holds)
         if isinstance(found, threading.Event):
             waiting.set()
         return found
@@ -502,6 +503,98 @@ def test_an_interrupt_before_the_open_starts_leaves_no_opening_record(
         result = pool.submit(q.blink).result(TIMEOUT)
     assert list(core._streams) == [2]
     massive_session.release(result)
+
+
+def test_an_interrupt_right_after_a_reuse_claim_leaks_no_hold(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The reuse path: _claim took one more hold on stream 1 and returned its handle, and a
+    # KeyboardInterrupt lands before the verb builds its result. That hold must be released.
+    core = massive_session._core
+    first = stream_query(massive_session).blink()
+    claim = core._claim
+
+    def interrupting(
+        spec: DatasetSpec,
+        request: Request,
+        key: StreamKey,
+        *,
+        holds: list[tuple[int, threading.Event | None]],
+    ) -> StreamHandle | threading.Event | int:
+        found = claim(spec, request, key, holds=holds)
+        if isinstance(found, StreamHandle):
+            raise KeyboardInterrupt
+        return found
+
+    monkeypatch.setattr(core, "_claim", interrupting)
+    with pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session).append_only()
+    assert core._streams[1].row.held_results == 1  # only the first result's hold
+    massive_session.release(first)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # so its release shuts the stream down
+    assert core._streams == {}
+    assert core._stream_ids == {}
+
+
+def test_an_interrupt_before_the_record_is_stored_is_not_masked(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A KeyboardInterrupt landing while _claim builds the OPENING record, before it is
+    # stored: the cleanup must find nothing to release, so the interrupt itself propagates
+    # (not a KeyError from releasing a record that was never stored).
+    core = massive_session._core
+    state_class = _session._StreamState
+
+    def interrupted(*_args: object, **_kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_session, "_StreamState", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session).blink()
+    monkeypatch.setattr(_session, "_StreamState", state_class)
+    assert core._streams == {}
+    assert core._stream_ids == {}
+
+
+def test_an_interrupt_before_the_opened_stream_is_stored_releases_it(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The transport returned the stream; a KeyboardInterrupt lands before _open stores its
+    # handle (here, at the exit of `entered`). Nobody else knows the stream, so _open must
+    # release its scope itself.
+    core = massive_session._core
+    armed: list[bool] = []
+    real_entered = entered
+
+    class Arming:
+        def open_stream(
+            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+        ) -> StreamHandle:
+            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+            armed.append(True)
+            return handle
+
+    @contextlib.contextmanager
+    def interrupting_entered(exec_ctx: ExecutionContext) -> Iterator[ExecutionContext]:
+        with real_entered(exec_ctx):
+            yield exec_ctx
+        if armed:
+            armed.clear()
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(core, "stream_transport", Arming)
+    monkeypatch.setattr(_session, "entered", interrupting_entered)
+    with pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session).blink()
+    assert core._streams == {}
+    assert core._stream_ids == {}
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the opened stream was released
 
 
 def test_an_interrupt_after_the_open_releases_the_stream(

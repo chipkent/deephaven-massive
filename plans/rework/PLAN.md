@@ -205,10 +205,12 @@ skeleton created in P2 is designed so that later packages own disjoint files:
   `tests/_domains/test_<domain>.py`, and `tests/data/<domain>/`. P6h owns
   `_domains/partners.py`, which holds the four vendor classes. P6g owns
   `_domains/reference.py`, `_domains/indicators.py`, and `_domains/economy.py`, and is the one
-  domain package that also edits `_session.py` and `_catalog.py`: it fills
-  `MassiveSession.snapshots()` and adds that dataset's record, because DESIGN places the
-  unified snapshot on the session rather than in a namespace module.
-- **No shared registry file is edited by domain packages** (P6g's two edits above excepted).
+  domain package that also edits `_session.py`: it fills `MassiveSession.snapshots()`, because
+  DESIGN places the unified snapshot on the session rather than in a namespace. The dataset's
+  record, `reference.snapshots`, is declared in `_domains/reference.py` like every other
+  record (DESIGN § 8.11), so `_catalog.datasets()` finds it without a `_catalog.py` edit.
+- **No shared registry file is edited by domain packages** (P6g's `_session.py` edit above
+  excepted).
   Every cross-cutting table is composed from per-domain declarations rather than written
   centrally:
   - Each `_domains/<domain>.py` exports `DATASETS: tuple[DatasetSpec, ...]`. A `DatasetSpec`
@@ -1193,9 +1195,10 @@ SeriesType`; symbol prefix selects the class; axis `timestamp` ms), and `_domain
 (`treasury_yields`, `inflation`, `inflation_expectations`, `labor_market`,
 `funding_conditions` via the P3 shim until D2). It also fills `MassiveSession.snapshots()` in
 `_session.py` (`m.snapshots(symbols, …F)`: `/v3/snapshot`, 250 per request, mixed classes,
-per-ticker `NOT_ENTITLED` rows keep `Error`/`Message` and log once) and adds that dataset's
-record to `_catalog.py`; its tests for the unified snapshot go in `tests/test_session.py`.
-P6g is the only domain package that edits those two shared modules. `cusip` is typed `str` in
+per-ticker `NOT_ENTITLED` rows keep `Error`/`Message` and log once) and declares that
+dataset's record, `reference.snapshots` (`asset_class=None`), in `_domains/reference.py`
+(DESIGN § 8.11); its tests for the unified snapshot go in `tests/test_session.py`. P6g is the
+only domain package that edits `_session.py`. `cusip` is typed `str` in
 the library regardless of the SDK hint.
 
 ### P6h — `feat: partner datasets` — branch `feat/partner-datasets` — Issue: #24

@@ -491,12 +491,13 @@ class SessionCore:
     ) -> StreamHandle:
         """Take a hold on the stream of `key`: reuse it, wait for its open, or open it.
 
-        A verb that registers a new `OPENING` record owns it from the moment it is registered:
-        the claim and the open run inside one `try`/`finally`, so whatever interrupts them, even
-        a `KeyboardInterrupt` landing between the two calls or after the open returned, the
-        record's `ready` event is set (waiting verbs wake) and, unless this call returns the
-        handle, the opener's hold is released (a never-opened record is deleted and its key
-        unmapped; an opened stream's scope is released). Waiting happens outside every lock.
+        Every hold `_claim` takes is reported in `holds` right after it is stored, and the
+        claim and the open run inside one `try`/`finally`. So whatever interrupts them, even a
+        `KeyboardInterrupt` landing between two calls, the cleanup is exact: unless this call
+        returns the handle, each hold it took is released (a reused stream's extra hold; or the
+        opener's hold, which deletes a never-opened record and unmaps its key, or releases an
+        opened stream's scope), and a new record's `ready` event is set so waiting verbs wake.
+        Waiting happens outside every lock.
 
         Args:
             spec: The dataset.
@@ -511,10 +512,10 @@ class SessionCore:
         of `_claim` or `_open`.
         """
         while True:
-            opening: list[tuple[int, threading.Event]] = []
+            holds: list[tuple[int, threading.Event | None]] = []
             handle: StreamHandle | None = None
             try:
-                claim = self._claim(spec, request, key, opening=opening)
+                claim = self._claim(spec, request, key, holds=holds)
                 if isinstance(claim, threading.Event):
                     claim.wait()  # another thread is opening the stream; never under a lock
                     continue
@@ -523,12 +524,13 @@ class SessionCore:
                 handle = claim
                 return handle
             finally:
-                for stream_id, ready in opening:
+                for stream_id, ready in holds:
                     try:
-                        if handle is None:  # the open did not reach this caller
+                        if handle is None:  # the hold did not reach this caller
                             self._release_hold(stream_id)
                     finally:
-                        ready.set()  # waiters must wake whatever happens
+                        if ready is not None:
+                            ready.set()  # waiters must wake whatever happens
 
     def _claim(
         self,
@@ -536,7 +538,7 @@ class SessionCore:
         request: Request,
         key: StreamKey,
         *,
-        opening: list[tuple[int, threading.Event]],
+        holds: list[tuple[int, threading.Event | None]],
     ) -> StreamHandle | threading.Event | int:
         """Take a hold on the stream with `key`, find its open in progress, or register it.
 
@@ -547,8 +549,11 @@ class SessionCore:
             spec: The dataset.
             request: The normalized arguments.
             key: The stream key.
-            opening: Receives `(stream_id, ready)` of a new `OPENING` record, inside the lock
-                and before the record is registered, so the caller can always clean it up.
+            holds: Receives one `(stream_id, ready)` entry per hold this call takes, appended
+                inside the lock right after the registry stores it, so the caller cleans up
+                exactly what was taken: `(stream_id, None)` for a hold on an open stream it
+                reuses, `(stream_id, ready)` for a new `OPENING` record and the opener's hold.
+                An interrupt before the stores leaves nothing to clean up.
 
         Returns:
             The handle of an open stream, with one more hold taken on it; the `ready` event of
@@ -570,6 +575,7 @@ class SessionCore:
                     return state.ready
                 row = replace(state.row, held_results=state.row.held_results + 1)
                 self._streams[existing] = replace(state, row=row)
+                holds.append((existing, None))  # right after the store: the caller cleans up
                 self.diagnostics.write(row)
                 return state.handle
             stream_id = _next_stream_id()
@@ -584,10 +590,10 @@ class SessionCore:
                 created_at=time.time_ns(),
             )
             ready = threading.Event()
-            opening.append((stream_id, ready))  # first: the caller now cleans up whatever happens
             # No row is written until the open finishes: m.streams() has no OPENING state.
             self._streams[stream_id] = _StreamState(key, None, row, ready)
             self._stream_ids[key] = stream_id
+            holds.append((stream_id, ready))  # right after the stores: the caller cleans up
             return stream_id
 
     def _open(
@@ -598,10 +604,12 @@ class SessionCore:
         Runs with no lock held while the transport works. The caller (`_acquire`) sets the
         record's `ready` event afterwards and, if this raises anything, even
         `KeyboardInterrupt`, drops the opener's hold, which deletes a never-opened record and
-        unmaps its key; a waiting verb then opens the stream itself. A failure or a shutdown
-        the transport reported during the open has already been recorded on the record, and
-        the stream is returned as is: `blink()` returns the failed table, and the other shapes
-        raise `DHError` while the caller builds them.
+        unmaps its key; a waiting verb then opens the stream itself. If the interrupt lands
+        after the transport returned the stream but before its handle is stored in the
+        registry, nothing else knows the stream, so this method releases its scope itself. A
+        failure or a shutdown the transport reported during the open has already been
+        recorded on the record, and the stream is returned as is: `blink()` returns the failed
+        table, and the other shapes raise `DHError` while the caller builds them.
 
         Args:
             spec: The dataset.
@@ -616,16 +624,25 @@ class SessionCore:
             MassiveError: If the session was closed while the transport opened the stream; the
                 caller then releases the opener's hold, which releases the new stream's scope.
         """
-        with entered(self.exec_ctx):
-            opened = self.stream_transport().open_stream(
-                spec, request, channel, stream_id=stream_id
-            )
-        with self.registry_lock:
-            state = self._streams[stream_id]
-            row = replace(state.row, host=opened.host, path=opened.path)
-            self._streams[stream_id] = replace(state, handle=opened, row=row)
-            self.diagnostics.write(row)
-            closed = self._closed
+        opened: StreamHandle | None = None
+        stored = False
+        try:
+            with entered(self.exec_ctx):
+                opened = self.stream_transport().open_stream(
+                    spec, request, channel, stream_id=stream_id
+                )
+            with self.registry_lock:
+                state = self._streams[stream_id]
+                row = replace(state.row, host=opened.host, path=opened.path)
+                self._streams[stream_id] = replace(state, handle=opened, row=row)
+                stored = True  # from here on, releasing the opener's hold releases the stream
+                self.diagnostics.write(row)
+                closed = self._closed
+        except BaseException:
+            if opened is not None and not stored:  # the stream never reached the registry
+                with entered(self.exec_ctx):
+                    opened.scope.release()
+            raise
         if closed:
             logger.debug("%s: releasing a stream opened during close()", self.label)
             raise MassiveError(f"{self.label} was closed while a stream was opening")
