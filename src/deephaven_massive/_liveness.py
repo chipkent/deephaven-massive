@@ -372,9 +372,10 @@ class ResultRegistry:
         """Record a live result so that garbage collection or `release` frees its scope.
 
         The record is complete (its finalizer exists) before it is registered, so `release`
-        never sees a half-built record. If anything raises, even `KeyboardInterrupt`, nothing
-        is registered and the finalizer is detached, so the result is never released by the
-        library: the caller still owns `scope` and must release it.
+        never sees a half-built record. If anything raises, even `KeyboardInterrupt` (also one
+        landing right after the finalizer is created, or at the lock's exit after the insert),
+        the record is marked released and removed from the registry, so neither its finalizer
+        nor `release` ever releases it: the caller still owns `scope` and must release it.
 
         Args:
             result: The result, as returned to the user. It must be a distinct Python object
@@ -393,13 +394,16 @@ class ResultRegistry:
         # for exactly as long as the result lives, so a result that outlives every reference
         # to its session is still released when it is collected. Nothing refers to the result
         # strongly, so no cycle keeps anything alive beyond it.
-        record.finalizer = weakref.finalize(result, self._on_collected, record, key)
         try:
+            record.finalizer = weakref.finalize(result, self._on_collected, record, key)
             record.finalizer.atexit = False
             with self._lock:
                 self._results[key] = record
-        except BaseException:  # nothing is registered: the finalizer must not release it
-            record.finalizer.detach()
+        except BaseException:  # the caller releases the scope: no finalizer may release it
+            with self._lock:
+                record.released = True
+                if self._results.get(key) is record:
+                    del self._results[key]
             raise
         return record
 

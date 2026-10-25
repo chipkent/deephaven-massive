@@ -5,8 +5,10 @@ from __future__ import annotations
 import contextlib
 import gc
 import importlib
+import inspect
 import itertools
 import logging
+import sys
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
@@ -48,13 +50,16 @@ from deephaven_massive._liveness import (
 )
 from deephaven_massive._query import Request, StreamQuery
 from deephaven_massive._schema import TRADES
+from deephaven_massive._symbols import SymbolTable
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
     import functools
     from collections.abc import Callable, Iterator
+    from types import FrameType
 
     from deephaven.execution_context import ExecutionContext
+    from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
 
     from _fakes.stream import FakeStreamTransport
@@ -1486,3 +1491,142 @@ def test_a_session_start_logs_the_json_codec_once(
     assert [r.getMessage() for r in caplog.records if "JSON codec" in r.getMessage()] == [
         f"JSON codec: {codec}"
     ]
+
+
+# --- Interrupt windows inside the verb's own bookkeeping (DESIGN § 6.1) ------------------------
+
+
+def _cleanup_loop_line() -> int:
+    # The line of the first `for ... in holds` loop of `_acquire`, the success path's.
+    lines, start = inspect.getsourcelines(_session.SessionCore._acquire)
+    for offset, text in enumerate(lines):
+        if "for stream_id, ready in holds" in text or "for _, ready in holds" in text:
+            return start + offset
+    raise AssertionError("_acquire has no loop over its holds")
+
+
+@contextlib.contextmanager
+def _interrupt_at_the_cleanup_back_edge() -> Iterator[list[bool]]:
+    # Raise KeyboardInterrupt at the loop's backward jump (an eval-breaker checkpoint) once
+    # `_acquire` has the handle it is about to return. Restores the previous trace function,
+    # so a line-tracing coverage tool keeps working afterwards.
+    line = _cleanup_loop_line()
+    visits: list[int] = []
+    fired: list[bool] = []
+
+    def local(frame: FrameType, event: str, arg: object) -> object:
+        if event == "line" and frame.f_lineno == line and not fired:
+            visits.append(1)
+            got = frame.f_locals.get("handle", frame.f_locals.get("claim"))
+            if len(visits) == 2 and isinstance(got, StreamHandle):
+                fired.append(True)
+                raise KeyboardInterrupt
+        return local
+
+    def tracer(frame: FrameType, event: str, arg: object) -> object:
+        if frame.f_code is _session.SessionCore._acquire.__code__:
+            visits.clear()
+            return local
+        return None
+
+    previous = sys.gettrace()
+    sys.settrace(cast("Any", tracer))
+    try:
+        yield fired
+    finally:
+        sys.settrace(previous)
+
+
+def test_an_interrupt_while_acquire_returns_a_reused_stream_leaks_no_hold(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
+) -> None:
+    core = massive_session._core
+    first = stream_query(massive_session).blink()
+    with _interrupt_at_the_cleanup_back_edge() as fired, pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session).append_only()
+    assert fired
+    assert core._streams[1].row.held_results == 1  # only the first result's hold
+    massive_session.release(first)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+
+
+def test_an_interrupt_while_acquire_returns_a_new_stream_leaks_no_hold(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
+) -> None:
+    core = massive_session._core
+    with _interrupt_at_the_cleanup_back_edge() as fired, pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session).blink()
+    assert fired
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the opener's hold was released
+    assert core._streams == {}
+
+
+def test_an_interrupt_while_a_reactive_key_is_hashed_leaves_no_record(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Storing a reactive key hashes its SymbolTable box in Python code, an interruptible
+    # checkpoint inside _claim's stores on Pythons that do not cache a tuple's hash (3.11,
+    # 3.13). The interrupt must leave neither an OPENING record nor a key behind.
+    core = massive_session._core
+    real_hash = SymbolTable.__hash__
+    real_mint = _session._next_stream_id
+    minted: list[bool] = []
+    fired: list[bool] = []
+
+    def minting() -> int:
+        minted.append(True)
+        return real_mint()
+
+    def hashing(self: SymbolTable) -> int:
+        if minted and not fired:  # the first hash after the id is minted: inside the stores
+            fired.append(True)
+            raise KeyboardInterrupt
+        return real_hash(self)
+
+    monkeypatch.setattr(_session, "_next_stream_id", minting)
+    monkeypatch.setattr(SymbolTable, "__hash__", hashing)
+    reactive = stream_query(massive_session, new_table([string_col("Symbol", ["AAPL"])]))
+    with contextlib.suppress(KeyboardInterrupt):
+        massive_session.release(reactive.blink())
+    monkeypatch.setattr(SymbolTable, "__hash__", real_hash)
+    if not fired:
+        pytest.skip("this Python caches the key tuple's hash: no Python code runs in the stores")
+    assert core._streams == {}
+    assert core._stream_ids == {}
+
+
+def test_an_interrupt_after_make_result_releases_the_result_scope(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The interrupt lands at the exit of `entered`, after make_result returned and before the
+    # result is tracked: both the result scope and the hold are this call's to release.
+    core = massive_session._core
+    real_make = make_result
+    real_entered = entered
+    armed: list[bool] = []
+
+    def making(build: Callable[[], Table], *, wrap: bool = False) -> tuple[Table, LivenessScope]:
+        made = real_make(build, wrap=wrap)
+        armed.append(True)
+        return made
+
+    @contextlib.contextmanager
+    def interrupting_entered(exec_ctx: ExecutionContext) -> Iterator[ExecutionContext]:
+        with real_entered(exec_ctx):
+            yield exec_ctx
+        if armed:
+            armed.clear()
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(_session, "make_result", making)
+    monkeypatch.setattr(_session, "entered", interrupting_entered)
+    with pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session).append_only()
+    monkeypatch.setattr(_session, "entered", real_entered)
+    gc.collect()
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # nothing keeps the stream alive
+    assert core._streams == {}

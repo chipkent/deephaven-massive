@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from deephaven.execution_context import ExecutionContext
+    from deephaven.liveness_scope import LivenessScope
 
     from deephaven_massive._catalog import DatasetSpec
     from deephaven_massive._enums import Order
@@ -444,18 +445,21 @@ class SessionCore:
     ) -> Table:
         """Create one live result over the stream of `(spec, channel, symbols)`.
 
-        The stream is reused when one with the same key is open. When another thread is
-        opening it, this call waits for that open to finish (outside every lock) and then
-        reuses the stream, or opens it itself if that open failed. Otherwise the WebSocket
-        transport opens it here. The result is built from the stream's blink table in its own
-        result scope on this thread, inside the session's execution context, and tracked so
-        that garbage collection or `release()` frees it. If building or tracking the result
-        raises anything, even `KeyboardInterrupt`, the result scope and the stream hold are
-        released before the exception propagates. A stream that failed while it was opening
-        (or between the claim and the build) still serves `blink()`, as a failed table;
-        `append_only()`, `ring()` and `last_by()` then raise Deephaven's `DHError` ("Can not
-        listen to failed table") while shaping, with the hold released. Either way
-        `m.streams()` shows `FAILED`.
+        The stream is reused when one with the same key is open. When another thread is opening it,
+        this call waits for that open to finish (outside every lock) and then reuses the stream, or
+        opens it itself if that open failed. Otherwise the WebSocket transport opens it here. The
+        result is built from the stream's blink table in its own result scope on this thread, inside
+        the session's execution context, and tracked so that garbage collection or `release()` frees
+        it. If building or tracking the result raises anything, even `KeyboardInterrupt` (including
+        one landing between `make_result` and `track`), the result scope, if it exists, and the
+        stream hold are released before the exception propagates. Asynchronous exceptions such as
+        `KeyboardInterrupt` are handled on a best-effort basis: every window between the library's
+        own steps is covered, and the windows that remain are inside the cleanup code itself (an
+        interrupt while a hold or a scope is being released). A stream that failed while it was
+        opening (or between the claim and the build) still serves `blink()`, as a failed table;
+        `append_only()`, `ring()` and `last_by()` then raise Deephaven's `DHError` ("Can not listen
+        to failed table") while shaping, with the hold released. Either way `m.streams()` shows
+        `FAILED`.
 
         Args:
             spec: The dataset.
@@ -470,19 +474,20 @@ class SessionCore:
         key: StreamKey = (spec.name, channel, request.symbol_key())
         handle = self._acquire(spec, request, key, channel=channel)
         blink = handle.blink
+        scope: LivenessScope | None = None
         try:
             with entered(self.exec_ctx):
                 result, scope = make_result(lambda: build(blink), wrap=wrap)
+            self.results.track(
+                result, scope, functools.partial(self._release_hold, handle.stream_id)
+            )
+        except BaseException:  # nothing was tracked: the scope and the hold are this call's
             try:
-                self.results.track(
-                    result, scope, functools.partial(self._release_hold, handle.stream_id)
-                )
-            except BaseException:  # nothing was tracked: the scope is still this call's
-                with entered(self.exec_ctx):
-                    scope.release()
-                raise
-        except BaseException:  # also KeyboardInterrupt: the hold must not leak
-            self._release_hold(handle.stream_id)
+                if scope is not None:
+                    with entered(self.exec_ctx):
+                        scope.release()
+            finally:
+                self._release_hold(handle.stream_id)
             raise
         return result
 
@@ -491,13 +496,17 @@ class SessionCore:
     ) -> StreamHandle:
         """Take a hold on the stream of `key`: reuse it, wait for its open, or open it.
 
-        Every hold `_claim` takes is reported in `holds` right after it is stored, and the
-        claim and the open run inside one `try`/`finally`. So whatever interrupts them, even a
-        `KeyboardInterrupt` landing between two calls, the cleanup is exact: unless this call
-        returns the handle, each hold it took is released (a reused stream's extra hold; or the
-        opener's hold, which deletes a never-opened record and unmaps its key, or releases an
-        opened stream's scope), and a new record's `ready` event is set so waiting verbs wake.
-        Waiting happens outside every lock.
+        Every hold `_claim` takes is reported in `holds` right after it is stored, and the claim,
+        the open, and the wake-up of the waiters run inside one `try`/`except`; the handle is
+        returned after it, with no checkpoint between the `try` and the caller's own cleanup. So
+        whatever interrupts them, even a `KeyboardInterrupt` landing between two calls, the cleanup
+        is exact: each hold this call took is released (a reused stream's extra hold; or the
+        opener's hold, which deletes a never-opened record and unmaps its key, or releases an opened
+        stream's scope), and a new record's `ready` event is set so waiting verbs wake. Waiting
+        happens outside every lock. Asynchronous exceptions such as `KeyboardInterrupt` are handled
+        on a best-effort basis: every window between the library's own steps is covered, and the
+        windows that remain are inside the cleanup code itself (an interrupt while a hold or a scope
+        is being released).
 
         Args:
             spec: The dataset.
@@ -513,7 +522,6 @@ class SessionCore:
         """
         while True:
             holds: list[tuple[int, threading.Event | None]] = []
-            handle: StreamHandle | None = None
             try:
                 claim = self._claim(spec, request, key, holds=holds)
                 if isinstance(claim, threading.Event):
@@ -521,16 +529,18 @@ class SessionCore:
                     continue
                 if isinstance(claim, int):
                     claim = self._open(spec, request, channel=channel, stream_id=claim)
-                handle = claim
-                return handle
-            finally:
+                for _, ready in holds:  # inside the try: an interrupt here still cleans up
+                    if ready is not None:
+                        ready.set()
+            except BaseException:  # the hold did not reach the caller
                 for stream_id, ready in holds:
                     try:
-                        if handle is None:  # the hold did not reach this caller
-                            self._release_hold(stream_id)
+                        self._release_hold(stream_id)
                     finally:
                         if ready is not None:
                             ready.set()  # waiters must wake whatever happens
+                raise
+            return claim  # no checkpoint between the try and the caller's own cleanup
 
     def _claim(
         self,
@@ -590,9 +600,12 @@ class SessionCore:
                 created_at=time.time_ns(),
             )
             ready = threading.Event()
+            state = _StreamState(key, None, row, ready)
+            # The key first: hashing it can run Python (a SymbolTable box), so it may be
+            # interrupted; the int-keyed store and the append after it run no Python code.
             # No row is written until the open finishes: m.streams() has no OPENING state.
-            self._streams[stream_id] = _StreamState(key, None, row, ready)
             self._stream_ids[key] = stream_id
+            self._streams[stream_id] = state
             holds.append((stream_id, ready))  # right after the stores: the caller cleans up
             return stream_id
 

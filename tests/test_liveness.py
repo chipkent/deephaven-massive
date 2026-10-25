@@ -7,6 +7,7 @@ tables, so they observe exactly when Deephaven runs a stream's `on_shutdown_call
 import gc
 import logging
 import threading
+import weakref
 from collections.abc import Callable
 from typing import Any, Protocol, cast
 
@@ -551,3 +552,70 @@ def test_collection_removes_the_record_and_keeps_a_newer_one(
     assert done.wait(TIMEOUT)
     assert registry._results.get(recycled) is newer_record  # the newer record stays
     reaper.stop()
+
+
+class _InterruptingExit:
+    # Stands in for the registry's lock: raises KeyboardInterrupt at `__exit__` once a record
+    # has been stored, the checkpoint between `track`'s insert and its return.
+    def __init__(self, real: threading.RLock, registry: ResultRegistry) -> None:
+        self.real = real
+        self.registry = registry
+        self.armed = True
+
+    def __enter__(self) -> bool:
+        return self.real.__enter__()
+
+    def __exit__(self, *exc: object) -> None:
+        self.real.__exit__(None, None, None)
+        if self.armed and self.registry._results:
+            self.armed = False
+            raise KeyboardInterrupt
+
+
+def test_an_interrupt_after_the_record_is_stored_leaves_no_stale_record(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = massive_session._core.results
+    real = registry._lock
+    monkeypatch.setattr(registry, "_lock", _InterruptingExit(real, registry))
+    with pytest.raises(KeyboardInterrupt):
+        query(massive_session).blink()
+    monkeypatch.setattr(registry, "_lock", real)
+    assert registry._results == {}  # the caller released the scope: nothing stays registered
+    assert registry.held() == 0
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+
+
+def test_an_interrupt_right_after_the_finalizer_is_created_never_releases_twice(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The interrupt lands once the finalizer is attached but before `track` can manage it:
+    # the verb releases the result itself, so the finalizer must not release it again when
+    # the dead result is collected.
+    core = massive_session._core
+    first = query(massive_session).blink()
+    real = weakref.finalize
+    armed = [True]
+
+    def creating(obj: object, func: Callable[..., object], /, *args: object) -> object:
+        made = real(obj, func, *args)
+        if armed:
+            armed.clear()
+            raise KeyboardInterrupt
+        return made
+
+    monkeypatch.setattr(weakref, "finalize", creating)  # as _liveness sees it
+    with pytest.raises(KeyboardInterrupt):
+        query(massive_session).append_only()
+    monkeypatch.setattr(weakref, "finalize", real)
+    gc.collect()
+    done = threading.Event()
+    core._reaper.submit(done.set)
+    assert done.wait(TIMEOUT)
+    assert core._streams[1].row.held_results == 1  # `first` still holds the stream
+    massive_session.release(first)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)

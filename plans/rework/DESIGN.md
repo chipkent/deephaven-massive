@@ -405,9 +405,10 @@ return result
   panel, or a user scope therefore keeps the stream alive and subscribed, even after every
   library-held result has been released.
 - **Tracking is all or nothing.** `ResultRegistry.track` builds the record and its finalizer
-  before it registers the record; if anything raises, even `KeyboardInterrupt`, it detaches
-  the finalizer and registers nothing, and the verb releases the result scope and the stream
-  hold itself. A result is never released twice and never leaked.
+  before it registers the record; if anything raises, even `KeyboardInterrupt`, it marks the
+  record released and removes it, and the verb releases the result scope and the stream hold
+  itself (also when the interrupt lands between `make_result` and `track`). A result is never
+  released twice and never leaked, within the best-effort boundary above.
 - **Collection finalizer.** A `weakref.finalize` on the result fires when the Python wrapper
   is collected. It holds the result registry and the record strongly, and through them the
   reaper and the session core, for exactly as long as the result lives, so a result that
@@ -429,9 +430,12 @@ return result
   returns (`m.streams()` has no `OPENING` state). A second verb on the same key finds the
   record still opening and waits for the open to finish, on the caller thread and outside every
   lock, then reuses the stream; one open per key, never a wasted publisher. The opener's claim
-  and open run inside one `try`/`finally`, so whatever interrupts them (even a
+  and open run inside one `try`/`except`, so whatever interrupts them (even a
   `KeyboardInterrupt` landing between the two, or after the open returned) the record is
-  readied and, unless the verb got the stream, the opener's hold is released. If the open raises
+  readied and, unless the verb got the stream, the opener's hold is released. Asynchronous
+  exceptions such as `KeyboardInterrupt` are handled on a best-effort basis: every window
+  between the library's own steps (claim, open, build, track) is covered, and the windows that
+  remain are inside the cleanup code itself. If the open raises
   anything, even `KeyboardInterrupt`, the record is deleted, its key is unmapped, and the
   waiters wake and open the stream themselves. `m.close()` wakes the waiters, which raise
   `MassiveError`; the opener releases the stream when its open returns. A failure reported
