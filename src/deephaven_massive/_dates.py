@@ -142,7 +142,8 @@ def check_order(start: date | datetime, end: date | datetime) -> None:
 
     The same rule as `history()`, without a day zone (the dataset's API applies its own): two
     dates are whole days, so `end` may equal `start`; two datetimes are a half-open range, so
-    `end` must be later; a date and a datetime compare by calendar day.
+    `end` must be a later instant (compared in UTC, so the repeated hour of a daylight-saving
+    fall-back is ordered correctly); a date and a datetime compare by calendar day.
 
     Args:
         start: The parsed lower bound.
@@ -151,9 +152,10 @@ def check_order(start: date | datetime, end: date | datetime) -> None:
     Raises:
         ValueError: `start (...) must be before end (...)` if the range is empty.
     """
-    both_times = isinstance(start, datetime) and isinstance(end, datetime)
-    if both_times:
-        empty = start >= end
+    if isinstance(start, datetime) and isinstance(end, datetime):
+        # In UTC: two datetimes sharing one tzinfo compare by wall clock and ignore `fold`, which
+        # misorders the repeated hour of a daylight-saving fall-back.
+        empty = start.astimezone(UTC) >= end.astimezone(UTC)
     else:
         first = start.date() if isinstance(start, datetime) else start
         last = end.date() if isinstance(end, datetime) else end

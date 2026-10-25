@@ -14,6 +14,7 @@ from deephaven_massive._dates import (
     FuturesSessions,
     TimeRange,
     bounds,
+    check_order,
     flat_file_published,
     futures_sessions,
     history_range,
@@ -284,3 +285,13 @@ def test_epoch_ns_of_a_mid_day_instant() -> None:
     # 2025-03-03T00:00Z is 1_740_960_000 s; 14:30:15.25 is 52_215.25 s later, 15:00 is 54_000.
     assert window.start_ns == 1_741_012_215_250_000_000
     assert window.end_ns == 1_741_014_000_000_000_000
+
+
+def test_time_axis_order_compares_instants_across_the_fall_back_hour() -> None:
+    # 01:30 EDT (fold=0) comes 45 minutes before 01:15 EST (fold=1) on 2025-11-02; compared by
+    # wall clock (same tzinfo) the pair would look reversed.
+    first = datetime(2025, 11, 2, 1, 30, tzinfo=NEW_YORK)
+    later = datetime(2025, 11, 2, 1, 15, fold=1, tzinfo=NEW_YORK)
+    check_order(first, later)
+    with pytest.raises(ValueError, match="must be before end"):
+        check_order(later, first)
