@@ -2,7 +2,7 @@
 
 Reference material gathered while planning the rework. `PLAN.md` and `DESIGN.md` cite these appendices by letter. They record the state of the code, the SDK, and the Massive documentation as of 2026-10-23. Where they conflict with `DESIGN.md`, `DESIGN.md` wins. This file is temporary, like the rest of `plans/rework/`.
 
-Line citations into this repository (for example `session.py:208` or `pyproject.toml:18`) refer to the code as of b44fe5c, the commit that added this document. Much of that code has since been moved or deleted; read it with `git show b44fe5c:<path>`.
+Line citations into this repository refer to the code as of b44fe5c, the commit that added this document. Bare module paths such as `session.py:208` or `domains/base.py` are relative to `src/deephaven_massive/`; paths such as `pyproject.toml:18` or `tests/test_domains.py` are relative to the repository root. Much of that code has since been moved or deleted; read it with the full path, for example `git show b44fe5c:src/deephaven_massive/session.py`.
 
 ## Contents
 
