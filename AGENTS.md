@@ -34,10 +34,11 @@ The library does not build on Massive's Python SDK (`massive`). It has its own R
 WebSocket clients, and its REST parameters and columns are generated from a vendored snapshot of
 Massive's OpenAPI spec (`DESIGN.md` § 19); until the `PLAN.md` package PC4 lands, the old
 dependency is still installed. Never add an import of `massive` (ruff's `banned-api` rejects it
-once the dependency is gone). Never edit a generated file by hand: `restspec.json` changes only
-through `scripts/refresh_massive_spec.py`, and the name lock only through that refresh and its
-`ALIASES` and `BREAKING_RENAMES` inputs. Never change or remove a shipped column name or type
-without an owner-approved `BREAKING_RENAMES` entry.
+once the dependency is gone). Never edit `restspec.json` by hand: it changes only through
+`scripts/refresh_massive_spec.py`. The name lock is written by that refresh, which never renames
+an existing entry; renaming, retyping, or removing an entry by hand is an ordinary edit,
+reviewed as a diff in its PR. The library has no users, so nothing is kept or shimmed for
+compatibility.
 
 ## Hard rules
 

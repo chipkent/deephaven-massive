@@ -58,7 +58,9 @@ from a pinned snapshot of Massive's OpenAPI spec. All of that lives in one priva
 ([section 19](#19-wire-clients-and-the-spec-snapshot)). The runtime dependencies are
 `deephaven-core`, `pyarrow`, `boto3` (flat files), `urllib3`, `websockets`, and `certifi`.
 
-There are no existing users. Backward compatibility with the previous code base is not a goal.
+There are no existing users. Backward compatibility with the previous code base is not a goal,
+and nothing in this design exists to avoid breaking a user: no compatibility shim, no
+deprecation path, and no rule that rests on the chance of breaking someone.
 
 ## 2. Principles and terms
 
@@ -1730,8 +1732,8 @@ src/deephaven_massive/_massive/
     │                  the identity entries, the WebSocket-only names
     ├── wskeys.py      the WebSocket key maps, one per (cluster path, channel)
     ├── flatkeys.py    the flat-file key maps, one per prefix
-    ├── lock.py        loading, appending, and comparing the lock; ALIASES; BREAKING_RENAMES
-    └── locks/         data: <domain>.json, one append-only lock per domain module
+    ├── lock.py        loading, updating, and comparing the lock
+    └── locks/         data: <domain>.json, one lock per domain module
 ```
 
 **The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these names:
@@ -1961,7 +1963,6 @@ The other vendored sources are cross-checks only:
   `x-polygon-go-type` tag (the 20 indicator `IMicroseconds` tags first).
 - `_massive/names/lexicon.py`, `wskeys.py`, `flatkeys.py`: the lexicons, the WebSocket key maps,
   and the flat-file key maps (each key with its column and `WireType`).
-- `_massive/names/lock.py`: `ALIASES` and `BREAKING_RENAMES` (below).
 
 They are complete for every path, channel, and prefix that § 8 uses, so a dataset package never
 edits them.
@@ -1995,7 +1996,7 @@ outside `_massive`'s allowed imports, so the script does it). Its modes:
 |---|---|---|
 | `--check` | yes | Downloads the live `openapi.json`, `websocket.json`, `llms.txt`, and flat-file pages into a temporary directory and runs the semantic comparison of `_massive/spec/drift.py`. Against the vendored snapshot it reports REST paths new, removed, or newly deprecated; response fields and parameters added, removed, or retyped; WebSocket channels and keys added or removed; CSV headers added, removed, or renamed in a known flat file's page; and the keys the naming gate would stop on. Against the allow-list and `EXCLUSIONS` it reports **unaccounted items**: documented REST endpoints (spec or `llms.txt`), WebSocket channels, and flat-file pages that are neither allow-listed nor excluded, plus, when `s3_prefixes` is given, bucket prefixes that no `flatkeys.py` entry or exclusion names (CI has no S3 credentials, so there it relies on the pages). JSON is compared canonically (`sort_keys`) and text normalized, so reordering and volatile fields are never reported. It prints a report, changes nothing, and exits non-zero when it finds drift or unaccounted items. |
 | `--fetch` | yes | Replaces the vendored snapshot with the live sources and records their fetch date and SHA-256 in `manifest.json`. |
-| (none) | no | Regenerates `restspec.json` from the vendored snapshot and appends new name-lock entries. |
+| (none) | no | Regenerates `restspec.json` from the vendored snapshot and updates the name locks: new wire paths get entries, and entries whose wire path left the spec are removed. |
 | `--verify` | no | Exits non-zero when the regeneration would change anything (the parity test runs the same comparison). |
 
 **The generator.** For each allow-listed path it:
@@ -2064,25 +2065,22 @@ every transport `(dataset, transport, wire path) -> (column, WireType)`:
                    "ws": {"p": {"column": "Price", "type": "double"}}}}
 ```
 
-It is written canonically (sorted keys, a one-space indent, a trailing newline), so every refresh
-diff is a pure addition. REST entries are appended from the rule above; WebSocket and flat-file
+It is written canonically (sorted keys, a one-space indent, a trailing newline), so each change
+reads as a small diff. REST entries are proposed by the rule above; WebSocket and flat-file
 entries are copied from the key maps. A dataset's schema is derived from its lock entries,
-column types included ([section 4.1](#41-source-modules), `_schema.dataset_schema`). Once a name ships,
-the lock outranks the spec and the rule:
+column types included ([section 4.1](#41-source-modules), `_schema.dataset_schema`), so a change
+of name or type at Massive always shows up in the lock diff. The lock exists for correctness:
+every name is chosen by a person, the generator refuses to guess, and a refresh never renames a
+column silently.
 
-- The generator never recomputes an existing entry, so a lexicon edit cannot silently rename a
-  shipped column.
-- The lock is never edited by hand. Two hand-written inputs in `lock.py` change it through the
-  refresh, each entry carrying its reason and PR:
-  - `ALIASES[(dataset, transport, new wire path)] = old wire path`: a wire key that Massive
-    renamed gets an entry naming the old column. An alias is exempt from the collision gate only
-    when the old key is absent from the current snapshot.
-  - `BREAKING_RENAMES[(dataset, transport, wire path)] = (old, new, "PR #n")`: an owner-approved
-    change of a shipped column's name or type.
-- A wire key that Massive removes keeps its entry, so its column stays, typed from the lock, and
-  is null.
+- The generator never recomputes an existing entry, so a lexicon edit or a spec refresh cannot
+  rename a column without a visible diff.
 - A new readable field gets its entry automatically when a dataset's path exposes it, and the
   reviewer sees it in the lock diff. A description-only change produces no lock diff.
+- A wire key that leaves the spec loses its entry in the refresh, and its column leaves the
+  schema; a key that Massive renames is a removed entry plus a new one.
+- Renaming, retyping, or removing an entry by hand is an ordinary edit, reviewed as a diff in
+  its PR.
 
 The tests that keep this honest:
 
@@ -2105,16 +2103,10 @@ The tests that keep this honest:
 - **Accounted for, inside `_massive`** (`tests/_massive/spec/test_allowlist.py`): the pinned
   snapshot has no unaccounted items; every documented REST path, WebSocket channel, and
   flat-file prefix is allow-listed or on `EXCLUSIONS`.
-- **Compatibility** (`tests/_massive/names/test_lock.py`): the lock at the **last release tag**
-  is compared with the current lock, and any changed or removed entry, a changed type included,
-  fails the test unless `BREAKING_RENAMES` lists it. The test first runs
-  `git rev-parse --is-shallow-repository` and fails on a shallow clone; the baseline is then
-  `git describe --tags --abbrev=0 --match 'v[0-9]*'`, and with no such tag (before the first
-  release) it passes. CI checks out the full history.
 
 **The refresh flow.** The drift job ([section 20](#20-quality-gates)) runs `--check` and opens an
 issue from its report. A person runs `--fetch`, then the plain refresh, reviews three diffs (the
-snapshot, `restspec.json`, and the lock), adds a lexicon, alias, or unit line where the
+snapshot, `restspec.json`, and the lock), adds a lexicon or unit line where the
 generator asks for one, and lands the result as one PR. A new endpoint additionally needs its
 path on the allow-list and a `DatasetSpec`.
 
@@ -2134,10 +2126,9 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
 - **Layout:** `tests/test_layout.py` (the mirror rule and the `_massive` import boundary of
   [section 19](#19-wire-clients-and-the-spec-snapshot)) and `tests/test_catalog.py` pass.
 - **Spec:** the parity test (`restspec.json` equals what the vendored snapshot generates), the
-  completeness checks (no unaccounted documented endpoint, channel, or flat-file prefix), and the
-  name-lock compatibility test
-  ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)) pass. They read only
-  vendored files and git history, never the network.
+  completeness checks (no unaccounted documented endpoint, channel, or flat-file prefix), and
+  the lock tests ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)) pass.
+  They read only vendored files, never the network.
 - **Process:** conventional-commit titles; every change lands through a pull request; only the
   owner merges.
 
@@ -2158,7 +2149,7 @@ documentation pages alone.
   - **field, type, and column changes** (response fields and parameters added, removed, or
     retyped; WebSocket keys added or removed; CSV headers changed; keys the naming gate would
     stop on): run `refresh_massive_spec.py --fetch` and the plain refresh, adding a lexicon,
-    alias, or unit line where the generator asks;
+    or unit line where the generator asks;
   - **deprecations** (an allow-listed path newly deprecated or removed): replace the dataset's
     path or move it to `EXCLUSIONS` with a reason.
 - It has `permissions: issues: write` only, never pushes, never opens a pull request, and is
@@ -2208,8 +2199,7 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   `uv sync --upgrade`, so they use the newest versions; offline, a local run warns and keeps
   what is installed, and CI fails. The fast tier then runs ruff fix, ruff format, and mypy; the
   full tier adds pytest with coverage. Local hooks and CI call the same script; CI passes
-  `--output-format github` to ruff. CI checks out the full history with tags, which the
-  name-lock compatibility test needs.
+  `--output-format github` to ruff.
 - **Agent hooks** (committed `.claude/settings.json`). After an agent edits a `.py` file, ruff
   fixes and formats it and reports remaining diagnostics to the agent. Before an agent ends its
   turn, `scripts/check.sh fast --no-fix` runs. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip`
@@ -2415,16 +2405,16 @@ document already reflects them.
     messages, and a query's dataset and arguments only in its repr. The public surface stays
     exactly the verbs and namespaces, and the API key stays out of objects users routinely
     leave in console globals.
-22. **Column names come from a committed, append-only name lock** (2026-10-26). Fields come
+22. **Column names come from a committed name lock** (2026-10-26). Fields come
     from the spec; names come from the lock, `(dataset, transport, wire path) -> column`, filled
     by the rule of [section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock): drop
     the result key, apply `Symbol`, `Timestamp`, and `Underlying`, translate abbreviated keys
     through per-record-family lexicons of Massive's own long-form names, then PascalCase. The
     refresh fails instead of guessing on an unknown key of three characters or fewer and on a
-    PascalCase collision. Names are never derived from descriptions. A compatibility test against
-    the lock at the last release tag fails on any changed or removed name unless an
-    owner-approved `BREAKING_RENAMES` entry lists it; a renamed wire key is aliased to the old
-    column. The snapshot `min` object's columns are `Minute…`. WebSocket-only names: `av` →
+    PascalCase collision. Names are never derived from descriptions, and a refresh never
+    renames a column silently; renaming, retyping, or removing an entry is an ordinary edit,
+    reviewed as a diff. The library has no users, so no rule guards existing names. The snapshot
+    `min` object's columns are `Minute…`. WebSocket-only names: `av` →
     `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`, aggregate `z` →
     `AverageTradeSize`, `dav` → `AccumulatedDollarVolume`.
 23. **Spec drift is reported, not gated** (2026-10-26). A weekly workflow runs

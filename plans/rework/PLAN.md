@@ -226,7 +226,7 @@ skeleton created in P2 is designed so that later packages own disjoint files:
   snapshot, exclusions, unit table, lexicons, and key maps are complete for every path, channel,
   and prefix DESIGN § 8 uses when PC3b merges. A domain package runs
   `scripts/refresh_massive_spec.py` offline with the snapshot unchanged, which leaves
-  `_massive/spec/restspec.json` as it is and only appends its datasets' entries to its own lock file,
+  `_massive/spec/restspec.json` as it is and only adds its datasets' entries to its own lock file,
   `_massive/names/locks/<domain>.json`, the one generated file a domain package owns. PC3b delivers the
   lexicons for every allow-listed path, so a domain refresh never needs a lexicon edit; if one
   does, land it first in a separate PR.
@@ -1053,7 +1053,7 @@ gates, the drift workflow, the wheel exclusion).
       modes `--check`, `--fetch`, plain regeneration, and `--verify`. It imports `DatasetWire`
       and the other value types from `spec/types.py` (PC1a), never the reverse; in PC3a the
       script passes no records,
-      and lock appending comes in PC3b.
+      and lock updating comes in PC3b.
 - [ ] `spec/__init__.py`: load `restspec.json` once into frozen dataclasses; the cross-check
       readers, which raise `WireError` when the snapshot is absent (an installed wheel).
 - [ ] `drift.py`: the semantic comparison of a live fetch with the snapshot (canonical JSON,
@@ -1118,8 +1118,7 @@ lazy schemas, and a catalog that imports without Deephaven. Remove every SDK-der
 
 **DESIGN sections implemented.**
 [§ 19.3 The spec snapshot, the generator, and the name lock](DESIGN.md#193-the-spec-snapshot-the-generator-and-the-name-lock)
-(the naming rule, the lock, `ALIASES`, `BREAKING_RENAMES`, the completeness and compatibility
-tests); [§ 3 Exports](DESIGN.md#3-exports) and [§ 4.1 Source modules](DESIGN.md#41-source-modules)
+(the naming rule, the lock, the completeness tests); [§ 3 Exports](DESIGN.md#3-exports) and [§ 4.1 Source modules](DESIGN.md#41-source-modules)
 (`_datasets/`, the role paths, the Deephaven-free layer; the lazy `__init__.py` is PC1a's);
 [§ 9 Filters](DESIGN.md#9-filters); [§ 11 Enums and types](DESIGN.md#11-enums-and-types);
 [§ 12 Timestamp units and day boundaries](DESIGN.md#12-timestamp-units-and-day-boundaries)
@@ -1137,15 +1136,14 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
     `DATASETS = ()`);
   - their mirrors under `tests/_massive/names/` and `tests/_datasets/`.
 - Modify: `_massive/__init__.py` (PC3b's block: `column_names`, `ws_key_map`,
-  `flatfile_key_map`), `_massive/spec/generate.py` (lock appending) and `drift.py`
+  `flatfile_key_map`), `_massive/spec/generate.py` (lock updating) and `drift.py`
   (channels and flat-file prefixes join the allow-list that unaccounted items are counted
   against, with `EXCLUSIONS`; `DatasetWire`s play no part in it), `scripts/refresh_massive_spec.py`
   (pass `_catalog.dataset_wires()`), `_catalog.py`, `_schema.py`, `_timeunits.py`, `_enums.py` (`QueryKind`), `_query.py` and
   `_sources.py` (role paths), `_flatfiles.py` (key maps from `_massive.flatfile_key_map`),
   `_domains/*.py` (records come from `_datasets`), and their tests (`tests/test_catalog.py`,
   `tests/test_schema.py`, `tests/test_timeunits.py`, `tests/test_enums.py`,
-  `tests/test_query.py`, `tests/test_sources.py`, `tests/test_flatfiles.py`), and
-  `.github/workflows/ci.yml` (check out the full history with tags for the compatibility test).
+  `tests/test_query.py`, `tests/test_sources.py`, `tests/test_flatfiles.py`).
 - Delete: none.
 
 **Tasks.**
@@ -1159,16 +1157,12 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
 - [ ] `flatkeys.py`: the flat-file key maps, with types, of every prefix § 8 uses, each mapped to
       its documentation page, moved out of `_schema.py` and `_flatfiles.py`; checked against the
       documented headers.
-- [ ] `lock.py`: canonical loading, appending, and comparing; `ALIASES` (an alias exempt from the
-      collision gate only when the old key is absent from the snapshot) and `BREAKING_RENAMES`
-      (names and types), both empty; the compatibility test against the lock at the last
-      release tag in `tests/_massive/names/test_lock.py`, failing on a changed name or type,
-      with the shallow-clone and no-tag rules of DESIGN § 19.3 (the comparison is a pure
-      function tested directly; its git read is tested against a temporary repository made with
-      `git init`).
+- [ ] `lock.py`: canonical loading, updating (new entries added, entries whose wire path left
+      the spec removed, existing entries never recomputed), and comparing, with tests in
+      `tests/_massive/names/test_lock.py`.
 - [ ] `generate.py`: the naming rule and its gate (short unknown key; PascalCase collision) with
-      the description-match suggestion, and lock appending from `DatasetWire` records, applying
-      `ALIASES` and `BREAKING_RENAMES`. `drift.py` and the accounted-for test: channels
+      the description-match suggestion, and lock updating from `DatasetWire` records.
+      `drift.py` and the accounted-for test: channels
       (`wskeys.py`) and flat-file prefixes (`flatkeys.py`) join the allow-list.
 - [ ] `unused_allowlisted(wires, namespace=None)` in the wire package, tested on synthetic
       `DatasetWire` declarations (none used, some used, one namespace filtered). With every
@@ -1195,8 +1189,7 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
       keyed by wire path), and `KeyMap`; add the `WireType` → `ColumnType` mapping and
       `dataset_schema(spec)` (lazy, cached, from the lock); make `Schema.to_arrow` columnar;
       apply the owner's names: `AggregateVwap` becomes `DayVwap`, `AverageSize` becomes
-      `AverageTradeSize`, and `BARS` gains `AccumulatedDollarVolume` (`dav`). No release has
-      shipped, so these renames need no `BREAKING_RENAMES` entry.
+      `AverageTradeSize`, and `BARS` gains `AccumulatedDollarVolume` (`dav`).
 - [ ] `_timeunits.py`: units from `_massive.wire_unit`; it keeps conversion, the FMV rule, and
       the guard.
 - [ ] `_query.py` and `_sources.py`: read the role paths and `has_rest_history` /
@@ -1208,14 +1201,13 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
 - [ ] `tests/test_enums.py`: compare the public enums with the parameter enums of the generated
       table instead of the SDK's enums. `tests/test_schema.py`: replace the SDK-model tests; no
       test imports `massive`.
-- [ ] `ci.yml`: `fetch-depth: 0` on the checkout of the test jobs.
 
 **Acceptance criteria.**
 - [ ] `git grep -nE "^(from|import) massive" -- src tests ':!tests/legacy'` is empty.
 - [ ] The boundary test and the Deephaven-free subprocess test pass.
 - [ ] Negative tests: an unknown short key fails the refresh and prints its suggestion; a
-      PascalCase collision fails; a changed lock name or type without a `BREAKING_RENAMES`
-      entry fails the compatibility test; a documented endpoint neither allow-listed nor
+      PascalCase collision fails; a refresh never recomputes an existing lock entry; a
+      documented endpoint neither allow-listed nor
       excluded fails `tests/_massive/spec/test_allowlist.py` as unaccounted.
 - [ ] `uv run python scripts/refresh_massive_spec.py --verify` exits 0, with no JVM.
 - [ ] `./scripts/check.sh` green; CI green on all five test jobs.
@@ -1744,7 +1736,7 @@ needs a change, land it first in a separate `refactor:` PR.
       `PollMode`, page size. Key maps and timestamp units come from the wire package
       (`_massive.ws_key_map`, `flatfile_key_map`, `wire_unit`) and are never edited here.
 - [ ] Run `uv run python scripts/refresh_massive_spec.py` (offline). With the snapshot unchanged
-      it leaves `_massive/spec/restspec.json` as it is and appends the domain's datasets to
+      it leaves `_massive/spec/restspec.json` as it is and adds the domain's datasets to
       `_massive/names/locks/<domain>.json`; review every new column name in the lock diff. If the gate stops
       on an unknown short key or a collision, the lexicon in `_massive/names/lexicon.py` needs a line: land it
       first in a separate PR (DESIGN § 19.3).
@@ -1774,8 +1766,8 @@ needs a change, land it first in a separate `refactor:` PR.
 - [ ] Every allow-listed item of this namespace is declared: `tests/_datasets/test_<domain>.py`
       asserts that `_massive.unused_allowlisted(_catalog.dataset_wires(), namespace=<ns>)` is
       empty (in the domain's own test file, so parallel P6 packages never share an edit).
-- [ ] The name-lock completeness tests in `tests/test_catalog.py` and the compatibility test in
-      `tests/_massive/names/test_lock.py` pass with the domain's new entries (DESIGN § 19.3).
+- [ ] The name-lock completeness tests in `tests/test_catalog.py` pass with the domain's new
+      entries (DESIGN § 19.3).
 - [ ] No fallback chains (`_first_present`, `row.get("a") or row.get("b")`) in the module.
 - [ ] `./scripts/check.sh` green; CI green on all five test jobs.
 
