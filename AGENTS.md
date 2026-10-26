@@ -17,6 +17,10 @@ uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once p
 ./scripts/check.sh fast --no-fix           # report only (what CI's lint job and the commit hook run)
 uv run pytest tests/test_layout.py -q      # one file, no coverage, debugger-friendly
 uv build                                   # sdist and wheel
+uv run python scripts/refresh_massive_spec.py --check    # live: report Massive API drift; changes nothing
+uv run python scripts/refresh_massive_spec.py --verify   # offline: generated table and locks are current
+uv run python scripts/refresh_massive_spec.py --fetch    # replace the vendored snapshot (then refresh)
+uv run python scripts/refresh_massive_spec.py            # regenerate restspec.json, append lock entries
 ```
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
@@ -29,10 +33,11 @@ instead.
 The library does not build on Massive's Python SDK (`massive`). It has its own REST and
 WebSocket clients, and its REST parameters and columns are generated from a vendored snapshot of
 Massive's OpenAPI spec (`DESIGN.md` § 19); until the `PLAN.md` packages PC1–PC4 land, the old
-dependency is still installed. Never add an import of `massive`. Never edit a generated file by
-hand; regenerate it with `scripts/refresh_massive_spec.py`. Column names come from the
-append-only name lock: never change or remove a shipped name without an owner-approved
-`BREAKING_RENAMES` entry.
+dependency is still installed. Never add an import of `massive` (ruff's `banned-api` rejects it
+once the dependency is gone). Never edit a generated file by hand: `restspec.json` changes only
+through `scripts/refresh_massive_spec.py`, and the name lock only through that refresh and its
+`ALIASES` and `BREAKING_RENAMES` inputs. Never change or remove a shipped column name or type
+without an owner-approved `BREAKING_RENAMES` entry.
 
 ## Hard rules
 
@@ -72,13 +77,15 @@ append-only name lock: never change or remove a shipped name without an owner-ap
     default, or table semantics updates `DESIGN.md` first (owner decision).
 12. **Dependencies** (the declarations in `pyproject.toml`) change only in dedicated
     `chore(deps):` PRs. `uv.lock` is not committed: every sync resolves the newest versions.
-13. **The Massive API lives in one package.** Everything that talks to Massive's REST or
-    WebSocket API or describes its wire format (the clients, the spec snapshot, the generator,
-    the generated REST table, the lexicons, the WebSocket key maps, the name lock) lives in
-    `src/deephaven_massive/_api/`. `_api` imports nothing from `deephaven` or from the rest of
-    the library; everything else imports only `deephaven_massive._api` (its interface), never a
-    submodule, and never `urllib3`, `websockets`, or `certifi`. The import-boundary test in
-    `tests/test_layout.py` enforces both directions. Its tests mirror it under `tests/_api/`.
+13. **Massive's wire format lives in one package.** Everything that talks to Massive's REST or
+    WebSocket API or describes its wire format (the clients, frame decoding, the spec snapshot,
+    the generator, the generated REST table, the lexicons, the WebSocket and flat-file key maps,
+    the wire-field unit table, the name lock) lives in `src/deephaven_massive/_massive/`.
+    `_massive` imports nothing from `deephaven` or from the rest of the library. Everything else
+    imports only `deephaven_massive._massive` and uses only the names in its `__all__`: never a
+    submodule (by `import`, relative import, or `importlib`), never `urllib3`, `websockets`, or
+    `certifi`, and never a snapshot file. The import-boundary test in `tests/test_layout.py`
+    enforces both directions. Its tests mirror it under `tests/_massive/`.
 
 ## Documentation standard
 
