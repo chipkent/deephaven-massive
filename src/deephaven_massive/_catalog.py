@@ -3,10 +3,10 @@
 Every dataset (`m.stocks.trades`, `m.reference.news`, ...) is described once, declaratively, by
 a `DatasetSpec` in its namespace module under `_namespaces/`. Each of those modules exports
 `DATASETS: tuple[DatasetSpec, ...]`, and this module composes them from a *fixed* module list,
-`DOMAIN_MODULES`, so that adding a dataset never touches a shared file: the time-unit table,
+`NAMESPACE_MODULES`, so that adding a dataset never touches a shared file: the time-unit table,
 the schema registry, and the coverage tests are all derived from the specs.
 
-The composition is lazy (`datasets()`, `time_units()`): the domain modules import this module
+The composition is lazy (`datasets()`, `time_units()`): the namespace modules import this module
 for `DatasetSpec`, so importing them here at module level would be a cycle.
 
 `SDK_PARAMS` is the table of every filter parameter each SDK `RESTClient` method accepts, keyed
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from deephaven_massive._schema import ColumnOverride, KeyMap
 
 __all__ = [
-    "DOMAIN_MODULES",
+    "NAMESPACE_MODULES",
     "SCHEMA_FROM_MODEL",
     "SDK_PARAMS",
     "DatasetSpec",
@@ -54,7 +54,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-DOMAIN_MODULES: Final = (
+NAMESPACE_MODULES: Final = (
     "stocks",
     "options",
     "futures",
@@ -400,7 +400,7 @@ def _is_date(kind: ParamKind, value: object) -> bool:
 def datasets() -> Mapping[str, DatasetSpec]:
     """Return every dataset of every namespace module, keyed by dataset name.
 
-    Imports each module of `DOMAIN_MODULES` on first call and caches the result for the life of
+    Imports each module of `NAMESPACE_MODULES` on first call and caches the result for the life of
     the process.
 
     Returns:
@@ -410,7 +410,7 @@ def datasets() -> Mapping[str, DatasetSpec]:
         ValueError: If two modules declare the same dataset name.
     """
     found: dict[str, DatasetSpec] = {}
-    for module_name in DOMAIN_MODULES:
+    for module_name in NAMESPACE_MODULES:
         module = importlib.import_module(f"deephaven_massive._namespaces.{module_name}")
         specs: tuple[DatasetSpec, ...] = module.DATASETS
         for spec in specs:
