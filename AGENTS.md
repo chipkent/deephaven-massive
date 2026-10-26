@@ -84,12 +84,14 @@ anything with behavior worth knowing is a defect, not brevity.
 These are the rules that keep the library free of deadlocks and leaks (`DESIGN.md` § 6.1, § 18).
 
 - **Enter the execution context on every library thread.** The session captures the caller's
-  `ExecutionContext` at construction; every library thread enters it before any Deephaven call.
-  Without it, Deephaven raises `No execution context`.
-- **Lock order is the update-graph (UG) lock, then `_registry_lock`.** `_registry_lock` is a
+  `ExecutionContext` at construction; every library thread enters it before any Deephaven call,
+  through a fresh wrapper (`with entered(exec_ctx):`), never a shared one: a shared wrapper entered
+  on two threads at once loses one thread's context. Without it, Deephaven raises
+  `No execution context`.
+- **Lock order is the update-graph (UG) lock, then `registry_lock`.** `registry_lock` is a
   leaf lock: while holding it, make no Deephaven call, no network call, and no blocking wait.
   Table operations such as `where_in`, `last_by`, `Table.snapshot()`, and
-  `deephaven.arrow.to_table` may take the UG lock, so never run them under `_registry_lock`.
+  `deephaven.arrow.to_table` may take the UG lock, so never run them under `registry_lock`.
 - **Never block inside a table listener.** Listeners run on a UG thread with the UG lock held.
   Compute the diff, hand it to a worker, and return. No table operations, no I/O, no waiting on
   library threads. Verbs called on a UG thread raise `ValueError`.
@@ -107,8 +109,10 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 ## Testing with the embedded JVM
 
 - `tests/conftest.py` starts one embedded Deephaven server per process in `pytest_configure`,
-  before collection, with a 25 ms update-graph cycle. Never start or stop another `Server`.
-  Test modules may import `deephaven` at module level.
+  before collection, with a 25 ms update-graph cycle
+  (`PeriodicUpdateGraph.targetCycleDurationMillis`, checked at startup because the JVM
+  silently ignores an unknown property). Never start or stop another `Server`. Test modules
+  may import `deephaven` at module level.
 - `pytest_configure` runs `trylast` so the JVM installs its signal handlers after pytest's
   faulthandler. The JVM raises SIGSEGV on purpose; in the other order the first one kills the
   process. A `hs_err_pid*.log` file means the JVM crashed: investigate it, do not ignore it.
@@ -138,4 +142,4 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | SDK fork (`chipkent/massive-client-python`) | `DESIGN.md` § 19 |
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
 | Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
-| Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `config.py`, `session.py`, `tests/legacy/`; every exclusion carries the grep-able legacy-exclusion marker |
+| Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `tests/legacy/`; every exclusion carries the grep-able legacy-exclusion marker |

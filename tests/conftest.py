@@ -16,6 +16,7 @@ import gzip
 import importlib
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,19 +24,26 @@ import pytest
 from deephaven_server import Server
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+
+    from _fakes.stream import FakeStreamTransport
+    from deephaven_massive import MassiveSession
 
 collect_ignore_glob = ["legacy/*"]  # LEGACY-EXCLUSION: legacy tests, deleted in P7
 
 _DATA_DIR = Path(__file__).parent / "data"
 
+_CYCLE_MILLIS = 25
+"""The update-graph cycle of the test JVM, in milliseconds (Deephaven's default is 1000)."""
+
 _JVM_ARGS = [
     "-Xmx2g",
-    # A 25 ms update-graph cycle (default 1 s) keeps ticking-table tests fast.
-    "-DPeriodicUpdateGraph.defaultRefreshIntervalMillis=25",
+    # A short update-graph cycle keeps ticking-table tests fast. pytest_configure checks that
+    # the JVM applied it: an unknown property is silently ignored.
+    f"-DPeriodicUpdateGraph.targetCycleDurationMillis={_CYCLE_MILLIS}",
 ]
 
 
@@ -48,12 +56,24 @@ _JVM_ARGS = [
 def pytest_configure(config: pytest.Config) -> None:
     """Start the embedded Deephaven server once per process, before collection.
 
+    Then check that the update graph runs the 25 ms cycle the tests are written for.
+
     Args:
         config: The pytest configuration (unused; required by the hook signature).
+
+    Raises:
+        pytest.UsageError: If the JVM did not apply the cycle property.
     """
     # Port 0 asks the OS for an ephemeral port, so two test runs can share a machine.
     Server(port=0, jvm_args=_JVM_ARGS).start()
     atexit.register(_final_jvm_exit)
+    jpy = importlib.import_module("jpy")
+    execution_context = importlib.import_module("deephaven.execution_context")
+    periodic = jpy.get_type("io.deephaven.engine.updategraph.impl.PeriodicUpdateGraph")
+    j_update_graph = execution_context.get_exec_ctx().update_graph.j_update_graph
+    cycle = int(jpy.cast(j_update_graph, periodic).getTargetCycleDurationMillis())
+    if cycle != _CYCLE_MILLIS:
+        raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {_CYCLE_MILLIS} ms")
 
 
 # --- JVM shutdown workaround -------------------------------------------------------------------
@@ -143,3 +163,86 @@ def make_csv_gz() -> Callable[[str], bytes]:
         return gzip.compress(csv_text.encode())
 
     return compress
+
+
+# --- Session fixtures (P2) ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def massive_session() -> Iterator[MassiveSession]:
+    """Yield a `MassiveSession` with a test key, closed at teardown.
+
+    Yields:
+        An open session on the embedded server's execution context.
+    """
+    dm = importlib.import_module("deephaven_massive")
+    session: MassiveSession = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
+    yield session
+    session.close()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Number each test's streams from 1, so tests can name them by id.
+
+    Stream ids are process-unique in the library (a module-level counter in `_session.py`);
+    each test gets a fresh counter.
+    """
+    session = importlib.import_module("deephaven_massive._session")
+    itertools = importlib.import_module("itertools")
+    monkeypatch.setattr(session, "_stream_numbers", itertools.count(1))
+
+
+@pytest.fixture
+def fake_streams(
+    massive_session: MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> FakeStreamTransport:
+    """Install a `FakeStreamTransport` (`tests/_fakes/stream.py`) as the stream factory hook.
+
+    Returns:
+        The fake, for inspecting opened streams and shutdown callbacks.
+    """
+    stream = importlib.import_module("_fakes.stream")
+    fake: FakeStreamTransport = stream.FakeStreamTransport(massive_session._core)
+    monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake)
+    return fake
+
+
+@pytest.fixture
+def drain(massive_session: MassiveSession) -> Callable[[], None]:
+    """Return a function that waits until the session's background work has caught up.
+
+    It waits for every reaper job queued so far (result releases), then for every diagnostics
+    row queued so far, so a test can read `m.streams()` deterministically.
+
+    Returns:
+        The waiting function; it fails the test after 10 seconds.
+    """
+
+    def wait() -> None:
+        core = massive_session._core
+        released = threading.Event()
+        core._reaper.submit(released.set)
+        assert released.wait(10.0)
+        assert core.diagnostics.barrier().wait(30.0)
+
+    return wait
+
+
+@pytest.fixture
+def stream_rows(
+    massive_session: MassiveSession,
+    drain: Callable[[], None],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[], list[dict[str, Any]]]:
+    """Return a function that drains the session and reads `m.streams()`, sorted by stream.
+
+    Returns:
+        A function returning one dictionary per `m.streams()` row, ordered by `StreamId`.
+    """
+
+    def rows() -> list[dict[str, Any]]:
+        drain()
+        return sorted(dh_to_pylist(massive_session.streams()), key=lambda r: r["StreamId"])
+
+    return rows

@@ -61,8 +61,10 @@ There are no existing users. Backward compatibility with the previous code base 
 ### 2.1 Principles
 
 1. **Datasets are named by what they are, not how they travel.** One method per dataset. One
-   schema per dataset: the union of the SDK model fields across WebSocket, REST, and flat files,
-   flattened to PascalCase. A column that a transport does not supply is null. `Timestamp` is
+   schema per dataset kind: the union of the SDK model fields across asset classes and
+   transports (WebSocket, REST, and flat files), flattened to PascalCase. A column a class or
+   transport does not supply is null (crypto trades have no `Tape`; stock bars have no
+   `SettlementPrice`). `Timestamp` is
    the primary time column on every tick, bar, and value row. `Symbol` is the instrument on every
    instrument row.
 2. **Shape is the user's choice; transport and host are the library's.** Verbs name the
@@ -109,7 +111,7 @@ There are no existing users. Backward compatibility with the previous code base 
 | blink table | A Deephaven table whose rows exist for exactly one update cycle. `TablePublisher` produces one. |
 | result scope | A library-owned `LivenessScope` that holds exactly one result. |
 | stream scope | A library-owned `LivenessScope` that holds one stream's blink table and publisher. |
-| registry lock | `MassiveSession._registry_lock`, the one lock that guards every session-level registry. |
+| registry lock | `SessionCore.registry_lock`, the one lock that guards every session-level registry. |
 
 ## 3. Exports
 
@@ -167,23 +169,28 @@ Every module below `deephaven_massive/` other than `__init__.py` is private. The
 first path component below the package has a leading underscore. A module inside a private
 subpackage needs no underscore of its own.
 
+Inside the private modules, a name used by other modules is bare (`QueryBase`, `SessionCore`,
+`check_filters`), and a leading underscore marks a helper local to its module. The exceptions are
+names this document fixes with an underscore: `_All`, `_require_enum`, and the namespace classes
+(`_Stocks`, `_Partners`, ...), whose underscore keeps them out of users' completion lists.
+
 | Module | Contents |
 |---|---|
 | `__init__.py` | The public names of [section 3](#3-exports), `__all__`, `__version__`. |
 | `_config.py` | `MassiveConfig` ([section 5](#5-massiveconfig)). |
-| `_session.py` | `MassiveSession`: namespaces, `snapshots`, `release`, `close`, the registry lock, the reaper thread, the host-decision cache ([section 6](#6-massivesession-and-lifecycle)). |
+| `_session.py` | `MassiveSession`: namespaces, `snapshots`, `release`, `close`, the registry lock, the reaper thread, the stream-id allocator ([section 6](#6-massivesession-and-lifecycle)). The host-decision cache belongs to the REST transport ([section 13.2](#132-host-decision)). |
 | `_query.py` | The six query classes and their verbs ([section 7](#7-query-classes-and-verbs)). |
-| `_enums.py` | The fourteen public enums and the internal `Recency` and `ChannelFamily` enums; the `_require_enum` runtime check. |
-| `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases. |
+| `_enums.py` | The fourteen public enums and the internal `Recency`, `ChannelFamily`, and `Transport` enums; the `_require_enum` runtime check. |
+| `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases, and `override` (`typing_extensions.override` for the type checker, a no-op at run time, since `typing.override` needs Python 3.12). |
 | `_errors.py` | `MassiveError`, `AuthenticationError`, `EntitlementError`. |
-| `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST method, `start`/`end` parameter pair, poll default, flat-file prefix). Also the generated `SDK_PARAMS` table ([section 9](#9-filters)). |
+| `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST method, `start`/`end` parameter pair, poll default, flat-file prefix, how symbols reach a REST request (`SymbolParam`: `ticker`, `tickers`, `ticker.any_of`, path segment, `from`/`to` pair)). A REST dataset gives its SDK model (`rest_model`) and the record derives its schema from it at construction, so the poll-key and time-unit checks run at import for every dataset; exactly one of a hand-written schema and a model is given, and a WebSocket dataset always has a hand-written schema and an asset class. Also the generated `SDK_PARAMS` table ([section 9](#9-filters)). |
 | `_schema.py` | The schema registry: SDK-model flattening, PascalCase naming, the dtype override table, the four hand-written tick schemas (trades, quotes, bars, index values) with per-transport key maps. |
 | `_timeunits.py` | The `(dataset, transport, field) -> unit` table and the conversion rules ([section 12](#12-timestamp-units-and-day-boundaries)). |
 | `_symbols.py` | Symbol normalization and the `Symbol`/`Underlying` rule ([section 10](#10-symbols-and-all)). |
 | `_dates.py` | `DateLike` parsing, class day zones, session-date rules, `[start, end)` normalization. |
 | `_liveness.py` | Result scopes, stream scopes, result records, the reaper queue and thread. |
-| `_rest.py` | `RESTClient` construction from config, pagination into bounded Arrow batches, 403/429 mapping, the two documented private-call shims. |
-| `_hosts.py` | Host resolution from REST evidence and the host-decision record ([section 13.2](#132-host-decision)). |
+| `_rest.py` | `RESTClient` construction from config, pagination into bounded Arrow batches, 403/429 mapping. Public SDK methods only, no private-call shims: the pinned fork carries `list_funding_conditions` and `get_daily_open_close_crypto` (fork item F6, since #45). |
+| `_hosts.py` | Host resolution from REST evidence ([section 13.2](#132-host-decision)). The `HostDecision` record itself lives in `_query.py`, next to the transport protocols that return it (`RestTransport.resolve_host`). |
 | `_ws.py` | One connection per URL over the forked `WebSocketClient(raw=True)`: client thread, frame decoding, status routing, the reconcile loop, acknowledgement watchdogs, the explicit-verdict rule, the options contract cap. |
 | `_stream.py` | Streams, per-stream publishers, the per-connection flush thread, shared-batch fan-out ([section 14](#14-publishers-fan-out-and-failure-semantics)). |
 | `_watchlist.py` | Reactive symbol tables: the listener, the diff, and dispatch off the UG thread. |
@@ -257,13 +264,13 @@ defined in exactly one place: the field defaults of this class.
 |---|---|---|
 | `api_key: str` | `MASSIVE_API_KEY`, then `POLYGON_API_KEY` | Required. Absent raises `AuthenticationError` at construction. |
 | `s3_access_key_id: str \| None` | `MASSIVE_S3_ACCESS_KEY_ID` | Enables flat-file history. |
-| `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | |
+| `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | The two S3 credentials are both set or both absent; exactly one raises `ValueError`. |
 | `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. Hostname only; validated. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
 | `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic. |
-| `reconnect_backoff: float` | `15.0` seconds | Minimum wait before any reconnect. Values below 15 raise `ValueError` (Massive's knowledge base requires at least 15 seconds). |
-| `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` (§19, F2.3). |
+| `reconnect_backoff: float` | `30.0` seconds | The first wait before reconnecting after a connection that opened has closed, including a `max_connections` refusal (it arrives after a successful handshake); later waits double up to `max_reconnect_backoff`. Before a connection opens, a TCP failure, a timeout, a connection closed during the handshake, or a retryable handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the connection's streams (§ 13.3, `raise_fatal_errors=True`). Must be positive (a base of 0 would never grow and retry in a hot loop); any positive value is accepted, so tests can use milliseconds. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
+| `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` (§19, F2.3). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
-| `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | A partition for day D counts as published from the first occurrence of this New York time after day D ends ([section 16](#16-historysourceauto)). The documentation says files land "by approximately 11:00 AM ET the following day". |
+| `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | A partition for day D counts as published from the first occurrence of this New York time after day D ends ([section 16](#16-historysourceauto)). The documentation says files land "by approximately 11:00 AM ET the following day". A naive `time` (a New York wall-clock time); one with `tzinfo` raises `ValueError`. |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
 | `flush_interval: float` | `0.05` seconds | WebSocket micro-batch flush into `TablePublisher.add`. |
 | `rest_base_url: str` | `https://api.massive.com` | Rarely changed. |
@@ -297,19 +304,55 @@ m.streams() -> Table          # live diagnostics: one row per stream
 m.release(table: Table) -> None   # deterministic teardown of one result
 m.close() -> None             # closes every connection, stops every poller; live tables go static
 with MassiveSession() as m: ...   # __exit__ calls close(); for scripts whose results are static
+repr(m)  # "<MassiveSession #1 open>" or "<MassiveSession #1 closed>"; the label names the session in logs and errors
+repr(m.stocks)  # "<MassiveSession #1 stocks>"; vendors "<MassiveSession #1 partners.benzinga>"
 ```
+
+`MassiveSession` exposes nothing beyond the names above (§ 22, decision 21). In particular it
+has no `name` or `config` attribute: the session's label (`MassiveSession #1`, a per-process counter) appears in
+its repr, in the same-key WARNING, and in error messages, and nowhere else; the configuration is
+the `MassiveConfig` the caller passed (or `MassiveConfig()`), which the caller already holds. Not
+exposing the configuration keeps the API key one step further from console globals, which every
+user of a Deephaven worker can read.
 
 The session must be created inside a Deephaven worker: an `ExecutionContext` must be active.
 The library captures it at construction and enters it on every library thread before any
-Deephaven call. Construction without an active context raises `MassiveError`. The library never
-starts a JVM.
+Deephaven call. Construction without an active context raises `MassiveError`. The context's
+query scope must also be the Python script session's own (`ScriptSessionQueryScope`), because
+library formulas such as `canonical_view`'s `update_view` call Python functions through it; a
+context from `make_user_exec_ctx(freeze_vars=[...])` holds a frozen `StandaloneQueryScope`
+instead, so construction under it raises `MassiveError` naming the requirement. The library
+never starts a JVM.
 
 A second session with the same key in one process logs a WARNING naming the first. Individual
 plans allow one WebSocket connection per cluster per account.
 
+After `close()`: `close()` itself is idempotent; verbs, `m.connections()`, and `m.streams()`
+raise `MassiveError("MassiveSession #1 is closed")`; `m.release(table)` keeps working, and so
+does garbage-collection release of results; building queries and reaching namespaces never fail;
+live results stop updating and keep their rows. A verb that passed the closed check just before
+`close()` ran also raises `MassiveError`: the stream registry is checked again under
+`registry_lock`, so a closed stream is never reused. The diagnostics tables are the exception: their
+scope is released, so a `connections()` or `streams()` table obtained before `close()` becomes
+unusable unless the caller holds it in a liveness scope of their own.
+
 Every verb raises `ValueError` when called on a UG thread (for example from inside a table
-listener). Verbs create tables and take the registry lock; both are forbidden on the UG thread
-([section 18](#18-concurrency-model)).
+listener), checked before anything else, so also on a closed session; `close()` likewise. The
+closed check comes next, still before any argument is validated, so `q.ring(0)` on a closed
+session raises `MassiveError`. Verbs create tables and take the registry lock; both are
+forbidden on the UG thread ([section 18](#18-concurrency-model)).
+
+A session that is garbage-collected without `close()` is cleaned up by a finalizer on its core
+(not run at interpreter exit). The finalizer takes no lock and makes no Deephaven call: it hands
+the registered closers (connections, pollers) to the reaper, which logs a WARNING ("MassiveSession
+#1 was garbage-collected without close(); closing its connections and pollers") and runs them,
+and stops the diagnostics writer. The reaper keeps running while results are still tracked (a
+result whose release path does not hold the core, such as a `poll()` table, can outlive its
+session) and stops once the last one has been collected and released. `close()` empties the closer list, so a closed
+session's closers never run twice. A closer must not refer to the core strongly, or the core
+could never be collected. Even so, an unclosed session's core is collected by the cyclic garbage
+collector, not promptly by reference counting: each result record's `on_released` callback (a
+`functools.partial` of the core's release method) refers back to the core.
 
 ### 6.1 How a live table is kept alive and released
 
@@ -337,10 +380,10 @@ scope = LivenessScope()                       # library-owned, one per result
 with scope.open():                            # top of the thread-local stack during creation
     result = shape(stream.blink)              # append_only / ring / last_by; for blink(), a fresh wrapper:
                                               #   Table(stream.blink.j_table), then scope.manage(result)
-record = _ResultRecord(stream_id, scope, released=False,
-                       ref=weakref.ref(result, _enqueue_release(record_id)))
-with m._registry_lock:
-    m._results[id(result)] = record           # keyed by Python object id; checked against the weakref on use
+m._core.results.track(result, scope, on_released)
+    # ResultRegistry.track: under registry_lock, a ResultRecord(scope, on_released,
+    # finalizer=weakref.finalize(result, <enqueue release>), released=False) keyed by
+    # id(result); the key is checked against finalizer.peek() on use
 return result
 ```
 
@@ -361,26 +404,74 @@ return result
   bound exclusively to the blink table's `on_shutdown_callback`. A derived table, an open UI
   panel, or a user scope therefore keeps the stream alive and subscribed, even after every
   library-held result has been released.
-- **Weakref callback.** It fires when the Python wrapper is collected. Under
-  `_registry_lock` it flips the record's once-only `released` flag; if the flag was already set
-  it returns. Otherwise it puts `record_id` on the reaper queue (`queue.SimpleQueue`). It makes no
-  Java call.
+- **Tracking is all or nothing.** `ResultRegistry.track` builds the record and its finalizer
+  before it registers the record; if anything raises, even `KeyboardInterrupt`, it marks the
+  record released and removes it, and the verb releases the result scope and the stream hold
+  itself (also when the interrupt lands between `make_result` and `track`). A result is never
+  released twice and never leaked, within the best-effort boundary below (see **Opening a stream**).
+- **Collection finalizer.** A `weakref.finalize` on the result fires when the Python wrapper
+  is collected. It holds the result registry and the record strongly, and through them the
+  reaper and the session core, for exactly as long as the result lives, so a result that
+  outlives every reference to its session and query is still released. The finalizer takes
+  no lock and makes no Java call: it only puts a job on the reaper queue (`queue.SimpleQueue`).
+  Garbage collection can run it on any thread, including one that holds another library lock,
+  so taking `registry_lock` there could deadlock. The reaper job then flips the record's
+  once-only `released` flag under `registry_lock` and, if it was not already set, releases the
+  result.
 - **Reaper thread.** One daemon thread per session. It takes records off the queue, calls
   `scope.release()`, decrements the stream's held-result count, and at zero releases the stream
   scope. Each job runs inside `try`/`except Exception`; a failure is logged at ERROR and the
-  thread continues. The reaper does nothing else.
+  thread continues. The reaper does nothing else, except run the closers of a session collected
+  without `close()` ([section 6](#6-massivesession-and-lifecycle)).
+- **Opening a stream.** The session mints the stream id (a process-wide counter) and
+  registers the stream's record, `OPENING`, with one hold for the opener, before it calls
+  `StreamTransport.open_stream(..., stream_id=)`; so a failure or a shutdown the transport
+  reports while the open is still running finds the record. No row is written until the open
+  returns (`m.streams()` has no `OPENING` state). A second verb on the same key finds the
+  record still opening and waits for the open to finish, on the caller thread and outside every
+  lock, then reuses the stream; one open per key, never a wasted publisher. The opener's claim
+  and open run inside one `try`/`except`, so whatever interrupts them (even a
+  `KeyboardInterrupt` landing between the two, or after the open returned) the record is
+  readied and, unless the verb got the stream, the opener's hold is released. Asynchronous
+  exceptions such as `KeyboardInterrupt` are handled on a best-effort basis: every window
+  between the library's own steps (claim, open, build, track) is covered, and the windows that
+  remain are inside the cleanup code itself. If the open raises
+  anything, even `KeyboardInterrupt`, the record is deleted, its key is unmapped, and the
+  waiters wake and open the stream themselves. `m.close()` wakes the waiters, which raise
+  `MassiveError`; the opener releases the stream when its open returns. A failure reported
+  during the open leaves the stream `FAILED`, and the open returns the stream as is, exactly as
+  if the failure had arrived just after it: `blink()` returns the failed table, while
+  `append_only()`, `ring()` and `last_by()` raise Deephaven's `DHError` ("Can not listen to
+  failed table") as they derive from it, with the hold released. P4 wraps that error in a
+  `MassiveError` naming the stream's failure.
+- **Record lifetime.** Holds and the shutdown callback run on different clocks (a
+  `publish_failure` shuts the blink table down at once, while results are still held), so
+  either may come last. A stream's registry record is deleted only once both have happened:
+  its holds have reached zero and its blink table has shut down. Until then `m.streams()` keeps
+  showing its row count and a late failure, even for a released stream a derived table keeps
+  alive. Its key maps to it only while it is opening or held, not failed, and not shut down,
+  so no verb ever reuses a dead table.
 - **Shutdown callback.** It usually runs on the reaper thread, but it may run on a UG thread or a
-  gRPC thread if the UI held the last reference. It does exactly two things: a registry update
-  under `_registry_lock`, and `loop.call_soon_threadsafe(...)` to the connection's loop so the
-  topic reference counts are decremented there. Never a send, never a Deephaven call.
-- **`m.release(table)`** looks up `id(table)` in `_results`, verifies that the weakref resolves to
+  gRPC thread if the UI held the last reference. It does exactly two things:
+  `SessionCore.stream_shut_down(stream_id)`, which under `registry_lock` unmaps the stream's
+  key and deletes its record if no hold is left, or marks it shut down so that the last hold
+  deletes it, and `loop.call_soon_threadsafe(...)` to the connection's loop so the topic
+  reference counts are decremented there. Never a send, never a Deephaven call.
+- **`m.release(table)`** delegates to `m._core.results.release(table)`, which looks up
+  `id(table)` in the registry, verifies that the weakref resolves to
   that exact object (so a recycled id cannot match), flips the `released` flag under the lock,
-  and enqueues the same job. It raises `ValueError` if the table is not a verb result. It is
+  and enqueues the release. `m.release` raises `ValueError` if the table is not a verb result.
+  A release always notifies the owner (the stream's held-result count, or the poller), even if
+  releasing the result scope raised. It is
   deterministic: the table keeps ticking only while other holders (derived tables, open panels)
   exist.
 - **`m.close()`** closes every connection and poller and releases the session-owned diagnostics
-  scope. Publishers are not failed; live tables go static. `m.streams()` flips every stream to
-  `State=CLOSED` and one WARNING is logged: "session closed; N live tables are now static".
+  scope. Publishers are not failed; live tables go static. Before the release, the streams
+  table flips every stream still in the registry to `State=CLOSED`, including a released
+  stream that a derived table or panel still keeps alive (a stream leaves the registry only
+  once its holds are released and its blink table has shut down), and one message is logged:
+  "session closed; N live tables are now static", at WARNING when N > 0 and at INFO when N
+  is 0.
 
 Two documented behaviours that users will notice:
 
@@ -399,7 +490,11 @@ There is no `stop()` on queries. Release is automatic (garbage collection) or ex
 ## 7. Query classes and verbs
 
 Six classes, defined in `_query.py`. Nothing touches the network until a verb is called. Queries
-are immutable, hashable, and reusable.
+are immutable, hashable, and reusable. A query's repr names its class, its dataset, and the
+arguments that differ from their defaults, for example
+`<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
+reactive table as `<reactive table>`. Queries have no other attributes: the verbs are their whole
+API (§ 22, decision 21).
 
 ```python
 class Query:                               # REST list and snapshot datasets
@@ -411,7 +506,7 @@ class StreamQuery:                         # WebSocket datasets
     def blink(self) -> Table: ...
     def append_only(self) -> Table: ...
     def ring(self, capacity: int) -> Table: ...
-    def last_by(self, *, by: str | Sequence[str] | None = None) -> Table: ...
+    def last_by(self, by: str | Sequence[str] | None = None) -> Table: ...
 
 class HistoryQuery:                        # datasets with a historical retrieval path
     def history(self, start: DateLike, end: DateLike, *,
@@ -445,9 +540,15 @@ listener. Fan-out endpoints issue one request per symbol per cycle under `max_co
 `m.streams()` shows `RequestsPerCycle`.
 
 **`last_by()`.** Returns `blink.last_by(keys)` with the default key `Symbol`. With a reactive
-`Table` as symbols the result is `blink.last_by(keys).where_in(symbol_table, "Symbol")`, so rows
-of removed symbols are evicted from the result. The underlying `last_by` state keeps every symbol
-ever seen: a symbol that is removed and re-added shows its stale row until its next tick.
+`Table` as symbols and `Symbol` among the keys, the result is
+`blink.last_by(keys).where_in(symbol_table, "Symbol")`, so rows of removed symbols are evicted
+from the result. The underlying `last_by` state keeps every symbol ever seen: a symbol that is
+removed and re-added shows its stale row until its next tick. With keys that span symbols (for
+example `by="Exchange"`) the filter comes first, `blink.where_in(symbol_table,
+"Symbol").last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
+latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
+watched when the row arrived, and keeps it after that symbol is removed until a watched symbol
+ticks in the group.
 `last_by()` never seeds from REST. The "last" endpoints are absent from Starter and base Business
 plans, so a seed would behave differently per tier; `snapshots(symbols).poll(n)` is the
 tier-identical way to get current state.
@@ -515,7 +616,8 @@ maxima are validated by the server (HTTP 400 becomes `MassiveError`).
 
 ### 7.2 Synchronous `ValueError`s for parameter values
 
-- `fetch()` with `ALL` on a `StreamHistoryLatestQuery`.
+- `fetch()` with `ALL` on a `StreamHistoryLatestQuery` or a `HistoryLatestQuery` (the "last"
+  and `/prev` endpoints take one ticker per request).
 - `history()` with `ALL` over REST, except daily bars (the grouped-daily endpoint).
 - `history(source=HistorySource.REST)` on `indices.values` (flat files only).
 - `history(source=HistorySource.FLAT_FILES)` when a flat-file constraint is violated
@@ -543,7 +645,12 @@ Notation:
 - `…T` is `start: DateLike | None = None, end: DateLike | None = None` followed by `…F`. It
   exists only on datasets whose row has a named time axis (shown as "axis"). `start` and `end`
   address that axis with the day rules of [section 12](#12-timestamp-units-and-day-boundaries).
-- `limit` is a total-row cap. Page size is internal. Every docstring says so.
+  A range that ends before it starts raises `ValueError` at construction, as `history()` does
+  (two dates may be equal: whole days; two datetimes are half-open; a date and a datetime
+  compare by day).
+- `limit` is a total-row cap. Page size is internal. Every docstring says so. The cap is
+  stored apart from the SDK parameters, in `Request.limit`, so it can never be forwarded as
+  the SDK's page-size `limit`; the page size is `DatasetSpec.page_size`.
 - The REST column names the path and, in parentheses, the SDK `RESTClient` method.
 
 ### 8.1 `m.stocks`
@@ -704,7 +811,9 @@ All return `Query`.
 `m.snapshots(symbols, *, …F) -> Query` calls the unified `/v3/snapshot`
 (`list_universal_snapshots`) with `ticker.any_of`, 250 tickers per request, any mix of asset
 classes. Rows are the union schema of the unified snapshot. `ALL` is not accepted here (the
-endpoint requires tickers).
+endpoint requires tickers). Its catalog record is named `reference.snapshots` and is declared
+in `_domains/reference.py` with `asset_class=None` (each ticker's prefix selects its class,
+§ 10), so `_catalog.datasets()` finds it; `m.streams()` and messages show that name.
 
 ### 8.12 Excluded endpoints
 
@@ -753,9 +862,10 @@ m.options.contracts(underlying="NVDA",
 ```
 
 Validation is synchronous at query construction. `_catalog.py` holds a generated table
-`SDK_PARAMS[dataset] = {name: kind}`, produced by `scripts/refresh_massive_catalog.py` from
-`inspect.signature(RESTClient.<method>)`. An unknown key or a value of the wrong kind raises
-`ValueError` naming the valid keys. A test asserts that the vendored table equals the installed
+`SDK_PARAMS[method] = {name: kind}`, keyed by SDK `RESTClient` method name and produced by
+`scripts/refresh_massive_catalog.py` from `inspect.signature(RESTClient.<method>)`; a dataset's
+accepted filters are the union over its methods plus its `extra_params`. An unknown key or a
+value of the wrong kind raises `ValueError` naming the valid keys. A test asserts that the vendored table equals the installed
 SDK's signatures, so an SDK upgrade that adds a filter fails CI until the table is regenerated.
 
 `start` and `end` map to the SDK parameter pair recorded per dataset in the catalog
@@ -767,7 +877,7 @@ SDK's signatures, so an SDK upgrade that adds a filter fails CI until the table 
 ## 10. Symbols and `ALL`
 
 ```python
-Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All instance
+Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All instance; repr "dm.ALL", str "ALL"
 ```
 
 - A `str` is one symbol. A `Sequence[str]` is materialized to a tuple at construction. An
@@ -777,10 +887,23 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   (full market, all pairs, all contracts), and by `history()` when a flat file or a grouped-daily
   REST path exists. Everywhere else `ALL` raises `ValueError` naming the alternative.
 - Input forms are normalized: `"EUR/USD"` and `"C:EURUSD"`; `"AAPL250117C00150000"` and
-  `"O:AAPL250117C00150000"`; `"BTC-USD"` and `"X:BTCUSD"`; `"I:SPX"`; `"ESZ5"`. The `Symbol`
-  column always holds the canonical Massive form.
+  `"O:AAPL250117C00150000"`; `"BTC-USD"` and `"X:BTCUSD"`; `"I:SPX"` and `"SPX"` (an index
+  symbol without its prefix gets `I:`); `"ESZ5"`. The `Symbol` column always holds the canonical
+  Massive form. A crypto pair must end in a known quote currency, so its WebSocket form
+  (`BTC-USD`) can always be recovered; others raise `ValueError` at construction. A symbol
+  with another class's prefix raises `ValueError` saying which prefix, if any, the class uses
+  (`'X:BTCUSD' carries the prefix of another asset class; stocks symbols have no prefix`).
+- **Datasets that span asset classes** (indicators, reference data, the unified
+  `m.snapshots()`) declare no asset class. Each symbol's prefix then selects its class (`O:`
+  options, `I:` indices, `C:` forex, `X:` crypto), a symbol without one is a stock, and that
+  class's rules apply unchanged: `["X:BTCUSD", "i:spx", "aapl"]` normalizes to
+  `("AAPL", "I:SPX", "X:BTCUSD")`. A WebSocket dataset always declares its class.
 - A `Table` must have a `Symbol` column. Streams listen to it and subscribe or unsubscribe as
-  rows are added or removed. Polls re-read it each cycle.
+  rows are added or removed. Polls re-read it each cycle. Its rows may use any accepted input
+  form: every consumer reads the table through one canonicalized view
+  (`_symbols.canonical_view`), so `last_by()`'s `where_in` filter and the subscribed topics
+  agree on `C:EURUSD` whether the row says `EUR/USD` or `C:EURUSD`. A row that is not a valid
+  symbol for the class matches nothing and is logged once at WARNING.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
   instrument, it is `Underlying` on every options row (from `underlying_ticker` or
   `underlying_asset.ticker`) and on `related_companies` rows. Non-instrument fan-out keys use
@@ -822,11 +945,18 @@ console, and typo safety at both type-check time and run time.
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
 
-Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}` and `ChannelFamily {TICK, FMV}`.
+Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}`, `ChannelFamily {TICK, FMV}`,
+and `Transport {WS, REST, FLAT_FILES}`.
 
 **Dates.** Parameters accept an ISO-8601 `str`, a `date`, or a timezone-aware `datetime`. A
-naive `datetime`, or an ISO string with a time but no offset, raises
-`ValueError("timezone required")`.
+naive `datetime`, or an ISO string with a time but no offset, raises a `ValueError` that names
+the parameter, the value, and the fix, for example `start=datetime.datetime(2025, 1, 2, 9, 30)
+needs a timezone: pass an aware datetime or a date`. The same rule and message apply to a naive
+`datetime` passed as a `filters` value or a typed parameter.
+
+**ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
+becomes an `Instant`; text without a UTC offset is read as UTC. SDK fields named `*_utc` map to
+`Instant` automatically; any other text timestamp needs an explicit override.
 
 **Column types.** `Instant` for timestamps, `LocalDate` for calendar dates, `double`, `long`,
 `int`, `String`, `boolean`, and `int[]` for condition lists. Each union column has exactly one
@@ -841,7 +971,7 @@ registered SDK model and flat-file header has an entry.
 
 | Transport and fields | Unit |
 |---|---|
-| WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); `LULD`/`NOI`; options `T`/`Q`; futures `T`/`Q`; indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` | ms (verified on each documentation page) |
+| WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); `LULD`/`NOI`; options `T`/`Q`; futures `T`/`Q`; indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` (`t`; `XT`/`XQ` received time `r`) | ms (verified on each documentation page) |
 | WebSocket `FMV` `t` | Documented as ns; the documentation sample is `1678220098130` (13 digits, ms). Rule, FMV only: `t >= 10**17` means ns, otherwise ms. Every ns value after 1973-03-03 is at least 10^17, and an ms value reaches 10^17 only in the year 3,170,000, so the rule cannot misclassify. Logged once; tested. |
 | REST `/v3/trades`, `/v3/quotes`, `/v2/last/trade`, `/v2/last/nbbo`; snapshot `last_updated`, `fmv_last_updated`; futures `/trades` and `/quotes` (`timestamp`, `bid_timestamp`, `ask_timestamp`); futures aggregates `window_start` (documented as "nanosecond Unix timestamp") | ns |
 | REST aggregates `t`; `/prev` `t`; indicators `timestamp`; futures snapshot `last_minute.last_updated` | ms |
@@ -853,7 +983,9 @@ registered SDK model and flat-file header has an entry.
 units fail loudly, never silently.
 
 **Canonical time columns:** `Timestamp`, `ParticipantTimestamp`, `TrfTimestamp`,
-`BidTimestamp`, `AskTimestamp`, `EndTimestamp` (bars), `LastUpdated` (snapshots).
+`BidTimestamp`, `AskTimestamp` (futures quotes), `ReceivedTimestamp` (crypto trades and
+quotes), `EndTimestamp` (bars), `LastUpdated` (snapshots). Calendar dates such as the futures
+`SessionEndDate` are `LocalDate`.
 
 **`history(start, end)` normalization.** Each bound converts independently to an `Instant`. The
 range is half-open: `[start, end)`. A `date` or `"YYYY-MM-DD"` `start` is that day's 00:00 in
@@ -886,14 +1018,27 @@ timezone-aware `datetime` is used as is.
    [section 13.3](#133-connection-and-subscription-protocol), which acts on a server statement,
    never on silence.
 3. No connection is ever opened to test anything.
-4. Connects are single-flight. At least 15 seconds pass before any reconnect; the wait doubles
-   up to `max_reconnect_backoff`, with upward-only jitter clamped to that range.
+4. Connects are single-flight. A reconnect after a connection that opened has closed
+   (including a `max_connections` refusal, which arrives after a successful handshake) waits at
+   least `reconnect_backoff` (30 s by default, the upper end of the 10–30 s the knowledge base
+   gives the server to release a dropped connection); the wait doubles up to
+   `max_reconnect_backoff`, with upward-only jitter clamped to that range. Before a connection
+   opens, a TCP failure, a timeout, a connection closed during the handshake, or a retryable
+   handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule
+   (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the
+   connection's streams (§ 13.3, `raise_fatal_errors=True`).
 5. Futures streams always use `/futures`. `/futures/{venue}` is undocumented and unsupported.
 
 ### 13.2 Host decision
 
 Resolution runs synchronously on the calling thread at the first stream verb for a
-(class, family) and is cached in the session.
+(class, family) and is cached in the session. The seam is
+`RestTransport.resolve_host(asset_class, family) -> HostDecision` (a protocol method defined in
+P2 and implemented in P3), where `HostDecision(host, recency, evidence)` is a frozen record.
+The WebSocket transport calls it. The REST transport is the one place the decision is
+cached: per session, for the session's life, under its own leaf lock (never `registry_lock`),
+released before the REST call. Each new decision writes the pair's `Transport=REST` row of
+`m.connections()`.
 
 ```
 resolve(asset_class, family) -> HostDecision(host, recency, evidence)
@@ -977,8 +1122,10 @@ client = WebSocketClient(api_key, feed=host, market=path, raw=True,
                          max_reconnects=None,
                          reconnect_backoff=cfg.reconnect_backoff,
                          max_reconnect_backoff=cfg.max_reconnect_backoff,
-                         max_size=None)                     # websockets frame cap off
-thread.run(lambda: asyncio.run(client.connect(conn.on_frame)))
+                         reconnect_on_close=True,           # section 19.2
+                         raise_fatal_errors=True)           # section 19.2
+thread.run(lambda: asyncio.run(
+    client.connect(conn.on_frame, max_size=None)))         # websockets frame cap off
 ```
 
 In raw mode the SDK consumes only the handshake frames (`connected`, the auth reply) and passes
@@ -995,7 +1142,7 @@ Responsibilities:
 | Open the socket, read `connected`, send auth, read the auth reply | fork client |
 | `auth_failed` | The fork raises `AuthError` out of `connect()`. The library marks the session failed and fails every stream on the path with `AuthenticationError`. |
 | `max_connections` status before a server close | Received as a raw frame after the handshake; during the handshake the fork surfaces it to the caller (fork item F2.6), so the library can tell it from a network drop. The fork reconnects after backoff; the library shows `State=WAITING_SLOT`; streams stay alive. |
-| Reconnect after any close unless `request_close()` was called; merge pending subscriptions; backoff of at least 15 s, doubling | fork |
+| Reconnect after any close unless `request_close()` was called; merge pending subscriptions; after a connection that opened closes (including a `max_connections` refusal), a backoff of at least `reconnect_backoff`, doubling to `max_reconnect_backoff`; before a connection opens, a TCP failure, a timeout, a connection closed during the handshake, or a retryable handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the connection's streams (§ 13.3, `raise_fatal_errors=True`) | fork |
 | Desired topic set, reference counts, single in-flight step | library |
 | Sending the subscribe and unsubscribe frames for a step | fork `set_subscriptions(desired, resend=...)` |
 | Per-topic acknowledgement parsing, watchdog, re-send | library, from the status frames |
@@ -1080,8 +1227,13 @@ logged once.
   tables are created only on the caller thread inside a result scope or a stream scope, and in
   the session's diagnostics scope. The flush thread creates only static tables.
 - Each stream owns one
-  `table_publisher(name=f"massive.{dataset}#{n}", col_defs=<dataset schema>, on_shutdown_callback=...)`,
-  created inside the stream scope under the session's captured `ExecutionContext`. `blink()`
+  `table_publisher(name=f"massive.{dataset}#{stream_id}", col_defs=<dataset schema>, on_shutdown_callback=...)`,
+  created inside the stream scope under the session's captured `ExecutionContext` by
+  `StreamTransport.open_stream(spec, request, channel, *, stream_id)`. The session mints
+  `stream_id` and has registered the stream before the call, so the transport may call
+  `SessionCore.fail_stream(stream_id, ...)` as soon as the publisher exists; the callback calls
+  `SessionCore.stream_shut_down(stream_id)` before it releases the topics; the returned
+  `StreamHandle` carries `stream_id`. `blink()`
   returns a new wrapper of the blink table's Java object, managed in its own result scope
   ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)); `append_only()` is
   `blink_to_append_only(blink)`; `ring(n)` is `ring_table(blink, n)`; `last_by()` is as in
@@ -1099,8 +1251,26 @@ logged once.
 - `TablePublisher.add` is safe from the flush thread: the Java side snapshots the static batch
   and guarantees non-interleaved adds. `on_flush_callback` is not used (it blocks the update
   cycle).
+- After its `add` calls, each flush reports to the session once:
+  `SessionCore.update_streams({stream_id: StreamUpdate(rows_published=..., ...)})`, where
+  `StreamUpdate` is a frozen keyword-only record whose fields left as None keep their values.
+  One short critical section under `registry_lock`, about 20 times a second per connection at
+  the default `flush_interval`; it updates the rows of every stream still in the registry
+  (writing a row only once the stream has opened), ignores ids that have left it, and never
+  changes `State` (only `fail_stream` does). An `error` there is a warning, and
+  `StreamUpdate(clear_error=True)` sets `Error` back to null, for example once the options
+  contract cap no longer defers anything. `poll()` rows take their `StreamId` from the same
+  allocator, `SessionCore.next_stream_id()`, so the two kinds never collide.
 - A failure fails exactly the streams whose topics the server rejected. Nothing tears down a
-  whole URL on an entitlement error.
+  whole URL on an entitlement error. A failed stream's key is unregistered at once
+  (`SessionCore.fail_stream`), so the next verb with the same key opens a fresh stream rather
+  than returning the failed table. A stream's registry record lives until its holds are
+  released and its blink table's `on_shutdown_callback` (`SessionCore.stream_shut_down`) has
+  run ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), so a failure is shown
+  whenever it is reported: during the open, after the library's last result was released
+  while a derived table or an open panel still keeps the publisher alive (the row moves from
+  `RELEASED` to `FAILED` with its `Error`), or after the blink table shut down while results
+  are still held. A failure reported for a stream that has left the registry is only logged.
 - REST `poll()` tables use a per-table publisher (`APPEND`) or a keyed `input_table`
   (`REPLACE`, `UPSERT`), created in the result scope.
 
@@ -1165,7 +1335,11 @@ bound on `Timestamp` after partition selection.
 ## 17. Diagnostics
 
 Both tables are keyed `input_table`s. They live in one session-owned `LivenessScope` that
-`m.close()` releases. They are updated only from library threads, never from UG callbacks.
+`m.close()` releases. They are written by one diagnostics writer thread per session, which
+applies immutable row snapshots from a queue in order; other threads only enqueue, never wait on
+the update graph for diagnostics, and never write from UG callbacks. Each time it wakes, the
+writer takes everything queued, keeps the latest row per key, and applies it with one `add` per
+table, so the queue stays bounded however fast rows arrive.
 
 **`m.connections()`**: one row per connection plus one `Transport=REST` row per resolved
 (class, family).
@@ -1184,7 +1358,14 @@ Both tables are keyed `input_table`s. They live in one session-owned `LivenessSc
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant` |
 | `LastError` | text |
 
-**`m.streams()`**: one row per stream.
+**`m.streams()`**: one row per stream. A row is written when the stream has opened and on
+every change until the stream leaves the registry (its holds released and its blink table shut
+down), so a released stream still kept alive by a derived table keeps reporting
+`RowsPublished` and a late failure; its last row (`RELEASED`, or `FAILED` if the stream failed)
+stays in the table while the session is open. At `m.close()` every stream
+still in the registry is written `CLOSED` and then
+the diagnostics scope is released, so those `CLOSED` rows are readable only through a table the
+caller kept alive in a liveness scope of their own.
 
 | Column | Meaning |
 |---|---|
@@ -1201,7 +1382,8 @@ Both tables are keyed `input_table`s. They live in one session-owned `LivenessSc
 | `CreatedAt` | `Instant` |
 
 `RELEASED` means "no library-held results; still publishing until the blink table dies"
-([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)).
+([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). `FAILED` can follow `RUNNING`
+or `RELEASED`; a failed stream's row keeps `FAILED` when its last result is released.
 
 Every failure is logged at ERROR with the text the exception carries: hosts, the server message
 verbatim, the decision evidence, and the nearest entitled alternative. For example: "Quotes are
@@ -1217,44 +1399,51 @@ without the GIL.
 
 | Thread | Created by | Does | Must not |
 |---|---|---|---|
-| caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation | hold the registry lock while calling Deephaven |
+| caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key | hold the registry lock while calling Deephaven or waiting |
 | WS client, one per connection | library | `asyncio.run(client.connect(on_frame))`; decode each frame once; route status frames; append rows to per-channel `SimpleQueue`s; the reconcile loop; idle close | any JVM call; blocking waits |
-| flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, diagnostics updates | touch loop-owned state directly |
+| flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
+| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
-| Java-originated (shutdown callback, UI export release) | Deephaven | registry update under the registry lock; `call_soon_threadsafe` | sends; JVM calls; blocking |
+| Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (under the registry lock: unmaps the key; deletes the record, or marks it for the last hold to delete); `call_soon_threadsafe` | sends; JVM calls; blocking |
 
 ### 18.2 Shared state and ownership
 
-- `MassiveSession._registry_lock` (a `threading.RLock`) guards every mutable registry: streams
-  by key, results by id, connections by URL, topic reference counts, host decisions. It is a
+- `SessionCore.registry_lock` (a `threading.RLock`) guards every mutable registry: streams
+  by key, results by id, connections by URL, topic reference counts. (Host decisions are
+  cached by the REST transport under its own leaf lock, § 13.2.) It is a
   **leaf lock**: no Deephaven call, no network call, no blocking wait, and no wait on a
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
   atomically under the lock; readers copy references out and release the lock before working.
 - Per-connection mutable state (desired, acknowledged, and pending sets; the in-flight step;
   watchdogs; the client object) is **loop-confined**: only the connection's client thread touches
   it. Other threads reach it through `loop.call_soon_threadsafe` with plain data (tuples of topic
-  strings). Nothing reads loop state across threads; diagnostics are pushed from the loop thread
-  to the flush thread's queue.
+  strings). Nothing reads loop state across threads; the loop thread enqueues diagnostics row
+  snapshots on the diagnostics writer's queue, and the writer is the only thread that writes the
+  diagnostics tables.
 - Row buffers are one `queue.SimpleQueue` per (connection, channel). The WS thread is the only
   producer; the flush thread is the only consumer.
-- The reaper queue is a `queue.SimpleQueue`. Weakref callbacks, `m.release`, and `m.close` are
-  producers.
+- The reaper queue is a `queue.SimpleQueue`. The producers are the result finalizers,
+  `m.release`, and the collection finalizer of an unclosed session (`_collect_session`);
+  `m.close` runs its closers on the calling thread and queues nothing.
 - No code relies on the atomicity of `dict`, `set`, or `list` operations. Every shared container
   is behind the lock or has a single owner.
 - `ExecutionContext` is captured at session construction. Every library thread enters it before
-  any Deephaven call.
+  any Deephaven call, each time through a fresh Python wrapper of the captured Java context
+  (`_liveness.entered`). The `deephaven` wrapper stores its restore handle on the wrapper object,
+  so two threads entering one shared wrapper at once make the first to exit install the other
+  thread's previous (empty) context on itself.
 - `LivenessScopeStack` is thread-local, so result scopes are opened and closed on the caller
   thread. `release()` runs on the reaper thread, which is allowed: the tracker is synchronized and
   drains on the releasing thread.
 
 ### 18.3 Lock order
 
-The order is **UG lock, then `_registry_lock`**. Listeners run on the UG thread while the UG
-lock is held and may take `_registry_lock`. Therefore no library thread acquires the UG lock,
+The order is **UG lock, then `registry_lock`**. Listeners run on the UG thread while the UG
+lock is held and may take `registry_lock`. Therefore no library thread acquires the UG lock,
 directly or through auto-locking in `Table.snapshot()`, `where_in`, `last_by`, or
-`deephaven.arrow.to_table`, while holding `_registry_lock`. That single rule prevents the UG and
+`deephaven.arrow.to_table`, while holding `registry_lock`. That single rule prevents the UG and
 registry deadlock. Verbs called on the UG thread raise `ValueError`.
 
 ### 18.4 Free-threaded specifics
@@ -1592,6 +1781,12 @@ document already reflects them.
     fork, each topic branch goes upstream as one pull request; the fork's `deephaven-fixes`
     branch is assembled by direct merges of those branches, with CI on every push, is never
     reset or force-pushed, and is tracked here by branch, with `uv.lock` recording the exact commit.
+21. **Sessions and queries expose no introspection attributes; their reprs are defined.**
+    `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
+    appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error
+    messages, and a query's dataset and arguments only in its repr. The public surface stays
+    exactly the verbs and namespaces, and the API key stays out of objects users routinely
+    leave in console globals.
 
 ## 23. Open verification items
 

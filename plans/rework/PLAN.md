@@ -205,10 +205,12 @@ skeleton created in P2 is designed so that later packages own disjoint files:
   `tests/_domains/test_<domain>.py`, and `tests/data/<domain>/`. P6h owns
   `_domains/partners.py`, which holds the four vendor classes. P6g owns
   `_domains/reference.py`, `_domains/indicators.py`, and `_domains/economy.py`, and is the one
-  domain package that also edits `_session.py` and `_catalog.py`: it fills
-  `MassiveSession.snapshots()` and adds that dataset's record, because DESIGN places the
-  unified snapshot on the session rather than in a namespace module.
-- **No shared registry file is edited by domain packages** (P6g's two edits above excepted).
+  domain package that also edits `_session.py`: it fills `MassiveSession.snapshots()`, because
+  DESIGN places the unified snapshot on the session rather than in a namespace. The dataset's
+  record, `reference.snapshots`, is declared in `_domains/reference.py` like every other
+  record (DESIGN § 8.11), so `_catalog.datasets()` finds it without a `_catalog.py` edit.
+- **No shared registry file is edited by domain packages** (P6g's `_session.py` edit above
+  excepted).
   Every cross-cutting table is composed from per-domain declarations rather than written
   centrally:
   - Each `_domains/<domain>.py` exports `DATASETS: tuple[DatasetSpec, ...]`. A `DatasetSpec`
@@ -510,7 +512,9 @@ network code.
 
 **DESIGN sections implemented.** [§ 2 Principles and terms](DESIGN.md#2-principles-and-terms);
 [§ 3 Exports](DESIGN.md#3-exports); [§ 4 Package layout](DESIGN.md#4-package-layout) (every
-module exists after P2, as a stub where its transport or domain comes later);
+P2 module of § 4.1 exists after P2, the domain modules as stubs; the transport modules
+`_rest.py`, `_hosts.py`, `_poll.py`, `_ws.py`, `_stream.py`, `_watchlist.py`, and
+`_flatfiles.py` are created by P3, P4, and P5);
 [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig);
 [§ 6 `MassiveSession` and lifecycle](DESIGN.md#6-massivesession-and-lifecycle) including
 [§ 6.1 How a live table is kept alive and released](DESIGN.md#61-how-a-live-table-is-kept-alive-and-released);
@@ -534,10 +538,11 @@ query classes and the type aliases are importable from `deephaven_massive._query
 - Create under `src/deephaven_massive/`:
   - `__init__.py` (rewrite): exactly the names of DESIGN § 3, `__all__`, and `__version__`.
   - `_config.py`: frozen `MassiveConfig`; `MassiveConfig()` reads the environment; validation
-    (`reconnect_backoff < 15` → `ValueError`; `ws_hosts` hostname-only).
+    (`reconnect_backoff` positive and `max_reconnect_backoff >= reconnect_backoff`, else
+    `ValueError`; `ws_hosts` hostname-only).
   - `_session.py`: `MassiveSession`, namespaces, the `snapshots()` shell (P6g fills it),
-    `connections()`, `streams()`, `release()`, `close()`, context manager, `_registry_lock`,
-    reaper thread, the host-decision cache, the captured `ExecutionContext` with fail-fast,
+    `connections()`, `streams()`, `release()`, `close()`, context manager, `registry_lock`,
+    reaper thread, the captured `ExecutionContext` with fail-fast,
     second-session WARNING, per-transport factory hooks (stubs).
   - `_query.py`: the six query classes and their verbs.
   - `_errors.py`: `MassiveError`, `AuthenticationError`, `EntitlementError`.
@@ -553,7 +558,7 @@ query classes and the type aliases are importable from `deephaven_massive._query
   - `_symbols.py`: normalization across WS/REST/S3 forms for every class; `Underlying` parsing.
   - `_dates.py`: `DateLike` parsing (tz required), class day zones, half-open `[start, end)`,
     futures session rules, `flat_file_publish_cutoff` logic (pure function).
-  - `_liveness.py`: result and stream scopes, `_ResultRecord`, weakref → reaper queue, once-only
+  - `_liveness.py`: result and stream scopes, `ResultRecord`, weakref → reaper queue, once-only
     `released` flag.
   - `_diagnostics.py`: `connections`/`streams` `input_table` definitions and update helpers
     (library threads only).
@@ -591,7 +596,7 @@ query classes and the type aliases are importable from `deephaven_massive._query
       `_domains/`.
 - [ ] Implement `_liveness.py` and the reaper in `_session.py` exactly per DESIGN § 6.1:
       scope per result, `manage`, weakref callback enqueues only, reaper wraps each job in
-      try/except with ERROR log, once-only flag flipped under `_registry_lock`, `release()`
+      try/except with ERROR log, once-only flag flipped under `registry_lock`, `release()`
       verifies the weakref resolves to the same object. Tests run inside the embedded JVM with
       a `table_publisher` blink table and assert `on_shutdown_callback` fires after the last
       result is released, and does not fire while a derived table is alive.
@@ -680,7 +685,7 @@ hunks overlap).
 **Files.**
 - Create: `src/deephaven_massive/_rest.py` (SDK client construction, `iter_rows`, `get_json`,
   Arrow batching, error mapping, rate-limit WARNING once), `_hosts.py` (host resolution and the
-  `HostDecision` record; the cache lives on the session under `_registry_lock`), `_poll.py`
+  `HostDecision` cache, per session, kept by the REST transport under its own lock), `_poll.py`
   (REPLACE/UPSERT/APPEND pollers, reactive symbol snapshot per cycle, fan-out executor),
   `scripts/refresh_massive_catalog.py`, `tests/test_rest.py`, `tests/test_hosts.py`,
   `tests/test_poll.py`, `tests/_fakes/rest.py` (the fake REST transport),
@@ -722,8 +727,8 @@ hunks overlap).
       per class via public SDK methods with raw results; ordered timeframe fields excluding
       `underlying_asset`; DELAYED wins; the no-timeframe branches incl. the base-Business
       WARNING ([DESIGN § 13.2](DESIGN.md#132-host-decision)) and futures `UNKNOWN`; HTTP 403 → `EntitlementError`; transport error
-      → nothing cached. Synchronous on the calling thread, cached under `_registry_lock`
-      (released before the call).
+      → nothing cached. Synchronous on the calling thread; the REST transport caches each
+      decision per session under its own leaf lock, released before the REST call.
 - [ ] `_poll.py`: one thread per `poll()` table; `REPLACE` and `UPSERT` on a keyed
       `input_table` with static Arrow key tables for deletes (incl. empty cycles); `APPEND` on a
       `table_publisher`; reactive symbols read with `Table.snapshot()` on the poller thread, never
@@ -747,6 +752,10 @@ hunks overlap).
       test reference in a comment.
 - [ ] Every host-decision branch in DESIGN § 13.2 has a fixture test naming it.
 - [ ] `poll(mode=REPLACE)` evicts keys absent from the latest cycle, including on an empty cycle.
+- [ ] A session that used this transport and was dropped without `close()` is collected when
+      unreferenced (`gc.collect()`), the `garbage-collected without close()` WARNING is logged,
+      and the transport's closer ran (model: `test_a_session_collected_unclosed_runs_its_closers`;
+      the closer and anything the transport keeps must hold the core weakly, DESIGN § 6).
 - [ ] `./scripts/check.sh` green; CI green on all five test jobs.
 
 **Verification.**
@@ -773,6 +782,12 @@ test fixtures (P6); `HistorySource.AUTO` arbitration (P5, which owns `_flatfiles
 
 **Approval gates.** Opening the PR. Running `scripts/refresh_massive_catalog.py` fetches docs
 from massive.com (read-only; no approval needed, note it in the PR).
+
+**Follow-ups from the P2 review (PR #46).** `poll()` must handle a verb that races `close()`,
+as `SessionCore._claim` does for streams: a `poll()` that passed the verb guard just before
+`close()` ran must not start a poller the session will never stop. Register the poller's
+cleanup through `SessionCore.on_close`, which runs it at once on a closed session, or recheck
+the closed flag under `registry_lock` before starting it.
 
 ---
 
@@ -809,8 +824,10 @@ with.** P3, P5.
 - Create: `src/deephaven_massive/_ws.py` (connection registry keyed by URL, single-flight
   creation, client thread per connection running `WebSocketClient.connect`, reconcile loop, ack
   parser, watchdogs, verdict rule, the options contract cap, idle close after 30 s grace),
-  `_stream.py` (stream registry keyed by `(dataset, channel, symbol key)`, `table_publisher`
-  inside the stream scope, per-channel `SimpleQueue`s, flush thread, one Arrow→Java conversion
+  `_stream.py` (per-stream publisher, blink table, and stream scope created by
+  `StreamTransport.open_stream`; the session's registry from P2 already deduplicates streams
+  by key and owns each stream's record, so `_stream.py` keeps no second registry), per-channel
+  `SimpleQueue`s, flush thread, one Arrow→Java conversion
   per channel per flush, `where_in` fan-out with cached filter tables, cap deferral),
   `_watchlist.py` (`listen(..., do_replay=True)` on the symbol table; diffs dispatched off the
   UG thread; `last_by().where_in(symbol_table, "Symbol")`), `tests/test_ws.py`,
@@ -842,10 +859,11 @@ with.** P3, P5.
       `max_connections` → `State=WAITING_SLOT`, streams alive, whether it arrives as a raw frame
       after the handshake or is surfaced by the fork during the handshake (F2.6, in D1);
       reconnect states.
-- [ ] `_stream.py`: stream dedup by key; `table_publisher(name=f"massive.{dataset}#{n}",
+- [ ] `_stream.py`: `open_stream(spec, request, channel, *, stream_id)` creates
+      `table_publisher(name=f"massive.{dataset}#{stream_id}",
       col_defs=<schema>, on_shutdown_callback=…)` created in the stream's `LivenessScope` under
       the captured `ExecutionContext`; shutdown callback does only registry update under
-      `_registry_lock` and `loop.call_soon_threadsafe`; flush thread: drain → one Arrow batch →
+      `registry_lock` and `loop.call_soon_threadsafe`; flush thread: drain → one Arrow batch →
       `to_table` once → per stream `add(batch)` or `add(batch.where_in(filter_table, "Symbol"))`;
       `on_flush_callback` unused; schema mismatch → `publish_failure` + ERROR.
 - [ ] Options cap: count parameters per `/options` connection; static over-cap → `ValueError`
@@ -854,7 +872,7 @@ with.** P3, P5.
 - [ ] `_watchlist.py`: listener computes adds/removes only; dispatches to a session worker;
       subscribe order: insert, enable, subscribe; unsubscribe order: disable, unsubscribe,
       delete; symbol table held strongly by the stream in its scope.
-- [ ] Library threads never take the UG lock while holding `_registry_lock`; verbs on the UG
+- [ ] Library threads never take the UG lock while holding `registry_lock`; verbs on the UG
       thread raise `ValueError` (P2 helper).
 - [ ] Idle connection close in the connection loop (30 s grace), not the reaper.
 - [ ] Tests: the `fake_ws_server` fixture (`tests/_fakes/ws.py`) speaking the Massive protocol
@@ -869,6 +887,10 @@ with.** P3, P5.
 **Acceptance criteria.**
 - [ ] A refused parameter fails only its streams; other streams on the same connection keep
       ticking (test).
+- [ ] A session that used this transport and was dropped without `close()` is collected when
+      unreferenced (`gc.collect()`), the `garbage-collected without close()` WARNING is logged,
+      and the transport's closer ran (model: `test_a_session_collected_unclosed_runs_its_closers`;
+      the closer and anything the transport keeps must hold the core weakly, DESIGN § 6).
 - [ ] Releasing the last result of a stream unsubscribes its topics; a derived table keeps the
       stream alive (test under the embedded JVM).
 - [ ] Deferred option contracts subscribe automatically when capacity frees (test).
@@ -900,6 +922,34 @@ fixtures only); live tests (P8).
 
 **Approval gates.** Opening the PR. The PR must link the D1 PR that bumped the fork SHA.
 
+**Follow-ups from the P2 review (PR #46).** The transport review of P2 (B1–B9) left these notes
+for the implementer:
+
+- Tighten `StreamTransport.open_stream`'s `channel` parameter from `str | None` to `str`: every
+  WebSocket dataset has a channel, and `None` only means "no channel" for REST datasets.
+- If `open_stream` raises after creating its stream scope or taking topic references, it must
+  release both itself before the exception propagates; the session never sees a handle for it.
+- The blink table's shutdown callback must catch the `RuntimeError` that
+  `loop.call_soon_threadsafe` raises once the connection's loop is closed, and only log it: the
+  callback can run long after the connection ended.
+- The flush builds Arrow columns directly from the WebSocket key maps, not through
+  `Schema.to_arrow`, whose per-row dictionaries are too slow for the flush path.
+- Forex and crypto frames carry `sym` in the wire spelling (`EUR/USD`, `BTC-USD`). Canonicalise
+  it before the `where_in` fan-out, so it matches `canonical_view`'s `C:EURUSD` and `X:BTCUSD`.
+- The forex `C` channel sends `x` (the exchange id) as a quoted string; coerce it to `int`.
+- `blink()` on a stream that failed during its open returns the failed table, but
+  `append_only()`, `ring()` and `last_by()` raise Deephaven's `DHError` ("Can not listen to
+  failed table") while shaping it (DESIGN § 6.1). Wrap that error in a `MassiveError` that
+  names the stream's failure.
+
+**Key maps for the other asset classes.** The owner decided (PR #46) that the shared tick
+schemas are the union across asset classes: P2 added the nullable columns `ReceivedTimestamp`
+(crypto `r`, ms), `SessionEndDate`, `Channel`, and `ReportSequence` to `TRADES` and `QUOTES`,
+a single `Exchange` and `BidTimestamp`/`AskTimestamp` to `QUOTES`, and `DollarVolume`,
+`SessionEndDate`, and `SettlementPrice` to `BARS`. This package maps the crypto `XT`/`XQ` keys
+(`x`, `r`) and the futures WebSocket keys (`dv` to `DollarVolume`) onto them, and declares the
+units of the new timestamp fields in the dataset specs.
+
 ---
 
 <a id="p5"></a>
@@ -930,8 +980,10 @@ fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
   **documented** headers per prefix, e.g. `us_stocks_sip/trades_v1`:
   `conditions,correction,exchange,id,participant_timestamp,price,sequence_number,sip_timestamp,size,tape,ticker,trf_id,trf_timestamp`).
 - Modify: `tests/conftest.py` (one thin `fake_s3` fixture that builds the `tests/_fakes/s3.py`
-  opener), `_session.py` (S3 factory hook), `_query.py` (`history()` arbitration calls
-  `_flatfiles.choose_source` then dispatches), `_domains/base.py` (flat-file prefix helper).
+  opener), `_session.py` (S3 factory hook), `_domains/base.py` (flat-file prefix helper).
+  `_query.py` needs no change: `history()` already hands `source=AUTO` (and `FLAT_FILES`) to
+  `FlatFileTransport.history(..., source=...)`, which runs `choose_source` and calls
+  `core.rest_transport().history(...)` itself when REST is the better source.
 - Delete: none.
 
 **Tasks.**
@@ -965,6 +1017,10 @@ fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
       multi-chunk fixture).
 - [ ] Every branch of DESIGN § 16 is covered by a named test; `./scripts/check.sh` green; CI
       green.
+- [ ] A session that used this transport and was dropped without `close()` is collected when
+      unreferenced (`gc.collect()`), the `garbage-collected without close()` WARNING is logged,
+      and the transport's closer ran (model: `test_a_session_collected_unclosed_runs_its_closers`;
+      the closer and anything the transport keeps must hold the core weakly, DESIGN § 6).
 
 **Verification.**
 ```bash
@@ -1034,6 +1090,11 @@ needs a change, land it first in a separate `refactor:` PR.
       `indices.values`, …).
 - [ ] For streamed datasets: a fake-server test that one data frame lands in `blink()` with the
       dataset schema; for flat-file datasets: a one-batch CSV fixture round trip.
+- [ ] Docstring examples: once the namespace's datasets exist, give the query classes in
+      `_query.py`, `MassiveSession` in `_session.py`, the enums in `_enums.py`, and
+      `EntitlementError` in `_errors.py` real examples that use them again (P2 removed or
+      reduced every example that used a dataset, because AGENTS.md requires examples that run
+      against the documented API).
 
 **Shared acceptance criteria.**
 - [ ] Every row of the namespace's table in DESIGN § 8 has a `DatasetSpec` and a test module
@@ -1064,6 +1125,14 @@ lines (F H3) — one name per dataset, no aliases; Benzinga transcripts never ex
 **Shared out of scope.** Shared modules; README (P7); catalog exclusions (P7); live tests (P8).
 
 **Shared approval gates.** Opening the PR.
+
+**Follow-ups from the P2 review (PR #46): SDK hint overrides.** The packages that declare these
+datasets add `ColumnOverride`s, each with a test, for SDK hints that do not match the data:
+`OptionsContract.correction` is hinted `str` but carries an integer (P6b); the snapshot
+`LastQuoteAskSize` and `LastQuoteBidSize` columns are sizes, so `double` (P6a, P6g); and every
+`*Exchange` and `*Tape` column is an `int` id (DESIGN § 11), whatever its hint. The futures and
+crypto packages (P6c, P6f) map their REST and flat-file fields onto the shared columns P2 added
+(see P4) and declare their timestamp units.
 
 ### P6a — `feat: stocks datasets` — branch `feat/stocks-datasets` — Issue: #17
 DESIGN [§ 8.1 `m.stocks`](DESIGN.md#81-mstocks). Owns `_domains/stocks.py`, including the
@@ -1127,8 +1196,9 @@ SeriesType`; symbol prefix selects the class; axis `timestamp` ms), and `_domain
 `funding_conditions` via the P3 shim until D2). It also fills `MassiveSession.snapshots()` in
 `_session.py` (`m.snapshots(symbols, …F)`: `/v3/snapshot`, 250 per request, mixed classes,
 per-ticker `NOT_ENTITLED` rows keep `Error`/`Message` and log once) and adds that dataset's
-record to `_catalog.py`; its tests for the unified snapshot go in `tests/test_session.py`.
-P6g is the only domain package that edits those two shared modules. `cusip` is typed `str` in
+record, `reference.snapshots` (`asset_class=None`), to `_domains/reference.py` (DESIGN § 8.11),
+not `_catalog.py`; its tests for the unified snapshot go in `tests/test_session.py`. P6g is
+the only domain package that edits `_session.py`. `cusip` is typed `str` in
 the library regardless of the SDK hint.
 
 ### P6h — `feat: partner datasets` — branch `feat/partner-datasets` — Issue: #24
@@ -1283,6 +1353,10 @@ never add a probe for an unsupported endpoint (`/v1/summaries`, `/futures/{venue
 **Out of scope.** Changing any behaviour (file a `fix:` package if a note turns out wrong).
 
 **Approval gates.** Opening the PR; the owner runs the suite.
+
+**Follow-ups from the P2 review (PR #46).** Regenerate `tests/data/_symbols/crypto_tickers.csv`
+from the live reference endpoint (`/v3/reference/tickers?market=crypto`) instead of the
+current fixture, and note the date of the snapshot in the PR.
 
 ---
 

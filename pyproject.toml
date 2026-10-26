@@ -86,8 +86,6 @@ extend-exclude = [
     "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
     "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
     "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "src/deephaven_massive/config.py",  # LEGACY-EXCLUSION: replaced by _config.py in P2
-    "src/deephaven_massive/session.py",  # LEGACY-EXCLUSION: replaced by _session.py in P2
     "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, deleted in P7
 ]
 
@@ -183,7 +181,6 @@ mypy_path = ["src", "tests"]
 explicit_package_bases = true
 exclude = [
     '^src/deephaven_massive/(engine|domains|schemas)/',  # LEGACY-EXCLUSION: deleted in P7
-    '^src/deephaven_massive/(config|session)\.py$',  # LEGACY-EXCLUSION: replaced in P2
     '^tests/legacy/',  # LEGACY-EXCLUSION: legacy tests, deleted in P7
 ]
 
@@ -203,8 +200,6 @@ exclude = [
     "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
     "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
     "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "src/deephaven_massive/config.py",  # LEGACY-EXCLUSION: replaced by _config.py in P2
-    "src/deephaven_massive/session.py",  # LEGACY-EXCLUSION: replaced by _session.py in P2
 ]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"
@@ -233,8 +228,6 @@ omit = [
     "*/deephaven_massive/engine/*",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
     "*/deephaven_massive/domains/*",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
     "*/deephaven_massive/schemas/*",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "*/deephaven_massive/config.py",  # LEGACY-EXCLUSION: replaced by _config.py in P2
-    "*/deephaven_massive/session.py",  # LEGACY-EXCLUSION: replaced by _session.py in P2
 ]
 
 [tool.coverage.report]
