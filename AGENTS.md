@@ -10,7 +10,7 @@ is the schedule. Where this file and `DESIGN.md` disagree, `DESIGN.md` wins.
 Run everything from the repository root. The test suite needs JDK 17 or later.
 
 ```bash
-uv sync                                    # create .venv from uv.lock
+uv sync --upgrade                          # create or update .venv with the newest versions
 uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
 ./scripts/check.sh                         # full gate: lint, format, types, tests + coverage
 ./scripts/check.sh fast                    # lint and types only; fixes what ruff can fix
@@ -21,6 +21,10 @@ uv build                                   # sdist and wheel
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
+
+`uv.lock` is not committed. Both `check.sh` tiers start with `uv sync --upgrade`, so every run
+uses the newest versions, including the latest `deephaven-fixes` commit of the SDK fork, and
+prints that commit. Offline, a local run warns and keeps what is installed; CI fails instead.
 
 ## Hard rules
 
@@ -58,7 +62,9 @@ environment, and the Claude Code hook blocks them.
     touch Massive, and only when `MASSIVE_API_KEY` is set.
 11. **Docstrings meet the documentation standard below.** A change to a public signature,
     default, or table semantics updates `DESIGN.md` first (owner decision).
-12. **Dependencies** change only in dedicated `chore(deps):` PRs. `uv.lock` is committed.
+12. **Dependencies** (the declarations in `pyproject.toml`) change only in dedicated
+    `chore(deps):` PRs. `uv.lock` is not committed: every sync resolves the newest versions,
+    including the latest `deephaven-fixes` commit of the SDK fork.
 
 ## Documentation standard
 

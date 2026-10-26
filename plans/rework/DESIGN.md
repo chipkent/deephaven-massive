@@ -834,10 +834,11 @@ Each exclusion appears in `tests/test_catalog.py` with a `# reason:` comment.
 | Single-ticker v2 snapshots `/v2/snapshot/.../tickers/{t}` | Covered by `snapshots(symbols)` with the `tickers` filter. |
 | `/v3/snapshot/options/{u}/{o}` | Covered by `m.options.snapshots`; identical fields. |
 
-**Private SDK calls.** Exactly two documented endpoints that the released SDK lacks use
-`RESTClient._paginate_iter` or `_get` until the fork methods land: `/fed/v1/funding-conditions`
-and `/v1/open-close/crypto/{from}/{to}/{date}`. A test pins each shim to the fork commit and
-fails when the fork method exists, so the shim is removed on the next upgrade.
+**No private SDK calls.** The two documented endpoints that the released SDK lacks,
+`/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}`, are called through
+the fork's public methods `list_funding_conditions` and `get_daily_open_close_crypto` (fork
+PR #7, [section 19](#19-sdk-fork-fix-list-and-responsibility-split), F6). The library never
+calls `RESTClient._get`, `_paginate`, or `_paginate_iter`.
 
 ## 9. Filters
 
@@ -1128,6 +1129,79 @@ thread.run(lambda: asyncio.run(
     client.connect(conn.on_frame, max_size=None)))         # websockets frame cap off
 ```
 
+`max_size` goes to `connect()`, which passes it to websockets; extra keyword arguments to the
+constructor are stored and never used. The client thread is a daemon thread, and `m.close()`
+never joins it without a timeout: `request_close()` does not cut short a wait in progress, so a
+backoff sleep (up to `max_reconnect_backoff`) or a websockets retry delay (up to 90 s) runs to
+its end before `connect()` returns.
+
+**What the library observes.** The fork has no callback for handshakes, reconnects, or backoff
+waits, and in raw mode it passes the processor nothing from a handshake. The library adds no
+fork hook. It detects **connection generations** on the client's own loop thread, where every
+connection-state writer runs; the flush thread never touches the client. Two fork facts are
+relied on, and both hold for upstream today: while the processor runs, `client.websocket` is the
+current websockets `ClientConnection` (the fork assigns it before the receive loop), and
+`client.max_connections_reached` (fork #23) is the value from that connection's handshake.
+Socket state is read through websockets' public `ClientConnection.state` (`CONNECTING`, `OPEN`,
+`CLOSING`, `CLOSED`).
+
+- **A. `on_frame` opens generations.** `conn.on_frame` runs on the loop thread, in order with
+  the frames, and only after the handshake completed and the fork started its sender. The
+  library keeps a strong reference to the current generation's socket (never `id()`). When a
+  frame arrives and `client.websocket` is not that socket, it: increments the generation;
+  cancels the old generation's watchdogs; clears A; starts one watchdog per topic in S (the set
+  the library last passed to `client.set_subscriptions`, its own record of the fork's
+  `scheduled_subs`; see the reconcile loop below), bound to the new socket; sets `State=CONNECTED`, or `State=WAITING_SLOT` when
+  `client.max_connections_reached` is true. Only then does it process the frame's statuses, so an
+  acknowledgement that arrives in the generation's first frame is kept. Ordinary reconciles and
+  `resubscribe` never open a generation, never clear A, and never restart watchdogs, so a resend
+  after an acknowledgement timeout advances to `NO_ACK` as specified.
+- **B. Watchdogs check their socket and their topic.** Watchdogs are keyed to S, not to D: D
+  can run ahead of S (a topic added while a step is in flight is not sent yet, and is not in the
+  fork's `scheduled_subs`), and such a topic gets its watchdog only when the step that sends it
+  goes out. A topic that leaves D (its ref-count reaches zero, or the options cap defers it)
+  cancels its watchdog at once. A watchdog that fires first checks that its topic is still in S
+  and in D, `client.websocket is sock`, and `sock.state is OPEN`. If any fails, it is cancelled without escalating, and if `sock.state` is
+  `CLOSED` the connection shows `State=RECONNECTING` (unless it already shows `WAITING_SLOT`).
+  Otherwise it resends once, then reaches `NO_ACK`. A dead generation's watchdogs are therefore
+  harmless during the backoff, a stale watchdog never acts on a newer socket, and
+  `client.resubscribe` is never called for a topic outside `scheduled_subs` (which would raise
+  `ValueError` on the loop thread).
+- **C. Old watchdogs are cancelled** when A opens the next generation (cleanup; B already makes
+  them inert).
+- **D. A heartbeat covers silent connections.** One `loop.call_later` heartbeat, every
+  `ack_timeout`, on the loop thread: if `client.websocket` is a socket not yet seen, `OPEN`, and
+  unseen for `ack_timeout`, it opens the generation as in A, so a server that never sends a frame
+  reaches `NO_ACK` within 3 × `ack_timeout` of the socket appearing (at most one heartbeat to open
+  the generation, one to resend, one to `NO_ACK`). `OPEN` is the websockets state, reached before
+  the Massive authentication, so a handshake that stalls longer than `ack_timeout` also opens a
+  generation early. That is harmless: a resend before the fork's sender starts merges into its
+  first send. Only a stall longer than 2 × `ack_timeout` produces a false `NO_ACK`, which the next
+  generation clears. If the current generation's socket is `CLOSED`, the heartbeat cancels that
+  generation's watchdogs and shows `State=WAITING_SLOT` when `client.max_connections_reached` is
+  true, else `State=RECONNECTING` unless the generation already shows `WAITING_SLOT` (a
+  `max_connections` status received as a frame after the handshake leaves the flag false). A
+  refused `max_connections` attempt produces no
+  processor frame and closes within the handshake, so it never opens a generation and never
+  starts a watchdog; but the fork keeps it as `client.websocket` through the backoff that
+  follows. So the heartbeat also inspects a `client.websocket` that is `CLOSED` and never opened
+  a generation (including before the first successful connection) and shows
+  `State=WAITING_SLOT` when `client.max_connections_reached` is true, else
+  `State=RECONNECTING`, without starting watchdogs. The thread wrapper cancels the heartbeat
+  when `connect()` returns or raises.
+
+A `max_connections` status that arrives after the handshake reaches the processor as a frame and
+is handled directly. Two limitations remain, both diagnostic only. A generation that never
+reached authentication can leave a stale `max_connections_reached`, so the heartbeat may show
+`WAITING_SLOT` instead of `RECONNECTING` for one generation, with no effect on watchdogs. And the
+library still learns that `connect()` returned for good (rather than reconnecting under
+`reconnect_on_close`) only when the thread wrapper sees it return.
+
+A fatal handshake error (for example HTTP 400 or 404, raised because of
+`raise_fatal_errors=True`) ends `connect()`; the library fails every stream on the connection
+through `publish_failure` with a `MassiveError` naming the HTTP status and the host, and
+`m.connections()` shows `State=FAILED`.
+
 In raw mode the SDK consumes only the handshake frames (`connected`, the auth reply) and passes
 every later text frame to the processor unparsed. That includes subscribe acknowledgements,
 refusals, and `max_connections`. `conn.on_frame` decodes each frame exactly once with the
@@ -1144,7 +1218,7 @@ Responsibilities:
 | `max_connections` status before a server close | Received as a raw frame after the handshake; during the handshake the fork surfaces it to the caller (fork item F2.6), so the library can tell it from a network drop. The fork reconnects after backoff; the library shows `State=WAITING_SLOT`; streams stay alive. |
 | Reconnect after any close unless `request_close()` was called; merge pending subscriptions; after a connection that opened closes (including a `max_connections` refusal), a backoff of at least `reconnect_backoff`, doubling to `max_reconnect_backoff`; before a connection opens, a TCP failure, a timeout, a connection closed during the handshake, or a retryable handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the connection's streams (§ 13.3, `raise_fatal_errors=True`) | fork |
 | Desired topic set, reference counts, single in-flight step | library |
-| Sending the subscribe and unsubscribe frames for a step | fork `set_subscriptions(desired, resend=...)` |
+| Sending the subscribe and unsubscribe frames for a step | fork `set_subscriptions(desired)`; `resubscribe(*topics)` for the one re-send after a timeout |
 | Per-topic acknowledgement parsing, watchdog, re-send | library, from the status frames |
 | Routing data frames to streams; Deephaven publishing | library |
 
@@ -1154,13 +1228,17 @@ Responsibilities:
 ```
 desired D = topics with ref-count > 0, minus deferred options contracts (section 15)
 acked   A = topics the server acknowledged
+sent    S = the set the library last passed to client.set_subscriptions (its record of the
+            fork's scheduled_subs; D may run ahead of S while a step is in flight)
 
 when no step is in flight and D != A:
    removes = A - D  -> client.set_subscriptions(D): one unsubscribe frame; removed immediately
-                       (unsubscribe acknowledgements are UNVERIFIED and not awaited)
+                       (unsubscribe acknowledgements are UNVERIFIED and not awaited); S = D
    adds    = D - A  -> one subscribe frame per step, at most 1,000 topics per frame
                        (the frame-size limit is UNVERIFIED; the chunk size is conservative);
-                       start a watchdog per topic
+                       S = the set passed; start a watchdog for each topic of S that has none
+                       (a topic has at most one watchdog; one started when a generation
+                       opened is kept)
 
 status "success", message "subscribed to: <p1>[,<p2>...]"
    -> those topics are ACKED. Cluster-agnostic text match; tolerates a comma list. The
@@ -1172,16 +1250,41 @@ status "error" naming a topic
 status "error" with no topic
    -> applies to every topic of the in-flight step (exact attribution, because one step is in
       flight). See the explicit-verdict rule below.
-no acknowledgement within ack_timeout
-   -> client.set_subscriptions(D, resend={topic}) once
-still none
+frame arrives and client.websocket is not the generation's socket (all on the loop thread)
+   -> new generation: cancel the old generation's watchdogs; A = {}; start a watchdog for
+      every topic in S (not D) bound to the new socket; State=CONNECTED (WAITING_SLOT if
+      client.max_connections_reached); then process this frame's statuses (so
+      acknowledgements in the first frame are kept)
+heartbeat (every ack_timeout): client.websocket unseen, OPEN, and silent for ack_timeout
+   -> open its generation as above (a silent server reaches NO_ACK within 3 x ack_timeout of
+      the socket appearing; a handshake stalled past ack_timeout opens it early, harmlessly)
+no acknowledgement within ack_timeout, the topic still in S and D, and the watchdog's socket
+still client.websocket and OPEN
+   -> client.resubscribe(topic) once
+still none, same check
    -> topic state NO_ACK; ERROR logged; reconnect scheduled under the backoff rules; streams
       are not failed
+watchdog fires but its topic left S or D, client.websocket is not its socket, or its socket
+is not OPEN
+   -> cancelled without escalating; State=RECONNECTING if the socket is CLOSED, unless the
+      connection already shows WAITING_SLOT
+ordinary reconcile step or resubscribe
+   -> never opens a generation, never clears A, never restarts a watchdog
 server close or network error
-   -> the fork reconnects; the library shows State=RECONNECTING; after auth_success the fork
-      re-sends D; watchdogs restart
+   -> the fork reconnects and, after a successful handshake, its sender re-sends D; the
+      heartbeat sees the generation's socket CLOSED: cancel its watchdogs; WAITING_SLOT when
+      client.max_connections_reached is true, else RECONNECTING unless the generation already
+      shows WAITING_SLOT (from a max_connections frame after the handshake)
+refused max_connections handshake
+   -> no processor frame, closes within the handshake: no generation, no watchdog, no NO_ACK;
+      the heartbeat sees that CLOSED, never-opened client.websocket and shows WAITING_SLOT
+      (RECONNECTING if max_connections_reached is false), also before the first success
+fatal handshake error (raise_fatal_errors=True, e.g. HTTP 400 or 404)
+   -> connect() raises; the thread wrapper, after asyncio.run returns or raises, fails every
+      stream on the connection through publish_failure with a MassiveError naming the HTTP
+      status and the host; State=FAILED
 shutdown callback (section 6.1)
-   -> ref-count decrement; topics at zero leave D
+   -> ref-count decrement; topics at zero leave D, and each cancels its watchdog
 a connection whose D stays empty for 30 s
    -> closed by the connection loop (idle grace); the row is kept in m.connections() with
       State=CLOSED
@@ -1202,16 +1305,24 @@ at most once per (class, family) per session. In every other case the verdict is
 `EntitlementError` for that step's streams.
 
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
-`error` for the stream's topic, or REST 403 for `poll()`), and unrecoverable library errors such
-as a schema mismatch. `max_connections`, closes, and `NO_ACK` are diagnostic states.
+`error` for the stream's topic, or REST 403 for `poll()`), a fatal WebSocket handshake error
+(`MassiveError` with the HTTP status and host), and unrecoverable library errors such as a
+schema mismatch. `max_connections`, closes, and `NO_ACK` are diagnostic states.
 
 ### 13.4 REST
 
-One host. HTTP 403 becomes `EntitlementError` from `fetch()` and `history()` and fails the table
-from `poll()`. HTTP 429 is retried by the SDK's urllib3 `Retry` (which honours `Retry-After`) and
-then becomes `MassiveError("rate limited ...")`; the library logs once at WARNING that Basic keys
-allow 5 requests per minute and that fan-out `poll()` multiplies requests. `BadResponse` carries
-the HTTP status after the fork fix; until then the library parses the status from the body.
+One host. The library constructs `RESTClient(..., raise_on_status=False)` (fork F5.2), so a
+response whose status is still retryable after the SDK's retries raises `BadResponse` with its
+HTTP status in `.status` (fork F5.1) instead of urllib3's `MaxRetryError`. The option covers
+status retries only: a connection or read failure that outlasts the retries still raises
+urllib3's `MaxRetryError` (or `ProtocolError` or `ReadTimeoutError`), and the library maps those
+to `MassiveError` naming the host and the cause. HTTP 403 becomes `EntitlementError`
+from `fetch()` and `history()` and fails the table from `poll()`. HTTP 429 is retried by the
+SDK's urllib3 `Retry` (which honours `Retry-After`) and then becomes
+`MassiveError("rate limited ...")`; the library logs once at WARNING that Basic keys allow 5
+requests per minute and that fan-out `poll()` multiplies requests. A body that is not valid JSON
+raises `BadResponse` with `.status` on any call or page (fork F5.3), and the library maps it to
+`MassiveError`, so a malformed response never becomes an empty or truncated dataset.
 Per-ticker `NOT_ENTITLED` rows in snapshots keep their `Error` and `Message` columns and are
 logged once.
 
@@ -1462,76 +1573,160 @@ builds rather than unit tests alone.
 
 ## 19. SDK fork: fix list and responsibility split
 
-Fork: `github.com/chipkent/massive-client-python`. The fixes are grouped into seven topic
-branches, F1 to F7. Each branch is opened as one pull request to `massive-com/client-python`.
-The fork's `deephaven-fixes` branch is assembled by direct merges of the seven branches (no
-pull requests into it); CI runs on every push to it. This project tracks the branch:
+Fork: `github.com/chipkent/massive-client-python`. Everything this library needs from the SDK
+goes upstream; the fork carries nothing that is not submitted. The fixes are 20 small pull
+requests in the fork, #4, #7 to #24, and #31, each a preview of the pull request planned for
+`massive-com/client-python`; each will be paired with an upstream issue when the series is
+submitted, and until then its body holds a `Fixes #<issue>` placeholder (the fork has issues
+disabled). Every pull request applies to
+upstream `master` alone unless its body says "Builds on #N", in which case its branch is based
+on that pull request's branch. The whole series is submitted at once, after owner review.
+
+Two rules shape every one of them. **Zero breaking changes:** upstream defaults and the public
+API stay as they are, and new behavior is opt-in through new keyword arguments. Genuine bugs
+are fixed unconditionally, and type hints that are wrong at run time are corrected. **Small and
+focused:** pull requests are split only by related content, because upstream merges small
+outside contributions and rarely large ones.
+
+The fork's `deephaven-fixes` branch is exactly the merge of the series. An integration branch
+cut from upstream `master` merges every pull request head in dependency order with `--no-ff`;
+once CI is green on it, `deephaven-fixes` moves to a commit whose tree is the integration tree
+and whose second parent is the integration head. The branch therefore only moves forward. It is
+never reset or force-pushed, and a fork ruleset blocks deletion and force pushes. When upstream
+merges a pull request or moves `master`, the series is rebuilt on the new `master` the same way.
+Agents may push fork branches and open draft pull requests in the fork; opening an upstream pull
+request needs explicit owner approval each time.
+
+**This project always uses the latest `deephaven-fixes`.** The source is
 `[tool.uv.sources] massive = { git = "<fork>", branch = "deephaven-fixes" }`, with `[project]`
-keeping `massive>=2.9.0`. `uv.lock` records the exact commit, so every install is reproducible,
-and `uv lock --upgrade-package massive` moves the lock to the branch's latest commit. The branch
-only moves forward: when upstream moves, the new upstream `master` is merged into it. It is
-never reset or force-pushed, so every commit a lock has recorded stays reachable; a
-fork ruleset blocks deletion and force pushes. Agents may push topic branches, and may merge
-into `deephaven-fixes` and push it when the fork's CI is green; opening an upstream pull
-request needs explicit owner approval each time. Evidence paths are relative to `site-packages/massive` in `massive==2.9.0`.
+keeping `massive>=2.9.0`. `uv.lock` is not committed: users never install from it, and a
+committed lock would freeze the fork at one commit. `scripts/check.sh` (both tiers, and so the
+git hooks) starts with `uv sync --upgrade`, and every CI job resolves afresh, so each run uses the
+newest versions, including the branch head, and prints the installed `massive` commit. Offline, a
+local `check.sh` run warns and keeps what is installed; in CI a failed resolve is an error. The
+build job installs the wheel next to the same branch head.
 
-### F1 `fix/ws-subscriptions`: thread-safe, prompt, isolated subscription handling
+The topic IDs F1 to F7 group the series by concern and keep the item numbers used elsewhere in
+this document (F2.3, F2.6, …). F8 is a REST bug found while writing the series.
 
-| Item | Problem | Evidence | API change | Test |
-|---|---|---|---|---|
-| F1.1 thread-safe subscribe | `subscribe()` and `unsubscribe()` mutate `scheduled_subs` on the caller thread while `connect()` reads it on the loop thread; no lock | `websocket/__init__.py:273-312` vs `:136-146` | a `threading.Lock` around `scheduled_subs` and `schedule_resub`; the loop copies the set under the lock | 16 threads × 10,000 subscribe/unsubscribe calls against a fake server; the final server set equals the desired set; runs on 3.13t |
-| F1.2 loop wake-up | pending subscriptions are applied only after the 1 s `recv` timeout | `:148-154` | an `asyncio.Event` set through `loop.call_soon_threadsafe` from `subscribe()`; the loop waits on `recv()` or the event | subscribe latency under 50 ms in a fake-server test |
-| F1.3 wildcard isolation | `subscribe("T.*")` discards every scheduled topic whose string starts with the prefix, and `unsubscribe("T.*")` likewise; the prefix test `t.startswith(topic)` makes `"A"` match `"AM.AAPL"` | `:285-289`, `:306-310` | match on the exact channel (`t.split(".", 1)[0] == topic`); a wildcard add no longer removes explicit topics; the collapse becomes opt-in `collapse=True` | `subscribe("A.X"); subscribe("AM.*")` keeps `A.X`; `unsubscribe("T.*")` keeps `T.AAPL` |
-| F1.4 `set_subscriptions` | no way to re-send an unacknowledged topic (`difference()` is empty when the topic is already in `subs`) and no declarative reconcile | `:140-145` | `set_subscriptions(desired: Iterable[str], *, resend: Iterable[str] = ())`: atomically replaces the scheduled set, emits one unsubscribe frame for removals and one subscribe frame for additions plus `resend` | frames captured by a fake server; `resend` of an acknowledged topic emits a frame |
+### 19.1 The series
 
-### F2 `fix/ws-reconnect`: reconnect semantics
+**F1 — WebSocket subscriptions.**
 
-| Item | Problem | Evidence | API change | Test |
-|---|---|---|---|---|
-| F2.1 keep the desired set across reconnects | on `ConnectionClosedError` the client runs `scheduled_subs = set(self.subs)`, dropping subscribes and resurrecting unsubscribes that were scheduled but not yet applied | `:178` | treat `scheduled_subs` as the authoritative desired set and leave it untouched; reset only `subs = set()` and set `schedule_resub = True`, so the new connection subscribes exactly the desired set (a union with `subs` would resurrect pending unsubscribes) | during an outage, schedule one subscribe and one unsubscribe; after reconnect the server holds the new topic and not the removed one |
-| F2.2 reconnect after a clean close | `ConnectionClosedOK` returns; a server-initiated clean close (after `max_connections` or a slow consumer) ends the client permanently | `:168-172` | reconnect unless close was requested (F2.5 sets the flag) | the fake server closes with 1000; the client reconnects; after `request_close()` it stops |
-| F2.3 configurable backoff | reconnects are immediate (the `connect()` iterator's delay resets after a success); the knowledge base requires at least 15 s | `:111-117`, `:183` | `reconnect_backoff: float = 15.0`, `max_reconnect_backoff: float = 120.0`, doubling; the n-th consecutive wait is `uniform(b, min(1.2 * b, max_reconnect_backoff))` with `b = min(reconnect_backoff * 2**n, max_reconnect_backoff)`, so jitter only lengthens a wait and never leaves `[reconnect_backoff, max_reconnect_backoff]`; the client sleeps before re-entering the iterator | every measured wait lies in `[reconnect_backoff, max_reconnect_backoff]`, including at the cap |
-| F2.4 `max_reconnects` semantics | `max_reconnects=5` is a lifetime total, so a long-running client eventually raises | `:106`, `:177-182` | count consecutive failed attempts, reset on `auth_success`; `None` means unlimited; docstring updated | six outages with successes between them do not raise |
-| F2.5 thread-safe close | `close()` is a coroutine that touches `self.websocket` from any thread | `:321-332` | `request_close()` (synchronous, thread-safe, through `call_soon_threadsafe`) sets the close flag; `close()` kept | called from another thread; the loop exits |
-| F2.6 surface handshake `max_connections` (the last commit of F2, separable so the upstream PR can drop it) | a `max_connections` status in the auth reply is only logged; the library sees a disconnect and a reconnect | `:132-133` | surface the status to the caller (for example a distinct exception or a flag) so the library can show `WAITING_SLOT` immediately | the fake server sends `max_connections` in the auth reply; the caller observes it |
+| Item | Fork PR | What it adds |
+|---|---|---|
+| F1.1 thread-safe subscribe | #20 `fix: make WebSocket subscribe and unsubscribe thread-safe` (builds on #19) | A lock guards `scheduled_subs` and `schedule_resub`. `subscribe()`, `unsubscribe()`, and `unsubscribe_all()` hold it for their whole body; the code that sends copies the scheduled set under it and records only that copy as sent, so a change made while a send is in flight goes out on the next turn instead of being lost. In #20 alone that is the receive loop; once #21 is merged it is the sender task. |
+| F1.2 prompt sends | #21 `feat: send WebSocket subscription changes without waiting for recv` (builds on #20) | One sender task per connection sends every subscription change. Callers wake it through `loop.call_soon_threadsafe()`, which never blocks, so a change reaches an idle connection at once instead of after the 1 s receive timeout. As the only sender it never interleaves frames and merges a burst of changes into one subscribe and one unsubscribe frame. |
+| F1.3 wildcard isolation | #18 `fix: match WebSocket wildcard topics on the exact channel` | A wildcard such as `A.*` replaces only topics on exactly that channel: `subscribe("A.*")` keeps `AM.AAPL`, and calling it twice no longer unsubscribes the wildcard itself. |
+| F1.4 declarative subscriptions | #22 `feat: add WebSocketClient.set_subscriptions() and resubscribe()` (builds on #21) | `set_subscriptions(desired)` replaces the wanted topics in one step and sends one unsubscribe frame for the removals, then one subscribe frame for the additions; removals go first so that a connection at the server's topic limit can swap topics. `resubscribe(*topics)` sends a subscribe frame again for topics the client already counts as subscribed, for example ones the server never acknowledged; a topic that is not in `scheduled_subs` raises `ValueError`, and then nothing is sent. Both are safe from any thread while `connect()` runs. |
 
-### F3 `fix/ws-logging-format`
+**F2 — WebSocket reconnects.** Every behavior change here is opt-in; with no new keyword
+arguments the client reconnects exactly as upstream does today.
 
-| Item | Problem | Evidence | API change | Test |
-|---|---|---|---|---|
-| F3.1 | `logger.warning("invalid subscription:", s)` passes `s` as a format argument with no placeholder | `:268` | `logger.warning("invalid subscription: %s", s)` | caplog |
+| Item | Fork PR | What it adds |
+|---|---|---|
+| F2.1 keep pending subscriptions | #19 `fix: keep pending WebSocket subscriptions across a reconnect` | A reconnect keeps `scheduled_subs`, the authoritative desired set, and resets only `subs`, so a subscribe or unsubscribe made just before a drop survives it. Each `connect()` starts with an empty `subs`, so calling it again resubscribes everything. A bug fix, so unconditional. |
+| F2.2 reconnect after a clean close | #23 `feat: add opt-in WebSocket reconnect options` (builds on #19) | `reconnect_on_close=True` reconnects when the server closes the connection normally (a `ConnectionClosedOK`, which websockets raises only when both close frames carry 1000, 1001, or no status code, and whose `rcvd_then_sent` shows the server closed first, as after `max_connections` or a slow consumer) instead of returning from `connect()`. A close the client started still ends `connect()`. An abnormal close (`ConnectionClosedError`, any other code or no close frame) reconnects with or without the option, as upstream already does. |
+| F2.3 backoff | #23 | `reconnect_backoff` and `max_reconnect_backoff`: the wait before reconnecting after an open connection closes doubles with each consecutive failure up to the cap, and jitter adds up to 20%. At the cap the wait is drawn from `[max(reconnect_backoff, cap / 1.2), cap]`, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]`. A failed attempt to open a connection is still retried on the schedule of websockets' own `connect()` iterator: a random first delay of up to 5 s, then 3.1 s growing by a factor of 1.618 to 90 s. The `reconnect_backoff` floor therefore applies only after an opened connection closes, which includes a `max_connections` refusal (the server completes the handshake, sends the status, then closes); a handshake that fails follows the websockets schedule. |
+| F2.4 failure budget | #23 | `max_consecutive_failures` counts failures in a row, where a failure is a failed attempt or a connection that closes before it has been open for `stable_uptime` seconds; `None` allows any number. The count and the backoff reset only after `stable_uptime` of uptime, not on `auth_success`. `max_reconnects` keeps its upstream meaning, a total per `connect()` call. |
+| F2.5 thread-safe close | #24 `feat: add WebSocketClient.request_close()` (builds on #23) | `request_close()` is synchronous, safe from any thread, and does not wait. It sets a flag and, while `connect()` runs, closes the socket through `loop.call_soon_threadsafe()`; `connect()` checks the flag before it reconnects and again after the wait before reconnecting, and returns instead, even with `reconnect_on_close`. An attempt or wait in progress is not cut short, but no further connection is opened; a request made before `connect()` makes the next call return at once. `close()` called while `connect()` runs now sets the same flag, so it also stops a reconnect that is waiting or in its handshake; a `close()` before `connect()` starts is unchanged. |
+| F2.6 handshake `max_connections` | #23 | The attribute `max_connections_reached` is true when the server sent a `max_connections` status during the last handshake, so the caller can tell a full allowance from a network drop. The processor receives the same frames as before. |
+| F2.7 fatal handshake errors | #23 | `raise_fatal_errors=True` uses websockets' default `process_exception`, which raises errors that retrying cannot fix, such as an HTTP 404 during the handshake, instead of retrying them forever. `connect(process_exception=...)` also reaches websockets now instead of raising `TypeError`. |
 
-### F4 `feat/typing`: `py.typed` and hint fixes
+The reconnect keywords of #23, with their upstream-preserving defaults:
 
-| Item | Problem | Evidence | API change | Test |
-|---|---|---|---|---|
-| F4.1 `py.typed` | no `py.typed`; mypy strict needs `ignore_missing_imports` | `massive/` has no `py.typed` | add `py.typed` | mypy strict passes on a sample consumer |
-| F4.2 model hints | wrong hints: `CryptoQuote.bid_price`, `ask_price`, `ask_size` as `int` and `timestamp` as `float`; `IndexValue.timestamp: str`; `PreviousCloseAgg.timestamp: float`; `LastTrade.sequence_number: float` | `websocket/models/models.py:220-224`, `:331`; `rest/models/aggs.py:107`; `rest/models/trades.py:34` | `float`, `float`, `float`, `int`; `int`; `int`; `int` | round-trip fixtures |
-| F4.3 `cusip` | `list_tickers(cusip: int)` | `rest/reference.py:95` | `cusip: Optional[str]` | the parameter accepts a 9-character string |
+| Keyword | Default | Meaning |
+|---|---|---|
+| `reconnect_backoff: float` | `0.0` | Seconds to wait before reconnecting after an open connection closes; `0` reconnects at once, as upstream does. Must lie in `[0, max_reconnect_backoff]`, else `ValueError`. |
+| `max_reconnect_backoff: float` | `120.0` | The longest wait, in seconds. |
+| `reconnect_on_close: bool` | `False` | Also reconnect after a normal close by the server; by default `connect()` returns. |
+| `max_consecutive_failures: int \| None` | `None` | Raise the last error after this many failures in a row; `None` allows any number. |
+| `stable_uptime: float` | `60.0` | Seconds a connection must stay open to reset the failure count and the backoff. |
+| `raise_fatal_errors: bool` | `False` | Raise unfixable handshake errors instead of retrying them. |
 
-### F5 `fix/rest-bad-response-status`
+**F3 — WebSocket logging.**
 
-| Item | Problem | Evidence | API change | Test |
-|---|---|---|---|---|
-| F5.1 | `BadResponse(resp.data.decode())` loses the HTTP status | `rest/base.py:154-155` | `BadResponse(message, *, status: int, body: str)`; `__str__` unchanged | 403 and 429 fixtures |
+| Item | Fork PR | What it adds |
+|---|---|---|
+| F3.1 | #4 `fix: log the topic for an invalid subscription` | `logger.warning("invalid subscription: %s", s)`, so a topic without a channel prefix logs `invalid subscription: AAPL` instead of a logging traceback. |
 
-### F6 `feat/rest-missing-endpoints`
+**F4 — typing.**
 
-| Item | Problem | Evidence | API change | Test |
-|---|---|---|---|---|
-| F6.1 funding conditions | `/fed/v1/funding-conditions` is documented but absent | `rest/economy.py` has only four `/fed/v1/*` URLs | `list_funding_conditions(...)` mirroring `list_treasury_yields` | signature parity with the documentation |
-| F6.2 crypto daily open-close | `/v1/open-close/crypto/{from}/{to}/{date}` is absent (only `/v1/open-close/{ticker}/{date}` exists) | `rest/aggs.py:154` | `get_daily_open_close_crypto(from_, to, date, ...)` | fixture |
+| Item | Fork PR | What it adds |
+|---|---|---|
+| F4.1 hint fixes | #14 `fix: correct type hints that disagree with the API` | `CryptoQuote.bid_price`, `ask_price`, and `ask_size` become `float`; `IndexValue.timestamp` becomes `int` (Unix milliseconds); `get_previous_close_agg()` returns `List[PreviousCloseAgg]`; `list_treasury_yields()`, `list_short_interest()`, `list_short_volume()`, and `vx.list_ipos()` return `Iterator[...]`; `list_tickers(cusip=...)` widens to `Union[int, str]`. Annotations and docstrings only. |
+| F4.2 model constructors | #15 `feat: let type checkers see model constructors` | `modelclass` is marked with `dataclass_transform` (PEP 681) under `TYPE_CHECKING`, so checkers accept keyword construction such as `LastTrade(ticker="AAPL", price=1.5)`. No run-time change. |
+| F4.3 `py.typed` | #16 `feat: ship py.typed so the package is checked as typed` (builds on #14 and #15) | An empty `massive/py.typed` (PEP 561) and explicit re-exports of `RESTClient` and `WebSocketClient`, so `mypy --strict` checks the package instead of skipping it. |
+| F4.4 raw overloads | #17 `feat: overload REST methods on raw so callers get precise return types` (builds on #7 and #16) | Every REST method that takes `raw` gets three `@overload`s: the default call returns the model type, `raw=True` (keyword-only) returns `HTTPResponse`, and any other `bool` returns the old `Union`. A strict consumer module is checked in `make static`. |
 
-### F7 `ci/free-threaded`
+**F5 — REST errors.**
 
-| Item | Problem | Evidence | API change | Test |
-|---|---|---|---|---|
-| F7.1 | no free-threaded CI | `.github/workflows` | jobs on 3.13t and 3.14t with `PYTHON_GIL=0`; the stress tests from F1.1 and concurrent `RESTClient` use | CI green |
+| Item | Fork PR | What it adds |
+|---|---|---|
+| F5.1 `BadResponse.status` | #12 `fix: include the HTTP status in BadResponse` | `BadResponse` takes a keyword-only `status` and stores it as an attribute, and `_get` passes the HTTP status. `str(exc)` and `exc.args` are still the response body; construction without a status still works, with `status=None`. |
+| F5.2 `raise_on_status` | #13 `feat: add raise_on_status to RESTClient` (builds on #12) | `RESTClient(raise_on_status=False)` makes a response that still fails after the client's retries (413, 429, 499, 500, 502, 503, 504) raise `BadResponse` with its status and body instead of urllib3's `MaxRetryError`. The default, `True`, keeps upstream's behavior; attempts and backoff are unchanged. |
+| F5.3 non-JSON responses | #31 `fix: raise BadResponse when a response is not valid JSON` (builds on #12) | A response body that is not valid JSON (an HTML page from a proxy, a truncated body) used to be logged and turned into `[]`: a `get_*` call returned `[]` instead of a model, and a `list_*` call yielded nothing on a bad first page or stopped early on a bad later page. `_decode` now raises `BadResponse` with `status` and the first 200 bytes of the body, chaining the `json` error as `__cause__`, and `_get` and `_paginate_iter` let it propagate. A bug fix, so unconditional; valid responses are unaffected. |
 
-Work package P4 (the WebSocket layer) depends on F1 and F2. The crypto and economy packages
-depend on F6; until it lands, the two endpoints use the documented private-call shims of
-[section 8.12](#812-excluded-endpoints). The typing package F4 removes the `massive.*` mypy
-override.
+**F6 — missing REST endpoints.**
+
+| Item | Fork PR | What it adds |
+|---|---|---|
+| F6.1, F6.2 | #7 `feat: add funding-conditions and crypto daily open/close endpoints` | `list_funding_conditions(...)` for `/fed/v1/funding-conditions`, paginated like `list_treasury_yields`, with a `FedFundingConditions` model; `sort` is a plain string such as `"date.desc"`. `get_daily_open_close_crypto(from_, to, date, adjusted)` for `/v1/open-close/crypto/{from}/{to}/{date}`, with `DailyOpenCloseCrypto` and `DailyOpenCloseCryptoTrade` models. |
+
+**F7 — CI and test isolation.**
+
+| Item | Fork PR | What it adds |
+|---|---|---|
+| F7.1 pook isolation | #9 `test: stop pook mocks leaking between REST test classes` | `BaseTest.tearDownClass` turns pook off, so each test class sees only its own mocks; two tests that passed only through leaked mocks now declare persistent ones. Tests only. |
+| F7.2 newer CPython | #10 `ci: run unit tests on Python 3.12, 3.13 and 3.14` | The unit-test matrix grows from 3.10 and 3.11 to 3.10 through 3.14, on Ubuntu and Windows. |
+| F7.3 free-threaded CPython | #11 `ci: run unit tests on free-threaded Python 3.14t` (builds on #9) | One job on 3.14t that fails unless the GIL is off (`PYTHON_GIL=0`), and a test in which 16 threads share one `RESTClient`. 3.14t is the only free-threaded target. |
+
+**F8 — REST request options.**
+
+| Item | Fork PR | What it adds |
+|---|---|---|
+| F8.1 | #8 `fix: stop sending the options argument as a query parameter` | `_get_params` skips `options`, so a call with a `RequestOptionBuilder` no longer also sends `?options=<object repr>`. The headers it carries are applied as before. |
+
+#17 builds on #7 as well as #16, because its overloads cover every REST method, including the two
+that #7 adds; with that, every merge of the series is clean.
+
+### 19.2 How this library uses the fork
+
+The WebSocket layer ([section 13.3](#133-connection-and-subscription-protocol)) opts in to
+every reconnect behavior it relies on; nothing depends on a changed default:
+
+| Keyword | Value passed | Why |
+|---|---|---|
+| `max_reconnects` | `None` | Upstream's total per `connect()` call would end a long-running session; the library never gives up on a path while streams want it. |
+| `reconnect_backoff` | `cfg.reconnect_backoff` ([section 5](#5-massiveconfig)) | Waits out the window in which the server still holds a dropped connection's slot. |
+| `max_reconnect_backoff` | `cfg.max_reconnect_backoff` (120 s) | The doubling stops here; jitter at the cap stays within `[max(base, cap / 1.2), cap]`. |
+| `reconnect_on_close` | `True` | A server-initiated normal close, such as after `max_connections` or a slow consumer, must not end the stream. |
+| `max_consecutive_failures` | `None` (the default) | The library shows `State=RECONNECTING` or `WAITING_SLOT` and keeps streams alive rather than raising. |
+| `stable_uptime` | `60.0` (the default) | The failure count and the backoff reset only after a minute of uptime, not on `auth_success`, so a server that accepts and then drops at once still backs off. |
+| `raise_fatal_errors` | `True` | A handshake error that retrying cannot fix, such as HTTP 400 or 404, ends `connect()`. The library fails the connection's streams through `publish_failure` with a `MassiveError` naming the HTTP status and the host, and `m.connections()` shows `State=FAILED` ([section 13.3](#133-connection-and-subscription-protocol)). |
+
+`max_size=None`, which lifts websockets' 1 MiB frame cap, goes to `connect()`, not to the
+constructor, which stores extra keyword arguments without using them.
+
+The library also calls `set_subscriptions(desired)` for each reconcile step, `resubscribe(topic)`
+for the one re-send after an acknowledgement timeout, and `request_close()` to stop a connection
+from any thread. `request_close()` does not cut short a backoff sleep or a websockets retry
+delay, so the client thread is a daemon and `m.close()` never joins it without a timeout. The
+fork offers no connection callback, and the library adds none: it detects connection
+generations on the client's loop thread, from `conn.on_frame` and one heartbeat, reading
+`client.websocket`, its public `state`, and `client.max_connections_reached` (F2.6); the flush
+thread never touches the client ([section 13.3](#133-connection-and-subscription-protocol),
+"What the library observes").
+
+On the REST side the library constructs `RESTClient(..., raise_on_status=False)`, so a response
+whose status is still retryable after the SDK's retries raises `BadResponse` with `.status`
+instead of urllib3's `MaxRetryError`. It maps 403 to `EntitlementError` and 429 to
+`MassiveError("rate limited ...")`. The option covers status retries only; connection and read
+failures still arrive as urllib3's `MaxRetryError`, `ProtocolError`, or `ReadTimeoutError`, and
+the library maps them to `MassiveError`. A body that is not valid JSON raises `BadResponse`
+(F5.3), which the library also maps to `MassiveError` ([section 13.4](#134-rest)). The shipped
+`py.typed` and raw overloads let `mypy --strict` check every SDK call without a `massive.*`
+override. The crypto and economy packages use the F6 methods.
 
 **Stays in this library, never a PR:** the connection registry keyed by URL with single-flight
 creation; topic reference counts and the desired-set reconcile with one in-flight step;
@@ -1564,10 +1759,11 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 
 - **Ruff.**
   - `select = ["ALL"]`. Linters and type checkers track their latest releases: the dev group
-    declares floors only (`ruff>=…`, `mypy>=…`, `pyright>=…`), `uv.lock` pins the exact versions
-    for reproducible runs, and Dependabot's weekly `uv` update moves the lock to the newest
-    releases. Because `ALL` enables new rules as they ship, an update PR may surface new
-    findings; that PR fixes them (or proposes an ignore for owner approval).
+    declares floors only (`ruff>=…`, `mypy>=…`, `pyright>=…`), and with no committed `uv.lock`
+    every `check.sh` run (`uv sync --upgrade`) and every CI job installs the newest releases; a
+    plain `uv sync` or `uv run` keeps the local lock. Because `ALL` enables new rules as they ship, a new
+    release may surface new findings; the next PR fixes them (or proposes an ignore for owner
+    approval).
   - `preview = true` with `explicit-preview-rules = true`, enabling only `DOC201`, `DOC501`, and
     `DOC502` (docstring Returns and Raises sections must match the code).
   - Global ignores: the rules that conflict with `ruff format` (`COM812`, `COM819`, `W191`,
@@ -1595,22 +1791,26 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Deephaven imports.** Module-level wherever used at run time; imports used only in
   annotations go under `TYPE_CHECKING` (enforced by `TC`). `tests/conftest.py` starts the
   embedded JVM in `pytest_configure`, before collection.
-- **One entry point.** `scripts/check.sh [fast|full] [--no-fix]`. The fast tier (about 2 s) runs
-  ruff fix, ruff format, and mypy; the full tier adds pytest with coverage. Local hooks and CI call
+- **One entry point.** `scripts/check.sh [fast|full] [--no-fix]`. Both tiers first run
+  `uv sync --upgrade`, so they use the newest versions, including the latest `deephaven-fixes`
+  ([section 19](#19-sdk-fork-fix-list-and-responsibility-split)), and print the installed
+  `massive` commit; offline, a local run warns and keeps what is installed, and CI fails. The
+  fast tier then runs ruff fix, ruff format, and mypy; the full tier adds pytest with coverage. Local hooks and CI call
   the same script; CI passes `--output-format github` to ruff.
 - **Agent hooks** (committed `.claude/settings.json`). After an agent edits a `.py` file, ruff
   fixes and formats it and reports remaining diagnostics to the agent. Before an agent ends its
   turn, `scripts/check.sh fast --no-fix` runs. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip`
   commands not prefixed by `uv run` are blocked.
 - **Git hooks** (`.pre-commit-config.yaml`). The commit stage runs the fast tier plus
-  `no-commit-to-branch` (main), `check-yaml`, `end-of-file-fixer`, `trailing-whitespace`, and
-  `uv-lock`. The full tier runs at the pre-push stage.
-- **Packaging.** `uv.lock` is committed and CI runs `uv sync --locked`. Development dependencies
-  use a PEP 735 `[dependency-groups]` table; license metadata follows PEP 639. `__version__`
-  comes from `importlib.metadata`. `deephaven-server` is a development dependency only.
-  `websockets>=14`. `[project]` declares `massive>=2.9.0`, and `[tool.uv.sources]` tracks the fork's
-  `deephaven-fixes` branch, with `uv.lock` recording the exact commit. `.gitignore` lists only the files this project
-  produces.
+  `no-commit-to-branch` (main), `check-yaml`, `end-of-file-fixer`, and `trailing-whitespace`.
+  The full tier runs at the pre-push stage.
+- **Packaging.** `uv.lock` is not committed, and CI resolves afresh on every run.
+  Development dependencies use a PEP 735 `[dependency-groups]` table; license metadata follows
+  PEP 639. `__version__` comes from `importlib.metadata`. `deephaven-server` is a development dependency only.
+  `websockets>=14`. `[project]` declares `massive>=2.9.0`, and `[tool.uv.sources]` tracks the
+  fork's `deephaven-fixes` branch, always at its latest commit
+  ([section 19](#19-sdk-fork-fix-list-and-responsibility-split)). `.gitignore` lists only the
+  files this project produces.
 - **Metadata.** `authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]`; repository
   `https://github.com/chipkent/deephaven-massive`. Not published to PyPI until the fork fixes are
   released upstream.
@@ -1769,8 +1969,11 @@ document already reflects them.
     configuration line.
 16. **WebSocket status handling needs no SDK API change.** In raw mode every frame after the
     handshake reaches the processor, so the library parses frames once and routes status frames
-    itself. One fork item, F2.6, surfaces a `max_connections` status received during the
-    handshake, so `WAITING_SLOT` is accurate from the first attempt.
+    itself. One fork item, F2.6, records a `max_connections` status received during the
+    handshake in the attribute `max_connections_reached`. The client thread's heartbeat reads
+    it when it sees a connection closed, so `WAITING_SLOT` shows within one heartbeat
+    (`ack_timeout`) of a refused attempt; connection generations are detected on the client
+    thread with no fork hook (section 13.3).
 17. **The context manager is kept**, documented as static-results-only.
 18. **`m.options.snapshots(dm.ALL)` is allowed.** It paginates the whole OPRA universe, which is
     slow and documented as such. The rule "`ALL` is accepted by every per-class `snapshots()`"
@@ -1778,9 +1981,14 @@ document already reflects them.
 19. **No live testing as design input.** Unverifiable facts get the conservative choice and a
     fixture test; live tests come later and retire the UNVERIFIED notes.
 20. **All merges into `main` happen through pull requests, and only the owner merges.** In the
-    fork, each topic branch goes upstream as one pull request; the fork's `deephaven-fixes`
-    branch is assembled by direct merges of those branches, with CI on every push, is never
-    reset or force-pushed, and is tracked here by branch, with `uv.lock` recording the exact commit.
+    fork, every fix is one small draft pull request, previewing one upstream pull request, and
+    `deephaven-fixes` is the tree-equal merge of the whole series
+    ([section 19](#19-sdk-fork-fix-list-and-responsibility-split)): an integration branch merges
+    every pull request, and once CI is green on it, `deephaven-fixes` moves to a commit with the
+    integration tree by fast-forward only. The fork's CI runs on pull requests, so the integration
+    branch and each candidate head get their CI through draft pull requests. The branch is never
+    reset or force-pushed. This project always uses its latest commit: `uv.lock` is not committed,
+    and every sync resolves afresh.
 21. **Sessions and queries expose no introspection attributes; their reprs are defined.**
     `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
     appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error

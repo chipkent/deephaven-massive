@@ -13,21 +13,6 @@ permissions:
   contents: read
 
 jobs:
-  lock:
-    name: lock
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          enable-cache: true
-      - name: Check that uv.lock matches pyproject.toml
-        run: uv lock --check
-
   lint:
     name: lint
     runs-on: ubuntu-latest
@@ -40,10 +25,14 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
       - name: Set up Python
         run: uv python install 3.11
       - name: Sync dependencies
-        run: uv sync --locked --python 3.11
+        # uv.lock is not committed, so this resolves the newest versions, including the latest
+        # deephaven-fixes commit of the SDK fork.
+        run: uv sync --python 3.11
       - name: Ruff and mypy (scripts/check.sh fast --no-fix)
         # GitHub sets CI=true, so ruff reports in GitHub annotation format.
         run: ./scripts/check.sh fast --no-fix
@@ -77,13 +66,21 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
       - name: Sync dependencies
-        # The orjson extra is tested on 3.14; orjson publishes no free-threaded wheels.
+        # uv.lock is not committed, so this resolves the newest versions, including the latest
+        # deephaven-fixes commit of the SDK fork. The orjson extra is tested on 3.14; orjson
+        # publishes no free-threaded wheels.
         run: >-
-          uv sync --locked --python ${{ matrix.python-version }}
+          uv sync --python ${{ matrix.python-version }}
           ${{ matrix.python-version == '3.14' && '--extra orjson' || '' }}
+      - name: Show the installed massive commit (the deephaven-fixes head)
+        run: >-
+          uv run --no-sync python -c "import json, importlib.metadata as m;
+          print(json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
       - name: Pytest with 100% statement and branch coverage
         run: uv run pytest --cov --cov-report=xml
       - name: Upload coverage XML
@@ -104,6 +101,8 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
       - name: Set up Python
         run: uv python install 3.11
       - name: Build wheel and sdist
@@ -115,12 +114,18 @@ jobs:
           java-version: "17"
       - name: Import the built wheel in a clean environment, inside a Deephaven server
         # The library imports deephaven at module level, so importing it needs a running
-        # Deephaven JVM, exactly as it does for users. The wheel is installed next to
-        # deephaven-server, a server is started, and only then is the package imported.
-        run: >-
-          uv run --isolated --no-project --python 3.11 --with dist/*.whl
-          --with deephaven-server python -c
-          "from deephaven_server import Server; Server(port=0).start();
+        # Deephaven JVM, exactly as it does for users. The wheel is installed in a fresh
+        # virtual environment next to deephaven-server and the latest deephaven-fixes. The fork
+        # builds as version 0.0.0, which cannot satisfy the wheel's massive>=2.9.0, so an
+        # override supplies it. A server is started, and only then is the package imported.
+        run: |
+          echo "massive @ git+https://github.com/chipkent/massive-client-python@deephaven-fixes" > "$RUNNER_TEMP/overrides.txt"
+          uv venv --python 3.11 "$RUNNER_TEMP/smoke"
+          uv pip install --python "$RUNNER_TEMP/smoke/bin/python" \
+            --override "$RUNNER_TEMP/overrides.txt" dist/*.whl deephaven-server
+          "$RUNNER_TEMP/smoke/bin/python" -c "import json, importlib.metadata as m;
+          print('massive', json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
+          "$RUNNER_TEMP/smoke/bin/python" -c "from deephaven_server import Server; Server(port=0).start();
           import deephaven_massive; print(deephaven_massive.__version__)"
       - name: Upload distributions
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

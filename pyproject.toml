@@ -55,8 +55,8 @@ dev = [
 ]
 
 [tool.uv.sources]
-# The fork's `deephaven-fixes` integration branch. uv.lock records the exact commit, so installs
-# are reproducible; `uv lock --upgrade-package massive` moves the lock to the branch's latest.
+# The fork's `deephaven-fixes` integration branch. uv.lock is not committed, so every sync
+# resolves its latest commit.
 # The fork builds as version 0.0.0, so no code or test may check the massive version.
 massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }
 
