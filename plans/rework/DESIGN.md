@@ -1594,8 +1594,9 @@ rate-limit warning, which is a `threading.Event`. Every call is independent; no 
 argument (the parameters mapping is copied before it is encoded).
 
 ```python
-client.get(path, params) -> Page                    # one request
-client.pages(path, params, *, limit=None) -> Iterator[Page]   # follows next_url
+client.get(path, params, *, result_key="results") -> Page                 # one request
+client.pages(path, params, *, result_key="results", limit=None) -> Iterator[Page]
+                                                                  # follows next_url
 Page(status: str, request_id: str | None, rows: list[dict], body: dict)
 ```
 
@@ -1635,10 +1636,11 @@ Page(status: str, request_id: str | None, rows: list[dict], body: dict)
   the `request_id`, and the first 200 characters of the server's `message` or body.
 - **Strict decoding.** The body is decoded once with the library's JSON codec. Bytes that are not
   UTF-8, or text that is not JSON, raise `MassiveError` with the status and the first 200 bytes,
-  on any call and on any page. The page's rows come from the path's result key in the generated
-  table (`results` for most paths; one of the seven others, such as `last` or `ticker`, where the
-  spec says so). A single object is wrapped as one row; a bare JSON list (`/v1/marketstatus/upcoming`)
-  is the rows. A missing result key is an empty page only when `status` is `OK` or `DELAYED`.
+  on any call and on any page. The page's rows come from the `result_key` the caller passes,
+  which the REST transport reads from the path's entry in the generated `_restspec.py`
+  (`results` for most paths; one of the seven others, such as `last` or `ticker`, where the spec
+  says so); the client itself reads no generated table. A single object is wrapped as one row;
+  a bare JSON list (`/v1/marketstatus/upcoming`) is the rows. A missing result key is an empty page only when `status` is `OK` or `DELAYED`.
   The envelope's `status` and `request_id` are kept on the `Page`, so callers can read `DELAYED`.
 - **Logging.** Each request logs at DEBUG: method, path, query (with no secret), status,
   `request_id`, row count, and elapsed time. Retries log at INFO with the wait, and exhausted

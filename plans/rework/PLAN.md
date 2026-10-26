@@ -683,8 +683,10 @@ Deephaven; P3 builds the REST transport on it.
 - Delete: none.
 
 **Tasks.**
-- [ ] `RestClient(api_key, *, base_url, max_concurrency)` with `get(path, params) -> Page` and
-      `pages(path, params, *, limit=None) -> Iterator[Page]`, and `close()`. Every bullet of
+- [ ] `RestClient(api_key, *, base_url, max_concurrency)` with
+      `get(path, params, *, result_key="results") -> Page`,
+      `pages(path, params, *, result_key="results", limit=None) -> Iterator[Page]`, and
+      `close()`. Every bullet of
       DESIGN § 19.1 is implemented and has a named test: bearer authentication and no key in any
       URL (the fake rejects an `apiKey` parameter); proxy selection from `HTTPS_PROXY` and
       `NO_PROXY`; the CA bundle from `SSL_CERT_FILE`/`SSL_CERT_DIR` or `certifi`; query encoding
@@ -697,7 +699,9 @@ Deephaven; P3 builds the REST transport on it.
       strict decoding (invalid JSON and non-UTF-8 bodies raise on the first and on a later page;
       result keys; a single object wrapped; a bare list; a missing result key with `OK` or
       `DELAYED` is empty); `User-Agent`; DEBUG logging with the key and header never logged.
-- [ ] The result key and page size come from the caller; the client has no dataset knowledge.
+- [ ] The result key (the `result_key` argument) and the page size (a query parameter) come
+      from the caller; the client reads no generated table and has no dataset knowledge, so PC1
+      does not depend on PC3.
 - [ ] Sleeping goes through an injectable clock, so retry tests are deterministic and never call
       `time.sleep()`.
 - [ ] `tests/_fakes/rest.py`: scripted routes (status, headers, body, a dropped connection,
@@ -1035,8 +1039,10 @@ all three modes including reactive symbol tables. After P3, `Query.fetch()`, `Qu
       through a closer that holds the core weakly. Every request goes through it.
 - [ ] Build each request from the `DatasetSpec`: the path template with its path segments, the
       symbol parameter (`SymbolParam`), the `start`/`end` wire pair, the validated `filters`
-      (mapped to wire names by `_catalog.py`, PC3), and the page size; `limit` stays the
-      total-row cap of `RestClient.pages`.
+      (mapped to wire names by `_catalog.py`, PC3), and the page size; pass the path's result
+      key from `_restspec.py` as `result_key`; `limit` stays the total-row cap of
+      `RestClient.pages`. Tests cover a path whose result key is not `results` (for example
+      `/v2/last/trade/{t}`, key `results`, beside `/v1/last/crypto/{from}/{to}`, key `last`).
 - [ ] Decode each page straight to columns: for each wire path the dataset's schema names, one
       Python list per column, timestamp units converted (`_timeunits.py`), one Arrow batch per
       page. Never hold more than one page of rows; build no row objects.
