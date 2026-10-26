@@ -2436,13 +2436,15 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
     approval).
   - `preview = true` with `explicit-preview-rules = true`, enabling only the preview rules
     selected by name: `DOC201`, `DOC501`, and `DOC502` (docstring Returns and Raises sections
-    must match the code), and `PLR0904`, `PLR0914`, and `PLR0916` (the PLR091x limits that are
-    still preview rules). Preview also switches some stable rules to their preview behavior.
-  - Global ignores: `COM812`, the one enabled rule that conflicts with `ruff format`, plus
-    `TRY003`, `EM101`, `EM102`, `PLR0913`, and `CPY001`.
+    must match the code), and `PLR0904`, `PLR0914`, and `PLR0916` (the Pylint limits on public
+    methods, local variables, and boolean expressions, which are still preview rules). Preview
+    also switches some stable rules to their preview behavior.
+  - Global ignores: `COM812`, which conflicts with `ruff format` (it is the only one of ruff's
+    documented formatter-overlap rules that reports anything on formatted code; the others stay
+    enabled), plus `TRY003`, `EM101`, `EM102`, `PLR0913`, and `CPY001`.
   - Enforced on purpose: `E501` at 100 columns, `ANN401` (no `Any`), the `TC` import rules,
-    `SLF001` in `src/`, `C901` at a maximum of 12, the `PLR091x` limits, and `PLR0917` with
-    `max-positional-args = 3`.
+    `SLF001` in `src/`, `C901` at a maximum of 12, the Pylint size limits (`PLR0904` and
+    `PLR0911`–`PLR0916`, except `PLR0913` above), and `PLR0917` with `max-positional-args = 3`.
   - Ignored in `tests/` only: `S101`, `PLR2004`, `SLF001`, `ARG001`, `ARG002`, `FBT001`
     (listener stand-ins keep Deephaven's `on_update(update, is_replay)` signature), and
     `D100`–`D103` and `D107` (test docstrings are optional, but any that exist must be well
