@@ -689,7 +689,8 @@ proxies from the environment. `massive` stays until PC4.
 **Tasks.**
 - [ ] The declarations, each floor checked against the API it uses (`urllib3.ProxyManager`,
       `websockets.asyncio.client.connect` proxy support,
-      `botocore.config.Config(proxies=…, total_max_attempts=…)`).
+      `botocore.config.Config(proxies=…, retries={"total_max_attempts": …})`, and
+      `verify=` on `boto3` `Session.client`).
 
 **Acceptance criteria.**
 - [ ] `rm -rf .venv && uv sync --upgrade` resolves.
@@ -1271,12 +1272,15 @@ extra one is ignored silently; read by name.
 **Files.** Modify `_massive/flatfiles/client.py` and its tests.
 
 **Tasks.**
-- [ ] The botocore `Config` from `net` (`verify`, `proxies`, `total_max_attempts=1`), and the
+- [ ] `session.client("s3", verify=<net.http CA bundle>, config=Config(proxies=<net.http>,
+      retries={"total_max_attempts": 1}))`, and the
       `net/retry.py` schedule for HTTP 500, 503 `SlowDown`, `RequestTimeout`, and connection
       errors before the first byte.
 
 **Acceptance criteria.**
 - [ ] A connection error before the first byte is retried.
+- [ ] The client is constructed with `verify=` on `Session.client` and the proxies and
+      `retries={"total_max_attempts": 1}` inside `Config` (a test constructs it).
 - [ ] A drop after the first block fails loudly, with no duplicate rows.
 - [ ] TLS is never retried.
 - [ ] No credential appears in any log record.

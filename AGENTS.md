@@ -64,7 +64,9 @@ The library has no users, so nothing is kept or shimmed for compatibility.
    `tests/test_readme.py`. Fixtures live in `tests/data/<test owner path>/`. Import roots are
    `pythonpath = ["."]` and `mypy_path = ["src"]`; import fakes as `tests._fakes…`.
    `tests/test_layout.py` enforces this; a new exception needs owner approval and a change to
-   `DESIGN.md` § 4.2.
+   `DESIGN.md` § 4.2. Until the `PLAN.md` package PN lands, `tests/test_layout.py` still enforces
+   the earlier rule (directory underscores kept, so `tests/_domains/`; `tests/test_catalog.py`
+   listed as an exception); PN moves the tests and the rule to the layout above.
 8. **Linter ignores need a reason and, if new, owner approval.** Every entry in the ruff ignore
    lists and every inline `# noqa` or `# type: ignore[code]` carries a reason comment. Adding a
    rule to any ignore list, or a new `noqa` category, requires owner approval recorded in the

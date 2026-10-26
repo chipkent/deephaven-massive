@@ -2043,9 +2043,10 @@ leaf lock, and keeps a closed flag (a `threading.Event`); once closed, it makes 
   `WireAuthError`; any other 403 is `WireEntitlementError`; anything else is `WireError`. The
   messages keep the flat-file transport's texts ([section 16](#16-historysourceauto)).
   `request_id` comes from `x-amz-request-id`. Credentials are never logged.
-- **TLS, proxies, retries.** The botocore `Config` takes `verify=` the `net.http` CA bundle
-  (`SSL_CERT_FILE`, else certifi; `SSL_CERT_DIR` does not apply to S3) and `proxies=` from
-  `net.http`. botocore's own retries are off (`total_max_attempts=1`); the shared
+- **TLS, proxies, retries.** The client is built as `session.client("s3", verify=<the
+  net.http CA bundle>, config=Config(proxies=<from net.http>, retries={"total_max_attempts":
+  1}))`: the CA bundle is `SSL_CERT_FILE`, else certifi (`SSL_CERT_DIR` does not apply to S3),
+  and botocore's own retries are off; the shared
   `net/retry.py` schedule retries HTTP 500, 503 `SlowDown`, `RequestTimeout`, and connection
   errors before the first byte. A TLS failure is never retried, and neither is a failure partway
   through a body.
@@ -2384,7 +2385,8 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   `[dependency-groups]` table; license metadata follows PEP 639. `__version__` comes from
   `importlib.metadata`. `deephaven-server` is a development dependency only. The runtime
   dependencies are declared directly, with floors: `deephaven-core`, `pyarrow`, `boto3`,
-  `botocore` (a floor whose `Config` takes `proxies` and `total_max_attempts`), `urllib3`,
+  `botocore` (a floor whose `Config` takes `proxies` and `retries={"total_max_attempts": …}`),
+  `urllib3`,
   `websockets` (a floor with proxy support in `websockets.asyncio.client.connect`), and
   `certifi`. There is no `massive` dependency and no `[tool.uv.sources]` table: every
   dependency comes from PyPI. `.gitignore` lists only the files this project produces.
