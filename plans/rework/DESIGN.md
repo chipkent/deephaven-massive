@@ -556,7 +556,11 @@ tier-identical way to get current state.
 **`history()`.** Static. `start` and `end` follow the day rules of
 [section 12](#12-timestamp-units-and-day-boundaries). There is no `limit`: the library pages
 internally. (The aggregates endpoint's `limit` counts base aggregates, not rows, so it cannot
-serve as a row cap.)
+serve as a row cap.) A reactive `Table` passed as `symbols` is read once, when the verb is
+called, on the caller thread inside the session's execution context: its valid rows become the
+sorted canonical symbol tuple that every source receives (`REST`, `FLAT_FILES`, and the `AUTO`
+choice), rows that are not valid symbols of the class are ignored with one WARNING, and a table
+with no valid symbol raises `ValueError`, as an empty symbol list does.
 
 **Backfill plus live.** There is no seeding verb. The documented recipe is:
 
@@ -1004,8 +1008,14 @@ timezone-aware `datetime` is used as is.
   widened by one day on each side in America/Chicago and post-filter
   `SessionEndDate` within `[start, end]`. Flat-file keys are assumed to be keyed by session date
   (**UNVERIFIED**: the futures flat-file overview says only "standardized in Central Time"; the
-  implementation reads one file and asserts that the date column matches the key, failing
-  loudly otherwise). With `datetime` bounds, futures filter on `Timestamp`.
+  implementation checks every block of every futures file against its key, and a
+  `session_end_date` that differs from the key's date, or is empty, fails loudly). With
+  `datetime` bounds, futures filter on `Timestamp`, and flat files read the sessions the
+  instants belong to. The futures trading day rolls at 17:00 America/Chicago (the weekly open is
+  Sunday 17:00 CT; 16:00 to 17:00 CT is the daily maintenance break), so the session of an
+  instant `t` is the date of `t` in Chicago plus 7 hours, and the files read are the sessions
+  from the session of `start` to the session of `end - 1 µs`. An intraday window reads one
+  file; an evening window reads only the next session's file.
 
 ## 13. Host resolution and connection protocol
 
@@ -1427,21 +1437,47 @@ start of the next day, `date + 1 day`, in the class day zone of
 11:30 New York time on the following day. For forex and crypto, whose days are UTC, it is the
 first 11:30 New York time after the following UTC midnight. A partition is published once `now`
 reaches that instant; comparing full instants, not a time of day, keeps the rule correct for
-every day zone. `indices.values` is flat-file only.
+every day zone. Futures files are named by session date, and their clock starts at the next
+midnight in America/Chicago, where Massive standardizes futures data. `indices.values` is
+flat-file only.
 `indices.bars` has no `adjusted`, so the predicate is satisfied.
 
-Each `history()` logs `source=S3 files=<n> skipped=<dates>` or `source=REST requests=<n>`.
+The choice covers the whole range: one unpublished partition sends all of it to REST, and
+nothing is split between the sources. A dataset without instruments counts as `ALL`.
+
+An `AUTO` call logs its choice and the reason once, for example
+`stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)`. Each
+transport then logs its own work: the flat-file transport `source=S3 files=<n> skipped=<dates>`
+(`skipped=none` when nothing was missing), the REST transport `source=REST requests=<n>`.
 Missing keys on non-trading dates are skipped. A missing weekday key logs a WARNING. A missing
 key for the last requested date raises
 `MassiveError("... not yet published; flat files land ~11:00 ET next day")`. Futures
 `venue=None` reads four prefixes per date; a 403 on any prefix raises `EntitlementError` naming
 the venue and the `venue=` parameter.
 
-Flat files are streamed: `pyarrow.csv.open_csv` reads each `.csv.gz` key in chunks; every chunk
-is renamed to PascalCase, cast, and filtered by `Symbol` (`pyarrow.compute.is_in`) as pure Arrow
-operations; list columns (`Conditions`, `Indicators`) are parsed from strings only on surviving
-rows. No chunk is converted to Python objects. Row filtering applies the half-open `[start, end)`
-bound on `Timestamp` after partition selection.
+Flat files are streamed: `pyarrow.csv.open_csv` reads each `.csv.gz` key in 1 MiB blocks (gzip
+only: every documented key is `.csv.gz`). The CSV reader parses each header straight to its
+column's type (epoch integers for `Instant`s, text for lists), and only an empty field is null:
+`NA` and `NULL` are text, since both are valid tickers. Each block then goes through pure Arrow
+operations in this order: the futures session check on the whole block, the `Symbol` filter
+(`pyarrow.compute.is_in`), the half-open `[start, end)` filter on `Timestamp` (not applied to
+date-bounded futures, whose files hold exactly the requested sessions), and, on the surviving
+rows only, the rename to PascalCase, unit conversion, and parsing of the list columns
+(`Conditions`, `Indicators`). No block is converted to Python objects. A file's surviving rows
+become one static Deephaven table per 16 blocks of data and at the end of the file (usually one
+table per file, since each table carries a fixed JVM-heap cost), and the tables are merged.
+
+Memory is bounded per concurrent reader, not per range: Arrow reads about 32 blocks ahead of the
+consumer, so a reader holds about 32 MiB of decompressed text plus at most 16 blocks of
+surviving rows, and at most `max_concurrency` readers run at once.
+
+Rows come in partition-date order, then (futures) venue order (CME, CBOT, NYMEX, COMEX), then
+file order. They are not sorted by time across venues, and may differ in order from REST.
+
+Keys are read by a per-call pool of `min(max_concurrency, keys)` threads. A failed read, an
+interrupt of the calling thread, or `m.close()` stops every other read at its next block: reads
+not yet started are cancelled, no request is made once the session is closed, and the failure
+of the earliest file is raised (`MassiveError("MassiveSession #1 is closed")` for a close).
 
 ## 17. Diagnostics
 
@@ -1514,6 +1550,7 @@ without the GIL.
 | WS client, one per connection | library | `asyncio.run(client.connect(on_frame))`; decode each frame once; route status frames; append rows to per-channel `SimpleQueue`s; the reconcile loop; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
+| flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's shared boto3 client; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the bucket's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
@@ -1527,6 +1564,10 @@ without the GIL.
   **leaf lock**: no Deephaven call, no network call, no blocking wait, and no wait on a
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
   atomically under the lock; readers copy references out and release the lock before working.
+- `FlatFileBucket._lock` (a `threading.Lock`, one per session) guards the creation and the close
+  of the session's boto3 S3 client. It is a leaf lock: client creation reads local AWS
+  configuration but makes no request, and no Deephaven call or wait happens under it. Its
+  closed flag is a `threading.Event`, read without the lock by the reader threads.
 - Per-connection mutable state (desired, acknowledged, and pending sets; the in-flight step;
   watchdogs; the client object) is **loop-confined**: only the connection's client thread touches
   it. Other threads reach it through `loop.call_soon_threadsafe` with plain data (tuples of topic

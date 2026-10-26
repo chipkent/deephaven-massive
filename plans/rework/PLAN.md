@@ -1024,22 +1024,28 @@ fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
   **documented** headers per prefix, e.g. `us_stocks_sip/trades_v1`:
   `conditions,correction,exchange,id,participant_timestamp,price,sequence_number,sip_timestamp,size,tape,ticker,trf_id,trf_timestamp`).
 - Modify: `tests/conftest.py` (one thin `fake_s3` fixture that builds the `tests/_fakes/s3.py`
-  opener), `_session.py` (S3 factory hook), `_domains/base.py` (flat-file prefix helper).
-  `_query.py` needs no change: `history()` already hands `source=AUTO` (and `FLAT_FILES`) to
-  `FlatFileTransport.history(..., source=...)`, which runs `choose_source` and calls
+  opener), `_session.py` (S3 factory hook). `history()` hands `source=AUTO` (and `FLAT_FILES`)
+  to `FlatFileTransport.history(..., source=...)`, which runs `choose_source` and calls
   `core.rest_transport().history(...)` itself when REST is the better source.
+  - *As implemented (#51):* `_domains/base.py` is unchanged; prefix resolution is three lines of
+    transport logic in `_flatfiles.py`. `_query.py` gained `rest_history_problem` (one REST
+    predicate shared by `source=REST` and `AUTO`) and reads a reactive symbol table once in
+    `HistoryQuery.history()`; `_dates.py` gained `futures_session`; `_catalog.py` checks the
+    flat-file key maps at import (`Symbol`, `Timestamp`, and `SessionEndDate` for futures).
 - Delete: none.
 
 **Tasks.**
 - [ ] `boto3` client from config (`s3_endpoint_url`, `s3_bucket`, credentials); typed via
       `types-boto3[s3]`. Missing credentials → S3 "not possible" in AUTO; explicit
       `source=FLAT_FILES` → `ValueError` listing the violated constraint.
-- [ ] Read each key with `pyarrow.csv.open_csv` in 16 MB chunks; per batch: rename headers to
+- [ ] Read each key with `pyarrow.csv.open_csv` in 1 MiB blocks (Arrow reads about 32 blocks
+      ahead, so 16 MB blocks held ~0.5 GB per reader); per batch: rename headers to
       the dataset's PascalCase columns, `pc.cast` to the registered dtypes, timestamp units from
       `_timeunits.py` (ns for ticks and `window_start`), `Symbol` pushdown with `pc.is_in` on each
       batch, list columns (`Conditions`, `Indicators`) parsed with Arrow compute on surviving
       rows only, half-open `[start, end)` filter on `Timestamp`. Hand batches to Deephaven
-      incrementally (one `to_table` per batch, then `merge`), never accumulate the whole range.
+      incrementally (one `to_table` per 16 blocks of surviving rows of a file, then `merge`),
+      never accumulate the whole range.
 - [ ] Partition selection per class day zone; missing non-trading dates skipped silently,
       missing weekday WARNING, missing last requested date →
       `MassiveError("… not yet published; flat files land ~11:00 ET next day")`; the publish
@@ -1051,14 +1057,16 @@ fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
       logs `source=S3 files=<n> skipped=<dates>` or `source=REST requests=<n>`.
 - [ ] Tests: fake S3 (`tests/_fakes/s3.py`, through the `fake_s3` fixture) via a `botocore`
       stubber or an injected opener on the private client;
-      gzip and plain streams; pushdown keeps only matching symbols; a 3-day range with one
+      gzip streams (*as implemented:* gzip only, since every documented key is `.csv.gz`;
+      a non-gzip body is a tested error); pushdown keeps only matching symbols; a 3-day range with one
       missing weekday; the cutoff rule at 11:29 and 11:31 ET; futures venue fan-out and 403;
       every AUTO branch (none/one/both possible, threshold at 49/50/`ALL`).
 
 **Acceptance criteria.**
 - [ ] `grep -n "to_pylist\|to_pydict" src/deephaven_massive/_flatfiles.py` is empty.
-- [ ] Peak memory is bounded by one chunk (test monitors `pa.total_allocated_bytes()` across a
-      multi-chunk fixture).
+- [ ] Peak memory is bounded per concurrent reader, independent of the file's length (about 32
+      blocks of read-ahead plus 16 blocks of gathered rows); the test measures Python-owned
+      buffers with `tracemalloc` and Arrow's pool across a fixture of more than 1000 blocks.
 - [ ] Every branch of DESIGN § 16 is covered by a named test; `./scripts/check.sh` green; CI
       green.
 - [ ] A session that used this transport and was dropped without `close()` is collected when
