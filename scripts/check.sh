@@ -60,7 +60,7 @@ if ! uv sync --quiet --upgrade; then
         echo "check.sh: uv sync --upgrade failed" >&2
         exit 1
     fi
-    echo "check.sh: WARNING: uv sync --upgrade failed (offline?); using the installed versions," \
+    echo "check.sh: WARNING: uv sync --upgrade failed (offline or a resolution error); using the installed versions," \
         "massive at $(massive_commit 2>/dev/null || echo 'an unknown commit')" >&2
 fi
 # The environment is synced; the steps below run in it as is.

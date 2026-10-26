@@ -1760,7 +1760,8 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Ruff.**
   - `select = ["ALL"]`. Linters and type checkers track their latest releases: the dev group
     declares floors only (`ruff>=…`, `mypy>=…`, `pyright>=…`), and with no committed `uv.lock`
-    every sync installs the newest releases. Because `ALL` enables new rules as they ship, a new
+    every `check.sh` run (`uv sync --upgrade`) and every CI job installs the newest releases; a
+    plain `uv sync` or `uv run` keeps the local lock. Because `ALL` enables new rules as they ship, a new
     release may surface new findings; the next PR fixes them (or proposes an ignore for owner
     approval).
   - `preview = true` with `explicit-preview-rules = true`, enabling only `DOC201`, `DOC501`, and
