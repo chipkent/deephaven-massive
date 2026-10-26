@@ -87,8 +87,8 @@ flowchart LR
 ```
 
 Every fork fix reaches this repository through `deephaven-fixes`, which is always the merge of
-the whole series, and this repository always uses its latest commit: there are no lock-bump
-pull requests ([Using the fork](#fork-usage)). Inside the fork, some pull requests build on
+the whole series, and this repository always uses its latest commit ([Using the
+fork](#fork-usage)). Inside the fork, some pull requests build on
 others; the table under [F1–F8](#f1-f7) lists those edges.
 
 Critical path: `F0 → P1 → P2 → P4 → P6 → P7`, with the fork series on `deephaven-fixes` joining
@@ -229,8 +229,8 @@ skeleton created in P2 is designed so that later packages own disjoint files:
   and `tests/data/massive_docs_index.txt` are regenerated only by P3 and P7 (and whenever the
   fork's signatures change), never inside a domain PR. A domain package that needs a parameter the generated table lacks (the
   two SDK-gap endpoints) declares it in its own `DatasetSpec.extra_params`.
-- **`uv.lock` and `pyproject.toml` dependency changes** happen only in P1, P7, and `chore(deps):`
-  PRs. The fork is the exception: it is always the latest `deephaven-fixes` and is never bumped.
+- **`pyproject.toml` dependency changes** happen only in P1, P7, and `chore(deps):` PRs.
+  `uv.lock` is not committed.
   Feature PRs do not add dependencies; if one is needed, open a `chore(deps):` PR first.
 - **Fixture data is per package.** Never add a shared fixture file; put payloads in
   `tests/data/<owner>/` and load them through the `load_fixture` fixture from `conftest.py`.
@@ -341,7 +341,7 @@ them into `DESIGN.md`.
 **Goal.** Replace the permissive, four-way-duplicated gate with one strict, agent-friendly
 toolchain: ruff `ALL` on the latest release, strict mypy, pytest 9 native config, a single `scripts/check.sh`
 entry point, git and Claude Code hooks, a CI matrix that includes free-threaded CPython, and a
-committed lockfile, with the SDK fork tracked by branch. Legacy code is excluded from the gate until P7.
+no committed lockfile: every sync resolves the newest versions, including the latest SDK fork. Legacy code is excluded from the gate until P7.
 
 **DESIGN sections implemented.** [§ 20 Quality gates](DESIGN.md#20-quality-gates) (the whole
 section); [§ 4.2 Test layout](DESIGN.md#42-test-layout) (`tests/conftest.py` and
@@ -357,11 +357,11 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
 - Create: `scripts/check.sh`, `.claude/settings.json`, `.claude/hooks/post-edit-ruff.sh`,
   `.claude/hooks/stop-check.sh`, `.claude/hooks/pre-bash-uv-only.sh`, `tests/test_layout.py`,
   `tests/test_init.py`, `tests/_fakes/__init__.py` (empty; P3, P4, and P5 each add one module),
-  `uv.lock` (un-ignored and committed), `tests/legacy/` (moved files).
+  `tests/legacy/` (moved files). `uv.lock` stays git-ignored.
 - Modify: `pyproject.toml` (rewrite), `.pre-commit-config.yaml` (rewrite), `.gitignore` (trim to
   ~20 lines), `.github/workflows/ci.yml` (rewrite), `.github/workflows/conventional-pr-check.yml`
-  (runner `ubuntu-latest`), `.github/dependabot.yml` (keep; now effective because `uv.lock` is
-  committed), `AGENTS.md` (rewrite), `tests/conftest.py` (rewrite), `src/deephaven_massive/__init__.py`
+  (runner `ubuntu-latest`), `.github/dependabot.yml` (GitHub Actions and pre-commit
+  updates only), `AGENTS.md` (rewrite), `tests/conftest.py` (rewrite), `src/deephaven_massive/__init__.py`
   (minimal: `__version__` from `importlib.metadata` only).
 - Delete: `scripts/pre-commit.sh`, `scripts/install-hooks.sh`, `tests/__init__.py`.
 - Move: `tests/test_*.py` (eight legacy files) → `tests/legacy/`.
@@ -374,9 +374,9 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
     `authors = [{name = "Chip Kent", email = "chipkent@illumon.com"}]`; `[project.urls]` to
     `github.com/chipkent/deephaven-massive`; `Typing :: Typed`.
   - `dependencies`: `massive>=2.9.0`, `deephaven-core>=42.0`, `pyarrow>=14`, `boto3>=1.28`,
-    `websockets>=14`. `[tool.uv.sources] massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }` (`uv.lock` records the commit).
+    `websockets>=14`. `[tool.uv.sources] massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }` (always the latest commit).
     `orjson` as an optional extra (`[project.optional-dependencies] orjson = ["orjson>=3.9"]`).
-  - `[dependency-groups] dev`: `ruff>=…` (floor only; latest via the lock and Dependabot), `mypy`, `types-boto3[s3]`, `pytest>=9`,
+  - `[dependency-groups] dev`: `ruff>=…` (floor only; every sync installs the latest), `mypy`, `types-boto3[s3]`, `pytest>=9`,
     `pytest-cov`, `pytest-timeout`, `pyright`, `pre-commit`, `deephaven-server>=42.0`. No
     `pytest-asyncio` ([DESIGN § 20.1](DESIGN.md#201-tooling-configuration)).
   - Ruff: `select = ["ALL", "DOC201", "DOC501", "DOC502"]`, `preview = true`,
@@ -401,23 +401,21 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
     `show_missing`, `exclude_also = ["if TYPE_CHECKING:", "@(typing\\.)?overload"]` only.
   - Pyright `[tool.pyright]` standard mode over `src` (non-gating).
   - `LEGACY-EXCLUSION` entries (see [Legacy code transition](#legacy-code-transition)).
-- [ ] `uv lock`; remove `uv.lock` from `.gitignore`; commit it. Trim `.gitignore` to the ~20
-      lines in Appendix G finding 13.
+- [ ] Keep `uv.lock` git-ignored. Trim `.gitignore` to the ~20 lines in Appendix G finding 13.
 - [ ] **`scripts/check.sh [fast|full] [--no-fix]`**: fast = `ruff check --fix` + `ruff format` +
       `mypy src tests`; full = fast + `pytest --cov --cov-report=term-missing:skip-covered`;
       `--no-fix` = `ruff check` + `ruff format --check` (CI and hooks). `CI=true` adds
       `--output-format github`. Exit non-zero on first failure; print each step's name.
 - [ ] **`.pre-commit-config.yaml`**: local hooks calling `uv run` for the fast tier at
       `pre-commit`; the full tier at `pre-push`; `pre-commit-hooks` `no-commit-to-branch`
-      (`main`), `check-yaml`, `end-of-file-fixer`, `trailing-whitespace`; `uv-pre-commit`
-      `uv-lock`. Pin `rev`s.
+      (`main`), `check-yaml`, `end-of-file-fixer`, `trailing-whitespace`. Pin `rev`s.
 - [ ] **`.claude/settings.json`** hooks: `PostToolUse` on `Edit|Write` of `*.py` → ruff fix +
       format on that file, remaining diagnostics to stderr with exit 2; `Stop` → `check.sh fast
       --no-fix` (respect `stop_hook_active`); `PreToolUse` on `Bash` → block bare
       `python|pytest|ruff|mypy|pip` not prefixed by `uv run`. Scripts live in `.claude/hooks/`.
-- [ ] **CI** (`ci.yml`): jobs `lock` (`uv lock --check`), `lint` (`check.sh fast --no-fix` with
+- [ ] **CI** (`ci.yml`): jobs `lint` (`check.sh fast --no-fix` with
       GitHub output format, plus `pyright src` with `continue-on-error: true`), `test` matrix
-      `["3.11", "3.12", "3.13", "3.14", "3.14t"]` with JDK 17, `uv sync --locked`,
+      `["3.11", "3.12", "3.13", "3.14", "3.14t"]` with JDK 17, `uv sync` (a fresh resolve),
       `PYTHON_GIL=0` on `3.14t` (the only free-threaded target: pyarrow, numpy, and pandas no
       longer publish cp313t wheels), `pytest --cov --cov-report=xml`; `build` (`uv build`
       then `uv run --isolated --with dist/*.whl python -c "import deephaven_massive"`). Pin
@@ -444,7 +442,7 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
 - [ ] Move the eight legacy test files to `tests/legacy/`; delete `tests/__init__.py`.
 - [ ] Delete `scripts/pre-commit.sh` and `scripts/install-hooks.sh`. (`IMPLEMENTATION_PLAN.md`
       was already deleted in P0; DESIGN.md supersedes it.)
-- [ ] **`AGENTS.md`** rewrite (≤ 150 lines): commands (`uv sync`, `./scripts/check.sh`,
+- [ ] **`AGENTS.md`** rewrite (≤ 150 lines): commands (`uv sync --upgrade`, `./scripts/check.sh`,
       `uv run pre-commit install --hook-type pre-commit --hook-type pre-push`); the hard rules
       (merges via PR, only the owner merges, answer every review comment, branch naming,
       conventional commits, test layout,
@@ -458,7 +456,7 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
 
 **Acceptance criteria.**
 - [ ] `./scripts/check.sh` (full) is green locally on 3.11; CI is green on all five Python jobs.
-- [ ] `uv sync --locked` succeeds from a clean checkout; `uv lock --check` passes.
+- [ ] `uv sync` succeeds from a clean checkout.
 - [ ] `uv run pre-commit run --all-files` passes; `pre-push` stage runs the full tier.
 - [ ] Claude Code hooks fire: editing a `.py` file with a lint error surfaces it (exit 2); a
       bare `pytest` command is blocked.
@@ -468,7 +466,7 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
 
 **Verification.**
 ```bash
-uv sync --locked
+uv sync --upgrade
 ./scripts/check.sh                       # full tier
 ./scripts/check.sh fast --no-fix
 uv run pre-commit run --all-files
@@ -478,7 +476,7 @@ uv build && uv run --isolated --with dist/*.whl python -c "import deephaven_mass
 grep -rn LEGACY-EXCLUSION pyproject.toml tests/conftest.py tests/test_layout.py
 ```
 
-**Pitfalls (Appendix G).** `uv.lock` git-ignored makes dependabot a no-op (G#1); unused
+**Pitfalls (Appendix G).** Unused
 `massive` dependency (G#2); blanket `ignore_missing_imports` discarding real types for
 `deephaven`/`websockets` (G#3); `pytest-asyncio` with zero async tests (G#4); four gate
 definitions (G#6); tests importing helpers from `conftest.py` plus `pythonpath=["."]` (G#7);
@@ -1409,22 +1407,18 @@ current fixture, and note the date of the snapshot in the PR.
 <a id="fork-usage"></a>
 ## Using the fork: always the latest `deephaven-fixes`
 
-This repository always uses the latest `deephaven-fixes` commit, and there are no lock-bump pull
-requests ([DESIGN § 19](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)).
+This repository always uses the latest `deephaven-fixes` commit
+([DESIGN § 19](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)).
 
 - **Source.** `[tool.uv.sources] massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }`,
   with `[project]` keeping `massive>=2.9.0`. The fork builds as version `0.0.0` (its packaging
   carries no release version), so nothing may check the installed `massive` version.
-- **Refresh at sync.** `scripts/check.sh` (both tiers, and so the commit and pre-push hooks) and
-  every CI job that installs the project run `uv lock --upgrade-package massive` before they sync.
-  That re-locks only `massive` to the branch head; every other dependency stays as locked.
-  `check.sh` restores `uv.lock` when it exits, so the working tree is never left dirty. The CI
-  build job installs the built wheel next to the same branch head.
-- **The committed lock may go stale.** The `massive` commit recorded in the committed `uv.lock`
-  is not maintained, nobody bumps it, and `uv lock --check` still passes with a stale commit.
-- **One-off commands.** A plain `uv run` syncs to the committed lock and so can install an older
-  `massive`. Run `./scripts/check.sh fast` first and then `uv run --no-sync …` to use the latest
-  fork outside `check.sh`.
+- **No committed lock.** `uv.lock` is git-ignored: users never install from it, and a committed
+  lock would freeze the fork at one commit.
+- **Every run resolves afresh.** `scripts/check.sh` (both tiers, and so the commit and pre-push
+  hooks) starts with `uv sync --upgrade` and prints the installed `massive` commit; offline, a
+  local run warns and keeps what is installed, and in CI a failed resolve is an error. Every CI
+  job resolves afresh, and the build job installs the built wheel next to the branch head.
 - **A change to the fork** lands in the fork series (see [Fork workflow](#fork-workflow)); the
   next sync here picks it up. When the change alters the fork's API or the series' shape, a
   `docs:` PR updates DESIGN § 19 and the passages that describe the fork's API, and the
