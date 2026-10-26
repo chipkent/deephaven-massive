@@ -285,6 +285,16 @@ class DatasetSpec:
             # the first frame or page.
             raise ValueError(f"{self.name}: Instant fields {unitless} have no time_units")
 
+    @property
+    def has_rest_history(self) -> bool:
+        """True when the dataset has a REST history endpoint (`history(source=REST)` works)."""
+        return self.history_method is not None
+
+    @property
+    def has_grouped_daily(self) -> bool:
+        """True when a grouped-daily REST endpoint serves `dm.ALL` 1-day bars, one request a day."""
+        return self.grouped_daily_method is not None
+
     def _check_flat_files(self) -> None:
         """Check that a dataset with flat files can be read from them.
 

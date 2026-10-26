@@ -2,25 +2,13 @@
 
 Massive publishes one gzip CSV file per dataset and day in the `flatfiles` bucket at
 `https://files.massive.com`, under keys `<prefix>/<YYYY>/<MM>/<YYYY-MM-DD>.csv.gz` (for
-example `us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz`). This module owns everything
-between those files and the table `history()` returns:
+example `us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz`). This module is the flat-file
+transport: pure S3 I/O. `HistoryQuery.history()` decides that flat files serve a request
+(`_sources.choose_source`) and hands it the partition dates to read.
 
-- `choose_source` decides where `history()` reads from. With `HistorySource.FLAT_FILES` it
-  checks that flat files can serve the request; with `HistorySource.AUTO` it arbitrates between
-  flat files and REST, for the whole range at once. Flat files can serve a request when S3
-  credentials are configured, the dataset has a file for the request (for bars only 1-minute
-  and 1-day bars, and 1-session bars for futures, and only unadjusted where the dataset has an
-  `adjusted` parameter), and every file the range needs is already published. REST can serve
-  it when the dataset has a REST history endpoint and the symbols are explicit (or the request
-  is daily bars with a grouped-daily endpoint). When both can, many symbols
-  (`MassiveConfig.flat_file_symbol_threshold` or more, or `dm.ALL`) read flat files and fewer
-  use REST. The choice and its reason are logged once per call.
-- `partition_dates` turns a `history()` window into the dates of the files it needs, in the
-  asset class's day zone; a futures date names a trading session.
 - `FlatFileBucket` is the session's connection to the bucket: one boto3 S3 client, created on
   first use and closed with the session.
-- `FlatFileHistory` is the flat-file transport the session hands to `history()`
-  (`SessionCore.flat_file_transport()`). It reads the files of a request in parallel, at most
+- `FlatFileHistory` reads the files of one `history()` call in parallel, at most
   `MassiveConfig.max_concurrency` at a time, each with `pyarrow.csv.open_csv` in blocks of
   `BLOCK_SIZE` bytes. Each block is first checked (futures sessions), then filtered to the
   requested symbols with `pyarrow.compute.is_in` (symbol pushdown) and to the half-open
@@ -36,13 +24,10 @@ Rows come in partition-date order, then (for futures) venue order (CME, CBOT, NY
 then file order; they are not sorted by time across venues. Only an empty CSV field is null:
 text such as `NA` or `NULL` is data (both are valid tickers).
 
-A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
-after the next day starts in the class's day zone (`_dates.publish_time`); futures use their
-Chicago session date. Massive says files land "by approximately 11:00 AM ET the following
-day". A missing file is judged by its date: on a weekend (for every class but crypto, which
-trades every day) it is skipped silently; on a weekday it is skipped with a WARNING, since it
-is most likely a market holiday; for the last requested date it raises `MassiveError`, since
-that file is most likely not yet published.
+A missing file is judged by its date: on a weekend (for every class but crypto, which trades
+every day) it is skipped silently; on a weekday it is skipped with a WARNING, since it is most
+likely a market holiday; for the last requested date it raises `MassiveError`, since that file
+is most likely not yet published.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix
 holds the placeholder `{venue}`, `venue=None` reads all four venues, and HTTP 403 on any venue
@@ -53,8 +38,9 @@ mismatch (or a missing session date) raises `MassiveError` rather than return ro
 session.
 
 A failed read, a `KeyboardInterrupt`, or `m.close()` stops every other read of the call at its
-next block: reads not yet started are cancelled, and no request is made after the session is
-closed.
+next block, and reads not yet started are cancelled. After a close, no request starts once a
+reader has seen it; a request already in flight is discarded, and the call raises
+`MassiveError("MassiveSession #1 is closed")`.
 """
 
 from __future__ import annotations
@@ -63,11 +49,10 @@ import gzip
 import logging
 import threading
 import zlib
-from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, NamedTuple
+from typing import TYPE_CHECKING, Final
 
 import boto3
 import pyarrow as pa
@@ -79,44 +64,30 @@ from deephaven import merge
 from deephaven.arrow import to_table
 
 from deephaven_massive._catalog import unit_rules
-from deephaven_massive._dates import (
-    CHICAGO,
-    DAY_ZONES,
-    NEW_YORK,
-    FuturesSessions,
-    TimeRange,
-    flat_file_published,
-    futures_session,
-)
-from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Transport
+from deephaven_massive._dates import TimeRange
+from deephaven_massive._enums import AssetClass, FuturesVenue, Transport
 from deephaven_massive._errors import EntitlementError, MassiveError
 from deephaven_massive._liveness import entered
-from deephaven_massive._query import rest_history_problem
 from deephaven_massive._schema import ColumnType
+from deephaven_massive._sources import NOT_PUBLISHED
 from deephaven_massive._timeunits import TimeField, TimeUnitTable
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from concurrent.futures import Future
-    from datetime import tzinfo
+    from datetime import date
 
     from deephaven.table import Table
     from types_boto3_s3.client import S3Client
 
     from deephaven_massive._catalog import DatasetSpec
     from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._dates import FuturesSessions
     from deephaven_massive._query import Request
     from deephaven_massive._session import SessionCore
     from deephaven_massive._symbols import NormalizedSymbols
 
-__all__ = [
-    "BLOCK_SIZE",
-    "FlatFileBucket",
-    "FlatFileHistory",
-    "SourceChoice",
-    "choose_source",
-    "partition_dates",
-]
+__all__ = ["BLOCK_SIZE", "FlatFileBucket", "FlatFileHistory"]
 
 logger = logging.getLogger(__name__)
 
@@ -129,196 +100,10 @@ _TABLE_BLOCKS: Final = 16
 blocks of Arrow data, and at the end of the file. Fewer, larger tables cost far less JVM heap
 than one per block (each table carries a fixed overhead), while memory stays bounded."""
 
-_NOT_PUBLISHED: Final = "not yet published; flat files land ~11:00 ET next day"
-
 _CREDENTIAL_ERRORS: Final = frozenset({"InvalidAccessKeyId", "SignatureDoesNotMatch"})
 """S3 error codes, answered with HTTP 403, that mean the S3 credentials themselves are wrong."""
 
-_PARTITION_ZONES: Final[Mapping[AssetClass | None, tzinfo]] = dict(
-    [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (None, NEW_YORK)]
-)
-"""The zone whose calendar dates name a class's files and start its publication clock.
-
-Futures files are named by trading session, and Massive standardizes futures data in Central
-Time. A dataset without an asset class uses New York, as `_dates.bounds` does."""
-
 _SATURDAY: Final = 5
-
-
-def _now() -> datetime:
-    """Return the current instant: the one clock of this module, which tests replace.
-
-    Returns:
-        An aware UTC `datetime`.
-    """
-    return datetime.now(UTC)
-
-
-def partition_dates(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> tuple[date, ...]:
-    """Return the dates of the files a `history()` window needs, oldest first.
-
-    For a `TimeRange` they are the dates of `start` and of `end - 1 ns` in the class's day zone
-    and every date between: New York for stocks, options, and indices, UTC for forex and
-    crypto. For date-bounded futures (`FuturesSessions`) they are the sessions from `first` to
-    `last`. A futures range given with `datetime` bounds reads the sessions its instants belong
-    to, from the session of `start` to the session of the last instant before `end`; a session
-    opens at 17:00 Chicago time on the day before its `session_end_date`
-    (`_dates.futures_session`). Its rows are then filtered on `Timestamp`.
-
-    Args:
-        spec: The dataset; its asset class picks the day zone.
-        window: The normalized `history()` bounds (`_dates.bounds`).
-
-    Returns:
-        The partition dates; never empty.
-    """
-    if isinstance(window, FuturesSessions):
-        first, last = window.first, window.last
-    elif spec.asset_class is AssetClass.FUTURES:
-        last_instant = window.end - timedelta(microseconds=1)
-        first, last = futures_session(window.start), futures_session(last_instant)
-    else:
-        dates = window.partition_dates(_PARTITION_ZONES[spec.asset_class])
-        first, last = dates[0], dates[-1]
-    return tuple(first + timedelta(days=n) for n in range((last - first).days + 1))
-
-
-def _prefix(spec: DatasetSpec, request: Request) -> str | None:
-    """Return the dataset's S3 key prefix for a request, or None when no file serves it.
-
-    Args:
-        spec: The dataset.
-        request: The normalized arguments; for bars, the timespan selects the prefix, and only
-            multiplier 1 has files.
-
-    Returns:
-        The prefix, such as `"us_stocks_sip/minute_aggs_v1"`; a futures prefix still holds the
-        placeholder `{venue}`.
-    """
-    if request.multiplier != 1:
-        return None
-    return spec.flat_file_prefixes.get(request.timespan)
-
-
-def _flat_file_problems(
-    spec: DatasetSpec,
-    request: Request,
-    dates: Sequence[date],
-    *,
-    config: MassiveConfig,
-    now: datetime,
-) -> list[str]:
-    """List every reason flat files cannot serve a request; empty when they can.
-
-    Args:
-        spec: The dataset.
-        request: The normalized arguments.
-        dates: The partition dates of the request (`partition_dates`).
-        config: The session's configuration (credentials and publish cutoff).
-        now: The current instant.
-
-    Returns:
-        One human-readable reason per violated constraint, in a fixed order: credentials, the
-        dataset's files, adjustment, publication.
-    """
-    problems = []
-    if config.s3_access_key_id is None:
-        problems.append(
-            "no S3 credentials are configured (MassiveConfig s3_access_key_id and "
-            "s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY)"
-        )
-    if _prefix(spec, request) is None:
-        if spec.is_bars and spec.flat_file_prefixes:
-            spans = ", ".join(f"1-{span}" for span in spec.flat_file_prefixes)
-            problems.append(f"{spec.name} flat files hold only {spans} bars")
-        else:
-            problems.append(f"{spec.name} has no flat files")
-    if dict(request.params).get("adjusted", False) is not False:
-        problems.append("flat-file bars are unadjusted; pass adjusted=False")
-    zone = _PARTITION_ZONES[spec.asset_class]
-    cutoff = config.flat_file_publish_cutoff
-    late = [d for d in dates if not flat_file_published(d, now=now, zone=zone, cutoff=cutoff)]
-    if late:
-        problems.append(
-            f"the file for {late[0].isoformat()} is {_NOT_PUBLISHED} (a day's file counts as "
-            f"published from {cutoff.isoformat('minutes')} New York time after the day ends)"
-        )
-    return problems
-
-
-class SourceChoice(NamedTuple):
-    """Where a `history()` call reads from, and why."""
-
-    source: HistorySource
-    """`HistorySource.FLAT_FILES` or `HistorySource.REST`."""
-    reason: str
-    """Why, for the log line of an `AUTO` call, such as
-    `"2 symbols < flat_file_symbol_threshold 50"`."""
-
-
-def choose_source(
-    spec: DatasetSpec,
-    request: Request,
-    dates: Sequence[date],
-    *,
-    requested: HistorySource,
-    symbol_count: int | None,
-    config: MassiveConfig,
-    now: datetime,
-) -> SourceChoice:
-    """Decide whether a `history()` call reads flat files or REST, for the whole range.
-
-    Flat files are possible when S3 credentials are configured, the dataset has a file for the
-    request (for bars: multiplier 1 and a timespan the dataset has files for, which is `MINUTE`
-    or `DAY`, or `MINUTE` or `SESSION` for futures), the request is unadjusted or the dataset
-    has no `adjusted` parameter, and every partition date is published at `now`. REST is
-    possible when the dataset has a REST history endpoint and the symbols are explicit, or the
-    request is 1-day bars with a grouped-daily endpoint. Under `AUTO`, when both are possible,
-    flat files win for `dm.ALL` (and for datasets without instruments) or for at least
-    `config.flat_file_symbol_threshold` symbols, and REST wins for fewer. The choice covers the
-    whole range: one unpublished date sends all of it to REST. Pure: no I/O.
-
-    Args:
-        spec: The dataset.
-        request: The normalized arguments (symbols, timespan, multiplier, `adjusted`).
-        dates: The partition dates of the request (`partition_dates`).
-        requested: `HistorySource.AUTO` or `HistorySource.FLAT_FILES`. An explicit `REST` is
-            handled by the query and never reaches the flat-file transport.
-        symbol_count: The number of explicit symbols, or None for `dm.ALL` (or a dataset
-            without instruments).
-        config: The session's configuration.
-        now: The current instant, for the publication rule.
-
-    Returns:
-        The source and the reason it was chosen.
-
-    Raises:
-        ValueError: Under `FLAT_FILES`, if flat files cannot serve the request; under `AUTO`, if
-            neither source can. The message lists every violated constraint, per source.
-    """
-    flat = _flat_file_problems(spec, request, dates, config=config, now=now)
-    if requested is HistorySource.FLAT_FILES:
-        if flat:
-            raise ValueError(f"{spec.name} cannot be read from flat files: {'; '.join(flat)}")
-        return SourceChoice(HistorySource.FLAT_FILES, "requested")
-    rest = rest_history_problem(spec, request)
-    if flat and rest is not None:
-        raise ValueError(
-            f"{spec.name} history has no possible source. "
-            f"Flat files: {'; '.join(flat)}. REST: {rest}."
-        )
-    if flat:
-        return SourceChoice(HistorySource.REST, f"flat files cannot serve it: {'; '.join(flat)}")
-    if rest is not None:
-        return SourceChoice(HistorySource.FLAT_FILES, f"REST cannot serve it: {rest}")
-    threshold = config.flat_file_symbol_threshold
-    if symbol_count is None:
-        return SourceChoice(HistorySource.FLAT_FILES, "every symbol")
-    if symbol_count >= threshold:
-        reason = f"{symbol_count} symbols >= flat_file_symbol_threshold {threshold}"
-        return SourceChoice(HistorySource.FLAT_FILES, reason)
-    reason = f"{symbol_count} symbols < flat_file_symbol_threshold {threshold}"
-    return SourceChoice(HistorySource.REST, reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -674,62 +459,41 @@ class FlatFileHistory:
         request: Request,
         window: TimeRange | FuturesSessions,
         *,
-        source: HistorySource,
+        dates: Sequence[date],
     ) -> Table:
-        """Return the rows of `window` from flat files, or under `AUTO` from the better source.
+        """Return the rows of `window` from the dataset's flat files, as one static table.
 
-        The source is chosen by `choose_source`; an `AUTO` call logs its choice and the reason
-        at INFO (`"stocks.trades history: AUTO chose REST (2 symbols <
-        flat_file_symbol_threshold 50)"`), and a REST choice is delegated to the session's REST
-        transport. A flat-file read logs `source=S3 files=<n> skipped=<dates>` at INFO.
-
-        Files are read by a pool of `min(max_concurrency, files)` threads, which end before
-        this method returns. If any read fails, or this thread is interrupted, every other read
-        stops at its next block, reads that have not started are cancelled, and the failure of
-        the earliest file is raised. Closing the session stops the reads the same way.
+        Flat files have already been chosen for the request (`_sources.choose_source`), so the
+        dataset has a file for its timespan. Files are read by a pool of
+        `min(max_concurrency, files)` threads, which end before this method returns. If any read
+        fails, or this thread is interrupted, every other read stops at its next block, reads
+        that have not started are cancelled, and the failure of the earliest file is raised.
+        Closing the session stops the reads the same way. Logs
+        `source=S3 files=<n> skipped=<dates>` at INFO.
 
         Args:
             spec: The dataset.
             request: The normalized arguments, with the raw `start` and `end` bounds, and
                 static symbols (the query reads a reactive symbol table before this call).
             window: The bounds under the class's day rules (`_dates.bounds`).
-            source: `HistorySource.FLAT_FILES` or `HistorySource.AUTO`.
+            dates: The partition dates to read (`_sources.partition_dates`).
 
         Returns:
             A static table in the dataset's schema: the files' rows in date order (and, for
             futures, venue order within a date), each file's rows in file order. A range
             without rows gives an empty table with every column.
 
-        Errors, all raised on the calling thread: `ValueError` when no source can serve the
-        request (`choose_source`); `EntitlementError` when S3 answers HTTP 403 for a file,
-        naming the venue and the `venue=` parameter for futures, or the S3 credentials when S3
-        rejects them; `MassiveError` when the file for the last requested date is missing on a
-        trading day (`"... not yet published; flat files land ~11:00 ET next day"`), when the
-        S3 client cannot be created, the bucket is unreachable or answers another error, a file
-        is not the expected gzip CSV (for example, a documented header is missing), a futures
-        file holds another session, or the session is closed during the call; and the REST
-        transport's own errors.
+        Errors, all raised on the calling thread: `EntitlementError` when S3 answers HTTP 403
+        for a file, naming the venue and the `venue=` parameter for futures, or the S3
+        credentials when S3 rejects them; `MassiveError` when the file for the last requested
+        date is missing on a trading day (`"... not yet published; flat files land ~11:00 ET
+        next day"`), when the S3 client cannot be created, the bucket is unreachable or answers
+        another error, a file is not the expected gzip CSV (for example, a documented header is
+        missing), a futures file holds another session, or the session is closed during the
+        call.
         """
-        dates = partition_dates(spec, window)
-        symbols = request.symbols
-        choice = choose_source(
-            spec,
-            request,
-            dates,
-            requested=source,
-            symbol_count=len(symbols) if isinstance(symbols, tuple) else None,
-            config=self._core.config,
-            now=_now(),
-        )
-        if source is HistorySource.AUTO:
-            logger.info(
-                "%s history: AUTO chose %s (%s)", spec.name, choice.source.name, choice.reason
-            )
-        if choice.source is HistorySource.REST:
-            return self._core.rest_transport().history(spec, request, window)
-        # Flat files were chosen, so the dataset has a file for this timespan (multiplier 1).
         prefix = spec.flat_file_prefixes[request.timespan]
-        transform = _Transform.build(spec, symbols, window)
+        transform = _Transform.build(spec, request.symbols, window)
         return self._read(spec, transform, _keys(prefix, request.venue, dates), last=dates[-1])
 
     def _read(
@@ -740,8 +504,10 @@ class FlatFileHistory:
         Waits until every read has finished or one has failed. On a failure, or an interrupt
         of this thread, it sets the call's cancel event, which stops the other reads at their
         next block, cancels the reads not yet started, and waits for the pool to drain; then it
-        raises the failure of the earliest file (an interrupt is re-raised as is). The
-        missing-file error of `_skip_missing` propagates.
+        raises the failure of the earliest file (an interrupt is re-raised as is). If the
+        session was closed meanwhile, it closes the client once more, now that no read is
+        running, and raises the `MassiveError` of `FlatFileBucket.check_open`, whatever the
+        reads returned. The missing-file error of `_skip_missing` propagates.
 
         Args:
             spec: The dataset.
@@ -764,6 +530,13 @@ class FlatFileHistory:
             finally:
                 cancel.set()
                 pool.shutdown(cancel_futures=True)
+        if self._bucket.closed:
+            # A request already past its check when the session closed may have opened a new
+            # connection pool, and its answer may look like any outcome (a row, a missing file,
+            # a refusal). No read of this call is running now: close the client once more and
+            # report the close.
+            client.close()
+            self._bucket.check_open()
         parts = [_outcome(future) for future in futures]
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
         self._skip_missing(spec, missing, last=last)
@@ -778,23 +551,19 @@ class FlatFileHistory:
             # Merging onto an empty table in the schema keeps every column when no row matched.
             return merge([to_table(transform.arrow_schema.empty_table()), *tables])
 
-    def _check(self, client: S3Client, cancel: threading.Event) -> None:
+    def _check(self, cancel: threading.Event) -> None:
         """Stop a read if the session was closed or another read of the call failed.
 
         Called before each request and after each block. A closed session raises the
-        `MassiveError` of `FlatFileBucket.check_open`, after closing the client again, which
-        drops any connection pool a request opened after the first close.
+        `MassiveError` of `FlatFileBucket.check_open`.
 
         Args:
-            client: The bucket's client.
             cancel: The call's cancel event.
 
         Raises:
             _CancelledError: If the call was cancelled.
         """
-        if self._bucket.closed:
-            client.close()
-            self._bucket.check_open()
+        self._bucket.check_open()
         if cancel.is_set():
             raise _CancelledError
 
@@ -823,7 +592,7 @@ class FlatFileHistory:
         """
         config = self._core.config
         location = f"s3://{config.s3_bucket}/{key.key} at {config.s3_endpoint_url}"
-        self._check(client, cancel)
+        self._check(cancel)
         try:
             body = client.get_object(Bucket=config.s3_bucket, Key=key.key)["Body"]
         except ClientError as error:
@@ -836,7 +605,7 @@ class FlatFileHistory:
         pending: list[pa.RecordBatch] = []
         size = 0
         try:
-            self._check(client, cancel)
+            self._check(cancel)
             # Python's gzip decompresses on the reader's own read calls; Arrow asks for one
             # block per call and reads about 32 blocks ahead of this loop.
             stream = pa.PythonFile(gzip.GzipFile(fileobj=body, mode="rb"), mode="r")
@@ -854,7 +623,7 @@ class FlatFileHistory:
                     if size >= limit:
                         tables.append(_convert(pending, transform))
                         pending, size = [], 0
-                    self._check(client, cancel)
+                    self._check(cancel)
                 if pending:
                     tables.append(_convert(pending, transform))
         except (pa.ArrowException, OSError, EOFError, zlib.error, BotoCoreError) as error:
@@ -924,7 +693,7 @@ class FlatFileHistory:
             if not trading:
                 continue
             if key.day == last:
-                raise MassiveError(f"{spec.name}: {key.key} is {_NOT_PUBLISHED}")
+                raise MassiveError(f"{spec.name}: {key.key} is {NOT_PUBLISHED}")
             logger.warning(
                 "%s: %s does not exist; skipping %s (a market holiday?)",
                 spec.name,
@@ -949,26 +718,27 @@ def _convert(batches: list[pa.RecordBatch], transform: _Transform) -> Table:
 
 
 def _outcome(future: Future[list[Table] | None]) -> list[Table] | None:
-    """Return a finished read's tables, or raise its failure.
+    """Return a finished read's tables, or re-raise its failure.
 
     Called in file order after the pool has drained, so the first failure raised is the
-    earliest file's. A read that was cancelled, or stopped because another read failed, is
-    skipped over: the read that caused it raises in its place.
+    earliest file's. A read that was cancelled before it started, or stopped because another
+    read failed, is skipped over: the read that caused it raises in its place. A failure that
+    is not a `MassiveError` (a defect) propagates unchanged.
 
     Args:
         future: A read of the call.
 
-    A read that failed re-raises its own exception here.
-
     Returns:
-        The read's tables, None for a missing file, or None for a stopped read (only ever
-        reached after a real failure, which is raised first or later in file order).
+        The read's tables, None for a missing file, or None for a cancelled or stopped read
+        (only ever reached alongside a real failure, which is raised first or later in file
+        order).
+
+    Raises:
+        MassiveError: The read's own failure (`EntitlementError` for a refusal).
     """
-    if future.cancelled():
-        return None
-    error = future.exception()
-    if error is None:
+    try:
         return future.result()
-    if isinstance(error, _CancelledError):
+    except (CancelledError, _CancelledError):
         return None
-    raise error
+    except MassiveError:
+        raise

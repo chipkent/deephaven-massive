@@ -340,3 +340,11 @@ def test_date_filters_must_be_dates(monkeypatch: pytest.MonkeyPatch) -> None:
     for bad in ("2025-01-02T00:00:00Z", "yesterday", datetime(2025, 1, 2, tzinfo=UTC)):
         with pytest.raises(ValueError, match="takes a date value"):
             check_filters(spec, {"date": bad})
+
+
+def test_rest_capabilities() -> None:
+    assert not BASE.has_rest_history
+    assert not BASE.has_grouped_daily
+    spec = _trades(history_method="list_trades", grouped_daily_method="get_grouped_daily_aggs")
+    assert spec.has_rest_history
+    assert spec.has_grouped_daily

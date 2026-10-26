@@ -6,10 +6,11 @@ import logging
 import re
 import threading
 import tracemalloc
+from array import array
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, cast
 from zoneinfo import ZoneInfo
@@ -26,16 +27,13 @@ from deephaven.table import Table
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _flatfiles
+from deephaven_massive import _flatfiles, _sources
 from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._dates import CHICAGO, FuturesSessions, TimeRange, bounds
 from deephaven_massive._domains.base import build_query
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan, Transport
 from deephaven_massive._flatfiles import (
     FlatFileBucket,
-    SourceChoice,
-    choose_source,
-    partition_dates,
 )
 from deephaven_massive._query import HistoryQuery, Request
 from deephaven_massive._schema import BARS, INDEX_VALUES, QUOTES, TRADES, Column, ColumnType, Schema
@@ -47,7 +45,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
 NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
 """A Monday afternoon, when every file of the first week of March 2025 is published."""
-LOGGER = "deephaven_massive._flatfiles"
+LOGGER = "deephaven_massive"
+"""The package logger: the AUTO line comes from the query, the S3 line from the transport."""
 
 
 class FakeS3(Protocol):
@@ -102,16 +101,6 @@ STOCK_BARS = DatasetSpec(
     },
     time_units=_ns("window_start"),
 )
-INDEX_BARS = replace(
-    STOCK_BARS,
-    name="indices.bars",
-    asset_class=AssetClass.INDICES,
-    grouped_daily_method=None,
-    flat_file_prefixes={
-        Timespan.MINUTE: "us_indices/minute_aggs_v1",
-        Timespan.DAY: "us_indices/day_aggs_v1",
-    },
-)
 INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
     query_class=HistoryQuery,
@@ -143,26 +132,6 @@ FUTURES_TRADES = DatasetSpec(
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
     time_units=_ns("timestamp"),
 )
-FUTURES_BARS = DatasetSpec(
-    name="futures.bars",
-    query_class=HistoryQuery,
-    asset_class=AssetClass.FUTURES,
-    schema=BARS.schema,
-    is_bars=True,
-    key_maps={
-        FF: {
-            "ticker": "Symbol",
-            "window_start": "Timestamp",
-            "session_end_date": "SessionEndDate",
-        }
-    },
-    history_method="list_futures_aggregates",
-    flat_file_prefixes={
-        Timespan.MINUTE: "us_futures_{venue}/minute_aggs_v1",
-        Timespan.SESSION: "us_futures_{venue}/session_aggs_v1",
-    },
-    time_units=_ns("window_start"),
-)
 CRYPTO_TRADES = DatasetSpec(
     name="crypto.trades",
     query_class=HistoryQuery,
@@ -182,15 +151,6 @@ CRYPTO_TRADES = DatasetSpec(
     history_method="list_trades",
     flat_file_prefixes={None: "global_crypto/trades_v1"},
     time_units=_ns("participant_timestamp"),
-)
-FOREX_BARS = replace(
-    STOCK_BARS,
-    name="forex.bars",
-    asset_class=AssetClass.FOREX,
-    flat_file_prefixes={
-        Timespan.MINUTE: "global_forex/minute_aggs_v1",
-        Timespan.DAY: "global_forex/day_aggs_v1",
-    },
 )
 YIELDS = DatasetSpec(
     name="economy.yields",
@@ -260,7 +220,7 @@ def pick(table: Table, *columns: str) -> list[tuple[Any, ...]]:
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
     def set_now(moment: datetime) -> None:
-        monkeypatch.setattr(_flatfiles, "_now", lambda: moment)
+        monkeypatch.setattr(_sources, "_now", lambda: moment)
 
     set_now(NOW)
     return set_now
@@ -360,265 +320,6 @@ def pool(monkeypatch: pytest.MonkeyPatch) -> type[ShutdownSignal]:
 
     monkeypatch.setattr(_flatfiles, "ThreadPoolExecutor", Recorded)
     return Recorded
-
-
-# --- partition_dates -------------------------------------------------------------------------
-
-
-def test_partition_dates_cover_the_range_in_the_class_day_zone() -> None:
-    window = bounds(STOCK_TRADES, "2025-03-03", "2025-03-05")
-    assert partition_dates(STOCK_TRADES, window) == (
-        date(2025, 3, 3),
-        date(2025, 3, 4),
-        date(2025, 3, 5),
-    )
-    # The end is exclusive: midnight New York names no file of its own.
-    window = bounds(
-        STOCK_TRADES,
-        datetime(2025, 3, 3, 10, tzinfo=NEW_YORK),
-        datetime(2025, 3, 4, tzinfo=NEW_YORK),
-    )
-    assert partition_dates(STOCK_TRADES, window) == (date(2025, 3, 3),)
-
-
-def test_partition_dates_of_forex_are_utc_dates() -> None:
-    evening = datetime(2025, 3, 3, 22, tzinfo=NEW_YORK)  # 03:00 UTC on March 4
-    window = TimeRange(evening.astimezone(UTC), datetime(2025, 3, 4, 4, tzinfo=UTC))
-    assert partition_dates(FOREX_BARS, window) == (date(2025, 3, 4),)
-    assert partition_dates(STOCK_BARS, window) == (date(2025, 3, 3),)
-
-
-def test_partition_dates_without_a_class_are_new_york_dates() -> None:
-    evening = TimeRange(
-        datetime(2025, 3, 3, 22, tzinfo=NEW_YORK), datetime(2025, 3, 3, 23, tzinfo=NEW_YORK)
-    )
-    assert partition_dates(YIELDS, evening) == (date(2025, 3, 3),)  # March 4 in UTC
-
-
-def test_partition_dates_of_futures_are_sessions() -> None:
-    window = bounds(FUTURES_TRADES, "2025-03-03", "2025-03-05")
-    assert isinstance(window, FuturesSessions)
-    assert partition_dates(FUTURES_TRADES, window) == (
-        date(2025, 3, 3),
-        date(2025, 3, 4),
-        date(2025, 3, 5),
-    )
-
-
-@pytest.mark.parametrize(
-    ("start", "end", "sessions"),
-    [
-        pytest.param((10, 0), (11, 0), (date(2025, 3, 3),), id="inside-one-session"),
-        pytest.param((16, 0), (17, 0), (date(2025, 3, 3),), id="up-to-the-roll"),
-        pytest.param((16, 0), (18, 0), (date(2025, 3, 3), date(2025, 3, 4)), id="across-the-roll"),
-        pytest.param((17, 0), (18, 0), (date(2025, 3, 4),), id="evening-only"),
-        # 23:30 Chicago is 00:30 on March 4 in New York: the session, not either date, decides.
-        pytest.param((23, 30), (23, 45), (date(2025, 3, 4),), id="late-evening"),
-    ],
-)
-def test_partition_dates_of_futures_instants_are_their_sessions(
-    start: tuple[int, int], end: tuple[int, int], sessions: tuple[date, ...]
-) -> None:
-    window = bounds(
-        FUTURES_TRADES,
-        datetime(2025, 3, 3, *start, tzinfo=CHICAGO),
-        datetime(2025, 3, 3, *end, tzinfo=CHICAGO),
-    )
-    assert partition_dates(FUTURES_TRADES, window) == sessions
-
-
-# --- choose_source: every branch of the AUTO rule --------------------------------------------
-
-MARCH_3 = (date(2025, 3, 3),)
-
-
-def decide(
-    spec: DatasetSpec,
-    req: Request,
-    *,
-    requested: HistorySource = HistorySource.AUTO,
-    symbol_count: int | None = 1,
-    cfg: dm.MassiveConfig | None = None,
-    now: datetime = NOW,
-    dates: tuple[date, ...] = MARCH_3,
-) -> SourceChoice:
-    return choose_source(
-        spec,
-        req,
-        dates,
-        requested=requested,
-        symbol_count=symbol_count,
-        config=cfg or config(),
-        now=now,
-    )
-
-
-def choose(spec: DatasetSpec, req: Request, **kwargs: object) -> HistorySource:
-    return decide(spec, req, **cast("dict[str, Any]", kwargs)).source
-
-
-def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
-    bars = request(dm.ALL, timespan=Timespan.HOUR, multiplier=5, params=(("adjusted", True),))
-    with pytest.raises(ValueError, match=r"stocks\.bars history has no possible source") as info:
-        choose(
-            STOCK_BARS,
-            bars,
-            symbol_count=None,
-            cfg=NO_S3,
-            now=datetime(2025, 3, 4, 15, tzinfo=UTC),  # 10:00 New York: March 3 not published
-        )
-    assert str(info.value) == (
-        "stocks.bars history has no possible source. Flat files: "
-        "no S3 credentials are configured (MassiveConfig s3_access_key_id and "
-        "s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY); "
-        "stocks.bars flat files hold only 1-minute, 1-day bars; "
-        "flat-file bars are unadjusted; pass adjusted=False; "
-        "the file for 2025-03-03 is not yet published; flat files land ~11:00 ET next day "
-        "(a day's file counts as published from 11:30 New York time after the day ends). "
-        "REST: stocks.bars history over REST needs explicit symbols."
-    )
-
-
-def test_auto_with_only_flat_files_possible_reads_flat_files() -> None:
-    # indices.values has no REST history, so even one symbol reads flat files.
-    assert decide(INDEX_VALUES_SPEC, request(("I:SPX",))) == SourceChoice(
-        HistorySource.FLAT_FILES, "REST cannot serve it: indices.values has no REST history"
-    )
-
-
-def test_auto_with_only_rest_possible_uses_rest() -> None:
-    choice = decide(STOCK_TRADES, request(), symbol_count=500, cfg=NO_S3)
-    assert choice.source is HistorySource.REST
-    assert choice.reason.startswith("flat files cannot serve it: no S3 credentials")
-    assert decide(YIELDS, request(None), symbol_count=None) == SourceChoice(
-        HistorySource.REST, "flat files cannot serve it: economy.yields has no flat files"
-    )
-
-
-@pytest.mark.parametrize(
-    ("symbol_count", "expected"),
-    [
-        (49, SourceChoice(HistorySource.REST, "49 symbols < flat_file_symbol_threshold 50")),
-        (
-            50,
-            SourceChoice(HistorySource.FLAT_FILES, "50 symbols >= flat_file_symbol_threshold 50"),
-        ),
-        (None, SourceChoice(HistorySource.FLAT_FILES, "every symbol")),
-    ],
-)
-def test_auto_with_both_possible_switches_at_the_threshold(
-    symbol_count: int | None, expected: SourceChoice
-) -> None:
-    # None stands for dm.ALL: the daily grouped endpoint makes REST possible too.
-    req = request(dm.ALL, timespan=Timespan.DAY, params=(("adjusted", False),))
-    assert decide(STOCK_BARS, req, symbol_count=symbol_count) == expected
-
-
-def test_auto_threshold_comes_from_the_config() -> None:
-    cfg = config(flat_file_symbol_threshold=3)
-    assert choose(STOCK_TRADES, request(), symbol_count=2, cfg=cfg) is HistorySource.REST
-    assert choose(STOCK_TRADES, request(), symbol_count=3, cfg=cfg) is HistorySource.FLAT_FILES
-
-
-def test_flat_files_forced_reads_flat_files_or_names_every_violation() -> None:
-    forced = HistorySource.FLAT_FILES
-    assert decide(STOCK_TRADES, request(), requested=forced) == SourceChoice(forced, "requested")
-    with pytest.raises(ValueError, match="cannot be read from flat files") as info:
-        choose(
-            STOCK_TRADES,
-            request(),
-            requested=forced,
-            cfg=NO_S3,
-            now=datetime(2025, 3, 4, 10, tzinfo=NEW_YORK),
-        )
-    assert str(info.value) == (
-        "stocks.trades cannot be read from flat files: no S3 credentials are configured "
-        "(MassiveConfig s3_access_key_id and s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID "
-        "and MASSIVE_S3_SECRET_ACCESS_KEY); the file for 2025-03-03 is not yet published; flat "
-        "files land ~11:00 ET next day (a day's file counts as published from 11:30 New York "
-        "time after the day ends)"
-    )
-
-
-@pytest.mark.parametrize(
-    ("spec", "timespan", "multiplier", "params", "problem"),
-    [
-        (STOCK_BARS, Timespan.MINUTE, 1, (("adjusted", False),), None),
-        (STOCK_BARS, Timespan.DAY, 1, (("adjusted", False),), None),
-        (STOCK_BARS, Timespan.HOUR, 1, (("adjusted", False),), "hold only 1-minute, 1-day bars"),
-        (STOCK_BARS, Timespan.MINUTE, 5, (("adjusted", False),), "hold only 1-minute, 1-day"),
-        (STOCK_BARS, Timespan.DAY, 1, (("adjusted", True),), "pass adjusted=False"),
-        (INDEX_BARS, Timespan.DAY, 1, (), None),  # no adjusted parameter
-        (FUTURES_BARS, Timespan.SESSION, 1, (), None),
-        (FUTURES_BARS, Timespan.MINUTE, 1, (), None),
-        (FUTURES_BARS, Timespan.HOUR, 1, (), "hold only 1-minute, 1-session bars"),
-        (replace(STOCK_BARS, flat_file_prefixes={}), Timespan.DAY, 1, (), "has no flat files"),
-        (YIELDS, None, 1, (), "economy.yields has no flat files"),
-    ],
-)
-def test_flat_file_constraints_of_bars_and_datasets(
-    *,
-    spec: DatasetSpec,
-    timespan: Timespan | None,
-    multiplier: int,
-    params: tuple[tuple[str, object], ...],
-    problem: str | None,
-) -> None:
-    req = request(timespan=timespan, multiplier=multiplier, params=params)
-    forced = HistorySource.FLAT_FILES
-    if problem is None:
-        assert choose(spec, req, requested=forced) is HistorySource.FLAT_FILES
-    else:
-        with pytest.raises(ValueError, match=problem):
-            choose(spec, req, requested=forced)
-
-
-@pytest.mark.parametrize(
-    ("minute", "published"),
-    [(29, False), (31, True)],
-)
-def test_the_publish_cutoff_applies_the_next_day(minute: int, published: bool) -> None:
-    now = datetime(2025, 3, 4, 11, minute, tzinfo=NEW_YORK)
-    forced = HistorySource.FLAT_FILES
-    if published:
-        assert choose(STOCK_TRADES, request(), requested=forced, now=now) is forced
-    else:
-        with pytest.raises(ValueError, match=r"2025-03-03 is not yet published.*11:30 New York"):
-            choose(STOCK_TRADES, request(), requested=forced, now=now)
-    # Under AUTO the same request falls back to REST until the file is published.
-    expected = HistorySource.FLAT_FILES if published else HistorySource.REST
-    assert choose(STOCK_TRADES, request(), symbol_count=50, now=now) is expected
-
-
-def test_the_publish_cutoff_comes_from_the_config() -> None:
-    now = datetime(2025, 3, 4, 9, 30, tzinfo=NEW_YORK)
-    early = config(flat_file_publish_cutoff=time(9))
-    forced = HistorySource.FLAT_FILES
-    assert choose(STOCK_TRADES, request(), requested=forced, now=now, cfg=early) is forced
-    with pytest.raises(ValueError, match="not yet published"):
-        choose(STOCK_TRADES, request(), requested=forced, now=now)
-
-
-def test_futures_are_published_by_their_chicago_session_date() -> None:
-    # With a 00:30 New York cutoff, a stocks day is published 30 minutes after New York's
-    # midnight; a futures session only from the first 00:30 New York after Chicago's midnight,
-    # which falls at 01:00 New York, so on the following night.
-    cutoff = config(flat_file_publish_cutoff=time(0, 30))
-    forced = HistorySource.FLAT_FILES
-    req = request(("ESH5",))
-    night = datetime(2025, 3, 4, 0, 45, tzinfo=NEW_YORK)
-    next_night = datetime(2025, 3, 5, 0, 45, tzinfo=NEW_YORK)
-    assert choose(STOCK_TRADES, req, requested=forced, now=night, cfg=cutoff) is forced
-    with pytest.raises(ValueError, match="2025-03-03 is not yet published"):
-        choose(FUTURES_TRADES, req, requested=forced, now=night, cfg=cutoff)
-    assert choose(FUTURES_TRADES, req, requested=forced, now=next_night, cfg=cutoff) is forced
-
-
-def test_every_partition_date_must_be_published() -> None:
-    now = datetime(2025, 3, 5, 12, tzinfo=NEW_YORK)  # March 4 is published, March 5 is not
-    dates = (date(2025, 3, 4), date(2025, 3, 5))
-    with pytest.raises(ValueError, match="2025-03-05 is not yet published"):
-        choose(STOCK_TRADES, request(), requested=HistorySource.FLAT_FILES, now=now, dates=dates)
 
 
 # --- The verb ----------------------------------------------------------------------------------
@@ -850,7 +551,7 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
         STOCK_BARS,
         symbols=dm.ALL,
         timespan=Timespan.DAY,
-        params={"adjusted": False},
+        adjusted=False,
     )
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-03", "2025-03-03")
@@ -1582,33 +1283,55 @@ def test_closing_the_session_stops_a_read_in_progress(
     assert fake_s3.keys() == [TRADES_0303]
 
 
-def test_a_request_answered_after_close_is_dropped(
-    *, fake_s3: FakeS3, clock: Callable[[datetime], None], put: Callable[[str, str], None]
+@pytest.mark.parametrize(
+    ("day", "stored"),
+    [
+        pytest.param(3, True, id="a-file-answered-200"),
+        pytest.param(4, False, id="a-missing-tuesday"),
+        pytest.param(8, False, id="a-missing-saturday"),
+    ],
+)
+def test_a_close_during_a_request_reports_the_close(
+    *,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    put: Callable[[str, str], None],
+    monkeypatch: pytest.MonkeyPatch,
+    day: int,
+    stored: bool,
 ) -> None:
-    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    # The session closes while the request is in flight, after the reader's last check: the
+    # answer, whatever it is (a file, a missing weekday, a missing weekend day), is discarded
+    # and the call reports the close.
+    if stored:
+        put(TRADES_KEY.format(day), "us_stocks_sip_trades_v1_2025-03-03.csv")
     m = dm.MassiveSession(config())
     bucket = m._core._flat_files
-    reopened: list[bool] = []
+    closes: list[bool] = []
 
     def close_mid_request(key: str) -> None:
-        client = cast("Any", bucket._client)
+        client = bucket._client
+        assert client is not None
         close = client.close
 
         def recorded() -> None:
-            reopened.append(True)
+            closes.append(True)
             close()
 
-        client.close = recorded
-        bucket.close()  # the session closes while this request is in flight
+        monkeypatch.setattr(client, "close", recorded)
+        bucket.close()
 
     fake_s3.before_answer = close_mid_request
+    when = f"2025-03-{day:02d}"
     try:
-        with pytest.raises(dm.MassiveError, match="is closed"):
-            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+        with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
+            query(m, STOCK_TRADES, symbols=dm.ALL).history(when, when)
     finally:
         m.close()
-    # Closed by the bucket, then again by the reader, which drops any pool the request opened.
-    assert reopened == [True, True]
+    # Closed by the bucket, then once more after the pool drained, which drops any connection
+    # pool the in-flight request opened.
+    assert closes == [True, True]
+    assert fake_s3.keys() == [TRADES_KEY.format(day)]
 
 
 # --- The bucket and its client ---------------------------------------------------------------
@@ -1711,6 +1434,69 @@ def test_a_session_collected_unclosed_closes_its_bucket(
 # --- Bounded memory --------------------------------------------------------------------------
 
 
+def synthetic_trades(rows: int) -> str:
+    # A trades file whose rows vary like real ones; one row in a thousand is the symbol RARE.
+    moment = 1741012200000000000
+    tickers = ("AAPL", "MSFT", "SPY", "NVDA")
+    lines = [
+        f"12,,4,{n},{moment + n * 1000},{100 + n % 997 / 7:.4f},{n},{moment + n * 1001},"
+        f"{n % 5000 + 1},3,{'RARE' if n % 1000 == 0 else tickers[n % 4]},,\n"
+        for n in range(rows)
+    ]
+    return TRADE_HEADER + "".join(lines)
+
+
+class MemorySampler:
+    # Samples Arrow's pool at each block and table, and the running Python peak (tracemalloc)
+    # at each block, into buffers allocated up front: a list of Python ints would itself grow
+    # inside the traced region by about 40 bytes per block.
+    def __init__(self, capacity: int) -> None:
+        self.arrow = array("q", bytes(8 * capacity))
+        self.python = array("q", bytes(8 * capacity))
+        self.taken = [0, 0]
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        apply = _flatfiles._Transform.apply
+        convert = dh_arrow.to_table
+
+        def sampled_apply(
+            transform: _flatfiles._Transform, data: pa.RecordBatch, key: _flatfiles._Key
+        ) -> pa.RecordBatch:
+            self.sample_arrow()
+            self.python[self.taken[1]] = tracemalloc.get_traced_memory()[1]
+            self.taken[1] += 1
+            return apply(transform, data, key)
+
+        def sampled_convert(data: pa.Table) -> Table:
+            self.sample_arrow()
+            return convert(data)
+
+        monkeypatch.setattr(_flatfiles._Transform, "apply", sampled_apply)
+        monkeypatch.setattr(_flatfiles, "to_table", sampled_convert)
+
+    def sample_arrow(self) -> None:
+        self.arrow[self.taken[0]] = pa.total_allocated_bytes()
+        self.taken[0] += 1
+
+    def measure(self, read: Callable[[], Table]) -> tuple[int, int, int]:
+        # Runs `read` and returns its rows, and the Python and Arrow peaks above the baselines.
+        self.taken[:] = [0, 0]
+        arrow_baseline = pa.total_allocated_bytes()
+        tracemalloc.start()
+        try:
+            python_baseline = tracemalloc.get_traced_memory()[0]
+            rows = read().size
+            python_peak = tracemalloc.get_traced_memory()[1] - python_baseline
+        finally:
+            tracemalloc.stop()
+        return rows, python_peak, max(self.arrow[: self.taken[0]]) - arrow_baseline
+
+    def python_rise(self) -> int:
+        # How far the running Python peak rose from a third of the blocks to the last one.
+        blocks = self.taken[1]
+        return self.python[blocks - 1] - self.python[blocks // 3]
+
+
 def test_memory_per_reader_does_not_grow_with_the_file(
     *,
     fake_s3: FakeS3,
@@ -1718,61 +1504,39 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     make_csv_gz: Callable[[str], bytes],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Python-owned buffers (the decompressed text Arrow reads ahead) are seen by tracemalloc;
-    # Arrow's own buffers by its pool, sampled at every block and table.
     block = 16 * 1024
     monkeypatch.setattr(_flatfiles, "BLOCK_SIZE", block)
-    moment = 1741012200000000000
-    tickers = ("AAPL", "MSFT", "SPY", "NVDA")
-    lines = [
-        f"12,,4,{n},{moment + n * 1000},{100 + n % 997 / 7:.4f},{n},{moment + n * 1001},"
-        f"{n % 5000 + 1},3,{tickers[n % 4]},,\n"
-        for n in range(600_000)
-    ]
-    text = TRADE_HEADER + "".join(lines)
+    text = synthetic_trades(600_000)
     fake_s3.put(TRADES_0303, make_csv_gz(text))
-    del lines
-    arrow: list[int] = []
-    apply = _flatfiles._Transform.apply
-    convert = dh_arrow.to_table
-
-    def sampled_apply(
-        transform: _flatfiles._Transform, data: pa.RecordBatch, key: _flatfiles._Key
-    ) -> pa.RecordBatch:
-        arrow.append(pa.total_allocated_bytes())
-        return apply(transform, data, key)
-
-    def sampled_convert(data: pa.Table) -> Table:
-        arrow.append(pa.total_allocated_bytes())
-        return convert(data)
-
-    monkeypatch.setattr(_flatfiles._Transform, "apply", sampled_apply)
-    monkeypatch.setattr(_flatfiles, "to_table", sampled_convert)
+    sampler = MemorySampler(2 * (len(text) // block) + 1000)
+    sampler.install(monkeypatch)
     m = dm.MassiveSession(config(max_concurrency=1))
+
+    def read(symbols: object) -> Callable[[], Table]:
+        q = query(m, STOCK_TRADES, symbols=symbols)
+        return lambda: q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+
     try:
         # A first read creates the client: botocore parses its service model once per client.
-        fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, moment)))
+        fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04")
-        arrow.clear()
-        arrow_baseline = pa.total_allocated_bytes()
-        tracemalloc.start()
-        try:
-            python_baseline = tracemalloc.get_traced_memory()[0]
-            t = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-            python_peak = tracemalloc.get_traced_memory()[1] - python_baseline
-        finally:
-            tracemalloc.stop()
-        assert t.size == 600_000
+        every, python_peak, arrow_peak = sampler.measure(read(dm.ALL))
+        rare, _, _ = sampler.measure(read(["RARE"]))
     finally:
         m.close()
-    # About 32 blocks of read-ahead and 16 of gathered rows. The free-threaded build frees
-    # buffers that crossed threads later, so its peak is about 150 blocks (and about the same
-    # at three times this file's length); the bound allows that and still proves the peak
-    # does not grow with the file, which is more than ten times longer.
+    assert (every, rare) == (600_000, 600)
+    # About 32 blocks of read-ahead and 16 of gathered rows. Small test blocks inflate the peak
+    # through fixed per-block overhead (about 75 blocks with the GIL and 150 without it at
+    # 16 KiB, against about 37 at the production 1 MiB), so 250 blocks is only a loose ceiling.
     bound = 250 * block
     assert len(text) > 10 * bound
     assert python_peak < bound
-    assert max(arrow) - arrow_baseline < bound
+    assert arrow_peak < bound
+    # The real check is the plateau: once the read-ahead has filled, the running peak must not
+    # keep rising with the file. It is measured on the rare symbol's read, whose result is one
+    # small table: with dm.ALL the result itself (a Deephaven table, and its Python wrapper,
+    # per 16 blocks) legitimately grows with the file.
+    assert sampler.python_rise() < 32 * block
 
 
 def test_the_production_block_size() -> None:

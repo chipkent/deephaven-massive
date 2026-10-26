@@ -22,6 +22,8 @@ take the session's registry lock.
 The verbs delegate the transport work to three interfaces, one per transport, which the session
 provides through its factory hooks: `RestTransport` (`fetch`, `poll`, REST `history`),
 `StreamTransport` (opening a WebSocket stream), and `FlatFileTransport` (flat-file `history`).
+`history()` chooses its source itself (`_sources.choose_source`) and then calls one transport,
+so the transports only do I/O.
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
@@ -54,8 +56,9 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._liveness import entered
+from deephaven_massive._sources import choose_source, partition_dates, rest_history_problem
 from deephaven_massive._symbols import SymbolTable, canonical_view, symbol_canonicalizer
-from deephaven_massive._types import ALL, _All, override
+from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -83,7 +86,6 @@ __all__ = [
     "StreamKey",
     "StreamQuery",
     "StreamTransport",
-    "rest_history_problem",
 ]
 
 logger = logging.getLogger(__name__)
@@ -112,6 +114,8 @@ class Request:
         timespan: The bar timespan (bars and indicators only).
         multiplier: The bar multiplier.
         venue: The futures venue, which selects flat-file prefixes only.
+        adjusted: Whether bars are adjusted for splits, for datasets with an `adjusted`
+            parameter; None for datasets without one. Flat files hold only unadjusted bars.
         start: The lower bound of the dataset's time axis (`…T` datasets), or of `history()`.
         end: The upper bound of the dataset's time axis, or of `history()`.
         params: The dataset's other typed parameters, by SDK parameter name, sorted by name.
@@ -125,6 +129,7 @@ class Request:
     timespan: Timespan | None = None
     multiplier: int = 1
     venue: FuturesVenue | None = None
+    adjusted: bool | None = None
     start: date | datetime | None = None
     end: date | datetime | None = None
     params: tuple[tuple[str, ParamValue], ...] = ()
@@ -285,7 +290,11 @@ class StreamTransport(Protocol):
 
 
 class FlatFileTransport(Protocol):
-    """The flat-file transport, provided by `SessionCore.flat_file_transport()`."""
+    """The flat-file transport, provided by `SessionCore.flat_file_transport()`.
+
+    It only reads files: `HistoryQuery.history()` has already chosen flat files as the source
+    (`_sources.choose_source`).
+    """
 
     def history(
         self,
@@ -293,16 +302,17 @@ class FlatFileTransport(Protocol):
         request: Request,
         window: TimeRange | FuturesSessions,
         *,
-        source: HistorySource,
+        dates: Sequence[date],
     ) -> Table:
-        """Return history from flat files (or, under `AUTO`, from the chosen source), static.
+        """Return the rows of `window` from the dataset's flat files, static.
 
         Args:
-            spec: The dataset.
-            request: The normalized arguments, with the raw `start` and `end` bounds.
+            spec: The dataset, with a flat-file prefix for the request.
+            request: The normalized arguments, with the raw `start` and `end` bounds and static
+                symbols (never a reactive table).
             window: The bounds under the class's day rules: a half-open `TimeRange`, or the
                 `FuturesSessions` of date-bounded futures.
-            source: `FLAT_FILES` or `AUTO`.
+            dates: The partition dates to read (`_sources.partition_dates`).
         """
         ...
 
@@ -383,34 +393,6 @@ def _read_symbol_table(
     if not found:
         raise ValueError(f"{spec.name} history: the symbol table holds no valid symbols")
     return found
-
-
-def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
-    """Tell why REST cannot serve a dataset's `history()` request, if it cannot.
-
-    REST serves history when the dataset has a REST history endpoint and the symbols are
-    explicit; `dm.ALL` is served only for 1-day bars of a dataset with a grouped-daily endpoint
-    (one request per day for the whole market). Shared by `history(source=REST)`, which raises
-    the reason, and the `AUTO` arbitration of the flat-file transport, which weighs it.
-
-    Args:
-        spec: The dataset.
-        request: The normalized arguments (symbols, timespan, multiplier).
-
-    Returns:
-        The reason, such as `"indices.values has no REST history"`, or None when REST can
-        serve the request.
-    """
-    if spec.history_method is None:
-        return f"{spec.name} has no REST history"
-    grouped = (
-        spec.grouped_daily_method is not None
-        and request.timespan is Timespan.DAY
-        and request.multiplier == 1
-    )
-    if isinstance(request.symbols, _All) and not grouped:
-        return f"{spec.name} history over REST needs explicit symbols"
-    return None
 
 
 @dataclass(frozen=True, repr=False, slots=True)
@@ -720,7 +702,20 @@ class HistoryQuery(QueryBase):
         if chosen is HistorySource.REST:
             self._check_rest_history()
             return self._core.rest_transport().history(self._spec, request, window)
-        return self._core.flat_file_transport().history(self._spec, request, window, source=chosen)
+        dates = partition_dates(self._spec, window)
+        choice = choose_source(
+            self._spec, request, dates, requested=chosen, config=self._core.config
+        )
+        if chosen is HistorySource.AUTO:
+            logger.info(
+                "%s history: AUTO chose %s (%s)",
+                self._spec.name,
+                choice.source.name,
+                choice.reason,
+            )
+        if choice.source is HistorySource.REST:
+            return self._core.rest_transport().history(self._spec, request, window)
+        return self._core.flat_file_transport().history(self._spec, request, window, dates=dates)
 
     def _check_rest_history(self) -> None:
         """Reject `history(source=REST)` where REST cannot serve the request.

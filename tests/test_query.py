@@ -2,7 +2,7 @@
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol, cast
 
@@ -17,7 +17,7 @@ from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _errors
+from deephaven_massive import _errors, _sources
 from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._dates import FuturesSessions, TimeRange
 from deephaven_massive._domains.base import build_query
@@ -123,9 +123,9 @@ class Recorder:
         request: Request,
         window: TimeRange | FuturesSessions,
         *,
-        source: HistorySource | None = None,
+        dates: Sequence[date] | None = None,
     ) -> Table:
-        return self._record("history", spec, request, window=window, source=source)
+        return self._record("history", spec, request, window=window, dates=dates)
 
 
 @pytest.fixture
@@ -369,13 +369,60 @@ def test_history_rest_needs_a_rest_endpoint(
         values.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
 
 
-def test_history_flat_files_and_auto_go_to_the_flat_file_transport(
-    massive_session: dm.MassiveSession, flat: Recorder
+@pytest.fixture
+def s3_session(monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
+    # S3 credentials set explicitly, and a clock at which early March 2025 is published.
+    monkeypatch.setattr(_sources, "_now", lambda: datetime(2025, 3, 10, 16, tzinfo=UTC))
+    fields = {"api_key": "test-key", "s3_access_key_id": "AKID", "s3_secret_access_key": "sk"}
+    config = dm.MassiveConfig(**cast("dict[str, Any]", fields))
+    session = dm.MassiveSession(config)
+    yield session
+    session.close()
+
+
+def test_history_dispatches_by_the_source_choice(
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    q = trades(massive_session)
-    q.history("2025-03-03", "2025-03-03")
-    q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
-    assert [c[3]["source"] for c in flat.calls] == [HistorySource.AUTO, HistorySource.FLAT_FILES]
+    rest, flat = Recorder(), Recorder()
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._query"):
+        values.history("2025-03-03", "2025-03-04")  # AUTO: flat files are the only source
+        values.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        trades(s3_session).history("2025-03-03", "2025-03-03")  # AUTO: no flat files
+    assert [c[3]["dates"] for c in flat.calls] == [
+        (date(2025, 3, 3), date(2025, 3, 4)),
+        (date(2025, 3, 3),),
+    ]
+    assert len(rest.calls) == 1
+    # Only AUTO calls log their choice; a forced source does not.
+    assert caplog.messages == [
+        (
+            "indices.values history: AUTO chose FLAT_FILES (REST cannot serve it: indices.values "
+            "has no REST history)"
+        ),
+        (
+            "stocks.trades history: AUTO chose REST (flat files cannot serve it: stocks.trades has "
+            "no flat files)"
+        ),
+    ]
+
+
+def test_history_with_no_possible_source_raises_before_any_transport(
+    *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+) -> None:
+    every = trades(massive_session, dm.ALL)  # no flat files, and REST needs explicit symbols
+    with pytest.raises(ValueError, match=r"stocks\.trades history has no possible source"):
+        every.history("2025-03-03", "2025-03-03")
+    with pytest.raises(ValueError, match=r"stocks\.trades cannot be read from flat files"):
+        trades(massive_session).history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert rest.calls == []
+    assert flat.calls == []
 
 
 def test_history_argument_errors(massive_session: dm.MassiveSession, flat: Recorder) -> None:
@@ -423,7 +470,7 @@ def test_history_reads_a_reactive_symbol_table_once_for_every_source(
     # the same sorted canonical tuple, never the table itself.
     assert reads == [True, True]
     assert rest.calls[0][2].symbols == ("AAPL", "MSFT")
-    assert flat.calls[0][2].symbols == ("AAPL", "MSFT")
+    assert rest.calls[1][2].symbols == ("AAPL", "MSFT")  # AUTO: the dataset has no flat files
     assert caplog.messages == [
         "a symbol table holds '$$$', which is not a valid stocks symbol; such rows are ignored"
     ]
