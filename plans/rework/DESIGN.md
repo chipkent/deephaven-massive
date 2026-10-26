@@ -1985,7 +1985,10 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   names them all.
 - **Strict decoding.** The body is decoded once with the `net.codec` JSON codec. Bytes that are
   not UTF-8, or text that is not JSON, raise `WireError` with the status and the first 200
-  bytes, on any call and on any page. The page's rows come from the `RestPath`'s result key
+  bytes, on any call and on any page. So does a document nested deeper than 512 on the
+  standard-library path: the codec counts the depth before decoding, so a hostile body can
+  never exhaust the C stack of the calling thread (a JVM thread has 1 MB); orjson enforces its
+  own limit of 1024. The page's rows come from the `RestPath`'s result key
   (`results`, or the `RESULT_KEYS` entry). A single object is wrapped as one row; a bare JSON
   list (`/v1/marketstatus/upcoming`) is the rows, with `status=""` and `request_id=None`. A
   missing result key is an empty page only when `status` is `OK` or `DELAYED`. The envelope's

@@ -115,6 +115,82 @@ def test_orjson_rejects_the_same_input_with_value_error(
     assert _value_error_of(data) is not None
 
 
+def _nested(depth: int, inner: str = "0") -> str:
+    """Return `inner` wrapped in `depth` arrays, as JSON text.
+
+    Args:
+        depth: The number of arrays.
+        inner: The JSON text at the bottom.
+
+    Returns:
+        The document.
+    """
+    return "[" * depth + inner + "]" * depth
+
+
+def test_the_depth_limit_is_512() -> None:
+    assert codec.MAX_DEPTH == 512
+
+
+@pytest.mark.usefixtures("stdlib")
+@pytest.mark.parametrize("as_bytes", [True, False], ids=["bytes", "str"])
+def test_stdlib_decodes_a_document_exactly_at_the_limit(as_bytes: bool) -> None:
+    text = _nested(512)
+    expected = json.loads(text)
+    assert codec.loads(text.encode() if as_bytes else text) == expected
+
+
+@pytest.mark.usefixtures("stdlib")
+@pytest.mark.parametrize("as_bytes", [True, False], ids=["bytes", "str"])
+def test_stdlib_rejects_a_document_one_level_too_deep(as_bytes: bool) -> None:
+    # The scan rejects before decoding, so depth 513 never reaches the recursive decoder.
+    text = _nested(513)
+    with pytest.raises(ValueError, match="JSON nests deeper than 512 arrays and objects"):
+        codec.loads(text.encode() if as_bytes else text)
+
+
+@pytest.mark.usefixtures("stdlib")
+def test_stdlib_counts_objects_as_well_as_arrays() -> None:
+    text = '{"a":' * 257 + "[" * 256 + "0" + "]" * 256 + "}" * 257
+    with pytest.raises(ValueError, match="nests deeper than 512"):
+        codec.loads(text)
+
+
+@pytest.mark.usefixtures("stdlib")
+@pytest.mark.parametrize(
+    "text",
+    [
+        '["' + "[" * 600 + '"]',  # openers inside a string
+        '"' + "{" * 600 + '"',  # a top-level string: nothing outside it
+        '["' + "[" * 600 + '\\"' + "[" * 600 + '"]',  # an escaped quote keeps the string open
+        '["\\\\' + "[" * 600 + '"]',  # an escaped backslash does not escape the quote
+    ],
+    ids=["in a string", "top-level string", "escaped quote", "escaped backslash"],
+)
+def test_stdlib_ignores_brackets_inside_strings(text: str) -> None:
+    assert codec.loads(text) == json.loads(text)
+
+
+@pytest.mark.usefixtures("stdlib")
+@pytest.mark.parametrize(
+    "inner",
+    [
+        '"]]]"',  # closers inside a string do not close anything
+        '"\\\\"',  # an escaped backslash ends its string, so the depth after it counts
+    ],
+    ids=["closers in a string", "escaped backslash"],
+)
+def test_stdlib_strings_do_not_hide_depth(inner: str) -> None:
+    with pytest.raises(ValueError, match="nests deeper than 512"):
+        codec.loads(_nested(513, inner))
+
+
+def test_orjson_keeps_its_own_limit_of_1024(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codec, "_orjson", pytest.importorskip("orjson"))
+    assert codec.loads(_nested(1024)) == json.loads(_nested(1024))
+    assert _value_error_of(_nested(1025).encode()) is not None
+
+
 def test_orjson_decodes_a_valid_document_as_the_standard_library_does(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
