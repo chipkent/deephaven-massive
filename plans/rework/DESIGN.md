@@ -5,9 +5,10 @@ library that exposes Massive.com (formerly Polygon.io) market data as live and s
 [Deephaven](https://deephaven.io) tables. It is the source of truth for every implementation
 work package in `PLAN.md`. It changes only by owner decision.
 
-The design was checked against `massive==2.9.0` (the official Python SDK), `deephaven-core`
-42.7 (Python package; Java behaviour from the `deephaven-core` `main` branch), and the
-massive.com documentation as of 2026-10-23. Facts that could not be verified from those
+The design was checked against Massive's OpenAPI spec (`https://api.massive.com/openapi`) and
+WebSocket spec (`https://api.massive.com/specs/websocket.json`) as of 2026-10-26,
+`deephaven-core` 42.7 (Python package; Java behaviour from the `deephaven-core` `main` branch),
+and the massive.com documentation as of 2026-10-23. Facts that could not be verified from those
 sources are marked **UNVERIFIED**, carry the conservative handling that applies, and are
 collected in [section 23](#23-open-verification-items).
 
@@ -31,7 +32,7 @@ collected in [section 23](#23-open-verification-items).
 16. [`HistorySource.AUTO`](#16-historysourceauto)
 17. [Diagnostics](#17-diagnostics)
 18. [Concurrency model](#18-concurrency-model)
-19. [SDK fork: fix list and responsibility split](#19-sdk-fork-fix-list-and-responsibility-split)
+19. [Wire clients and the spec snapshot](#19-wire-clients-and-the-spec-snapshot)
 20. [Quality gates](#20-quality-gates)
 21. [Examples](#21-examples)
 22. [Decisions](#22-decisions)
@@ -49,10 +50,12 @@ collected in [section 23](#23-open-verification-items).
 - **Flat files** (gzip CSV on S3 at `files.massive.com`) become static tables.
 
 The library runs inside an existing Deephaven worker. It never starts a JVM and never embeds a
-Deephaven server. HTTP, retries, pagination, the WebSocket socket, authentication, and reconnects
-belong to the official `massive` SDK (from the owner's fork, see
-[section 19](#19-sdk-fork-fix-list-and-responsibility-split)). Everything Deephaven-specific
-belongs here.
+Deephaven server. It does not use Massive's Python SDK (`massive`). It speaks Massive's
+documented REST and WebSocket protocols directly, through its own REST client (on `urllib3`) and
+its own WebSocket client (on `websockets`), and it generates its REST parameters and columns
+from a pinned snapshot of Massive's OpenAPI spec
+([section 19](#19-wire-clients-and-the-spec-snapshot)). The runtime dependencies are
+`deephaven-core`, `pyarrow`, `boto3` (flat files), `urllib3`, `websockets`, and `certifi`.
 
 There are no existing users. Backward compatibility with the previous code base is not a goal.
 
@@ -61,12 +64,13 @@ There are no existing users. Backward compatibility with the previous code base 
 ### 2.1 Principles
 
 1. **Datasets are named by what they are, not how they travel.** One method per dataset. One
-   schema per dataset kind: the union of the SDK model fields across asset classes and
-   transports (WebSocket, REST, and flat files), flattened to PascalCase. A column a class or
-   transport does not supply is null (crypto trades have no `Tape`; stock bars have no
-   `SettlementPrice`). `Timestamp` is
-   the primary time column on every tick, bar, and value row. `Symbol` is the instrument on every
-   instrument row.
+   schema per dataset kind: the union of the fields Massive documents across asset classes and
+   transports (the REST fields of the OpenAPI spec, the WebSocket keys, and the flat-file
+   headers), flattened to PascalCase. Column names come from the committed name lock
+   ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)), never from an
+   SDK or a field description. A column a class or transport does not supply is null (crypto
+   trades have no `Tape`; stock bars have no `SettlementPrice`). `Timestamp` is the primary time
+   column on every tick, bar, and value row. `Symbol` is the instrument on every instrument row.
 2. **Shape is the user's choice; transport and host are the library's.** Verbs name the
    Deephaven table shape. No feed, host, channel, or S3 prefix appears in user code.
 3. **Tier is a property of the key.** Identical code runs on every plan. The library learns
@@ -84,10 +88,12 @@ There are no existing users. Backward compatibility with the previous code base 
 7. **Failures land where Deephaven users look.** Live tables fail through
    `TablePublisher.publish_failure`. Static verbs raise. Both log at ERROR and appear in the
    diagnostics tables.
-8. **Thin over the official SDK.** `massive.RESTClient` does HTTP, retries, and pagination.
-   `massive.websocket.WebSocketClient` (the fork) does the socket, authentication, reconnects, and
-   subscription frames. SDK model classes define columns. Bugs in the SDK are fixed in the fork,
-   not worked around here.
+8. **Direct over Massive's documented APIs.** The library owns one REST client and one WebSocket
+   client ([section 19](#19-wire-clients-and-the-spec-snapshot)). They implement Massive's
+   documented protocols, and nothing works around a third-party client. REST parameters and
+   columns are generated from a vendored, pinned snapshot of the OpenAPI spec; a parity test
+   keeps the generated code in step with the snapshot, and an advisory weekly job reports
+   drift in the live spec.
 9. **No live testing as design input.** Unverifiable facts get the conservative choice and a
    fixture test. Live integration tests are a later work package.
 10. **Closed categorical sets are enums.** Every closed set of values in a public signature is a
@@ -183,15 +189,20 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 | `_enums.py` | The fourteen public enums and the internal `Recency`, `ChannelFamily`, and `Transport` enums; the `_require_enum` runtime check. |
 | `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases, and `override` (`typing_extensions.override` for the type checker, a no-op at run time, since `typing.override` needs Python 3.12). |
 | `_errors.py` | `MassiveError`, `AuthenticationError`, `EntitlementError`. |
-| `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST method, `start`/`end` parameter pair, poll default, flat-file prefix, how symbols reach a REST request (`SymbolParam`: `ticker`, `tickers`, `ticker.any_of`, path segment, `from`/`to` pair)). A REST dataset gives its SDK model (`rest_model`) and the record derives its schema from it at construction, so the poll-key and time-unit checks run at import for every dataset; exactly one of a hand-written schema and a model is given, and a WebSocket dataset always has a hand-written schema and an asset class. Also the generated `SDK_PARAMS` table ([section 9](#9-filters)). |
-| `_schema.py` | The schema registry: SDK-model flattening, PascalCase naming, the dtype override table, the four hand-written tick schemas (trades, quotes, bars, index values) with per-transport key maps. |
+| `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST path templates, `start`/`end` wire parameter pair, poll default, flat-file prefix, how symbols reach a REST request (`SymbolParam`: `ticker`, `tickers`, `ticker.any_of`, or path segments, where a forex or crypto pair fills `{from}` and `{to}`)). A REST dataset without a hand-written schema derives its schema at construction from the generated fields of its paths (`_restspec.py`) and the column names of its domain's name lock, so the poll-key and time-unit checks run at import for every dataset; a WebSocket dataset always has a hand-written schema and an asset class. Also the name-lock loader ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)) and filter validation against the generated parameters ([section 9](#9-filters)). |
+| `_schema.py` | The schema registry: column types, PascalCase naming, the dtype override table (`ColumnOverride`, keyed by wire path), columnar Arrow construction, the four hand-written tick schemas (trades, quotes, bars, index values) with per-transport key maps keyed by wire key or CSV header. |
+| `_restspec.py` | **Generated; never edited by hand.** For every allow-listed REST path template: its result key, its parameters (wire name, kind, enum values, path or query), and its response fields (wire path, column type, unit tag). Written by `scripts/refresh_massive_spec.py` from the vendored snapshot ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). |
+| `_specgen.py` | The generator's pure logic, used only by `scripts/refresh_massive_spec.py` and the tests, never imported at run time: spec flattening, the path allow-list, result keys, the per-record-family lexicon and family assignments, spec type overrides, the naming rule and its gate, and lock appending. |
+| `_names/<domain>.json` | The name lock, one append-only JSON file per domain module: `(dataset, transport, wire path) -> column`. Package data, read by `_catalog.py`; appended by the refresh script, never rewritten. |
 | `_timeunits.py` | The `(dataset, transport, field) -> unit` table and the conversion rules ([section 12](#12-timestamp-units-and-day-boundaries)). |
 | `_symbols.py` | Symbol normalization and the `Symbol`/`Underlying` rule ([section 10](#10-symbols-and-all)). |
 | `_dates.py` | `DateLike` parsing, class day zones, session-date rules, `[start, end)` normalization. |
 | `_liveness.py` | Result scopes, stream scopes, result records, the reaper queue and thread. |
-| `_rest.py` | `RESTClient` construction from config, pagination into bounded Arrow batches, 403/429 mapping. Public SDK methods only, no private-call shims: the pinned fork carries `list_funding_conditions` and `get_daily_open_close_crypto` (fork item F6, since #45). |
+| `_restclient.py` | The REST client ([section 19.1](#191-the-rest-client)): authentication, query encoding, `next_url` paging, retries, error mapping, strict JSON. Knows nothing of datasets or Deephaven. |
+| `_rest.py` | The REST transport: requests built from a `DatasetSpec` and the generated parameters, pages decoded into bounded columnar Arrow batches, 403/429 handling for `fetch()`, `history()`, and `poll()`. |
 | `_hosts.py` | Host resolution from REST evidence ([section 13.2](#132-host-decision)). The `HostDecision` record itself lives in `_query.py`, next to the transport protocols that return it (`RestTransport.resolve_host`). |
-| `_ws.py` | One connection per URL over the forked `WebSocketClient(raw=True)`: client thread, frame decoding, status routing, the reconcile loop, acknowledgement watchdogs, the explicit-verdict rule, the options contract cap. |
+| `_wsclient.py` | The WebSocket client ([section 19.2](#192-the-websocket-client)): one socket to one URL on its own loop thread; connect, authenticate, send subscription frames, reconnect with backoff, close. Knows nothing of datasets or Deephaven. |
+| `_ws.py` | One connection per URL over `_wsclient.py`: frame decoding, status routing, the reconcile loop, acknowledgement watchdogs, the explicit-verdict rule, the options contract cap. |
 | `_stream.py` | Streams, per-stream publishers, the per-connection flush thread, shared-batch fan-out ([section 14](#14-publishers-fan-out-and-failure-semantics)). |
 | `_watchlist.py` | Reactive symbol tables: the listener, the diff, and dispatch off the UG thread. |
 | `_poll.py` | `poll()` tables: `REPLACE`, `UPSERT`, and `APPEND` modes, fan-out under `max_concurrency`. |
@@ -206,8 +217,10 @@ Supporting files outside the package:
 | File | Purpose |
 |---|---|
 | `scripts/check.sh [fast\|full] [--no-fix]` | The single verification entry point (lint, format, type check; `full` adds the test suite with coverage). |
-| `scripts/refresh_massive_catalog.py` | Regenerates `SDK_PARAMS` in `_catalog.py` and the vendored docs index under `tests/data/` from the installed SDK and the documentation index. |
-| `tests/data/` | Vendored documentation index and payload fixtures. |
+| `scripts/refresh_massive_spec.py` | Fetches the spec sources into `scripts/massive_spec/` (`--fetch`, the only step that uses the network), regenerates `_restspec.py`, and appends new entries to the name locks (offline, from the vendored snapshot). `--check` exits non-zero when regenerating would change anything. |
+| `scripts/massive_spec/` | The vendored, pinned spec sources: `openapi.json` (`https://api.massive.com/openapi`), `websocket.json` (`https://api.massive.com/specs/websocket.json`), `llms.txt` (`https://massive.com/docs/llms.txt`), the flat-file documentation pages, and `manifest.json` (fetch date and SHA-256 of each). |
+| `.github/workflows/spec-drift.yml` | The advisory weekly drift job ([section 20](#20-quality-gates)). |
+| `tests/data/` | Payload fixtures. |
 | `tests/_fakes/` | Fake REST transport, WebSocket server, and S3 opener used by the unit tests ([section 4.2](#42-test-layout)). |
 
 Deephaven is imported at module level where it is used at runtime. Type-only imports go under
@@ -241,10 +254,12 @@ the mirror rule, and no others:
   table-to-Python and fixture-loading helpers. Test modules never import from it.
 - `tests/test_layout.py`: walks `src/deephaven_massive/**/*.py` and asserts every module has its
   mirrored test file, and that every test file maps to a module or is one of these exceptions.
-- `tests/test_catalog.py`: asserts 100% Massive coverage against the SDK and the documentation
-  index, with a reviewed exclusion list ([section 8.12](#812-excluded-endpoints)). Under the
-  naming rule it is also the mirror of `_catalog.py`, so the unit tests of the catalog records
-  and of the generated `SDK_PARAMS` table live in the same file.
+- `tests/test_catalog.py`: asserts 100% Massive coverage against the vendored spec and the
+  documentation index, with a reviewed exclusion list ([section 8.12](#812-excluded-endpoints)),
+  and holds the name-lock tests (parity, completeness, and compatibility with the last release,
+  [section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). Under the naming rule
+  it is also the mirror of `_catalog.py`, so the unit tests of the catalog records live in the
+  same file.
 - `tests/test_readme.py`: runs every example of [section 21](#21-examples) in the embedded JVM
   against the fake servers. It mirrors `README.md`, not a source module; the lowercase name
   follows PEP 8 module naming (ruff `N999`).
@@ -267,8 +282,8 @@ defined in exactly one place: the field defaults of this class.
 | `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | The two S3 credentials are both set or both absent; exactly one raises `ValueError`. |
 | `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. Hostname only; validated. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
 | `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic. |
-| `reconnect_backoff: float` | `30.0` seconds | The first wait before reconnecting after a connection that opened has closed, including a `max_connections` refusal (it arrives after a successful handshake); later waits double up to `max_reconnect_backoff`. Before a connection opens, a TCP failure, a timeout, a connection closed during the handshake, or a retryable handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the connection's streams (§ 13.3, `raise_fatal_errors=True`). Must be positive (a base of 0 would never grow and retry in a hot loop); any positive value is accepted, so tests can use milliseconds. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
-| `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` (§19, F2.3). |
+| `reconnect_backoff: float` | `30.0` seconds | The first wait before the WebSocket client tries again after any failure that is not fatal: a connection that opened and closed (cleanly or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake or authentication timeout, or a retryable HTTP status during the upgrade (500, 502, 503, 504). Later waits double up to `max_reconnect_backoff` ([section 19.2](#192-the-websocket-client)). Must be positive (a base of 0 would never grow and retry in a hot loop); any positive value is accepted, so tests can use milliseconds. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
+| `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` ([section 19.2](#192-the-websocket-client)). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
 | `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | A partition for day D counts as published from the first occurrence of this New York time after day D ends ([section 16](#16-historysourceauto)). The documentation says files land "by approximately 11:00 AM ET the following day". A naive `time` (a New York wall-clock time); one with `tzinfo` raises `ValueError`. |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
@@ -284,6 +299,10 @@ Not configurable:
   `deephaven-massive[orjson]`); otherwise the standard library. The choice is logged once at
   INFO.
 - The evidence endpoints of [section 13.2](#132-host-decision).
+- The REST client's retry policy, timeouts, and pool size, and the WebSocket client's handshake
+  timeout and stable-uptime rule ([section 19](#19-wire-clients-and-the-spec-snapshot)).
+- Proxies and CA certificates: both clients read the standard environment variables
+  (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`), as section 19 specifies.
 
 There is no `tier` field. No entitlement endpoint exists, so a tier field would be a claim the
 server corrects.
@@ -649,48 +668,50 @@ Notation:
   (two dates may be equal: whole days; two datetimes are half-open; a date and a datetime
   compare by day).
 - `limit` is a total-row cap. Page size is internal. Every docstring says so. The cap is
-  stored apart from the SDK parameters, in `Request.limit`, so it can never be forwarded as
-  the SDK's page-size `limit`; the page size is `DatasetSpec.page_size`.
-- The REST column names the path and, in parentheses, the SDK `RESTClient` method.
+  stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
+  endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`.
+- The REST column names the path template as the OpenAPI spec writes it (the spec's own
+  placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
+  Every path is in the generated `_restspec.py` ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)).
 
 ### 8.1 `m.stocks`
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `trades(symbols)` | StreamHistoryLatestQuery | `T` | fetch `/v2/last/trade/{t}` (`get_last_trade`); history `/v3/trades/{t}` (`list_trades`) | `us_stocks_sip/trades_v1` |
-| `quotes(symbols)` | StreamHistoryLatestQuery | `Q` | fetch `/v2/last/nbbo/{t}` (`get_last_quote`); history `/v3/quotes/{t}` (`list_quotes`) | `us_stocks_sip/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads ([7.1](#71-bars-overloads)) | `A` (1 s), `AM` (1 min) | fetch `/v2/aggs/ticker/{t}/prev` (`get_previous_close_agg`, DAY only); history `/v2/aggs/ticker/{t}/range/{m}/{span}/{from}/{to}` (`list_aggs`); `ALL` with DAY: `/v2/aggs/grouped/locale/us/market/stocks/{date}` per day (`get_grouped_daily_aggs`) | `us_stocks_sip/minute_aggs_v1`, `us_stocks_sip/day_aggs_v1` (`adjusted=False` only) |
+| `trades(symbols)` | StreamHistoryLatestQuery | `T` | fetch `/v2/last/trade/{t}`; history `/v3/trades/{t}` | `us_stocks_sip/trades_v1` |
+| `quotes(symbols)` | StreamHistoryLatestQuery | `Q` | fetch `/v2/last/nbbo/{t}`; history `/v3/quotes/{t}` | `us_stocks_sip/quotes_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads ([7.1](#71-bars-overloads)) | `A` (1 s), `AM` (1 min) | fetch `/v2/aggs/ticker/{t}/prev` (DAY only); history `/v2/aggs/ticker/{t}/range/{m}/{span}/{from}/{to}`; `ALL` with DAY: `/v2/aggs/grouped/locale/us/market/stocks/{date}` per day | `us_stocks_sip/minute_aggs_v1`, `us_stocks_sip/day_aggs_v1` (`adjusted=False` only) |
 | `luld(symbols)` | StreamQuery | `LULD` | | |
 | `imbalances(symbols)` | StreamQuery | `NOI` | | |
 | `fmv(symbols)` | StreamQuery | `FMV` (FMV family, `business.massive.com/stocks`) | | |
-| `snapshots(symbols, *, include_otc: bool = False)` | Query | | `/v2/snapshot/locale/us/markets/stocks/tickers` (`get_snapshot_all`, `tickers=`; `ALL` is the full market) | |
-| `movers(direction: Direction, *, include_otc: bool = False)` | Query | | `/v2/snapshot/locale/us/markets/stocks/{gainers\|losers}` (`get_snapshot_direction`) | |
-| `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/{t}/{date}` per symbol (`get_daily_open_close_agg`) | |
-| `dividends(symbols=None, …T)`, axis `ex_dividend_date` | Query | | `/stocks/v1/dividends` (`list_stocks_dividends`) | |
-| `splits(symbols=None, …T)`, axis `execution_date` | Query | | `/stocks/v1/splits` (`list_stocks_splits`) | |
-| `ipos(symbols=None, …T)`, axis `listing_date` | Query | | `/vX/reference/ipos` (`vx.list_ipos`) | |
-| `short_interest(symbols=None, …T)`, axis `settlement_date` | Query | | `/stocks/v1/short-interest` (`list_short_interest`) | |
-| `short_volume(symbols=None, …T)`, axis `date` | Query | | `/stocks/v1/short-volume` (`list_short_volume`) | |
-| `share_float(symbols=None, …T)`, axis `date` | Query | | `/stocks/vX/float` (`list_stocks_floats`) | |
-| `financials.balance_sheets`, `financials.income_statements`, `financials.cash_flow_statements`, `financials.ratios` — each `(symbols=None, *, timeframe: Timeframe \| None = None, …T)`, axis `period_end` | Query | | `/stocks/financials/v1/{balance-sheets,income-statements,cash-flow-statements,ratios}` (`list_financials_*`) | |
-| `filings.index(symbols=None, *, form_type: str \| None = None, …T)`, axis `filing_date` | Query | | `/stocks/filings/vX/index` (`list_stocks_filings_index`) | |
-| `filings.sections_10k`, `filings.text_8k`, `filings.disclosures_8k`, `filings.risk_factors` — each `(symbols=None, …T)`, axis `filing_date` | Query | | `/stocks/filings/10-K/vX/sections`, `/stocks/filings/8-K/vX/text`, `/stocks/filings/8-K/vX/disclosures`, `/stocks/filings/vX/risk-factors` (`list_stocks_filings_10k_sections`, `_8k_text`, `_8k_disclosures`, `_risk_factors`) | |
-| `filings.institutional_holdings(*, filer_cik: str \| None = None, …T)`, axis `filing_date` (Form 13-F) | Query | | `/stocks/filings/vX/13-F` (`list_stocks_filings_13f`) | |
-| `filings.insider_holdings(symbols=None, *, issuer_cik: str \| None = None, owner_cik: str \| None = None, …T)` (Form 3); `filings.insider_transactions(...)` with the same signature (Form 4); axis `filing_date` | Query | | `/stocks/filings/vX/form-3`, `/stocks/filings/vX/form-4` (`list_stocks_filings_form_3`, `_form_4`) | |
-| `filings.risk_factor_taxonomy(…F)`, `filings.disclosure_taxonomy(…F)` | Query | | `/stocks/taxonomies/vX/risk-factors`, `/stocks/taxonomies/vX/disclosures` (`list_stocks_taxonomies_risk_factors`, `_disclosures`) | |
+| `snapshots(symbols, *, include_otc: bool = False)` | Query | | `/v2/snapshot/locale/us/markets/stocks/tickers` (`tickers=`; `ALL` is the full market) | |
+| `movers(direction: Direction, *, include_otc: bool = False)` | Query | | `/v2/snapshot/locale/us/markets/stocks/{gainers\|losers}` | |
+| `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/{t}/{date}` per symbol | |
+| `dividends(symbols=None, …T)`, axis `ex_dividend_date` | Query | | `/stocks/v1/dividends` | |
+| `splits(symbols=None, …T)`, axis `execution_date` | Query | | `/stocks/v1/splits` | |
+| `ipos(symbols=None, …T)`, axis `listing_date` | Query | | `/vX/reference/ipos` | |
+| `short_interest(symbols=None, …T)`, axis `settlement_date` | Query | | `/stocks/v1/short-interest` | |
+| `short_volume(symbols=None, …T)`, axis `date` | Query | | `/stocks/v1/short-volume` | |
+| `share_float(symbols=None, …T)`, axis `date` | Query | | `/stocks/vX/float` | |
+| `financials.balance_sheets`, `financials.income_statements`, `financials.cash_flow_statements`, `financials.ratios` — each `(symbols=None, *, timeframe: Timeframe \| None = None, …T)`, axis `period_end` | Query | | `/stocks/financials/v1/{balance-sheets,income-statements,cash-flow-statements,ratios}` | |
+| `filings.index(symbols=None, *, form_type: str \| None = None, …T)`, axis `filing_date` | Query | | `/stocks/filings/vX/index` | |
+| `filings.sections_10k`, `filings.text_8k`, `filings.disclosures_8k`, `filings.risk_factors` — each `(symbols=None, …T)`, axis `filing_date` | Query | | `/stocks/filings/10-K/vX/sections`, `/stocks/filings/8-K/vX/text`, `/stocks/filings/8-K/vX/disclosures`, `/stocks/filings/vX/risk-factors` | |
+| `filings.institutional_holdings(*, filer_cik: str \| None = None, …T)`, axis `filing_date` (Form 13-F) | Query | | `/stocks/filings/vX/13-F` | |
+| `filings.insider_holdings(symbols=None, *, issuer_cik: str \| None = None, owner_cik: str \| None = None, …T)` (Form 3); `filings.insider_transactions(...)` with the same signature (Form 4); axis `filing_date` | Query | | `/stocks/filings/vX/form-3`, `/stocks/filings/vX/form-4` | |
+| `filings.risk_factor_taxonomy(…F)`, `filings.disclosure_taxonomy(…F)` | Query | | `/stocks/taxonomies/vX/risk-factors`, `/stocks/taxonomies/vX/disclosures` | |
 
 ### 8.2 `m.options`
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `trades(symbols)` | StreamHistoryLatestQuery | `T` | fetch `/v2/last/trade/{o}` (`get_last_trade`); history `/v3/trades/{o}` (`list_trades`) | `us_options_opra/trades_v1` |
-| `quotes(symbols)` | StreamHistoryQuery | `Q` | history `/v3/quotes/{o}` (`list_quotes`) | `us_options_opra/quotes_v1` |
+| `trades(symbols)` | StreamHistoryLatestQuery | `T` | fetch `/v2/last/trade/{o}`; history `/v3/trades/{o}` | `us_options_opra/trades_v1` |
+| `quotes(symbols)` | StreamHistoryQuery | `Q` | history `/v3/quotes/{o}` | `us_options_opra/quotes_v1` |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `A`, `AM` | `/prev` (DAY); range | `us_options_opra/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/options`) | | |
-| `chain(underlying: str, *, contract_type: ContractType \| None = None, …F)`; `filters` takes `strike_price_*`, `expiration_date_*` | Query | | `/v3/snapshot/options/{u}` (`list_snapshot_options_chain`) | |
-| `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` parsed; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…` (`list_universal_snapshots`), 250 per request. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
-| `contracts(*, symbols=None, underlying: str \| None = None, contract_type: ContractType \| None = None, as_of: DateLike \| None = None, expired: bool \| None = None, …F)`; `filters` takes `expiration_date_*`, `strike_price_*` | Query | | `/v3/reference/options/contracts` (`list_options_contracts`); with `symbols`: `/v3/reference/options/contracts/{o}` per contract (`get_options_contract`) | |
-| `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/{o}/{date}` per contract (`get_daily_open_close_agg`) | |
+| `chain(underlying: str, *, contract_type: ContractType \| None = None, …F)`; `filters` takes `strike_price_*`, `expiration_date_*` | Query | | `/v3/snapshot/options/{u}` | |
+| `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` parsed; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…`, 250 per request. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
+| `contracts(*, symbols=None, underlying: str \| None = None, contract_type: ContractType \| None = None, as_of: DateLike \| None = None, expired: bool \| None = None, …F)`; `filters` takes `expiration_date_*`, `strike_price_*` | Query | | `/v3/reference/options/contracts`; with `symbols`: `/v3/reference/options/contracts/{o}` per contract | |
+| `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/{o}/{date}` per contract | |
 
 ### 8.3 `m.futures`
 
@@ -700,12 +721,12 @@ below and selects the flat-file prefix only: it is not part of the stream key
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `trades(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (`list_futures_trades`; `session_end_date` filters) | `us_futures_{venue}/trades_v1` |
-| `quotes(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` (`list_futures_quotes`) | `us_futures_{venue}/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, venue: FuturesVenue \| None = None)` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`list_futures_aggregates`; `resolution`; `window_start` in ns) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
-| `snapshots(symbols, *, product_code: str \| None = None, …F)`; `ALL` with `product_code` is every contract of a product | Query | | `/futures/v1/snapshot` (`get_futures_snapshot`) | |
-| `contracts(*, product_code: str \| None = None, …F)`, `products(…F)`, `exchanges()`, `market_status(…F)` | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` (`list_futures_contracts`, `_products`, `_exchanges`, `_market_statuses`) | |
-| `schedules(…T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` (`list_futures_schedules`) | |
+| `trades(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (`session_end_date` filters) | `us_futures_{venue}/trades_v1` |
+| `quotes(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` | `us_futures_{venue}/quotes_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, venue: FuturesVenue \| None = None)` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
+| `snapshots(symbols, *, product_code: str \| None = None, …F)`; `ALL` with `product_code` is every contract of a product | Query | | `/futures/v1/snapshot` | |
+| `contracts(*, product_code: str \| None = None, …F)`, `products(…F)`, `exchanges()`, `market_status(…F)` | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
+| `schedules(…T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
 
 No futures dataset has a "last" endpoint, so no futures stream query has `fetch()`.
 `snapshots(symbols).fetch()` is the one-request answer. There is no futures `day_aggs` flat
@@ -715,32 +736,32 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `values(symbols)` | StreamHistoryLatestQuery | `V` | fetch `/v3/snapshot/indices` (`list_snapshot_indices`) projected to `Value`, with `Timestamp` from `last_updated`; history flat files only | `us_indices/values_v1` |
+| `values(symbols)` | StreamHistoryLatestQuery | `V` | fetch `/v3/snapshot/indices` projected to `Value`, with `Timestamp` from `last_updated`; history flat files only | `us_indices/values_v1` |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: the endpoint has none) | overloads | `A`, `AM` | `/prev` (DAY); range | `us_indices/{minute,day}_aggs_v1` |
-| `snapshots(symbols, *, …F)` | Query | | `/v3/snapshot/indices` (`list_snapshot_indices`) | |
-| `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/{t}/{date}` (`get_daily_open_close_agg`) | |
+| `snapshots(symbols, *, …F)` | Query | | `/v3/snapshot/indices` | |
+| `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/{t}/{date}` | |
 
 ### 8.5 `m.forex`
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `quotes(symbols)` | StreamHistoryLatestQuery | `C` | fetch `/v1/last_quote/currencies/{from}/{to}` (`get_last_forex_quote`); history `/v3/quotes/{C:…}` (`list_quotes`) | `global_forex/quotes_v1` |
+| `quotes(symbols)` | StreamHistoryLatestQuery | `C` | fetch `/v1/last_quote/currencies/{from}/{to}`; history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
-| `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` (`get_snapshot_all`) | |
-| `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/forex/{gainers\|losers}` (`get_snapshot_direction`) | |
-| `conversion(from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2)` | Query | | `/v1/conversion/{from}/{to}` (`get_real_time_currency_conversion`) | |
+| `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
+| `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/forex/{gainers\|losers}` | |
+| `conversion(from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2)` | Query | | `/v1/conversion/{from}/{to}` | |
 
 ### 8.6 `m.crypto`
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `trades(symbols)` | StreamHistoryLatestQuery | `XT` | fetch `/v1/last/crypto/{from}/{to}` (`get_last_crypto_trade`); history `/v3/trades/{X:…}` (`list_trades`) | `global_crypto/trades_v1` |
+| `trades(symbols)` | StreamHistoryLatestQuery | `XT` | fetch `/v1/last/crypto/{from}/{to}`; history `/v3/trades/{X:…}` | `global_crypto/trades_v1` |
 | `quotes(symbols)` | StreamQuery | `XQ` | | |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
-| `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` (fork method `get_daily_open_close_crypto`) | |
+| `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` | |
 
 ### 8.7 `m.reference`
 
@@ -748,16 +769,16 @@ All return `Query`.
 
 | Method | REST |
 |---|---|
-| `tickers(*, symbols=None, market: Market \| None = None, type: str \| None = None, exchange: str \| None = None, cusip: str \| None = None, cik: str \| None = None, date: DateLike \| None = None, active: bool = True, search: str \| None = None, …F)` | `/v3/reference/tickers` (`list_tickers`). The library types `cusip` as `str`; the SDK's `int` hint is wrong and is a fork fix. |
-| `ticker_details(symbols, *, date: DateLike \| None = None)` | `/v3/reference/tickers/{t}` per symbol (`get_ticker_details`) |
-| `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` (`get_ticker_types`) |
-| `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol (`get_ticker_events`) |
-| `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol (`get_related_companies`); rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(*, symbols=None, …T)`, axis `published_utc` | `/v2/reference/news` (`list_ticker_news`) |
-| `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` (`get_exchanges`) |
-| `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions` (`list_conditions`) |
-| `market_status()` | `/v1/marketstatus/now` (`get_market_status`); one row; nested maps flattened |
-| `market_holidays()` | `/v1/marketstatus/upcoming` (`get_market_holidays`) |
+| `tickers(*, symbols=None, market: Market \| None = None, type: str \| None = None, exchange: str \| None = None, cusip: str \| None = None, cik: str \| None = None, date: DateLike \| None = None, active: bool = True, search: str \| None = None, …F)` | `/v3/reference/tickers`. `cusip` and `cik` are `str`, as the spec types them. |
+| `ticker_details(symbols, *, date: DateLike \| None = None)` | `/v3/reference/tickers/{t}` per symbol |
+| `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
+| `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
+| `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
+| `news(*, symbols=None, …T)`, axis `published_utc` | `/v2/reference/news` |
+| `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
+| `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions` |
+| `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
+| `market_holidays()` | `/v1/marketstatus/upcoming` |
 
 `AssetClass.FOREX` is sent as `fx` on these endpoints. `AssetClass.FUTURES` has no value on
 these endpoints and raises `ValueError`.
@@ -778,8 +799,8 @@ macd(symbols, *, short_window: int, long_window: int, signal_window: int,
      expand_underlying: bool = False, …T)
 ```
 
-REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol (`get_sma`, `get_ema`, `get_rsi`,
-`get_macd`). `Timespan.SESSION` is rejected here.
+REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol. `Timespan.SESSION` is rejected
+here.
 
 ### 8.9 `m.economy`
 
@@ -787,11 +808,11 @@ All return `Query`; axis `date`; each takes `…T`.
 
 | Method | REST |
 |---|---|
-| `treasury_yields` | `/fed/v1/treasury-yields` (`list_treasury_yields`) |
-| `inflation` | `/fed/v1/inflation` (`list_inflation`) |
-| `inflation_expectations` | `/fed/v1/inflation-expectations` (`list_inflation_expectations`) |
-| `labor_market` | `/fed/v1/labor-market` (`list_labor_market_indicators`) |
-| `funding_conditions` | `/fed/v1/funding-conditions` (fork method `list_funding_conditions`; the released SDK has only four `/fed/v1/*` methods) |
+| `treasury_yields` | `/fed/v1/treasury-yields` |
+| `inflation` | `/fed/v1/inflation` |
+| `inflation_expectations` | `/fed/v1/inflation-expectations` |
+| `labor_market` | `/fed/v1/labor-market` |
+| `funding_conditions` | `/fed/v1/funding-conditions` |
 
 ### 8.10 `m.partners`
 
@@ -799,18 +820,17 @@ All return `Query`.
 
 | Vendor | Methods | REST |
 |---|---|---|
-| `benzinga` | `analysts`, `analyst_insights`, `ratings`, `bulls_bears_say`, `guidance`, `earnings`, `firms` — `(symbols=None, …F)` where the endpoint takes tickers, `(…F)` otherwise | `/benzinga/v1/{analysts,analyst-insights,ratings,bulls-bears-say,guidance,earnings,firms}` (`list_benzinga_*`) |
-| `benzinga` | `consensus_ratings(symbols)` | `/benzinga/v1/consensus-ratings/{t}` per symbol (`list_benzinga_consensus_ratings`; the ticker is a path segment) |
-| `benzinga` | `news(*, symbols=None, …T)`, axis `published` | `/benzinga/v2/news` (`list_benzinga_news_v2`) |
-| `etf_global` | `analytics`, `constituents`, `fund_flows`, `profiles`, `taxonomies` — `(symbols=None, …F)` | `/etf-global/v1/{analytics,constituents,fund-flows,profiles,taxonomies}` (`get_etf_global_*`) |
-| `tmx` | `corporate_events(symbols=None, …T)`, axis `date` | `/tmx/v1/corporate-events` (`list_tmx_corporate_events`) |
-| `fable` | `merchant_aggregates(…T)`, `merchant_hierarchy(…F)` | `/consumer-spending/eu/v1/{merchant-aggregates,merchant-hierarchy}` (`list_eu_merchant_aggregates`, `list_eu_merchant_hierarchy`) |
+| `benzinga` | `analysts`, `analyst_insights`, `ratings`, `bulls_bears_say`, `guidance`, `earnings`, `firms` — `(symbols=None, …F)` where the endpoint takes tickers, `(…F)` otherwise | `/benzinga/v1/{analysts,analyst-insights,ratings,bulls-bears-say,guidance,earnings,firms}` |
+| `benzinga` | `consensus_ratings(symbols)` | `/benzinga/v1/consensus-ratings/{t}` per symbol (the ticker is a path segment) |
+| `benzinga` | `news(*, symbols=None, …T)`, axis `published` | `/benzinga/v2/news` |
+| `etf_global` | `analytics`, `constituents`, `fund_flows`, `profiles`, `taxonomies` — `(symbols=None, …F)` | `/etf-global/v1/{analytics,constituents,fund-flows,profiles,taxonomies}` |
+| `tmx` | `corporate_events(symbols=None, …T)`, axis `date` | `/tmx/v1/corporate-events` |
+| `fable` | `merchant_aggregates(…T)`, `merchant_hierarchy(…F)` | `/consumer-spending/eu/v1/{merchant-aggregates,merchant-hierarchy}` |
 
 ### 8.11 `m.snapshots`
 
-`m.snapshots(symbols, *, …F) -> Query` calls the unified `/v3/snapshot`
-(`list_universal_snapshots`) with `ticker.any_of`, 250 tickers per request, any mix of asset
-classes. Rows are the union schema of the unified snapshot. `ALL` is not accepted here (the
+`m.snapshots(symbols, *, …F) -> Query` calls the unified `/v3/snapshot` with `ticker.any_of`,
+250 tickers per request, any mix of asset classes. Rows are the union schema of the unified snapshot. `ALL` is not accepted here (the
 endpoint requires tickers). Its catalog record is named `reference.snapshots` and is declared
 in `_domains/reference.py` with `asset_class=None` (each ticker's prefix selects its class,
 § 10), so `_catalog.datasets()` finds it; `m.streams()` and messages show that name.
@@ -827,18 +847,20 @@ Each exclusion appears in `tests/test_catalog.py` with a `# reason:` comment.
 | `/v1/summaries` | Not in the documentation index. |
 | Crypto `/book` REST endpoint; WebSocket `XL2` | Deprecated and sunset. |
 | WebSocket `LV`; Launchpad hosts and paths | Product retired. |
-| WebSocket `/futures/{venue}` | Only in the SDK `Market` enum; the futures WebSocket pages list `/futures` only. |
+| WebSocket `/futures/{venue}` | Not documented: the futures WebSocket pages list `/futures` only. |
 | `/v1/historic/*`, `/v2/ticks/*` | Deprecated 2022; replaced by `/v3/trades` and `/v3/quotes`. |
-| Form 5, per-asset `/v1/exchanges`, `/options/v3/*`, `/v1/reference/ipos` | Present only in the OpenAPI spec; not announced or documented. |
+| Form 5, per-asset `/v1/exchanges`, `/options/v3/*`, `/v1/reference/ipos`, `/stocks/dev/*`, `vX_0` paths, and every path marked `x-polygon-draft` or `x-polygon-ignore` | Present only in the OpenAPI spec; not announced or documented in `llms.txt`. |
 | `/benzinga/v1/transcripts` | Never existed. |
 | Single-ticker v2 snapshots `/v2/snapshot/.../tickers/{t}` | Covered by `snapshots(symbols)` with the `tickers` filter. |
 | `/v3/snapshot/options/{u}/{o}` | Covered by `m.options.snapshots`; identical fields. |
 
-**No private SDK calls.** The two documented endpoints that the released SDK lacks,
-`/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}`, are called through
-the fork's public methods `list_funding_conditions` and `get_daily_open_close_crypto` (fork
-PR #7, [section 19](#19-sdk-fork-fix-list-and-responsibility-split), F6). The library never
-calls `RESTClient._get`, `_paginate`, or `_paginate_iter`.
+**The allow-list.** The REST paths above are the generator's allow-list
+([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). Each one is in the
+vendored OpenAPI snapshot and in the vendored `llms.txt` index; the catalog test fails on an
+allow-listed path missing from either, and on a documented path that is neither allow-listed nor
+excluded above. Two documented endpoints that Massive's Python SDK lacks,
+`/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}`, are ordinary
+entries: every path reaches the same REST client in the same way.
 
 ## 9. Filters
 
@@ -852,28 +874,40 @@ Typed keyword-only parameters exist for:
 - shape parameters (`timeframe`, `contract_type`, `window`);
 - `sort`, `order`, `limit`.
 
-Every other SDK filter (the `_gt`, `_gte`, `_lt`, `_lte`, and `_any_of` variants; the SDK has
-over a thousand such parameter lines) goes through `filters: Mapping[str, FilterValue]`, where
-`FilterValue = str | int | float | bool | date | datetime | Sequence[str]`, using the SDK's
-parameter names:
+Every other query parameter the spec documents for the dataset's paths (the `.gt`, `.gte`, `.lt`,
+`.lte`, and `.any_of` variants, of which the spec lists over a thousand, and plain filters such
+as `pay_date`) goes through `filters: Mapping[str, FilterValue]`, where
+`FilterValue = str | int | float | bool | date | datetime | Sequence[str]`. A key is the wire
+name with its dot written as an underscore, so every key is a Python identifier:
 
 ```python
 m.options.contracts(underlying="NVDA",
                     filters={"strike_price_gte": 100, "expiration_date_lte": "2026-01-16"})
+# sends strike_price.gte=100&expiration_date.lte=2026-01-16
 ```
 
-Validation is synchronous at query construction. `_catalog.py` holds a generated table
-`SDK_PARAMS[method] = {name: kind}`, keyed by SDK `RESTClient` method name and produced by
-`scripts/refresh_massive_catalog.py` from `inspect.signature(RESTClient.<method>)`; a dataset's
-accepted filters are the union over its methods plus its `extra_params`. An unknown key or a
-value of the wrong kind raises `ValueError` naming the valid keys. A test asserts that the vendored table equals the installed
-SDK's signatures, so an SDK upgrade that adds a filter fails CI until the table is regenerated.
+The mapping is mechanical and one to one: a key ending in `_gt`, `_gte`, `_lt`, `_lte`, or
+`_any_of` is sent as `<field>.<suffix>` exactly when the spec lists that dotted parameter for the
+path; every other key is sent unchanged. `Sequence[str]` values of an `.any_of` parameter are
+joined with commas; dates are ISO-8601; an aware `datetime` becomes the parameter's documented
+form (exact integer nanoseconds for a nanosecond timestamp parameter, ISO-8601 otherwise), and a
+naive one raises `ValueError` (§ 11).
 
-`start` and `end` map to the SDK parameter pair recorded per dataset in the catalog
-(`timestamp_gte`/`timestamp_lt`, `published_utc_gte`/`published_utc_lte`,
-`ex_dividend_date_gte`/`ex_dividend_date_lte`, `filing_date_gte`/`filing_date_lte`,
-`session_end_date_gte`/`session_end_date_lte`, and so on). Passing the same axis through
-`filters` raises `ValueError`.
+Validation is synchronous at query construction, against the generated parameters of the
+dataset's paths in `_restspec.py`
+([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)), which carry each
+parameter's kind and, for an enum parameter, its values. A dataset's accepted filters are the
+union over its paths, minus the parameters the library sets itself (path segments, the symbol
+parameter, the axis pair, `limit`, `sort`, `order`, and the typed keyword parameters). An unknown
+key, a value of the wrong kind, or a value outside a parameter's enum raises `ValueError` naming
+the valid keys or values. When Massive adds a filter, refreshing the snapshot adds it; no code
+changes.
+
+`start` and `end` map to the wire parameter pair recorded per dataset in the catalog
+(`timestamp.gte`/`timestamp.lt`, `published_utc.gte`/`published_utc.lte`,
+`ex_dividend_date.gte`/`ex_dividend_date.lte`, `filing_date.gte`/`filing_date.lte`,
+`session_end_date.gte`/`session_end_date.lte`, and so on). Passing the same axis through
+`filters` (as `timestamp_gte`, for example) raises `ValueError`.
 
 ## 10. Symbols and `ALL`
 
@@ -908,7 +942,7 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
   instrument, it is `Underlying` on every options row (from `underlying_ticker` or
   `underlying_asset.ticker`) and on `related_companies` rows. Non-instrument fan-out keys use
-  the SDK field name in PascalCase (`FilerCik`).
+  the column name the name lock gives the wire key (`filer_cik` becomes `FilerCik`).
 
 ## 11. Enums and types
 
@@ -927,7 +961,8 @@ console, and typo safety at both type-check time and run time.
 ([section 7.3](#73-runtime-enum-check)).
 
 **Enforcement.** `tests/test_enums.py` asserts that no public signature in the package contains a
-`Literal` of strings, and that every enum that mirrors an SDK enum has the same value set.
+`Literal` of strings, and that every enum that mirrors a parameter enum of the vendored
+OpenAPI snapshot has the same value set as that parameter.
 
 | Enum | Members | Wire values | Used by |
 |---|---|---|---|
@@ -956,8 +991,10 @@ needs a timezone: pass an aware datetime or a date`. The same rule and message a
 `datetime` passed as a `filters` value or a typed parameter.
 
 **ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
-becomes an `Instant`; text without a UTC offset is read as UTC. SDK fields named `*_utc` map to
-`Instant` automatically; any other text timestamp needs an explicit override.
+becomes an `Instant`; text without a UTC offset is read as UTC. A spec string field with
+`format: date-time`, or with no format and a name ending in `_utc`, maps to `Instant`
+automatically; one with `format: date`, or with no format and named `date` or `*_date`, maps to
+`LocalDate`; any other text timestamp needs an explicit override.
 
 **Column types.** `Instant` for timestamps, `LocalDate` for calendar dates, `double`, `long`,
 `int`, `String`, `boolean`, and `int[]` for condition lists. Each union column has exactly one
@@ -968,7 +1005,17 @@ are `double` (fractional sizes exist), condition codes are `int[]`, exchange ids
 
 `_timeunits.py` is a `(dataset, transport, field) -> unit` table. The normalizer refuses to
 convert an unregistered field. The catalog test asserts that every timestamp-like field of every
-registered SDK model and flat-file header has an entry.
+REST path a dataset uses (from the generated `_restspec.py`), every WebSocket key map, and every
+flat-file header has an entry.
+
+The table stays hand-verified. The OpenAPI spec tags some integer fields with a unit type in
+`x-polygon-go-type` (`INanoseconds`, `IMicroseconds`, `IMilliseconds`, `IDaysPolygonDateString`),
+but the tags are not reliable: all 20 `IMicroseconds` tags sit on indicator `timestamp` fields
+whose descriptions say "Unix Msec", and the indicator responses carry milliseconds. The generator
+copies each tag into `_restspec.py` as a cross-check only. The catalog test asserts that every
+tagged field a dataset uses has a registered unit, and that a registered unit that differs from
+its tag is listed, with its reason, in a reviewed conflict list in `tests/test_catalog.py`; the
+indicator `timestamp` fields are its first entries.
 
 | Transport and fields | Unit |
 |---|---|
@@ -1019,15 +1066,14 @@ timezone-aware `datetime` is used as is.
    [section 13.3](#133-connection-and-subscription-protocol), which acts on a server statement,
    never on silence.
 3. No connection is ever opened to test anything.
-4. Connects are single-flight. A reconnect after a connection that opened has closed
-   (including a `max_connections` refusal, which arrives after a successful handshake) waits at
-   least `reconnect_backoff` (30 s by default, the upper end of the 10–30 s the knowledge base
+4. Connects are single-flight. Every retry, whether after a connection that opened has closed
+   (cleanly or not, including a `max_connections` refusal) or after a failed attempt (TCP or TLS
+   failure, handshake or authentication timeout, HTTP 500/502/503/504 during the upgrade), waits
+   at least `reconnect_backoff` (30 s by default, the upper end of the 10–30 s the knowledge base
    gives the server to release a dropped connection); the wait doubles up to
-   `max_reconnect_backoff`, with upward-only jitter clamped to that range. Before a connection
-   opens, a TCP failure, a timeout, a connection closed during the handshake, or a retryable
-   handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule
-   (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the
-   connection's streams (§ 13.3, `raise_fatal_errors=True`).
+   `max_reconnect_backoff`, with upward-only jitter clamped to that range. A handshake error that
+   retrying cannot fix (for example HTTP 400 or 404) and a rejected key are fatal and fail the
+   connection's streams ([section 19.2](#192-the-websocket-client)).
 5. Futures streams always use `/futures`. `/futures/{venue}` is undocumented and unsupported.
 
 ### 13.2 Host decision
@@ -1053,11 +1099,11 @@ TICK family:
   2. FOREX, CRYPTO
        -> socket.massive.com, REALTIME,
           evidence="single documented host; Starter is real-time"      (no REST call)
-  3. One REST call through the SDK RESTClient, raw results:
-       STOCKS  : GET /v3/snapshot?ticker.any_of=SPY,AAPL        (list_universal_snapshots)
-       OPTIONS : GET /v3/snapshot/options/SPY?limit=1            (list_snapshot_options_chain)
-       INDICES : GET /v3/snapshot/indices?ticker.any_of=I:SPX     (list_snapshot_indices)
-       FUTURES : GET /futures/v1/snapshot?product_code=ES&limit=1 (get_futures_snapshot)
+  3. One REST call through the library's REST client (section 19.1), the raw JSON rows:
+       STOCKS  : GET /v3/snapshot?ticker.any_of=SPY,AAPL
+       OPTIONS : GET /v3/snapshot/options/SPY?limit=1
+       INDICES : GET /v3/snapshot/indices?ticker.any_of=I:SPX
+       FUTURES : GET /futures/v1/snapshot?product_code=ES&limit=1
      Per-ticker rows carrying "error"/"message" (NOT_ENTITLED) count as absent.
   4. Classify:
      a. HTTP 403 / NOT_AUTHORIZED
@@ -1066,7 +1112,7 @@ TICK family:
           STOCKS, OPTIONS: last_trade.timeframe, last_quote.timeframe
           INDICES:         timeframe (top level; documented DELAYED | REAL-TIME)
           FUTURES:         last_trade.timeframe, last_quote.timeframe, last_minute.timeframe
-                           (SDK model fields; absent from the documentation page)
+                           (in the OpenAPI spec; absent from the documentation page)
         If any value is DELAYED  -> delayed.massive.com, DELAYED, evidence="<field>=DELAYED"
                                     (DELAYED wins conflicts; the field used is logged)
         elif any is REAL-TIME    -> socket.massive.com,  REALTIME, evidence="<field>=REAL-TIME"
@@ -1098,7 +1144,7 @@ Basic has no chain snapshot (403, rule 4a) and no WebSocket. The option-chain sa
 `underlying_asset.timeframe: "DELAYED"` beside `last_trade.timeframe: "REAL-TIME"`, which is why
 `underlying_asset` is excluded. The forex and crypto WebSocket pages list only
 `socket.massive.com`, with Starter real-time, so no REST call is made. The futures snapshot
-documentation lists no `timeframe` (only the SDK model has it), so absence proves nothing, and a
+documentation lists no `timeframe` (only the OpenAPI spec has it), so absence proves nothing, and a
 real-time customer must never be routed to delayed data by inference.
 
 **Base Business key, TICK family.** A Business key without a trades/quotes expansion is routed
@@ -1116,129 +1162,78 @@ replies; the live integration test must retire this note before 1.0.
 
 ### 13.3 Connection and subscription protocol
 
-The library drives the forked `WebSocketClient` from one client thread per connection:
+Each connection is one `_wsclient.WsClient` ([section 19.2](#192-the-websocket-client)) bound to
+one `wss://host/path`. The client runs on its own daemon thread with its own asyncio loop, and
+owns the socket: connecting, authenticating, sending frames, reconnecting with backoff, and
+closing. `_ws.py` owns everything the library decides: the desired topics, the acknowledgements,
+the watchdogs, the routing, and the connection's diagnostics. Both run on the client's loop
+thread; other threads reach a connection only through `loop.call_soon_threadsafe` with plain
+data, and through `WsClient.close()`.
 
-```python
-client = WebSocketClient(api_key, feed=host, market=path, raw=True,
-                         max_reconnects=None,
-                         reconnect_backoff=cfg.reconnect_backoff,
-                         max_reconnect_backoff=cfg.max_reconnect_backoff,
-                         reconnect_on_close=True,           # section 19.2
-                         raise_fatal_errors=True)           # section 19.2
-thread.run(lambda: asyncio.run(
-    client.connect(conn.on_frame, max_size=None)))         # websockets frame cap off
-```
+The client reports to `_ws.py` through three callbacks, each called on the loop thread, in
+order:
 
-`max_size` goes to `connect()`, which passes it to websockets; extra keyword arguments to the
-constructor are stored and never used. The client thread is a daemon thread, and `m.close()`
-never joins it without a timeout: `request_close()` does not cut short a wait in progress, so a
-backoff sleep (up to `max_reconnect_backoff`) or a websockets retry delay (up to 90 s) runs to
-its end before `connect()` returns.
+- `on_open(generation)`: Massive accepted the key (`auth_success`) on a new socket. A
+  **generation** is one authenticated socket; the number increases by one per `on_open`.
+- `on_frame(generation, text)`: one text frame received after authentication, not decoded.
+- `on_state(state, detail)`: `CONNECTING`, `RECONNECTING` (with the next attempt's time),
+  `WAITING_SLOT` (the auth reply was `max_connections`), `FAILED` (with the exception), or
+  `CLOSED` (after `close()`).
 
-**What the library observes.** The fork has no callback for handshakes, reconnects, or backoff
-waits, and in raw mode it passes the processor nothing from a handshake. The library adds no
-fork hook. It detects **connection generations** on the client's own loop thread, where every
-connection-state writer runs; the flush thread never touches the client. Two fork facts are
-relied on, and both hold for upstream today: while the processor runs, `client.websocket` is the
-current websockets `ClientConnection` (the fork assigns it before the receive loop), and
-`client.max_connections_reached` (fork #23) is the value from that connection's handshake.
-Socket state is read through websockets' public `ClientConnection.state` (`CONNECTING`, `OPEN`,
-`CLOSING`, `CLOSED`).
+`_ws.py` calls the client's loop-thread methods `subscribe(generation, topics)` and
+`unsubscribe(generation, topics)`. Each sends at once, in call order, at most 1,000 topics per
+frame (the frame-size limit is **UNVERIFIED**; the chunk size is conservative). A call for a
+generation that is no longer current is discarded: the next generation re-sends the whole
+desired set. `reconnect()` closes the current socket so the client reconnects under its backoff
+rules.
 
-- **A. `on_frame` opens generations.** `conn.on_frame` runs on the loop thread, in order with
-  the frames, and only after the handshake completed and the fork started its sender. The
-  library keeps a strong reference to the current generation's socket (never `id()`). When a
-  frame arrives and `client.websocket` is not that socket, it: increments the generation;
-  cancels the old generation's watchdogs; clears A; starts one watchdog per topic in S (the set
-  the library last passed to `client.set_subscriptions`, its own record of the fork's
-  `scheduled_subs`; see the reconcile loop below), bound to the new socket; sets `State=CONNECTED`, or `State=WAITING_SLOT` when
-  `client.max_connections_reached` is true. Only then does it process the frame's statuses, so an
-  acknowledgement that arrives in the generation's first frame is kept. Ordinary reconciles and
-  `resubscribe` never open a generation, never clear A, and never restart watchdogs, so a resend
-  after an acknowledgement timeout advances to `NO_ACK` as specified.
-- **B. Watchdogs check their socket and their topic.** Watchdogs are keyed to S, not to D: D
-  can run ahead of S (a topic added while a step is in flight is not sent yet, and is not in the
-  fork's `scheduled_subs`), and such a topic gets its watchdog only when the step that sends it
-  goes out. A topic that leaves D (its ref-count reaches zero, or the options cap defers it)
-  cancels its watchdog at once. A watchdog that fires first checks that its topic is still in S
-  and in D, `client.websocket is sock`, and `sock.state is OPEN`. If any fails, it is cancelled without escalating, and if `sock.state` is
-  `CLOSED` the connection shows `State=RECONNECTING` (unless it already shows `WAITING_SLOT`).
-  Otherwise it resends once, then reaches `NO_ACK`. A dead generation's watchdogs are therefore
-  harmless during the backoff, a stale watchdog never acts on a newer socket, and
-  `client.resubscribe` is never called for a topic outside `scheduled_subs` (which would raise
-  `ValueError` on the loop thread).
-- **C. Old watchdogs are cancelled** when A opens the next generation (cleanup; B already makes
-  them inert).
-- **D. A heartbeat covers silent connections.** One `loop.call_later` heartbeat, every
-  `ack_timeout`, on the loop thread: if `client.websocket` is a socket not yet seen, `OPEN`, and
-  unseen for `ack_timeout`, it opens the generation as in A, so a server that never sends a frame
-  reaches `NO_ACK` within 3 × `ack_timeout` of the socket appearing (at most one heartbeat to open
-  the generation, one to resend, one to `NO_ACK`). `OPEN` is the websockets state, reached before
-  the Massive authentication, so a handshake that stalls longer than `ack_timeout` also opens a
-  generation early. That is harmless: a resend before the fork's sender starts merges into its
-  first send. Only a stall longer than 2 × `ack_timeout` produces a false `NO_ACK`, which the next
-  generation clears. If the current generation's socket is `CLOSED`, the heartbeat cancels that
-  generation's watchdogs and shows `State=WAITING_SLOT` when `client.max_connections_reached` is
-  true, else `State=RECONNECTING` unless the generation already shows `WAITING_SLOT` (a
-  `max_connections` status received as a frame after the handshake leaves the flag false). A
-  refused `max_connections` attempt produces no
-  processor frame and closes within the handshake, so it never opens a generation and never
-  starts a watchdog; but the fork keeps it as `client.websocket` through the backoff that
-  follows. So the heartbeat also inspects a `client.websocket` that is `CLOSED` and never opened
-  a generation (including before the first successful connection) and shows
-  `State=WAITING_SLOT` when `client.max_connections_reached` is true, else
-  `State=RECONNECTING`, without starting watchdogs. The thread wrapper cancels the heartbeat
-  when `connect()` returns or raises.
+**Topics are exact strings.** `A.*` and `AM.AAPL` are unrelated topics; nothing in the library
+matches one topic as a prefix of another. On one channel, while that channel's wildcard is in
+the desired set, the channel's explicit topics are not sent: the wildcard already delivers their
+events, routing filters rows per stream, and whether the server would deliver an event twice for
+`T.*` plus `T.AAPL` is **UNVERIFIED**. They are sent again, in one step, when the wildcard leaves
+the set, and they count as acknowledged while the acknowledged wildcard covers them.
 
-A `max_connections` status that arrives after the handshake reaches the processor as a frame and
-is handled directly. Two limitations remain, both diagnostic only. A generation that never
-reached authentication can leave a stale `max_connections_reached`, so the heartbeat may show
-`WAITING_SLOT` instead of `RECONNECTING` for one generation, with no effect on watchdogs. And the
-library still learns that `connect()` returned for good (rather than reconnecting under
-`reconnect_on_close`) only when the thread wrapper sees it return.
-
-A fatal handshake error (for example HTTP 400 or 404, raised because of
-`raise_fatal_errors=True`) ends `connect()`; the library fails every stream on the connection
-through `publish_failure` with a `MassiveError` naming the HTTP status and the host, and
-`m.connections()` shows `State=FAILED`.
-
-In raw mode the SDK consumes only the handshake frames (`connected`, the auth reply) and passes
-every later text frame to the processor unparsed. That includes subscribe acknowledgements,
-refusals, and `max_connections`. `conn.on_frame` decodes each frame exactly once with the
-library's JSON codec, routes `ev == "status"` objects to the status handler, and appends data
-objects to the per-channel row buffer. The client itself keeps the standard-library codec for its
-handshake and subscribe frames (`orjson.dumps` returns bytes, which would produce binary frames).
+Frames are decoded exactly once, in `on_frame`, with the library's JSON codec. `ev == "status"`
+objects go to the status handler, and data objects are appended to the per-channel row buffer.
+Outgoing frames are encoded with the standard library (`orjson.dumps` returns bytes, which would
+produce binary frames).
 
 Responsibilities:
 
 | Step | Owner |
 |---|---|
-| Open the socket, read `connected`, send auth, read the auth reply | fork client |
-| `auth_failed` | The fork raises `AuthError` out of `connect()`. The library marks the session failed and fails every stream on the path with `AuthenticationError`. |
-| `max_connections` status before a server close | Received as a raw frame after the handshake; during the handshake the fork surfaces it to the caller (fork item F2.6), so the library can tell it from a network drop. The fork reconnects after backoff; the library shows `State=WAITING_SLOT`; streams stay alive. |
-| Reconnect after any close unless `request_close()` was called; merge pending subscriptions; after a connection that opened closes (including a `max_connections` refusal), a backoff of at least `reconnect_backoff`, doubling to `max_reconnect_backoff`; before a connection opens, a TCP failure, a timeout, a connection closed during the handshake, or a retryable handshake failure (HTTP 500/502/503/504) retries on the websockets library's own schedule (up to 5 s at first, growing to 90 s); any other handshake error is fatal and fails the connection's streams (§ 13.3, `raise_fatal_errors=True`) | fork |
-| Desired topic set, reference counts, single in-flight step | library |
-| Sending the subscribe and unsubscribe frames for a step | fork `set_subscriptions(desired)`; `resubscribe(*topics)` for the one re-send after a timeout |
-| Per-topic acknowledgement parsing, watchdog, re-send | library, from the status frames |
+| Open the socket (TLS, proxy, keepalive pings), read `connected`, send auth, read the auth reply, all within the handshake timeout | client |
+| `auth_failed` | The client reports `FAILED` with `AuthenticationError` and stops; it never retries a rejected key. The library fails every stream on the path with `AuthenticationError`. |
+| `max_connections` in the auth reply | The client reports `WAITING_SLOT`, lets the server close the socket, and retries after its backoff; streams stay alive. |
+| `max_connections` as a status frame after authentication | The status handler records it; when that generation's socket closes, the connection shows `WAITING_SLOT` instead of `RECONNECTING`. |
+| Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
+| Classify a failed upgrade as fatal or retryable, by websockets' public rule | client; a fatal one is reported as `FAILED` with a `MassiveError` naming the HTTP status and the host |
+| Desired topic set, reference counts, single in-flight step, wildcard coverage | library |
+| Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
+| Per-topic acknowledgement parsing, watchdogs | library, from the status frames |
 | Routing data frames to streams; Deephaven publishing | library |
 
 **Reconcile loop.** It runs on the connection's loop thread and is entered through
-`loop.call_soon_threadsafe`.
+`loop.call_soon_threadsafe`, through `on_open`, and through the status handler.
 
 ```
 desired D = topics with ref-count > 0, minus deferred options contracts (section 15)
-acked   A = topics the server acknowledged
-sent    S = the set the library last passed to client.set_subscriptions (its record of the
-            fork's scheduled_subs; D may run ahead of S while a step is in flight)
+wire    W = D without the explicit topics of a channel whose wildcard is in D
+sent    S = topics subscribed in the current generation (acknowledged or not)
+acked   A = topics the server acknowledged in the current generation
+a step is in flight from its send until each of its topics is acknowledged, refused, or NO_ACK
 
-when no step is in flight and D != A:
-   removes = A - D  -> client.set_subscriptions(D): one unsubscribe frame; removed immediately
-                       (unsubscribe acknowledgements are UNVERIFIED and not awaited); S = D
-   adds    = D - A  -> one subscribe frame per step, at most 1,000 topics per frame
-                       (the frame-size limit is UNVERIFIED; the chunk size is conservative);
-                       S = the set passed; start a watchdog for each topic of S that has none
-                       (a topic has at most one watchdog; one started when a generation
-                       opened is kept)
+no generation open (connecting, waiting for a slot, backing off)
+   -> nothing is sent; reference-count changes only update D
+on_open(generation)
+   -> cancel the old generation's watchdogs; S = A = {}; State=CONNECTED; reconcile, which
+      subscribes all of W: the full desired set is re-sent after every authentication
+when a generation is open, no step is in flight, and W != S:
+   removes = S - W  -> client.unsubscribe: removed from S and A at once, their watchdogs
+                       cancelled (unsubscribe acknowledgements are UNVERIFIED and not awaited)
+   adds    = W - S  -> client.subscribe, one step; S |= adds; one watchdog per added topic,
+                       bound to the generation
 
 status "success", message "subscribed to: <p1>[,<p2>...]"
    -> those topics are ACKED. Cluster-agnostic text match; tolerates a comma list. The
@@ -1250,45 +1245,39 @@ status "error" naming a topic
 status "error" with no topic
    -> applies to every topic of the in-flight step (exact attribution, because one step is in
       flight). See the explicit-verdict rule below.
-frame arrives and client.websocket is not the generation's socket (all on the loop thread)
-   -> new generation: cancel the old generation's watchdogs; A = {}; start a watchdog for
-      every topic in S (not D) bound to the new socket; State=CONNECTED (WAITING_SLOT if
-      client.max_connections_reached); then process this frame's statuses (so
-      acknowledgements in the first frame are kept)
-heartbeat (every ack_timeout): client.websocket unseen, OPEN, and silent for ack_timeout
-   -> open its generation as above (a silent server reaches NO_ACK within 3 x ack_timeout of
-      the socket appearing; a handshake stalled past ack_timeout opens it early, harmlessly)
-no acknowledgement within ack_timeout, the topic still in S and D, and the watchdog's socket
-still client.websocket and OPEN
-   -> client.resubscribe(topic) once
-still none, same check
-   -> topic state NO_ACK; ERROR logged; reconnect scheduled under the backoff rules; streams
-      are not failed
-watchdog fires but its topic left S or D, client.websocket is not its socket, or its socket
-is not OPEN
-   -> cancelled without escalating; State=RECONNECTING if the socket is CLOSED, unless the
-      connection already shows WAITING_SLOT
-ordinary reconcile step or resubscribe
-   -> never opens a generation, never clears A, never restarts a watchdog
-server close or network error
-   -> the fork reconnects and, after a successful handshake, its sender re-sends D; the
-      heartbeat sees the generation's socket CLOSED: cancel its watchdogs; WAITING_SLOT when
-      client.max_connections_reached is true, else RECONNECTING unless the generation already
-      shows WAITING_SLOT (from a max_connections frame after the handshake)
-refused max_connections handshake
-   -> no processor frame, closes within the handshake: no generation, no watchdog, no NO_ACK;
-      the heartbeat sees that CLOSED, never-opened client.websocket and shows WAITING_SLOT
-      (RECONNECTING if max_connections_reached is false), also before the first success
-fatal handshake error (raise_fatal_errors=True, e.g. HTTP 400 or 404)
-   -> connect() raises; the thread wrapper, after asyncio.run returns or raises, fails every
-      stream on the connection through publish_failure with a MassiveError naming the HTTP
-      status and the host; State=FAILED
+status "max_connections" after authentication
+   -> recorded for the generation; State=WAITING_SLOT once its socket closes
+no acknowledgement within ack_timeout, the topic still in S and W, same generation
+   -> client.subscribe(generation, [topic]): that topic alone, once
+still none after another ack_timeout, same check
+   -> topic state NO_ACK; ERROR logged; client.reconnect(), so the backoff rules apply;
+      streams are not failed
+watchdog fires but its topic left S or W, or its generation is no longer current
+   -> cancelled without escalating
+socket closed or failed (not by close())
+   -> the generation ends; its watchdogs are cancelled; State=RECONNECTING with
+      NextReconnectAt, or WAITING_SLOT after a max_connections status; on the next on_open,
+      W is re-sent
+fatal handshake error, or auth_failed
+   -> every stream on the connection fails through publish_failure (MassiveError naming the
+      HTTP status and the host, or AuthenticationError); State=FAILED
 shutdown callback (section 6.1)
    -> ref-count decrement; topics at zero leave D, and each cancels its watchdog
 a connection whose D stays empty for 30 s
    -> closed by the connection loop (idle grace); the row is kept in m.connections() with
       State=CLOSED
 ```
+
+A socket that the server stops answering is detected by websockets' keepalive pings and closed,
+which starts a reconnect. A server that goes silent after authentication leaves the topics of the
+in-flight step unacknowledged, so they reach `NO_ACK` within 2 × `ack_timeout` of their send. A
+server that goes silent before `auth_success` is cut off by the handshake timeout.
+
+**Closing.** `m.close()` and the idle close call `WsClient.close()`, which is safe from any
+thread and does not wait: it cancels the client's task on its loop, which interrupts a backoff
+wait, a handshake, or a receive at once, and the socket, if open, is closed with code 1000. The
+client thread is a daemon; `m.close()` joins it with a bounded timeout and logs a WARNING if it
+has not ended.
 
 **Explicit-verdict rule.** When a status `error` with no topic arrives on a `socket.` TICK
 connection and its message contains "real-time" (case-insensitive; the exact text is
@@ -1311,18 +1300,28 @@ schema mismatch. `max_connections`, closes, and `NO_ACK` are diagnostic states.
 
 ### 13.4 REST
 
-One host. The library constructs `RESTClient(..., raise_on_status=False)` (fork F5.2), so a
-response whose status is still retryable after the SDK's retries raises `BadResponse` with its
-HTTP status in `.status` (fork F5.1) instead of urllib3's `MaxRetryError`. The option covers
-status retries only: a connection or read failure that outlasts the retries still raises
-urllib3's `MaxRetryError` (or `ProtocolError` or `ReadTimeoutError`), and the library maps those
-to `MassiveError` naming the host and the cause. HTTP 403 becomes `EntitlementError`
-from `fetch()` and `history()` and fails the table from `poll()`. HTTP 429 is retried by the
-SDK's urllib3 `Retry` (which honours `Retry-After`) and then becomes
-`MassiveError("rate limited ...")`; the library logs once at WARNING that Basic keys allow 5
-requests per minute and that fan-out `poll()` multiplies requests. A body that is not valid JSON
-raises `BadResponse` with `.status` on any call or page (fork F5.3), and the library maps it to
-`MassiveError`, so a malformed response never becomes an empty or truncated dataset.
+One host, one REST client per session ([section 19.1](#191-the-rest-client)), shared by every
+caller thread, poller, and fan-out worker. Every REST dataset reaches its paths through it,
+including the two documented endpoints Massive's Python SDK lacks. What a user sees:
+
+- **HTTP 401** raises `AuthenticationError`. **HTTP 403**, and a 200 response whose envelope
+  `status` is `NOT_AUTHORIZED`, raise `EntitlementError` from `fetch()` and `history()` and fail
+  the table from `poll()`.
+- **HTTP 429** is retried with backoff, honouring `Retry-After`; if it persists it raises
+  `MassiveError("rate limited ...")`, and the library logs once at WARNING that Basic keys allow
+  5 requests per minute and that fan-out `poll()` multiplies requests.
+- **HTTP 5xx** and connection failures are retried; if they persist they raise `MassiveError`
+  naming the host and the cause. Every other status, and a 200 envelope whose `status` is
+  `ERROR`, raises `MassiveError` with the server's `message`.
+- **A body that is not valid JSON** (an HTML page from a proxy, a truncated body, bytes that are
+  not UTF-8) raises `MassiveError` on any call or page, so a malformed response never becomes an
+  empty or truncated dataset.
+- **A missing result key** in an envelope whose `status` is `OK` or `DELAYED` is an empty page
+  (Massive omits `results` when a range has no data); with any other `status` it is an error, as
+  above.
+- Every error message names the HTTP status, the path, and the response's `request_id`, and is
+  logged at ERROR with the same text; the API key never appears in a message or a log.
+
 Per-ticker `NOT_ENTITLED` rows in snapshots keep their `Error` and `Message` columns and are
 logged once.
 
@@ -1467,7 +1466,7 @@ table, so the queue stays bounded however fast rows arrive.
 | `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts |
 | `Reconnects` | count |
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant` |
-| `LastError` | text |
+| `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
 
 **`m.streams()`**: one row per stream. A row is written when the stream has opened and on
 every change until the stream leaves the registry (its holds released and its blink table shut
@@ -1496,8 +1495,9 @@ caller kept alive in a liveness scope of their own.
 ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). `FAILED` can follow `RUNNING`
 or `RELEASED`; a failed stream's row keeps `FAILED` when its last result is released.
 
-Every failure is logged at ERROR with the text the exception carries: hosts, the server message
-verbatim, the decision evidence, and the nearest entitled alternative. For example: "Quotes are
+Every failure is logged at ERROR with the text the exception carries: hosts, the HTTP status and
+`request_id` of a REST failure, the server message verbatim, the decision evidence, and the
+nearest entitled alternative. For example: "Quotes are
 not available on 15-minute delayed stock plans; `m.stocks.snapshots(symbols).poll(15)` provides
 delayed NBBO via REST".
 
@@ -1511,7 +1511,7 @@ without the GIL.
 | Thread | Created by | Does | Must not |
 |---|---|---|---|
 | caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key | hold the registry lock while calling Deephaven or waiting |
-| WS client, one per connection | library | `asyncio.run(client.connect(on_frame))`; decode each frame once; route status frames; append rows to per-channel `SimpleQueue`s; the reconcile loop; idle close | any JVM call; blocking waits |
+| WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once; route status frames; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
@@ -1528,11 +1528,15 @@ without the GIL.
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
   atomically under the lock; readers copy references out and release the lock before working.
 - Per-connection mutable state (desired, acknowledged, and pending sets; the in-flight step;
-  watchdogs; the client object) is **loop-confined**: only the connection's client thread touches
-  it. Other threads reach it through `loop.call_soon_threadsafe` with plain data (tuples of topic
-  strings). Nothing reads loop state across threads; the loop thread enqueues diagnostics row
-  snapshots on the diagnostics writer's queue, and the writer is the only thread that writes the
-  diagnostics tables.
+  watchdogs; the `WsClient` and its socket) is **loop-confined**: only the connection's client
+  thread touches it. Other threads reach it through `loop.call_soon_threadsafe` with plain data
+  (tuples of topic strings), and through `WsClient.close()`, which any thread may call: it only
+  sets an `Event` and schedules a cancel on the loop (section 19.2). Nothing reads loop state
+  across threads; the loop thread enqueues diagnostics row snapshots on the diagnostics writer's
+  queue, and the writer is the only thread that writes the diagnostics tables.
+- The session's `RestClient` is shared by every thread that makes REST calls. It is safe per
+  call: its only shared mutable state is urllib3's internally locked pool and a once-only
+  warning `Event` (section 19.1).
 - Row buffers are one `queue.SimpleQueue` per (connection, channel). The WS thread is the only
   producer; the flush thread is the only consumer.
 - The reaper queue is a `queue.SimpleQueue`. The producers are the result finalizers,
@@ -1561,179 +1565,240 @@ registry deadlock. Verbs called on the UG thread raise `ValueError`.
 
 `PYTHON_GIL=0` jobs run the full suite, including the Deephaven integration tests (the embedded
 JVM starts in `pytest_configure`). Stress tests exercise concurrent subscribe and unsubscribe
-from 16 threads against a fake server, concurrent `release()` and verb calls, and concurrent
-`RESTClient` use. The only free-threaded target is 3.14t, because pyarrow, numpy, and pandas no
-longer publish cp313t wheels. Wheel availability on 3.14t: `jpy 2.2.0`, `pyarrow`, `numpy`, and
-`pandas` ship cp314t wheels; `deephaven-core` is `py3-none-any`; `websockets 17.3` ships cp314t
-wheels. `orjson 3.13.0` publishes no free-threaded wheels, so `orjson` is an optional extra and
+from 16 threads against a fake server, concurrent `release()` and verb calls, and 16 threads
+paging through one `RestClient` against the fake REST server (including a 429 with
+`Retry-After` and a reset in the middle of paging). The only free-threaded target is 3.14t,
+because pyarrow, numpy, and pandas no longer publish cp313t wheels. Wheel availability on 3.14t:
+`jpy 2.2.0`, `pyarrow`, `numpy`, and `pandas` ship cp314t wheels; `deephaven-core` is
+`py3-none-any`; `websockets 17.3` ships cp314t wheels; `urllib3` and `certifi` are pure Python. `orjson 3.13.0` publishes no free-threaded wheels, so `orjson` is an optional extra and
 the standard-library codec is the default. `PythonDeephavenSession.setVariable` carries the
 comment "relying on the GIL being kind to us"; the library never mutates script globals, so this
 does not affect it, but it is why the Deephaven integration tests must run on the free-threaded
 builds rather than unit tests alone.
 
-## 19. SDK fork: fix list and responsibility split
+## 19. Wire clients and the spec snapshot
 
-Fork: `github.com/chipkent/massive-client-python`. Everything this library needs from the SDK
-goes upstream; the fork carries nothing that is not submitted. The fixes are 20 small pull
-requests in the fork, #4, #7 to #24, and #31, each a preview of the pull request planned for
-`massive-com/client-python`; each will be paired with an upstream issue when the series is
-submitted, and until then its body holds a `Fixes #<issue>` placeholder (the fork has issues
-disabled). Every pull request applies to
-upstream `master` alone unless its body says "Builds on #N", in which case its branch is based
-on that pull request's branch. The whole series is submitted at once, after owner review.
+The library talks to Massive through two clients of its own and describes Massive's REST surface
+with code generated from a pinned snapshot of Massive's OpenAPI spec. It does not depend on
+Massive's Python SDK (`massive`), and nothing here works around a third-party client: each rule
+below implements Massive's documented protocol or a requirement of this design. Both clients
+know nothing of datasets or Deephaven, so their unit tests need only the fake servers of
+`tests/_fakes/`.
 
-Two rules shape every one of them. **Zero breaking changes:** upstream defaults and the public
-API stay as they are, and new behavior is opt-in through new keyword arguments. Genuine bugs
-are fixed unconditionally, and type hints that are wrong at run time are corrected. **Small and
-focused:** pull requests are split only by related content, because upstream merges small
-outside contributions and rarely large ones.
+### 19.1 The REST client
 
-The fork's `deephaven-fixes` branch is exactly the merge of the series. An integration branch
-cut from upstream `master` merges every pull request head in dependency order with `--no-ff`;
-once CI is green on it, `deephaven-fixes` moves to a commit whose tree is the integration tree
-and whose second parent is the integration head. The branch therefore only moves forward. It is
-never reset or force-pushed, and a fork ruleset blocks deletion and force pushes. When upstream
-merges a pull request or moves `master`, the series is rebuilt on the new `master` the same way.
-Agents may push fork branches and open draft pull requests in the fork; opening an upstream pull
-request needs explicit owner approval each time.
+`_restclient.RestClient` is one object per session, created on first use and closed by
+`m.close()` (a session closer). It is **safe to call from any number of threads at once**: its
+only shared mutable state is urllib3's connection pool, which locks internally, and the once-only
+rate-limit warning, which is a `threading.Event`. Every call is independent; no call mutates an
+argument (the parameters mapping is copied before it is encoded).
 
-**This project always uses the latest `deephaven-fixes`.** The source is
-`[tool.uv.sources] massive = { git = "<fork>", branch = "deephaven-fixes" }`, with `[project]`
-keeping `massive>=2.9.0`. `uv.lock` is not committed: users never install from it, and a
-committed lock would freeze the fork at one commit. `scripts/check.sh` (both tiers, and so the
-git hooks) starts with `uv sync --upgrade`, and every CI job resolves afresh, so each run uses the
-newest versions, including the branch head, and prints the installed `massive` commit. Offline, a
-local `check.sh` run warns and keeps what is installed; in CI a failed resolve is an error. The
-build job installs the wheel next to the same branch head.
+```python
+client.get(path, params) -> Page                    # one request
+client.pages(path, params, *, limit=None) -> Iterator[Page]   # follows next_url
+Page(status: str, request_id: str | None, rows: list[dict], body: dict)
+```
 
-The topic IDs F1 to F7 group the series by concern and keep the item numbers used elsewhere in
-this document (F2.3, F2.6, …). F8 is a REST bug found while writing the series.
+- **Transport.** One `urllib3.PoolManager` (or `ProxyManager`, below) with `retries=False` (the
+  client retries itself), a 10 s connect and 30 s read timeout, `maxsize` at least
+  `max_concurrency` so fan-out never discards connections, and `Accept-Encoding: gzip`
+  (urllib3 decodes it). `User-Agent: deephaven-massive/<version>`.
+- **Authentication.** `Authorization: Bearer <key>` on every request. The key never appears in
+  a URL: an `apiKey` parameter in a `next_url` is removed before the request.
+- **Proxies and certificates.** The proxy comes from the standard environment, read once at
+  construction: `urllib.request.getproxies()` for `HTTPS_PROXY` and `urllib.request.proxy_bypass`
+  for `NO_PROXY` select a `ProxyManager` for the REST host or a plain `PoolManager`. The CA
+  bundle is the system default when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an
+  `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise.
+- **Query encoding.** Path parameters are percent-encoded into the template. Query values: an
+  enum by its value, `bool` as `true`/`false`, a `date` as ISO-8601, an aware `datetime` as exact
+  integer nanoseconds computed from `timedelta` days, seconds, and microseconds (never through a
+  float) when the parameter is a nanosecond timestamp, and as ISO-8601 otherwise, and a sequence
+  joined with commas (the `.any_of` form). A naive `datetime` raises `ValueError`. `None` values
+  are omitted. Names arrive already in wire form (`strike_price.gte`); the dot mapping of
+  [section 9](#9-filters) happens before the client.
+- **Paging.** `pages` follows each page's `next_url`, which carries the cursor and the query.
+  A `next_url` whose scheme and host differ from `rest_base_url` raises `MassiveError` and is
+  never requested. `limit` is the total-row cap: paging stops once that many rows have been
+  yielded, and the last page is truncated. Only one page of rows is held at a time.
+- **Retries.** A request is retried, up to 3 times, on HTTP 429, 500, 502, 503, and 504 and on
+  connection errors (refused, reset, timed out, TLS failure). Every request is a `GET`, so a
+  retry is always safe. The wait honours `Retry-After` in both forms (delta-seconds and
+  HTTP-date), capped at 60 s; without it the wait is exponential from 0.5 s, doubling to a cap of
+  30 s, with up to 20% upward jitter. A connection reset in the middle of paging retries **that
+  page** (its `next_url`), never the first page, so a long history neither restarts nor skips.
+- **Error mapping.** After the retries, the client raises the exceptions of
+  [section 13.4](#134-rest): 401 is `AuthenticationError`; 403, and a 200 envelope with `status`
+  `NOT_AUTHORIZED`, are `EntitlementError`; 429 is `MassiveError("rate limited ...")`; every
+  other non-200 status, a 200 envelope with `status` `ERROR`, and a connection failure are
+  `MassiveError`. Each message names the status, the method and path (query without secrets),
+  the `request_id`, and the first 200 characters of the server's `message` or body.
+- **Strict decoding.** The body is decoded once with the library's JSON codec. Bytes that are not
+  UTF-8, or text that is not JSON, raise `MassiveError` with the status and the first 200 bytes,
+  on any call and on any page. The page's rows come from the path's result key in the generated
+  table (`results` for most paths; one of the seven others, such as `last` or `ticker`, where the
+  spec says so). A single object is wrapped as one row; a bare JSON list (`/v1/marketstatus/upcoming`)
+  is the rows. A missing result key is an empty page only when `status` is `OK` or `DELAYED`.
+  The envelope's `status` and `request_id` are kept on the `Page`, so callers can read `DELAYED`.
+- **Logging.** Each request logs at DEBUG: method, path, query (with no secret), status,
+  `request_id`, row count, and elapsed time. Retries log at INFO with the wait, and exhausted
+  retries at ERROR. The `Authorization` header is never logged.
 
-### 19.1 The series
+The REST transport (`_rest.py`) turns pages into columns: for each row it reads the wire paths
+the dataset's schema names, straight from the decoded dictionaries into one Python list per
+column, and builds one Arrow array per column (`Schema.to_arrow` is columnar). No row object or
+model class sits between the JSON and Arrow.
 
-**F1 — WebSocket subscriptions.**
+### 19.2 The WebSocket client
 
-| Item | Fork PR | What it adds |
-|---|---|---|
-| F1.1 thread-safe subscribe | #20 `fix: make WebSocket subscribe and unsubscribe thread-safe` (builds on #19) | A lock guards `scheduled_subs` and `schedule_resub`. `subscribe()`, `unsubscribe()`, and `unsubscribe_all()` hold it for their whole body; the code that sends copies the scheduled set under it and records only that copy as sent, so a change made while a send is in flight goes out on the next turn instead of being lost. In #20 alone that is the receive loop; once #21 is merged it is the sender task. |
-| F1.2 prompt sends | #21 `feat: send WebSocket subscription changes without waiting for recv` (builds on #20) | One sender task per connection sends every subscription change. Callers wake it through `loop.call_soon_threadsafe()`, which never blocks, so a change reaches an idle connection at once instead of after the 1 s receive timeout. As the only sender it never interleaves frames and merges a burst of changes into one subscribe and one unsubscribe frame. |
-| F1.3 wildcard isolation | #18 `fix: match WebSocket wildcard topics on the exact channel` | A wildcard such as `A.*` replaces only topics on exactly that channel: `subscribe("A.*")` keeps `AM.AAPL`, and calling it twice no longer unsubscribes the wildcard itself. |
-| F1.4 declarative subscriptions | #22 `feat: add WebSocketClient.set_subscriptions() and resubscribe()` (builds on #21) | `set_subscriptions(desired)` replaces the wanted topics in one step and sends one unsubscribe frame for the removals, then one subscribe frame for the additions; removals go first so that a connection at the server's topic limit can swap topics. `resubscribe(*topics)` sends a subscribe frame again for topics the client already counts as subscribed, for example ones the server never acknowledged; a topic that is not in `scheduled_subs` raises `ValueError`, and then nothing is sent. Both are safe from any thread while `connect()` runs. |
+`_wsclient.WsClient` is one object per connection (one `wss://host/path`), created by `_ws.py`
+and run on its own daemon thread under `asyncio.run`. Its interface and callbacks are those of
+[section 13.3](#133-connection-and-subscription-protocol). **Apart from `start()` (called once by
+its creator, before the loop thread exists), `close()`, and `join(timeout)`, every method must be
+called on the client's loop thread.** All its state is confined to that thread except the
+`close()` request flag (a `threading.Event`), and `close()` touches nothing else: it hands its
+work to the loop. No other client state is ever reached from two threads, which is what makes
+the design correct on free-threaded 3.14t without locks.
 
-**F2 — WebSocket reconnects.** Every behavior change here is opt-in; with no new keyword
-arguments the client reconnects exactly as upstream does today.
+- **Connecting.** `websockets.asyncio.client.connect(url, ssl=..., max_size=None,
+  open_timeout=..., user_agent_header="deephaven-massive/<version>")`. `max_size=None` lifts
+  websockets' 1 MiB frame cap; keepalive pings stay at websockets' defaults; the proxy comes
+  from the environment through websockets' own proxy support; the CA bundle follows the REST
+  rule of [section 19.1](#191-the-rest-client).
+- **Handshake.** Read the `connected` status, send `{"action":"auth","params":"<key>"}`, and read
+  the reply. The upgrade, the `connected` status, and the reply together must finish within a
+  fixed 10 s handshake timeout, or the attempt fails and is retried. `auth_success` opens a
+  generation (`on_open`). `auth_failed` is fatal (`AuthenticationError`). `max_connections`
+  reports `WAITING_SLOT`, and the attempt ends when the server closes the socket (or after the
+  handshake timeout), then waits its backoff. The auth frame is never logged.
+- **Receiving.** After `auth_success`, every text frame goes to `on_frame` unparsed, in order.
+- **Sending.** `subscribe` and `unsubscribe` put their frames
+  (`{"action":"subscribe","params":"T.AAPL,Q.AAPL"}`, at most 1,000 topics each) on one sender
+  coroutine's queue, which sends them in order as soon as it runs: no change waits for a frame
+  to arrive. Frames for a generation that is no longer current are dropped.
+- **Reconnecting.** After every close and every failed attempt that `close()` did not request
+  and that is not fatal (a server's clean close included), the client waits and tries again,
+  forever. The first wait is `reconnect_backoff`; each further consecutive failure doubles it up
+  to `max_reconnect_backoff`; jitter adds up to 20%, clamped, so at the cap the wait is drawn
+  from `[max(reconnect_backoff, max_reconnect_backoff / 1.2), max_reconnect_backoff]` and every
+  wait lies in `[reconnect_backoff, max_reconnect_backoff]`. The failure count and the backoff
+  reset only after a generation has stayed open for 60 s (stable uptime), never on
+  `auth_success` alone, so a server that accepts and then drops at once still backs off. The
+  client reports `RECONNECTING` with the next attempt's time before each wait.
+- **Fatal errors.** An exception from `connect()` is classified by websockets' public
+  `websockets.asyncio.client.process_exception`: what it returns `None` for (EOF, `OSError`,
+  timeouts, HTTP 500/502/503/504) is retried; anything it returns (for example HTTP 400 or 404,
+  an invalid URI) is fatal. A fatal error ends the client and is reported as `FAILED` with a
+  `MassiveError` naming the HTTP status and the host.
+- **Closing.** `close()` sets the request flag and calls `loop.call_soon_threadsafe(task.cancel)`
+  (a no-op once the loop has ended). Cancellation interrupts whatever the task awaits, a backoff
+  wait included; a `finally` block closes an open socket with code 1000 and reports `CLOSED`.
+  `close()` never waits; `join(timeout)` waits for the thread with a bound.
+- **Logging.** INFO on connect, authentication, and close; WARNING on `max_connections` and on
+  each reconnect wait (with its length); ERROR on a fatal error.
 
-| Item | Fork PR | What it adds |
-|---|---|---|
-| F2.1 keep pending subscriptions | #19 `fix: keep pending WebSocket subscriptions across a reconnect` | A reconnect keeps `scheduled_subs`, the authoritative desired set, and resets only `subs`, so a subscribe or unsubscribe made just before a drop survives it. Each `connect()` starts with an empty `subs`, so calling it again resubscribes everything. A bug fix, so unconditional. |
-| F2.2 reconnect after a clean close | #23 `feat: add opt-in WebSocket reconnect options` (builds on #19) | `reconnect_on_close=True` reconnects when the server closes the connection normally (a `ConnectionClosedOK`, which websockets raises only when both close frames carry 1000, 1001, or no status code, and whose `rcvd_then_sent` shows the server closed first, as after `max_connections` or a slow consumer) instead of returning from `connect()`. A close the client started still ends `connect()`. An abnormal close (`ConnectionClosedError`, any other code or no close frame) reconnects with or without the option, as upstream already does. |
-| F2.3 backoff | #23 | `reconnect_backoff` and `max_reconnect_backoff`: the wait before reconnecting after an open connection closes doubles with each consecutive failure up to the cap, and jitter adds up to 20%. At the cap the wait is drawn from `[max(reconnect_backoff, cap / 1.2), cap]`, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]`. A failed attempt to open a connection is still retried on the schedule of websockets' own `connect()` iterator: a random first delay of up to 5 s, then 3.1 s growing by a factor of 1.618 to 90 s. The `reconnect_backoff` floor therefore applies only after an opened connection closes, which includes a `max_connections` refusal (the server completes the handshake, sends the status, then closes); a handshake that fails follows the websockets schedule. |
-| F2.4 failure budget | #23 | `max_consecutive_failures` counts failures in a row, where a failure is a failed attempt or a connection that closes before it has been open for `stable_uptime` seconds; `None` allows any number. The count and the backoff reset only after `stable_uptime` of uptime, not on `auth_success`. `max_reconnects` keeps its upstream meaning, a total per `connect()` call. |
-| F2.5 thread-safe close | #24 `feat: add WebSocketClient.request_close()` (builds on #23) | `request_close()` is synchronous, safe from any thread, and does not wait. It sets a flag and, while `connect()` runs, closes the socket through `loop.call_soon_threadsafe()`; `connect()` checks the flag before it reconnects and again after the wait before reconnecting, and returns instead, even with `reconnect_on_close`. An attempt or wait in progress is not cut short, but no further connection is opened; a request made before `connect()` makes the next call return at once. `close()` called while `connect()` runs now sets the same flag, so it also stops a reconnect that is waiting or in its handshake; a `close()` before `connect()` starts is unchanged. |
-| F2.6 handshake `max_connections` | #23 | The attribute `max_connections_reached` is true when the server sent a `max_connections` status during the last handshake, so the caller can tell a full allowance from a network drop. The processor receives the same frames as before. |
-| F2.7 fatal handshake errors | #23 | `raise_fatal_errors=True` uses websockets' default `process_exception`, which raises errors that retrying cannot fix, such as an HTTP 404 during the handshake, instead of retrying them forever. `connect(process_exception=...)` also reaches websockets now instead of raising `TypeError`. |
+### 19.3 The spec snapshot, the generator, and the name lock
 
-The reconnect keywords of #23, with their upstream-preserving defaults:
+**Sources of truth.** The fields of a REST response, the parameters of a REST path, and their
+types come from Massive's OpenAPI spec, `https://api.massive.com/openapi`, vendored and pinned
+under `scripts/massive_spec/` (never `https://api.massive.com/specs/rest.json`, a stale 33-path
+subset). The documentation is rendered from the same spec, so it adds no naming information.
+The other vendored sources are cross-checks only:
 
-| Keyword | Default | Meaning |
-|---|---|---|
-| `reconnect_backoff: float` | `0.0` | Seconds to wait before reconnecting after an open connection closes; `0` reconnects at once, as upstream does. Must lie in `[0, max_reconnect_backoff]`, else `ValueError`. |
-| `max_reconnect_backoff: float` | `120.0` | The longest wait, in seconds. |
-| `reconnect_on_close: bool` | `False` | Also reconnect after a normal close by the server; by default `connect()` returns. |
-| `max_consecutive_failures: int \| None` | `None` | Raise the last error after this many failures in a row; `None` allows any number. |
-| `stable_uptime: float` | `60.0` | Seconds a connection must stay open to reset the failure count and the backoff. |
-| `raise_fatal_errors: bool` | `False` | Raise unfixable handshake errors instead of retrying them. |
+| Source | Use |
+|---|---|
+| `openapi.json` (`/openapi`) | REST paths, parameters, response fields, types, formats, enums, unit tags. The generator's only input. |
+| `websocket.json` (`/specs/websocket.json`, OpenAPI 3.0.3) | A completeness check over the hand-written WebSocket key maps: every key of every channel a dataset uses is mapped or listed as dropped, with a reason. |
+| `llms.txt` (`https://massive.com/docs/llms.txt`) | A check of the path allow-list: every allow-listed path is documented, and every documented path is allow-listed or excluded ([section 8.12](#812-excluded-endpoints)). |
+| The flat-file documentation pages | A cross-check of the flat-file key maps against the documented CSV headers (Massive publishes no machine-readable flat-file spec). |
 
-**F3 — WebSocket logging.**
+**The generator.** `scripts/refresh_massive_spec.py` is a thin command line over the pure
+functions of `_specgen.py`. With `--fetch` it downloads the four sources and records their fetch
+date and SHA-256 in `manifest.json`; that is the only step that uses the network. Without it, it
+works offline from the vendored files and writes two outputs: `_restspec.py` and new name-lock
+entries. For each allow-listed path it:
 
-| Item | Fork PR | What it adds |
-|---|---|---|
-| F3.1 | #4 `fix: log the topic for an invalid subscription` | `logger.warning("invalid subscription: %s", s)`, so a topic without a channel prefix logs `invalid subscription: AAPL` instead of a logging traceback. |
+1. skips operations marked `x-polygon-ignore`, `x-polygon-draft`, or `deprecated`;
+2. merges `allOf` and flattens nested objects into dotted wire paths below the path's result
+   key;
+3. maps each leaf to a column type: `integer` to `long`, `number` to `double`, `boolean`,
+   `string` (with the format and name rules of [section 11](#11-enums-and-types)), and an array
+   of integers to `int[]`; a leaf with a unit tag keeps it for the cross-check of
+   [section 12](#12-timestamp-units-and-day-boundaries);
+4. records each parameter: wire name, kind, enum values, and whether it is a path segment.
 
-**F4 — typing.**
+The generator never guesses. A construct it has no rule for (`$ref`, `oneOf`, `anyOf`, an
+untyped leaf, an array of strings or objects, a free-form map, `number` with an integer format)
+fails the run with its path, unless an entry in the generator's override table (`_specgen.py`)
+gives the leaf a type or drops it. An override that names a path the spec lacks also fails the
+run. Arrays and maps that a dataset keeps become JSON-text `String` columns through such an
+override.
 
-| Item | Fork PR | What it adds |
-|---|---|---|
-| F4.1 hint fixes | #14 `fix: correct type hints that disagree with the API` | `CryptoQuote.bid_price`, `ask_price`, and `ask_size` become `float`; `IndexValue.timestamp` becomes `int` (Unix milliseconds); `get_previous_close_agg()` returns `List[PreviousCloseAgg]`; `list_treasury_yields()`, `list_short_interest()`, `list_short_volume()`, and `vx.list_ipos()` return `Iterator[...]`; `list_tickers(cusip=...)` widens to `Union[int, str]`. Annotations and docstrings only. |
-| F4.2 model constructors | #15 `feat: let type checkers see model constructors` | `modelclass` is marked with `dataclass_transform` (PEP 681) under `TYPE_CHECKING`, so checkers accept keyword construction such as `LastTrade(ticker="AAPL", price=1.5)`. No run-time change. |
-| F4.3 `py.typed` | #16 `feat: ship py.typed so the package is checked as typed` (builds on #14 and #15) | An empty `massive/py.typed` (PEP 561) and explicit re-exports of `RESTClient` and `WebSocketClient`, so `mypy --strict` checks the package instead of skipping it. |
-| F4.4 raw overloads | #17 `feat: overload REST methods on raw so callers get precise return types` (builds on #7 and #16) | Every REST method that takes `raw` gets three `@overload`s: the default call returns the model type, `raw=True` (keyword-only) returns `HTTPResponse`, and any other `bool` returns the old `Union`. A strict consumer module is checked in `make static`. |
+**The naming rule.** A column name is fixed once per `(dataset, transport, wire path)` and
+recorded in the name lock. For a new REST entry the generator proposes it by this rule:
 
-**F5 — REST errors.**
+1. Split the wire path into segments and drop the result key (`results[]`, `tickers[]`,
+   `ticker`, `last`).
+2. Apply the library-wide names: the row's instrument key (`ticker`, `T`, `sym`) becomes
+   `Symbol`; the dataset's primary time key (declared in its `DatasetSpec` for tick, bar, and
+   value rows) becomes `Timestamp`; the dataset's fan-out key becomes `Underlying`
+   ([section 10](#10-symbols-and-all)).
+3. Translate an abbreviated key through the lexicon of its **record family**: bar, trade, NBBO
+   quote, forex quote, or ticker, assigned per object shape in `_specgen.py` (the row of an
+   aggregates response, the snapshot objects `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`,
+   and so on). Each lexicon value is Massive's own long-form name for the field, as v3 REST,
+   futures v1, and the flat-file headers write it: `o` is `open`, `vw` is `vwap`, `n` is
+   `transactions`, `q` is `sequence_number`, `y` is `participant_timestamp`, `f` is
+   `trf_timestamp`, `P` is `ask_price`, `X` is `ask_exchange`, `ds` is `decimal_size`, and so on.
+   The snapshot object `min` is named `minute`, so its columns are `MinuteOpen`, `MinuteVwap`, and
+   so on (`Min…` would read as "minimum").
+4. Keep every other segment as it is, and PascalCase-join the segments (`prevDay.vw` becomes
+   `PrevDayVwap`, `lastQuote.P` becomes `LastQuoteAskPrice`).
 
-| Item | Fork PR | What it adds |
-|---|---|---|
-| F5.1 `BadResponse.status` | #12 `fix: include the HTTP status in BadResponse` | `BadResponse` takes a keyword-only `status` and stores it as an attribute, and `_get` passes the HTTP status. `str(exc)` and `exc.args` are still the response body; construction without a status still works, with `status=None`. |
-| F5.2 `raise_on_status` | #13 `feat: add raise_on_status to RESTClient` (builds on #12) | `RESTClient(raise_on_status=False)` makes a response that still fails after the client's retries (413, 429, 499, 500, 502, 503, 504) raise `BadResponse` with its status and body instead of urllib3's `MaxRetryError`. The default, `True`, keeps upstream's behavior; attempts and backoff are unchanged. |
-| F5.3 non-JSON responses | #31 `fix: raise BadResponse when a response is not valid JSON` (builds on #12) | A response body that is not valid JSON (an HTML page from a proxy, a truncated body) used to be logged and turned into `[]`: a `get_*` call returned `[]` instead of a model, and a `list_*` call yielded nothing on a bad first page or stopped early on a bad later page. `_decode` now raises `BadResponse` with `status` and the first 200 bytes of the body, chaining the `json` error as `__cause__`, and `_get` and `_paginate_iter` let it propagate. A bug fix, so unconditional; valid responses are unaffected. |
+The refresh **fails instead of guessing** in two cases: a key of three characters or fewer, with
+no underscore, that has no lexicon entry (short real words and acronyms such as `id`, `cik`,
+`url`, `low`, `fmv`, `mic` have explicit identity entries); and two wire keys of one row that
+produce the same column. The failure prints the key, its path, its description, and a
+suggestion: a readable key elsewhere in the spec with the identical description. The suggestion
+is for the reviewer; **names are never derived from descriptions**, which Massive edits about
+twenty times as often as it changes keys.
 
-**F6 — missing REST endpoints.**
+WebSocket names come from the hand-written key maps, which use the same long-form vocabulary. The
+WebSocket-only concepts, which have no long form at Massive, are named `av` →
+`AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`, aggregate `z` →
+`AverageTradeSize`, and `dav` → `AccumulatedDollarVolume`. Flat-file names come from the
+flat-file key maps; the headers are already long-form.
 
-| Item | Fork PR | What it adds |
-|---|---|---|
-| F6.1, F6.2 | #7 `feat: add funding-conditions and crypto daily open/close endpoints` | `list_funding_conditions(...)` for `/fed/v1/funding-conditions`, paginated like `list_treasury_yields`, with a `FedFundingConditions` model; `sort` is a plain string such as `"date.desc"`. `get_daily_open_close_crypto(from_, to, date, adjusted)` for `/v1/open-close/crypto/{from}/{to}/{date}`, with `DailyOpenCloseCrypto` and `DailyOpenCloseCryptoTrade` models. |
+**The name lock.** `_names/<domain>.json`, one file per domain module, maps
+`(dataset, transport, wire path)` to a column for every transport. REST entries are appended by
+the refresh from the rule above; WebSocket and flat-file entries are copied from the key maps.
+The lock is append-only, and once a name ships it outranks the spec and the rule:
 
-**F7 — CI and test isolation.**
+- The generator never recomputes an existing entry, so a lexicon edit cannot silently rename a
+  shipped column.
+- A wire key that Massive renames is aliased: the new key gets an entry naming the old column.
+- A wire key that Massive removes keeps its entry; its column stays and is null.
+- A new readable field gets its entry automatically when a dataset's path exposes it, and the
+  reviewer sees it in the lock diff. A description-only change produces no lock diff.
 
-| Item | Fork PR | What it adds |
-|---|---|---|
-| F7.1 pook isolation | #9 `test: stop pook mocks leaking between REST test classes` | `BaseTest.tearDownClass` turns pook off, so each test class sees only its own mocks; two tests that passed only through leaked mocks now declare persistent ones. Tests only. |
-| F7.2 newer CPython | #10 `ci: run unit tests on Python 3.12, 3.13 and 3.14` | The unit-test matrix grows from 3.10 and 3.11 to 3.10 through 3.14, on Ubuntu and Windows. |
-| F7.3 free-threaded CPython | #11 `ci: run unit tests on free-threaded Python 3.14t` (builds on #9) | One job on 3.14t that fails unless the GIL is off (`PYTHON_GIL=0`), and a test in which 16 threads share one `RESTClient`. 3.14t is the only free-threaded target. |
+The tests that keep this honest:
 
-**F8 — REST request options.**
+- **Parity** (`tests/test_restspec.py`): regenerating `_restspec.py` from the vendored snapshot
+  and the generator's tables gives the committed file, byte for byte.
+- **Completeness** (`tests/test_catalog.py`): every wire path of every dataset has a lock entry
+  and no entry is missing for a key-map key; the WebSocket key maps are complete against
+  `websocket.json`; the allow-list matches `llms.txt`; the flat-file key maps match the
+  documented headers.
+- **Compatibility** (`tests/test_catalog.py`): the lock at the **last release tag** is compared
+  with the current lock, and any changed or removed entry fails the test unless a
+  `BREAKING_RENAMES` entry in the same file lists it, with the owner's approval recorded in the
+  PR. Before the first release there is no baseline and the test checks nothing. A shallow clone
+  without tags fails the test rather than passing it, so CI checks out the full history.
 
-| Item | Fork PR | What it adds |
-|---|---|---|
-| F8.1 | #8 `fix: stop sending the options argument as a query parameter` | `_get_params` skips `options`, so a call with a `RequestOptionBuilder` no longer also sends `?options=<object repr>`. The headers it carries are applied as before. |
-
-#17 builds on #7 as well as #16, because its overloads cover every REST method, including the two
-that #7 adds; with that, every merge of the series is clean.
-
-### 19.2 How this library uses the fork
-
-The WebSocket layer ([section 13.3](#133-connection-and-subscription-protocol)) opts in to
-every reconnect behavior it relies on; nothing depends on a changed default:
-
-| Keyword | Value passed | Why |
-|---|---|---|
-| `max_reconnects` | `None` | Upstream's total per `connect()` call would end a long-running session; the library never gives up on a path while streams want it. |
-| `reconnect_backoff` | `cfg.reconnect_backoff` ([section 5](#5-massiveconfig)) | Waits out the window in which the server still holds a dropped connection's slot. |
-| `max_reconnect_backoff` | `cfg.max_reconnect_backoff` (120 s) | The doubling stops here; jitter at the cap stays within `[max(base, cap / 1.2), cap]`. |
-| `reconnect_on_close` | `True` | A server-initiated normal close, such as after `max_connections` or a slow consumer, must not end the stream. |
-| `max_consecutive_failures` | `None` (the default) | The library shows `State=RECONNECTING` or `WAITING_SLOT` and keeps streams alive rather than raising. |
-| `stable_uptime` | `60.0` (the default) | The failure count and the backoff reset only after a minute of uptime, not on `auth_success`, so a server that accepts and then drops at once still backs off. |
-| `raise_fatal_errors` | `True` | A handshake error that retrying cannot fix, such as HTTP 400 or 404, ends `connect()`. The library fails the connection's streams through `publish_failure` with a `MassiveError` naming the HTTP status and the host, and `m.connections()` shows `State=FAILED` ([section 13.3](#133-connection-and-subscription-protocol)). |
-
-`max_size=None`, which lifts websockets' 1 MiB frame cap, goes to `connect()`, not to the
-constructor, which stores extra keyword arguments without using them.
-
-The library also calls `set_subscriptions(desired)` for each reconcile step, `resubscribe(topic)`
-for the one re-send after an acknowledgement timeout, and `request_close()` to stop a connection
-from any thread. `request_close()` does not cut short a backoff sleep or a websockets retry
-delay, so the client thread is a daemon and `m.close()` never joins it without a timeout. The
-fork offers no connection callback, and the library adds none: it detects connection
-generations on the client's loop thread, from `conn.on_frame` and one heartbeat, reading
-`client.websocket`, its public `state`, and `client.max_connections_reached` (F2.6); the flush
-thread never touches the client ([section 13.3](#133-connection-and-subscription-protocol),
-"What the library observes").
-
-On the REST side the library constructs `RESTClient(..., raise_on_status=False)`, so a response
-whose status is still retryable after the SDK's retries raises `BadResponse` with `.status`
-instead of urllib3's `MaxRetryError`. It maps 403 to `EntitlementError` and 429 to
-`MassiveError("rate limited ...")`. The option covers status retries only; connection and read
-failures still arrive as urllib3's `MaxRetryError`, `ProtocolError`, or `ReadTimeoutError`, and
-the library maps them to `MassiveError`. A body that is not valid JSON raises `BadResponse`
-(F5.3), which the library also maps to `MassiveError` ([section 13.4](#134-rest)). The shipped
-`py.typed` and raw overloads let `mypy --strict` check every SDK call without a `massive.*`
-override. The crypto and economy packages use the F6 methods.
-
-**Stays in this library, never a PR:** the connection registry keyed by URL with single-flight
-creation; topic reference counts and the desired-set reconcile with one in-flight step;
-acknowledgement parsing and watchdogs; explicit-verdict host re-resolution; host resolution from
-REST evidence; routing rows to streams; Deephaven publishers, flush, liveness scopes, and the
-reaper; reactive watchlists; the options cap; schema mapping and time units; flat files;
-diagnostics tables.
+**The refresh flow.** The drift job ([section 20](#20-quality-gates)) opens an issue. A person
+runs `scripts/refresh_massive_spec.py --fetch`, reviews three diffs (the snapshot, `_restspec.py`,
+and the lock), adds a lexicon line where the gate asks for one, and lands the result as one PR.
+A new endpoint additionally needs its path on the allow-list and a `DatasetSpec`.
 
 ## 20. Quality gates
 
@@ -1749,8 +1814,20 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
 - **Pytest 9:** `strict = true`, `filterwarnings = ["error"]`, `--import-mode=importlib`,
   deadlock detection through `faulthandler_timeout` and `pytest-timeout`.
 - **Layout:** `tests/test_layout.py` and `tests/test_catalog.py` pass.
+- **Spec:** the parity test (`_restspec.py` equals what the vendored snapshot generates), the
+  completeness checks, and the name-lock compatibility test
+  ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)) pass. They read only
+  vendored files and git history, never the network.
 - **Process:** conventional-commit titles; every change lands through a pull request; only the
   owner merges.
+
+**Spec drift is advisory, never a gate.** `.github/workflows/spec-drift.yml` runs weekly (and on
+demand): it fetches the four spec sources, compares them with `scripts/massive_spec/`, and, when
+they differ, opens one issue (or comments on the open one) labelled `spec-drift` with a summary:
+paths, parameters, and fields added or removed, and keys the naming gate would stop on. It never
+pushes, never opens a pull request, and is never a required check, because a change at Massive
+must not block unrelated pull requests. The refresh itself is a reviewed PR
+([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)).
 
 ### 20.1 Tooling configuration
 
@@ -1780,8 +1857,8 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   ["ignore-without-code", "redundant-expr", "truthy-bool", "truthy-iterable",
   "possibly-undefined", "unused-awaitable", "deprecated", "explicit-override"]`. The dev group
   adds `types-boto3[s3]`. The only override is `ignore_missing_imports` for `pyarrow.*`, which
-  ships no type information; the fork's `massive` ships `py.typed` (F4). No other override is
-  allowed. Pyright runs as a non-gating second checker.
+  ships no type information; `urllib3`, `websockets`, and `certifi` ship their own. No other
+  override is allowed. Pyright runs as a non-gating second checker.
 - **Pytest 9** (native `[tool.pytest]` table). `strict = true`, `filterwarnings = ["error"]`,
   `addopts = ["-ra", "--import-mode=importlib"]`, `faulthandler_timeout = 120` with
   `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Coverage is not in
@@ -1792,11 +1869,11 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   annotations go under `TYPE_CHECKING` (enforced by `TC`). `tests/conftest.py` starts the
   embedded JVM in `pytest_configure`, before collection.
 - **One entry point.** `scripts/check.sh [fast|full] [--no-fix]`. Both tiers first run
-  `uv sync --upgrade`, so they use the newest versions, including the latest `deephaven-fixes`
-  ([section 19](#19-sdk-fork-fix-list-and-responsibility-split)), and print the installed
-  `massive` commit; offline, a local run warns and keeps what is installed, and CI fails. The
-  fast tier then runs ruff fix, ruff format, and mypy; the full tier adds pytest with coverage. Local hooks and CI call
-  the same script; CI passes `--output-format github` to ruff.
+  `uv sync --upgrade`, so they use the newest versions; offline, a local run warns and keeps
+  what is installed, and CI fails. The fast tier then runs ruff fix, ruff format, and mypy; the
+  full tier adds pytest with coverage. Local hooks and CI call the same script; CI passes
+  `--output-format github` to ruff. CI checks out the full history with tags, which the
+  name-lock compatibility test needs.
 - **Agent hooks** (committed `.claude/settings.json`). After an agent edits a `.py` file, ruff
   fixes and formats it and reports remaining diagnostics to the agent. Before an agent ends its
   turn, `scripts/check.sh fast --no-fix` runs. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip`
@@ -1807,13 +1884,14 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Packaging.** `uv.lock` is not committed, and CI resolves afresh on every run.
   Development dependencies use a PEP 735 `[dependency-groups]` table; license metadata follows
   PEP 639. `__version__` comes from `importlib.metadata`. `deephaven-server` is a development dependency only.
-  `websockets>=14`. `[project]` declares `massive>=2.9.0`, and `[tool.uv.sources]` tracks the
-  fork's `deephaven-fixes` branch, always at its latest commit
-  ([section 19](#19-sdk-fork-fix-list-and-responsibility-split)). `.gitignore` lists only the
-  files this project produces.
+  The runtime dependencies are declared directly, with floors: `deephaven-core`, `pyarrow`,
+  `boto3`, `urllib3`, `websockets` (a floor with proxy support in
+  `websockets.asyncio.client.connect`), and `certifi`. There is no `massive` dependency and no
+  `[tool.uv.sources]` table: every dependency comes from PyPI. `.gitignore` lists only the files
+  this project produces.
 - **Metadata.** `authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]`; repository
-  `https://github.com/chipkent/deephaven-massive`. Not published to PyPI until the fork fixes are
-  released upstream.
+  `https://github.com/chipkent/deephaven-massive`. No dependency blocks publication to PyPI;
+  when to publish is an owner decision.
 
 ## 21. Examples
 
@@ -1930,13 +2008,22 @@ t = merge([q.history("2026-10-20", "2026-10-23"), q.append_only()])
 The owner settled each of the following. They are recorded here as rationale; the body of this
 document already reflects them.
 
-1. **Official SDK.** REST goes through `RESTClient` `list_*` and `get_*` methods. WebSocket goes
-   through `WebSocketClient(raw=True)` from the owner's fork, inside a thin wrapper that holds
-   only Deephaven-specific logic. SDK bugs are fixed in the fork, not worked around here. Private
-   `_get` calls are allowed only for documented endpoints the SDK lacks, each listed explicitly.
-2. **All SDK fields as columns.** REST datasets expose every SDK model field, flattened to
-   PascalCase, with an explicit, tested override table for wrong hints and timestamp units. The
-   four WebSocket tick schemas keep hand-written per-transport key maps. Fallback chains are gone.
+1. **No SDK: own clients over Massive's documented APIs** (revised 2026-10-26; this replaces
+   "official SDK" and the fork). The library has its own REST client on `urllib3` and its own
+   WebSocket client on `websockets`, and speaks Massive's documented protocols directly
+   ([section 19](#19-wire-clients-and-the-spec-snapshot)). Using Massive's SDK would have meant
+   about fourteen workaround layers, two reads of undocumented SDK attributes, and permanent
+   residual defects: a wildcard subscribe that drops sibling topics, a clean server close that
+   ends the client, instant reconnects, up to 1 s of subscribe latency, no single-topic re-send,
+   invalid JSON returned as an empty list, unknown fields silently dropped, `datetime` converted
+   through a float, and REST decoding 2.5–5 times slower than columnar decoding. The fork that
+   fixed them could not be published to PyPI as a dependency. Owning the clients costs about one
+   week before 1.0 and permanent ownership of HTTP and WebSocket edge cases.
+2. **All documented fields as columns, generated from the OpenAPI spec** (revised 2026-10-26).
+   REST datasets expose every field the spec documents for their paths, flattened to PascalCase,
+   from a vendored, pinned snapshot; a parity test keeps the generated code in step with it, and
+   an explicit, tested override table covers spec errors and timestamp units. The WebSocket and
+   flat-file schemas keep hand-written per-transport key maps. Fallback chains are gone.
 3. **No seeding.** `last_by()` never seeds from REST, and there is no `seed_since`. The
    documented recipe is `merge([q.history(start, end), q.append_only()])`.
 4. **Reactive Deephaven-table watchlists are kept.**
@@ -1956,7 +2043,7 @@ document already reflects them.
 11. **Entitlement refusals fail the affected table** through `publish_failure`, are logged, and
     appear in the diagnostics tables.
 12. **Endpoint policy.** Everything documented is supported, plus endpoints that are new but lag
-    in the documentation or SDK. Deprecated and sunset endpoints are excluded with a reason.
+    in the documentation. Deprecated and sunset endpoints are excluded with a reason.
     Undocumented endpoints are unsupported.
 13. **Python 3.11 and above.** The CI matrix includes 3.14t as a required job; it is the only
     free-threaded target because pyarrow, numpy, and pandas no longer publish cp313t wheels.
@@ -1967,34 +2054,48 @@ document already reflects them.
     live integration test. A wrong guess yields an explicit server refusal that fails one stream
     and names `ws_hosts`; it cannot misbehave silently, and it spares every base Business user a
     configuration line.
-16. **WebSocket status handling needs no SDK API change.** In raw mode every frame after the
-    handshake reaches the processor, so the library parses frames once and routes status frames
-    itself. One fork item, F2.6, records a `max_connections` status received during the
-    handshake in the attribute `max_connections_reached`. The client thread's heartbeat reads
-    it when it sees a connection closed, so `WAITING_SLOT` shows within one heartbeat
-    (`ack_timeout`) of a refused attempt; connection generations are detected on the client
-    thread with no fork hook (section 13.3).
+16. **WebSocket status handling.** Every frame after authentication reaches the library
+    undecoded; the library decodes it once and routes status frames itself. `max_connections`,
+    in the auth reply or as a later status, shows `WAITING_SLOT`, and streams stay alive
+    (section 13.3).
 17. **The context manager is kept**, documented as static-results-only.
 18. **`m.options.snapshots(dm.ALL)` is allowed.** It paginates the whole OPRA universe, which is
     slow and documented as such. The rule "`ALL` is accepted by every per-class `snapshots()`"
     stays uniform.
 19. **No live testing as design input.** Unverifiable facts get the conservative choice and a
     fixture test; live tests come later and retire the UNVERIFIED notes.
-20. **All merges into `main` happen through pull requests, and only the owner merges.** In the
-    fork, every fix is one small draft pull request, previewing one upstream pull request, and
-    `deephaven-fixes` is the tree-equal merge of the whole series
-    ([section 19](#19-sdk-fork-fix-list-and-responsibility-split)): an integration branch merges
-    every pull request, and once CI is green on it, `deephaven-fixes` moves to a commit with the
-    integration tree by fast-forward only. The fork's CI runs on pull requests, so the integration
-    branch and each candidate head get their CI through draft pull requests. The branch is never
-    reset or force-pushed. This project always uses its latest commit: `uv.lock` is not committed,
-    and every sync resolves afresh.
+20. **All merges into `main` happen through pull requests, and only the owner merges.**
+    `uv.lock` is not committed, and every sync resolves afresh.
 21. **Sessions and queries expose no introspection attributes; their reprs are defined.**
     `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
     appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error
     messages, and a query's dataset and arguments only in its repr. The public surface stays
     exactly the verbs and namespaces, and the API key stays out of objects users routinely
     leave in console globals.
+22. **Column names come from a committed, append-only name lock** (2026-10-26). Fields come
+    from the spec; names come from the lock, `(dataset, transport, wire path) -> column`, filled
+    by the rule of [section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock): drop
+    the result key, apply `Symbol`, `Timestamp`, and `Underlying`, translate abbreviated keys
+    through per-record-family lexicons of Massive's own long-form names, then PascalCase. The
+    refresh fails instead of guessing on an unknown key of three characters or fewer and on a
+    PascalCase collision. Names are never derived from descriptions. A compatibility test against
+    the lock at the last release tag fails on any changed or removed name unless an
+    owner-approved `BREAKING_RENAMES` entry lists it; a renamed wire key is aliased to the old
+    column. The snapshot `min` object's columns are `Minute…`. WebSocket-only names: `av` →
+    `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`, aggregate `z` →
+    `AverageTradeSize`, `dav` → `AccumulatedDollarVolume`.
+23. **Spec drift is reported, not gated** (2026-10-26). A weekly workflow opens an issue; it is
+    never a required check. The WebSocket spec checks the WebSocket key maps for completeness,
+    `llms.txt` checks the path allow-list, and the flat-file documentation tables check the CSV
+    headers.
+24. **No client object is shared unless it is proven thread-safe** (2026-10-26). The REST client
+    is safe per call and shared by the session's threads; each WebSocket client is confined to
+    its own loop thread. Free-threaded 3.14t remains a required CI job.
+25. **Upstream SDK issues are optional goodwill** (2026-10-26). Real bugs in
+    `massive-com/client-python` may be reported as issues only, never pull requests, off the 1.0
+    path, and only after the owner has reviewed the issue text. The fork
+    `chipkent/massive-client-python` is no longer used; it is archived once the project has
+    fully shipped.
 
 ## 23. Open verification items
 
@@ -2010,11 +2111,12 @@ before 1.0.
 | 3 | Futures flat files keyed by session date | Read one file and assert the date column matches the key; fail loudly otherwise | `tests/test_flatfiles.py`: matching and mismatching fixtures | `tests/test_flatfiles_integration.py` (S3 credentials): one key per venue |
 | 4 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/test_hosts.py`: both replies | `tests/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |
 | 5 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/test_hosts.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/test_hosts_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
-| 6 | Futures snapshot `timeframe` fields (SDK model only) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/test_hosts.py`: with and without the fields | `tests/test_hosts_integration.py`: record which fields the live payload carries |
+| 6 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/test_hosts.py`: with and without the fields | `tests/test_hosts_integration.py`: record which fields the live payload carries |
 | 7 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/test_ws.py`: verdict and non-verdict messages | `tests/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
 | 8 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/test_ws.py`: removal without an acknowledgement | `tests/test_ws_integration.py`: record whether an acknowledgement arrives |
 | 9 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/test_ws.py`: 2,500 topics produce three frames | `tests/test_ws_integration.py`: a 1,000-topic frame is acknowledged |
 | 10 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/test_ws_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
-| 11 | Exact `max_connections` status text and timing | Any status `max_connections`, after the handshake or surfaced by the fork during it (F2.6), shows `WAITING_SLOT` | `tests/test_ws.py`: both placements | `tests/test_ws_integration.py`: two sessions with one individual key |
+| 11 | Exact `max_connections` status text and timing | Any status `max_connections`, in the auth reply or after it, shows `WAITING_SLOT` | `tests/test_ws.py`: both placements | `tests/test_ws_integration.py`: two sessions with one individual key |
 | 12 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/test_config.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
 | 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/test_flatfiles.py`: AUTO before and after the cutoff | `tests/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |
+| 14 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's wildcard is desired, its explicit topics are not sent ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/test_ws.py`: adding and removing a wildcard over explicit topics sends the expected frames | `tests/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |

@@ -15,6 +15,9 @@ not link to it from docstrings or from `README.md`.
 Citations of the form "Appendix B" through "Appendix I" refer to
 [`RESEARCH.md`](RESEARCH.md), the reference material gathered during planning: the data
 catalog, endpoint status, tooling research, and the bug lists for the current code.
+Appendix H (the SDK evaluation) predates the decision to drop the SDK; its notes on SDK
+behaviour are history, and the SDK defects it records are now requirements of the library's own
+clients (DESIGN § 19).
 
 ## How progress is tracked
 
@@ -24,7 +27,7 @@ catalog, endpoint status, tooling research, and the bug lists for the current co
   the issues' checklists, not by ticking boxes in this file.
 - A package is **done** when its PR is merged by the owner and the issue is closed with a link to
   the merged PR. Agents never merge and never close issues on their own authority.
-- Packages are referred to by ID (`P3`, `F6`) in commit bodies and PR descriptions
+- Packages are referred to by ID (`P3`, `PC1`) in commit bodies and PR descriptions
   (`Refs #<issue>`), never by title, so renames do not break traceability.
 
 ## Table of contents
@@ -38,19 +41,17 @@ catalog, endpoint status, tooling research, and the bug lists for the current co
    - [P0 docs: rework design and plan](#p0)
    - [P1 chore: tooling foundation](#p1)
    - [P2 refactor: core skeleton](#p2)
+   - [PC1–PC4 own clients and the spec snapshot](#pc)
    - [P3 feat: REST transport and tier detection](#p3)
    - [P4 feat: WebSocket layer](#p4)
    - [P5 feat: flat-file history](#p5)
    - [P6a–P6h feat: domain datasets](#p6)
    - [P7 chore: finish rework](#p7)
    - [P8 test: live integration suite](#p8)
-   - [Using the fork: always the latest `deephaven-fixes`](#fork-usage)
-7. Fork packages (`chipkent/massive-client-python`)
-   - [Fork workflow](#fork-workflow)
-   - [F0 fork setup](#f0)
-   - [F1–F8 the fork series](#f1-f7)
-8. [End-to-end verification](#end-to-end-verification)
-9. [Decisions recorded during planning](#decisions-recorded-during-planning)
+7. [Upstream SDK issues (optional)](#upstream)
+8. [Final step: archive the fork](#archive-fork)
+9. [End-to-end verification](#end-to-end-verification)
+10. [Decisions recorded during planning](#decisions-recorded-during-planning)
 
 ---
 
@@ -58,42 +59,27 @@ catalog, endpoint status, tooling research, and the bug lists for the current co
 
 ```mermaid
 flowchart LR
-    subgraph fork["Fork: chipkent/massive-client-python (20 draft PRs, one upstream submission)"]
-        F0["F0 fork setup (done)"]
-        F1["F1 WebSocket subscriptions<br/>#18 wildcard, #20 thread-safe, #21 prompt sends, #22 set_subscriptions"]
-        F2["F2 WebSocket reconnects<br/>#19 pending subscriptions, #23 reconnect options, #24 request_close"]
-        F3["F3 WebSocket logging<br/>#4"]
-        F4["F4 typing<br/>#14 hints, #15 constructors, #16 py.typed, #17 raw overloads"]
-        F5["F5 REST errors<br/>#12 BadResponse.status, #13 raise_on_status, #31 bad JSON"]
-        F6["F6 REST endpoints<br/>#7 funding conditions, crypto open-close"]
-        F7["F7 CI and tests<br/>#9 pook isolation, #10 3.12–3.14, #11 3.14t"]
-        F8["F8 REST options<br/>#8"]
-        F0 --> F1 & F2 & F3 & F4 & F5 & F6 & F7 & F8
-    end
-
-    DF["deephaven-fixes<br/>(the whole series; always the latest, no lock bumps)"]
-    F1 & F2 & F3 & F4 & F5 & F6 & F7 & F8 --> DF
-
     P0["P0 docs: design + plan"] --> P1["P1 chore: tooling foundation"]
-    F0 --> P1
     P1 --> P2["P2 refactor: core skeleton"]
-    P2 --> P3["P3 feat: REST + tier detection"]
-    P2 --> P4["P4 feat: WebSocket layer"]
+    P2 --> PC1["PC1 feat: REST client"]
+    P2 --> PC2["PC2 feat: WebSocket client"]
+    P2 --> PC3["PC3 feat: spec snapshot,<br/>generator, name lock"]
     P2 --> P5["P5 feat: flat-file history"]
-    DF --> P3 & P4
+    PC1 & PC2 & PC3 --> PC4["PC4 chore(deps): drop massive"]
+    PC1 & PC3 & PC4 --> P3["P3 feat: REST + tier detection"]
+    PC2 & PC3 & PC4 --> P4["P4 feat: WebSocket layer"]
     P3 & P4 & P5 --> P6["P6a–P6h feat: domain datasets<br/>(parallel)"]
     P6 --> P7["P7 chore: finish rework"]
     P7 --> P8["P8 test: live integration suite"]
+    P8 --> AF["Archive the fork<br/>(owner, after shipping)"]
 ```
 
-Every fork fix reaches this repository through `deephaven-fixes`, which is always the merge of
-the whole series, and this repository always uses its latest commit ([Using the
-fork](#fork-usage)). Inside the fork, some pull requests build on
-others; the table under [F1–F8](#f1-f7) lists those edges.
+P0, P1, and P2 are merged; P5 is in review (#51). PC1, PC2, and PC3 own disjoint files and run
+in parallel with each other and with P5. PC4 removes `massive` once PC3 has removed its last
+import.
 
-Critical path: `F0 → P1 → P2 → P4 → P6 → P7`, with the fork series on `deephaven-fixes` joining
-at P3 and P4. The fork series proceeds while P1–P3 are in flight, so it should be on
-`deephaven-fixes` by the time P2 merges.
+Critical path: `PC2 → PC4 → P4 → P6 → P7`. PC3 (the generator and the lexicons) is about as
+long as PC2 and gates P3, P4, and every P6 package, so start both at once.
 
 ---
 
@@ -101,12 +87,8 @@ at P3 and P4. The fork series proceeds while P1–P3 are in flight, so it should
 
 These rules apply to every package in both repositories. Package sections only add to them.
 
-1. **Branching.** One PR per package on a branch named `<type>/<topic>` off `main` in this
-   repository. In the fork, each fix is a draft PR against upstream `master` (or against the
-   branch of the PR it builds on) and previews one upstream PR; `deephaven-fixes` is the merge of
-   the whole series, never a PR target (see [Fork workflow](#fork-workflow)). Never commit
-   directly on `main` or `master` in either repository. Never force-push a branch another agent
-   may have checked out.
+1. **Branching.** One PR per package on a branch named `<type>/<topic>` off `main`. Never
+   commit directly on `main`. Never force-push a branch another agent may have checked out.
 2. **Conventional commits.** Commit subjects and PR titles follow Conventional Commits v1.0.0
    (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `ci:`, `chore:`), with the PR title given in
    each package below. Commit bodies end with the attribution lines the harness supplies.
@@ -118,17 +100,12 @@ These rules apply to every package in both repositories. Package sections only a
 4. **Fresh-context implementers.** Each package is executed by a subagent whose only inputs are
    `DESIGN.md`, this file, `AGENTS.md`, and the code. If a package cannot be completed from those
    inputs, the fix is to improve those files (a `docs:` PR), not to pass tribal knowledge along.
-5. **No merging in this repository.** Agents never run `gh pr merge`, `git merge` into `main`,
-   or `git push` to `main`. Only the owner merges, always via PR. The single exception is the
-   fork's `deephaven-fixes` branch: agents may move it forward to a rebuilt integration of the
-   series, only when CI is green on that integration (owner decision; see
-   [Fork workflow](#fork-workflow)). Agents never merge a PR in either repository.
+5. **No merging.** Agents never run `gh pr merge`, `git merge` into `main`, or `git push` to
+   `main`. Only the owner merges, always via PR.
 6. **Owner approvals.** The following are outward-facing and require explicit owner approval
-   each time: opening a PR or issue in this repository, opening an upstream PR to
-   `massive-com/client-python`, creating the PyPI tracking issue, and any change to branch
-   protection. Agents prepare the text and stop at the gate. Pushing a `fix/*`, `feat/*`,
-   `test/*`, or `ci/*` branch to the fork, opening a draft PR there, and moving
-   `deephaven-fixes` forward need no per-event approval.
+   each time: opening a PR or issue in this repository, filing an issue on
+   `massive-com/client-python` ([Upstream SDK issues](#upstream); pull requests there are never
+   opened), and any change to branch protection. Agents prepare the text and stop at the gate.
 7. **Test layout** ([DESIGN § 4.2 Test layout](DESIGN.md#42-test-layout)). `tests/` mirrors
    `src/deephaven_massive/`: the module `<path>/<name>.py` is tested by
    `tests/<path>/test_<name>.py`, where `<name>` has its leading underscore removed and `<path>`
@@ -158,7 +135,8 @@ These rules apply to every package in both repositories. Package sections only a
     an explicit liveness scope). A package that touches `src/deephaven_massive/_*.py` restates
     the invariants it relies on in its PR description.
 11. **No live testing as design input** ([DESIGN § 22](DESIGN.md#22-decisions), item 19). Unit tests use fake REST/WS/S3 servers and
-    fixtures shaped from SDK `from_dict` and documentation samples. Live tests are P8 only.
+    fixtures shaped from the OpenAPI spec's examples and the documentation samples. Live tests
+    are P8 only.
 12. **Docstrings and docs sync.** Every module, class, and function, public or private, has a
     Google-style docstring that meets `AGENTS.md`'s documentation standard (purpose, arguments,
     returns, raises, side effects, threading, and an example where it helps). Minimal docstrings
@@ -178,27 +156,31 @@ These rules apply to every package in both repositories. Package sections only a
 
 | Wave | Packages | Notes |
 |---|---|---|
-| 0 | P0, F0 | F0 needs the fork to exist (owner step). P1 points the source at `deephaven-fixes`, so F0 precedes P1. |
-| 1 | P1; the fork series (F1–F8) | Independent of P1–P3; inside the fork, PRs build on others only as [F1–F8](#f1-f7) lists. |
-| 2 | P2 | P2 is the only writer of the new package skeleton. |
-| 3 | P3, P4, P5 | Disjoint files (see below). P3 and P4 need the fork series on `deephaven-fixes`. |
-| 4 | P6a–P6h | Eight domain packages, disjoint files by construction. |
-| 5 | P7 | Serial: deletes legacy code, rewrites docs, adds the catalog coverage assertions. |
-| 6 | P8 | After P7; needs a key; owner runs it. |
+| 0–2 | P0, P1, P2 | Merged. |
+| 3 | PC1, PC2, PC3, P5 | Disjoint files (see below). P5 is in review (#51); PC3 and P5 both edit `_catalog.py`, and the second to merge rebases. |
+| 4 | PC4 | Serial: removes `massive` once PC1–PC3 are merged. |
+| 5 | P3, P4 | Disjoint files. |
+| 6 | P6a–P6h | Eight domain packages, disjoint files by construction. |
+| 7 | P7 | Serial: deletes legacy code, rewrites docs, adds the catalog coverage assertions. |
+| 8 | P8 | After P7; needs a key; owner runs it. |
+| — | Archive the fork | Owner step after shipping. |
 
 ### How file conflicts are avoided
 
 The module names are fixed by [DESIGN § 4.1 Source modules](DESIGN.md#41-source-modules). The
 skeleton created in P2 is designed so that later packages own disjoint files:
 
-- **Transport packages own distinct modules.** P3 owns `_rest.py`, `_hosts.py`, `_poll.py`,
-  the generated `SDK_PARAMS` block of `_catalog.py`, and `scripts/refresh_massive_catalog.py`.
-  P4 owns `_ws.py`, `_stream.py`, and `_watchlist.py`. P5 owns `_flatfiles.py`. Each owns its
-  mirrored test file(s) and a fixture directory `tests/data/<module>/`. The fake servers
-  follow the same split: P1 creates the empty `tests/_fakes/__init__.py`, and P3 owns
-  `tests/_fakes/rest.py`, P4 `tests/_fakes/ws.py`, and P5 `tests/_fakes/s3.py`. Each also adds
-  its own thin fixture to `tests/conftest.py` as a separate, self-contained block (one
-  fixture function and its import), so the three edits are disjoint hunks. `_session.py` exposes
+- **Client and transport packages own distinct modules.** PC1 owns `_restclient.py`; PC2 owns
+  `_wsclient.py`; PC3 owns `_specgen.py`, the generated `_restspec.py`,
+  `scripts/refresh_massive_spec.py`, `scripts/massive_spec/`, and
+  `.github/workflows/spec-drift.yml`, and is the package that reworks `_schema.py` and
+  `_catalog.py`. P3 owns `_rest.py`, `_hosts.py`, and `_poll.py`. P4 owns `_ws.py`, `_stream.py`,
+  and `_watchlist.py`. P5 owns `_flatfiles.py`. Each owns its mirrored test file(s) and a
+  fixture directory `tests/data/<module>/`. The fake servers follow the clients: P1 created the
+  empty `tests/_fakes/__init__.py`, PC1 owns `tests/_fakes/rest.py`, PC2 `tests/_fakes/ws.py`,
+  and P5 `tests/_fakes/s3.py`. Each also adds its own thin fixture to `tests/conftest.py` as a
+  separate, self-contained block (one fixture function and its import), so the three edits are
+  disjoint hunks. `_session.py` exposes
   one factory hook per transport that P2 stubs (`NotImplementedError`) and each transport
   package fills; the hooks are separate functions, so three PRs can edit `_session.py` without
   overlapping hunks. If overlap is unavoidable, P3 lands first, then P5, then P4.
@@ -215,21 +197,25 @@ skeleton created in P2 is designed so that later packages own disjoint files:
   Every cross-cutting table is composed from per-domain declarations rather than written
   centrally:
   - Each `_domains/<domain>.py` exports `DATASETS: tuple[DatasetSpec, ...]`. A `DatasetSpec`
-    (defined in P2's `_catalog.py`) carries the dataset name, query class, REST endpoint(s) and
-    SDK method name(s), WebSocket channel(s), flat-file prefix(es), schema overrides, timestamp
-    units per transport and field, `start`/`end` axis pair, default `PollMode`, and the page
-    size.
+    (defined in P2's `_catalog.py`, reworked by PC3) carries the dataset name, query class, REST
+    path template(s), WebSocket channel(s), flat-file prefix(es), schema overrides, timestamp
+    units per transport and field, the `start`/`end` wire parameter pair, default `PollMode`,
+    and the page size.
   - `_catalog.py` aggregates `DATASETS` from a **fixed module list written in P2** (every domain
     module exists from P2 as a stub exporting `DATASETS = ()`), so P6 packages never touch
     `_timeunits.py` or `_schema.py`.
   - The namespace classes (`_Stocks`, `_Options`, …) live in their domain modules; `_session.py`
     instantiates them from P2 on, so P6 packages never touch `__init__.py`.
   - Catalog exclusions with `# reason:` live only in `tests/test_catalog.py` (P7).
-- **Generated content is regenerated in one place.** The `SDK_PARAMS` block of `_catalog.py`
-  and `tests/data/massive_docs_index.txt` are regenerated only by P3 and P7 (and whenever the
-  fork's signatures change), never inside a domain PR. A domain package that needs a parameter the generated table lacks (the
-  two SDK-gap endpoints) declares it in its own `DatasetSpec.extra_params`.
-- **`pyproject.toml` dependency changes** happen only in P1, P7, and `chore(deps):` PRs.
+- **Generated content is regenerated in one place.** `_restspec.py`, `_specgen.py`, and the
+  vendored snapshot under `scripts/massive_spec/` change only in PC3, P7, and dedicated spec
+  refresh PRs, never inside a domain PR. A domain package runs
+  `scripts/refresh_massive_spec.py` offline with the snapshot unchanged, which leaves
+  `_restspec.py` as it is and only appends its datasets' entries to its own lock file,
+  `_names/<domain>.json`, the one generated file a domain package owns. PC3 delivers the
+  lexicons for every allow-listed path, so a domain refresh never needs a lexicon edit; if one
+  does, land it first in a separate PR.
+- **`pyproject.toml` dependency changes** happen only in P1, PC4, P7, and `chore(deps):` PRs.
   `uv.lock` is not committed.
   Feature PRs do not add dependencies; if one is needed, open a `chore(deps):` PR first.
 - **Fixture data is per package.** Never add a shared fixture file; put payloads in
@@ -338,6 +324,10 @@ them into `DESIGN.md`.
 | **Branch** | `chore/tooling-foundation` |
 | **Issue** | #12 |
 
+**Status.** Merged (#42). Its fork source (`[tool.uv.sources]`, the `massive` dependency, and
+the installed-commit steps in `check.sh` and CI) is removed by PC4; the text below records what
+P1 did.
+
 **Goal.** Replace the permissive, four-way-duplicated gate with one strict, agent-friendly
 toolchain: ruff `ALL` on the latest release, strict mypy, pytest 9 native config, a single `scripts/check.sh`
 entry point, git and Claude Code hooks, a CI matrix that includes free-threaded CPython, and a
@@ -347,8 +337,8 @@ no committed lockfile: every sync resolves the newest versions, including the la
 section); [§ 4.2 Test layout](DESIGN.md#42-test-layout) (`tests/conftest.py` and
 `tests/test_layout.py`); [§ 11 Enums and types](DESIGN.md#11-enums-and-types) (the `>=3.11`
 floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-threaded-specifics)
-(free-threaded CI is gating); [§ 19 SDK fork: fix list and responsibility split](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)
-(the `[tool.uv.sources]` branch source). The exact configuration is [§ 20.1 Tooling configuration](DESIGN.md#201-tooling-configuration).
+(free-threaded CI is gating); the `[tool.uv.sources]` branch source of the former § 19 (the
+SDK fork, since replaced by [§ 19 Wire clients and the spec snapshot](DESIGN.md#19-wire-clients-and-the-spec-snapshot)). The exact configuration is [§ 20.1 Tooling configuration](DESIGN.md#201-tooling-configuration).
 
 **Depends on.** P0 (merged), F0 (the `deephaven-fixes` branch must exist to be tracked).
 **Parallel with.** F1–F7.
@@ -503,6 +493,10 @@ lists beyond those enumerated above.
 | **Branch** | `refactor/core-skeleton` |
 | **Issue** | #13 |
 
+**Status.** Merged (#46). Its SDK-derived parts (`_schema.model_schema` and the model
+flattening, the SDK fields of `DatasetSpec`, the empty `SDK_PARAMS` block, and the tests that
+import `massive`) are removed by PC3; the text below records what P2 did.
+
 **Goal.** Create the new package layout with the public surface fixed (exports, config, session
 shell, query classes, enums, types, errors), the cross-cutting engines that transports and domains
 build on (schema registry, time units, symbols, dates, liveness, diagnostics, dataset catalog),
@@ -653,6 +647,347 @@ overloads (P6, per domain); deleting legacy code (P7).
 DESIGN § 4.1 needs an owner decision first.
 
 ---
+<a id="pc"></a>
+## PC1–PC4 — own clients and the spec snapshot
+
+The owner decided on 2026-10-26 to drop Massive's Python SDK and the fork
+([DESIGN § 22](DESIGN.md#22-decisions), decisions 1, 2, and 22 to 25). These four packages
+build what replaces it, ahead of P3 and P4, split by content: the REST client, the WebSocket
+client, the spec generator with the name lock, and the dependency change. PC1, PC2, and PC3 own
+disjoint files and run in parallel; PC4 lands once no code imports `massive`.
+
+<a id="pc1"></a>
+### PC1 — `feat: REST client`
+
+| | |
+|---|---|
+| **Branch** | `feat/rest-client` |
+| **Issue** | TBD (owner approval to create) |
+
+**Goal.** A REST client that speaks Massive's documented REST protocol exactly, shared safely by
+every thread of a session, with a protocol-faithful fake server. It knows nothing of datasets or
+Deephaven; P3 builds the REST transport on it.
+
+**DESIGN sections implemented.** [§ 19.1 The REST client](DESIGN.md#191-the-rest-client);
+[§ 13.4 REST](DESIGN.md#134-rest) (the error semantics);
+[§ 18.2 Shared state and ownership](DESIGN.md#182-shared-state-and-ownership) and
+[§ 18.4 Free-threaded specifics](DESIGN.md#184-free-threaded-specifics) (the shared client).
+
+**Depends on.** P2. **Parallel with.** PC2, PC3, P5.
+
+**Files.**
+- Create: `src/deephaven_massive/_restclient.py`, `tests/test_restclient.py`,
+  `tests/_fakes/rest.py` (a real HTTP server on `127.0.0.1`, a `ThreadingHTTPServer`, speaking
+  Massive's envelope), `tests/data/_restclient/`.
+- Modify: `tests/conftest.py` (one thin `fake_rest` fixture that starts the fake server).
+- Delete: none.
+
+**Tasks.**
+- [ ] `RestClient(api_key, *, base_url, max_concurrency)` with `get(path, params) -> Page` and
+      `pages(path, params, *, limit=None) -> Iterator[Page]`, and `close()`. Every bullet of
+      DESIGN § 19.1 is implemented and has a named test: bearer authentication and no key in any
+      URL (the fake rejects an `apiKey` parameter); proxy selection from `HTTPS_PROXY` and
+      `NO_PROXY`; the CA bundle from `SSL_CERT_FILE`/`SSL_CERT_DIR` or `certifi`; query encoding
+      (enum, `bool`, `date`, exact `datetime` nanoseconds, `.any_of` lists, `None` omitted, naive
+      `datetime` rejected); `next_url` paging with the foreign-host refusal and the total-row
+      `limit`; retries on 429/500/502/503/504 and connection errors with `Retry-After` in both
+      forms and capped exponential backoff with upward jitter; a reset mid-pagination retries that
+      page only; the error mapping (401, 403, `NOT_AUTHORIZED`, 429, other statuses, `ERROR`
+      envelopes, connection failures), each message naming the status, path, and `request_id`;
+      strict decoding (invalid JSON and non-UTF-8 bodies raise on the first and on a later page;
+      result keys; a single object wrapped; a bare list; a missing result key with `OK` or
+      `DELAYED` is empty); `User-Agent`; DEBUG logging with the key and header never logged.
+- [ ] The result key and page size come from the caller; the client has no dataset knowledge.
+- [ ] Sleeping goes through an injectable clock, so retry tests are deterministic and never call
+      `time.sleep()`.
+- [ ] `tests/_fakes/rest.py`: scripted routes (status, headers, body, a dropped connection,
+      a delay), recorded requests (path, query, headers), and paging by `next_url`.
+- [ ] Free-threaded stress: 16 threads page through one client concurrently against the fake
+      (including a 429 with `Retry-After` and a mid-pagination reset), every result correct,
+      run on `3.14t` with `PYTHON_GIL=0`.
+
+**Acceptance criteria.**
+- [ ] `urllib3` and `certifi` are imported only in `_restclient.py`.
+- [ ] Every rule of DESIGN § 19.1 has a named test; `caplog` proves the key never appears in a log
+      record at any level.
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs, including the stress test on
+      `3.14t`.
+
+**Verification.**
+```bash
+./scripts/check.sh
+uv run pytest tests/test_restclient.py -q
+PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_restclient.py -q
+```
+
+**Pitfalls.** The SDK defects this client must not reproduce: a `datetime` converted through a
+float (97% of microsecond values off); invalid JSON or a missing `results` key returned as an
+empty list; an error without its HTTP status; urllib3's `MaxRetryError` leaking out; a 0, 0.2,
+0.4 s backoff on 5xx. urllib3's `PoolManager` does not read `HTTPS_PROXY`; build a
+`ProxyManager` yourself. Construct the pool with `retries=False`, or urllib3 retries a second
+time underneath the client. Until PC4 declares them, `urllib3` and `certifi` are installed only
+as dependencies of `massive`; that is expected.
+
+**Out of scope.** Datasets, Arrow, and Deephaven (P3); host resolution (P3).
+
+**Approval gates.** Opening the PR.
+
+---
+
+<a id="pc2"></a>
+### PC2 — `feat: WebSocket client`
+
+| | |
+|---|---|
+| **Branch** | `feat/websocket-client` |
+| **Issue** | TBD (owner approval to create) |
+
+**Goal.** A WebSocket client for one `wss://host/path` that speaks Massive's documented
+WebSocket protocol, confined to its own loop thread, with a protocol-faithful fake server. It
+knows nothing of datasets or Deephaven; P4 builds the connection layer on it.
+
+**DESIGN sections implemented.** [§ 19.2 The WebSocket client](DESIGN.md#192-the-websocket-client);
+the client's side of [§ 13.3 Connection and subscription protocol](DESIGN.md#133-connection-and-subscription-protocol)
+(callbacks, sends, `reconnect()`, `close()`); [§ 13.1 Invariants](DESIGN.md#131-invariants)
+item 4 (backoff); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`reconnect_backoff`,
+`max_reconnect_backoff`).
+
+**Depends on.** P2. **Parallel with.** PC1, PC3, P5.
+
+**Files.**
+- Create: `src/deephaven_massive/_wsclient.py`, `tests/test_wsclient.py`, `tests/_fakes/ws.py`
+  (a fake Massive server on `websockets.asyncio.server`), `tests/data/_wsclient/` (status-frame
+  fixtures: `connected`, `auth_success`, `auth_failed`, `max_connections`).
+- Modify: `tests/conftest.py` (one thin `fake_ws_server` fixture).
+- Delete: none.
+
+**Tasks.**
+- [ ] `WsClient(url, api_key, *, on_open, on_frame, on_state, reconnect_backoff,
+      max_reconnect_backoff)` with `start()`, loop-thread `subscribe(generation, topics)`,
+      `unsubscribe(generation, topics)`, and `reconnect()`, and thread-safe `close()` and
+      `join(timeout)`. Every bullet of DESIGN § 19.2 is implemented and has a named test.
+- [ ] Handshake: `connected`, auth, reply, within the 10 s handshake timeout; `auth_success`
+      opens a generation; `auth_failed` is fatal; `max_connections` reports `WAITING_SLOT`,
+      waits for the server's close, and backs off.
+- [ ] One `connect()` per attempt (never websockets' reconnecting `async for` iterator, whose
+      own schedule would bypass the backoff), `max_size=None`, the CA rule of § 19.1, and the
+      `User-Agent`.
+- [ ] Reconnect after every close or failure not requested and not fatal, a clean server close
+      included; the backoff doubles from `reconnect_backoff` to `max_reconnect_backoff` with
+      clamped upward jitter; it resets only after 60 s of stable uptime. Classify `connect()`
+      failures with `websockets.asyncio.client.process_exception`.
+- [ ] One sender coroutine sends queued frames in order and at once, chunked at 1,000 topics;
+      frames of a stale generation are dropped.
+- [ ] `close()` from any thread cancels the task through `call_soon_threadsafe`, interrupting a
+      backoff wait at once, and closes an open socket with code 1000.
+- [ ] Time goes through an injectable clock and sleep, so backoff tests never wait in real time.
+- [ ] `tests/_fakes/ws.py`: scripted handshakes (accept, reject, `max_connections` in the reply
+      or later, silent after the upgrade, silent after auth, HTTP 404 and 503 at the upgrade),
+      per-topic acknowledgements and refusals, server-initiated clean and abnormal closes, and a
+      record of every frame received.
+- [ ] Free-threaded stress: `close()` from 16 threads while the client runs, and 16 clients at
+      once against the fake, on `3.14t` with `PYTHON_GIL=0`.
+
+**Acceptance criteria.**
+- [ ] `websockets` is imported only in `_wsclient.py` and `tests/_fakes/ws.py`.
+- [ ] A clean server close (1000) reconnects; `A.*` and `AM.X` are sent and kept independently;
+      a change made while disconnected is never sent to the old socket.
+- [ ] `close()` returns at once, and the thread ends within a second, while the client sits in a
+      120 s backoff wait.
+- [ ] The auth frame and the key never appear in a log record (`caplog`).
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs.
+
+**Verification.**
+```bash
+./scripts/check.sh
+uv run pytest tests/test_wsclient.py -q
+PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_wsclient.py -q
+```
+
+**Pitfalls.** The SDK defects this client must not reproduce: a clean server close that ends
+the client; a wildcard subscribe that drops topics sharing its prefix; changes made while down
+that are lost or resurrected; instant reconnects (Massive needs at least 10–30 s to free the
+slot); subscriptions sent only after a 1 s receive timeout; a lifetime reconnect count; no
+thread-safe close; `max_connections` only logged; a server silent after the upgrade that hangs
+`connect()` forever. `orjson.dumps` returns bytes, which would send binary frames; encode
+outgoing frames with the standard library.
+
+**Out of scope.** Topics, reference counts, acknowledgements, watchdogs, routing (P4).
+
+**Approval gates.** Opening the PR.
+
+---
+
+<a id="pc3"></a>
+### PC3 — `feat: spec snapshot, generator, and name lock`
+
+| | |
+|---|---|
+| **Branch** | `feat/spec-generator` |
+| **Issue** | TBD (owner approval to create) |
+
+**Goal.** Make Massive's OpenAPI spec the single source of REST parameters, fields, and types,
+and the committed name lock the single source of column names, then remove every SDK-derived
+part of the merged P2 core.
+
+**DESIGN sections implemented.**
+[§ 19.3 The spec snapshot, the generator, and the name lock](DESIGN.md#193-the-spec-snapshot-the-generator-and-the-name-lock);
+[§ 9 Filters](DESIGN.md#9-filters) (validation against the generated parameters and the `_` to
+`.` mapping); [§ 11 Enums and types](DESIGN.md#11-enums-and-types) (spec types to column types;
+enums against spec enums); [§ 12 Timestamp units and day boundaries](DESIGN.md#12-timestamp-units-and-day-boundaries)
+(the unit-tag cross-check); [§ 8.12 Excluded endpoints](DESIGN.md#812-excluded-endpoints) (the
+allow-list); [§ 20 Quality gates](DESIGN.md#20-quality-gates) (the spec gates and the advisory
+drift job); [§ 4.1 Source modules](DESIGN.md#41-source-modules) (`_specgen.py`, `_restspec.py`,
+`_names/`).
+
+**Depends on.** P2. **Parallel with.** PC1, PC2, P5. If P5 (#51) merges first, rebase: its
+`_catalog.py` change (the flat-file key-map check at import) stays.
+
+**Files.**
+- Create: `scripts/massive_spec/` (`openapi.json`, `websocket.json`, `llms.txt`, the flat-file
+  documentation pages, `manifest.json`), `scripts/refresh_massive_spec.py`,
+  `src/deephaven_massive/_specgen.py`, `src/deephaven_massive/_restspec.py` (generated),
+  `src/deephaven_massive/_names/<domain>.json` (one per domain module, each `{}`),
+  `tests/test_specgen.py`, `tests/test_restspec.py`, `.github/workflows/spec-drift.yml`.
+- Modify: `src/deephaven_massive/_schema.py`, `src/deephaven_massive/_catalog.py`,
+  `tests/test_schema.py`, `tests/test_catalog.py`, `tests/test_enums.py`,
+  `.github/workflows/ci.yml` (check out the full history with tags for the compatibility test).
+- Delete: none (`scripts/refresh_massive_catalog.py` and the `SDK_PARAMS` block were never
+  generated).
+
+**Tasks.**
+- [ ] Fetch the four sources once with `scripts/refresh_massive_spec.py --fetch` and commit them
+      with `manifest.json`.
+- [ ] `_specgen.py`, pure and offline: the allow-list (every REST path of DESIGN § 8), the seven
+      non-`results` result keys, spec flattening (`allOf`, nested objects, filtering of
+      `x-polygon-ignore`, `x-polygon-draft`, and `deprecated`), type mapping, parameter
+      extraction, the override table (rejecting overrides that name a missing path), the record
+      families with their object-shape assignments and **complete lexicons for every
+      allow-listed path**, the identity entries for short readable keys, the naming rule, the
+      gate (short unknown key; PascalCase collision) with the description-match suggestion, and
+      lock appending. Domain packages never edit `_specgen.py`, so the refresh must pass on the
+      whole allow-list when PC3 merges.
+- [ ] `scripts/refresh_massive_spec.py`: `--fetch`, the offline regeneration of `_restspec.py`,
+      lock appending for every declared dataset, and `--check`.
+- [ ] Generate and commit `_restspec.py`; the parity test in `tests/test_restspec.py`.
+- [ ] `_schema.py`: delete `model_schema`, `ModelSchema`, `flatten`, `_flatten_into`,
+      `_model_fields`, `_unwrap_optional`, the hint mapping of `_column_type`, and `_jsonable`;
+      keep `Schema`, `Column`, `ColumnType`, `ColumnOverride` (now keyed by wire path), and
+      `KeyMap`; make `Schema.to_arrow` columnar (one list per column straight from the decoded
+      rows); re-key the tick schemas' REST key maps by wire key (aggregates `t`, `o`, `h`, `l`,
+      `c`, `v`, `vw`, `n`; `/v3/trades` and `/v3/quotes` keys as the spec writes them); apply the
+      owner's WebSocket names: `AggregateVwap` becomes `DayVwap`, `AverageSize` becomes
+      `AverageTradeSize`, and `BARS` gains `AccumulatedDollarVolume` (`dav`). No release has
+      shipped, so these renames need no `BREAKING_RENAMES` entry.
+- [ ] `_catalog.py`: drop `rest_model`, `rest_columns`, `fetch_method`, `history_method`,
+      `grouped_daily_method`, `SymbolParam.PAIR`, `extra_params`, `SCHEMA_FROM_MODEL`,
+      `SDK_PARAMS`, and `sdk_params`; `rest_paths` names path templates from the allow-list;
+      `time_axis` names wire parameters (`timestamp.gte`, `timestamp.lt`); a REST dataset's
+      schema comes from `_restspec.py` and its domain's lock; filter validation per DESIGN § 9;
+      the lock loader (package data through `importlib.resources`).
+- [ ] `tests/test_catalog.py`: the completeness checks (lock entries for every wire path; the
+      WebSocket key maps against `websocket.json`, with a reviewed dropped-key list; the
+      allow-list against `llms.txt`; the flat-file key maps against the documented headers),
+      the unit-tag cross-check with its reviewed conflict list (the 20 indicator
+      `IMicroseconds` tags first), and the compatibility test against the lock at the last
+      release tag with an empty `BREAKING_RENAMES`. The comparison is a pure function tested
+      directly; its git read is tested against a temporary repository made with `git init`.
+- [ ] `tests/test_enums.py`: compare the public enums with the parameter enums of the vendored
+      snapshot instead of the SDK's enums.
+- [ ] `tests/test_schema.py`: replace the SDK-model tests with tests of the remaining functions;
+      no test imports `massive`.
+- [ ] `.github/workflows/spec-drift.yml`: weekly `schedule` and `workflow_dispatch`; fetch into a
+      temporary directory, compare with `scripts/massive_spec/`, and open or update one issue
+      labelled `spec-drift` with the summary of DESIGN § 20; `permissions: issues: write` only;
+      never pushes or opens a PR; not a required check.
+- [ ] `ci.yml`: `fetch-depth: 0` on the checkout of the test jobs.
+
+**Acceptance criteria.**
+- [ ] `uv run python scripts/refresh_massive_spec.py --check` exits 0 offline.
+- [ ] `git grep -nE "^(from|import) massive" -- src tests ':!tests/legacy'` is empty.
+- [ ] Negative tests: an unknown short key fails the refresh and prints its suggestion; a
+      PascalCase collision fails; an override naming a missing path fails; a changed lock entry
+      without a `BREAKING_RENAMES` entry fails the compatibility test.
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs.
+
+**Verification.**
+```bash
+./scripts/check.sh
+uv run python scripts/refresh_massive_spec.py --check
+uv run pytest tests/test_specgen.py tests/test_restspec.py tests/test_catalog.py tests/test_schema.py tests/test_enums.py -q
+```
+
+**Pitfalls.** `https://api.massive.com/specs/rest.json` is a stale 33-path subset; pin
+`/openapi`. Descriptions churn about twenty times as often as keys: never derive a name from
+one, and keep descriptions out of `_restspec.py` so a description edit produces no generated
+diff. The same short key means different things by record family (`c` is close or conditions,
+`z` is tape or average trade size), so a flat key table cannot work. The spec's
+`x-polygon-go-type` unit tags are wrong on indicators; they are a cross-check, never a source.
+The drift workflow can be run only after it reaches `main`; the owner triggers its first run
+by hand.
+
+**Out of scope.** Declaring datasets (P6); the REST transport (P3); the catalog's final
+coverage assertions and exclusion lists (P7).
+
+**Approval gates.** Opening the PR. The lexicon, the family assignments, and the override table
+are reviewed by the owner in the PR. Running `--fetch` reads public Massive URLs (read-only;
+note it in the PR).
+
+---
+
+<a id="pc4"></a>
+### PC4 — `chore(deps): replace massive with urllib3, websockets, and certifi`
+
+| | |
+|---|---|
+| **Branch** | `chore/deps-own-clients` |
+| **Issue** | TBD (owner approval to create) |
+
+**Goal.** Remove the `massive` dependency and its fork source, and declare the libraries the
+clients use directly.
+
+**DESIGN sections implemented.** [§ 1 Purpose and scope](DESIGN.md#1-purpose-and-scope) (the
+runtime dependencies); [§ 20.1 Tooling configuration](DESIGN.md#201-tooling-configuration)
+(packaging, the entry point, mypy without a `massive` override).
+
+**Depends on.** PC1, PC2, PC3 (no code imports `massive` any more). **Parallel with.** P5.
+
+**Files.**
+- Modify: `pyproject.toml` (remove `massive>=2.9.0`, the `[tool.uv.sources]` table, and its
+  comment block; add floors for `urllib3` and `certifi`; raise the `websockets` floor to the
+  first release whose asyncio client reads proxies from the environment), `scripts/check.sh`
+  (remove the installed-`massive`-commit step and its offline message),
+  `.github/workflows/ci.yml` (remove the step that prints the `massive` commit and the build
+  job's fork override).
+- Create, delete: none.
+
+**Tasks.**
+- [ ] The dependency edits above, each floor checked against the code's use.
+- [ ] The `check.sh` and CI edits, which the removal needs: both read `massive`'s install record.
+- [ ] Confirm that a clean `uv sync --upgrade` resolves from PyPI alone.
+
+**Acceptance criteria.**
+- [ ] `git grep -n "massive-client-python\|deephaven-fixes\|tool.uv.sources" -- ':!plans'` is
+      empty.
+- [ ] `uv run python -c "import massive"` fails after a clean sync.
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs and the build job.
+
+**Verification.**
+```bash
+rm -rf .venv && uv sync --upgrade
+./scripts/check.sh
+uv build && uv run --isolated --with dist/*.whl python -c "import deephaven_massive"
+```
+
+**Pitfalls.** A `chore(deps):` PR changes declarations only; the `check.sh` and CI edits are
+here because they would break without `massive`, and nothing else rides along.
+
+**Out of scope.** Any library code.
+
+**Approval gates.** Opening the PR.
+
+---
+
 <a id="p3"></a>
 ## P3 — `feat: REST transport and tier detection`
 
@@ -661,81 +996,60 @@ DESIGN § 4.1 needs an owner decision first.
 | **Branch** | `feat/rest-transport` |
 | **Issue** | #14 |
 
-**Goal.** Put every REST dataset on the official SDK: `RESTClient` wiring, paginated results
-streamed into bounded Arrow batches, filter validation against a generated parameter table,
-403/429 mapping, host resolution from REST evidence, and the `poll()` verb with all three modes
-including reactive symbol tables. After P3, `Query.fetch()`, `Query.poll()`,
+**Goal.** Put every REST dataset on the library's own REST client (PC1) and the generated spec
+table (PC3): requests built from a `DatasetSpec`, pages decoded straight into bounded columnar
+Arrow batches, 403/429 handling, host resolution from REST evidence, and the `poll()` verb with
+all three modes including reactive symbol tables. After P3, `Query.fetch()`, `Query.poll()`,
 `HistoryQuery.history(source=REST)`, and the `fetch()` of the latest-queries work for any
-`DatasetSpec` that declares an SDK method.
+`DatasetSpec` that declares REST paths.
 
 **DESIGN sections implemented.** [§ 7 Query classes and verbs](DESIGN.md#7-query-classes-and-verbs)
-(`fetch`, `poll`, REST `history`); [§ 9 Filters](DESIGN.md#9-filters);
+(`fetch`, `poll`, REST `history`); [§ 9 Filters](DESIGN.md#9-filters) (`start`/`end` on the wire);
 [§ 13.1 Invariants](DESIGN.md#131-invariants) and [§ 13.2 Host decision](DESIGN.md#132-host-decision);
-[§ 13.4 REST](DESIGN.md#134-rest);
+[§ 13.4 REST](DESIGN.md#134-rest); the transport paragraph of
+[§ 19.1 The REST client](DESIGN.md#191-the-rest-client);
 [§ 14 Publishers, fan-out, and failure semantics](DESIGN.md#14-publishers-fan-out-and-failure-semantics)
 (the `poll()` publisher and `input_table` rules); [§ 17 Diagnostics](DESIGN.md#17-diagnostics)
 (REST rows in `connections()`, `RequestsPerCycle`);
 [§ 18 Concurrency model](DESIGN.md#18-concurrency-model) (poller thread,
 `ThreadPoolExecutor(max_concurrency)`).
 
-**Depends on.** P2; the fork series on `deephaven-fixes` (`BadResponse.status`,
-`raise_on_status`, #31, and the F6 methods). **Parallel with.** P4, P5 (disjoint files; P3 lands first if `_session.py`
-hunks overlap).
+**Depends on.** PC1, PC3, PC4. **Parallel with.** P4, P5 (disjoint files; P3 lands first if
+`_session.py` hunks overlap).
 
 **Files.**
-- Create: `src/deephaven_massive/_rest.py` (SDK client construction, `iter_rows`, `get_json`,
-  Arrow batching, error mapping, rate-limit WARNING once), `_hosts.py` (host resolution and the
+- Create: `src/deephaven_massive/_rest.py` (request building, columnar decoding into Arrow
+  batches, error handling, the rate-limit WARNING once), `_hosts.py` (host resolution and the
   `HostDecision` cache, per session, kept by the REST transport under its own lock), `_poll.py`
   (REPLACE/UPSERT/APPEND pollers, reactive symbol snapshot per cycle, fan-out executor),
-  `scripts/refresh_massive_catalog.py`, `tests/test_rest.py`, `tests/test_hosts.py`,
-  `tests/test_poll.py`, `tests/_fakes/rest.py` (the fake REST transport),
-  `tests/data/massive_docs_index.txt` (vendored for P7),
-  `tests/data/_rest/`, `tests/data/_hosts/` (snapshot fixtures per class and tier).
-- Modify: `tests/conftest.py` (one thin `fake_rest` fixture that builds the
-  `tests/_fakes/rest.py` transport), `_session.py` (fill the REST factory hook; `connections()`
-  REST rows), `_query.py`
-  (REST-backed verb bodies replace `NotImplementedError`), `_catalog.py` (the generated
-  `SDK_PARAMS` block), `tests/test_catalog.py` (the `SDK_PARAMS` parity test against the
-  installed SDK), `_domains/base.py` (REST dataset factory helper used by P6).
+  `tests/test_rest.py`, `tests/test_hosts.py`, `tests/test_poll.py`, `tests/data/_rest/`,
+  `tests/data/_hosts/` (snapshot fixtures per class and tier).
+- Modify: `_session.py` (fill the REST factory hook; the session's `RestClient` and its closer;
+  `connections()` REST rows), `_query.py` (REST-backed verb bodies replace
+  `NotImplementedError`), `_domains/base.py` (REST dataset factory helper used by P6).
 - Delete: none.
 
 **Tasks.**
-- [ ] `_rest.py`: build `massive.RESTClient(api_key, base=cfg.rest_base_url, retries=3,
-      connect_timeout=10, read_timeout=30, maxsize=16, pagination=True,
-      raise_on_status=False)` (DESIGN § 13.4, § 19.2); clear the SDK's stdout
-      handler on logger `RESTClient` (Appendix H §1 note). Public SDK `list_*`/`get_*` methods
-      are the only call path, including the fork's `list_funding_conditions` and
-      `get_daily_open_close_crypto` (DESIGN § 8.12); no private-call shim.
-- [ ] Convert models with `dataclasses.asdict`, flatten via `_schema.py`, build Arrow batches of
-      at most one SDK page; never hold more than one page of dicts (Appendix H §1 "bounded
-      memory"). Never pass one `params` dict to two threads (the SDK mutates it in place).
-- [ ] Error mapping from `BadResponse.status` (with `raise_on_status=False`, exhausted status
-      retries also raise `BadResponse`): 403 → `EntitlementError`; 429 →
-      `MassiveError("rate limited …")` with a one-time WARNING about Basic-plan limits. The
-      option covers status retries only: connection and read failures still raise urllib3's
-      `MaxRetryError`, `ProtocolError`, or `ReadTimeoutError`, which map to `MassiveError` naming
-      the host and the cause (tests for each).
-- [ ] Malformed JSON (owner decision): P3 relies on fork PR #31 (F5.3). A response body that is
-      not valid JSON raises `BadResponse` with `.status`, on a `get_*` call and on any page of a
-      `list_*` call, instead of returning `[]` or ending pagination early. P3 maps it to
-      `MassiveError` naming the host and the status, so a malformed response never becomes an
-      empty or truncated dataset (tests: a non-JSON body on a single call, on the first page,
-      and on a later page).
-- [ ] `scripts/refresh_massive_catalog.py`: regenerate the `SDK_PARAMS` block of
-      `_catalog.py` as `SDK_PARAMS[method] = {name: kind}` from
-      `inspect.signature(RESTClient.<method>)`, and vendor `tests/data/massive_docs_index.txt`
-      (llms.txt slugs and `Endpoint:` lines) for P7. A parity test in `tests/test_catalog.py`
-      asserts that the vendored table equals the installed SDK's signatures.
-- [ ] Filter validation at query construction: unknown key or wrong kind → `ValueError` naming
-      the valid keys; passing the dataset's time-axis pair through `filters` → `ValueError`;
-      `start`/`end` map to the pair in `DatasetSpec`.
+- [ ] `_rest.py`: one `RestClient` per session (PC1), built from `MassiveConfig`
+      (`rest_base_url`, `api_key`, `max_concurrency`) on first use and closed by `m.close()`
+      through a closer that holds the core weakly. Every request goes through it.
+- [ ] Build each request from the `DatasetSpec`: the path template with its path segments, the
+      symbol parameter (`SymbolParam`), the `start`/`end` wire pair, the validated `filters`
+      (mapped to wire names by `_catalog.py`, PC3), and the page size; `limit` stays the
+      total-row cap of `RestClient.pages`.
+- [ ] Decode each page straight to columns: for each wire path the dataset's schema names, one
+      Python list per column, timestamp units converted (`_timeunits.py`), one Arrow batch per
+      page. Never hold more than one page of rows; build no row objects.
+- [ ] Error handling per DESIGN § 13.4: the client's exceptions reach `fetch()` and `history()`
+      unchanged; the 429 WARNING about Basic-plan limits is logged once per session; in `poll()`,
+      `EntitlementError` fails the table through `publish_failure`.
 - [ ] `_hosts.py`: `resolve(asset_class, family) -> HostDecision` exactly per DESIGN § 13.2:
-      FMV fixed; `ws_hosts` pin; forex/crypto without a REST call; one evidence call
-      per class via public SDK methods with raw results; ordered timeframe fields excluding
+      FMV fixed; `ws_hosts` pin; forex/crypto without a REST call; one evidence call per class
+      through `RestClient.get` (raw rows); ordered timeframe fields excluding
       `underlying_asset`; DELAYED wins; the no-timeframe branches incl. the base-Business
-      WARNING ([DESIGN § 13.2](DESIGN.md#132-host-decision)) and futures `UNKNOWN`; HTTP 403 → `EntitlementError`; transport error
-      → nothing cached. Synchronous on the calling thread; the REST transport caches each
-      decision per session under its own leaf lock, released before the REST call.
+      WARNING and futures `UNKNOWN`; HTTP 403 → `EntitlementError`; transport error → nothing
+      cached. Synchronous on the calling thread; the REST transport caches each decision per
+      session under its own leaf lock, released before the REST call.
 - [ ] `_poll.py`: one thread per `poll()` table; `REPLACE` and `UPSERT` on a keyed
       `input_table` with static Arrow key tables for deletes (incl. empty cycles); `APPEND` on a
       `table_publisher`; reactive symbols read with `Table.snapshot()` on the poller thread, never
@@ -744,18 +1058,17 @@ hunks overlap).
       `publish_failure(EntitlementError)`.
 - [ ] `fetch()` on `StreamHistoryLatestQuery` (one request per symbol via the "last" endpoints;
       `ALL` → `ValueError` naming `snapshots()`); `fetch()` on `HistoryLatestQuery` (`/prev`).
-- [ ] REST `history()` paging with no `limit`; grouped-daily path for `ALL` + DAY.
-- [ ] Tests use a fake `RESTClient` transport (`tests/_fakes/rest.py`, handed to tests by the
-      `fake_rest` fixture) injected by monkeypatching `urllib3` at the
-      `PoolManager.request` boundary (so the SDK's own pagination and `Retry` run), with fixtures
-      in `tests/data/_rest/` shaped from SDK `from_dict`; assert exact path and query params for
-      each code path, `next_url` pagination with page-size cap, 403, 429, bad JSON, and all three
-      poll modes under the embedded JVM.
+- [ ] REST `history()` paging with no `limit`; grouped-daily path for `ALL` + DAY. This is the
+      REST transport that P5's `HistorySource.AUTO` hands off to (`core.rest_transport().history(...)`).
+- [ ] Tests against the `fake_rest` fixture (PC1), with fixtures in `tests/data/_rest/` shaped
+      from the spec's response examples and the documentation samples (never invented keys):
+      exact path and query for each code path, `next_url` paging with the page-size cap, 403,
+      429, bad JSON, and all three poll modes under the embedded JVM.
 - [ ] Free-threaded test: 16 threads calling `fetch()` on one session concurrently.
 
 **Acceptance criteria.**
-- [ ] No `urllib3` import in `src/`; every REST call goes through `massive.RESTClient`.
-- [ ] `grep -rn "_get(\|_paginate" src/` finds nothing: no private SDK call.
+- [ ] `urllib3` is imported only in `_restclient.py`; `_rest.py`, `_hosts.py`, and `_poll.py` make
+      every request through the session's `RestClient`.
 - [ ] Every host-decision branch in DESIGN § 13.2 has a fixture test naming it.
 - [ ] `poll(mode=REPLACE)` evicts keys absent from the latest cycle, including on an empty cycle.
 - [ ] A session that used this transport and was dropped without `close()` is collected when
@@ -768,26 +1081,26 @@ hunks overlap).
 ```bash
 ./scripts/check.sh
 uv run pytest tests/test_rest.py tests/test_hosts.py tests/test_poll.py tests/test_catalog.py -q
-uv run python scripts/refresh_massive_catalog.py --check    # generated block is current
+uv run python scripts/refresh_massive_spec.py --check    # generated table and locks are current
 PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_rest.py tests/test_poll.py -q
 ```
 
-**Pitfalls (Appendices E, F, H).** Hand-rolled urllib3 client with its own retry loop (session
-`_request_json`); `limit` used as page size (F H1: `/v3/reference/tickers` max 1000 → HTTP 400);
-envelope sniffing (`"converted" not in payload …`, F H4) — use the SDK's `result_key`;
-`_paginate(raw=True)` returns only the first page (H §1); `BadResponse` loses the HTTP status
-(H §1); ms epoch ints forwarded to `timestamp.gte` which expects ns (F M6);
-`datetime.isoformat()` placed in the aggs path (F M6); option seeding with N per-contract
-snapshot calls (F M7) — use `/v3/snapshot?ticker.any_of=` 250 per request; network I/O in a
-poller `__init__` (E M); `__PollId` written but never read (E M); a second `poll()` on the same
-query silently stopping the first (E M); "absence ⇒ delayed" applied to futures (v3 §19 M2).
+**Pitfalls (Appendices E, F, H).** A second HTTP path beside `RestClient` (the legacy session's
+`_request_json` had its own retry loop); `limit` used as page size (F H1:
+`/v3/reference/tickers` max 1000 → HTTP 400); envelope sniffing (`"converted" not in payload …`,
+F H4) — use the generated result key; ms epoch ints forwarded to `timestamp.gte`, which expects
+ns (F M6); `datetime.isoformat()` placed in the aggs path (F M6); option seeding with N
+per-contract snapshot calls (F M7) — use `/v3/snapshot?ticker.any_of=` 250 per request; network
+I/O in a poller `__init__` (E M); `__PollId` written but never read (E M); a second `poll()` on
+the same query silently stopping the first (E M); "absence ⇒ delayed" applied to futures (v3 §19
+M2).
 
-**Out of scope.** WebSocket (P4); S3 (P5); any `DatasetSpec` beyond the two or three used as
-test fixtures (P6); `HistorySource.AUTO` arbitration (P5, which owns `_flatfiles.py`; P3's
-`history()` handles only `source=REST`); the catalog coverage assertions (P7).
+**Out of scope.** The REST client itself (PC1); the generator (PC3); WebSocket (P4); S3 (P5);
+any `DatasetSpec` beyond the two or three used as test fixtures (P6); `HistorySource.AUTO`
+arbitration (P5, which owns `_flatfiles.py`; P3's `history()` handles only `source=REST`); the
+catalog coverage assertions (P7).
 
-**Approval gates.** Opening the PR. Running `scripts/refresh_massive_catalog.py` fetches docs
-from massive.com (read-only; no approval needed, note it in the PR).
+**Approval gates.** Opening the PR.
 
 **Follow-ups from the P2 review (PR #46).** `poll()` must handle a verb that races `close()`,
 as `SessionCore._claim` does for streams: a `poll()` that passed the verb guard just before
@@ -805,31 +1118,28 @@ the closed flag under `registry_lock` before starting it.
 | **Branch** | `feat/websocket-layer` |
 | **Issue** | #15 |
 
-**Goal.** Implement live streams on the forked `WebSocketClient(raw=True)`: one connection per
+**Goal.** Implement live streams on the library's own WebSocket client (PC2): one connection per
 URL, a reconcile loop with one in-flight step, acknowledgement parsing and watchdogs, the
 explicit-verdict re-resolve, per-stream publishers with shared-batch fan-out, the options cap
 with deferral, reactive watchlists, and the live diagnostics. After P4, every `StreamQuery` verb
 works for any `DatasetSpec` that declares a channel.
 
 **DESIGN sections implemented.**
-[§ 13.3 Connection and subscription protocol](DESIGN.md#133-connection-and-subscription-protocol);
+[§ 13.3 Connection and subscription protocol](DESIGN.md#133-connection-and-subscription-protocol)
+(the library's side; the client's side is PC2);
 [§ 14 Publishers, fan-out, and failure semantics](DESIGN.md#14-publishers-fan-out-and-failure-semantics);
 [§ 15 Options contract cap](DESIGN.md#15-options-contract-cap);
 [§ 17 Diagnostics](DESIGN.md#17-diagnostics) (connection and stream rows, `HeldResults`,
 `Deferred`, `State`); [§ 18 Concurrency model](DESIGN.md#18-concurrency-model) (WS client
 thread, flush thread, loop-confined state, lock order);
 [§ 6.1 How a live table is kept alive and released](DESIGN.md#61-how-a-live-table-is-kept-alive-and-released)
-(stream scope; `on_shutdown_callback` → ref-count decrement);
-[§ 19 SDK fork: fix list and responsibility split](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)
-(what the library relies on versus what it owns).
+(stream scope; `on_shutdown_callback` → ref-count decrement).
 
-**Depends on.** P2; the fork series on `deephaven-fixes` (the restructured F1 and F2, including
-`set_subscriptions`/`resubscribe`, the reconnect options, `max_connections_reached`, and
-`request_close`). **Parallel with.** P3, P5.
+**Depends on.** PC2, PC3 (the renamed `BARS` columns), PC4. **Parallel with.** P3, P5.
 
 **Files.**
 - Create: `src/deephaven_massive/_ws.py` (connection registry keyed by URL, single-flight
-  creation, client thread per connection running `WebSocketClient.connect`, reconcile loop, ack
+  creation, one `WsClient` per connection, the callbacks, reconcile loop, wildcard coverage, ack
   parser, watchdogs, verdict rule, the options contract cap, idle close after 30 s grace),
   `_stream.py` (per-stream publisher, blink table, and stream scope created by
   `StreamTransport.open_stream`; the session's registry from P2 already deduplicates streams
@@ -838,68 +1148,40 @@ thread, flush thread, loop-confined state, lock order);
   per channel per flush, `where_in` fan-out with cached filter tables, cap deferral),
   `_watchlist.py` (`listen(..., do_replay=True)` on the symbol table; diffs dispatched off the
   UG thread; `last_by().where_in(symbol_table, "Symbol")`), `tests/test_ws.py`,
-  `tests/test_stream.py`, `tests/test_watchlist.py`, `tests/_fakes/ws.py` (the fake WebSocket
-  server), `tests/data/_ws/` (status-frame fixtures per cluster: `connected`, `auth_success`,
-  `auth_failed`, `success subscribed to: …`, `error not authorized`, `max_connections`,
-  comma-list acks).
-- Modify: `tests/conftest.py` (one thin `fake_ws_server` fixture that builds the
-  `tests/_fakes/ws.py` server), `_session.py` (fill the WS factory hook;
-  `connections()`/`streams()` live rows), `_query.py` (stream verb bodies), `_domains/base.py`
-  (stream dataset factory helper).
+  `tests/test_stream.py`, `tests/test_watchlist.py`, `tests/data/_ws/` (status-frame fixtures
+  per cluster: `success subscribed to: …`, `error not authorized`, `max_connections` after
+  authentication, comma-list acks).
+- Modify: `tests/_fakes/ws.py` only if a scenario needs a new script (PC2 owns the module),
+  `_session.py` (fill the WS factory hook; `connections()`/`streams()` live rows), `_query.py`
+  (stream verb bodies), `_domains/base.py` (stream dataset factory helper).
 - Delete: none.
 
 **Tasks.**
-- [ ] `_ws.py`: construct `WebSocketClient(api_key, feed=host, market=path, raw=True,
-      max_reconnects=None, reconnect_backoff=cfg.reconnect_backoff,
-      max_reconnect_backoff=cfg.max_reconnect_backoff, reconnect_on_close=True,
-      raise_fatal_errors=True)` and run `client.connect(conn.on_frame, max_size=None)` on a
-      daemon client thread (DESIGN § 13.3, § 19.2; constructor kwargs such as `max_size` are
-      ignored by the SDK); clear the SDK's stdout handler on logger `WebSocketClient`.
-- [ ] Connection generations on the client's loop thread, no fork hook (DESIGN § 13.3,
-      mechanisms A–D); every connection-state writer runs on the client thread, and the flush
-      thread never touches the client. (A) `on_frame` compares `client.websocket` with the
-      generation's socket (a strong reference, never `id()`); on a new socket it increments the
-      generation, cancels the old watchdogs, clears the acknowledged set, starts a watchdog per
-      topic in S (the set last passed to `set_subscriptions`, not D) bound to the new socket,
-      sets `CONNECTED` (`WAITING_SLOT` if `max_connections_reached`), and only then processes the
-      frame's statuses. (B) Watchdogs are keyed to S: a topic added to D while a step is in
-      flight gets its watchdog when its step is sent; a topic that leaves D cancels its
-      watchdog; a firing watchdog cancels without escalating unless its topic is in S and D,
-      `client.websocket is sock`, and `sock.state` is `OPEN`, showing
-      `RECONNECTING` when `CLOSED` unless the connection already shows `WAITING_SLOT`. (D) One
-      `call_later` heartbeat every `ack_timeout` opens the generation of an `OPEN` socket that
-      has sent no frame for `ack_timeout` (a handshake stalled past `ack_timeout` opens it early,
-      harmlessly); on a `CLOSED` generation socket it cancels the watchdogs and shows
-      `WAITING_SLOT` when `max_connections_reached` is true, else `RECONNECTING` unless the
-      generation already shows `WAITING_SLOT`; it does the same, without watchdogs, for a
-      `CLOSED` `client.websocket` that never opened a generation (a refused attempt, also before
-      the first success). The thread wrapper cancels the heartbeat when `connect()` returns or
-      raises, and alone writes `FAILED`. Tests: a refused first attempt shows `WAITING_SLOT`;
-      a `max_connections` frame after the handshake keeps `WAITING_SLOT` when the socket closes;
-      acknowledgements that arrive in a new connection's first frame are kept; a reconnect that
-      acknowledges nothing reaches `NO_ACK`; a resend after an acknowledgement timeout advances
-      to `NO_ACK` instead of restarting; a topic released while its watchdog runs never calls
-      `resubscribe`; a topic added to D while a step is in flight, followed by a reconnect that
-      opens a generation before its step is sent, gets no watchdog until that step goes out and
-      never calls `resubscribe` early; an ordinary subscription change keeps the acknowledgements of unchanged
-      topics; repeated refused `max_connections` attempts log no `NO_ACK`; a silent `OPEN`
-      socket reaches `NO_ACK` through the heartbeat within 3 × `ack_timeout`.
-- [ ] A fatal handshake error fails the connection's streams through `publish_failure` with the
-      HTTP status and host, and the connection shows `FAILED`. Decode each raw frame once
-      (stdlib `json`, or `orjson` when importable, logged once at INFO); route `ev == "status"` frames to the connection's
-      status handler and data frames to per-channel queues.
-- [ ] Reconcile loop per DESIGN § 13.3: desired set from ref-counts minus deferred
-      contracts; one in-flight step; `set_subscriptions(desired)` (F1) for sends and
-      `resubscribe(topic)` for the one resend; ≤ 1000 parameters per frame; per-parameter
-      watchdog `ack_timeout` → one resend → `NO_ACK`
-      + ERROR + scheduled reconnect; `status error` naming a parameter fails exactly that
-      parameter's streams; unattributed `error` applies to the in-flight step; explicit-verdict
-      re-resolve only when `Recency=UNKNOWN`, every parameter of the step was refused, and the
-      host is not pinned, at most once per (class, family).
-- [ ] `auth_failed` → fail every stream on the path with `AuthenticationError`;
-      `max_connections` → `State=WAITING_SLOT`, streams alive, whether it arrives as a raw frame
-      after the handshake or is surfaced by the fork during the handshake (F2.6);
-      reconnect states.
+- [ ] `_ws.py`: one `WsClient` (PC2) per `wss://host/path`, created on the first stream for that
+      URL with `MassiveConfig`'s `reconnect_backoff` and `max_reconnect_backoff`, started on its
+      daemon thread. Wire `on_open`, `on_frame`, and `on_state` per DESIGN § 13.3; every
+      connection-state writer runs on the client's loop thread, and the flush thread never
+      touches the client.
+- [ ] Generations: `on_open` cancels the old generation's watchdogs, clears S and A, shows
+      `CONNECTED`, and reconciles, which re-sends the whole wire set W. Watchdogs are bound to
+      their generation; one that fires for a stale generation, or for a topic that left S or W,
+      is cancelled without escalating.
+- [ ] Decode each raw frame once (stdlib `json`, or `orjson` when importable, logged once at
+      INFO); route `ev == "status"` objects to the status handler and data objects to
+      per-channel queues.
+- [ ] Reconcile loop per DESIGN § 13.3: D from reference counts minus deferred contracts; W
+      without the explicit topics of a channel whose wildcard is in D; one in-flight step;
+      `client.unsubscribe` for removals and `client.subscribe` for additions (≤ 1,000 topics
+      per frame, chunked by the client); per-topic watchdog `ack_timeout` → one single-topic
+      re-send → `NO_ACK` + ERROR + `client.reconnect()`; `status error` naming a topic fails
+      exactly that topic's streams; unattributed `error` applies to the in-flight step;
+      explicit-verdict re-resolve only when `Recency=UNKNOWN`, every topic of the step was
+      refused, and the host is not pinned, at most once per (class, family).
+- [ ] `auth_failed` and fatal handshake errors (reported by the client as `FAILED`) fail every
+      stream on the connection through `publish_failure` (`AuthenticationError`, or a
+      `MassiveError` naming the HTTP status and host); `max_connections`, in the auth reply or
+      as a later status, shows `WAITING_SLOT`, streams alive; `RECONNECTING` with
+      `NextReconnectAt` from the client.
 - [ ] `_stream.py`: `open_stream(spec, request, channel, *, stream_id)` creates
       `table_publisher(name=f"massive.{dataset}#{stream_id}",
       col_defs=<schema>, on_shutdown_callback=…)` created in the stream's `LivenessScope` under
@@ -907,7 +1189,7 @@ thread, flush thread, loop-confined state, lock order);
       `registry_lock` and `loop.call_soon_threadsafe`; flush thread: drain → one Arrow batch →
       `to_table` once → per stream `add(batch)` or `add(batch.where_in(filter_table, "Symbol"))`;
       `on_flush_callback` unused; schema mismatch → `publish_failure` + ERROR.
-- [ ] Options cap: count parameters per `/options` connection; static over-cap → `ValueError`
+- [ ] Options cap: count topics per `/options` connection; static over-cap → `ValueError`
       at verb time; reactive input → sorted subscribe up to the cap, the rest `Deferred`,
       `State=RUNNING`, WARNING on each transition, promote on freed capacity.
 - [ ] `_watchlist.py`: listener computes adds/removes only; dispatches to a session worker;
@@ -916,17 +1198,21 @@ thread, flush thread, loop-confined state, lock order);
 - [ ] Library threads never take the UG lock while holding `registry_lock`; verbs on the UG
       thread raise `ValueError` (P2 helper).
 - [ ] Idle connection close in the connection loop (30 s grace), not the reaper.
-- [ ] Tests: the `fake_ws_server` fixture (`tests/_fakes/ws.py`) speaking the Massive protocol
-      (auth, status acks, data frames, server-initiated close, `max_connections` both in the
-      auth reply and after it); deterministic drives (`flush_now()`
-      style test seams on private objects, allowed under tests-only `SLF001`); every row of the
-      DESIGN § 13.3 protocol table has a test; the fan-out benchmark (non-gating, `-m benchmark`,
-      deselected by default) records rows/second for 1, 10, 100 streams; free-threaded stress:
-      16 threads × concurrent subscribe/unsubscribe/release against the fake server, run on
-      `3.14t`.
+- [ ] Tests against the `fake_ws_server` fixture (PC2); deterministic drives (`flush_now()`
+      style test seams on private objects, allowed under tests-only `SLF001`); every line of the
+      DESIGN § 13.3 protocol block has a test, among them: acknowledgements in a generation's
+      first frame are kept; a reconnect re-sends the whole wire set; a resend after an
+      acknowledgement timeout is for that topic alone and advances to `NO_ACK`; a topic
+      released while its watchdog runs is never re-sent; adding and removing a wildcard over
+      explicit topics sends the expected frames; a `max_connections` status after
+      authentication shows `WAITING_SLOT` once the socket closes; a server silent after
+      authentication reaches `NO_ACK` within 2 × `ack_timeout`. The fan-out benchmark
+      (non-gating, `-m benchmark`, deselected by default) records rows/second for 1, 10, 100
+      streams; free-threaded stress: 16 threads × concurrent subscribe/unsubscribe/release
+      against the fake server, run on `3.14t`.
 
 **Acceptance criteria.**
-- [ ] A refused parameter fails only its streams; other streams on the same connection keep
+- [ ] A refused topic fails only its streams; other streams on the same connection keep
       ticking (test).
 - [ ] A session that used this transport and was dropped without `close()` is collected when
       unreferenced (`gc.collect()`), the `garbage-collected without close()` WARNING is logged,
@@ -935,9 +1221,9 @@ thread, flush thread, loop-confined state, lock order);
 - [ ] Releasing the last result of a stream unsubscribes its topics; a derived table keeps the
       stream alive (test under the embedded JVM).
 - [ ] Deferred option contracts subscribe automatically when capacity frees (test).
-- [ ] `m.close()` returns promptly while a connection sits in a backoff sleep: it calls
-      `request_close()`, never joins the client thread without a timeout, and the thread is a
-      daemon (test with a long `reconnect_backoff` against the fake server).
+- [ ] `m.close()` returns promptly while a connection sits in a backoff wait: it calls
+      `WsClient.close()`, which interrupts the wait, and joins the daemon thread with a bounded
+      timeout (test with a long `reconnect_backoff` against the fake server).
 - [ ] No Python per-row work per stream in the flush path (benchmark shows per-stream cost
       independent of row count in Python; recorded in the PR).
 - [ ] `./scripts/check.sh` green; CI green on all five test jobs including the stress tests.
@@ -955,14 +1241,13 @@ C2; gone: `last_by` never seeds); streams never shut down (E C3); all decode/JVM
 asyncio thread (E H1); swallowed exceptions and unobserved `create_task` results (E H2); seed
 failure leaving a half-started stream (E H3); idle connections never closed (E H4); unlocked
 `_stream_registry` (E H5); `_emit_action` under a lock with a user hook (E M); tearing down the
-whole URL on an entitlement error (DESIGN § 14); SDK defects the fork now fixes — do not
-re-implement workarounds in the library (`scheduled_subs` races, pending-subs loss,
-`ConnectionClosedOK` return, immediate reconnects) — rely on F1/F2; `custom_json=orjson` is unsafe
-for WS sends (`dumps` returns bytes, H §3) — decode only; `websockets` default `max_size` 1 MiB
-(H §3).
+whole URL on an entitlement error (DESIGN § 14); prefix matching between topics (`A.*` must
+never touch `AM.X`) — topics are exact strings, and the only wildcard rule is the same-channel
+coverage of DESIGN § 13.3; `custom_json=orjson`-style encoding of outgoing frames (`dumps`
+returns bytes, H §3) — decode only.
 
-**Out of scope.** REST (P3); S3 (P5); channel definitions for datasets (P6; P4 uses `T`/`Q`
-fixtures only); live tests (P8).
+**Out of scope.** The WebSocket client itself (PC2); REST (P3); S3 (P5); channel definitions for
+datasets (P6; P4 uses `T`/`Q` fixtures only); live tests (P8).
 
 **Approval gates.** Opening the PR.
 
@@ -976,8 +1261,9 @@ for the implementer:
 - The blink table's shutdown callback must catch the `RuntimeError` that
   `loop.call_soon_threadsafe` raises once the connection's loop is closed, and only log it: the
   callback can run long after the connection ended.
-- The flush builds Arrow columns directly from the WebSocket key maps, not through
-  `Schema.to_arrow`, whose per-row dictionaries are too slow for the flush path.
+- The flush builds Arrow columns directly from the WebSocket key maps. (P2's
+  `Schema.to_arrow` built per-row dictionaries, too slow for the flush path; PC3 makes it
+  columnar, so the flush may use it if it fits.)
 - Forex and crypto frames carry `sym` in the wire spelling (`EUR/USD`, `BTC-USD`). Canonicalise
   it before the `where_in` fan-out, so it matches `canonical_view`'s `C:EURUSD` and `X:BTCUSD`.
 - The forex `C` channel sends `x` (the exchange id) as a quoted string; coerce it to `int`.
@@ -990,9 +1276,11 @@ for the implementer:
 schemas are the union across asset classes: P2 added the nullable columns `ReceivedTimestamp`
 (crypto `r`, ms), `SessionEndDate`, `Channel`, and `ReportSequence` to `TRADES` and `QUOTES`,
 a single `Exchange` and `BidTimestamp`/`AskTimestamp` to `QUOTES`, and `DollarVolume`,
-`SessionEndDate`, and `SettlementPrice` to `BARS`. This package maps the crypto `XT`/`XQ` keys
-(`x`, `r`) and the futures WebSocket keys (`dv` to `DollarVolume`) onto them, and declares the
-units of the new timestamp fields in the dataset specs.
+`SessionEndDate`, and `SettlementPrice` to `BARS`; PC3 adds `AccumulatedDollarVolume` (`dav`) to
+`BARS` and renames its WebSocket-only columns to `DayVwap` (`a`) and `AverageTradeSize` (`z`).
+This package maps the crypto `XT`/`XQ` keys (`x`, `r`) and the futures WebSocket keys (`dv` to
+`DollarVolume`, `dav` to `AccumulatedDollarVolume`) onto them, and declares the units of the new
+timestamp fields in the dataset specs.
 
 ---
 
@@ -1016,7 +1304,11 @@ flat-file columns of [§ 8 Namespace tree](DESIGN.md#8-namespace-tree) (as `Data
 fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
 `flat_file_symbol_threshold`, `flat_file_publish_cutoff`).
 
-**Depends on.** P2. **Parallel with.** P3, P4.
+**Depends on.** P2. **Parallel with.** P3, P4, PC1–PC4. The move to own clients (PC1–PC4)
+leaves P5 (open PR #51) unaffected, except that its REST hand-off,
+`core.rest_transport().history(...)`, now reaches P3's transport on the library's REST client
+instead of the SDK. PC3 rewrites `_catalog.py`; whichever of P5 and PC3 merges second rebases
+and keeps the other's change.
 
 **Files.**
 - Create: `src/deephaven_massive/_flatfiles.py`, `tests/test_flatfiles.py`,
@@ -1108,24 +1400,34 @@ path and params, normalized column values, and timestamp units.
 namespace's input forms); [§ 11 Enums and types](DESIGN.md#11-enums-and-types) (the
 namespace's parameters).
 
-**Depends on.** P3, P4, P5. **Parallel with.** every other P6 package. P6f and P6g use the
-fork's F6 methods (`get_daily_open_close_crypto`, `list_funding_conditions`), which
-`deephaven-fixes` already carries. No other P6 package depends on a fork fix.
+**Depends on.** P3, P4, P5 (and through them PC1–PC4). **Parallel with.** every other P6
+package. Every REST path, including `/fed/v1/funding-conditions` (P6g) and
+`/v1/open-close/crypto/{from}/{to}/{date}` (P6f), is an ordinary allow-listed path of the
+generated table.
 
-**Shared files.** Replace the P2 stub `src/deephaven_massive/_domains/<domain>.py`, and create
-or extend `tests/_domains/test_<domain>.py` and `tests/data/<domain>/*.json` (plus `*.csv` for
-flat-file datasets). Nothing else, with the single exception noted for P6g. If a shared module
+**Shared files.** Replace the P2 stub `src/deephaven_massive/_domains/<domain>.py`, append the
+domain's entries to its name lock `src/deephaven_massive/_names/<domain>.json` (by running
+`scripts/refresh_massive_spec.py` offline; never by hand), and create or extend
+`tests/_domains/test_<domain>.py` and `tests/data/<domain>/*.json` (plus `*.csv` for flat-file
+datasets). Nothing else, with the single exception noted for P6g. If a shared module
 needs a change, land it first in a separate `refactor:` PR.
 
 **Shared tasks (per dataset).**
-- [ ] `DatasetSpec` with: name (`"<ns>.<dataset>"`), query class, SDK method name(s) and path
-      template(s), WS channel(s) and family, flat-file prefix(es) and documented headers, the
-      per-transport key maps for tick schemas (WS / SDK model / CSV, explicit, no fallback
-      chains), schema overrides (wrong SDK hints, dtype narrowing), timestamp units per
-      `(transport, field)`, `start`/`end` axis pair, default `PollMode`, page size.
+- [ ] `DatasetSpec` with: name (`"<ns>.<dataset>"`), query class, REST path template(s) from
+      the allow-list, WS channel(s) and family, flat-file prefix(es) and documented headers, the
+      per-transport key maps for tick schemas (WS key / REST wire key / CSV header, explicit, no
+      fallback chains), its primary time key and fan-out key where the naming rule needs them,
+      schema overrides (spec types that do not match the data, dtype narrowing), timestamp
+      units per `(transport, field)`, the `start`/`end` wire parameter pair, default
+      `PollMode`, page size.
+- [ ] Run `uv run python scripts/refresh_massive_spec.py` (offline). With the snapshot unchanged
+      it leaves `_restspec.py` as it is and appends the domain's datasets to
+      `_names/<domain>.json`; review every new column name in the lock diff. If the gate stops
+      on an unknown short key or a collision, the lexicon in `_specgen.py` needs a line: land it
+      first in a separate PR (DESIGN § 19.3).
 - [ ] Factory method on the namespace class with the exact DESIGN § 8 signature and a Google
       docstring stating the transports, the `limit` total-row semantics, and `ALL` behaviour.
-- [ ] Fixture shaped from the SDK model's `from_dict` and the docs sample (not invented keys);
+- [ ] Fixture shaped from the spec's response example and the docs sample (not invented keys);
       test asserts the exact request path and params, the normalized PascalCase column values
       for every column the fixture supplies, the `Instant` of each timestamp column, and
       `Symbol`/`Underlying` per DESIGN § 10.
@@ -1144,7 +1446,10 @@ needs a change, land it first in a separate `refactor:` PR.
 - [ ] Every row of the namespace's table in DESIGN § 8 has a `DatasetSpec` and a test module
       section named after it.
 - [ ] `tests/test_timeunits.py` (P2) passes with the new specs: every timestamp-like field of
-      every registered SDK model and flat-file header has a unit.
+      every REST field the dataset uses, every WebSocket key, and every flat-file header has a
+      unit, and every unit-tag conflict is listed (DESIGN § 12).
+- [ ] The name-lock completeness and compatibility tests in `tests/test_catalog.py` pass with the
+      domain's new entries (DESIGN § 19.3).
 - [ ] No fallback chains (`_first_present`, `row.get("a") or row.get("b")`) in the module.
 - [ ] `./scripts/check.sh` green; CI green on all five test jobs.
 
@@ -1170,11 +1475,12 @@ lines (F H3) — one name per dataset, no aliases; Benzinga transcripts never ex
 
 **Shared approval gates.** Opening the PR.
 
-**Follow-ups from the P2 review (PR #46): SDK hint overrides.** The packages that declare these
-datasets add `ColumnOverride`s, each with a test, for SDK hints that do not match the data:
-`OptionsContract.correction` is hinted `str` but carries an integer (P6b); the snapshot
-`LastQuoteAskSize` and `LastQuoteBidSize` columns are sizes, so `double` (P6a, P6g); and every
-`*Exchange` and `*Tape` column is an `int` id (DESIGN § 11), whatever its hint. The futures and
+**Follow-ups from the P2 review (PR #46): type overrides.** The packages that declare these
+datasets add `ColumnOverride`s, each with a test, where the generated type does not match the
+data or the design: the options contract `correction` carries an integer, whatever the spec says
+(P6b; the SDK hinted `str`); the snapshot `LastQuoteAskSize` and `LastQuoteBidSize` columns are
+sizes, so `double` (P6a, P6g); and every `*Exchange` and `*Tape` column is an `int` id
+(DESIGN § 11), whatever its spec type. The futures and
 crypto packages (P6c, P6f) map their REST and flat-file fields onto the shared columns P2 added
 (see P4) and declare their timestamp units.
 
@@ -1188,7 +1494,7 @@ per namespace; splitting it would need an owner decision). Datasets: `trades`, `
 `short_volume`, `share_float`, `financials.{balance_sheets,income_statements,
 cash_flow_statements,ratios}(timeframe: Timeframe)`, `filings.{index,sections_10k,text_8k,
 disclosures_8k,risk_factors,institutional_holdings,insider_holdings,insider_transactions,
-risk_factor_taxonomy,disclosure_taxonomy}`. Filings paths are the SDK's
+risk_factor_taxonomy,disclosure_taxonomy}`. Filings paths are the spec's
 `/stocks/filings/vX/{13-F,form-3,form-4}`, `/stocks/filings/8-K/vX/disclosures`,
 `/stocks/taxonomies/vX/*`.
 
@@ -1220,13 +1526,13 @@ DESIGN [§ 8.5 `m.forex`](DESIGN.md#85-mforex). Owns `_domains/forex.py`. Datase
 (latest via `/v1/last_quote/currencies`, unit UNVERIFIED → ms with the `[1990, 2100]` guard),
 `bars` (`CAS`/`CA`; grouped `…/fx/{date}`), `fmv`, `snapshots` (`ALL` = all pairs), `movers`,
 `conversion(from_currency, to_currency, amount, precision)`. Pair forms `EUR/USD` ↔
-`C:EURUSD`. Forex has no daily open-close dataset, so P6e has no dependency on F6.
+`C:EURUSD`. Forex has no daily open-close dataset.
 
 ### P6f — `feat: crypto datasets` — branch `feat/crypto-datasets` — Issue: #22
 DESIGN [§ 8.6 `m.crypto`](DESIGN.md#86-mcrypto). Owns `_domains/crypto.py`. Datasets: `trades` (latest via `/v1/last/crypto`, unit UNVERIFIED),
 `quotes` (stream only), `bars` (`XAS`/`XA`; grouped), `fmv`, `snapshots`, `movers`,
-`daily_open_close` (`/v1/open-close/crypto/{from}/{to}/{date}` via the fork's
-`get_daily_open_close_crypto`; `extra_params` declared in the spec). Pair forms `BTC-USD` ↔ `X:BTCUSD`.
+`daily_open_close` (`/v1/open-close/crypto/{from}/{to}/{date}`, the pair filling `{from}` and
+`{to}`). Pair forms `BTC-USD` ↔ `X:BTCUSD`.
 
 ### P6g — `feat: reference, indicators, economy, and unified snapshots` — branch `feat/reference-datasets` — Issue: #23
 DESIGN [§ 8.7 `m.reference`](DESIGN.md#87-mreference), [§ 8.8 `m.indicators`](DESIGN.md#88-mindicators),
@@ -1237,13 +1543,13 @@ ConditionDataType, sip: Sip)`, `market_status` (one row; nested maps flattened),
 `market_holidays`), `_domains/indicators.py` (`sma`, `ema`, `rsi`, `macd`; `series_type:
 SeriesType`; symbol prefix selects the class; axis `timestamp` ms), and `_domains/economy.py`
 (`treasury_yields`, `inflation`, `inflation_expectations`, `labor_market`,
-`funding_conditions` via the fork's `list_funding_conditions`). It also fills
+`funding_conditions`, `/fed/v1/funding-conditions`). It also fills
 `MassiveSession.snapshots()` in `_session.py` (`m.snapshots(symbols, …F)`: `/v3/snapshot`, 250 per request, mixed classes,
 per-ticker `NOT_ENTITLED` rows keep `Error`/`Message` and log once) and adds that dataset's
 record, `reference.snapshots` (`asset_class=None`), to `_domains/reference.py` (DESIGN § 8.11),
 not `_catalog.py`; its tests for the unified snapshot go in `tests/test_session.py`. P6g is
 the only domain package that edits `_session.py`. `cusip` is typed `str` in
-the library regardless of the SDK hint.
+the library, as the spec types it.
 
 ### P6h — `feat: partner datasets` — branch `feat/partner-datasets` — Issue: #24
 DESIGN [§ 8.10 `m.partners`](DESIGN.md#810-mpartners). Owns `_domains/partners.py`, which
@@ -1267,8 +1573,8 @@ holds the four vendor classes (`m.partners.benzinga`, `.etf_global`, `.tmx`, `.f
 | **Branch** | `chore/finish-rework` |
 | **Issue** | #25 |
 
-**Goal.** Close the rework: prove 100% Massive coverage against the SDK and the docs with
-reviewed exclusions, delete the legacy code and every temporary exclusion, run the README
+**Goal.** Close the rework: prove 100% Massive coverage against the vendored spec and the docs
+with reviewed exclusions, delete the legacy code and every temporary exclusion, run the README
 examples end to end against fake servers, rewrite `README.md`, move the durable content of
 `plans/rework/` into `README.md` and `AGENTS.md`, and delete `plans/rework/`.
 
@@ -1283,44 +1589,47 @@ material.
 **Files.**
 - Create: `tests/test_readme.py` (the README example tests; an approved non-mirrored file
   that mirrors `README.md`, DESIGN § 4.2).
-- Modify: `tests/test_catalog.py` (add the coverage assertions and exclusion lists to the P2/P3
-  unit tests), `tests/data/massive_docs_index.txt` (refreshed), `README.md` (rewrite, ≈250–350
-  lines, O'Reilly style), `AGENTS.md` (absorb the durable rules from this file:
-  parallelism/ownership conventions, fork workflow, legacy-free statement), `pyproject.toml`,
+- Modify: `tests/test_catalog.py` (add the coverage assertions and exclusion lists to the P2
+  and PC3 unit tests), `scripts/massive_spec/` and `_restspec.py` (refreshed, if Massive has
+  changed), `README.md` (rewrite, ≈250–350 lines, O'Reilly style), `AGENTS.md` (absorb the
+  durable rules from this file: parallelism/ownership conventions, the spec refresh flow,
+  legacy-free statement), `pyproject.toml`,
   `tests/conftest.py`, `tests/test_layout.py` (remove every `LEGACY-EXCLUSION`),
   `.github/workflows/ci.yml` only if a job name changed.
 - Delete: `src/deephaven_massive/engine/`, `domains/`, `schemas/`, `tests/legacy/`,
   `plans/rework/` (both files).
 
 **Tasks.**
-- [ ] Coverage assertions in `tests/test_catalog.py` per Appendix B §3: (A) every public
-      `RESTClient` method's path ∈ catalog ∪ `SDK_EXCLUSIONS`; (B) every documented `GET` path
-      in the vendored docs index ∈ catalog ∪ `DOCS_EXCLUSIONS`, and every catalog path ∈ docs ∪
-      SDK; (C) every `EventType × Market` ∈ catalog ∪ `WS_EXCLUSIONS`; (D) flat-file prefixes ==
-      documented set and schema columns ⊆ documented headers. Exclusion lists carry `# reason:`
+- [ ] Coverage assertions in `tests/test_catalog.py` per Appendix B §3, all against the
+      vendored sources in `scripts/massive_spec/`: (A) every path of the OpenAPI snapshot ∈
+      catalog ∪ `SPEC_EXCLUSIONS`; (B) every documented `GET` path in `llms.txt` ∈ catalog ∪
+      `DOCS_EXCLUSIONS`, and every catalog path ∈ the allow-list; (C) every channel of
+      `websocket.json` ∈ catalog ∪ `WS_EXCLUSIONS`; (D) flat-file prefixes == documented set
+      and schema columns ⊆ documented headers. Exclusion lists carry `# reason:`
       per entry, exactly the DESIGN § 8.12 list (deprecated: `/v3/reference/{dividends,splits}`,
       `/benzinga/v1/news`, `/vX/reference/financials`; undocumented: `/v1/summaries`, crypto
       `/book`, `XL2`, `LV`, Launchpad, WS `/futures/{venue}`, spec-only paths; superseded:
       `/v3/snapshot/options/{u}/{o}`; legacy `/v1/historic/*`, `/v2/ticks/*`).
-- [ ] Run `scripts/refresh_massive_catalog.py` and commit the refreshed index and params.
+- [ ] Run `scripts/refresh_massive_spec.py --fetch`; if Massive has changed, review and commit
+      the refreshed snapshot, `_restspec.py`, and locks (DESIGN § 19.3).
 - [ ] Delete the legacy subpackages and `tests/legacy/`; remove every `LEGACY-EXCLUSION`;
       `grep -rn LEGACY-EXCLUSION .` is empty; `tests/test_layout.py` runs with no skip list.
 - [ ] `tests/test_readme.py`: each DESIGN § 21 snippet runs in the embedded JVM against the
       `fake_rest` and `fake_ws_server` fixtures (examples 1–6); assertions on table columns and the
       `connections()` rows the comments claim.
-- [ ] `README.md` rewrite: install (git source until PyPI), configuration table, quickstart,
+- [ ] `README.md` rewrite: install (from the repository until the owner publishes to PyPI),
+      a line saying the library uses Massive's documented REST and WebSocket APIs and its
+      published OpenAPI spec, configuration table, quickstart,
       verbs and table shapes, symbols and `ALL`, host resolution summary, namespace index (one
       row per dataset: transports, query class), lifecycle (`release`, `close`, the console
       caveats), diagnostics, development (`check.sh`, hooks, layout rule), with no marketing
       prose and no counts.
 - [ ] `AGENTS.md`: fold in the durable parts of this file; point "where to look" at modules.
-- [ ] Draft the "move to PyPI once fork fixes are upstream" issue (lists the 20 upstream PRs
-      and the `[tool.uv.sources]` removal). **Owner approval before creating.**
 - [ ] Delete `plans/rework/`.
 
 **Acceptance criteria.**
-- [ ] `tests/test_catalog.py` passes; adding a fake SDK method without a catalog entry fails it
-      (negative test included).
+- [ ] `tests/test_catalog.py` passes; adding a path to a copy of the snapshot without a catalog
+      entry or an exclusion fails it (negative test included).
 - [ ] `git grep -n "engine/\|domains/\|schemas/\|LEGACY-EXCLUSION\|plans/rework"` returns only
       `_domains/` references.
 - [ ] All six README examples execute as tests in `tests/test_readme.py`.
@@ -1330,7 +1639,7 @@ material.
 ```bash
 ./scripts/check.sh
 uv run pytest tests/test_catalog.py tests/test_layout.py tests/test_readme.py -q
-uv run python scripts/refresh_massive_catalog.py --check
+uv run python scripts/refresh_massive_spec.py --check
 git grep -n "LEGACY-EXCLUSION\|plans/rework" ; test $? -eq 1
 uv build && uv run --isolated --with dist/*.whl python -c "import deephaven_massive as dm; print(dm.__version__)"
 ```
@@ -1339,9 +1648,9 @@ uv build && uv run --isolated --with dist/*.whl python -c "import deephaven_mass
 memory for S3, `pip install` of an unpublished package); reversed alias documentation; AGENTS.md
 counts and the "commit messages are enforced" claim (the action lints PR titles only).
 
-**Out of scope.** Live tests (P8); PyPI publication; any new dataset.
+**Out of scope.** Live tests (P8); PyPI publication (an owner decision); any new dataset.
 
-**Approval gates.** Opening the PR; creating the PyPI tracking issue.
+**Approval gates.** Opening the PR.
 
 ---
 
@@ -1404,137 +1713,34 @@ current fixture, and note the date of the snapshot in the PR.
 
 ---
 
-<a id="fork-usage"></a>
-## Using the fork: always the latest `deephaven-fixes`
+<a id="upstream"></a>
+## Upstream SDK issues (optional, off the 1.0 path)
 
-This repository always uses the latest `deephaven-fixes` commit
-([DESIGN § 19](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)).
+The library no longer uses Massive's Python SDK or the fork `chipkent/massive-client-python`
+([DESIGN § 22](DESIGN.md#22-decisions), decisions 1 and 25). Real bugs found in
+`massive-com/client-python` may be reported upstream as goodwill. This is never on the critical
+path and never blocks a package.
 
-- **Source.** `[tool.uv.sources] massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }`,
-  with `[project]` keeping `massive>=2.9.0`. The fork builds as version `0.0.0` (its packaging
-  carries no release version), so nothing may check the installed `massive` version.
-- **No committed lock.** `uv.lock` is git-ignored: users never install from it, and a committed
-  lock would freeze the fork at one commit.
-- **Every run resolves afresh.** `scripts/check.sh` (both tiers, and so the commit and pre-push
-  hooks) starts with `uv sync --upgrade` and prints the installed `massive` commit; offline, a
-  local run warns and keeps what is installed, and in CI a failed resolve is an error. Every CI
-  job resolves afresh, and the build job installs the built wheel next to the branch head.
-- **A change to the fork** lands in the fork series (see [Fork workflow](#fork-workflow)); the
-  next sync here picks it up. When the change alters the fork's API or the series' shape, a
-  `docs:` PR updates DESIGN § 19 and the passages that describe the fork's API, and the
-  `SDK_PARAMS` block of `_catalog.py` is regenerated if SDK signatures changed.
-
----
-<a id="fork-workflow"></a>
-## Fork workflow (`github.com/chipkent/massive-client-python`)
-
-The fork exists to fix the SDK rather than work around it ([DESIGN § 19](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)).
-Everything this repository needs from the SDK goes upstream, and the fork carries nothing else.
-
-- **One track.** `deephaven-fixes` is exactly the merge of the pull requests submitted upstream.
-  No fork-only feature exists, and no package here may develop against code that is not in a
-  submitted pull request.
-- **Zero breaking changes.** Upstream defaults and the public API stay as they are; new behavior
-  is opt-in through new keyword arguments. Genuine bugs are fixed unconditionally, and type
-  hints that are wrong at run time may be corrected.
-- **Pull requests.** Each fix is a small, focused draft pull request in the fork against
-  `master`, previewing the exact text of the upstream pull request. Each is paired with an
-  upstream issue on submission; until then its body holds a `Fixes #<issue>` placeholder, because
-  the fork has issues disabled.
-  Pull requests are split only by related content. One that truly depends on another says
-  "Builds on #N" and bases its branch on that pull request's branch. Branches are named
-  `fix/...`, `feat/...`, `test/...`, or `ci/...`; titles and commits are plain Conventional
-  Commits with no scope and no AI trailer, and the text never mentions Deephaven or the F IDs.
-  The series is submitted upstream all at once, after owner review; opening an upstream pull
-  request needs owner approval each time. Agents never merge a pull request.
-- **`master`** tracks upstream `massive-com/client-python` `master` and is never edited.
-- **`deephaven-fixes`** is the branch this repository tracks, always at its latest commit
-  ([Using the fork](#fork-usage)). To change it, build an integration branch
-  `integrate/series-<date>` from `origin/master`, merge every pull request head in dependency
-  order with `--no-ff` (message `Merge #N <title>`), and wait for every CI job on it, including `3.14t`. Then make one commit on
-  top of `origin/deephaven-fixes` whose tree is the integration tree and whose second parent is
-  the integration head, check that `git diff` between the two is empty, and push it as a fast
-  forward. `deephaven-fixes` is **never reset, rebased, or force-pushed**, because a rewritten
-  history would break the fork's own history. A ruleset blocks
-  deletion, force pushes, and pushes without the required status checks.
-- **Upstream merges.** When upstream merges a pull request or moves `master`, rebuild the
-  integration branch on the new `master` from the pull requests still open, and move
-  `deephaven-fixes` as above. This repository picks up the new head at its next sync.
-- **Never in the fork:** connection sharing, ref-counting, publishers, failure semantics,
-  reactive watchlists, tier detection, the options cap, schema mapping, S3 (DESIGN § 19,
-  "stays in this library").
-- **Gate in the fork.** On Python 3.10 and 3.14 in poetry environments: `make test`,
-  `CI=1 make style`, and `make static`. In CI, the upstream matrix (3.10 to 3.14 on Ubuntu and
-  Windows), lint, and the free-threaded `3.14t` job with `PYTHON_GIL=0`. The workflows run on
-  pull requests, so CI on a branch needs a draft pull request.
+- **Issues only, never pull requests.** No fork branch, no draft pull request, no integration
+  branch.
+- **The owner reviews the text first.** An agent drafts the issue (a minimal reproduction against
+  the released package, the expected and the actual behavior, no mention of Deephaven) and stops
+  at the gate; posting needs the owner's approval each time.
+- **Candidates**, each reproduced against the latest release before drafting: a wildcard
+  subscribe that drops other topics sharing its prefix (`A.*` removes `AM.X`); a clean server
+  close that ends `connect()` for good; subscription changes made while disconnected being lost
+  or resurrected; instant reconnects; a `datetime` parameter converted to nanoseconds through a
+  float; invalid JSON or a missing `results` key returned as an empty list.
 
 ---
 
-<a id="f0"></a>
-## F0 — fork setup
+<a id="archive-fork"></a>
+## Final step — archive the fork
 
-| | |
-|---|---|
-| **Branch** | none (repository setup) |
-| **Issue** | #29 |
-
-**Status.** Done. The fork exists, `deephaven-fixes` exists and is protected by a ruleset
-against deletion and force pushes, and P1 tracks it by branch.
-
----
-
-<a id="f1-f7"></a>
-## F1–F8 — the fork series
-
-The series is the 20 draft pull requests #4, #7 to #24, and #31 in the fork. DESIGN
-[§ 19.1](DESIGN.md#191-the-series) describes what each one adds; the F IDs group them by
-concern and keep the item numbers (F2.3, F2.6, …) that DESIGN and the packages below cite.
-
-| Topic | Fork PRs | Builds on | Who here depends on it |
-|---|---|---|---|
-| F1 WebSocket subscriptions | #18 wildcard; #20 thread-safe subscribe; #21 prompt sends; #22 `set_subscriptions`/`resubscribe` | #20 on #19; #21 on #20; #22 on #21 | P4 |
-| F2 WebSocket reconnects | #19 keep pending subscriptions; #23 opt-in reconnect options and `max_connections_reached`; #24 `request_close` | #23 on #19; #24 on #23 | P4 |
-| F3 WebSocket logging | #4 | — | none (log quality) |
-| F4 typing | #14 hint fixes; #15 model constructors; #16 `py.typed`; #17 raw overloads | #16 on #14 and #15; #17 on #7 and #16 | every SDK call under `mypy --strict` |
-| F5 REST errors | #12 `BadResponse.status`; #13 `raise_on_status`; #31 non-JSON responses raise `BadResponse` | #13 and #31 on #12 | P3 |
-| F6 REST endpoints | #7 funding conditions, crypto daily open-close | — | P6f, P6g |
-| F7 CI and tests | #9 pook isolation; #10 Python 3.12–3.14; #11 free-threaded 3.14t | #11 on #9 | the fork's gate |
-| F8 REST options | #8 `options` no longer sent as a query parameter | — | P3 |
-
-The merge order is #4, #7, #8, #9, #10, #11, #12, #13, #31, #14, #15, #16, #17, #18, #19,
-#20, #21, #22, #23, #24, and every merge is clean.
-
-**Reconnect options.** #23 adds six keyword arguments whose names the owner has approved, all
-defaulting to upstream's behavior: `reconnect_backoff=0.0`, `max_reconnect_backoff=120.0`,
-`reconnect_on_close=False`, `max_consecutive_failures=None`, `stable_uptime=60.0`, and
-`raise_fatal_errors=False`. The owner's F2 rules hold: the failure count and the backoff reset
-only after `stable_uptime` of uptime, never on `auth_success`, and at the cap the wait is drawn
-from `[max(reconnect_backoff, cap / 1.2), cap]`. P4 passes `max_reconnects=None`,
-`reconnect_backoff=cfg.reconnect_backoff`, `max_reconnect_backoff=cfg.max_reconnect_backoff`
-(both from `MassiveConfig`, DESIGN § 5), `reconnect_on_close=True`, and
-`raise_fatal_errors=True`, and leaves `max_consecutive_failures` and `stable_uptime` at their
-defaults (DESIGN [§ 19.2](DESIGN.md#192-how-this-library-uses-the-fork)).
-
-**Owner decisions on fork usage.**
-
-- `raise_fatal_errors=True`: a fatal handshake error such as HTTP 400 or 404 fails the
-  connection's streams through `publish_failure` with the HTTP status and host, and
-  `m.connections()` shows `FAILED` (P4).
-- `raise_on_status=False`: P3 passes it, so exhausted status retries raise `BadResponse` with
-  `.status`; 403 maps to `EntitlementError` and 429 to `MassiveError("rate limited …")`.
-  Connection and read failures still raise urllib3 exceptions, which P3 maps to `MassiveError`
-  (DESIGN § 13.4).
-- Retry timing is documented, with no fork change: `reconnect_backoff` applies after an opened
-  connection closes, including a `max_connections` refusal; a handshake that fails is retried
-  on websockets' own schedule (a random first delay of up to 5 s, then 3.1 s growing by a
-  factor of 1.618 to 90 s).
-
-**Changing the series.** A fix to a pull request goes on its own branch (and is merged forward
-into the branches that build on it), then the integration branch is rebuilt and
-`deephaven-fixes` moved as described in [Fork workflow](#fork-workflow). Every pull request ships
-with a unittest in upstream's style (pook fixtures for REST, the existing
-`test_websocket/mock_server.py` extended in place for WebSocket), and its CI is green on the
-draft pull request before it joins the series.
+After P8, once the project is fully shipped (the owner decides when), the owner archives
+`github.com/chipkent/massive-client-python`. Nothing in this repository depends on it from PC4
+on, so archiving changes no build. This is an owner step; no
+agent archives a repository.
 
 ---
 
@@ -1551,8 +1757,11 @@ The rework is complete when all of the following hold on `main`:
 - [ ] `grep -rn "Literal\[\"" src/deephaven_massive/*.py src/deephaven_massive/_domains` finds no
       public string categorical.
 - [ ] `plans/rework/` no longer exists; `AGENTS.md` and `README.md` carry the durable content.
+- [ ] No dependency on `massive` and no `[tool.uv.sources]`; `git grep -nE "^(from|import) massive" -- src tests`
+      finds nothing; `scripts/refresh_massive_spec.py --check` is clean.
 - [ ] After merge, the owner runs P8 with a key and the UNVERIFIED notes are retired by a
       `docs:` PR.
+- [ ] After shipping, the owner archives the fork ([Final step](#archive-fork)).
 
 ---
 
@@ -1573,5 +1782,8 @@ file and `DESIGN.md`; this list records them in one place.
 4. **Embedded test server port:** an implementer's technical choice in P1, not an owner
    decision: `deephaven_server.Server(port=0)` if supported, else fixed port `10099` with a
    comment.
-5. **F2.6:** in scope. It is part of fork PR #23 (the `max_connections_reached` attribute), and
-   P4 relies on it through `deephaven-fixes`.
+5. **Own clients, no SDK** (2026-10-26; replaces the fork plan and its F2.6 decision). The
+   library has its own REST and WebSocket clients and generates its REST parameters and columns
+   from a pinned OpenAPI snapshot; PC1–PC4 build that ahead of P3 and P4. The fork is no longer
+   used and is archived after shipping; upstream SDK bugs may be filed as issues only, after
+   owner review (DESIGN § 22, decisions 1, 2, and 22 to 25).

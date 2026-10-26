@@ -23,8 +23,16 @@ Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` u
 environment, and the Claude Code hook blocks them.
 
 `uv.lock` is not committed. Both `check.sh` tiers start with `uv sync --upgrade`, so every run
-uses the newest versions, including the latest `deephaven-fixes` commit of the SDK fork, and
-prints that commit. Offline, a local run warns and keeps what is installed; CI fails instead.
+uses the newest versions. Offline, a local run warns and keeps what is installed; CI fails
+instead.
+
+The library does not build on Massive's Python SDK (`massive`). It has its own REST and
+WebSocket clients, and its REST parameters and columns are generated from a vendored snapshot of
+Massive's OpenAPI spec (`DESIGN.md` § 19); until the `PLAN.md` packages PC1–PC4 land, the old
+dependency is still installed. Never add an import of `massive`. Never edit a generated file by
+hand; regenerate it with `scripts/refresh_massive_spec.py`. Column names come from the
+append-only name lock: never change or remove a shipped name without an owner-approved
+`BREAKING_RENAMES` entry.
 
 ## Hard rules
 
@@ -63,8 +71,7 @@ prints that commit. Offline, a local run warns and keeps what is installed; CI f
 11. **Docstrings meet the documentation standard below.** A change to a public signature,
     default, or table semantics updates `DESIGN.md` first (owner decision).
 12. **Dependencies** (the declarations in `pyproject.toml`) change only in dedicated
-    `chore(deps):` PRs. `uv.lock` is not committed: every sync resolves the newest versions,
-    including the latest `deephaven-fixes` commit of the SDK fork.
+    `chore(deps):` PRs. `uv.lock` is not committed: every sync resolves the newest versions.
 
 ## Documentation standard
 
@@ -150,7 +157,7 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | Hosts, connections, subscriptions | `DESIGN.md` § 13 |
 | Publishers and fan-out | `DESIGN.md` § 14 |
 | Threads and locks | `DESIGN.md` § 18 |
-| SDK fork (`chipkent/massive-client-python`) | `DESIGN.md` § 19 |
+| REST and WebSocket clients, the spec snapshot, the name lock | `DESIGN.md` § 19 |
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
 | Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
 | Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `tests/legacy/`; every exclusion of it carries a grep-able `LEGACY-EXCLUSION` comment |
