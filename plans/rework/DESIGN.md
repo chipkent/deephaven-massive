@@ -195,7 +195,8 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 | `_stream.py` | Streams, per-stream publishers, the per-connection flush thread, shared-batch fan-out ([section 14](#14-publishers-fan-out-and-failure-semantics)). |
 | `_watchlist.py` | Reactive symbol tables: the listener, the diff, and dispatch off the UG thread. |
 | `_poll.py` | `poll()` tables: `REPLACE`, `UPSERT`, and `APPEND` modes, fan-out under `max_concurrency`. |
-| `_flatfiles.py` | S3 streaming of `.csv.gz` keys, pure-Arrow per-batch transforms, symbol pushdown, partition-date rules ([section 16](#16-historysourceauto)). |
+| `_sources.py` | Where `history()` reads from: partition dates, the REST capability check, and the `AUTO` choice ([section 16](#16-historysourceauto)). Pure: no I/O. |
+| `_flatfiles.py` | S3 streaming of `.csv.gz` keys, pure-Arrow per-batch transforms, symbol pushdown, the missing-file rules ([section 16](#16-historysourceauto)). Pure S3 I/O: it never chooses a source. |
 | `_diagnostics.py` | The `connections()` and `streams()` input tables ([section 17](#17-diagnostics)). |
 | `_domains/__init__.py` | Empty. |
 | `_domains/base.py` | The shared dataset factory: builds a query from a catalog record, validates symbols and filters, applies the `bars` overload selection. |
@@ -559,7 +560,8 @@ internally. (The aggregates endpoint's `limit` counts base aggregates, not rows,
 serve as a row cap.) A reactive `Table` passed as `symbols` is read once, when the verb is
 called, on the caller thread inside the session's execution context: its valid rows become the
 sorted canonical symbol tuple that every source receives (`REST`, `FLAT_FILES`, and the `AUTO`
-choice), rows that are not valid symbols of the class are ignored with one WARNING, and a table
+choice), rows that are not valid symbols of the class are ignored (logged once per process
+per class, at WARNING), and a table
 with no valid symbol raises `ValueError`, as an empty symbol list does.
 
 **Backfill plus live.** There is no seeding verb. The documented recipe is:
@@ -1444,6 +1446,10 @@ flat-file only.
 
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
 nothing is split between the sources. A dataset without instruments counts as `ALL`.
+`HistoryQuery.history()` makes the choice (`_sources.choose_source`) and then calls one
+transport; the transports only do I/O. The REST predicate depends only on the dataset's REST
+capabilities (`DatasetSpec.has_rest_history`, `has_grouped_daily`), and the `adjusted` check on
+the typed `Request.adjusted`, never on SDK method or parameter names.
 
 An `AUTO` call logs its choice and the reason once, for example
 `stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)`. Each
@@ -1475,9 +1481,11 @@ Rows come in partition-date order, then (futures) venue order (CME, CBOT, NYMEX,
 file order. They are not sorted by time across venues, and may differ in order from REST.
 
 Keys are read by a per-call pool of `min(max_concurrency, keys)` threads. A failed read, an
-interrupt of the calling thread, or `m.close()` stops every other read at its next block: reads
-not yet started are cancelled, no request is made once the session is closed, and the failure
-of the earliest file is raised (`MassiveError("MassiveSession #1 is closed")` for a close).
+interrupt of the calling thread, or `m.close()` stops every other read at its next block, and
+reads not yet started are cancelled; the failure of the earliest file is raised. After a close,
+no request starts once a reader has seen the close; a request already in flight is discarded
+(its connection pool is closed once the call's reads have drained), and the call raises
+`MassiveError("MassiveSession #1 is closed")`, whatever that request returned.
 
 ## 17. Diagnostics
 

@@ -1027,11 +1027,17 @@ fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
   opener), `_session.py` (S3 factory hook). `history()` hands `source=AUTO` (and `FLAT_FILES`)
   to `FlatFileTransport.history(..., source=...)`, which runs `choose_source` and calls
   `core.rest_transport().history(...)` itself when REST is the better source.
-  - *As implemented (#51):* `_domains/base.py` is unchanged; prefix resolution is three lines of
-    transport logic in `_flatfiles.py`. `_query.py` gained `rest_history_problem` (one REST
-    predicate shared by `source=REST` and `AUTO`) and reads a reactive symbol table once in
-    `HistoryQuery.history()`; `_dates.py` gained `futures_session`; `_catalog.py` checks the
-    flat-file key maps at import (`Symbol`, `Timestamp`, and `SessionEndDate` for futures).
+  - *As implemented (#51):* `_domains/base.py` is unchanged; prefix resolution is three lines in
+    the new `_sources.py`, which also holds `partition_dates`, `rest_history_problem`, and
+    `choose_source`. `HistoryQuery.history()` reads a reactive symbol table once, makes the
+    source choice, logs it, and calls one transport; `FlatFileTransport.history` takes the
+    partition dates (`dates=`) instead of `source=`, and `_flatfiles.py` is pure S3 I/O.
+    `Request` gained a typed `adjusted` field (`build_query(adjusted=)`), and `DatasetSpec`
+    gained `has_rest_history` and `has_grouped_daily`, so nothing in the source choice depends
+    on SDK method or parameter names. `_dates.py` gained `futures_session`; `_catalog.py`
+    checks the flat-file key maps at import (`Symbol`, `Timestamp`, and `SessionEndDate` for
+    futures). Domain packages pass `adjusted` to `build_query(adjusted=...)`, not in
+    `params`.
 - Delete: none.
 
 **Tasks.**
