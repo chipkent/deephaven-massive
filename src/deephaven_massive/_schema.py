@@ -1,9 +1,9 @@
 """The schema registry: column types, SDK-model flattening, and the four tick schemas.
 
 Every dataset kind has exactly one schema, the union of its fields across asset classes and
-transports (WebSocket, REST, and flat files), with PascalCase column names (DESIGN § 2.1). A
-column a class or transport does not supply is null: crypto trades have no `Tape`, and stocks
-have no `SessionEndDate`. This module holds the machinery that builds and fills those schemas:
+transports (WebSocket, REST, and flat files), with PascalCase column names. A column a class or
+transport does not supply is null: crypto trades have no `Tape`, and stocks have no
+`SessionEndDate`. This module holds the machinery that builds and fills those schemas:
 
 - `ColumnType`, the closed set of column types (`Instant`, `LocalDate`, `double`, `long`,
   `int`, `String`, `boolean`, `int[]`), each with its Deephaven and Arrow type.
@@ -80,10 +80,10 @@ _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 class ColumnType(StrEnum):
     """The type of a column, named by its Deephaven type.
 
-    Each member knows its Deephaven `DType` (`dh_type`) and its Arrow type (`arrow_type`).
-    DESIGN § 11 fixes the conventions: timestamps are `Instant`, calendar dates `LocalDate`,
-    sequence numbers `long`, sizes `double` (fractional sizes exist), exchange ids `int`, and
-    condition codes `int[]`.
+    Each member knows its Deephaven `DType` (`dh_type`) and its Arrow type (`arrow_type`). Column
+    types follow fixed conventions: timestamps are `Instant`, calendar dates `LocalDate`, sequence
+    numbers `long`, sizes `double` (fractional sizes exist), exchange ids `int`, and condition codes
+    `int[]`.
     """
 
     INSTANT = "Instant"

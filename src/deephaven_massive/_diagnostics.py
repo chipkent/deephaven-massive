@@ -1,4 +1,4 @@
-"""The live diagnostics tables behind `m.connections()` and `m.streams()` (DESIGN § 17).
+"""The live diagnostics tables behind `m.connections()` and `m.streams()`.
 
 Both are keyed Deephaven `input_table`s that the library writes and users read:
 

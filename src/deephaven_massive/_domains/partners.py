@@ -1,4 +1,4 @@
-"""The `m.partners` namespace: datasets from Massive's data partners (DESIGN § 8.10).
+"""The `m.partners` namespace: datasets from Massive's data partners.
 
 Partner datasets stay nested by vendor, one class each:
 
@@ -12,8 +12,8 @@ Partner datasets stay nested by vendor, one class each:
 This module owns the partners' `DatasetSpec`s, exported as `DATASETS` and composed into the
 catalog by `_catalog.datasets()`.
 
-Status: the datasets are declared by the partner work package. Until it lands, `DATASETS` is
-empty and the vendor classes have no dataset methods.
+Status: no datasets are declared yet. `DATASETS` is empty and the vendor classes have no dataset
+methods.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Tests for result scopes, records, and the reaper (DESIGN § 6.1), in the embedded JVM.
+"""Tests for result scopes, records, and the reaper, in the embedded JVM.
 
 The stream tests use a `FakeStreamTransport` whose streams are bare `table_publisher` blink
 tables, so they observe exactly when Deephaven runs a stream's `on_shutdown_callback`.

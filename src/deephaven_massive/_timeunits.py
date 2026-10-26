@@ -1,11 +1,11 @@
 """Declared timestamp units per `(dataset, transport, field)` and their conversion to nanoseconds.
 
-Massive sends epoch timestamps in milliseconds on some transports and nanoseconds on others,
-and the unit of a field is not always the one its documentation states. The previous code base
-guessed units from magnitudes, which hid unit bugs. Here every timestamp field is *declared*:
-each dataset's `DatasetSpec.time_units` maps `(transport, field)` to a `TimeUnit`, and
-`_catalog.time_units()` composes those declarations into one `TimeUnitTable`. The table refuses
-to convert a field nobody registered (DESIGN § 12).
+Massive sends epoch timestamps in milliseconds on some transports and nanoseconds on others, and the
+unit of a field is not always the one its documentation states. The previous code base guessed units
+from magnitudes, which hid unit bugs. Here every timestamp field is *declared*: each dataset's
+`DatasetSpec.time_units` maps `(transport, field)` to a `TimeUnit`, and `_catalog.time_units()`
+composes those declarations into one `TimeUnitTable`. The table refuses to convert a field nobody
+registered.
 
 Two rules guard the declarations that could not be verified from the documentation:
 
@@ -75,8 +75,8 @@ class UnitRule:
 
     Attributes:
         unit: The epoch unit the field's integers are in.
-        unverified: True when the unit is a conservative guess (DESIGN § 12 marks it
-            UNVERIFIED); conversions then check that the instant lies within 1990 to 2100.
+        unverified: True when the unit is a conservative guess that the documentation does
+            not confirm; conversions then check that the instant lies within 1990 to 2100.
     """
 
     unit: TimeUnit

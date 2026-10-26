@@ -1,4 +1,4 @@
-"""Tests for the enums, the runtime enum check, and the enums-only rule (DESIGN § 11)."""
+"""Tests for the enums, the runtime enum check, and the enums-only rule."""
 
 import collections.abc
 import importlib
@@ -16,7 +16,7 @@ import deephaven_massive as dm
 from deephaven_massive import _enums
 from deephaven_massive._enums import ChannelFamily, Recency, _require_enum
 
-DESIGN_VALUES: dict[type[StrEnum], list[str]] = {
+EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
     dm.AssetClass: ["stocks", "options", "futures", "indices", "forex", "crypto"],
     dm.Timespan: [
         "second",
@@ -55,10 +55,10 @@ SDK_MIRRORS: dict[type[StrEnum], type[Enum]] = {
     dm.ConditionDataType: sdk.DataType,
 }
 # reason: dm.AssetClass is not a mirror. Its values are the WebSocket cluster paths (with
-# futures and forex), while the SDK's REST AssetClass has "fx" and no futures (DESIGN § 11).
+# futures and forex), while the SDK's REST AssetClass has "fx" and no futures.
 
 
-@pytest.mark.parametrize(("enum", "values"), DESIGN_VALUES.items())
+@pytest.mark.parametrize(("enum", "values"), EXPECTED_VALUES.items())
 def test_each_exported_enum_is_a_strenum_of_wire_values(
     enum: type[StrEnum], values: list[str]
 ) -> None:
@@ -73,7 +73,7 @@ def test_every_exported_enum_is_tested() -> None:
         for name in dm.__all__
         if isinstance(getattr(dm, name), type) and issubclass(getattr(dm, name), Enum)
     }
-    assert exported == set(DESIGN_VALUES)
+    assert exported == set(EXPECTED_VALUES)
 
 
 @pytest.mark.parametrize(("ours", "theirs"), SDK_MIRRORS.items())
@@ -124,7 +124,7 @@ def test_text_converts_with_the_constructor() -> None:
 
 
 def test_module_exports() -> None:
-    assert set(_enums.__all__) == {e.__name__ for e in DESIGN_VALUES} | {
+    assert set(_enums.__all__) == {e.__name__ for e in EXPECTED_VALUES} | {
         "Recency",
         "ChannelFamily",
         "Transport",

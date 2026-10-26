@@ -1,6 +1,6 @@
-"""Tests for the dataset catalog and the SDK parameter table (DESIGN § 4.1, § 9).
+"""Tests for the dataset catalog and the SDK parameter table.
 
-This file is also where the catalog's Massive coverage assertions will live (DESIGN § 4.2).
+This file is also where the catalog's Massive coverage assertions will live.
 """
 
 import dataclasses

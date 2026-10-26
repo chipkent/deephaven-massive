@@ -1,10 +1,10 @@
 """`MassiveConfig`, the session's immutable configuration, and the JSON codec choice.
 
-`MassiveConfig` is the only way to configure the library: `MassiveSession(MassiveConfig(...))`
-(DESIGN § 5, § 22 item 7). Every default lives in exactly one place, the field defaults of the
-dataclass below; nothing else in the package repeats them. `MassiveConfig()` with no arguments
-reads the API key and the S3 credentials from the environment and validates everything at
-construction, so a bad configuration fails before any session exists.
+`MassiveConfig` is the only way to configure the library: `MassiveSession(MassiveConfig(...))`.
+Every default lives in exactly one place, the field defaults of the dataclass below; nothing else in
+the package repeats them. `MassiveConfig()` with no arguments reads the API key and the S3
+credentials from the environment and validates everything at construction, so a bad configuration
+fails before any session exists.
 
 What is deliberately *not* configurable: the options contract cap (1,000 per connection), the
 evidence endpoints of the host decision, the plan tier (Massive offers no entitlement endpoint,

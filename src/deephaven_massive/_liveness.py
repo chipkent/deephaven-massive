@@ -1,10 +1,10 @@
 """How live results are kept alive and released: result scopes, records, and the reaper.
 
-In a Deephaven console, a table created by a command is managed by the session's query scope
-and lives until the session ends; deleting the Python variable does not release it (DESIGN
-§ 6.1). The library therefore never lets a live result fall into that scope. Every live result
-is created inside its own library-owned *result scope*, a `LivenessScope` that holds exactly
-that one table, and is tracked by a `ResultRecord`:
+In a Deephaven console, a table created by a command is managed by the session's query scope and
+lives until the session ends; deleting the Python variable does not release it. The library
+therefore never lets a live result fall into that scope. Every live result is created inside its own
+library-owned *result scope*, a `LivenessScope` that holds exactly that one table, and is tracked by
+a `ResultRecord`:
 
 1. `make_result` opens a fresh scope on the caller thread, builds the table inside it, and, for
    a new wrapper of an existing Java table (`blink()`), manages the wrapper explicitly.

@@ -1,4 +1,4 @@
-"""Tests for date parsing and the day rules (DESIGN § 12, § 16)."""
+"""Tests for date parsing and the day rules."""
 
 import re
 from datetime import UTC, date, datetime, time, timedelta

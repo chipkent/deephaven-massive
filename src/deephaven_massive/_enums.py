@@ -1,12 +1,11 @@
 """The closed categorical sets of the public API, as `StrEnum`s, and their runtime check.
 
-Every closed set of values that appears in a public signature is an enum defined here (DESIGN
-§ 11). Each member's value is the exact string Massive puts on the wire, so a member can be sent
-to the server unchanged: `Timespan.MINUTE == "minute"`. Signatures accept only the enum, never a
-plain string, which gives one spelling per value, tab completion in every IDE and in the
-Deephaven web console, and typo safety at type-check time. At run time `_require_enum` turns a
-plain string into a `TypeError` that names the member to use; `Timespan("minute")` is the
-documented way to convert text.
+Every closed set of values that appears in a public signature is an enum defined here. Each member's
+value is the exact string Massive puts on the wire, so a member can be sent to the server unchanged:
+`Timespan.MINUTE == "minute"`. Signatures accept only the enum, never a plain string, which gives
+one spelling per value, tab completion in every IDE and in the Deephaven web console, and typo
+safety at type-check time. At run time `_require_enum` turns a plain string into a `TypeError` that
+names the member to use; `Timespan("minute")` is the documented way to convert text.
 
 Three further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
 data is), `ChannelFamily` (which host a channel is served from), and `Transport` (WebSocket,

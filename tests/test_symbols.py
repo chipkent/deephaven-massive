@@ -1,4 +1,4 @@
-"""Tests for symbol normalization (DESIGN § 10)."""
+"""Tests for symbol normalization."""
 
 import csv
 import io

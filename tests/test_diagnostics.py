@@ -1,4 +1,4 @@
-"""Tests for the diagnostics tables and their writer thread (DESIGN § 17)."""
+"""Tests for the diagnostics tables and their writer thread."""
 
 import dataclasses
 import logging

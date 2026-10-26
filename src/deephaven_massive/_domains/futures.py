@@ -1,4 +1,4 @@
-"""The `m.futures` namespace: US futures (CME, CBOT, NYMEX, COMEX) (DESIGN § 8.3).
+"""The `m.futures` namespace: US futures (CME, CBOT, NYMEX, COMEX).
 
 Datasets: trades, quotes, bars, snapshots, contracts, products, exchanges,
 market status, and schedules.
@@ -8,8 +8,7 @@ nothing touches the network until a verb is called on the query. This module own
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the catalog by
 `_catalog.datasets()`.
 
-Status: the datasets are declared by the namespace's own work package. Until it lands,
-`DATASETS` is empty and `_Futures` has no dataset methods.
+Status: no datasets are declared yet. `DATASETS` is empty and `_Futures` has no dataset methods.
 """
 
 from __future__ import annotations

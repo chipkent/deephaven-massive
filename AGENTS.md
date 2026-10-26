@@ -78,6 +78,11 @@ anything with behavior worth knowing is a defect, not brevity.
 - **Examples** are real code that runs against the documented API.
 - **Never** restate the signature in words, use filler ("This function…"), or leave a term
   undefined. Ruff's `D` and `DOC` rules check form; reviewers check substance.
+- **No planning references.** Code, comments, docstrings, test names, error messages, CI step
+  names, and config comments never reference the planning documents under `plans/`, their
+  section numbers, work-package names, or decision numbers. The planning documents are
+  temporary; the implementation explains itself, so state the behavior or the reason directly.
+  Only files under `plans/` may cross-reference each other.
 
 ## Deephaven invariants
 
@@ -142,4 +147,4 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | SDK fork (`chipkent/massive-client-python`) | `DESIGN.md` § 19 |
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
 | Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
-| Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `tests/legacy/`; every exclusion carries the grep-able legacy-exclusion marker |
+| Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `tests/legacy/`; every exclusion of it carries a grep-able `LEGACY-EXCLUSION` comment |

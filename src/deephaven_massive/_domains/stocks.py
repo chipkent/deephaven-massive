@@ -1,4 +1,4 @@
-"""The `m.stocks` namespace: US equities (DESIGN § 8.1).
+"""The `m.stocks` namespace: US equities.
 
 Datasets: trades, quotes, bars, LULD bands, net order imbalances, fair market value,
 snapshots, movers, daily open/close, dividends, splits, IPOs, short interest and volume, share
@@ -9,8 +9,7 @@ nothing touches the network until a verb is called on the query. This module own
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the catalog by
 `_catalog.datasets()`.
 
-Status: the datasets are declared by the namespace's own work package. Until it lands,
-`DATASETS` is empty and `_Stocks` has no dataset methods.
+Status: no datasets are declared yet. `DATASETS` is empty and `_Stocks` has no dataset methods.
 """
 
 from __future__ import annotations

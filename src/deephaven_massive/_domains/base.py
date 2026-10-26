@@ -8,17 +8,17 @@ module does the work they share when a dataset method is called:
 - `build_query` normalizes symbols (`_symbols.normalize`), rejects `dm.ALL` where the dataset
   cannot serve it (naming the alternative), parses the time-axis bounds, and normalizes the
   typed parameters and the `filters` mapping into a hashable `Request`.
-- `bar_query_class` is the run-time half of the `bars()` overloads (DESIGN § 7.1): it picks the
-  most specific query class for the actual timespan and multiplier and rejects the timespans
-  the asset class's endpoint does not accept.
+- `bar_query_class` is the run-time half of the `bars()` overloads: it picks the most specific query
+  class for the actual timespan and multiplier and rejects the timespans the asset class's endpoint
+  does not accept.
 - `list_params` validates the `sort` and `order` parameters of the `…F` block shared by the
   REST list datasets; its `limit` goes to `build_query(limit=...)` (`Request.limit`), because
   it is a total-row cap, not the SDK's page-size parameter.
 
 Filter keys and value kinds are checked against the generated SDK parameter table
-(`_catalog.check_filters`) synchronously at construction, as DESIGN § 9 requires; the check
-is active once that table has been generated. Everything here runs synchronously on the
-calling thread, makes no network call, and creates no table.
+(`_catalog.check_filters`) synchronously at construction, so a bad filter fails before any verb
+runs; the check is active once that table has been generated. Everything here runs synchronously on
+the calling thread, makes no network call, and creates no table.
 """
 
 from __future__ import annotations
@@ -163,7 +163,7 @@ def _value(name: str, value: object) -> ParamValue:
             first element that is not a `str`.
 
     A naive `datetime` raises the `ValueError` of `_dates.require_aware`, the same message as
-    a naive time bound (DESIGN § 11).
+    a naive time bound.
     """
     if isinstance(value, datetime):
         require_aware(name, value, value)
