@@ -752,7 +752,8 @@ the value types of [§ 19.3](DESIGN.md#193-the-spec-snapshot-the-generator-and-t
   `_massive/errors.py`, `_massive/net.py`, `_massive/rest/__init__.py`, `_massive/ws/__init__.py`,
   `_massive/names/__init__.py` (empty subpackage markers), `_massive/spec/__init__.py` (re-exports
   the types), `_massive/spec/types.py`; their mirrors under `tests/_massive/`.
-- Modify: `tests/test_layout.py` (the import-boundary test).
+- Modify: `tests/test_layout.py` (the import-boundary test), `src/deephaven_massive/__init__.py`
+  and `tests/test_init.py` (lazy public names).
 - Delete: none.
 
 **Tasks.**
@@ -767,6 +768,13 @@ the value types of [§ 19.3](DESIGN.md#193-the-spec-snapshot-the-generator-and-t
       here, so the generator is never needed at run time.
 - [ ] `_massive/__init__.py`: re-exports this package's block (the `WireError` family and the
       value types) and defines `__all__`.
+- [ ] The lazy package `__init__.py` (DESIGN § 3): `deephaven_massive/__init__.py` resolves its
+      public names through a module `__getattr__` (PEP 562), with the eager imports under
+      `TYPE_CHECKING`, so importing `deephaven_massive._massive` (and the refresh command PC3a
+      builds on it) needs no JVM. `tests/test_init.py` asserts that `dm.__all__` equals DESIGN
+      § 3 and that `getattr(dm, name)` resolves every name in it; a subprocess test with no
+      server imports `deephaven_massive._massive` and asserts that `deephaven` is not in
+      `sys.modules`.
 - [ ] The import-boundary test in `tests/test_layout.py`, reading every module with `ast` and
       resolving relative imports, with every rule of DESIGN § 19: allowed imports inside
       `_massive/`; outside it, no `urllib3`, `websockets`, or `certifi`, no `_massive`
@@ -1132,8 +1140,7 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
   `flatfile_key_map`), `_massive/spec/generate.py` (lock appending) and `drift.py`
   (channels and flat-file prefixes join the allow-list that unaccounted items are counted
   against, with `EXCLUSIONS`; `DatasetWire`s play no part in it), `scripts/refresh_massive_spec.py`
-  (pass `_catalog.dataset_wires()`), `src/deephaven_massive/__init__.py` (lazy exports),
-  `_catalog.py`, `_schema.py`, `_timeunits.py`, `_enums.py` (`QueryKind`), `_query.py` and
+  (pass `_catalog.dataset_wires()`), `_catalog.py`, `_schema.py`, `_timeunits.py`, `_enums.py` (`QueryKind`), `_query.py` and
   `_sources.py` (role paths), `_flatfiles.py` (key maps from `_massive.flatfile_key_map`),
   `_domains/*.py` (records come from `_datasets`), and their tests (`tests/test_catalog.py`,
   `tests/test_schema.py`, `tests/test_timeunits.py`, `tests/test_enums.py`,
@@ -1167,9 +1174,8 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
       `DatasetWire` declarations (none used, some used, one namespace filtered). With every
       domain at `DATASETS = ()` it returns everything, and that is expected: it gates nothing
       in PC3b.
-- [ ] The Deephaven-free catalog (DESIGN § 4.1): `deephaven_massive/__init__.py` resolves its
-      public names through a module `__getattr__`, with the eager imports under
-      `TYPE_CHECKING`; `DatasetSpec.query_class` becomes `query_kind: QueryKind`; the
+- [ ] The Deephaven-free catalog (DESIGN § 4.1), on top of PC1a's lazy package
+      `__init__.py`: `DatasetSpec.query_class` becomes `query_kind: QueryKind`; the
       declarations move to `_datasets/<domain>.py`; `_catalog.py`, `_datasets/`, `_enums.py`,
       `_errors.py`, `_dates.py`, `_config.py`, and `_massive/` import no Deephaven module. A test
       in `tests/test_catalog.py` runs `_catalog.dataset_wires()` in a subprocess with no server
