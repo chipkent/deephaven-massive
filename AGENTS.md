@@ -180,5 +180,5 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | Wire clients, generated schemas, drift | `DESIGN.md` § 19 |
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
 | Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
-| Legacy code (reference only; outside the gate; deleted by the `PLAN.md` package PL, after which it is read with `git show 519fad8:<path>`) | `src/deephaven_massive/{engine,domains,schemas}/`, `tests/legacy/`; every exclusion of it carries a grep-able `LEGACY-EXCLUSION` comment |
+| Legacy code (deleted; reference only) | `git show 519fad8:<path>` for `src/deephaven_massive/{engine,domains,schemas}/` and `tests/legacy/` |
 | Namespace classes and dataset declarations | `src/deephaven_massive/_domains/` (renamed `_namespaces/` by PN), `DESIGN.md` § 8 |

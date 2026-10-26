@@ -26,14 +26,6 @@ APPROVED_EXCEPTIONS = frozenset(
 # The shared fake servers, an approved package that the mirror rule ignores entirely.
 FAKES_DIR = PurePosixPath("_fakes")
 
-# Paths relative to the repository root that hold legacy code and are not mirrored.
-LEGACY_PATHS = (  # LEGACY-EXCLUSION: legacy code, to be removed
-    PurePosixPath("src/deephaven_massive/engine"),
-    PurePosixPath("src/deephaven_massive/domains"),
-    PurePosixPath("src/deephaven_massive/schemas"),
-    PurePosixPath("tests/legacy"),
-)
-
 _INTEGRATION_SUFFIX = "_integration"
 
 
@@ -63,24 +55,15 @@ def unit_test_of(test_file: PurePosixPath) -> PurePosixPath:
     return test_file.with_name(f"{stem}.py")
 
 
-def _is_legacy(path: Path) -> bool:
-    relative = PurePosixPath(path.relative_to(_ROOT).as_posix())
-    return any(relative.is_relative_to(legacy) for legacy in LEGACY_PATHS)
-
-
 def _source_modules() -> list[PurePosixPath]:
-    return sorted(
-        PurePosixPath(path.relative_to(_SRC).as_posix())
-        for path in _SRC.rglob("*.py")
-        if not _is_legacy(path)
-    )
+    return sorted(PurePosixPath(path.relative_to(_SRC).as_posix()) for path in _SRC.rglob("*.py"))
 
 
 def _test_files() -> list[PurePosixPath]:
     files = []
     for path in _TESTS.rglob("*.py"):
         relative = PurePosixPath(path.relative_to(_TESTS).as_posix())
-        if not relative.is_relative_to(FAKES_DIR) and not _is_legacy(path):
+        if not relative.is_relative_to(FAKES_DIR):
             files.append(relative)
     return sorted(files)
 

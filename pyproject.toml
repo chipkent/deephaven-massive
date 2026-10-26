@@ -68,7 +68,6 @@ exclude = [
     "plans",
     ".pre-commit-config.yaml",
     "AGENTS.md",
-    "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, to be removed
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -82,12 +81,6 @@ packages = ["src/deephaven_massive"]
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
-extend-exclude = [
-    "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
-    "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
-    "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
-    "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, to be removed
-]
 
 [tool.ruff.lint]
 select = ["ALL", "DOC201", "DOC501", "DOC502"]
@@ -179,10 +172,6 @@ enable_error_code = [
 files = ["src", "tests"]
 mypy_path = ["src", "tests"]
 explicit_package_bases = true
-exclude = [
-    '^src/deephaven_massive/(engine|domains|schemas)/',  # LEGACY-EXCLUSION: legacy, to be removed
-    '^tests/legacy/',  # LEGACY-EXCLUSION: legacy tests, to be removed
-]
 
 [[tool.mypy.overrides]]
 # pyarrow ships no type information.
@@ -196,11 +185,6 @@ ignore_missing_imports = true
 
 [tool.pyright]
 include = ["src"]
-exclude = [
-    "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
-    "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
-    "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
-]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"
 
@@ -224,11 +208,6 @@ faulthandler_exit_on_timeout = true
 [tool.coverage.run]
 source = ["deephaven_massive"]
 branch = true
-omit = [
-    "*/deephaven_massive/engine/*",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
-    "*/deephaven_massive/domains/*",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
-    "*/deephaven_massive/schemas/*",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
-]
 
 [tool.coverage.report]
 fail_under = 100
