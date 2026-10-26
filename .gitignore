@@ -230,3 +230,7 @@ hs_err_pid*.log
 # worktrees are not.
 .claude/settings.local.json
 .claude/worktrees/
+
+# uv.lock is not committed: users never install from it, and every sync resolves the newest
+# versions, including the latest deephaven-fixes commit of the SDK fork.
+uv.lock

@@ -13,23 +13,6 @@ permissions:
   contents: read
 
 jobs:
-  lock:
-    name: lock
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          enable-cache: true
-      - name: Check that uv.lock matches pyproject.toml
-        # The massive commit recorded in uv.lock may be stale: the source tracks the
-        # deephaven-fixes branch, and every other job installs its head.
-        run: uv lock --check
-
   lint:
     name: lint
     runs-on: ubuntu-latest
@@ -42,13 +25,14 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
       - name: Set up Python
         run: uv python install 3.11
-      - name: Install the latest deephaven-fixes, then sync
-        # Re-locks only massive to the branch head; every other dependency stays as locked.
-        run: |
-          uv lock --upgrade-package massive
-          uv sync --locked --python 3.11
+      - name: Sync dependencies
+        # uv.lock is not committed, so this resolves the newest versions, including the latest
+        # deephaven-fixes commit of the SDK fork.
+        run: uv sync --python 3.11
       - name: Ruff and mypy (scripts/check.sh fast --no-fix)
         # GitHub sets CI=true, so ruff reports in GitHub annotation format.
         run: ./scripts/check.sh fast --no-fix
@@ -82,15 +66,17 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
-      - name: Install the latest deephaven-fixes, then sync
-        # Re-locks only massive to the branch head; every other dependency stays as locked.
-        # The orjson extra is tested on 3.14; orjson publishes no free-threaded wheels.
-        run: |
-          uv lock --upgrade-package massive
-          uv sync --locked --python ${{ matrix.python-version }} \
-            ${{ matrix.python-version == '3.14' && '--extra orjson' || '' }}
+      - name: Sync dependencies
+        # uv.lock is not committed, so this resolves the newest versions, including the latest
+        # deephaven-fixes commit of the SDK fork. The orjson extra is tested on 3.14; orjson
+        # publishes no free-threaded wheels.
+        run: >-
+          uv sync --python ${{ matrix.python-version }}
+          ${{ matrix.python-version == '3.14' && '--extra orjson' || '' }}
       - name: Show the installed massive commit (the deephaven-fixes head)
         run: >-
           uv run --no-sync python -c "import json, importlib.metadata as m;
@@ -115,6 +101,8 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
       - name: Set up Python
         run: uv python install 3.11
       - name: Build wheel and sdist

@@ -3,7 +3,7 @@
 #
 # Usage: scripts/check.sh [fast|full] [--no-fix]
 #
-#   fast      refresh massive to the latest deephaven-fixes, ruff check --fix, ruff format, mypy
+#   fast      uv sync --upgrade (newest versions), ruff check --fix, ruff format, mypy
 #   full      fast, then pytest with coverage (the default)
 #   --no-fix  report instead of rewrite: ruff check and ruff format --check (CI and git hooks)
 #
@@ -46,22 +46,26 @@ step() {
     "$@"
 }
 
-# The SDK fork is always the latest `deephaven-fixes` commit.
-# Re-lock only `massive` to the branch head, so every `uv run` below syncs the environment to
-# it; every other dependency stays as locked. The refreshed uv.lock serves this run only: the
-# file as it was is restored on exit, so the working tree is never left dirty, and the `massive`
-# commit recorded in the committed lock may go stale without anyone bumping it.
-lock_backup="$(mktemp)"
-cp uv.lock "$lock_backup"
-restore_lock() {
-    cp "$lock_backup" uv.lock
-    rm -f "$lock_backup"
+massive_commit() {
+    uv run --no-sync python -c "import json, importlib.metadata as m; \
+print(json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
 }
-trap restore_lock EXIT
-step "uv lock --upgrade-package massive (latest deephaven-fixes)" \
-    uv lock --quiet --upgrade-package massive
-step "installed massive commit" uv run --quiet python -c \
-    "import json, importlib.metadata as m; print(json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
+
+# uv.lock is not committed, so every run resolves the newest versions, including the latest
+# deephaven-fixes commit of the SDK fork. Offline, a local run keeps what is installed and says
+# so; CI must always test the newest versions, so there a failed upgrade is an error.
+echo "==> uv sync --upgrade"
+if ! uv sync --quiet --upgrade; then
+    if [[ "${CI:-}" == "true" ]]; then
+        echo "check.sh: uv sync --upgrade failed" >&2
+        exit 1
+    fi
+    echo "check.sh: WARNING: uv sync --upgrade failed (offline?); using the installed versions," \
+        "massive at $(massive_commit 2>/dev/null || echo 'an unknown commit')" >&2
+fi
+# The environment is synced; the steps below run in it as is.
+export UV_NO_SYNC=1
+step "installed massive commit" massive_commit
 
 if ((fix)); then
     step "ruff check --fix" uv run ruff check --fix ${ruff_output[@]+"${ruff_output[@]}"} src tests
