@@ -122,7 +122,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 | connection | One WebSocket to one `wss://host/path`. |
 | topic | One subscription parameter, `<channel>.<symbol>` or `<channel>.*`. |
 | source | One generated wire schema: a REST path template, a WebSocket `(cluster, channel)`, or a flat-file prefix. |
-| kind | A dataset kind: the datasets whose sources share one merged schema (trades, quotes, bars, …), defined in `FAMILIES` and recorded on each generated source (`Source.kind`). |
+| kind | A dataset kind: the datasets whose sources share one merged schema (trades, quotes, bars, …), defined in `KINDS` and recorded on each generated source as a `Membership`. |
 | shape | An object shape in a payload (an aggregate row, a snapshot `day` object, a WebSocket channel), which selects a lexicon. |
 | drift | A difference between a payload on the wire and its committed generated schema. |
 | UG thread | A thread of Deephaven's update graph (UG), which refreshes live tables while holding the UG lock. |
@@ -212,8 +212,8 @@ _query.py            the six query classes and their verbs; HostDecision; transp
 _enums.py            the fourteen public enums, Recency, ChannelFamily, _require_enum
 _types.py            Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py           MassiveError (.status, .request_id), AuthenticationError, EntitlementError, from_wire
-_catalog.py          DatasetSpec (role paths, family, symbol/time/fanout/session columns, channels,
-                     prefixes, poll defaults, page size), datasets(), members(family), filter validation
+_catalog.py          DatasetSpec (role paths, kind, per-source key columns, channels, prefixes,
+                     poll defaults, page size), datasets(), members(kind), filter validation
 _namespaces/
   __init__.py        empty
   base.py            the shared dataset factory
@@ -252,7 +252,7 @@ Supporting files outside the package:
 | `scripts/check.sh [fast\|full] [--no-fix]` | The single verification entry point (lint, format, type check; `full` adds the test suite with coverage). |
 | `python -m deephaven_massive._massive.refresh [--check \| --fetch]` | The refresh command, run from a source checkout ([section 19.6](#196-refresh-and-drift)). |
 | `.github/workflows/spec-drift.yml` | The advisory weekly drift job ([section 20](#20-quality-gates)). |
-| `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag ([section 20.1](#201-tooling-configuration)). |
+| `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag; created only when the owner turns publishing on ([section 20.1](#201-tooling-configuration)). |
 | `tests/data/` | Payload fixtures. |
 | `tests/_fakes/` | Fake REST server, WebSocket server, S3, and stream helpers ([section 4.2](#42-test-layout)). |
 
@@ -584,9 +584,9 @@ class HistoryLatestQuery(HistoryQuery):   # daily bars only
 **`fetch()`.** Returns exactly what the dataset's REST endpoint returns for the request. On
 `Query` that is a list or snapshot endpoint. On `StreamHistoryLatestQuery` it is the dataset's
 "last" endpoint: `/v2/last/trade`, `/v2/last/nbbo`, `/v1/last_quote/currencies`,
-`/v1/last/crypto`, or `/v3/snapshot/indices` projected to the values schema by its
-`PROJECTIONS` entry, recorded on the generated source ([section 19.4](#194-generated-schemas)). Each "last" path is a member of
-its dataset's kind, so its rows come out in the stream schema. On
+`/v1/last/crypto`, or `/v3/snapshot/indices` projected to the values schema through its
+membership of the values kind ([section 19.4](#194-generated-schemas)). Each "last" path is a
+member of its dataset's kind, so its rows come out in the stream schema. On
 `HistoryLatestQuery` it is `/v2/aggs/ticker/{t}/prev`, documented as "the prior session's open,
 high, low, close, and volume"; the docstring says "previous completed session". No streamed
 dataset has `poll()`. Current state on every tier is `m.<class>.snapshots(symbols).poll(n)`, one
@@ -1000,9 +1000,11 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
   instrument, it is `Underlying` on every options row (from `underlying_ticker` or
   `underlying_asset.ticker`) and on `related_companies` rows. A non-instrument fan-out key
-  keeps the generated column the dataset declares as `fanout_column` (`filer_cik` becomes
-  `FilerCik`). Where the instrument sits outside the result key (`/v1/last/crypto`,
-  `/v1/last_quote`), `Symbol` comes from the request.
+  keeps the generated column the dataset declares as its `fanout` key (`filer_cik` becomes
+  `FilerCik`). Where a source does not carry the instrument in its rows (it takes the symbol
+  as a path parameter, as `/v3/trades/{t}` and `/v2/aggs/ticker/{t}/…` do, or holds it outside
+  the result key, as `/v1/last/crypto` and `/v1/last_quote` do), `Symbol` is filled from the
+  request ([section 19.4](#194-generated-schemas)).
 
 ## 11. Enums and types
 
@@ -1092,8 +1094,9 @@ beside the table, and the indicator `timestamp` fields are its first entries.
 
 1. **Epoch 0 means absent.** In every epoch `Instant` column except the dataset's declared time
    column, a `0` becomes null. Massive's flat files write `0` where a timestamp has no value
-   (the documented stocks-trades sample has `trf_timestamp` `0` on every row without a TRF),
-   and WebSocket and REST omit the field. The time column keeps its value, so a `0` there fails
+   (the documented stocks-trades sample has `trf_timestamp` `0` on every row without a TRF);
+   WebSocket and REST are expected to omit the field, and the rule applies on every transport
+   regardless. The time column keeps its value, so a `0` there fails
    step 3. Prices, sizes, and every other numeric column keep `0` (a one-sided quote has
    `ask_price` `0`).
 2. **Checked multiply.** The integer is multiplied to nanoseconds from its unit (`s`, `ms`,
@@ -1132,8 +1135,8 @@ timezone-aware `datetime` is used as is.
   `datetime` bounds, futures filter on `Timestamp`, and flat files read the sessions the
   instants belong to. The futures trading day rolls at 17:00 America/Chicago (the weekly open is
   Sunday 17:00 CT; 16:00 to 17:00 CT is the daily maintenance break), so the session of an
-  instant `t` is the date of `t` in Chicago plus 7 hours, and the files read are the sessions
-  from the session of `start` to the session of `end - 1 µs`. An intraday window reads one
+  instant `t` is `(t in America/Chicago + 7 h).date()`, and the files read are the sessions
+  from the session of `start` to the session of `end - 1 ns`. An intraday window reads one
   file; an evening window reads only the next session's file.
 
 ## 13. Host resolution and connection protocol
@@ -1407,7 +1410,7 @@ at most once per (class, family) per session. In every other case the verdict is
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
 `error` for the stream's topic, or REST 403 for `poll()`), a fatal WebSocket handshake error
 (`MassiveError` with the HTTP status and host), and the data failures of
-[section 19.5](#195-runtime-drift) (a missing declared key column, an unconvertible value, a
+[section 19.5](#195-runtime-drift) (a missing required key, an unconvertible value, a
 timestamp out of bounds). `max_connections`, closes, and `NO_ACK` are diagnostic states.
 
 ### 13.4 REST
@@ -1440,7 +1443,7 @@ sees:
   `daily_open_close` on a holiday, `/prev`, the "last" endpoints), an HTTP 404 for one symbol
   drops that symbol, with one WARNING per symbol; every other error fails the call.
 - **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, or hits
-  a data failure of [section 19.5](#195-runtime-drift) (a missing declared key column, an
+  a data failure of [section 19.5](#195-runtime-drift) (a missing required key, an
   unconvertible value, a timestamp out of bounds), fails the table through `publish_failure`.
   Any other error is logged at ERROR, sets the stream's `Error` in `m.streams()`, keeps the
   previous rows, and the next cycle runs as scheduled.
@@ -1598,7 +1601,8 @@ Flat files are read through `_massive.FlatFileClient` and `FlatFile`
 ([section 19.3](#193-the-flat-file-client)); `_flat_files.py` builds each file's `ReadPlan`.
 `pyarrow.csv.open_csv` reads each `.csv.gz` key in 1 MiB blocks (gzip only: every documented
 key is `.csv.gz`). Columns are matched **by name, never by position**: the reader first reads
-the header line and passes those names as `ReadOptions(column_names=…)`, then sets
+the header line, parses it with the `csv` module (quotes and `\r\n` included), and passes those
+names as `ReadOptions(column_names=…)`, then sets
 `include_columns` to the documented headers with `include_missing_columns=True`, so a reordered
 file reads identically, an extra header is reported as drift and ignored, a missing header
 becomes a null column of its declared type, and a missing declared key header raises at once
@@ -1811,9 +1815,9 @@ net/                 shared by every client; imports nothing else in _massive
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
 spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport): load once under a lock
-  types.py           Transport, Source(key, transport, fields, kind, group, position,
-                     projection), RestPath(Source + template, result key, params),
-                     Field(wire key, column, WireType, unit, required),
+  types.py           Transport, Source(key, transport, fields, memberships),
+                     Membership(kind, group, position, projection), RestPath(Source + template,
+                     result key, params), Field(wire key, column, WireType, unit, required),
                      Param, ParamKind, WireType, WireUnit, DriftReport(extra, missing)
   rest.json  ws.json  flatfiles.json        generated, committed
 rest/                imports net, spec
@@ -1838,8 +1842,8 @@ refresh/             build time only; excluded from the wheel; may import any of
   __init__.py        empty
   __main__.py        [--check | --fetch]; the plain run regenerates spec/*.json
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
-  overrides.py       NAMES, FAMILIES, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
-                     TRANSPORT_ONLY, RESULT_KEYS
+  overrides.py       NAMES, KINDS, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
+                     TRANSPORT_ONLY, RESULT_KEYS, VENUES
   exclusions.py      EXCLUSIONS (kind, item, reason), exactly section 8.12
   docs.py            flat-file "Columns" tables, overview prefix tables, llms.txt
   generate.py        snapshot -> spec/*.json: flatten, representation rules, type lattice, names, gates
@@ -2040,6 +2044,9 @@ leaf lock, and keeps a closed flag (a `threading.Event`); once closed, it makes 
 
 - **`open(key) -> FlatFile | None`.** `None` for a missing key (404). `object_key(prefix, day,
   venue)` builds keys as `<prefix>/<YYYY>/<MM>/<date>.csv.gz`, filling a `{venue}` template.
+  The generator folds the four concrete futures overview prefixes into that template using
+  `VENUES = ("cme", "cbot", "nymex", "comex")` in `refresh/overrides.py`, which a library test
+  checks against `FuturesVenue`.
 - **Error mapping.** An S3 error code `InvalidAccessKeyId` or `SignatureDoesNotMatch` is
   `WireAuthError`; any other 403 is `WireEntitlementError`; anything else is `WireError`. The
   messages keep the flat-file transport's texts ([section 16](#16-historysourceauto)).
@@ -2100,16 +2107,21 @@ verification, never a column list.
   an `epoch` in that unit; a string with `format: date-time`, or no format and a name ending in
   `_utc`, becomes an `iso-instant`; a string with `format: date`, or named `date` or `*_date`,
   becomes a `date`.
-- **Projections.** `PROJECTIONS {(family, source): keys}` limits a source that joins a family
-  for one verb to the listed keys. Its first entry is `/v3/snapshot/indices` → `value`,
-  `last_updated`, `ticker`, for `indices.values.fetch()`.
-- **Kinds are written into the generated files.** `FAMILIES` and `PROJECTIONS` are generator
-  inputs in `refresh/`, which is not shipped. The generator writes each source's kind
-  membership onto its committed entry in `spec/rest.json`, `ws.json`, or `flatfiles.json`:
-  `"kind"` (for example `"trades"`, or absent for a source in no kind), `"group"` (the asset
-  class group), `"position"` (its order within the group), and `"projection"` (the projected
-  keys, or absent). The `spec` loader exposes them on `Source`. Everything at run time, the
-  merge and gate C4 included, reads them from there and never from `refresh/`.
+- **Projections.** `PROJECTIONS {(kind, source): {wire key: long name}}` limits a source to
+  the listed keys, and renames them, **inside one membership only**. Its first entry gives
+  `/v3/snapshot/indices`'s membership of the values kind
+  `{"ticker": "ticker", "value": "value", "last_updated": "timestamp"}`, for
+  `indices.values.fetch()`; `indices.snapshots` uses the same source in full.
+- **Memberships are written into the generated files.** `KINDS` and `PROJECTIONS` are generator
+  inputs in `refresh/`, which is not shipped. The generator writes each source's memberships
+  onto its committed entry in `spec/rest.json`, `ws.json`, or `flatfiles.json`, and the `spec`
+  loader exposes them as `Source.memberships: tuple[Membership, ...]`, where
+  `Membership(kind, group, position, projection: Mapping[wire_key, long_name] | None)`: the
+  kind, the asset-class group, the source's order within the group, and its projection. A
+  source in no kind has no memberships; a source may hold several. Everything at run time, the
+  merge and gate C4 included, reads memberships from there and never from `refresh/`. Drift
+  detection stays per source, against the full fields, so projected-away fields are never
+  reported as drift.
 
 **The type lattice.** `WireType` is one of `long`, `double`, `bool`, `string`, `date`, `epoch`
 (an integer with a unit), `iso-instant`, `int-array`, and `json-text`. OpenAPI `integer`, and
@@ -2130,8 +2142,9 @@ names a source or field the snapshot lacks fails the refresh as stale (G4).
 |---|---|---|---|
 | Lexicon | `lexicon.py` | `SHAPES` maps each object shape (aggregate row; snapshot `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`; each WebSocket channel; each futures object) to its lexicon. A lexicon translates a short key to Massive's own long form; identity entries cover short real words (`id`, `cik`, `url`, `low`, `fmv`, `mic`). | trade lexicon `p` → `price`, `t` → `sip_timestamp`; segment `min` → `minute` |
 | `NAMES` | `overrides.py` | `{(source, wire key): (long name, reason)}` for a column the lexicon cannot name | stocks `A`/`AM` `dv` → `decimal_volume`, `dav` → `accumulated_decimal_volume`; futures `A`/`AM` `dv` → `dollar_volume`; `av`, `op`, aggregate `a`, aggregate `z` |
-| `FAMILIES` | `overrides.py` | `{kind: {group: [sources]}}`: the sources of one dataset kind, grouped per asset class, in source order. Every dataset with a stream or flat-file source has a kind, WebSocket-only `luld`, `imbalances`, and `fmv` included. | `trades: {stocks: [/v3/trades/{stockTicker}, /v2/last/trade/{stocksTicker}, (stocks, T), us_stocks_sip/trades_v1], crypto: […]}` |
-| `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values |
+| `KINDS` | `overrides.py` | `{kind: {group: [sources]}}`: the sources of one dataset kind, grouped per asset class, in source order. Every dataset with a stream or flat-file source has a kind, WebSocket-only `luld`, `imbalances`, and `fmv` included. | `trades: {stocks: [/v3/trades/{stockTicker}, /v2/last/trade/{stocksTicker}, (stocks, T), us_stocks_sip/trades_v1], crypto: […]}` |
+| `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values, `last_updated` → `timestamp` |
+| `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp"; with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | vendor type **errors** only; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | flat-file `conditions` `integer` → `int-array`; forex `x` (a quoted string) → `long`; crypto `XT` `i` (`integer`) → `string`; snapshot `lastQuote` sizes → `double` |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, column): reason}`: columns legitimately on one transport | `AccumulatedVolume` (WebSocket only) |
@@ -2142,7 +2155,7 @@ names a source or field the snapshot lacks fails the refresh as stale (G4).
 dropping the result key, translating each short key through the lexicon of its shape, applying
 `NAMES`, and PascalCase-joining the segments (`prevDay.vw` becomes `PrevDayVwap`). Names are
 never derived from descriptions. The generator never emits `Symbol` or `Underlying`, and emits
-`Timestamp` only where the vendor's long name is `timestamp` (futures). The WebSocket-only
+`Timestamp` only where the vendor's long name is `timestamp`. The WebSocket-only
 names are `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
 aggregate `z` → `AverageTradeSize`, `dav` → `AccumulatedDecimalVolume`, stocks `dv` →
 `DecimalVolume`, and futures `dv` → `DollarVolume`; the snapshot object `min` gives
@@ -2154,17 +2167,19 @@ reviewer, on:
 - **G1:** a short key (three characters or fewer, no underscore) with no lexicon, identity, or
   `NAMES` entry;
 - **G2:** two keys of one source producing one column;
-- **G3:** a timestamp-like field (one with a unit tag, or named `timestamp`, `*_timestamp`, or
-  `last_updated`, or `t`/`pt`/`trft`/`r`/`s`/`e` in a tick or bar shape) with no `UNITS`
-  entry;
-- **G4:** a stale hand entry: a `NAMES`, `UNITS`, `TYPE_FIXES`, `PROJECTIONS`, `FAMILIES`,
+- **G3:** a timestamp-like field with no `UNITS` entry. G3 runs on the long name, after the
+  lexicon and `NAMES`: a field is timestamp-like when it has a unit tag, a doc type of
+  `timestamp - integer`, or a long name matching `timestamp`, `*_timestamp`, `updated`,
+  `*_updated`, `window_start`, `window_end`, or `*_time` (the bar lexicon gives `s` and `e`
+  as `window_start` and `end_timestamp`, while a trade's `s` is `size`);
+- **G4:** a stale hand entry: a `NAMES`, `UNITS`, `TYPE_FIXES`, `PROJECTIONS`, `KINDS`,
   `RESULT_KEYS`, or `EXCLUSIONS` entry naming a source or field the snapshot lacks;
 - **G5 (type agreement):** within one kind, one column name joins to one `WireType`, unless a
   `TYPE_FIXES` entry resolves it; the message prints both keys' descriptions, because a
   conflict is first treated as a possible naming error (stocks and futures `dv` are exactly
   that);
-- **G6 (transport agreement):** within one `FAMILIES` group, every column appears on at least
-  two transports or is in `TRANSPORT_ONLY`, which catches a one-sided lexicon slip (`s` becoming
+- **G6 (transport agreement):** within one `KINDS` group whose sources span two or more
+  transports, every column appears on at least two transports or is in `TRANSPORT_ONLY`, which catches a one-sided lexicon slip (`s` becoming
   `Shares` while REST says `size`);
 - **G7:** a futures kind whose venue pages differ.
 
@@ -2174,20 +2189,30 @@ G6, not description matching, are the mechanical checks.
 **Dataset schemas** are merged at run time, after the rename, never inferred from data:
 
 ```
-dataset_schema(spec):                       # cached per dataset; leaf lock
-  members = datasets of spec.family, ordered by the generated Source.group and Source.position
-            of their sources                      (spec alone for a non-tick dataset)
-  for each member m, each source s of m (its role paths, channels, prefixes; Source.projection
-                                         applied):
-      cols(m, s) = rename(m, fields of s)    # symbol_column -> Symbol, time_column -> Timestamp,
-                                             # fanout_column -> Underlying; nothing else changes
+dataset_schema(spec):                       # cached per dataset; computed outside the lock,
+                                            # published under it (first writer wins)
+  members = datasets of spec.kind, ordered by the group and position of the memberships of
+            their sources                         (spec alone for a dataset in no kind)
+  for each member m, each source s of m (its role paths, channels, prefixes):
+      fields = s.fields through the projection of s's membership of (m.kind, m's group), if any
+      cols(m, s) = rename(m, s, fields)      # m's keys for s: symbol -> Symbol, time ->
+                                             # Timestamp, fanout -> Underlying; a key filled
+                                             # from the request adds a constant column;
+                                             # nothing else changes
   schema = ordered union by column name of every cols(m, s):
            Symbol, Timestamp first; then first appearance in member, then source, then field order
   each column's WireType = the lattice join over every contribution
 ```
 
-Each `DatasetSpec` declares four long-form key columns: `symbol_column`, `time_column`,
-`fanout_column`, and (futures) `session_column`. Every member of a kind gets the identical
+**Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
+columns as `KeySpec(column, from_request)`: `symbol` and `time` always, and `fanout` and
+(futures) `session` only on the sources that carry them. A key is `from_request` when the
+source does not carry it in its rows: the symbol of a source that takes it as a path parameter
+or holds it outside the result key ([section 10](#10-symbols-and-all)). The library fills a
+`from_request` key as a constant column. `to_batch(..., required=)` and `ReadPlan.required`
+receive exactly the source's required keys, so a futures WebSocket row without
+`session_end_date` is not a missing key, while a futures flat file without it is. Every member
+of a kind gets the identical
 column set: crypto's `ParticipantTimestamp` is renamed to `Timestamp`, while stocks keeps its
 `ParticipantTimestamp` column, so crypto rows hold `ParticipantTimestamp` null. A non-tick
 dataset with several role paths (`options.contracts` list and per-contract) is the union of its
@@ -2195,12 +2220,13 @@ role paths under the same join.
 
 **Catalog gates** (`tests/test_catalog.py`, with negative tests on synthetic `DatasetSpec`s):
 
-- **C1:** each declared key column (symbol, time, fan-out, session) exists in every source of
-  its dataset;
+- **C1:** every key a dataset declares for a source is either a field of that source or
+  `from_request`, and `symbol` and `time` are declared for every source of the dataset in one
+  of the two forms;
 - **C2:** after the rename, no source has a duplicate column;
 - **C3:** across members, one column name gets one `WireType`;
-- **C4:** each tick dataset's sources equal its kind group, as recorded on the generated
-  sources (`Source.kind` and `Source.group`);
+- **C4:** each kind dataset's sources equal the sources holding a membership of its
+  `(kind, group)`;
 - **C5:** every declared wire name (time-axis pair, symbol parameter, path placeholders) is a
   parameter of its `RestPath`;
 - **C6:** every path, channel, and prefix a dataset uses is generated; a miss names the dataset
@@ -2208,7 +2234,7 @@ role paths under the same join.
 - **C7:** generated = used ⊎ undeclared ([section 8.12](#812-excluded-endpoints)), and the
   undeclared files are pairwise disjoint.
 
-`FAMILIES` overlaps the catalog by design: the refresh checks names before any dataset is
+`KINDS` overlaps the catalog by design: the refresh checks names before any dataset is
 declared, and C4 keeps the two in step. A test loads `spec/` with `refresh/` absent, as in an
 installed wheel; the CI build job checks that the wheel holds no `refresh/`.
 
@@ -2224,7 +2250,7 @@ routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
 |---|---|---|---|---|
 | **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field). Shown in `SchemaDrift`. |
-| **Missing declared key column** (symbol, time, fan-out, session) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
+| **Missing required key** (a key the dataset declares for this source, not `from_request`) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced; a lattice widening is not coercion. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_timeunits` | in `_timeunits`, in the flush thread as a vectorized mask | in `_timeunits` | Loud failure naming the dataset, the column, the unit, and the value. |
@@ -2233,14 +2259,16 @@ routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
 **A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
 `MassiveError` through `from_wire`; `poll()` fails its table through `publish_failure`; a
 WebSocket failure fails, through `publish_failure`, only the streams that would have received
-the row (the channel's `ALL` streams and the streams holding that symbol, or every stream on the
-channel when the symbol itself is missing). Rejected rows are never published, and the rest of
-the batch is. A drift failure goes through `SessionCore.fail_stream`, like an entitlement
+the row: the channel's `ALL` streams and the streams holding that symbol. A row with no
+symbol is rejected and fails only the channel's `ALL` streams, since it cannot be routed to a
+symbol stream; it is logged at ERROR. Rejected rows are never published, and the rest of the
+batch is. A drift failure goes through `SessionCore.fail_stream`, like an entitlement
 failure.
 
-**`SchemaDrift`** is a text column of both diagnostics tables ([section 17](#17-diagnostics)):
-`transport:field+` for extra and `transport:field-` for missing, sorted, truncated at 200
-characters.
+**`SchemaDrift`** is a text column of both diagnostics tables ([section 17](#17-diagnostics)),
+sorted and truncated at 200 characters: `m.streams()` uses `transport:field+` for extra and
+`transport:field-` for missing, and `m.connections()` uses `channel:field+` and
+`channel:field-`.
 
 ### 19.6 Refresh and drift
 
@@ -2283,7 +2311,7 @@ and C1–C7. What each change does:
 | Change at Massive | At run time | In the refresh |
 |---|---|---|
 | Field added | Dropped, one WARNING, `SchemaDrift`. | It gets a name (G1 asks for a lexicon or `NAMES` line for a short key) and joins its kind (G5 checks the type, G6 the transports). |
-| Field removed | Null; a required field or CSV header warns; a declared key column fails loudly. | It leaves its source; C1 fails if it was a declared key. |
+| Field removed | Null; a required field or CSV header warns; a required key fails loudly. | It leaves its source; C1 fails if it was a declared key. |
 | Field renamed | A removal plus an addition. | The column is renamed in the diff, or stays the same if the long form is unchanged; G6 catches a one-sided rename. |
 | Type changed | A value that no longer converts fails loudly. | G5 or C3 fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
 | Unit changed | The overflow check or the bound fails loudly. | `--check` reports the changed tag, and the `UNITS` entry is re-verified. |
@@ -2405,9 +2433,13 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Banned import.** `[tool.ruff.lint.flake8-tidy-imports.banned-api]` bans `massive` with the
   message "The library has its own clients; see deephaven_massive._massive". A ban is not an
   ignore, so it needs no approval.
-- **Release.** `.github/workflows/release.yml` runs on a `v*` tag: it builds the sdist and the
+- **Release, on the owner's go-ahead only.** Publishing is not turned on. When the owner gives
+  the go-ahead, `.github/workflows/release.yml` runs on a `v*` tag: it builds the sdist and the
   wheel, checks that the tag equals `project.version`, and publishes to PyPI through trusted
-  publishing (`id-token: write`, no long-lived token). The first version is 0.1.0.
+  publishing (`id-token: write`, no long-lived token). The first version is 0.1.0. Until then
+  no publishing workflow, GitHub environment, or pending publisher exists. **Hazard:** a PyPI
+  version can never be re-uploaded, so no rehearsal may push a tag that matches the project
+  version; the rehearsal method is chosen at the go-ahead.
 - **Metadata.** `authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]`; repository
   `https://github.com/chipkent/deephaven-massive`.
 
@@ -2606,13 +2638,9 @@ document already reflects them.
 24. **No client object is shared unless it is proven thread-safe** (2026-10-26). The REST client
     is safe per call and shared by the session's threads; each WebSocket client is confined to
     its own loop thread. Free-threaded 3.14t remains a required CI job.
-25. **Upstream SDK issues are optional, issues only** (2026-10-26). Four real bugs in
-    `massive-com/client-python` may be filed as issues, never pull requests, off the path: a
-    clean close ends the client, a wildcard drops sibling topics, a datetime goes through a
-    float, and invalid JSON yields `[]`. Each is reproduced against the latest PyPI `massive`,
-    passes a clarity critique, and is posted only after the owner approves its text. The fork
-    `chipkent/massive-client-python` is no longer used; what happens to it is the owner's own
-    action.
+25. **No SDK pull requests; upstream issues are optional** (2026-10-26). The library never
+    depends on a fix in `massive-com/client-python`. Real bugs found there may be reported as
+    issues, never pull requests, off the path.
 26. **One wire package** (2026-10-26). `deephaven_massive._massive` owns all Massive wire
     access (REST, WebSocket, and S3 flat files), the vendored snapshot, the generated schemas,
     the units, and the long-form names, in six subpackages (`net/`, `spec/`, `rest/`, `ws/`,
@@ -2645,7 +2673,7 @@ document already reflects them.
     page-to-prefix map is derived from the vendor's overview tables
     ([section 19.4](#194-generated-schemas)).
 35. **The runtime drift policy** of [section 19.5](#195-runtime-drift): an extra field is
-    dropped and reported; a missing declared key column, an unconvertible value, or a timestamp
+    dropped and reported; a missing required key, an unconvertible value, or a timestamp
     out of bounds fails loudly (a `poll()` table through `publish_failure`; on WebSocket only
     the affected topic's streams). The table never silently lies.
 36. **One timestamp routine** for every transport: epoch 0 to null except in the time column,
@@ -2661,27 +2689,20 @@ document already reflects them.
 40. **REST rate limits and host resolution are shared.** A client-wide not-before instant after
     a 429, and single-flight host resolution through one future per (class, family)
     ([section 13.2](#132-host-decision), [section 19.1](#191-the-rest-client)).
-41. **The flat-file implementation is restructured before merge** as a move with unchanged
-    logic into the wire package, so `main` never carries another boundary.
-42. **The legacy implementation is deleted.** References to it read
-    `git show 519fad8:<path>`.
-43. **Test layout:** every path component drops one leading underscore, `__init__.py` maps to
+41. **Test layout:** every path component drops one leading underscore, `__init__.py` maps to
     `test_init.py` and `__main__.py` to `test_main.py`, `_` directories under `tests/` are
     helpers, and `test_catalog.py` is a plain mirror ([section 4.2](#42-test-layout)).
-44. **Import roots:** `pythonpath = ["."]` and `mypy_path = ["src"]`, fakes imported as
+42. **Import roots:** `pythonpath = ["."]` and `mypy_path = ["src"]`, fakes imported as
     `tests._fakes…`; ruff bans `import massive` once the dependency is gone.
-45. **Module names:** `_namespaces/` (plain modules of namespace classes), `_flat_files.py`,
+43. **Module names:** `_namespaces/` (plain modules of namespace classes), `_flat_files.py`,
     `_history_source.py`, and the wire package `_massive/flatfiles/` (PEP 8 forbids the
     underscore in a package name).
-46. **The flat-file design text** settled in the flat-file work package is part of this
-    document, under the final module names.
-47. **Release:** `.github/workflows/release.yml` publishes to PyPI with trusted publishing from a
-    `v*` tag; the first version is 0.1.0 ([section 20.1](#201-tooling-configuration)).
-48. **The fork is left alone.** The plan has no archive, pull-request-closing, or branch-cleanup
-    step for `chipkent/massive-client-python`.
-49. **Upstream SDK issues** are optional and off the path (decision 25).
-50. **The live integration suite runs alongside the finishing package**, and the last package
-    retires the verified UNVERIFIED notes and deletes `plans/rework/`.
+44. **Release through trusted publishing, on the owner's go-ahead.** When the owner turns
+    publishing on, `.github/workflows/release.yml` publishes to PyPI with trusted publishing
+    (no long-lived token), and the first version is 0.1.0. Until then no publishing workflow,
+    GitHub environment, or pending publisher exists. No rehearsal may push a tag that matches
+    the project version, because a PyPI version can never be re-uploaded; the rehearsal method
+    is chosen at the go-ahead ([section 20.1](#201-tooling-configuration)).
 
 ## 23. Open verification items
 
@@ -2706,3 +2727,4 @@ before 1.0.
 | 12 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/massive/net/test_codec.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
 | 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/test_history_source.py`: AUTO before and after the cutoff | `tests/test_flat_files_integration.py`: yesterday's key exists after the cutoff |
 | 14 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
+| 15 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/test_flat_files_integration.py` (S3 credentials): request a weekend key and record the status |

@@ -68,16 +68,19 @@ flowchart LR
     PC2 & PC3b --> P4["P4 feat: WebSocket layer"]
     P3 & P4 --> P6af["P6a–P6f datasets"]
     P3 --> P6gh["P6g, P6h datasets"]
-    P6af & P6gh & PC3c & PC4 & PS3 --> P7["P7 chore: finish rework"]
+    P6af & P6gh & PC3c & PC4 --> P7["P7 chore: finish rework"]
     P6af & P6gh --> P8["P8 test: live integration"]
     P7 & P8 --> PF["PF docs: retire notes and plans"]
-    P7 --> REL1["REL1 ci: release workflow"]
-    PF & REL1 --> REL2["REL2 chore: release 0.1.0"]
-    REL2 --> REL["REL owner: tag v0.1.0"]
+    P7 -.-> REL1["REL1 ci: release workflow<br/>(owner go-ahead only)"]
+    PF & REL1 -.-> REL2["REL2 chore: release 0.1.0<br/>(owner go-ahead only)"]
+    REL2 -.-> REL["REL owner: tag v0.1.0"]
 ```
 
-**Critical path:** PD → PL → PN → PC1a → PC1 → PC3a → PC3a2 → PC3b → P4 → P6a–f → P7 → PF →
-REL. **Chains alongside it:** PC1a → P5 → PDR → PC3b; PC1a → PC2 → P4; P5 → PS3 → PC3c. PC0
+The release packages (dashed) start only on the owner's go-ahead; nothing else depends on
+them.
+
+**Critical path:** PD → PL → PN → PC1a → PC1 → PC3a → PC3a2 → PC3b → P4 → P6a–f → P7 → PF.
+The release (REL1, REL2, REL) follows only on the owner's go-ahead. **Chains alongside it:** PC1a → P5 → PDR → PC3b; PC1a → PC2 → P4; P5 → PS3 → PC3c. PC0
 may merge at any time.
 
 ---
@@ -86,8 +89,9 @@ may merge at any time.
 
 These rules apply to every package. Package sections only add to them.
 
-1. **Branching.** One PR per package on a branch named `<type>/<topic>` off `main`. Never
-   commit directly on `main`. Never force-push a branch another agent may have checked out.
+1. **Branching.** One PR per package on a branch named `<type>/<topic>`, cut from
+   `origin/main` after `git fetch`, never from a local `main`. Never commit directly on `main`.
+   Never force-push a branch another agent may have checked out.
 2. **Conventional commits.** Commit subjects and PR titles follow Conventional Commits v1.0.0
    (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `ci:`, `chore:`), with the PR title given in
    each package below. Commit bodies end with the attribution lines the harness supplies.
@@ -176,7 +180,7 @@ with `git show 519fad8:src/deephaven_massive/<path>`.
 
 ## Package template
 
-Every package below has the same sections, in this order: header (PR title, branch, issue),
+Every package below has the same sections, in this order: header (PR title, branch, base, issue),
 goal, DESIGN sections, dependencies and parallelism, files, tasks, acceptance criteria,
 verification, pitfalls, out of scope, approval gates. "DESIGN §" references use the section
 numbers and titles of `DESIGN.md` and link to its headings; the "DESIGN sections implemented"
@@ -588,7 +592,8 @@ not repeat:
 - a negative test per new gate (global rule 15);
 - a Fable adversarial review to CONVERGED;
 - every review thread answered;
-- a tracking issue under #37, created with owner approval.
+- a tracking issue under #37, created with owner approval;
+- a branch cut from `origin/main` after `git fetch` (global rule 1).
 
 | Id | Title | Depends on |
 |---|---|---|
@@ -612,12 +617,12 @@ not repeat:
 | [P6a–P6f](#p6) | `feat: <stocks / options / futures / indices / forex / crypto> datasets` | P3, P4 |
 | [P6g](#p6) | `feat: reference, indicators, economy, and unified snapshots datasets` | P3 |
 | [P6h](#p6) | `feat: partner datasets` | P3 |
-| [P7](#p7) | `chore: finish rework` | P6a–h, PC3c, PC4, PS3 |
+| [P7](#p7) | `chore: finish rework` | P6a–h, PC3c, PC4 |
 | [P8](#p8) | `test: live integration suite` | P6a–h |
 | [PF](#pf) | `docs: retire verified notes and the rework plan` | P7, P8 |
-| [REL1](#rel1) | `ci: publish to PyPI from a version tag` | P7 |
-| [REL2](#rel2) | `chore: release 0.1.0` | PF, REL1 |
-| [REL](#rel) | Owner: push the tag `v0.1.0` | REL2 |
+| [REL1](#rel1) | `ci: publish to PyPI from a version tag` (on the owner's go-ahead only) | P7 |
+| [REL2](#rel2) | `chore: release 0.1.0` (on the owner's go-ahead only) | PF, REL1 |
+| [REL](#rel) | Owner: push the tag `v0.1.0` (on the owner's go-ahead only) | REL2 |
 | [UP](#upstream) | Upstream SDK issues (owner-gated, issues only, off the path) | none |
 
 ---
@@ -628,6 +633,7 @@ not repeat:
 | | |
 |---|---|
 | **Branch** | `docs/own-clients` (PR #52) |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | Parent tracking issue #37 |
 
 **Goal.** Rewrite `DESIGN.md`, this file, and `AGENTS.md` to the final design: one wire package
@@ -635,7 +641,7 @@ holding REST, WebSocket, and S3 access; every schema generated from the vendor's
 module and test layout; and every remaining package in the template.
 
 **DESIGN sections implemented.** All of `DESIGN.md`, including the flat-file text settled in
-#51 ([§ 22](DESIGN.md#22-decisions), decision 46).
+#51 ([process decision](#process-decisions) 3).
 
 **Depends on.** Nothing. **Parallel with.** PC0.
 
@@ -672,6 +678,7 @@ git diff --stat origin/main -- . ':!plans' ':!AGENTS.md'      # empty
 | | |
 |---|---|
 | **Branch** | `chore/deps-wire-clients` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** Declare the libraries the wire clients import, so nothing relies on a dependency that
@@ -715,12 +722,13 @@ rm -rf .venv && uv sync --upgrade
 | | |
 |---|---|
 | **Branch** | `chore/delete-legacy` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** Delete the legacy implementation and every temporary exclusion now, so no shadow of
 the old layout remains. References to it read `git show 519fad8:<path>`.
 
-**DESIGN sections implemented.** [§ 22](DESIGN.md#22-decisions), decision 42.
+**DESIGN sections implemented.** None; [process decision](#process-decisions) 2.
 
 **Depends on.** PD. **Parallel with.** PC0.
 
@@ -760,6 +768,7 @@ uv build && unzip -l dist/*.whl | grep -E 'engine/|/domains/|schemas/' ; test $?
 | | |
 |---|---|
 | **Branch** | `refactor/final-names` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** Rename to the final layout before new code lands: `_domains/` to `_namespaces/`, the
@@ -777,7 +786,8 @@ dunder rule, the import roots); [§ 20.1](DESIGN.md#201-tooling-configuration) (
   `tests/namespaces/`; test fixtures to `tests/data/<test owner path>/`.
 - Modify: `pyproject.toml` (`pythonpath = ["."]`, `mypy_path = ["src"]`), `tests/conftest.py`
   (fakes imported as `tests._fakes…`), `tests/test_layout.py` (the naming rules), every import
-  of `_domains`, `AGENTS.md` (rule 7 states the new layout, rule 10's fixture path, the
+  of `_domains`, `tests/test_session.py` (its four `_fakes.stream` imports), `AGENTS.md`
+  (rule 7 states the new layout, rule 10's fixture path, the
   `_namespaces/` row).
 
 **Tasks.**
@@ -812,6 +822,7 @@ change.
 | | |
 |---|---|
 | **Branch** | `feat/wire-package-scaffold` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** Create the wire package's skeleton and everything the later wire packages share, so
@@ -837,9 +848,10 @@ and `request_id`, the lazy `__init__`); [§ 19](DESIGN.md#19-wire-clients-and-th
       `host`, `path`, `request_id`, and `message`.
 - [ ] `net/http.py` (CA bundle, proxy selection) and `net/codec.py` (orjson when installed,
       logged once).
-- [ ] `spec/types.py`: `Transport`, `Source` (with `kind`, `group`, `position`, and `projection`),
-      `RestPath`, `Field`, `Param`, `ParamKind`, `WireType`, `WireUnit`, `DriftReport`, frozen,
-      standard library only.
+- [ ] `spec/types.py`: `Transport`, `Source` (with `memberships`), `Membership(kind, group,
+      position, projection: Mapping[wire_key, long_name] | None)`, `RestPath`, `Field`,
+      `Param`, `ParamKind`, `WireType`, `WireUnit`, `DriftReport`, frozen, standard library
+      only.
 - [ ] The lazy package `__init__.py` files.
 - [ ] `_errors.from_wire`; `MassiveError.status` and `.request_id`, read-only.
 - [ ] The boundary and layer tests of DESIGN § 19 (boto3 and botocore forbidden outside
@@ -871,6 +883,7 @@ uv run pytest tests/massive tests/test_layout.py tests/test_errors.py tests/test
 | | |
 |---|---|
 | **Branch** | `feat/flat-file-history` (#51) |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | #16 |
 
 **Goal.** Stream `.csv.gz` flat files into static tables with pure-Arrow per-block transforms,
@@ -889,11 +902,13 @@ the `HistorySource.AUTO` choice between S3 and REST, with the S3 wire access in
 **Depends on.** PC1a. **Parallel with.** PC1, PC2, PC3a.
 
 **How it is restructured.** #51 at 945d060 is restructured as a move with unchanged logic,
-built in a separate worktree on PC1a, in two commits: (1) 945d060 rebased with renames only
+built on a new local branch, `restructure/flat-file-history`, cut from `origin/main` after
+`git fetch` once PC1a has merged, in two commits: (1) 945d060 rebased with renames only
 (`_flatfiles.py` → `_flat_files.py`, `_sources.py` → `_history_source.py`); (2) the move of the
-S3 wire code into `_massive/flatfiles/` (`client.py`, `layout.py`, `reader.py`). It is
-force-pushed to #51 only after PC1a merges; the implementer stops before the push for the
-owner.
+S3 wire code into `_massive/flatfiles/` (`client.py`, `layout.py`, `reader.py`). It replaces
+#51's branch with
+`git push --force-with-lease=feat/flat-file-history:945d060 origin HEAD:feat/flat-file-history`,
+so the push fails if #51 moved; the implementer stops before the push for the owner.
 
 **Files.**
 - Create: `src/deephaven_massive/_flat_files.py`, `_history_source.py`,
@@ -935,6 +950,10 @@ owner.
       its session key.
 - [ ] `choose_source()` implementing the AUTO predicate verbatim from DESIGN § 16, and its log
       lines.
+- [ ] The move maps S3 errors to the wire-error family (`WireAuthError`,
+      `WireEntitlementError`, `WireError`) with `request_id` from `x-amz-request-id`
+      (DESIGN § 19.3), turned into public exceptions by `from_wire` with #51's texts. #51 does
+      neither, so this is a named, justified change to the affected test bodies.
 - [ ] Tests: fake S3 (`tests/_fakes/s3.py`); gzip streams (gzip only, since every documented
       key is `.csv.gz`; a non-gzip body is a tested error); pushdown keeps only matching
       symbols; a 3-day range with one missing weekday; the cutoff rule at 11:29 and 11:31 ET;
@@ -984,6 +1003,7 @@ parameter, and `indices.bars` has none; `ignore_missing = len(dates) > 1` droppi
 | | |
 |---|---|
 | **Branch** | `feat/rest-client` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** A REST client that speaks Massive's documented REST protocol exactly, shared safely by
@@ -1042,6 +1062,7 @@ retries underneath the client.
 | | |
 |---|---|
 | **Branch** | `feat/websocket-client` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** A WebSocket client for one `wss://host/path`, confined to its own loop thread, that
@@ -1101,6 +1122,7 @@ which would send binary frames.
 | | |
 |---|---|
 | **Branch** | `feat/rest-wire-schema` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** The refresh command, the canonical snapshot, and `spec/rest.json`: every non-excluded
@@ -1118,19 +1140,23 @@ timestamp-like integers (68 of them untagged) and about 50 short keys.
 
 **Files.**
 - Create: `_massive/refresh/__main__.py`, `fetch.py`, `generate.py` (the REST half),
-  `lexicon.py` (REST shapes), `overrides.py` (`NAMES`, REST `UNITS`, REST `TYPE_FIXES`,
-  `RESULT_KEYS`), `exclusions.py`, `refresh/snapshot/` (the snapshot and `manifest.json`),
+  `docs.py` (the `llms.txt` reader only), `lexicon.py` (REST shapes), `overrides.py` (`NAMES`,
+  REST `UNITS`, REST `TYPE_FIXES`, `RESULT_KEYS`), `exclusions.py` (the REST rows of
+  DESIGN § 8.12), `refresh/snapshot/` (every source, in one snapshot, with `manifest.json`),
   `_massive/spec/rest.json`; their mirrors under `tests/massive/refresh/`.
 - Modify: `AGENTS.md` (the refresh commands, and `uv run pytest tests/massive/refresh -q`),
-  `_massive/spec/__init__.py` (the loaders, one load under a lock), `pyproject.toml`
+  `_massive/__init__.py` (the spec block of `__all__`: `source`, `sources`, and the value
+  types), `_massive/spec/__init__.py` and `tests/massive/spec/test_init.py` (the loaders, one
+  load under a lock), `pyproject.toml`
   (the wheel exclusion of `_massive/refresh`), `.github/workflows/ci.yml` (the build job asserts
   the wheel holds `spec/rest.json` and no `refresh/`).
 
 **Tasks.**
-- [ ] `python -m deephaven_massive._massive.refresh [--fetch]`; `fetch.py` stores canonically
-      (DESIGN § 19.6).
-- [ ] The REST generator with the § 19.4 rules and gates G1–G4, and the type lattice.
-- [ ] `EXCLUSIONS`, exactly DESIGN § 8.12.
+- [ ] `python -m deephaven_massive._massive.refresh [--fetch]`; `fetch.py` stores every source
+      canonically in one snapshot (DESIGN § 19.6).
+- [ ] The REST generator with the § 19.4 rules and gates G1–G4 (G4's REST half), and the type
+      lattice.
+- [ ] `EXCLUSIONS` with the REST rows of DESIGN § 8.12; the `llms.txt` reader in `docs.py`.
 
 **Acceptance criteria.**
 - [ ] The parity test passes byte for byte.
@@ -1138,6 +1164,8 @@ timestamp-like integers (68 of them untagged) and about 50 short keys.
       owner before merge.
 - [ ] documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored).
 - [ ] Negative tests for G1–G4; a fixture exercises each `TYPE_FIXES` entry.
+- [ ] A test checks every "not documented in `llms.txt`" exclusion against the snapshot's
+      `llms.txt`.
 - [ ] A 16-thread first load on 3.14t.
 - [ ] The wheel has `spec/rest.json` and no `refresh/`.
 
@@ -1165,27 +1193,33 @@ Never derive a name from a description.
 | | |
 |---|---|
 | **Branch** | `feat/ws-flat-file-wire-schemas` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** `spec/ws.json` and `spec/flatfiles.json`, the dataset kinds, and the gates that make
 names, types, and transports agree.
 
 **DESIGN sections implemented.** [§ 19.4](DESIGN.md#194-generated-schemas) (WebSocket and
-flat-file sources, `FAMILIES`, `PROJECTIONS`, `TRANSPORT_ONLY`, G5–G7).
+flat-file sources, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, `VENUES`, the channel and
+prefix half of G4, G5–G7).
 
 **Depends on.** PC3a. **Parallel with.** P5, PC2.
 
 **Files.**
-- Create: `_massive/refresh/docs.py`; `_massive/spec/ws.json`, `flatfiles.json`.
-- Modify: `refresh/generate.py` (the WebSocket and flat-file halves), `lexicon.py` (their
-  `SHAPES`), `overrides.py` (`NAMES` including `dv` and `dav`, `UNITS`, `TYPE_FIXES`,
-  `FAMILIES`, `PROJECTIONS`, `TRANSPORT_ONLY`), the snapshot (flat-file pages and overviews).
+- Create: `_massive/spec/ws.json`, `flatfiles.json`.
+- Modify: `refresh/generate.py` (the WebSocket and flat-file halves), `docs.py` (the "Columns"
+  and overview parsers), `lexicon.py` (their `SHAPES`), `overrides.py` (`NAMES` including `dv`
+  and `dav`, `UNITS`, `TYPE_FIXES`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, `VENUES`),
+  `exclusions.py` (the WebSocket and flat-file rows of DESIGN § 8.12), `_massive/__init__.py`
+  and `_massive/spec/__init__.py` (the loaders for `ws.json` and `flatfiles.json`;
+  `Source.memberships`), `tests/massive/spec/test_init.py`.
 
 **Tasks.**
 - [ ] The WebSocket and flat-file generators, G5–G7.
-- [ ] Write each source's `kind`, `group`, `position`, and `projection` from `FAMILIES` and
-      `PROJECTIONS` into its entry in all three `spec/*.json` files, and load them onto
-      `Source`; a test loads `spec/` with `refresh/` absent.
+- [ ] Write each source's memberships (`kind`, `group`, `position`, `projection`) from `KINDS`
+      and `PROJECTIONS` into its entry in all three `spec/*.json` files, and load them onto
+      `Source.memberships`; a test loads `spec/` with `refresh/` absent.
+- [ ] A library test checks `VENUES` against `FuturesVenue`.
 - [ ] Check that the names DESIGN § 21 uses (`Symbol`, `Timestamp`, `BidPrice`, `AskPrice`) are
       generated names.
 
@@ -1217,6 +1251,7 @@ tape or average trade size); a flat key table cannot work.
 | | |
 |---|---|
 | **Branch** | `feat/runtime-drift` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** Report drift and fail loudly on bad data for flat files, and add the diagnostics
@@ -1266,6 +1301,7 @@ extra one is ignored silently; read by name.
 | | |
 |---|---|
 | **Branch** | `fix/flat-file-s3-net` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** S3 follows the same TLS, proxy, and retry rules as REST.
@@ -1275,7 +1311,9 @@ extra one is ignored silently; read by name.
 
 **Depends on.** P5, PC1. **Parallel with.** PC3a2, PDR.
 
-**Files.** Modify `_massive/flatfiles/client.py` and its tests.
+**Files.** Modify `_massive/flatfiles/client.py` and its tests. Failures are injected only
+through the fake's existing `fail(key, …)` and `put_dropped`, so PS3 never edits
+`tests/_fakes/s3.py`, which PDR edits in parallel.
 
 **Tasks.**
 - [ ] `session.client("s3", verify=<net.http CA bundle>, config=Config(proxies=<net.http>,
@@ -1311,6 +1349,7 @@ uv run pytest tests/massive/flatfiles -q
 | | |
 |---|---|
 | **Branch** | `refactor/generated-schemas` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** Derive every dataset schema from the generated tables and delete every hand-written
@@ -1325,14 +1364,21 @@ C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
 **Depends on.** PC3a2, P5, PDR. **Parallel with.** PC2, PS3.
 
 **Files.** Modify `_catalog.py`, `_schema.py`, `_timeunits.py`, `_enums.py`, `_flat_files.py`,
-`_namespaces/base.py`, and their tests; create `tests/data/catalog/undeclared/<namespace>.txt`.
+`_namespaces/base.py`, and the users of `_enums.Transport` (`_query.py`, `_session.py`,
+`_diagnostics.py`, `_history_source.py`), and their tests (`test_catalog`, `test_schema`,
+`test_timeunits`, `test_enums`, `test_query`, `test_session`, `test_diagnostics`,
+`test_history_source`, `namespaces/test_base`); create
+`tests/data/catalog/undeclared/<namespace>.txt`.
 
 **Tasks.**
-- [ ] `DatasetSpec` gains `family`, the four key columns, and the role paths (`fetch_path`,
+- [ ] `DatasetSpec` gains `kind`, the per-source key columns (`KeySpec(column, from_request)`
+      for `symbol` and `time`, and `fanout` and `session` on the sources that carry them), and
+      the role paths (`fetch_path`,
       `history_path`, `grouped_daily_path`, `extra_paths`); `has_rest_history` and
       `has_grouped_daily` read the role paths.
-- [ ] `_schema.rename` and `dataset_schema` (DESIGN § 19.4), reading kinds and projections from
-      the generated `Source` fields, never from `refresh/`.
+- [ ] `_schema.rename` and `dataset_schema` (DESIGN § 19.4), reading memberships and their
+      projections from `Source.memberships`, never from `refresh/`; a `from_request` key becomes a
+      constant column; the cache is computed outside its lock and published under it.
 - [ ] Delete the hand tick schemas, P2's key maps, `ColumnOverride`, the SDK flattening,
       `TimeUnitTable`, and `_enums.Transport`.
 - [ ] `_flat_files.py` builds plans from `source(Transport.FLAT_FILES, …)`; the timestamp routine
@@ -1342,6 +1388,10 @@ C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
 
 **Acceptance criteria.**
 - [ ] `git grep -nE "^\s*(from|import) massive" -- src tests` is empty.
+- [ ] `git grep -n "_enums import.*Transport"` is empty, and `Transport`'s string values are
+      unchanged in the diagnostics tables.
+- [ ] A per-ticker REST path (`/v3/trades/{t}`) and a futures WebSocket channel pass C1 with
+      `from_request` and absent session keys.
 - [ ] Negative tests for C1–C7 on synthetic specs.
 - [ ] A `stocks.trades`/`crypto.trades` fixture pair shows identical column sets with a single
       `Timestamp`.
@@ -1366,6 +1416,7 @@ uv run pytest tests/test_catalog.py tests/test_schema.py tests/test_timeunits.py
 | | |
 |---|---|
 | **Branch** | `feat/api-drift-check` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** `--check` and the weekly drift job.
@@ -1376,17 +1427,23 @@ uv run pytest tests/test_catalog.py tests/test_schema.py tests/test_timeunits.py
 **Depends on.** PC3a2, P5, PS3. **Parallel with.** PC3b.
 
 **Files.** Create `_massive/refresh/drift.py` and its tests, `.github/workflows/spec-drift.yml`.
-Modify `refresh/__main__.py`.
+Modify `refresh/__main__.py`; `_massive/flatfiles/client.py` (`prefixes()`) and
+`tests/massive/flatfiles/test_client.py`; `tests/_fakes/s3.py` (answer `ListObjectsV2`, with
+common prefixes and continuation tokens).
 
 **Tasks.**
 - [ ] `--check` covers REST, `llms.txt`, channels and keys, flat-file pages and headers, overview
       rows, S3 prefixes through `FlatFileClient.prefixes()`, and newly deprecated paths still in
       `rest.json`.
+- [ ] `FlatFileClient.prefixes()`: a paginated `list_objects_v2(Delimiter="/")` through the
+      shared retry schedule and the closed-flag check.
 - [ ] The workflow: `issues: write` only; one standing issue; creates the `spec-drift` label.
 
 **Acceptance criteria.**
 - [ ] Synthetic before-and-after snapshots for every drift kind.
 - [ ] The issue logic is tested against a fake `gh`.
+- [ ] `prefixes()` returns every prefix across two pages, and the drift report lists a bucket
+      prefix that nothing names.
 
 **Verification.**
 ```bash
@@ -1408,6 +1465,7 @@ uv run python -m deephaven_massive._massive.refresh --check    # live; prints th
 | | |
 |---|---|
 | **Branch** | `chore/deps-remove-massive` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** Remove the `massive` dependency and its fork source.
@@ -1449,6 +1507,7 @@ rm -rf .venv && uv sync --upgrade
 | | |
 |---|---|
 | **Branch** | `feat/rest-transport` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | #14 |
 
 **Goal.** Put every REST dataset on `RestClient` and the generated tables: requests built from a
@@ -1522,6 +1581,7 @@ per-contract snapshot calls instead of `ticker.any_of` (F M7); network I/O in a 
 | | |
 |---|---|
 | **Branch** | `feat/websocket-layer` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | #15 |
 
 **Goal.** Live streams on `WsClient`: one connection per URL, the reconcile loop, watchdogs and
@@ -1539,16 +1599,17 @@ routing, the options cap, reactive watchlists, and the live diagnostics.
 
 **Files.**
 - Create: `_ws.py`, `_stream.py`, `_watchlist.py`, `tests/test_ws.py`, `tests/test_stream.py`,
-  `tests/test_watchlist.py`, `tests/_fakes/stream.py`, `tests/data/ws/`.
-- Modify: `_session.py` (the WS factory hook, live rows), `_query.py` (stream verbs),
-  `_namespaces/base.py`.
+  `tests/test_watchlist.py`, `tests/data/ws/`.
+- Modify: `tests/_fakes/stream.py` (created in P2), `_session.py` (the WS factory hook, live
+  rows), `_query.py` (stream verbs), `_namespaces/base.py`.
 
 **Tasks.**
 - [ ] One `WsClient` per URL with the channels' generated sources; `on_open`, `on_status`,
       `on_data`, `on_state` per DESIGN § 13.3, all on the loop thread.
 - [ ] The reconcile loop with make-before-break wildcard transitions, single-topic re-send,
       and the `NO_ACK` rule (one reconnect per topic per session).
-- [ ] Rejects fail only their streams; drift goes to the `DriftRegistry`.
+- [ ] Rejects fail only their streams; a row with no symbol fails only the channel's `ALL`
+      streams and logs at ERROR; drift goes to the `DriftRegistry`.
 - [ ] The flush renames, converts, applies the bound mask, and fans out with `where_in`.
 - [ ] The options cap with deferral; `_watchlist.py`; idle close after 30 s.
 - [ ] The P2 follow-ups B1–B9: `open_stream`'s `channel` is `str`; `open_stream` releases its
@@ -1582,7 +1643,8 @@ tearing down a whole URL on one entitlement error; prefix matching between topic
 <a id="p6"></a>
 ## P6a–P6h — `feat: <namespace> datasets`
 
-All eight packages share this section; per-package specifics follow.
+All eight packages share this section; per-package specifics follow. Each branch is cut from
+`origin/main` after `git fetch`.
 
 | Id | Title | Branch | Issue | Depends on |
 |---|---|---|---|---|
@@ -1609,7 +1671,8 @@ fixtures, and the deletion of `tests/data/catalog/undeclared/<ns>.txt`. No `_mas
 needed `refresh/` fix lands first in its own PR.
 
 **Shared tasks (per dataset).**
-- [ ] A `DatasetSpec`: name, query class, family, the four key columns, the role paths,
+- [ ] A `DatasetSpec`: name, query class, kind, the per-source key columns (`KeySpec`), the
+      role paths,
       channels, prefixes, the `start`/`end` wire pair, poll defaults, page size. No column
       overrides and no unit declarations: those are generated.
 - [ ] The factory method with the exact DESIGN § 8 signature and a docstring stating the
@@ -1653,7 +1716,8 @@ needed, with `git show 519fad8:src/deephaven_massive/<path>`.
 - **P6c** ([§ 8.3](DESIGN.md#83-mfutures)): `trades`, `quotes`, `bars` (no `DAY`; `SESSION`;
   `resolution = f"{multiplier}{unit}"`), `snapshots(product_code)`, `contracts`, `products`,
   `exchanges`, `market_status`, `schedules`. Streams always `/futures`.
-- **P6d** ([§ 8.4](DESIGN.md#84-mindices)): `values` (`fetch()` through `PROJECTIONS`; history
+- **P6d** ([§ 8.4](DESIGN.md#84-mindices)): `values` (`fetch()` through the snapshot's
+  membership of the values kind; history
   flat files only), `bars` (no `adjusted`), `snapshots`, `daily_open_close`; the `V`
   not-authorized message.
 - **P6e** ([§ 8.5](DESIGN.md#85-mforex)): `quotes`, `bars`, `fmv`, `snapshots`, `movers`,
@@ -1675,6 +1739,7 @@ needed, with `git show 519fad8:src/deephaven_massive/<path>`.
 | | |
 |---|---|
 | **Branch** | `chore/finish-rework` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | #25 |
 
 **Goal.** Close the rework: the README examples run, `README.md` is rewritten, the durable rules
@@ -1683,10 +1748,10 @@ move into `AGENTS.md`, and generated = used.
 **DESIGN sections implemented.** [§ 21 Examples](DESIGN.md#21-examples);
 [§ 8.12](DESIGN.md#812-excluded-endpoints) (generated = used).
 
-**Depends on.** P6a–h, PC3c, PC4, PS3. **Parallel with.** P8.
+**Depends on.** P6a–h, PC3c, PC4. **Parallel with.** P8.
 
-**Files.** Create `tests/test_readme.py`. Modify `README.md`, `AGENTS.md`, the snapshot and
-`spec/*.json` if Massive changed. Delete `tests/data/catalog/undeclared/`.
+**Files.** Create `tests/test_readme.py`. Modify `README.md`, `AGENTS.md`. Delete
+`tests/data/catalog/undeclared/`.
 
 **Tasks.**
 - [ ] `tests/test_readme.py`: each DESIGN § 21 example runs in the embedded JVM against the
@@ -1694,7 +1759,9 @@ move into `AGENTS.md`, and generated = used.
 - [ ] `README.md`: install from the repository until REL2, configuration, quickstart, verbs,
       symbols, hosts, the namespace index, lifecycle, diagnostics, development.
 - [ ] Fold the durable rules into `AGENTS.md`.
-- [ ] Refresh the snapshot if Massive changed.
+
+A refresh of the snapshot, when Massive has changed, is its own `chore: refresh the Massive
+snapshot` PR, never part of P7.
 
 **Acceptance criteria.**
 - [ ] All six DESIGN § 21 examples run.
@@ -1722,6 +1789,7 @@ uv run pytest tests/test_readme.py tests/test_catalog.py -q
 | | |
 |---|---|
 | **Branch** | `test/live-integration` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | #26 |
 
 **Goal.** `*_integration.py` tests that run only with `MASSIVE_API_KEY` (and S3 keys), so the
@@ -1765,6 +1833,7 @@ MASSIVE_API_KEY=… uv run pytest -m integration -q    # owner only
 | | |
 |---|---|
 | **Branch** | `docs/retire-plans` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
 **Goal.** Retire each UNVERIFIED note that P8 verified and delete `plans/rework/`.
@@ -1782,6 +1851,7 @@ at the code and README). Delete `plans/rework/` (DESIGN, PLAN, RESEARCH).
 **Acceptance criteria.**
 - [ ] `git grep -n "UNVERIFIED\|plans/rework"` lists only refuted items, each with an owner
       decision.
+- [ ] The PR body links the owner's P8 run output for each DESIGN § 23 row it retires.
 
 **Verification.**
 ```bash
@@ -1803,13 +1873,18 @@ git grep -n "UNVERIFIED\|plans/rework"
 | | |
 |---|---|
 | **Branch** | `ci/release-workflow` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
+
+**Starts only on the owner's go-ahead.** Publishing is not turned on. Until the owner says so,
+no release workflow, GitHub environment, or pending trusted publisher is created, and no other
+package depends on this one.
 
 **Goal.** Publish to PyPI reproducibly, with no long-lived token.
 
 **DESIGN sections implemented.** [§ 20.1](DESIGN.md#201-tooling-configuration) (release).
 
-**Depends on.** P7. **Parallel with.** P8, PF.
+**Depends on.** P7 and the owner's go-ahead. **Parallel with.** P8, PF.
 
 **Files.** Create `.github/workflows/release.yml`.
 
@@ -1817,13 +1892,16 @@ git grep -n "UNVERIFIED\|plans/rework"
 - [ ] On a `v*` tag: build the sdist and the wheel, check that the tag equals
       `project.version`, publish through PyPI trusted publishing (`id-token: write`). The owner
       configures the PyPI project and the trusted publisher.
+- [ ] The rehearsal, in the method the owner chooses at the go-ahead.
 
 **Acceptance criteria.**
-- [ ] A dry run against TestPyPI from a test tag succeeds.
+- [ ] The chosen rehearsal succeeds without publishing `0.1.0` to PyPI.
 
-**Verification.** The TestPyPI dry run.
+**Verification.** The chosen rehearsal.
 
-**Pitfalls.** No token in secrets.
+**Pitfalls.** No token in secrets. No rehearsal may push a tag that matches `project.version`:
+the version is already `0.1.0`, the only tag that passes the check is `v0.1.0`, and pushing it
+publishes to PyPI, where a version can never be re-uploaded.
 
 **Out of scope.** The version bump (REL2).
 
@@ -1837,19 +1915,24 @@ git grep -n "UNVERIFIED\|plans/rework"
 | | |
 |---|---|
 | **Branch** | `chore/release-0.1.0` |
+| **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
-**Goal.** Set the first version.
+**Starts only on the owner's go-ahead.** Publishing is not turned on. Until the owner says so,
+no release workflow, GitHub environment, or pending trusted publisher is created, and no other
+package depends on this one.
+
+**Goal.** Prepare the first release.
 
 **DESIGN sections implemented.** [§ 20.1](DESIGN.md#201-tooling-configuration).
 
 **Depends on.** PF, REL1. **Parallel with.** nothing.
 
-**Files.** Modify `pyproject.toml` (`project.version = "0.1.0"`) and `README.md` (the install line
-becomes `pip install deephaven-massive`).
+**Files.** Modify `README.md` (the install line becomes `pip install deephaven-massive`).
+`pyproject.toml` already says `version = "0.1.0"`, so there is no version diff.
 
 **Tasks.**
-- [ ] The two edits.
+- [ ] The README edit.
 
 **Acceptance criteria.**
 - [ ] The README states no UNVERIFIED behaviour.
@@ -1870,8 +1953,8 @@ becomes `pip install deephaven-massive`).
 <a id="rel"></a>
 ## REL — owner: push the tag `v0.1.0`
 
-The owner pushes `v0.1.0` after REL2 merges. Acceptance: `pip install deephaven-massive==0.1.0`
-imports inside a Deephaven server.
+Only on the owner's go-ahead: the owner pushes `v0.1.0` after REL2 merges. Acceptance:
+`pip install deephaven-massive==0.1.0` imports inside a Deephaven server.
 
 ---
 
@@ -1904,7 +1987,8 @@ The rework is complete when all of the following hold on `main`:
 - [ ] No dependency on `massive` and no `[tool.uv.sources]`.
 - [ ] `plans/rework/` no longer exists (PF); `AGENTS.md` and `README.md` carry the durable
       content.
-- [ ] `pip install deephaven-massive==0.1.0` imports inside a Deephaven server (REL).
+- [ ] Once the owner has turned publishing on, and only then: `pip install
+      deephaven-massive==0.1.0` imports inside a Deephaven server (REL).
 
 ---
 
@@ -1916,10 +2000,32 @@ The rework is complete when all of the following hold on `main`:
    tests (DESIGN § 4.2).
 2. **README example tests:** they live in `tests/test_readme.py`, created in P7.
 3. **Shared fakes:** `tests/_fakes/` is a helper package outside the mirror rule; PC1 creates
-   `rest.py`, PC2 `ws.py`, P5 `s3.py`, P4 `stream.py`; only `tests/conftest.py` imports it,
+   `rest.py`, PC2 `ws.py`, P5 `s3.py`, P2 `stream.py`; only `tests/conftest.py` imports it,
    through thin fixtures.
 4. **Embedded test server port:** an implementer's choice in P1.
 5. **Own clients, no SDK** (DESIGN § 22, decision 1).
+
+<a id="process-decisions"></a>
+### Process decisions
+
+These decide how the work is carried out, not what is built, so they live here rather than in
+DESIGN.
+
+1. **The flat-file implementation of #51 is restructured before merge** as a move with
+   unchanged logic into the wire package, so `main` never carries another boundary (P5).
+2. **The legacy implementation is deleted** (PL). References to it read
+   `git show 519fad8:<path>`.
+3. **The flat-file DESIGN and PLAN text of #51** is carried into the final documents, under
+   the final module names (PD).
+4. **The fork is left alone.** The plan has no archive, pull-request-closing, or
+   branch-cleanup step for `chipkent/massive-client-python`; what happens to it is the owner's
+   own action.
+5. **The live integration suite runs alongside the finishing package** (P8 alongside P7), and
+   PF retires the verified UNVERIFIED notes and deletes `plans/rework/`.
+6. **Upstream issues** (DESIGN § 22, decision 25) are each reproduced against the latest PyPI
+   `massive`, pass a clarity critique, and are posted only after the owner approves the text
+   (UP).
+7. **Local worktree and branch cleanup** is done by the coordinator, outside the plan.
 
 The owner decisions of the final design (O-items), each recorded in DESIGN:
 
@@ -1928,24 +2034,24 @@ The owner decisions of the final design (O-items), each recorded in DESIGN:
 | O1 | Names from the lexicons, `NAMES`, and the declared key columns | § 19.4; § 22, decision 22 |
 | O2 | Coverage is derived: documented = generated ⊎ excluded ⊎ …; generated = used ⊎ undeclared | § 8.12; § 19.4 C7 |
 | O3 | One wire package, REST, WebSocket, and S3 | § 19; § 22, decision 26 |
-| O4 | #51 is restructured before merge as a move with unchanged logic | P5; § 22, decision 41 |
-| O5 | The legacy code is deleted now (PL) | § 22, decision 42 |
-| O6 | The test layout: one underscore dropped per component, the dunder rule | § 4.2; § 22, decision 43 |
+| O4 | #51 is restructured before merge as a move with unchanged logic | P5; process decision 1 |
+| O5 | The legacy code is deleted now (PL) | Process decision 2 |
+| O6 | The test layout: one underscore dropped per component, the dunder rule | § 4.2; § 22, decision 41 |
 | O7 | S3 follows the shared network rules | § 19.3; § 22, decision 39 |
-| O8 | Renames: `_namespaces/`, `_flat_files.py`, `_history_source.py`, `_massive/flatfiles/` | § 4.1; § 22, decision 45 |
+| O8 | Renames: `_namespaces/`, `_flat_files.py`, `_history_source.py`, `_massive/flatfiles/` | § 4.1; § 22, decision 43 |
 | O9 | `python -m deephaven_massive._massive.refresh`; `refresh/` not shipped | § 19.6; § 22, decision 29 |
-| O10 | The flat-file DESIGN and PLAN text of #51 is carried into the final documents | § 22, decision 46 |
+| O10 | The flat-file DESIGN and PLAN text of #51 is carried into the final documents | Process decision 3 |
 | O11 | Hand input is naming, grouping, and verification only | § 19.4; § 22, decision 34 |
 | O12 | The `SchemaDrift` column | § 17 |
 | O13 | The runtime drift policy | § 19.5; § 22, decision 35 |
 | O14 | One timestamp routine; the bound on epoch integers only | § 12; § 22, decision 36 |
-| O15 | Withdrawn: no `families.json`; `FAMILIES` lives in `refresh/overrides.py` | § 19.4 |
+| O15 | Kinds are hand input in `KINDS`; each source's memberships are written into `spec/*.json` | § 19.4 |
 | OQ1 | Dataset schemas merged at run time, after the rename | § 19.4; § 22, decision 32 |
 | OQ2 | A missing declared key column fails loudly on every transport | § 19.5 |
 | OQ3 | An unconvertible value in `poll()` fails the table | § 13.4; § 19.5 |
 | OQ4 | Hand input is never a column list | § 19.4 |
 | OQ5 | `dav` → `AccumulatedDecimalVolume`; stocks `dv` → `DecimalVolume`; futures `dv` → `DollarVolume` | § 19.4; § 22, decision 22 |
 | Q2 | The snapshot is stored canonically | § 19.6 |
-| Q3 | P8 runs alongside P7; PF retires notes and deletes `plans/rework/` | § 22, decision 50 |
-| Q4 | Release 0.1.0 through trusted publishing | § 20.1; § 22, decision 47 |
-| Q5 | The fork is left to the owner | § 22, decisions 25 and 48 |
+| Q3 | P8 runs alongside P7; PF retires notes and deletes `plans/rework/` | Process decision 5 |
+| Q4 | Release 0.1.0 through trusted publishing, on the owner's go-ahead only | § 20.1; § 22, decision 44 |
+| Q5 | The fork is left to the owner | § 22, decision 25; process decisions 4 and 6 |

@@ -48,7 +48,7 @@ nothing is kept or shimmed for compatibility.
    it and summarize the fix, or explain why nothing changes. Never resolve a thread without a
    reply.
 4. **Branches** are named `<type>/<topic>` (`feat/`, `fix/`, `docs/`, `test/`, `refactor/`,
-   `ci/`, `chore/`), cut from `main`.
+   `ci/`, `chore/`), cut from `origin/main` after `git fetch`, never from a local `main`.
 5. **Commits and PR titles** follow Conventional Commits v1.0.0 (`feat:`, `fix:`, `docs:`,
    `test:`, `refactor:`, `ci:`, `chore:`).
 6. **`scripts/check.sh` (full) is green before every push**, and every CI job is green on the
