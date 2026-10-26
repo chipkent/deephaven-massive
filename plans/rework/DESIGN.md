@@ -1910,7 +1910,8 @@ negative test per rule:
 - Inside `_massive`, a module imports only the standard library, `urllib3`, `websockets`,
   `certifi`, the optional `orjson`, `boto3`, `botocore`, `pyarrow`, and other `_massive`
   modules. It never imports `deephaven`, `deephaven_server`, `jpy`, or any module outside
-  `_massive`.
+  `_massive`. The one exception is `typing_extensions` inside `if TYPE_CHECKING:` (for
+  `override` on Python 3.11), which never runs.
 - **Layers.** `net` and `spec` import nothing else in `_massive`. `rest`, `ws`, and `flatfiles`
   import only `net` and `spec`. `refresh` may import any of them, and only `refresh` and its
   tests import `refresh`.
@@ -2130,8 +2131,8 @@ verification, never a column list.
   query).
 - **WebSocket.** Every `websocket.json` channel not in `EXCLUSIONS`, keyed `(cluster,
   channel)` and spelled `"<cluster>/<channel>"` as its `Source.key` (`"stocks/T"`,
-  `"futures/AM"`), since stocks, options, and futures share channel names. Fields are its message properties in spec order; `required` is copied where the
-  vendor gives it.
+  `"futures/AM"`), since stocks, options, and futures share channel names. Fields are its
+  message properties in spec order; `required` is copied where the vendor gives it.
 - **Flat files.** Every dataset page with a row in its class's overview table. That row's
   `S3 <prefix>` is the source key, so no hand-written page-to-prefix map exists. A futures kind
   keyed by `{venue}` requires its four venue pages to list identical columns. Fields are the

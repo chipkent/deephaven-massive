@@ -19,7 +19,8 @@ the imports of every module with `ast`:
 
 - Inside `_massive`, a module imports only the standard library, the wire libraries
   (`urllib3`, `websockets`, `certifi`, `orjson`, `boto3`, `botocore`, `pyarrow`), and other
-  `_massive` modules; never Deephaven, `jpy`, or the rest of the library.
+  `_massive` modules; never Deephaven, `jpy`, or the rest of the library. The one exception is
+  `typing_extensions` inside `if TYPE_CHECKING:`, which never runs.
 - Its subpackages are layered: `net` and `spec` import nothing else in `_massive`; `rest`,
   `ws`, and `flatfiles` import only `net` and `spec`; `refresh` may import anything, and only
   `refresh` and its tests import `refresh`.
@@ -34,7 +35,10 @@ A module named in a string counts as imported, since that is the form every dyna
 (`importlib.import_module` under any alias, `__import__`), patch (`mock.patch`,
 `monkeypatch.setattr`), and `sys.modules` lookup takes. Inside `_massive`, a module outside
 the six known subpackages is itself a violation, so a new module cannot escape the layers.
-This file is exempt from the rules on strings, since it names what it forbids.
+This file is exempt from the rules on strings, since it names what it forbids. A bare string
+naming a network library outside `_massive` (a logger name such as `"urllib3"` passed to
+`caplog.at_level`, say) is flagged on purpose: details of those libraries belong inside the
+wire package.
 
 Each rule is a pure function over relative paths (and, for the boundary, source text), so it is
 checked both against the real tree and against a synthetic tree that breaks it.
@@ -447,6 +451,8 @@ _LAYERS = {
     "flatfiles": frozenset({"flatfiles", "net", "spec"}),
 }
 _REFRESH = "refresh"
+# A library `_massive` may import for type checking only (`override` on Python 3.11).
+_TYPE_ONLY_LIBRARY = "typing_extensions"
 
 # The vendor files of the spec snapshot, and its directory.
 _SNAPSHOT_FILES = frozenset({"openapi.json", "websocket.json", "llms.txt", "manifest.json"})
@@ -678,6 +684,25 @@ def _snapshot_names(tree: ast.Module) -> list[tuple[int, str]]:
     ]
 
 
+def _type_checking_lines(tree: ast.Module) -> set[int]:
+    """Return the lines of the imports inside `if TYPE_CHECKING:` blocks.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        The line of each `import` or `from ... import` in the body (not the `else`) of an
+        `if TYPE_CHECKING:` statement.
+    """
+    return {
+        statement.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "TYPE_CHECKING"
+        for statement in node.body
+        if isinstance(statement, ast.Import | ast.ImportFrom)
+    }
+
+
 def _wire_layer(name: str) -> str | None:
     """Return the `_massive` subpackage a module name falls in.
 
@@ -713,9 +738,12 @@ def _wire_rules(where: str, tree: ast.Module, *, module: str, package: str) -> l
     layer = _wire_layer(module) if module != _WIRE else None
     if module != _WIRE and layer is None:
         return [f"{where}:1: not in a known layer of the wire package: {module}"]
+    type_only = _type_checking_lines(tree)
     found = []
     for line, name in [*_imports(tree, package), *_module_strings(tree)]:
         top = name.split(".")[0]
+        if top == _TYPE_ONLY_LIBRARY and line in type_only:
+            continue
         if _inside(name, _WIRE):
             target = _wire_layer(name)
             if target == _REFRESH and layer != _REFRESH:
@@ -884,6 +912,24 @@ def test_the_wire_package_may_import_its_allow_list(source: str) -> None:
 def test_the_wire_package_must_not_import_outside_its_allow_list(source: str, name: str) -> None:
     [message] = _check(_WIRE_FILE, source)
     assert message.startswith(f"{_WIRE_FILE}:1: the wire package must not import {name}")
+
+
+def test_the_wire_package_may_import_typing_extensions_for_type_checking_only() -> None:
+    type_only = (
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from typing_extensions import override\n"
+        "else:\n"
+        "    import ssl\n"
+    )
+    assert _check(_WIRE_FILE, type_only) == []
+    for source, line in [
+        ("from typing_extensions import override\n", 1),
+        ("if TYPE_CHECKING:\n    pass\nelse:\n    import typing_extensions\n", 4),
+        ("if TYPE_CHECKING:\n    import deephaven.table\n", 2),
+    ]:
+        [message] = _check(_WIRE_FILE, source)
+        assert message.startswith(f"{_WIRE_FILE}:{line}: the wire package must not import")
 
 
 # Inside the wire package: the layers.

@@ -33,10 +33,24 @@ from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
+
+_F = TypeVar("_F")
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+
+    from typing_extensions import override
+else:
+
+    def override(method: _F) -> _F:
+        """Return `method` unchanged: `typing.override` exists only from Python 3.12.
+
+        Type checkers read `typing_extensions.override` instead, from its bundled stub, so
+        overrides stay checked without a run-time dependency.
+        """
+        return method
+
 
 __all__ = [
     "DriftReport",
@@ -299,18 +313,12 @@ class Source:
     memberships: tuple[Membership, ...] = ()
 
     def __post_init__(self) -> None:
-        """Check the invariants of the source and, for a `RestPath`, of its parameters.
-
-        `RestPath` adds no `__post_init__` of its own: overriding one would need
-        `typing.override`, which Python 3.11 lacks and this standard-library-only module
-        cannot import from elsewhere. Its checks run here instead.
+        """Check the invariants of the fields and the memberships.
 
         Raises:
-            ValueError: If two fields share a wire key or a column; two memberships share a
-                kind and group; a projection names a wire key the source lacks or maps two
-                keys to one column; or, for a `RestPath`, two parameters share a name or the
-                path parameters differ from the template's placeholders. The message names
-                the source and the offending names.
+            ValueError: If two fields share a wire key or a column, two memberships share a
+                kind and group, or a projection names a wire key the source lacks or maps two
+                keys to one column. The message names the source and the offending names.
         """
         wire_keys = [f.wire_key for f in self.fields]
         checks = [
@@ -325,14 +333,6 @@ class Source:
                     (f"{where} names unknown wire keys", sorted(set(m.projection) - set(wire_keys)))
                 )
                 checks.append((f"{where} repeats columns", _duplicates(m.projection.values())))
-        if isinstance(self, RestPath):
-            in_path = {p.name for p in self.params if p.in_path}
-            placeholders = {name for _, name, _, _ in string.Formatter().parse(self.key) if name}
-            checks += [
-                ("repeated parameters", _duplicates(p.name for p in self.params)),
-                ("placeholders without a path parameter", sorted(placeholders - in_path)),
-                ("path parameters without a placeholder", sorted(in_path - placeholders)),
-            ]
         for what, names in checks:
             if names:
                 raise ValueError(f"source {self.key!r}: {what} {names}")
@@ -384,6 +384,26 @@ class RestPath(Source):
     transport: Transport = dataclasses.field(default=Transport.REST, init=False)
     result_key: str = "results"
     params: tuple[Param, ...] = ()
+
+    @override
+    def __post_init__(self) -> None:
+        """Check the source's invariants, then the parameters against the template.
+
+        Raises:
+            ValueError: If the source's invariants fail (see `Source`), two parameters share a
+                name, or the path parameters differ from the template's placeholders; the
+                message names the path and the offending names.
+        """
+        super().__post_init__()
+        in_path = {p.name for p in self.params if p.in_path}
+        placeholders = {name for _, name, _, _ in string.Formatter().parse(self.key) if name}
+        for what, names in (
+            ("repeated parameters", _duplicates(p.name for p in self.params)),
+            ("placeholders without a path parameter", sorted(placeholders - in_path)),
+            ("path parameters without a placeholder", sorted(in_path - placeholders)),
+        ):
+            if names:
+                raise ValueError(f"source {self.key!r}: {what} {names}")
 
     @property
     def template(self) -> str:
