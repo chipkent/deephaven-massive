@@ -25,16 +25,23 @@ the imports of every module with `ast`:
   `refresh` and its tests import `refresh`.
 - `tests/massive/`, the wire package's own tests, may import any `_massive` module.
 - Everything else, the rest of `tests/` included, sees only the interface: it imports no
-  `_massive` submodule (by `import`, relative import, or a literal `importlib.import_module`
-  or `__import__`), reads only names in `_massive.__all__`, imports none of `urllib3`,
-  `websockets`, `certifi`, `boto3`, or `botocore` (`tests/_fakes/` excepted), and names no
-  file of the vendored spec snapshot.
+  `_massive` submodule, reads only names in `_massive.__all__` (by `.` or a literal
+  `getattr`, through any alias of the package or of the root package), imports none of
+  `urllib3`, `websockets`, `certifi`, `boto3`, or `botocore` (`tests/_fakes/` excepted), and
+  names no file of the vendored spec snapshot.
+
+A module named in a string counts as imported, since that is the form every dynamic import
+(`importlib.import_module` under any alias, `__import__`), patch (`mock.patch`,
+`monkeypatch.setattr`), and `sys.modules` lookup takes. Inside `_massive`, a module outside
+the six known subpackages is itself a violation, so a new module cannot escape the layers.
+This file is exempt from the rules on strings, since it names what it forbids.
 
 Each rule is a pure function over relative paths (and, for the boundary, source text), so it is
 checked both against the real tree and against a synthetic tree that breaks it.
 """
 
 import ast
+import re
 import sys
 from collections import Counter
 from collections.abc import Iterable
@@ -445,6 +452,11 @@ _REFRESH = "refresh"
 _SNAPSHOT_FILES = frozenset({"openapi.json", "websocket.json", "llms.txt", "manifest.json"})
 _SNAPSHOT_DIRECTORY = "refresh/snapshot"
 
+# A string that may name a module: dotted identifiers, optionally relative.
+_DOTTED_NAME = re.compile(r"\.*[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
+# The top-level packages whose names in strings the rules check.
+_NAMED_TOPS = frozenset({_PACKAGE, "deephaven", "deephaven_server", "jpy", *_NETWORK_LIBRARIES})
+
 
 def _module_of(path: PurePosixPath) -> tuple[str, str]:
     """Return the dotted module name of a repository file and the package relative imports use.
@@ -481,10 +493,11 @@ def _absolute(package: str, level: int, name: str | None) -> str:
 
 
 def _imports(tree: ast.Module, package: str) -> list[tuple[int, str]]:
-    """Return every module a file imports, as absolute dotted names with their line.
+    """Return every module a file imports by statement, as absolute names with their line.
 
-    A `from a import b` counts as importing `a.b`, since `b` may be a submodule; a literal
-    `importlib.import_module("a.b")` or `__import__("a.b")` counts as importing `a.b`.
+    A `from a import b` counts as importing `a.b`, since `b` may be a submodule, and so does
+    `__import__("a", fromlist=["b"])` with literal names. Every other dynamic import names its
+    module in a string, which `_module_strings` reports.
 
     Args:
         tree: The file's syntax tree.
@@ -505,14 +518,84 @@ def _imports(tree: ast.Module, package: str) -> list[tuple[int, str]]:
                 (node.lineno, base if alias.name == "*" else f"{base}.{alias.name}")
                 for alias in node.names
             )
-        elif (
-            isinstance(node, ast.Call)
-            and ast.unparse(node.func) in {"importlib.import_module", "import_module", "__import__"}
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
+        elif isinstance(node, ast.Call) and ast.unparse(node.func) == "__import__" and node.args:
+            found.extend((node.lineno, name) for name in _fromlist_imports(node))
+    return found
+
+
+def _fromlist_imports(call: ast.Call) -> list[str]:
+    """Return the `base.member` names an `__import__(base, ..., fromlist)` call imports.
+
+    Args:
+        call: The call, whose first argument is the base.
+
+    Returns:
+        One name per literal string in a literal `fromlist`; empty when the base or the list is
+        not literal.
+    """
+    base = call.args[0]
+    fromlist = next((k.value for k in call.keywords if k.arg == "fromlist"), None)
+    if fromlist is None and len(call.args) > 3:  # fromlist is the fourth argument
+        fromlist = call.args[3]
+    if not (
+        isinstance(base, ast.Constant)
+        and isinstance(base.value, str)
+        and isinstance(fromlist, ast.List | ast.Tuple)
+    ):
+        return []
+    return [
+        f"{base.value}.{element.value}"
+        for element in fromlist.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    ]
+
+
+def _docstrings(tree: ast.Module) -> set[int]:
+    """Return the ids of the string constants that are docstrings or other bare prose.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        The `id()` of each constant that is a whole expression statement.
+    """
+    return {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    }
+
+
+def _module_strings(tree: ast.Module) -> list[tuple[int, str]]:
+    """Return the string constants that name a module the boundary rules care about.
+
+    A module named in a string can be imported (`importlib.import_module`, `__import__`, under
+    any alias or keyword), patched (`mock.patch`, `monkeypatch.setattr`), or looked up
+    (`sys.modules`), so the rules treat such a string as an import. A relative name such as
+    `"._massive.net"` is read as being under `deephaven_massive`.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        `(line, name)` for each non-docstring constant that is a dotted name in this package,
+        in Deephaven, or in a network library.
+    """
+    skipped = _docstrings(tree)
+    found = []
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, ast.Constant)
+            or not isinstance(node.value, str)
+            or id(node) in skipped
+            or not _DOTTED_NAME.fullmatch(node.value)
         ):
-            found.append((node.lineno, node.args[0].value))
+            continue
+        name = node.value
+        if name.startswith("."):
+            name = f"{_PACKAGE}.{name.lstrip('.')}"
+        if name.split(".")[0] in _NAMED_TOPS:
+            found.append((node.lineno, name))
     return found
 
 
@@ -524,19 +607,49 @@ def _wire_aliases(tree: ast.Module, package: str) -> set[str]:
         package: The file's package, to resolve relative imports.
 
     Returns:
-        The full dotted name, plus every name an import binds to the package
-        (`import deephaven_massive._massive as wire`, `from deephaven_massive import _massive`).
+        The full dotted name; every name an import binds to the package
+        (`import deephaven_massive._massive as wire`, `from deephaven_massive import _massive`);
+        and `<root>._massive` for every name bound to the root package
+        (`import deephaven_massive as dm` gives `dm._massive`).
     """
     aliases = {_WIRE}
+    roots: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             aliases.update(a.asname for a in node.names if a.name == _WIRE and a.asname)
+            roots.update(a.asname or a.name for a in node.names if a.name == _PACKAGE)
         elif isinstance(node, ast.ImportFrom):
             base = node.module or ""
             if node.level:
                 base = _absolute(package, node.level, node.module)
             aliases.update(a.asname or a.name for a in node.names if f"{base}.{a.name}" == _WIRE)
-    return aliases
+    return aliases | {f"{root}._massive" for root in roots}
+
+
+def _wire_reads(tree: ast.Module, aliases: set[str]) -> list[tuple[int, str]]:
+    """Return every attribute read on the `_massive` package, by `.` or by literal `getattr`.
+
+    Args:
+        tree: The file's syntax tree.
+        aliases: The expressions that name the package, from `_wire_aliases`.
+
+    Returns:
+        `(line, attribute)` pairs.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and ast.unparse(node.value) in aliases:
+            found.append((node.lineno, node.attr))
+        elif (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func) == "getattr"
+            and len(node.args) >= 2  # getattr(object, name[, default])
+            and ast.unparse(node.args[0]) in aliases
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            found.append((node.lineno, node.args[1].value))
+    return found
 
 
 def _snapshot_names(tree: ast.Module) -> list[tuple[int, str]]:
@@ -551,17 +664,13 @@ def _snapshot_names(tree: ast.Module) -> list[tuple[int, str]]:
         `(line, text)` for each constant that contains the snapshot directory or whose last
         path component is a snapshot file.
     """
-    docstrings = {
-        id(node.value)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
-    }
+    skipped = _docstrings(tree)
     return [
         (node.lineno, node.value)
         for node in ast.walk(tree)
         if isinstance(node, ast.Constant)
         and isinstance(node.value, str)
-        and id(node) not in docstrings
+        and id(node) not in skipped
         and (
             _SNAPSHOT_DIRECTORY in node.value
             or PurePosixPath(node.value.strip()).name in _SNAPSHOT_FILES
@@ -587,19 +696,25 @@ def _inside(name: str, package: str) -> bool:
     return name == package or name.startswith(f"{package}.")
 
 
-def _wire_rules(where: str, imports: list[tuple[int, str]], layer: str | None) -> list[str]:
-    """Check the imports of a module inside `_massive` against its allow list and layer.
+def _wire_rules(where: str, tree: ast.Module, *, module: str, package: str) -> list[str]:
+    """Check a module inside `_massive` against its allow list and its layer.
 
     Args:
         where: The file's path, for the messages.
-        imports: The module's imports, from `_imports`.
-        layer: The module's own subpackage, or `None` for `_massive/__init__.py`.
+        tree: The file's syntax tree.
+        module: The file's module name.
+        package: The file's package, to resolve relative imports.
 
     Returns:
-        One message per import the rules forbid.
+        One message per import or module name the rules forbid. A module outside the known
+        subpackages and the package's own `__init__.py` is itself a violation, so a new
+        module cannot escape the layers.
     """
+    layer = _wire_layer(module) if module != _WIRE else None
+    if module != _WIRE and layer is None:
+        return [f"{where}:1: not in a known layer of the wire package: {module}"]
     found = []
-    for line, name in imports:
+    for line, name in [*_imports(tree, package), *_module_strings(tree)]:
         top = name.split(".")[0]
         if _inside(name, _WIRE):
             target = _wire_layer(name)
@@ -619,7 +734,7 @@ def _outside_rules(
     *,
     interface: frozenset[str],
     network_allowed: bool,
-    snapshot_checked: bool,
+    strings_checked: bool,
 ) -> list[str]:
     """Check a module outside `_massive` against the interface rules.
 
@@ -629,29 +744,29 @@ def _outside_rules(
         package: The file's package, to resolve relative imports.
         interface: The names in `_massive.__all__`.
         network_allowed: Whether the file may import the network libraries (`tests/_fakes/`).
-        snapshot_checked: Whether the snapshot-name rule applies (not to this file, which
-            names the snapshot files in order to forbid them).
+        strings_checked: Whether the rules on string constants apply (not to this file, which
+            names forbidden modules and files in order to forbid them).
 
     Returns:
         One message per import, attribute read, or string the rules forbid.
     """
+    references = [(line, name, "imports") for line, name in _imports(tree, package)]
+    if strings_checked:
+        references += [(line, name, "names") for line, name in _module_strings(tree)]
     found = []
-    for line, name in _imports(tree, package):
+    for line, name, how in references:
         if _inside(name, _WIRE) and name != _WIRE:
             member = name.removeprefix(f"{_WIRE}.").split(".")[0]
             if member not in interface or name.count(".") > _WIRE.count(".") + 1:
-                found.append(f"{where}:{line}: imports a _massive submodule: {name}")
+                found.append(f"{where}:{line}: {how} a _massive submodule: {name}")
         elif name.split(".")[0] in _NETWORK_LIBRARIES and not network_allowed:
-            found.append(f"{where}:{line}: imports a network library: {name}")
-    aliases = _wire_aliases(tree, package)
+            found.append(f"{where}:{line}: {how} a network library: {name}")
     found.extend(
-        f"{where}:{node.lineno}: reads _massive.{node.attr}, which is not in its __all__"
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and ast.unparse(node.value) in aliases
-        and node.attr not in interface
+        f"{where}:{line}: reads _massive.{attribute}, which is not in its __all__"
+        for line, attribute in _wire_reads(tree, _wire_aliases(tree, package))
+        if attribute not in interface
     )
-    if snapshot_checked:
+    if strings_checked:
         found.extend(
             f"{where}:{line}: names a snapshot file: {text!r}"
             for line, text in _snapshot_names(tree)
@@ -675,13 +790,12 @@ def boundary_violations(path: PurePosixPath, source: str, interface: frozenset[s
     module, package = _module_of(path)
     where = str(path)
     if _inside(module, _WIRE):
-        layer = _wire_layer(module) if module != _WIRE else None
-        return _wire_rules(where, _imports(tree, package), layer)
+        return _wire_rules(where, tree, module=module, package=package)
     if _inside(module, "tests.massive"):
         own_refresh_test = _inside(module, "tests.massive.refresh")
         return [
             f"{where}:{line}: only the refresh tests import refresh: {name}"
-            for line, name in _imports(tree, package)
+            for line, name in [*_imports(tree, package), *_module_strings(tree)]
             if _inside(name, f"{_WIRE}.{_REFRESH}") and not own_refresh_test
         ]
     return _outside_rules(
@@ -690,7 +804,7 @@ def boundary_violations(path: PurePosixPath, source: str, interface: frozenset[s
         package,
         interface=interface,
         network_allowed=_inside(module, "tests._fakes"),
-        snapshot_checked=path != PurePosixPath("tests/test_layout.py"),
+        strings_checked=path != PurePosixPath("tests/test_layout.py"),
     )
 
 
@@ -810,6 +924,28 @@ def test_a_layer_must_not_import_another(file: str, source: str, message: str) -
     assert message in found
 
 
+@pytest.mark.parametrize(
+    ("file", "source", "message"),
+    [
+        ("net/http.py", "im('deephaven_massive._massive.rest.client')\n", "net must not import"),
+        ("rest/client.py", "x = 'deephaven_massive._massive.ws'\n", "rest must not import"),
+        ("ws/client.py", "im('deephaven.table')\n", "the wire package must not import"),
+        ("spec/types.py", "x = 'deephaven_massive._errors'\n", "the wire package must not"),
+    ],
+)
+def test_a_layer_must_not_name_another_in_a_string(file: str, source: str, message: str) -> None:
+    [found] = _check(f"src/deephaven_massive/_massive/{file}", source)
+    assert message in found
+
+
+@pytest.mark.parametrize("module", ["util.py", "extra/__init__.py", "extra/helpers.py"])
+def test_a_module_outside_the_known_layers_is_reported(module: str) -> None:
+    # A new module would otherwise escape every layer rule.
+    path = f"src/deephaven_massive/_massive/{module}"
+    [found] = _check(path, "import ssl\n")
+    assert found.startswith(f"{path}:1: not in a known layer of the wire package")
+
+
 # The wire package's own tests.
 
 
@@ -827,6 +963,13 @@ def test_only_the_refresh_tests_import_refresh() -> None:
             "deephaven_massive._massive.refresh.generate"
         )
     ]
+
+
+def test_the_refresh_rule_covers_names_in_strings() -> None:
+    source = "mock.patch('deephaven_massive._massive.refresh.fetch.download')\n"
+    assert _check("tests/massive/refresh/test_fetch.py", source) == []
+    [found] = _check("tests/massive/spec/test_init.py", source)
+    assert "only the refresh tests import refresh" in found
 
 
 # Everywhere else: only the interface.
@@ -867,10 +1010,13 @@ def test_the_library_may_use_the_interface_through_relative_imports() -> None:
         ("from ._massive.spec import types\n", "deephaven_massive._massive.spec.types"),
         ("from ._massive import codec\n", "deephaven_massive._massive.codec"),
         (
-            "importlib.import_module('deephaven_massive._massive.rest')\n",
-            "deephaven_massive._massive.rest",
+            "__import__('deephaven_massive._massive', fromlist=['net'])\n",
+            "deephaven_massive._massive.net",
         ),
-        ("__import__('deephaven_massive._massive.ws')\n", "deephaven_massive._massive.ws"),
+        (
+            "__import__('deephaven_massive._massive', None, None, ('spec',))\n",
+            "deephaven_massive._massive.spec",
+        ),
     ],
 )
 def test_outside_code_must_not_import_a_wire_submodule(source: str, name: str) -> None:
@@ -880,12 +1026,80 @@ def test_outside_code_must_not_import_a_wire_submodule(source: str, name: str) -
 
 
 @pytest.mark.parametrize(
+    ("source", "name"),
+    [
+        # Every dynamic import names its module in a string, whatever the spelling.
+        (
+            "importlib.import_module('deephaven_massive._massive.rest')\n",
+            "deephaven_massive._massive.rest",
+        ),
+        (
+            "im('deephaven_massive._massive.net')\n",  # from importlib import import_module as im
+            "deephaven_massive._massive.net",
+        ),
+        (
+            "il.import_module('deephaven_massive._massive.net')\n",  # import importlib as il
+            "deephaven_massive._massive.net",
+        ),
+        (
+            "importlib.import_module(name='deephaven_massive._massive.net')\n",
+            "deephaven_massive._massive.net",
+        ),
+        (
+            "importlib.import_module('._massive.net', 'deephaven_massive')\n",
+            "deephaven_massive._massive.net",
+        ),
+        ("__import__('deephaven_massive._massive.ws')\n", "deephaven_massive._massive.ws"),
+        # Patching and looking up a module name it as well.
+        (
+            "mock.patch('deephaven_massive._massive.net.http.ssl_context')\n",
+            "deephaven_massive._massive.net.http.ssl_context",
+        ),
+        (
+            "monkeypatch.setattr('deephaven_massive._massive.net.codec._orjson', None)\n",
+            "deephaven_massive._massive.net.codec._orjson",
+        ),
+        (
+            "sys.modules['deephaven_massive._massive.net.codec']\n",
+            "deephaven_massive._massive.net.codec",
+        ),
+        (
+            "x = 'deephaven_massive._massive.WireError.mro'\n",  # deeper than an interface name
+            "deephaven_massive._massive.WireError.mro",
+        ),
+    ],
+)
+def test_outside_code_must_not_name_a_wire_submodule(source: str, name: str) -> None:
+    assert _check(_LIBRARY_FILE, source) == [
+        f"{_LIBRARY_FILE}:1: names a _massive submodule: {name}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "x = 'deephaven_massive._massive'\n",
+        "x = 'deephaven_massive._massive.WireError'\n",
+        "x = 'deephaven_massive._types'\n",
+        "x = 'results'\ny = 'net'\nz = 'stocks/T'\n",
+        '"""See deephaven_massive._massive.net for the codec."""\n',
+    ],
+)
+def test_strings_naming_the_interface_or_other_things_pass(source: str) -> None:
+    assert _check(_LIBRARY_FILE, source) == []
+
+
+@pytest.mark.parametrize(
     "source",
     [
         "from deephaven_massive import _massive\nx = _massive.net\n",
         "import deephaven_massive._massive as wire\nx = wire.net\n",
         "import deephaven_massive._massive\nx = deephaven_massive._massive.net\n",
         "from . import _massive as wire\nx = wire.net\n",
+        "import deephaven_massive as dm\nx = dm._massive.net\n",
+        "import deephaven_massive\nx = deephaven_massive._massive.net\n",
+        "from deephaven_massive import _massive\nx = getattr(_massive, 'net')\n",
+        "import deephaven_massive as dm\nx = getattr(dm._massive, 'net', None)\n",
     ],
 )
 def test_outside_code_must_read_only_interface_names(source: str) -> None:
