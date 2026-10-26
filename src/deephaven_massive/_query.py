@@ -82,6 +82,7 @@ __all__ = [
     "StreamKey",
     "StreamQuery",
     "StreamTransport",
+    "rest_history_problem",
 ]
 
 logger = logging.getLogger(__name__)
@@ -352,6 +353,34 @@ def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
         )
 
 
+def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
+    """Tell why REST cannot serve a dataset's `history()` request, if it cannot.
+
+    REST serves history when the dataset has a REST history endpoint and the symbols are
+    explicit; `dm.ALL` is served only for 1-day bars of a dataset with a grouped-daily endpoint
+    (one request per day for the whole market). Shared by `history(source=REST)`, which raises
+    the reason, and the `AUTO` arbitration of the flat-file transport, which weighs it.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments (symbols, timespan, multiplier).
+
+    Returns:
+        The reason, such as `"indices.values has no REST history"`, or None when REST can
+        serve the request.
+    """
+    if spec.history_method is None:
+        return f"{spec.name} has no REST history"
+    grouped = (
+        spec.grouped_daily_method is not None
+        and request.timespan is Timespan.DAY
+        and request.multiplier == 1
+    )
+    if isinstance(request.symbols, _All) and not grouped:
+        return f"{spec.name} history over REST needs explicit symbols"
+    return None
+
+
 @dataclass(frozen=True, repr=False, slots=True)
 class QueryBase:
     """The state every query class shares: the session, the dataset, and the arguments.
@@ -614,11 +643,25 @@ class HistoryQuery(QueryBase):
         crypto; sessions for futures), so whole days are inclusive. There is no `limit`: the
         library pages internally.
 
+        Flat files (S3) can serve a request when S3 credentials are configured, the dataset
+        has files for it (bars: only 1-minute and 1-day bars, and 1-session bars for futures,
+        unadjusted where the dataset has `adjusted`), and every day's file is published (from
+        `flat_file_publish_cutoff`, New York time, after the day ends). REST can serve it when
+        the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
+        daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
+        or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
+        `dm.ALL`); otherwise it uses REST. A reactive symbol table is read once, when the verb
+        is called. Flat-file reads skip a missing weekend file silently and a missing weekday
+        file (a holiday) with a WARNING.
+
         A `source` that is not a `HistorySource`, or a bound of the wrong type, raises
-        `TypeError`. A naive or unparseable bound, an empty range, or `source=REST` where REST
-        cannot serve the request (no REST history, or `dm.ALL` without a grouped-daily
-        endpoint) raises `ValueError`, synchronously. A failed request raises `MassiveError`
-        (`EntitlementError` on HTTP 403).
+        `TypeError`. A naive or unparseable bound, an empty range, a source that cannot serve
+        the request (`REST` without REST history or with `dm.ALL` and no grouped-daily
+        endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO` when neither
+        can, with every violated condition listed) raises `ValueError`, synchronously. A failed
+        request raises `MassiveError` (`EntitlementError` on HTTP 403, which for futures flat
+        files names the venue and the `venue=` parameter), as does a missing flat file for the
+        last requested day ("not yet published").
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -647,23 +690,12 @@ class HistoryQuery(QueryBase):
 
         Raises:
             ValueError: If the dataset has no REST history endpoint, or the symbols are
-                `dm.ALL` and the request is not daily bars with a grouped-daily endpoint.
+                `dm.ALL` and the request is not daily bars with a grouped-daily endpoint
+                (`rest_history_problem`); the message names `HistorySource.FLAT_FILES`.
         """
-        spec, request = self._spec, self._request
-        if spec.history_method is None:
-            raise ValueError(
-                f"{spec.name} has no REST history; use source=dm.HistorySource.FLAT_FILES"
-            )
-        grouped = (
-            spec.grouped_daily_method is not None
-            and request.timespan is Timespan.DAY
-            and request.multiplier == 1
-        )
-        if isinstance(request.symbols, _All) and not grouped:
-            raise ValueError(
-                f"{spec.name} history over REST needs explicit symbols; "
-                "dm.ALL is served by source=dm.HistorySource.FLAT_FILES"
-            )
+        problem = rest_history_problem(self._spec, self._request)
+        if problem is not None:
+            raise ValueError(f"{problem}; use source=dm.HistorySource.FLAT_FILES")
 
 
 class StreamHistoryQuery(StreamQuery, HistoryQuery):

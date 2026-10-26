@@ -237,8 +237,8 @@ def test_transport_hooks_raise_not_implemented(massive_session: dm.MassiveSessio
         q.append_only()
     with pytest.raises(NotImplementedError, match="REST transport"):
         q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
-    with pytest.raises(NotImplementedError, match="flat-file transport"):
-        q.history("2025-03-03", "2025-03-03")
+    with pytest.raises(NotImplementedError, match="REST transport"):
+        q.history("2025-03-03", "2025-03-03")  # AUTO: the dataset has no flat files
     with pytest.raises(NotImplementedError, match="REST transport"):
         news(massive_session).poll(30)
 
