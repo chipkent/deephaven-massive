@@ -1,7 +1,7 @@
 """The dataset catalog: one frozen `DatasetSpec` per dataset, and the generated SDK parameters.
 
 Every dataset (`m.stocks.trades`, `m.reference.news`, ...) is described once, declaratively, by
-a `DatasetSpec` in its namespace module under `_domains/`. Each of those modules exports
+a `DatasetSpec` in its namespace module under `_namespaces/`. Each of those modules exports
 `DATASETS: tuple[DatasetSpec, ...]`, and this module composes them from a *fixed* module list,
 `DOMAIN_MODULES`, so that adding a dataset never touches a shared file: the time-unit table,
 the schema registry, and the coverage tests are all derived from the specs.
@@ -66,7 +66,7 @@ DOMAIN_MODULES: Final = (
     "economy",
     "partners",
 )
-"""The namespace modules under `_domains/`, each exporting `DATASETS`. A test asserts this list
+"""The namespace modules under `_namespaces/`, each exporting `DATASETS`. A test asserts this list
 equals the set of modules in the package."""
 
 
@@ -146,7 +146,7 @@ class DatasetSpec:
     Attributes:
         name: The dataset's dotted name, `"<namespace>.<dataset>"`, such as `"stocks.trades"`.
         query_class: The query class the factory returns. For `bars` this is the most general
-            class; the overload selection in `_domains/base.py` narrows it by timespan.
+            class; the overload selection in `_namespaces/base.py` narrows it by timespan.
         asset_class: The instruments' asset class, or None for datasets without instruments
             (economy, most partner datasets).
         is_bars: True for a `bars()` dataset: its `channels` and `flat_file_prefixes` are keyed
@@ -411,7 +411,7 @@ def datasets() -> Mapping[str, DatasetSpec]:
     """
     found: dict[str, DatasetSpec] = {}
     for module_name in DOMAIN_MODULES:
-        module = importlib.import_module(f"deephaven_massive._domains.{module_name}")
+        module = importlib.import_module(f"deephaven_massive._namespaces.{module_name}")
         specs: tuple[DatasetSpec, ...] = module.DATASETS
         for spec in specs:
             if spec.name in found:

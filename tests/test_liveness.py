@@ -20,7 +20,6 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._catalog import DatasetSpec
-from deephaven_massive._domains.base import build_query
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._liveness import (
     QueueWorker,
@@ -31,6 +30,7 @@ from deephaven_massive._liveness import (
     make_result,
     new_scope,
 )
+from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._schema import TRADES
 from deephaven_massive._types import override

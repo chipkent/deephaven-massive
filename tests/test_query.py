@@ -17,9 +17,9 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._dates import FuturesSessions, TimeRange
-from deephaven_massive._domains.base import build_query
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
 from deephaven_massive._liveness import new_scope
+from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,

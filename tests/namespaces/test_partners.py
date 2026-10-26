@@ -1,8 +1,8 @@
 """Tests for the `m.partners` namespace and its four vendor namespaces."""
 
 import deephaven_massive as dm
-from deephaven_massive._domains import partners
-from deephaven_massive._domains.base import Namespace
+from deephaven_massive._namespaces import partners
+from deephaven_massive._namespaces.base import Namespace
 
 
 def test_vendors_are_nested(massive_session: dm.MassiveSession) -> None:

@@ -1,8 +1,8 @@
 """Tests for the `m.options` namespace."""
 
 import deephaven_massive as dm
-from deephaven_massive._domains import options
-from deephaven_massive._domains.base import Namespace
+from deephaven_massive._namespaces import options
+from deephaven_massive._namespaces.base import Namespace
 
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:

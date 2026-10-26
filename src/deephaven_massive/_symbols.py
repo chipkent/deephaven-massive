@@ -86,7 +86,7 @@ CRYPTO_QUOTES: Final = (
 A canonical crypto ticker (`X:BTCUSD`) has no separator, so the WebSocket form (`BTC-USD`) is
 recovered by matching one of these suffixes. `canonical` accepts only pairs that split back
 unambiguously, so `ws_symbol` cannot fail. The list is checked against the vendored ticker
-fixture `tests/data/_symbols/crypto_tickers.csv`."""
+fixture `tests/data/symbols/crypto_tickers.csv`."""
 _PREFIXES: Final[dict[AssetClass, str]] = {
     AssetClass.OPTIONS: "O:",
     AssetClass.INDICES: "I:",

@@ -28,17 +28,6 @@ from deephaven_massive import _errors, _session
 from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._config import json_codec
 from deephaven_massive._diagnostics import ConnectionRow, Diagnostics, StreamRow, StreamUpdate
-from deephaven_massive._domains.base import build_query
-from deephaven_massive._domains.crypto import _Crypto
-from deephaven_massive._domains.economy import _Economy
-from deephaven_massive._domains.forex import _Forex
-from deephaven_massive._domains.futures import _Futures
-from deephaven_massive._domains.indicators import _Indicators
-from deephaven_massive._domains.indices import _Indices
-from deephaven_massive._domains.options import _Options
-from deephaven_massive._domains.partners import _Benzinga, _EtfGlobal, _Fable, _Partners, _Tmx
-from deephaven_massive._domains.reference import _Reference
-from deephaven_massive._domains.stocks import _Stocks
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._liveness import (
     Reaper,
@@ -48,6 +37,17 @@ from deephaven_massive._liveness import (
     make_result,
     new_scope,
 )
+from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._namespaces.crypto import _Crypto
+from deephaven_massive._namespaces.economy import _Economy
+from deephaven_massive._namespaces.forex import _Forex
+from deephaven_massive._namespaces.futures import _Futures
+from deephaven_massive._namespaces.indicators import _Indicators
+from deephaven_massive._namespaces.indices import _Indices
+from deephaven_massive._namespaces.options import _Options
+from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable, _Partners, _Tmx
+from deephaven_massive._namespaces.reference import _Reference
+from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._query import Request, StreamQuery
 from deephaven_massive._schema import TRADES
 from deephaven_massive._symbols import SymbolTable

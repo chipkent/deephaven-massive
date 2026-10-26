@@ -153,9 +153,9 @@ def _resolution_namespace() -> dict[str, object]:
         "_schema",
         "_timeunits",
         "_diagnostics",
-        "_domains.base",
-        "_domains.partners",
-        "_domains.stocks",
+        "_namespaces.base",
+        "_namespaces.partners",
+        "_namespaces.stocks",
     ):
         namespace.update(vars(importlib.import_module(f"deephaven_massive.{module_name}")))
     namespace.update({"Table": Table, "InputTable": InputTable})
