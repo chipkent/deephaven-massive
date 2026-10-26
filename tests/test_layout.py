@@ -7,14 +7,18 @@ component drops one leading underscore: `_namespaces/stocks.py` is tested by
 `__init__.py` is mirrored by `tests/<path>/test_init.py` and a `__main__.py` by
 `tests/<path>/test_main.py`. Live tests add the suffix `_integration` to the mirror's stem.
 
-A directory under `tests/` whose name starts with `_` (such as `tests/_fakes/`) is a helper
-package outside the mirror rule. The only other test files that mirror no module are
-`conftest.py`, this file, and `test_readme.py`, all at the top of `tests/`.
+A directory directly under `tests/` whose name starts with `_` (such as `tests/_fakes/`) is a
+helper package outside the mirror rule, as long as it holds no test modules: pytest collects a
+test module wherever it lies, so one inside a helper package must still mirror a source module.
+The only other test files that mirror no module are `conftest.py`, this file, and
+`test_readme.py`, all at the top of `tests/`. Fixtures under `tests/data/` follow the test
+paths, so none of their directories starts with `_` either.
 
 Each rule is a pure function over relative paths, so it is checked both against the real tree
 and against a synthetic tree that breaks it.
 """
 
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
@@ -23,6 +27,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src" / "deephaven_massive"
 _TESTS = _ROOT / "tests"
+_DATA = _TESTS / "data"
 
 # Test files that mirror no source module. A new entry needs owner approval.
 APPROVED_EXCEPTIONS = frozenset(
@@ -46,6 +51,7 @@ def _mirror_name(name: str) -> str:
         The bare name of a dunder (`__init__` gives `init`); otherwise the name without one
         leading underscore.
     """
+    # `__` alone, or `____`, has no name between its underscores, so it is not a dunder.
     if len(name) > 4 and name.startswith("__") and name.endswith("__"):
         return name[2:-2]
     return name.removeprefix("_")
@@ -78,15 +84,23 @@ def unit_test_of(test_file: PurePosixPath) -> PurePosixPath:
 
 
 def is_helper(test_file: PurePosixPath) -> bool:
-    """Return whether a test file lives in a helper package, outside the mirror rule.
+    """Return whether a file is part of a helper package, outside the mirror rule.
 
     Args:
-        test_file: A test file's path relative to `tests/`.
+        test_file: A Python file's path relative to `tests/`.
 
     Returns:
-        True when any directory on the path starts with `_`.
+        True for a file inside a directory directly under `tests/` whose name starts with `_`,
+        unless pytest would treat it as a test module or a conftest (`test_*.py`,
+        `*_test.py`, `conftest.py`).
     """
-    return any(part.startswith("_") for part in test_file.parent.parts)
+    return (
+        len(test_file.parts) > 1
+        and test_file.parts[0].startswith("_")
+        and test_file.name != "conftest.py"
+        and not test_file.name.startswith("test_")
+        and not test_file.stem.endswith("_test")
+    )
 
 
 def public_modules(modules: Iterable[PurePosixPath]) -> list[str]:
@@ -135,10 +149,7 @@ def shared_mirrors(modules: Iterable[PurePosixPath]) -> list[str]:
     Returns:
         The mirrored test paths that two or more modules map to, sorted.
     """
-    claimed: dict[PurePosixPath, int] = {}
-    for module in modules:
-        mirror = mirror_of(module)
-        claimed[mirror] = claimed.get(mirror, 0) + 1
+    claimed = Counter(mirror_of(module) for module in modules)
     return sorted(f"tests/{mirror}" for mirror, count in claimed.items() if count > 1)
 
 
@@ -147,11 +158,11 @@ def orphans(modules: Iterable[PurePosixPath], test_files: Iterable[PurePosixPath
 
     Args:
         modules: Module paths relative to `src/deephaven_massive/`.
-        test_files: Test file paths relative to `tests/`.
+        test_files: Python file paths relative to `tests/`.
 
     Returns:
-        One `"tests/<path>"` entry per test file outside a helper package that is neither an
-        approved exception nor the mirror (unit or live) of a module.
+        One `"tests/<path>"` entry per file that is neither a helper, an approved exception,
+        nor the mirror (unit or live) of a module.
     """
     mirrors = {mirror_of(module) for module in modules}
     return [
@@ -161,6 +172,26 @@ def orphans(modules: Iterable[PurePosixPath], test_files: Iterable[PurePosixPath
         and test_file not in APPROVED_EXCEPTIONS
         and unit_test_of(test_file) not in mirrors
     ]
+
+
+def underscored_fixture_dirs(fixtures: Iterable[PurePosixPath]) -> list[str]:
+    """Return the fixture directories whose name starts with `_`.
+
+    Fixture directories follow the test paths, which never start a component with `_`.
+
+    Args:
+        fixtures: Fixture file paths relative to `tests/data/`.
+
+    Returns:
+        The offending directories, as `"tests/data/<path>/"`, sorted and without duplicates.
+    """
+    found = set()
+    for fixture in fixtures:
+        parents = fixture.parent.parts
+        for depth, part in enumerate(parents, start=1):
+            if part.startswith("_"):
+                found.add(f"tests/data/{PurePosixPath(*parents[:depth])}/")
+    return sorted(found)
 
 
 def _paths(*paths: str) -> list[PurePosixPath]:
@@ -174,6 +205,14 @@ def _source_modules() -> list[PurePosixPath]:
 def _test_files() -> list[PurePosixPath]:
     return sorted(
         PurePosixPath(path.relative_to(_TESTS).as_posix()) for path in _TESTS.rglob("*.py")
+    )
+
+
+def _fixtures() -> list[PurePosixPath]:
+    return sorted(
+        PurePosixPath(path.relative_to(_DATA).as_posix())
+        for path in _DATA.rglob("*")
+        if path.is_file()
     )
 
 
@@ -195,18 +234,6 @@ def test_mirror_of_drops_one_leading_underscore_per_component(module: str, expec
     assert mirror_of(PurePosixPath(module)) == PurePosixPath(expected)
 
 
-@pytest.mark.parametrize(
-    ("module", "not_expected"),
-    [
-        ("_namespaces/stocks.py", "_namespaces/test_stocks.py"),
-        ("_massive/rest/client.py", "_massive/rest/test_client.py"),
-        ("_config.py", "test__config.py"),
-    ],
-)
-def test_mirror_of_never_keeps_the_underscore(module: str, not_expected: str) -> None:
-    assert mirror_of(PurePosixPath(module)) != PurePosixPath(not_expected)
-
-
 # The dunder rule.
 
 
@@ -221,18 +248,6 @@ def test_mirror_of_never_keeps_the_underscore(module: str, not_expected: str) ->
 )
 def test_mirror_of_maps_a_dunder_module_to_its_bare_name(module: str, expected: str) -> None:
     assert mirror_of(PurePosixPath(module)) == PurePosixPath(expected)
-
-
-@pytest.mark.parametrize(
-    ("module", "not_expected"),
-    [
-        ("__init__.py", "test__init__.py"),
-        ("__init__.py", "test_init__.py"),
-        ("_massive/refresh/__main__.py", "massive/refresh/test_main__.py"),
-    ],
-)
-def test_mirror_of_never_keeps_a_dunder_underscore(module: str, not_expected: str) -> None:
-    assert mirror_of(PurePosixPath(module)) != PurePosixPath(not_expected)
 
 
 # Live tests.
@@ -276,12 +291,24 @@ def test_every_source_module_has_its_mirrored_test() -> None:
     assert missing_mirrors(_source_modules(), _test_files()) == []
 
 
-def test_a_module_without_its_mirror_is_reported() -> None:
-    modules = _paths("_config.py", "_namespaces/stocks.py")
-    # A test kept under the module's underscored path is not its mirror.
-    test_files = _paths("test_config.py", "_namespaces/test_stocks.py")
-    found = missing_mirrors(modules, test_files)
-    assert found == ["_namespaces/stocks.py -> tests/namespaces/test_stocks.py"]
+@pytest.mark.parametrize(
+    ("module", "wrong_test", "mirror"),
+    [
+        # The naming rule: no component keeps its underscore.
+        ("_namespaces/stocks.py", "_namespaces/test_stocks.py", "namespaces/test_stocks.py"),
+        ("_config.py", "test__config.py", "test_config.py"),
+        # The dunder rule: a dunder module keeps only its bare name.
+        ("_massive/__init__.py", "massive/test___init__.py", "massive/test_init.py"),
+        (
+            "_massive/refresh/__main__.py",
+            "massive/refresh/test___main__.py",
+            "massive/refresh/test_main.py",
+        ),
+    ],
+)
+def test_a_module_without_its_mirror_is_reported(module: str, wrong_test: str, mirror: str) -> None:
+    found = missing_mirrors(_paths(module), _paths(wrong_test))
+    assert found == [f"{module} -> tests/{mirror}"]
 
 
 def test_no_two_source_modules_share_a_mirror() -> None:
@@ -289,9 +316,9 @@ def test_no_two_source_modules_share_a_mirror() -> None:
 
 
 def test_two_modules_with_one_mirror_are_reported() -> None:
-    assert shared_mirrors(_paths("_config.py", "config.py", "_hosts.py")) == [
-        "tests/test_config.py"
-    ]
+    # A package's `__init__.py` and a sibling `_init.py` both map to `test_init.py`.
+    modules = _paths("_massive/__init__.py", "_massive/_init.py", "_massive/client.py")
+    assert shared_mirrors(modules) == ["tests/massive/test_init.py"]
 
 
 # Every test file mirrors a module or is an allowed exception.
@@ -324,10 +351,49 @@ def test_an_approved_exception_counts_only_at_the_top_of_tests() -> None:
     ]
 
 
-def test_an_underscore_directory_is_a_helper_package() -> None:
-    test_files = _paths("_fakes/__init__.py", "_fakes/rest.py", "namespaces/_helpers/base.py")
-    assert orphans([], test_files) == []
+# Helper packages.
 
 
-def test_a_directory_without_an_underscore_is_mirrored() -> None:
-    assert orphans([], _paths("fakes/rest.py")) == ["tests/fakes/rest.py"]
+def test_an_underscore_directory_under_tests_is_a_helper_package() -> None:
+    assert orphans([], _paths("_fakes/__init__.py", "_fakes/rest.py", "_fakes/ws/server.py")) == []
+
+
+@pytest.mark.parametrize(
+    "test_file",
+    [
+        # A test module inside a helper package is collected, so it must mirror a module.
+        "_namespaces/test_stocks.py",
+        "_fakes/test_rest.py",
+        "_fakes/rest_test.py",
+        "_fakes/conftest.py",
+        # Only a directory directly under `tests/` can be a helper package.
+        "namespaces/_helpers/base.py",
+        # A file is not a directory.
+        "_util.py",
+        # A directory without an underscore is mirrored.
+        "fakes/rest.py",
+    ],
+)
+def test_a_file_outside_a_helper_package_is_an_orphan(test_file: str) -> None:
+    assert orphans([], _paths(test_file)) == [f"tests/{test_file}"]
+
+
+# Fixture directories.
+
+
+def test_no_fixture_directory_starts_with_an_underscore() -> None:
+    assert underscored_fixture_dirs(_fixtures()) == []
+
+
+def test_an_underscored_fixture_directory_is_reported() -> None:
+    fixtures = _paths(
+        "symbols/crypto_tickers.csv",
+        "_flatfiles/a.csv.gz",
+        "_flatfiles/b.csv.gz",
+        "massive/_rest/page.json",
+        "top.json",
+    )
+    assert underscored_fixture_dirs(fixtures) == [
+        "tests/data/_flatfiles/",
+        "tests/data/massive/_rest/",
+    ]

@@ -60,8 +60,10 @@ nothing is kept or shimmed for compatibility.
    (`_namespaces/stocks.py` → `tests/namespaces/test_stocks.py`, `_massive/rest/client.py` →
    `tests/massive/rest/test_client.py`). A package `__init__.py` is tested by
    `tests/<path>/test_init.py` and a `__main__.py` by `tests/<path>/test_main.py`. Live tests
-   end in `_integration.py`. A directory under `tests/` whose name starts with `_` is a helper
-   package outside the rule; there is one, `tests/_fakes/`. The only other files allowed are
+   end in `_integration.py`. A directory directly under `tests/` whose name starts with `_` is
+   a helper package outside the rule (a test module inside one is still checked); there is
+   one, `tests/_fakes/`. No directory under `tests/data/` starts with `_`. The only other files
+   allowed are
    `tests/conftest.py`, `tests/test_layout.py`, and `tests/test_readme.py`
    (`tests/test_catalog.py` is the plain mirror of `_catalog.py`). `tests/test_layout.py`
    enforces this; a new exception needs owner approval and a change to `DESIGN.md` § 4.2. The

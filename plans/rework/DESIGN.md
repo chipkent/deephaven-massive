@@ -269,9 +269,11 @@ Tests mirror the package. The test file for `deephaven_massive/<path>/<name>.py`
 `tests/<path>/test_init.py`, and a `__main__.py` by `tests/<path>/test_main.py`, so every source
 module has exactly one mirror. `tests/test_init.py` holds the public-surface tests (`dm.__all__`
 equals [section 3](#3-exports) and `__version__` equals the installed distribution's version).
-`tests/test_catalog.py` is the plain mirror of `_catalog.py`. A directory under `tests/` whose
-name starts with `_` is a helper package outside the mirror rule. Fixtures live in
-`tests/data/<test owner path>/` (for example `tests/data/massive/rest/`). Examples:
+`tests/test_catalog.py` is the plain mirror of `_catalog.py`. A directory directly under
+`tests/` whose name starts with `_` is a helper package outside the mirror rule; a test module
+(`test_*.py`, `*_test.py`, `conftest.py`) inside one is still checked. Fixtures live in
+`tests/data/<test owner path>/` (for example `tests/data/massive/rest/`), so no fixture
+directory starts with `_`. Examples:
 
 | Source | Unit test | Live integration test |
 |---|---|---|

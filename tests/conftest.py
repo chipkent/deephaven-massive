@@ -137,9 +137,9 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
 def load_fixture() -> Callable[[str, str], bytes]:
     """Return a function that reads a payload fixture from `tests/data/<owner>/<name>`.
 
-    `owner` is the path of the tests the payloads belong to, spelled as under `tests/` (no
-    leading underscores), such as `"symbols"` or `"massive/rest"`, so each owner's fixtures
-    stay together.
+    `owner` is the mirrored test's path under `tests/` without the `test_` prefix and `.py`
+    (`"symbols"` for `tests/test_symbols.py`), or a test package's path (`"massive/rest"`), so
+    each owner's fixtures stay together.
 
     Returns:
         A function mapping `(owner, name)` to the fixture file's bytes.
