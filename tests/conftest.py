@@ -29,8 +29,8 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
-    from _fakes.stream import FakeStreamTransport
     from deephaven_massive import MassiveSession
+    from tests._fakes.stream import FakeStreamTransport
 
 _DATA_DIR = Path(__file__).parent / "data"
 
@@ -201,7 +201,7 @@ def fake_streams(
     Returns:
         The fake, for inspecting opened streams and shutdown callbacks.
     """
-    stream = importlib.import_module("_fakes.stream")
+    stream = importlib.import_module("tests._fakes.stream")
     fake: FakeStreamTransport = stream.FakeStreamTransport(massive_session._core)
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake)
     return fake
