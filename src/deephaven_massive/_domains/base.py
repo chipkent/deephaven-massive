@@ -251,7 +251,8 @@ def build_query(
         An instance of the spec's query class (or of the class `bar_query_class` picks).
 
     Raises:
-        ValueError: If `dm.ALL` is passed where `all_alternative` is set.
+        ValueError: If `dm.ALL` is passed where `all_alternative` is set, or `params` holds
+            `adjusted`, which has its own typed argument.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
@@ -265,6 +266,8 @@ def build_query(
         _require_enum(venue, FuturesVenue, "venue")
     if adjusted is not None and not isinstance(adjusted, bool):
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
+    if params is not None and "adjusted" in params:
+        raise ValueError("adjusted is set through build_query(adjusted=...), not params")
     query_class = spec.query_class
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")

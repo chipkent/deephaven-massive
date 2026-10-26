@@ -201,13 +201,14 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
         symbols=["EUR/USD"],
         timespan=Timespan.MINUTE,
         multiplier=5,
+        adjusted=False,
         start="2025-01-02",
-        params={"adjusted": False},
+        params={"sort": "timestamp"},
         filters={"limit": 3},
     )
     assert repr(bars) == (
         "<HistoryQuery forex.bars symbols=('C:EURUSD',) timespan=Timespan.MINUTE multiplier=5 "
-        "start=2025-01-02 params={'adjusted': False} filters={'limit': 3}>"
+        "adjusted=False start=2025-01-02 params={'sort': 'timestamp'} filters={'limit': 3}>"
     )
 
 

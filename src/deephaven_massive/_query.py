@@ -116,6 +116,8 @@ class Request:
         venue: The futures venue, which selects flat-file prefixes only.
         adjusted: Whether bars are adjusted for splits, for datasets with an `adjusted`
             parameter; None for datasets without one. Flat files hold only unadjusted bars.
+            The REST transport sends it, when not None, as the `adjusted` query parameter;
+            `params` never holds `adjusted`.
         start: The lower bound of the dataset's time axis (`…T` datasets), or of `history()`.
         end: The upper bound of the dataset's time axis, or of `history()`.
         params: The dataset's other typed parameters, by SDK parameter name, sorted by name.
@@ -676,8 +678,11 @@ class HistoryQuery(QueryBase):
         endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO` when neither
         can, with every violated condition listed) raises `ValueError`, synchronously. A failed
         request raises `MassiveError` (`EntitlementError` on HTTP 403, which for futures flat
-        files names the venue and the `venue=` parameter), as does a missing flat file for the
-        last requested day ("not yet published").
+        files names the venue and the `venue=` parameter; `AuthenticationError` when S3 rejects
+        the flat-file credentials). A missing flat file for the last requested day raises
+        `MassiveError` only within a day after its publication time ("... is not yet published
+        (flat files land ~11:00 ET next day), or was a market holiday"); after that the date is
+        skipped with a WARNING, as a holiday.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.

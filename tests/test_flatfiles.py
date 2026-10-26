@@ -1571,6 +1571,11 @@ class MemorySampler:
         blocks = self.taken[1]
         return self.python[blocks - 1] - self.python[blocks // 3]
 
+    def arrow_rise(self) -> int:
+        # How far the Arrow pool's running maximum rose from a third of the samples to the end.
+        samples = self.taken[0]
+        return max(self.arrow[:samples]) - max(self.arrow[: samples // 3])
+
 
 def test_memory_per_reader_does_not_grow_with_the_file(
     *,
@@ -1596,7 +1601,7 @@ def test_memory_per_reader_does_not_grow_with_the_file(
         fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04")
         every, python_peak, arrow_peak = sampler.measure(read(dm.ALL))
-        rare, _, _ = sampler.measure(read(["RARE"]))
+        rare, _, _ = sampler.measure(read(["RARE"]))  # the samples kept are this read's
     finally:
         m.close()
     assert (every, rare) == (600_000, 600)
@@ -1612,6 +1617,9 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     # small table: with dm.ALL the result itself (a Deephaven table, and its Python wrapper,
     # per 16 blocks) legitimately grows with the file.
     assert sampler.python_rise() < 32 * block
+    # Arrow's pool is invisible to tracemalloc: each small batch a selective read gathers costs
+    # allocation overhead that its byte count does not show, so the batches must be merged.
+    assert sampler.arrow_rise() < 32 * block
 
 
 def test_the_production_block_size() -> None:

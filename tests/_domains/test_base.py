@@ -324,3 +324,6 @@ def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
     assert build_query(massive_session._core, spec, symbols=["AAPL"])._request.adjusted is None
     with pytest.raises(TypeError, match="adjusted must be a bool, not str"):
         build_query(massive_session._core, spec, symbols=["AAPL"], adjusted=cast("bool", "false"))
+    # One channel only: adjusted never travels in params, where a transport could drop it.
+    with pytest.raises(ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\)"):
+        build_query(massive_session._core, spec, symbols=["AAPL"], params={"adjusted": False})

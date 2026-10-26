@@ -442,7 +442,7 @@ class _CancelledError(Exception):
 
 
 class FlatFileHistory:
-    """The flat-file transport of one `history()` call: source choice, reads, and the table.
+    """The flat-file transport of one `history()` call: reads and the table.
 
     `SessionCore.flat_file_transport()` creates one per call, so it may hold the session's core
     strongly; the long-lived state, the S3 client, lives in the session's `FlatFileBucket`.
@@ -456,7 +456,7 @@ class FlatFileHistory:
         """Bind the transport to its session and the session's bucket.
 
         Args:
-            core: The session's core: configuration, execution context, and REST transport.
+            core: The session's core: configuration and execution context.
             bucket: The session's flat-file bucket.
         """
         self._core = core
@@ -585,7 +585,9 @@ class FlatFileHistory:
         Runs on a reader thread, inside the session's execution context for the Deephaven
         calls. Surviving rows are gathered per file and converted once they reach
         `_TABLE_BLOCKS` blocks of data and at the end of the file, so a file usually becomes
-        one table. The response body is closed however the read ends.
+        one table; when a selective read gathers `_TABLE_BLOCKS` small batches first, they are
+        merged into one, so the per-batch overhead never grows with the file. The response
+        body is closed however the read ends.
 
         Args:
             client: The bucket's S3 client.
@@ -633,6 +635,12 @@ class FlatFileHistory:
                     if size >= limit:
                         tables.append(_convert(pending, transform))
                         pending, size = [], 0
+                    elif len(pending) >= _TABLE_BLOCKS:
+                        # Every batch carries allocation overhead that nbytes does not count;
+                        # merging the small batches of a selective read keeps its memory flat
+                        # however long the file is.
+                        gathered = pa.Table.from_batches(pending, schema=transform.arrow_schema)
+                        pending = gathered.combine_chunks().to_batches()
                     self._check(cancel)
                 if pending:
                     tables.append(_convert(pending, transform))
