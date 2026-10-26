@@ -1120,7 +1120,7 @@ lazy schemas, and a catalog that imports without Deephaven. Remove every SDK-der
 [§ 19.3 The spec snapshot, the generator, and the name lock](DESIGN.md#193-the-spec-snapshot-the-generator-and-the-name-lock)
 (the naming rule, the lock, `ALIASES`, `BREAKING_RENAMES`, the completeness and compatibility
 tests); [§ 3 Exports](DESIGN.md#3-exports) and [§ 4.1 Source modules](DESIGN.md#41-source-modules)
-(the lazy `__init__.py`, `_datasets/`, the role paths, the Deephaven-free layer);
+(`_datasets/`, the role paths, the Deephaven-free layer; the lazy `__init__.py` is PC1a's);
 [§ 9 Filters](DESIGN.md#9-filters); [§ 11 Enums and types](DESIGN.md#11-enums-and-types);
 [§ 12 Timestamp units and day boundaries](DESIGN.md#12-timestamp-units-and-day-boundaries)
 (conversion reads `_massive.wire_unit`).
