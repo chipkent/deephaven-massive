@@ -5,6 +5,7 @@ import inspect
 import json
 import subprocess
 import sys
+from types import ModuleType
 
 import pytest
 
@@ -27,6 +28,23 @@ def test_every_name_resolves_to_its_defining_object() -> None:
 def test_every_lazy_name_is_in_all_and_none_is_bound() -> None:
     assert sorted(_massive._EXPORTS) == EXPECTED_INTERFACE
     assert set(vars(_massive)) & set(_massive._EXPORTS) == set()
+
+
+@pytest.mark.parametrize("name", ["TYPE_CHECKING", "annotations", "importlib", "import_module"])
+def test_helper_names_are_not_reachable(name: str) -> None:
+    with pytest.raises(AttributeError):
+        getattr(_massive, name)
+
+
+def test_no_public_names_outside_all() -> None:
+    # The import system binds each imported subpackage (`net`, `spec`, ...) on the package;
+    # those are modules, and the boundary test keeps code outside the package from using them.
+    public = {
+        name
+        for name, value in vars(_massive).items()
+        if not name.startswith("_") and not isinstance(value, ModuleType)
+    }
+    assert public == set()
 
 
 def test_type_checking_imports_mirror_all() -> None:
@@ -70,10 +88,12 @@ def _deephaven_imports_attempted_by(module: str, names: list[str]) -> list[str]:
     Returns:
         The attempted Deephaven module names, sorted and without repeats.
     """
-    # The script is a literal and the arguments travel as data on stdin.
+    # The script is a literal and the arguments travel as data on stdin; `-P` keeps the
+    # working directory off `sys.path`.
     result = subprocess.run(
         [
             sys.executable,
+            "-P",
             "-c",
             (
                 "import importlib, json, sys\n"

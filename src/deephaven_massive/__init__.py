@@ -58,9 +58,7 @@ Attributes:
         installed.
 """
 
-from __future__ import annotations
-
-import importlib
+from importlib import import_module as _import_module
 from importlib.metadata import version as _version
 from typing import TYPE_CHECKING
 
@@ -142,9 +140,9 @@ else:
     def __getattr__(name: str) -> object:
         """Resolve a public name by importing the private module that defines it.
 
-        Nothing is cached in this module's namespace: the import system already caches the
-        defining module, so a repeated lookup costs a dictionary lookup, and concurrent first
-        accesses write no shared state.
+        Nothing is cached in this module's namespace. The import system caches the defining
+        module, and its per-module lock serializes concurrent first imports, so this function
+        writes nothing itself and a repeated lookup costs a dictionary lookup.
 
         Args:
             name: The attribute requested.
@@ -159,7 +157,7 @@ else:
             module = _EXPORTS[name]
         except KeyError:
             raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
-        return getattr(importlib.import_module(module), name)
+        return getattr(_import_module(module), name)
 
 
 def __dir__() -> list[str]:
@@ -169,3 +167,7 @@ def __dir__() -> list[str]:
         `__all__`, sorted.
     """
     return sorted(__all__)
+
+
+# Keep the namespace to the public names: the helper import goes once the module is built.
+del TYPE_CHECKING

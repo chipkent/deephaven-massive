@@ -74,6 +74,18 @@ def test_no_lazy_name_is_bound_in_the_module_namespace() -> None:
     assert set(vars(dm)) & set(dm._EXPORTS) == set()
 
 
+@pytest.mark.parametrize("name", ["TYPE_CHECKING", "annotations", "importlib", "import_module"])
+def test_helper_names_are_not_reachable(name: str) -> None:
+    with pytest.raises(AttributeError):
+        getattr(dm, name)
+
+
+def test_no_public_names_outside_all() -> None:
+    # Every public name resolves lazily, so the namespace itself holds no public name at all;
+    # anything else would be reachable as `dm.<name>` beyond the exports.
+    assert {name for name in vars(dm) if not name.startswith("_")} == set()
+
+
 def test_type_checking_imports_mirror_all() -> None:
     assert _type_checking_imports(dm) == set(dm.__all__) - {"__version__"}
 
@@ -129,10 +141,12 @@ def _modules_loaded_by(*names: str) -> list[str]:
     Returns:
         The `deephaven_massive` submodules loaded afterwards, sorted.
     """
-    # The script is a literal and the names travel as data on stdin.
+    # The script is a literal and the names travel as data on stdin; `-P` keeps the working
+    # directory off `sys.path`.
     result = subprocess.run(
         [
             sys.executable,
+            "-P",
             "-c",
             (
                 "import json, sys\n"
