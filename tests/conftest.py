@@ -32,8 +32,6 @@ if TYPE_CHECKING:
     from _fakes.stream import FakeStreamTransport
     from deephaven_massive import MassiveSession
 
-collect_ignore_glob = ["legacy/*"]  # LEGACY-EXCLUSION: legacy tests, to be removed
-
 _DATA_DIR = Path(__file__).parent / "data"
 
 _CYCLE_MILLIS = 25
