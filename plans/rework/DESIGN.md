@@ -122,7 +122,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 | connection | One WebSocket to one `wss://host/path`. |
 | topic | One subscription parameter, `<channel>.<symbol>` or `<channel>.*`. |
 | source | One generated wire schema: a REST path template, a WebSocket `(cluster, channel)`, or a flat-file prefix. |
-| kind | A dataset kind: the datasets whose sources share one merged schema (trades, quotes, bars, …), listed in `FAMILIES`. |
+| kind | A dataset kind: the datasets whose sources share one merged schema (trades, quotes, bars, …), defined in `FAMILIES` and recorded on each generated source (`Source.kind`). |
 | shape | An object shape in a payload (an aggregate row, a snapshot `day` object, a WebSocket channel), which selects a lexicon. |
 | drift | A difference between a payload on the wire and its committed generated schema. |
 | UG thread | A thread of Deephaven's update graph (UG), which refreshes live tables while holding the UG lock. |
@@ -585,7 +585,7 @@ class HistoryLatestQuery(HistoryQuery):   # daily bars only
 `Query` that is a list or snapshot endpoint. On `StreamHistoryLatestQuery` it is the dataset's
 "last" endpoint: `/v2/last/trade`, `/v2/last/nbbo`, `/v1/last_quote/currencies`,
 `/v1/last/crypto`, or `/v3/snapshot/indices` projected to the values schema by its
-`PROJECTIONS` entry ([section 19.4](#194-generated-schemas)). Each "last" path is a member of
+`PROJECTIONS` entry, recorded on the generated source ([section 19.4](#194-generated-schemas)). Each "last" path is a member of
 its dataset's kind, so its rows come out in the stream schema. On
 `HistoryLatestQuery` it is `/v2/aggs/ticker/{t}/prev`, documented as "the prior session's open,
 high, low, close, and volume"; the docstring says "previous completed session". No streamed
@@ -1811,8 +1811,9 @@ net/                 shared by every client; imports nothing else in _massive
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
 spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport): load once under a lock
-  types.py           Transport, Source(key, transport, fields), RestPath(Source + template,
-                     result key, params), Field(wire key, column, WireType, unit, required),
+  types.py           Transport, Source(key, transport, fields, kind, group, position,
+                     projection), RestPath(Source + template, result key, params),
+                     Field(wire key, column, WireType, unit, required),
                      Param, ParamKind, WireType, WireUnit, DriftReport(extra, missing)
   rest.json  ws.json  flatfiles.json        generated, committed
 rest/                imports net, spec
@@ -2102,6 +2103,13 @@ verification, never a column list.
 - **Projections.** `PROJECTIONS {(family, source): keys}` limits a source that joins a family
   for one verb to the listed keys. Its first entry is `/v3/snapshot/indices` → `value`,
   `last_updated`, `ticker`, for `indices.values.fetch()`.
+- **Kinds are written into the generated files.** `FAMILIES` and `PROJECTIONS` are generator
+  inputs in `refresh/`, which is not shipped. The generator writes each source's kind
+  membership onto its committed entry in `spec/rest.json`, `ws.json`, or `flatfiles.json`:
+  `"kind"` (for example `"trades"`, or absent for a source in no kind), `"group"` (the asset
+  class group), `"position"` (its order within the group), and `"projection"` (the projected
+  keys, or absent). The `spec` loader exposes them on `Source`. Everything at run time, the
+  merge and gate C4 included, reads them from there and never from `refresh/`.
 
 **The type lattice.** `WireType` is one of `long`, `double`, `bool`, `string`, `date`, `epoch`
 (an integer with a unit), `iso-instant`, `int-array`, and `json-text`. OpenAPI `integer`, and
@@ -2167,8 +2175,10 @@ G6, not description matching, are the mechanical checks.
 
 ```
 dataset_schema(spec):                       # cached per dataset; leaf lock
-  members = datasets of spec.family in FAMILIES group order   (spec alone for a non-tick dataset)
-  for each member m, each source s of m (its role paths, channels, prefixes; PROJECTIONS applied):
+  members = datasets of spec.family, ordered by the generated Source.group and Source.position
+            of their sources                      (spec alone for a non-tick dataset)
+  for each member m, each source s of m (its role paths, channels, prefixes; Source.projection
+                                         applied):
       cols(m, s) = rename(m, fields of s)    # symbol_column -> Symbol, time_column -> Timestamp,
                                              # fanout_column -> Underlying; nothing else changes
   schema = ordered union by column name of every cols(m, s):
@@ -2189,7 +2199,8 @@ role paths under the same join.
   its dataset;
 - **C2:** after the rename, no source has a duplicate column;
 - **C3:** across members, one column name gets one `WireType`;
-- **C4:** each tick dataset's sources equal its `FAMILIES` group;
+- **C4:** each tick dataset's sources equal its kind group, as recorded on the generated
+  sources (`Source.kind` and `Source.group`);
 - **C5:** every declared wire name (time-axis pair, symbol parameter, path placeholders) is a
   parameter of its `RestPath`;
 - **C6:** every path, channel, and prefix a dataset uses is generated; a miss names the dataset
@@ -2198,7 +2209,8 @@ role paths under the same join.
   undeclared files are pairwise disjoint.
 
 `FAMILIES` overlaps the catalog by design: the refresh checks names before any dataset is
-declared, and C4 keeps the two in step.
+declared, and C4 keeps the two in step. A test loads `spec/` with `refresh/` absent, as in an
+installed wheel; the CI build job checks that the wheel holds no `refresh/`.
 
 ### 19.5 Runtime drift
 

@@ -837,8 +837,9 @@ and `request_id`, the lazy `__init__`); [§ 19](DESIGN.md#19-wire-clients-and-th
       `host`, `path`, `request_id`, and `message`.
 - [ ] `net/http.py` (CA bundle, proxy selection) and `net/codec.py` (orjson when installed,
       logged once).
-- [ ] `spec/types.py`: `Transport`, `Source`, `RestPath`, `Field`, `Param`, `ParamKind`,
-      `WireType`, `WireUnit`, `DriftReport`, frozen, standard library only.
+- [ ] `spec/types.py`: `Transport`, `Source` (with `kind`, `group`, `position`, and `projection`),
+      `RestPath`, `Field`, `Param`, `ParamKind`, `WireType`, `WireUnit`, `DriftReport`, frozen,
+      standard library only.
 - [ ] The lazy package `__init__.py` files.
 - [ ] `_errors.from_wire`; `MassiveError.status` and `.request_id`, read-only.
 - [ ] The boundary and layer tests of DESIGN § 19 (boto3 and botocore forbidden outside
@@ -1182,6 +1183,9 @@ flat-file sources, `FAMILIES`, `PROJECTIONS`, `TRANSPORT_ONLY`, G5–G7).
 
 **Tasks.**
 - [ ] The WebSocket and flat-file generators, G5–G7.
+- [ ] Write each source's `kind`, `group`, `position`, and `projection` from `FAMILIES` and
+      `PROJECTIONS` into its entry in all three `spec/*.json` files, and load them onto
+      `Source`; a test loads `spec/` with `refresh/` absent.
 - [ ] Check that the names DESIGN § 21 uses (`Symbol`, `Timestamp`, `BidPrice`, `AskPrice`) are
       generated names.
 
@@ -1327,7 +1331,8 @@ C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
 - [ ] `DatasetSpec` gains `family`, the four key columns, and the role paths (`fetch_path`,
       `history_path`, `grouped_daily_path`, `extra_paths`); `has_rest_history` and
       `has_grouped_daily` read the role paths.
-- [ ] `_schema.rename` and `dataset_schema` (DESIGN § 19.4).
+- [ ] `_schema.rename` and `dataset_schema` (DESIGN § 19.4), reading kinds and projections from
+      the generated `Source` fields, never from `refresh/`.
 - [ ] Delete the hand tick schemas, P2's key maps, `ColumnOverride`, the SDK flattening,
       `TimeUnitTable`, and `_enums.Transport`.
 - [ ] `_flat_files.py` builds plans from `source(Transport.FLAT_FILES, …)`; the timestamp routine
