@@ -195,13 +195,15 @@ skeleton created in P2 is designed so that later packages own disjoint files:
   one factory hook per transport that P2 stubs (`NotImplementedError`) and each transport
   package fills; the hooks are separate functions, so three PRs can edit `_session.py` without
   overlapping hunks. If overlap is unavoidable, P3 lands first, then P5, then P4.
-- **Domain packages own one module each.** P6x edits only `_domains/<domain>.py`,
-  `tests/_domains/test_<domain>.py`, and `tests/data/<domain>/`. P6h owns
-  `_domains/partners.py`, which holds the four vendor classes. P6g owns
-  `_domains/reference.py`, `_domains/indicators.py`, and `_domains/economy.py`, and is the one
+- **Domain packages own one domain each.** P6x edits only `_datasets/<domain>.py` (the
+  declarations), `_domains/<domain>.py` (the namespace class), their tests
+  `tests/_datasets/test_<domain>.py` and `tests/_domains/test_<domain>.py`, its lock file
+  `_massive/names/locks/<domain>.json` (through the refresh), and `tests/data/<domain>/`. P6h owns
+  the `partners` modules, which hold the four vendor classes. P6g owns the `reference`,
+  `indicators`, and `economy` modules of `_datasets/` and `_domains/`, and is the one
   domain package that also edits `_session.py`: it fills `MassiveSession.snapshots()`, because
   DESIGN places the unified snapshot on the session rather than in a namespace. The dataset's
-  record, `reference.snapshots`, is declared in `_domains/reference.py` like every other
+  record, `reference.snapshots`, is declared in `_datasets/reference.py` like every other
   record (DESIGN § 8.11), so `_catalog.datasets()` finds it without a `_catalog.py` edit.
 - **No shared registry file is edited by domain packages** (P6g's `_session.py` edit above
   excepted).
@@ -1127,8 +1129,9 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
     `DATASETS = ()`);
   - their mirrors under `tests/_massive/names/` and `tests/_datasets/`.
 - Modify: `_massive/__init__.py` (PC3b's block: `column_names`, `ws_key_map`,
-  `flatfile_key_map`), `_massive/spec/generate.py` and `drift.py` (lock
-  appending; unaccounted items against `DatasetWire`s), `scripts/refresh_massive_spec.py`
+  `flatfile_key_map`), `_massive/spec/generate.py` (lock appending) and `drift.py`
+  (channels and flat-file prefixes join the allow-list that unaccounted items are counted
+  against, with `EXCLUSIONS`; `DatasetWire`s play no part in it), `scripts/refresh_massive_spec.py`
   (pass `_catalog.dataset_wires()`), `src/deephaven_massive/__init__.py` (lazy exports),
   `_catalog.py`, `_schema.py`, `_timeunits.py`, `_enums.py` (`QueryKind`), `_query.py` and
   `_sources.py` (role paths), `_flatfiles.py` (key maps from `_massive.flatfile_key_map`),
@@ -1863,7 +1866,7 @@ SeriesType`; symbol prefix selects the class; axis `timestamp` ms), and `_domain
 `funding_conditions`, `/fed/v1/funding-conditions`). It also fills
 `MassiveSession.snapshots()` in `_session.py` (`m.snapshots(symbols, …F)`: `/v3/snapshot`, 250 per request, mixed classes,
 per-ticker `NOT_ENTITLED` rows keep `Error`/`Message` and log once) and adds that dataset's
-record, `reference.snapshots` (`asset_class=None`), to `_domains/reference.py` (DESIGN § 8.11),
+record, `reference.snapshots` (`asset_class=None`), to `_datasets/reference.py` (DESIGN § 8.11),
 not `_catalog.py`; its tests for the unified snapshot go in `tests/test_session.py`. P6g is
 the only domain package that edits `_session.py`. `cusip` is typed `str` in
 the library, as the spec types it.

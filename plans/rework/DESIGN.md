@@ -860,7 +860,7 @@ All return `Query`.
 `m.snapshots(symbols, *, …F) -> Query` calls the unified `/v3/snapshot` with `ticker.any_of`,
 250 tickers per request, any mix of asset classes. Rows are the union schema of the unified snapshot. `ALL` is not accepted here (the
 endpoint requires tickers). Its catalog record is named `reference.snapshots` and is declared
-in `_domains/reference.py` with `asset_class=None` (each ticker's prefix selects its class,
+in `_datasets/reference.py` with `asset_class=None` (each ticker's prefix selects its class,
 § 10), so `_catalog.datasets()` finds it; `m.streams()` and messages show that name.
 
 ### 8.12 Excluded endpoints
@@ -1233,7 +1233,9 @@ they break**, so a stream never loses data because of another stream's wildcard:
   Only once `T.*` is acknowledged are the covered explicit topics unsubscribed. If `T.*` is
   refused, they stay, and only the wildcard's own streams fail.
 - **Removing a wildcard.** The explicit `T.` topics still desired are subscribed first. `T.*`
-  is unsubscribed once each of them is acknowledged, refused, or `NO_ACK`.
+  stays on the wire, as long as it is still subscribed, until each of them is acknowledged,
+  refused, or `NO_ACK`, including the ones not yet sent (they left the wire while the
+  wildcard covered them). Only then is `T.*` unsubscribed.
 - During an overlap, an event may arrive twice for one round trip. That brief duplicate is
   accepted; a gap would be silent and unrecoverable.
 - Covered explicit topics count toward the options cap ([section 15](#15-options-contract-cap))
@@ -1264,8 +1266,9 @@ desired D = topics with ref-count > 0, minus deferred options contracts (section
 sent    S = topics subscribed in the current generation (acknowledged or not)
 acked   A = topics the server acknowledged in the current generation
 wire    W = D, minus the explicit topics of each channel whose wildcard is in D and in A,
-            plus each wildcard that has left D while an explicit topic of its channel in D is
-            in S and not yet acknowledged, refused, or NO_ACK (make before break)
+            plus each wildcard that has left D but is still in S while any explicit topic
+            of its channel in D is unresolved: not yet acknowledged, refused, or NO_ACK,
+            whether or not it has been sent (make before break)
 a step is in flight from its send until each of its topics is acknowledged, refused, or NO_ACK
 
 no generation open (connecting, waiting for a slot, backing off)
