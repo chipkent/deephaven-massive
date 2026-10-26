@@ -8,7 +8,7 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive._catalog import DatasetSpec, ParamKind
 from deephaven_massive._domains.base import Namespace, bar_query_class, build_query, list_params
-from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan
+from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, Transport
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
@@ -18,6 +18,7 @@ from deephaven_massive._query import (
     StreamQuery,
 )
 from deephaven_massive._schema import BARS, TRADES, Column, ColumnType, Schema
+from deephaven_massive._timeunits import TimeUnit
 
 S, LD = ColumnType.STRING, ColumnType.LOCAL_DATE
 
@@ -40,6 +41,14 @@ FUTURES_BARS = DatasetSpec(
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
     history_method="list_futures_aggregates",
     flat_file_prefixes={Timespan.SESSION: "us_futures_{venue}/session_aggs_v1"},
+    key_maps={
+        Transport.FLAT_FILES: {
+            "ticker": "Symbol",
+            "window_start": "Timestamp",
+            "session_end_date": "SessionEndDate",
+        }
+    },
+    time_units={(Transport.FLAT_FILES, "window_start"): TimeUnit.NANOSECONDS},
 )
 INDEX_BARS = DatasetSpec(
     name="indices.bars",
@@ -48,6 +57,8 @@ INDEX_BARS = DatasetSpec(
     asset_class=AssetClass.INDICES,
     schema=BARS.schema,
     flat_file_prefixes={Timespan.MINUTE: "us_indices/minute_aggs_v1"},
+    key_maps={Transport.FLAT_FILES: {"ticker": "Symbol", "window_start": "Timestamp"}},
+    time_units={(Transport.FLAT_FILES, "window_start"): TimeUnit.NANOSECONDS},
 )
 TRADES_SPEC = DatasetSpec(
     name="stocks.trades",

@@ -56,6 +56,9 @@ class FakeS3:
         self._failures: dict[str, Exception] = {}
         self.requests: list[tuple[str, str]] = []
         self.clients: list[dict[str, object]] = []
+        # Called with the key on the requesting thread before each answer, so a test can hold a
+        # read in flight or act at that moment; set it before the library's first read.
+        self.before_answer: Callable[[str], object] | None = None
 
     def put(self, key: str, data: bytes) -> None:
         """Store an object."""
@@ -115,6 +118,8 @@ class FakeS3:
 
     def _answer(self, context: dict[str, Any], **_: object) -> tuple[AWSResponse, dict[str, Any]]:
         bucket, key = context[_CONTEXT_KEY]
+        if self.before_answer is not None:
+            self.before_answer(key)
         with self._lock:
             self.requests.append((bucket, key))
             failure = self._failures.get(key)

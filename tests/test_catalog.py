@@ -241,12 +241,40 @@ def test_bar_channels_and_prefixes_are_keyed_by_timespan() -> None:
         is_bars=True,
         channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
         flat_file_prefixes={Timespan.MINUTE: "us_stocks_sip/minute_aggs_v1"},
+        key_maps=_FLAT_TRADES,
+        time_units=_FLAT_UNITS,
     )
     assert spec.channels[Timespan.MINUTE] == "AM"
     with pytest.raises(ValueError, match="must be keyed by Timespan"):
         _trades(is_bars=True)
     with pytest.raises(ValueError, match="must be keyed by None"):
         _trades(flat_file_prefixes={Timespan.DAY: "us_stocks_sip/day_aggs_v1"})
+
+
+_FLAT_TRADES = {Transport.FLAT_FILES: {"ticker": "Symbol", "sip_timestamp": "Timestamp"}}
+_FLAT_UNITS = {**BASE.time_units, (Transport.FLAT_FILES, "sip_timestamp"): TimeUnit.NANOSECONDS}
+
+
+def test_flat_files_need_a_key_map_for_symbol_and_timestamp() -> None:
+    prefixes = {None: "us_stocks_sip/trades_v1"}
+    spec = _trades(flat_file_prefixes=prefixes, key_maps=_FLAT_TRADES, time_units=_FLAT_UNITS)
+    assert spec.flat_file_prefixes == prefixes
+    with pytest.raises(ValueError, match=r"key map must fill \['Symbol', 'Timestamp'\]"):
+        _trades(flat_file_prefixes=prefixes)
+    with pytest.raises(ValueError, match=r"key map must fill \['Timestamp'\]"):
+        _trades(flat_file_prefixes=prefixes, key_maps={Transport.FLAT_FILES: {"ticker": "Symbol"}})
+
+
+def test_futures_flat_files_need_the_session_date() -> None:
+    futures: dict[str, object] = {
+        "asset_class": AssetClass.FUTURES,
+        "flat_file_prefixes": {None: "us_futures_{venue}/trades_v1"},
+    }
+    with pytest.raises(ValueError, match=r"key map must fill \['SessionEndDate'\]"):
+        _trades(key_maps=_FLAT_TRADES, time_units=_FLAT_UNITS, **futures)
+    sessions = {**_FLAT_TRADES[Transport.FLAT_FILES], "session_end_date": "SessionEndDate"}
+    spec = _trades(key_maps={Transport.FLAT_FILES: sessions}, time_units=_FLAT_UNITS, **futures)
+    assert spec.key_maps[Transport.FLAT_FILES]["session_end_date"] == "SessionEndDate"
 
 
 def test_filters_are_accepted_until_the_table_is_generated(

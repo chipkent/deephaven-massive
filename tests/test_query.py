@@ -1,5 +1,6 @@
 """Tests for the query classes and the verbs' synchronous validation."""
 
+import logging
 import threading
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
@@ -9,16 +10,18 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, empty_table, input_table, new_table, time_table
 from deephaven.column import string_col
+from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
+from deephaven_massive import _errors
 from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._dates import FuturesSessions, TimeRange
 from deephaven_massive._domains.base import build_query
-from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
+from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan, Transport
 from deephaven_massive._liveness import new_scope
 from deephaven_massive._query import (
     HistoryLatestQuery,
@@ -32,6 +35,7 @@ from deephaven_massive._query import (
 )
 from deephaven_massive._schema import BARS, INDEX_VALUES, TRADES, Column, ColumnType, Schema
 from deephaven_massive._symbols import SymbolTable
+from deephaven_massive._timeunits import TimeUnit
 
 TIMEOUT = 30.0
 
@@ -62,6 +66,8 @@ VALUES_SPEC = DatasetSpec(
     schema=INDEX_VALUES.schema,
     channels={None: "V"},
     flat_file_prefixes={None: "us_indices/values_v1"},
+    key_maps={Transport.FLAT_FILES: INDEX_VALUES.key_maps[Transport.FLAT_FILES]},
+    time_units={(Transport.FLAT_FILES, "timestamp"): TimeUnit.NANOSECONDS},
 )
 NEWS_SPEC = DatasetSpec(
     name="economy.inflation",
@@ -380,6 +386,58 @@ def test_history_argument_errors(massive_session: dm.MassiveSession, flat: Recor
         q.history("2025-03-03T09:30", "2025-03-04")
     with pytest.raises(ValueError, match="must be before end"):
         q.history("2025-03-04", "2025-03-03")
+    assert flat.calls == []
+
+
+def test_history_reads_a_reactive_symbol_table_once_for_every_source(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    flat: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_errors, "_logged", set())  # the invalid-row WARNING is logged once
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["msft", "aapl", "$$$"])]))
+    reads: list[bool] = []
+    iterate = Table.iter_tuple
+    expected = massive_session._core.exec_ctx.j_exec_ctx
+
+    def recorded(table: Table, *args: object, **kwargs: object) -> object:
+        reads.append(get_exec_ctx().j_exec_ctx.equals(expected))
+        return cast("Any", iterate)(table, *args, **kwargs)
+
+    monkeypatch.setattr(Table, "iter_tuple", recorded)
+    q = trades(massive_session, watchlist)
+
+    def forced_rest() -> None:  # from a thread with no execution context of its own
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+
+    worker = threading.Thread(target=forced_rest)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._symbols"):
+        worker.start()
+        worker.join(TIMEOUT)
+    q.history("2025-03-03", "2025-03-03")
+    # Each verb read the table once, inside the session's context, and every source received
+    # the same sorted canonical tuple, never the table itself.
+    assert reads == [True, True]
+    assert rest.calls[0][2].symbols == ("AAPL", "MSFT")
+    assert flat.calls[0][2].symbols == ("AAPL", "MSFT")
+    assert caplog.messages == [
+        "a symbol table holds '$$$', which is not a valid stocks symbol; such rows are ignored"
+    ]
+
+
+def test_history_rejects_a_symbol_table_without_a_valid_symbol(
+    *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+) -> None:
+    for content in ([], ["$$$"]):
+        q = trades(massive_session, new_table([string_col("Symbol", content)]))
+        for source in HistorySource:
+            with pytest.raises(ValueError, match="the symbol table holds no valid symbols"):
+                q.history("2025-03-03", "2025-03-03", source=source)
+    assert rest.calls == []
     assert flat.calls == []
 
 

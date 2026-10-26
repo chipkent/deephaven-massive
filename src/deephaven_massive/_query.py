@@ -53,7 +53,8 @@ from deephaven_massive._enums import (
     Timespan,
     _require_enum,
 )
-from deephaven_massive._symbols import SymbolTable, canonical_view
+from deephaven_massive._liveness import entered
+from deephaven_massive._symbols import SymbolTable, canonical_view, symbol_canonicalizer
 from deephaven_massive._types import ALL, _All, override
 
 if TYPE_CHECKING:
@@ -351,6 +352,37 @@ def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
             f"{spec.name}.fetch() needs explicit symbols; "
             f"use m.{namespace}.snapshots(dm.ALL).fetch() for every symbol"
         )
+
+
+def _read_symbol_table(
+    core: SessionCore, spec: DatasetSpec, symbols: SymbolTable
+) -> tuple[str, ...]:
+    """Read a reactive symbol table once, for a static `history()` result.
+
+    The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
+    it reads, so the symbols are one consistent snapshot. Runs on the caller thread, inside the
+    session's execution context, with no library lock held. Each row is canonicalized as the
+    stream verbs do (`_symbols.symbol_canonicalizer`): a row that is not a valid symbol of the
+    class is ignored and logged once at WARNING.
+
+    Args:
+        core: The session core, for its execution context.
+        spec: The dataset, whose asset class canonicalizes the symbols.
+        symbols: The boxed reactive table.
+
+    Returns:
+        The table's valid symbols, canonical, sorted, and de-duplicated.
+
+    Raises:
+        ValueError: If the table holds no valid symbol, as an empty symbol list does.
+    """
+    canonical_symbol = symbol_canonicalizer(spec.asset_class)
+    with entered(core.exec_ctx):
+        raw = {canonical_symbol(row[0]) for row in symbols.table.iter_tuple(cols="Symbol")}
+    found = tuple(sorted(symbol for symbol in raw if symbol is not None))
+    if not found:
+        raise ValueError(f"{spec.name} history: the symbol table holds no valid symbols")
+    return found
 
 
 def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
@@ -651,11 +683,13 @@ class HistoryQuery(QueryBase):
         daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
         or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
         `dm.ALL`); otherwise it uses REST. A reactive symbol table is read once, when the verb
-        is called. Flat-file reads skip a missing weekend file silently and a missing weekday
-        file (a holiday) with a WARNING.
+        is called, and every source receives the same sorted canonical symbols; rows that are
+        not valid symbols of the class are ignored with a WARNING. Flat-file reads skip a
+        missing weekend file silently and a missing weekday file (a holiday) with a WARNING.
 
         A `source` that is not a `HistorySource`, or a bound of the wrong type, raises
-        `TypeError`. A naive or unparseable bound, an empty range, a source that cannot serve
+        `TypeError`. A naive or unparseable bound, an empty range, a reactive symbol table
+        without a valid symbol, a source that cannot serve
         the request (`REST` without REST history or with `dm.ALL` and no grouped-daily
         endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO` when neither
         can, with every violated condition listed) raises `ValueError`, synchronously. A failed
@@ -679,7 +713,10 @@ class HistoryQuery(QueryBase):
         chosen = _require_enum(source, HistorySource, "source")
         first, last = parse_date_like(start, "start"), parse_date_like(end, "end")
         window = bounds(self._spec, first, last)
-        request = replace(self._request, start=first, end=last)
+        symbols = self._request.symbols
+        if isinstance(symbols, SymbolTable):
+            symbols = _read_symbol_table(self._core, self._spec, symbols)
+        request = replace(self._request, start=first, end=last, symbols=symbols)
         if chosen is HistorySource.REST:
             self._check_rest_history()
             return self._core.rest_transport().history(self._spec, request, window)

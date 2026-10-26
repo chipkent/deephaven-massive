@@ -16,6 +16,7 @@ from deephaven_massive._dates import (
     bounds,
     check_order,
     flat_file_published,
+    futures_session,
     futures_sessions,
     history_range,
     parse_date_like,
@@ -295,3 +296,21 @@ def test_time_axis_order_compares_instants_across_the_fall_back_hour() -> None:
     check_order(first, later)
     with pytest.raises(ValueError, match="must be before end"):
         check_order(later, first)
+
+
+@pytest.mark.parametrize(
+    ("moment", "session"),
+    [
+        (datetime(2025, 3, 3, 10, tzinfo=CHICAGO), date(2025, 3, 3)),
+        (datetime(2025, 3, 3, 16, 59, 59, 999999, tzinfo=CHICAGO), date(2025, 3, 3)),
+        (datetime(2025, 3, 3, 17, tzinfo=CHICAGO), date(2025, 3, 4)),
+        (datetime(2025, 3, 3, 23, 30, tzinfo=CHICAGO), date(2025, 3, 4)),
+        (datetime(2025, 3, 2, 17, tzinfo=CHICAGO), date(2025, 3, 3)),  # the Sunday open
+        (datetime(2025, 3, 9, 17, tzinfo=CHICAGO), date(2025, 3, 10)),  # after spring forward
+        (datetime(2025, 3, 3, 23, tzinfo=UTC), date(2025, 3, 4)),  # 17:00 CST
+        (datetime(2025, 7, 1, 22, tzinfo=UTC), date(2025, 7, 2)),  # 17:00 CDT
+        (datetime(2025, 7, 1, 21, 59, tzinfo=UTC), date(2025, 7, 1)),  # 16:59 CDT
+    ],
+)
+def test_futures_session_rolls_at_17_chicago(moment: datetime, session: date) -> None:
+    assert futures_session(moment) == session
