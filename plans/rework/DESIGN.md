@@ -2657,7 +2657,7 @@ document already reflects them.
     `test_init.py` and `__main__.py` to `test_main.py`, `_` directories under `tests/` are
     helpers, and `test_catalog.py` is a plain mirror ([section 4.2](#42-test-layout)).
 44. **Import roots:** `pythonpath = ["."]` and `mypy_path = ["src"]`, fakes imported as
-    `tests._fakes…`; the ruff ban on `massive` stays.
+    `tests._fakes…`; ruff bans `import massive` once the dependency is gone.
 45. **Module names:** `_namespaces/` (plain modules of namespace classes), `_flat_files.py`,
     `_history_source.py`, and the wire package `_massive/flatfiles/` (PEP 8 forbids the
     underscore in a package name).

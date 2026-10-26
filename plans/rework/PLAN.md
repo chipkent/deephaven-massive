@@ -777,7 +777,8 @@ dunder rule, the import roots); [§ 20.1](DESIGN.md#201-tooling-configuration) (
   `tests/namespaces/`; test fixtures to `tests/data/<test owner path>/`.
 - Modify: `pyproject.toml` (`pythonpath = ["."]`, `mypy_path = ["src"]`), `tests/conftest.py`
   (fakes imported as `tests._fakes…`), `tests/test_layout.py` (the naming rules), every import
-  of `_domains`.
+  of `_domains`, `AGENTS.md` (rule 7 states the new layout, rule 10's fixture path, the
+  `_namespaces/` row).
 
 **Tasks.**
 - [ ] The renames, with no logic change.
@@ -1119,7 +1120,8 @@ timestamp-like integers (68 of them untagged) and about 50 short keys.
   `lexicon.py` (REST shapes), `overrides.py` (`NAMES`, REST `UNITS`, REST `TYPE_FIXES`,
   `RESULT_KEYS`), `exclusions.py`, `refresh/snapshot/` (the snapshot and `manifest.json`),
   `_massive/spec/rest.json`; their mirrors under `tests/massive/refresh/`.
-- Modify: `_massive/spec/__init__.py` (the loaders, one load under a lock), `pyproject.toml`
+- Modify: `AGENTS.md` (the refresh commands, and `uv run pytest tests/massive/refresh -q`),
+  `_massive/spec/__init__.py` (the loaders, one load under a lock), `pyproject.toml`
   (the wheel exclusion of `_massive/refresh`), `.github/workflows/ci.yml` (the build job asserts
   the wheel holds `spec/rest.json` and no `refresh/`).
 
@@ -1409,9 +1411,10 @@ uv run python -m deephaven_massive._massive.refresh --check    # live; prints th
 
 **Depends on.** PC3b. **Parallel with.** P3, P4.
 
-**Files.** Modify `pyproject.toml` (`[tool.uv.sources]`, the `massive` declaration; the
-`banned-api` ban is kept), `scripts/check.sh` and `.github/workflows/ci.yml` (the `massive`
-steps), `AGENTS.md` (the "until PC4" sentence).
+**Files.** Modify `pyproject.toml` (remove `[tool.uv.sources]` and the `massive` declaration;
+add a `"massive"` entry to `[tool.ruff.lint.flake8-tidy-imports.banned-api]`, now that no code
+imports it), `scripts/check.sh` and `.github/workflows/ci.yml` (the `massive` steps),
+`AGENTS.md` (the "until PC4" sentence).
 
 **Tasks.**
 - [ ] The edits above.
@@ -1419,7 +1422,7 @@ steps), `AGENTS.md` (the "until PC4" sentence).
 **Acceptance criteria.**
 - [ ] `git grep -n "massive-client-python\|deephaven-fixes\|tool.uv.sources" -- ':!plans'` is
       empty.
-- [ ] `import massive` fails after a clean sync.
+- [ ] `import massive` fails after a clean sync, and ruff rejects an `import massive`.
 
 **Verification.**
 ```bash
