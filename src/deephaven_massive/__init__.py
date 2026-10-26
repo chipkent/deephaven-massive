@@ -16,8 +16,12 @@ shape: `blink()`, `append_only()`, `ring(n)`, `last_by()`, `fetch()`, `poll(inte
 `history(start, end)`. The same code runs on every Massive plan: the library finds the right
 WebSocket host for your key, and a dataset your plan lacks fails the table with a message that
 names the alternative. The library runs inside an existing Deephaven server (it needs an active
-`ExecutionContext`) and never starts one. Importing it requires a running Deephaven JVM: import
-it inside a Deephaven worker, or after starting `deephaven_server.Server`.
+`ExecutionContext`) and never starts one.
+
+Each public name is imported on first use (PEP 562), so `import deephaven_massive` is cheap
+and needs no JVM. `MassiveSession`, `MassiveConfig`, and `ALL` need a running Deephaven JVM:
+use them inside a Deephaven worker, or after starting `deephaven_server.Server`. The
+exceptions and enums do not.
 
 Public API:
     - `MassiveSession(config=None)`: the entry point; namespaces, `snapshots()`,
@@ -54,28 +58,11 @@ Attributes:
         installed.
 """
 
-from importlib.metadata import version as _version
+from __future__ import annotations
 
-from deephaven_massive._config import MassiveConfig
-from deephaven_massive._enums import (
-    AssetClass,
-    ConditionDataType,
-    ContractType,
-    Direction,
-    FuturesVenue,
-    HistorySource,
-    Locale,
-    Market,
-    Order,
-    PollMode,
-    SeriesType,
-    Sip,
-    Timeframe,
-    Timespan,
-)
-from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
-from deephaven_massive._session import MassiveSession
-from deephaven_massive._types import ALL
+import importlib
+from importlib.metadata import version as _version
+from typing import TYPE_CHECKING
 
 __all__ = [
     "ALL",
@@ -102,3 +89,83 @@ __all__ = [
 ]
 
 __version__: str = _version("deephaven-massive")
+
+# Each lazily resolved public name, and the private module that defines it.
+_EXPORTS: dict[str, str] = {
+    "ALL": "deephaven_massive._types",
+    "AssetClass": "deephaven_massive._enums",
+    "AuthenticationError": "deephaven_massive._errors",
+    "ConditionDataType": "deephaven_massive._enums",
+    "ContractType": "deephaven_massive._enums",
+    "Direction": "deephaven_massive._enums",
+    "EntitlementError": "deephaven_massive._errors",
+    "FuturesVenue": "deephaven_massive._enums",
+    "HistorySource": "deephaven_massive._enums",
+    "Locale": "deephaven_massive._enums",
+    "Market": "deephaven_massive._enums",
+    "MassiveConfig": "deephaven_massive._config",
+    "MassiveError": "deephaven_massive._errors",
+    "MassiveSession": "deephaven_massive._session",
+    "Order": "deephaven_massive._enums",
+    "PollMode": "deephaven_massive._enums",
+    "SeriesType": "deephaven_massive._enums",
+    "Sip": "deephaven_massive._enums",
+    "Timeframe": "deephaven_massive._enums",
+    "Timespan": "deephaven_massive._enums",
+}
+
+# Type checkers read the imports, so they see each name's real type and flag a name outside
+# `__all__`; at run time `__getattr__` resolves the names instead.
+if TYPE_CHECKING:
+    from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._enums import (
+        AssetClass,
+        ConditionDataType,
+        ContractType,
+        Direction,
+        FuturesVenue,
+        HistorySource,
+        Locale,
+        Market,
+        Order,
+        PollMode,
+        SeriesType,
+        Sip,
+        Timeframe,
+        Timespan,
+    )
+    from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
+    from deephaven_massive._session import MassiveSession
+    from deephaven_massive._types import ALL
+else:
+
+    def __getattr__(name: str) -> object:
+        """Resolve a public name by importing the private module that defines it.
+
+        Nothing is cached in this module's namespace: the import system already caches the
+        defining module, so a repeated lookup costs a dictionary lookup, and concurrent first
+        accesses write no shared state.
+
+        Args:
+            name: The attribute requested.
+
+        Returns:
+            The object `name` refers to.
+
+        Raises:
+            AttributeError: If `name` is not a public name of the package.
+        """
+        try:
+            module = _EXPORTS[name]
+        except KeyError:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+        return getattr(importlib.import_module(module), name)
+
+
+def __dir__() -> list[str]:
+    """Return the public names, for completion in IDEs and the Deephaven console.
+
+    Returns:
+        `__all__`, sorted.
+    """
+    return sorted(__all__)

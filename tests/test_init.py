@@ -1,10 +1,18 @@
-"""Tests for the public surface of `deephaven_massive`."""
+"""Tests for the public surface of `deephaven_massive` and its lazy resolution."""
 
+import ast
 import importlib.metadata
-import types
+import inspect
+import json
+import subprocess
+import sys
 from enum import StrEnum
+from types import ModuleType
+
+import pytest
 
 import deephaven_massive as dm
+from deephaven_massive import EntitlementError, MassiveError
 
 EXPECTED_EXPORTS = [
     "MassiveSession",
@@ -31,6 +39,18 @@ EXPECTED_EXPORTS = [
 ]
 
 
+def _type_checking_imports(module: ModuleType) -> set[str]:
+    """Return the names a module imports inside its `if TYPE_CHECKING:` block."""
+    tree = ast.parse(inspect.getsource(module))
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "TYPE_CHECKING":
+            for statement in node.body:
+                assert isinstance(statement, ast.ImportFrom)
+                names.update(alias.asname or alias.name for alias in statement.names)
+    return names
+
+
 def test_version_is_the_installed_distribution_version() -> None:
     assert dm.__version__ == importlib.metadata.version("deephaven-massive")
 
@@ -40,9 +60,43 @@ def test_all_is_exactly_the_public_api() -> None:
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 
-def test_every_export_is_defined() -> None:
+def test_every_lazy_name_resolves_to_its_defining_module() -> None:
+    lazy = set(dm.__all__) - {"__version__"}
+    assert set(dm._EXPORTS) == lazy
+    for name, module in dm._EXPORTS.items():
+        assert getattr(dm, name) is getattr(importlib.import_module(module), name), name
+
+
+def test_no_lazy_name_is_bound_in_the_module_namespace() -> None:
+    # Bound names would bypass `__getattr__`; the names resolve on every access instead.
     for name in dm.__all__:
-        assert hasattr(dm, name), name
+        getattr(dm, name)
+    assert set(vars(dm)) & set(dm._EXPORTS) == set()
+
+
+def test_type_checking_imports_mirror_all() -> None:
+    assert _type_checking_imports(dm) == set(dm.__all__) - {"__version__"}
+
+
+def test_an_unknown_name_raises_attribute_error() -> None:
+    with pytest.raises(AttributeError, match="module 'deephaven_massive' has no attribute 'nope'"):
+        _ = dm.nope  # type: ignore[attr-defined]  # the missing attribute is the point
+
+
+def test_a_private_module_is_not_a_lazy_name() -> None:
+    # `_EXPORTS` maps public names only; a private name is never imported on request.
+    with pytest.raises(AttributeError):
+        _ = dm._no_such_module  # type: ignore[attr-defined]  # the missing attribute is the point
+
+
+def test_dir_lists_exactly_the_public_names() -> None:
+    assert dir(dm) == sorted(EXPECTED_EXPORTS)
+
+
+def test_from_import_resolves_lazily() -> None:
+    # The module-level `from deephaven_massive import ...` above went through `__getattr__`.
+    assert EntitlementError is dm.EntitlementError
+    assert issubclass(EntitlementError, MassiveError)
 
 
 def test_public_names_come_from_private_modules() -> None:
@@ -66,10 +120,41 @@ def test_exception_hierarchy() -> None:
     assert issubclass(dm.MassiveError, Exception)
 
 
-def test_no_public_names_outside_all() -> None:
-    public = {
-        name
-        for name, value in vars(dm).items()
-        if not name.startswith("_") and not isinstance(value, types.ModuleType)
-    }
-    assert public == set(dm.__all__) - {"__version__"}
+def _modules_loaded_by(*names: str) -> list[str]:
+    """Import the package in a fresh interpreter (no JVM) and read `names` from it.
+
+    Args:
+        *names: Public names to read after the import.
+
+    Returns:
+        The `deephaven_massive` submodules loaded afterwards, sorted.
+    """
+    # The script is a literal and the names travel as data on stdin.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, sys\n"
+                "import deephaven_massive as dm\n"
+                "for name in json.load(sys.stdin):\n"
+                "    getattr(dm, name)\n"
+                "loaded = [m for m in sys.modules if m.startswith('deephaven_massive.')]\n"
+                "print(json.dumps(sorted(loaded)))"
+            ),
+        ],
+        input=json.dumps(names),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded: list[str] = json.loads(result.stdout)
+    return loaded
+
+
+def test_importing_the_package_imports_no_private_module() -> None:
+    assert _modules_loaded_by() == []
+
+
+def test_reading_a_name_imports_only_its_defining_module() -> None:
+    assert _modules_loaded_by("Timespan") == ["deephaven_massive._enums"]

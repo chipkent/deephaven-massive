@@ -14,10 +14,28 @@ The only other test files that mirror no module are `conftest.py`, this file, an
 `test_readme.py`, all at the top of `tests/`. Fixtures under `tests/data/` follow the test
 paths, so none of their directories starts with `_` either.
 
-Each rule is a pure function over relative paths, so it is checked both against the real tree
-and against a synthetic tree that breaks it.
+The file also enforces the boundary of the wire package `deephaven_massive._massive`, by reading
+the imports of every module with `ast`:
+
+- Inside `_massive`, a module imports only the standard library, the wire libraries
+  (`urllib3`, `websockets`, `certifi`, `orjson`, `boto3`, `botocore`, `pyarrow`), and other
+  `_massive` modules; never Deephaven, `jpy`, or the rest of the library.
+- Its subpackages are layered: `net` and `spec` import nothing else in `_massive`; `rest`,
+  `ws`, and `flatfiles` import only `net` and `spec`; `refresh` may import anything, and only
+  `refresh` and its tests import `refresh`.
+- `tests/massive/`, the wire package's own tests, may import any `_massive` module.
+- Everything else, the rest of `tests/` included, sees only the interface: it imports no
+  `_massive` submodule (by `import`, relative import, or a literal `importlib.import_module`
+  or `__import__`), reads only names in `_massive.__all__`, imports none of `urllib3`,
+  `websockets`, `certifi`, `boto3`, or `botocore` (`tests/_fakes/` excepted), and names no
+  file of the vendored spec snapshot.
+
+Each rule is a pure function over relative paths (and, for the boundary, source text), so it is
+checked both against the real tree and against a synthetic tree that breaks it.
 """
 
+import ast
+import sys
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
@@ -397,3 +415,527 @@ def test_an_underscored_fixture_directory_is_reported() -> None:
         "tests/data/_flatfiles/",
         "tests/data/massive/_rest/",
     ]
+
+
+# ---------------------------------------------------------------------------------------------
+# The boundary of the wire package.
+# ---------------------------------------------------------------------------------------------
+
+_PACKAGE = "deephaven_massive"
+_WIRE = "deephaven_massive._massive"
+
+# What `_massive` may import besides the standard library and itself.
+_WIRE_LIBRARIES = frozenset(
+    {"urllib3", "websockets", "certifi", "orjson", "boto3", "botocore", "pyarrow"}
+)
+# The network libraries nothing outside `_massive` imports (`tests/_fakes/` excepted).
+_NETWORK_LIBRARIES = frozenset({"urllib3", "websockets", "certifi", "boto3", "botocore"})
+
+# Each layer of `_massive`, and the layers it may import (`refresh` may import any).
+_LAYERS = {
+    "net": frozenset({"net"}),
+    "spec": frozenset({"spec"}),
+    "rest": frozenset({"rest", "net", "spec"}),
+    "ws": frozenset({"ws", "net", "spec"}),
+    "flatfiles": frozenset({"flatfiles", "net", "spec"}),
+}
+_REFRESH = "refresh"
+
+# The vendor files of the spec snapshot, and its directory.
+_SNAPSHOT_FILES = frozenset({"openapi.json", "websocket.json", "llms.txt", "manifest.json"})
+_SNAPSHOT_DIRECTORY = "refresh/snapshot"
+
+
+def _module_of(path: PurePosixPath) -> tuple[str, str]:
+    """Return the dotted module name of a repository file and the package relative imports use.
+
+    Args:
+        path: A Python file's path relative to the repository root, under `src/` or `tests/`.
+
+    Returns:
+        The module name (`deephaven_massive._massive.net` for
+        `src/deephaven_massive/_massive/net/__init__.py`, `tests.test_layout` for this file)
+        and its package: the module itself for an `__init__.py`, otherwise its parent.
+    """
+    parts = path.parts[1:] if path.parts[0] == "src" else path.parts
+    package = ".".join(parts[:-1])
+    if path.name == "__init__.py":
+        return package, package
+    return f"{package}.{path.stem}", package
+
+
+def _absolute(package: str, level: int, name: str | None) -> str:
+    """Resolve a relative import to an absolute module name.
+
+    Args:
+        package: The importing module's package.
+        level: The number of leading dots.
+        name: The text after the dots, or `None` for `from . import x`.
+
+    Returns:
+        The absolute name the import refers to.
+    """
+    base = package.split(".")
+    base = base[: len(base) - (level - 1)]
+    return ".".join([*base, name] if name else base)
+
+
+def _imports(tree: ast.Module, package: str) -> list[tuple[int, str]]:
+    """Return every module a file imports, as absolute dotted names with their line.
+
+    A `from a import b` counts as importing `a.b`, since `b` may be a submodule; a literal
+    `importlib.import_module("a.b")` or `__import__("a.b")` counts as importing `a.b`.
+
+    Args:
+        tree: The file's syntax tree.
+        package: The file's package, to resolve relative imports.
+
+    Returns:
+        `(line, name)` pairs in the order of the walk.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.extend((node.lineno, alias.name) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                base = _absolute(package, node.level, node.module)
+            found.extend(
+                (node.lineno, base if alias.name == "*" else f"{base}.{alias.name}")
+                for alias in node.names
+            )
+        elif (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func) in {"importlib.import_module", "import_module", "__import__"}
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            found.append((node.lineno, node.args[0].value))
+    return found
+
+
+def _wire_aliases(tree: ast.Module, package: str) -> set[str]:
+    """Return the expressions that name the `_massive` package in a file.
+
+    Args:
+        tree: The file's syntax tree.
+        package: The file's package, to resolve relative imports.
+
+    Returns:
+        The full dotted name, plus every name an import binds to the package
+        (`import deephaven_massive._massive as wire`, `from deephaven_massive import _massive`).
+    """
+    aliases = {_WIRE}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases.update(a.asname for a in node.names if a.name == _WIRE and a.asname)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                base = _absolute(package, node.level, node.module)
+            aliases.update(a.asname or a.name for a in node.names if f"{base}.{a.name}" == _WIRE)
+    return aliases
+
+
+def _snapshot_names(tree: ast.Module) -> list[tuple[int, str]]:
+    """Return the string constants that name a file of the spec snapshot.
+
+    Docstrings are prose, not references to a file, so they are skipped.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        `(line, text)` for each constant that contains the snapshot directory or whose last
+        path component is a snapshot file.
+    """
+    docstrings = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    }
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+        and (
+            _SNAPSHOT_DIRECTORY in node.value
+            or PurePosixPath(node.value.strip()).name in _SNAPSHOT_FILES
+        )
+    ]
+
+
+def _wire_layer(name: str) -> str | None:
+    """Return the `_massive` subpackage a module name falls in.
+
+    Args:
+        name: An absolute module name inside `_massive`.
+
+    Returns:
+        The subpackage (`net`, `spec`, `rest`, `ws`, `flatfiles`, or `refresh`), or `None` for
+        the package itself and the names of its interface.
+    """
+    parts = name.removeprefix(f"{_WIRE}.").split(".") if name != _WIRE else []
+    return parts[0] if parts and parts[0] in {*_LAYERS, _REFRESH} else None
+
+
+def _inside(name: str, package: str) -> bool:
+    return name == package or name.startswith(f"{package}.")
+
+
+def _wire_rules(where: str, imports: list[tuple[int, str]], layer: str | None) -> list[str]:
+    """Check the imports of a module inside `_massive` against its allow list and layer.
+
+    Args:
+        where: The file's path, for the messages.
+        imports: The module's imports, from `_imports`.
+        layer: The module's own subpackage, or `None` for `_massive/__init__.py`.
+
+    Returns:
+        One message per import the rules forbid.
+    """
+    found = []
+    for line, name in imports:
+        top = name.split(".")[0]
+        if _inside(name, _WIRE):
+            target = _wire_layer(name)
+            if target == _REFRESH and layer != _REFRESH:
+                found.append(f"{where}:{line}: only refresh imports refresh: {name}")
+            elif layer in _LAYERS and target not in _LAYERS[layer]:
+                found.append(f"{where}:{line}: {layer} must not import {name}")
+        elif top not in sys.stdlib_module_names and top not in _WIRE_LIBRARIES:
+            found.append(f"{where}:{line}: the wire package must not import {name}")
+    return found
+
+
+def _outside_rules(
+    where: str,
+    tree: ast.Module,
+    package: str,
+    *,
+    interface: frozenset[str],
+    network_allowed: bool,
+    snapshot_checked: bool,
+) -> list[str]:
+    """Check a module outside `_massive` against the interface rules.
+
+    Args:
+        where: The file's path, for the messages.
+        tree: The file's syntax tree.
+        package: The file's package, to resolve relative imports.
+        interface: The names in `_massive.__all__`.
+        network_allowed: Whether the file may import the network libraries (`tests/_fakes/`).
+        snapshot_checked: Whether the snapshot-name rule applies (not to this file, which
+            names the snapshot files in order to forbid them).
+
+    Returns:
+        One message per import, attribute read, or string the rules forbid.
+    """
+    found = []
+    for line, name in _imports(tree, package):
+        if _inside(name, _WIRE) and name != _WIRE:
+            member = name.removeprefix(f"{_WIRE}.").split(".")[0]
+            if member not in interface or name.count(".") > _WIRE.count(".") + 1:
+                found.append(f"{where}:{line}: imports a _massive submodule: {name}")
+        elif name.split(".")[0] in _NETWORK_LIBRARIES and not network_allowed:
+            found.append(f"{where}:{line}: imports a network library: {name}")
+    aliases = _wire_aliases(tree, package)
+    found.extend(
+        f"{where}:{node.lineno}: reads _massive.{node.attr}, which is not in its __all__"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and ast.unparse(node.value) in aliases
+        and node.attr not in interface
+    )
+    if snapshot_checked:
+        found.extend(
+            f"{where}:{line}: names a snapshot file: {text!r}"
+            for line, text in _snapshot_names(tree)
+        )
+    return found
+
+
+def boundary_violations(path: PurePosixPath, source: str, interface: frozenset[str]) -> list[str]:
+    """Return every break of the wire package's boundary and layers in one file.
+
+    Args:
+        path: The file's path relative to the repository root (`src/deephaven_massive/...` or
+            `tests/...`).
+        source: The file's text.
+        interface: The names in `_massive.__all__`.
+
+    Returns:
+        One `"<path>:<line>: <rule>"` message per violation, empty for a clean file.
+    """
+    tree = ast.parse(source)
+    module, package = _module_of(path)
+    where = str(path)
+    if _inside(module, _WIRE):
+        layer = _wire_layer(module) if module != _WIRE else None
+        return _wire_rules(where, _imports(tree, package), layer)
+    if _inside(module, "tests.massive"):
+        own_refresh_test = _inside(module, "tests.massive.refresh")
+        return [
+            f"{where}:{line}: only the refresh tests import refresh: {name}"
+            for line, name in _imports(tree, package)
+            if _inside(name, f"{_WIRE}.{_REFRESH}") and not own_refresh_test
+        ]
+    return _outside_rules(
+        where,
+        tree,
+        package,
+        interface=interface,
+        network_allowed=_inside(module, "tests._fakes"),
+        snapshot_checked=path != PurePosixPath("tests/test_layout.py"),
+    )
+
+
+def _interface() -> frozenset[str]:
+    """Return `_massive.__all__`, read from its source without importing the package.
+
+    Returns:
+        The names of the wire package's interface.
+
+    Raises:
+        AssertionError: If the file assigns no `__all__`.
+    """
+    tree = ast.parse((_SRC / "_massive" / "__init__.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and ast.unparse(node.targets[0]) == "__all__":
+            return frozenset(ast.literal_eval(node.value))
+    raise AssertionError("_massive/__init__.py defines no __all__")
+
+
+_INTERFACE = frozenset({"WireError", "RestClient"})
+
+
+def _check(path: str, source: str) -> list[str]:
+    return boundary_violations(PurePosixPath(path), source, _INTERFACE)
+
+
+def test_the_tree_keeps_the_wire_boundary() -> None:
+    interface = _interface()
+    files = [*_SRC.rglob("*.py"), *_TESTS.rglob("*.py")]
+    found = [
+        message
+        for file in sorted(files)
+        for message in boundary_violations(
+            PurePosixPath(file.relative_to(_ROOT).as_posix()), file.read_text(), interface
+        )
+    ]
+    assert found == []
+
+
+def test_the_interface_is_read_from_the_source() -> None:
+    assert {"WireError", "WireAuthError", "WireEntitlementError"} <= _interface()
+
+
+# Inside the wire package: the allow list.
+
+_WIRE_FILE = "src/deephaven_massive/_massive/rest/client.py"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import ssl\nimport urllib3\nimport certifi\n",
+        "from __future__ import annotations\nimport pyarrow as pa\n",
+        "import websockets.asyncio.client\nimport boto3\nfrom botocore.config import Config\n",
+        "import orjson\n",
+        "from deephaven_massive._massive.net.errors import WireError\n",
+        "from ..spec import types\nfrom . import query\n",
+    ],
+)
+def test_the_wire_package_may_import_its_allow_list(source: str) -> None:
+    assert _check(_WIRE_FILE, source) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "name"),
+    [
+        ("import deephaven.table\n", "deephaven.table"),
+        ("from deephaven_server import Server\n", "deephaven_server.Server"),
+        ("import jpy\n", "jpy"),
+        ("from deephaven_massive._errors import MassiveError\n", "deephaven_massive._errors"),
+        ("from ... import _enums\n", "deephaven_massive._enums"),
+        ("import deephaven_massive\n", "deephaven_massive"),
+        ("import requests\n", "requests"),
+        ("importlib.import_module('deephaven.table')\n", "deephaven.table"),
+    ],
+)
+def test_the_wire_package_must_not_import_outside_its_allow_list(source: str, name: str) -> None:
+    [message] = _check(_WIRE_FILE, source)
+    assert message.startswith(f"{_WIRE_FILE}:1: the wire package must not import {name}")
+
+
+# Inside the wire package: the layers.
+
+
+@pytest.mark.parametrize(
+    ("file", "source"),
+    [
+        ("net/http.py", "from deephaven_massive._massive.net import errors\n"),
+        ("spec/__init__.py", "from .types import Source\n"),
+        ("ws/client.py", "from ..net import codec\nfrom ..spec.types import Field\n"),
+        ("flatfiles/reader.py", "from deephaven_massive._massive.spec import types\n"),
+        ("refresh/generate.py", "from ..rest import client\nfrom .. import WireError\n"),
+        ("refresh/__main__.py", "from .generate import main\n"),
+        ("__init__.py", "from deephaven_massive._massive.rest.client import RestClient\n"),
+    ],
+)
+def test_each_layer_may_import_its_own_layers(file: str, source: str) -> None:
+    assert _check(f"src/deephaven_massive/_massive/{file}", source) == []
+
+
+@pytest.mark.parametrize(
+    ("file", "source", "message"),
+    [
+        ("net/http.py", "from ..spec import types\n", "net must not import"),
+        ("net/codec.py", "from deephaven_massive._massive import WireError\n", "net must not"),
+        ("spec/types.py", "from ..net.errors import WireError\n", "spec must not import"),
+        ("rest/client.py", "from ..ws import client\n", "rest must not import"),
+        ("ws/client.py", "from ..flatfiles import layout\n", "ws must not import"),
+        ("flatfiles/reader.py", "from ..rest import batch\n", "flatfiles must not import"),
+        ("rest/batch.py", "from .. import WireError\n", "rest must not import"),
+        ("net/errors.py", "from ..refresh import overrides\n", "only refresh imports refresh"),
+        ("__init__.py", "from .refresh import generate\n", "only refresh imports refresh"),
+    ],
+)
+def test_a_layer_must_not_import_another(file: str, source: str, message: str) -> None:
+    [found] = _check(f"src/deephaven_massive/_massive/{file}", source)
+    assert message in found
+
+
+# The wire package's own tests.
+
+
+def test_the_wire_tests_may_import_any_wire_module() -> None:
+    source = "from deephaven_massive._massive.net import codec\nimport urllib3\n"
+    assert _check("tests/massive/net/test_codec.py", source) == []
+
+
+def test_only_the_refresh_tests_import_refresh() -> None:
+    source = "from deephaven_massive._massive.refresh import generate\n"
+    assert _check("tests/massive/refresh/test_generate.py", source) == []
+    assert _check("tests/massive/rest/test_client.py", source) == [
+        (
+            "tests/massive/rest/test_client.py:1: only the refresh tests import refresh: "
+            "deephaven_massive._massive.refresh.generate"
+        )
+    ]
+
+
+# Everywhere else: only the interface.
+
+_LIBRARY_FILE = "src/deephaven_massive/_rest.py"
+
+
+@pytest.mark.parametrize("path", [_LIBRARY_FILE, "src/deephaven_massive/_namespaces/stocks.py"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from deephaven_massive._massive import RestClient, WireError\n",
+        "from deephaven_massive import _massive\nx = _massive.WireError\n",
+        "import deephaven_massive._massive as wire\nx = wire.RestClient\n",
+        "import deephaven_massive._massive\nx = deephaven_massive._massive.WireError\n",
+        "import pyarrow\nimport orjson\n",
+    ],
+)
+def test_the_library_may_use_the_interface(path: str, source: str) -> None:
+    assert _check(path, source) == []
+
+
+def test_the_library_may_use_the_interface_through_relative_imports() -> None:
+    assert _check(_LIBRARY_FILE, "from ._massive import WireError\n") == []
+    nested = "src/deephaven_massive/_namespaces/stocks.py"
+    assert _check(nested, "from .. import _massive\nx = _massive.RestClient\n") == []
+
+
+@pytest.mark.parametrize(
+    ("source", "name"),
+    [
+        ("import deephaven_massive._massive.net\n", "deephaven_massive._massive.net"),
+        (
+            "from deephaven_massive._massive.net.errors import WireError\n",
+            "deephaven_massive._massive.net.errors.WireError",
+        ),
+        ("from deephaven_massive._massive import net\n", "deephaven_massive._massive.net"),
+        ("from ._massive.spec import types\n", "deephaven_massive._massive.spec.types"),
+        ("from ._massive import codec\n", "deephaven_massive._massive.codec"),
+        (
+            "importlib.import_module('deephaven_massive._massive.rest')\n",
+            "deephaven_massive._massive.rest",
+        ),
+        ("__import__('deephaven_massive._massive.ws')\n", "deephaven_massive._massive.ws"),
+    ],
+)
+def test_outside_code_must_not_import_a_wire_submodule(source: str, name: str) -> None:
+    assert _check(_LIBRARY_FILE, source) == [
+        f"{_LIBRARY_FILE}:1: imports a _massive submodule: {name}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from deephaven_massive import _massive\nx = _massive.net\n",
+        "import deephaven_massive._massive as wire\nx = wire.net\n",
+        "import deephaven_massive._massive\nx = deephaven_massive._massive.net\n",
+        "from . import _massive as wire\nx = wire.net\n",
+    ],
+)
+def test_outside_code_must_read_only_interface_names(source: str) -> None:
+    assert _check(_LIBRARY_FILE, source) == [
+        f"{_LIBRARY_FILE}:2: reads _massive.net, which is not in its __all__"
+    ]
+
+
+@pytest.mark.parametrize(
+    "library",
+    ["urllib3", "websockets", "certifi", "boto3", "botocore"],
+)
+@pytest.mark.parametrize("path", [_LIBRARY_FILE, "tests/test_session.py"])
+def test_outside_code_must_not_import_a_network_library(library: str, path: str) -> None:
+    assert _check(path, f"import {library}.x\n") == [
+        f"{path}:1: imports a network library: {library}.x"
+    ]
+
+
+def test_the_fakes_may_import_the_network_libraries() -> None:
+    source = "import urllib3\nimport websockets.asyncio.server\nimport botocore\n"
+    assert _check("tests/_fakes/ws.py", source) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "src/deephaven_massive/_massive/refresh/snapshot/openapi.json",
+        "openapi.json",
+        "websocket.json",
+        "llms.txt",
+        "refresh/snapshot",
+        "flat-files/manifest.json",
+    ],
+)
+@pytest.mark.parametrize("path", [_LIBRARY_FILE, "tests/test_catalog.py"])
+def test_outside_code_must_not_name_a_snapshot_file(text: str, path: str) -> None:
+    assert _check(path, f"x = {text!r}\n") == [f"{path}:1: names a snapshot file: {text!r}"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '"""Generated from openapi.json, with refresh/snapshot as its input."""\n',
+        "x = 'snapshot'\ny = 'snapshots()'\nz = 'rest.json'\n",
+    ],
+)
+def test_prose_and_other_names_are_not_snapshot_files(source: str) -> None:
+    assert _check(_LIBRARY_FILE, source) == []
+
+
+def test_only_this_file_may_name_the_snapshot_files() -> None:
+    assert _check("tests/test_layout.py", "x = 'openapi.json'\n") == []
