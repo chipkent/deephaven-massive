@@ -126,14 +126,19 @@ jobs:
           java-version: "17"
       - name: Import the built wheel in a clean environment, inside a Deephaven server
         # The library imports deephaven at module level, so importing it needs a running
-        # Deephaven JVM, exactly as it does for users. The wheel is installed next to
-        # deephaven-server and the latest deephaven-fixes (the wheel's metadata names only
-        # massive>=2.9.0), a server is started, and only then is the package imported.
-        run: >-
-          uv run --isolated --no-project --python 3.11 --with dist/*.whl
-          --with "massive @ git+https://github.com/chipkent/massive-client-python@deephaven-fixes"
-          --with deephaven-server python -c
-          "from deephaven_server import Server; Server(port=0).start();
+        # Deephaven JVM, exactly as it does for users. The wheel is installed in a fresh
+        # virtual environment next to deephaven-server and the latest deephaven-fixes
+        # (DESIGN § 19). The fork builds as version 0.0.0, which cannot satisfy the wheel's
+        # massive>=2.9.0, so an override supplies it. A server is started, and only then is
+        # the package imported.
+        run: |
+          echo "massive @ git+https://github.com/chipkent/massive-client-python@deephaven-fixes" > "$RUNNER_TEMP/overrides.txt"
+          uv venv --python 3.11 "$RUNNER_TEMP/smoke"
+          uv pip install --python "$RUNNER_TEMP/smoke/bin/python" \
+            --override "$RUNNER_TEMP/overrides.txt" dist/*.whl deephaven-server
+          "$RUNNER_TEMP/smoke/bin/python" -c "import json, importlib.metadata as m;
+          print('massive', json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
+          "$RUNNER_TEMP/smoke/bin/python" -c "from deephaven_server import Server; Server(port=0).start();
           import deephaven_massive; print(deephaven_massive.__version__)"
       - name: Upload distributions
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
