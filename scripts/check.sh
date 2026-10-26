@@ -46,7 +46,7 @@ step() {
     "$@"
 }
 
-# The SDK fork is always the latest `deephaven-fixes` commit (DESIGN § 19).
+# The SDK fork is always the latest `deephaven-fixes` commit.
 # Re-lock only `massive` to the branch head, so every `uv run` below syncs the environment to
 # it; every other dependency stays as locked. The refreshed uv.lock serves this run only: the
 # file as it was is restored on exit, so the working tree is never left dirty, and the `massive`

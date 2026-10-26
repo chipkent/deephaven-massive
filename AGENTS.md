@@ -22,11 +22,11 @@ uv build                                   # sdist and wheel
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
 
-The SDK fork is always the latest `deephaven-fixes` commit (`DESIGN.md` § 19). Both `check.sh`
-tiers, and CI, first run `uv lock --upgrade-package massive`, which moves only `massive` to the
-branch head; `check.sh` restores `uv.lock` on exit, so the committed lock's `massive` commit may be
-stale and is never bumped. A plain `uv run` or `uv sync` installs that stale commit, so run a
-`check.sh` tier first and use `uv run --no-sync` for one-off commands.
+The SDK fork is always the latest `deephaven-fixes` commit. Both `check.sh` tiers, and CI, first
+run `uv lock --upgrade-package massive`, which moves only `massive` to the branch head;
+`check.sh` restores `uv.lock` on exit, so the committed lock's `massive` commit may be stale and
+is never bumped. A plain `uv run` or `uv sync` installs that stale commit, so run a `check.sh`
+tier first and use `uv run --no-sync` for one-off commands.
 
 ## Hard rules
 

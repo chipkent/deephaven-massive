@@ -27,7 +27,7 @@ jobs:
           enable-cache: true
       - name: Check that uv.lock matches pyproject.toml
         # The massive commit recorded in uv.lock may be stale: the source tracks the
-        # deephaven-fixes branch, and every other job installs its head (DESIGN § 19).
+        # deephaven-fixes branch, and every other job installs its head.
         run: uv lock --check
 
   lint:
@@ -44,7 +44,7 @@ jobs:
           enable-cache: true
       - name: Set up Python
         run: uv python install 3.11
-      - name: Use the latest deephaven-fixes (DESIGN § 19), then sync dependencies
+      - name: Install the latest deephaven-fixes, then sync
         # Re-locks only massive to the branch head; every other dependency stays as locked.
         run: |
           uv lock --upgrade-package massive
@@ -84,7 +84,7 @@ jobs:
           enable-cache: true
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
-      - name: Use the latest deephaven-fixes (DESIGN § 19), then sync dependencies
+      - name: Install the latest deephaven-fixes, then sync
         # Re-locks only massive to the branch head; every other dependency stays as locked.
         # The orjson extra is tested on 3.14; orjson publishes no free-threaded wheels.
         run: |
@@ -127,10 +127,9 @@ jobs:
       - name: Import the built wheel in a clean environment, inside a Deephaven server
         # The library imports deephaven at module level, so importing it needs a running
         # Deephaven JVM, exactly as it does for users. The wheel is installed in a fresh
-        # virtual environment next to deephaven-server and the latest deephaven-fixes
-        # (DESIGN § 19). The fork builds as version 0.0.0, which cannot satisfy the wheel's
-        # massive>=2.9.0, so an override supplies it. A server is started, and only then is
-        # the package imported.
+        # virtual environment next to deephaven-server and the latest deephaven-fixes. The fork
+        # builds as version 0.0.0, which cannot satisfy the wheel's massive>=2.9.0, so an
+        # override supplies it. A server is started, and only then is the package imported.
         run: |
           echo "massive @ git+https://github.com/chipkent/massive-client-python@deephaven-fixes" > "$RUNNER_TEMP/overrides.txt"
           uv venv --python 3.11 "$RUNNER_TEMP/smoke"

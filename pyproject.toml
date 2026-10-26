@@ -57,7 +57,7 @@ dev = [
 [tool.uv.sources]
 # The fork's `deephaven-fixes` integration branch, always at its latest commit: scripts/check.sh
 # and CI run `uv lock --upgrade-package massive` before they sync, so the massive commit in the
-# committed uv.lock may be stale and is never bumped (DESIGN § 19).
+# committed uv.lock may be stale and is never bumped.
 # The fork builds as version 0.0.0, so no code or test may check the massive version.
 massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }
 
