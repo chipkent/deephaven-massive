@@ -855,7 +855,8 @@ and `request_id`, the lazy `__init__`); [§ 19](DESIGN.md#19-wire-clients-and-th
 - [ ] The lazy package `__init__.py` files.
 - [ ] `_errors.from_wire`; `MassiveError.status` and `.request_id`, read-only.
 - [ ] The boundary and layer tests of DESIGN § 19 (boto3 and botocore forbidden outside
-      `_massive` and `tests/_fakes/`), with a negative test per rule.
+      `_massive` and `tests/_fakes/`; `tests/massive/` may import any `_massive` module, the
+      rest of `tests/` only the interface), with a negative test per rule.
 
 **Acceptance criteria.**
 - [ ] A subprocess import of `deephaven_massive._massive` leaves `deephaven` out of
@@ -1087,6 +1088,10 @@ column of [§ 19.5](DESIGN.md#195-runtime-drift); [§ 5](DESIGN.md#5-massiveconf
 **Tasks.**
 - [ ] Every rule of DESIGN § 19.2, each with a named test. Decoding takes injected `Source`s, so
       PC2 needs no generated file.
+- [ ] `set_required(channel, keys)` on the loop thread, kept across generations and passed to
+      the decoder; `tests/massive/ws/test_protocol.py` shows a missing required key becomes a
+      `Reject` while a missing optional field becomes null, and `test_client.py` shows the set
+      survives a reconnect.
 - [ ] Every WebSocket case of DESIGN § 19.5: a bad row rejects only its topic, and its siblings
       are delivered.
 - [ ] Time goes through an injectable clock and sleep.
@@ -1622,6 +1627,9 @@ routing, the options cap, reactive watchlists, and the live diagnostics.
       `on_data`, `on_state` per DESIGN § 13.3, all on the loop thread.
 - [ ] The reconcile loop with make-before-break wildcard transitions, single-topic re-send,
       and the `NO_ACK` rule (one reconnect per topic per session).
+- [ ] `_ws.py` builds each channel's required-key set from the dataset's `KeySpec`s for the
+      channel's source (no `from_request` keys) and calls `set_required` before the channel's
+      first subscribe; `tests/test_ws.py` asserts the set and the call order against the fake.
 - [ ] Rejects fail only their streams; a row with no symbol fails only the channel's `ALL`
       streams and logs at ERROR; drift goes to the `DriftRegistry`.
 - [ ] The flush renames, converts, applies the bound mask, and fans out with `where_in`.

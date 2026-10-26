@@ -86,11 +86,12 @@ nothing is kept or shimmed for compatibility.
     `flatfiles/`, `refresh/`. `_massive` imports nothing from `deephaven`, `deephaven_server`,
     `jpy`, or the rest of the library. Layers: `net` and `spec` import nothing else in
     `_massive`; `rest`, `ws`, and `flatfiles` import only `net` and `spec`; only `refresh` and
-    its tests import `refresh`. Everything else imports only `deephaven_massive._massive` and
-    uses only the names in its `__all__`: never a submodule (by `import`, relative import, or
-    `importlib`), never `urllib3`, `websockets`, `certifi`, `boto3`, or `botocore`, and never a
-    snapshot file. The one exception is `tests/_fakes/`. The AST tests in
-    `tests/test_layout.py` enforce all of it.
+    its tests import `refresh`. The wire package's own tests, under `tests/massive/`, may
+    import any `_massive` module. Everything else, the rest of `tests/` included, imports only
+    `deephaven_massive._massive` and uses only the names in its `__all__`: never a submodule
+    (by `import`, relative import, or `importlib`), never `urllib3`, `websockets`, `certifi`,
+    `boto3`, or `botocore`, and never a snapshot file. `tests/_fakes/` keeps its exception for
+    the network libraries. The AST tests in `tests/test_layout.py` enforce all of it.
 
 ## Documentation standard
 

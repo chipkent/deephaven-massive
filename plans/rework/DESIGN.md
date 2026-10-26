@@ -300,7 +300,9 @@ others:
 - `tests/test_layout.py`: walks `src/deephaven_massive/**/*.py` and asserts every module has its
   mirrored test file and that every test file maps to a module or is one of these exceptions.
   It also holds the import-boundary and layer tests of `_massive`
-  ([section 19](#19-wire-clients-and-the-spec-snapshot)), with a negative test per rule.
+  ([section 19](#19-wire-clients-and-the-spec-snapshot)), with a negative test per rule:
+  `tests/massive/` may import any `_massive` module, and the rest of `tests/` only the
+  interface.
 - `tests/test_readme.py`: runs every example of [section 21](#21-examples) in the embedded JVM
   against the fakes. It mirrors `README.md`, not a source module.
 - `_` helper directories, of which there is one: `tests/_fakes/` (`__init__.py`, `rest.py`,
@@ -1293,8 +1295,14 @@ The client reports to `_ws.py` through four callbacks, each called on the loop t
   `WAITING_SLOT` (the auth reply was `max_connections`), `FAILED` (with the `WireError`), or
   `CLOSED` (after `close()`).
 
-`_ws.py` parses no frame text. It calls the client's loop-thread methods
-`subscribe(generation, topics)` and `unsubscribe(generation, topics)`. Each sends at once, in
+`_ws.py` parses no frame text. Before it first subscribes a channel on a connection, it calls
+the client's loop-thread method `set_required(channel, keys)`: `keys` is a `frozenset` of
+long-form key columns, built by `_ws.py` from the `KeySpec`s that the channel's dataset
+declares for that channel's source, excluding `from_request` keys. The client keeps it across
+generations and hands it to the decoder, so a row missing one of those keys is a `Reject`,
+while any other absent field becomes null. A channel with no entry has no required keys. It
+then calls the loop-thread methods `subscribe(generation, topics)` and
+`unsubscribe(generation, topics)`. Each sends at once, in
 call order, at most 1,000 topics per frame (the frame-size limit is **UNVERIFIED**; the chunk
 size is conservative). A call for a generation that is no longer current is discarded: the next
 generation re-sends the whole desired set. `reconnect()` closes the current socket so the client
@@ -1845,7 +1853,8 @@ rest/                imports net, spec
   batch.py           to_batch(rows, rest_path, *, required) -> (RecordBatch, DriftReport)
 ws/                  imports net, spec
   __init__.py        WsClient, WsState, Status, StatusKind, Reject
-  client.py          loop thread, connect/reconnect task, sender, close/join
+  client.py          loop thread, connect/reconnect task, sender, close/join, per-channel
+                     required keys (set_required)
   protocol.py        handshake and auth frames, subscribe frames, frame decoding against ws.json,
                      rows + rejects + DriftReport, symbol normalization, failure classification
   backoff.py         backoff policy, stable-uptime reset
@@ -1903,11 +1912,14 @@ negative test per rule:
 - **Layers.** `net` and `spec` import nothing else in `_massive`. `rest`, `ws`, and `flatfiles`
   import only `net` and `spec`. `refresh` may import any of them, and only `refresh` and its
   tests import `refresh`.
-- Outside `_massive`: no module imports `urllib3`, `websockets`, `certifi`, `boto3`, or
-  `botocore` (except `tests/_fakes/`); no module imports a `_massive` submodule (by `import`,
-  relative import, or `importlib.import_module`/`__import__` with a literal name); an attribute
-  read on `_massive` names only a member of `_massive.__all__`; and no module names a snapshot
-  file.
+- **The wire package's own tests.** Modules under `tests/massive/` (the mirror tests of
+  `_massive` and the refresh parity tests) may import any `_massive` module, and only those
+  under `tests/massive/refresh/` import `refresh`.
+- Everywhere else outside `_massive`, the rest of `tests/` included: no module imports
+  `urllib3`, `websockets`, `certifi`, `boto3`, or `botocore` (except `tests/_fakes/`); no
+  module imports a `_massive` submodule (by `import`, relative import, or
+  `importlib.import_module`/`__import__` with a literal name); an attribute read on `_massive`
+  names only a member of `_massive.__all__`; and no module names a snapshot file.
 - A subprocess import of `deephaven_massive._massive` leaves `deephaven` out of `sys.modules`.
 
 **Not shipped.** The wheel excludes all of `refresh/`, the snapshot included. `spec/*.json` ship
@@ -2006,8 +2018,9 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
   socket (or after the handshake timeout), then waits its backoff. The auth frame is never
   logged.
 - **Receiving.** After `auth_success`, `protocol.py` decodes each text frame once, with the
-  `net.codec` JSON codec, against the channel's generated fields in `ws.json`, into events
-  delivered in order:
+  `net.codec` JSON codec, against the channel's generated fields in `ws.json` and the channel's
+  required-key set from `set_required` (empty when none was set), into events delivered in
+  order:
   - `on_status(generation, Status)` for each `ev == "status"` object. `Status.kind` is `ACK`
     (`topics` parsed from "subscribed to: <p1>[,<p2>...]", cluster-agnostic, a comma list
     tolerated; empty when the message cannot be parsed), `REFUSED` (`topics` holds the topic the
@@ -2163,7 +2176,7 @@ names a source or field the snapshot lacks fails the refresh as stale (G4).
 | `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values, `last_updated` → `timestamp` |
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp"; with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
-| `TYPE_FIXES` | `overrides.py` | vendor type **errors** only; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | flat-file `conditions` `integer` → `int-array`; forex `x` (a quoted string) → `long`; crypto `XT` `i` (`integer`) → `string`; snapshot `lastQuote` sizes → `double` |
+| `TYPE_FIXES` | `overrides.py` | vendor type **errors** only: a declared, field-scoped conversion that the decoder applies deliberately (see **Declared conversions** below); each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | flat-file `conditions` `integer` → `int-array`; forex `x` (documented as a quoted decimal string) → `long`; crypto `XT` `i` (`integer`) → `string`; snapshot `lastQuote` sizes → `double` |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, column): reason}`: columns legitimately on one transport | `AccumulatedVolume` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results` | `/v1/last/crypto` → `last` |
 | `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, the executable rows of section 8.12 | `/v1/summaries` |
@@ -2224,6 +2237,14 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
   each column's WireType = the lattice join over every contribution
 ```
 
+**Declared conversions.** A `TYPE_FIXES` entry names one field of one source, the wire form,
+and the generated type, and it is recorded on the generated `Field`. The decoder applies that
+conversion deliberately: forex `x` arrives as a quoted decimal string (`"48"`) and is parsed to
+`long`. A value that does not parse (`"4.8"`, `"x"`) is an unconvertible value and fails loudly
+like any other ([section 19.5](#195-runtime-drift)). Every entry has a fixture test of both the
+conversion and the failure. A conversion that no entry declares is coercion, which never
+happens.
+
 **Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
 columns as `KeySpec(column, from_request)`, one optional declaration per role (`symbol`,
 `time`, `fanout`, `session`):
@@ -2239,7 +2260,9 @@ A key is `from_request` when the source does not carry it in its rows: the symbo
 that takes it as a path parameter or holds it outside the result key
 ([section 10](#10-symbols-and-all)). The library fills a
 `from_request` key as a constant column. `to_batch(..., required=)` and `ReadPlan.required`
-receive exactly the source's required keys, so a futures WebSocket row without
+(per request) and `WsClient.set_required(channel, keys)` (per channel, before its first
+subscription, [section 13.3](#133-connection-and-subscription-protocol)) receive exactly the
+source's required keys, so a futures WebSocket row without
 `session_end_date` is not a missing key, while a futures flat file without it is. Every member
 of a kind gets the identical
 column set: crypto's `ParticipantTimestamp` is renamed to `Timestamp`, while stocks keeps its
@@ -2285,7 +2308,7 @@ routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
 | **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field). Shown in `SchemaDrift`. |
 | **Missing required key** (a key the dataset declares for this source, not `from_request`; a dataset that declares no key has none) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
-| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced; a lattice widening is not coercion. |
+| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a declared `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the declared conversion cannot parse fails here. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_timeunits` | in `_timeunits`, in the flush thread as a vectorized mask | in `_timeunits` | Loud failure naming the dataset, the column, the unit, and the value. |
 | **Undocumented value of an interpreted field** (`timeframe`) | `_hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
 
