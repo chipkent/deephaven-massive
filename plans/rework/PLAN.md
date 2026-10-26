@@ -986,9 +986,10 @@ gates, the drift workflow, the wheel exclusion).
 - [ ] `drift.py`: the semantic comparison of a live fetch with the snapshot (canonical JSON,
       normalized text): REST paths new, removed, or deprecated; fields and parameters added,
       removed, or retyped; WebSocket channels and keys; flat-file pages added and CSV headers
-      changed; and, against the `DatasetWire` records and `EXCLUSIONS`, unaccounted REST
-      endpoints, channels, flat-file pages, and unknown S3 prefixes. Tests on synthetic
-      before-and-after snapshots for every kind.
+      changed; and, against the allow-list and `EXCLUSIONS`, unaccounted REST endpoints,
+      channels, flat-file pages, and unknown S3 prefixes. Tests on synthetic before-and-after
+      snapshots for every kind. `tests/_massive/spec/test_allowlist.py`: the pinned snapshot has
+      no unaccounted items (allow-listed paths only in PC3a; PC3b adds channels and prefixes).
 - [ ] `scripts/refresh_massive_spec.py`: call `main(sys.argv[1:], wires, s3_prefixes)`, where
       `s3_prefixes` is listed with one `boto3` call when the S3 credentials are set; nothing
       else. (PC3b passes `_catalog.dataset_wires()` as `wires`.)
@@ -1094,7 +1095,12 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
       `git init`).
 - [ ] `generate.py`: the naming rule and its gate (short unknown key; PascalCase collision) with
       the description-match suggestion, and lock appending from `DatasetWire` records, applying
-      `ALIASES` and `BREAKING_RENAMES`. `drift.py`: unaccounted items against the records.
+      `ALIASES` and `BREAKING_RENAMES`. `drift.py` and the accounted-for test: channels
+      (`wskeys.py`) and flat-file prefixes (`flatkeys.py`) join the allow-list.
+- [ ] `unused_allowlisted(wires, namespace=None)` in the wire package, tested on synthetic
+      `DatasetWire` declarations (none used, some used, one namespace filtered). With every
+      domain at `DATASETS = ()` it returns everything, and that is expected: it gates nothing
+      in PC3b.
 - [ ] The Deephaven-free catalog (DESIGN § 4.1): `deephaven_massive/__init__.py` resolves its
       public names through a module `__getattr__`, with the eager imports under
       `TYPE_CHECKING`; `DatasetSpec.query_class` becomes `query_kind: QueryKind`; the
@@ -1124,8 +1130,9 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
 - [ ] `_query.py` and `_sources.py`: read the role paths and `has_rest_history` /
       `has_grouped_daily`; every `_massive` use goes through the interface.
 - [ ] `tests/test_catalog.py`, through the interface only: the completeness checks across the
-      boundary of DESIGN § 19.3, including no unaccounted documented endpoint, channel, or
-      flat-file prefix in the pinned snapshot.
+      boundary of DESIGN § 19.3 for the datasets that are declared. The "used by a declared
+      dataset" check is not asserted here yet: each P6 package asserts it for its namespace, and
+      P7 makes it strict for the whole catalog.
 - [ ] `tests/test_enums.py`: compare the public enums with the parameter enums of the generated
       table instead of the SDK's enums. `tests/test_schema.py`: replace the SDK-model tests; no
       test imports `massive`.
@@ -1136,8 +1143,8 @@ the wire package here, after #51 lands, so #51 is never broken. **Parallel with.
 - [ ] The boundary test and the Deephaven-free subprocess test pass.
 - [ ] Negative tests: an unknown short key fails the refresh and prints its suggestion; a
       PascalCase collision fails; a changed lock name or type without a `BREAKING_RENAMES`
-      entry fails the compatibility test; an undeclared documented endpoint fails the catalog
-      test as unaccounted.
+      entry fails the compatibility test; a documented endpoint neither allow-listed nor
+      excluded fails `tests/_massive/spec/test_allowlist.py` as unaccounted.
 - [ ] `uv run python scripts/refresh_massive_spec.py --verify` exits 0, with no JVM.
 - [ ] `./scripts/check.sh` green; CI green on all five test jobs.
 
@@ -1692,6 +1699,9 @@ needs a change, land it first in a separate `refactor:` PR.
 - [ ] `tests/test_timeunits.py` (P2) passes with the new specs: every timestamp-like field of
       every REST field the dataset uses, every WebSocket key, and every flat-file header has a
       unit, and every unit-tag conflict is listed (DESIGN § 12).
+- [ ] Every allow-listed item of this namespace is declared: `tests/_datasets/test_<domain>.py`
+      asserts that `_massive.unused_allowlisted(_catalog.dataset_wires(), namespace=<ns>)` is
+      empty (in the domain's own test file, so parallel P6 packages never share an edit).
 - [ ] The name-lock completeness tests in `tests/test_catalog.py` and the compatibility test in
       `tests/_massive/names/test_lock.py` pass with the domain's new entries (DESIGN § 19.3).
 - [ ] No fallback chains (`_first_present`, `row.get("a") or row.get("b")`) in the module.
@@ -1845,8 +1855,10 @@ material.
 
 **Tasks.**
 - [ ] Coverage assertions in `tests/test_catalog.py` per Appendix B §3, all against the
-      vendored sources, read through the `_massive` interface (PC3b already fails on unaccounted
-      items; P7 makes the final lists exact): (A) every path of the OpenAPI snapshot
+      vendored sources, read through the `_massive` interface (PC3a and PC3b already fail on
+      unaccounted items; P7 makes the final lists exact). P7 turns on the strict check:
+      `tests/test_catalog.py` asserts that `unused_allowlisted(dataset_wires())` returns nothing
+      for the whole catalog. (A) every path of the OpenAPI snapshot
       (`_massive.spec_paths()`) ∈ catalog ∪ `EXCLUSIONS`; (B) every documented `GET` path
       (`_massive.documented_paths()`) ∈ catalog ∪ `EXCLUSIONS`, and every catalog path ∈ the
       allow-list; (C) every channel of `websocket.json` (`_massive.ws_channels()`) ∈ catalog ∪

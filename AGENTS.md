@@ -32,7 +32,7 @@ instead.
 
 The library does not build on Massive's Python SDK (`massive`). It has its own REST and
 WebSocket clients, and its REST parameters and columns are generated from a vendored snapshot of
-Massive's OpenAPI spec (`DESIGN.md` § 19); until the `PLAN.md` packages PC1–PC4 land, the old
+Massive's OpenAPI spec (`DESIGN.md` § 19); until the `PLAN.md` package PC4 lands, the old
 dependency is still installed. Never add an import of `massive` (ruff's `banned-api` rejects it
 once the dependency is gone). Never edit a generated file by hand: `restspec.json` changes only
 through `scripts/refresh_massive_spec.py`, and the name lock only through that refresh and its
@@ -84,8 +84,11 @@ without an owner-approved `BREAKING_RENAMES` entry.
     `_massive` imports nothing from `deephaven` or from the rest of the library. Everything else
     imports only `deephaven_massive._massive` and uses only the names in its `__all__`: never a
     submodule (by `import`, relative import, or `importlib`), never `urllib3`, `websockets`, or
-    `certifi`, and never a snapshot file. The import-boundary test in `tests/test_layout.py`
-    enforces both directions. Its tests mirror it under `tests/_massive/`.
+    `certifi`, and never a snapshot file. Two exceptions: the fake servers in `tests/_fakes/`
+    may import `websockets` and the standard library's HTTP server, and
+    `scripts/refresh_massive_spec.py` calls `deephaven_massive._massive.spec.generate.main()`.
+    The import-boundary test in `tests/test_layout.py` enforces both directions. Its tests
+    mirror it under `tests/_massive/`.
 
 ## Documentation standard
 

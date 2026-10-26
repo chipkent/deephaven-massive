@@ -179,7 +179,8 @@ eager imports under `TYPE_CHECKING` for type checkers. Importing a private submo
 `deephaven_massive._catalog`, therefore never imports Deephaven
 ([section 4.1](#41-source-modules)).
 
-A test asserts that `dm.__all__` equals this list and that no public signature in the package
+A test asserts that `dm.__all__` equals this list, that `getattr(dm, name)` resolves every name
+in it through the lazy `__getattr__`, and that no public signature in the package
 contains a `Literal` of strings ([section 11](#11-enums-and-types)).
 
 ## 4. Package layout
@@ -1709,7 +1710,8 @@ src/deephaven_massive/_massive/
 │   └── backoff.py     the backoff policy and the stable-uptime reset
 ├── spec/              the spec snapshot and the generator (section 19.3)
 │   ├── __init__.py    rest_path, rest_paths, RestPath, Param, Field, ParamKind, WireType,
-│   │                  wire_unit, WireUnit, DatasetWire, and the cross-check readers
+│   │                  wire_unit, WireUnit, DatasetWire, unused_allowlisted, and the
+│   │                  cross-check readers
 │   ├── allowlist.py   the path allow-list, the non-`results` result keys, the type overrides
 │   ├── units.py       the hand-verified wire-field unit table and its unit-tag conflict list
 │   ├── drift.py       the semantic comparison of a live fetch with the snapshot
@@ -1740,6 +1742,7 @@ src/deephaven_massive/_massive/
 | `wire_unit(transport, source, field) -> WireUnit`, `WireUnit` | The unit of one timestamp-like wire field (`ns`, `us`, `ms`, `s`, the FMV magnitude rule, or `unverified-ms`), where `source` is a path template, a `(cluster path, channel)`, or a flat-file prefix. `_timeunits.py` converts. |
 | `column_names(domain)` | The name lock of one domain: `(dataset, transport, wire path) -> (column, WireType)`, with transports named by the strings `rest`, `ws`, and `flat_files`. |
 | `ws_key_map(cluster, channel)`, `flatfile_key_map(prefix)` | The key map of one WebSocket channel or flat-file prefix: wire key or CSV header to `(column, WireType)`, plus the keys deliberately dropped. |
+| `unused_allowlisted(wires, namespace=None)` | The allow-listed paths, channels, and prefixes no declared dataset uses ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). |
 | `DatasetWire` | The plain record of one dataset's wire facts: name, domain, role paths, primary time key, fan-out key, WebSocket channels, flat-file prefixes. `_catalog.dataset_wires()` builds them. |
 | `spec_paths()`, `documented_paths()`, `ws_channels()`, `ws_channel_keys(cluster, channel)`, `flatfile_headers(prefix)` | Read the vendored snapshot for the catalog's cross-checks. They read the source tree; in an installed wheel, which excludes the snapshot, they raise `WireError` naming the missing file. |
 
@@ -1960,9 +1963,20 @@ edits them.
 
 **Everything documented is accounted for.** Every documented REST path (in `openapi.json` or
 `llms.txt`), every WebSocket channel (in `websocket.json`), and every flat-file prefix (a
-flat-file page in `llms.txt`, each mapped to its prefix in `flatkeys.py`) is either covered by a
-declared dataset or on `EXCLUSIONS`. `tests/test_catalog.py` enforces this against the pinned
-snapshot, so drift always shows up as **unaccounted items**, never as silence.
+flat-file page in `llms.txt`, each mapped to its prefix in `flatkeys.py`) is **accounted for**:
+either allow-listed (a path in `allowlist.py`, a channel in `wskeys.py`, a prefix in
+`flatkeys.py`, each entry naming the § 8 namespace that owns it) or on `EXCLUSIONS`. The union
+lives entirely in the wire package, so the check needs no declared dataset:
+`tests/_massive/spec/test_allowlist.py` enforces it against the pinned snapshot, and
+`drift.py` and `--check` use the same union, so drift always shows up as **unaccounted items**,
+never as silence.
+
+**Every allow-listed item is used.** A separate check, `_massive.unused_allowlisted(wires,
+namespace=None)`, returns the allow-listed paths, channels, and prefixes that no declared
+dataset (`DatasetWire`) uses, optionally for one namespace. It is tested on synthetic
+declarations from the start, is required to return nothing for a namespace once that
+namespace's dataset package has merged, and becomes strict for the whole catalog when the
+rework finishes; until then empty namespaces are expected.
 
 **The refresh command.** `scripts/refresh_massive_spec.py` is a thin entry point: it calls
 `deephaven_massive._massive.spec.generate.main(argv, _catalog.dataset_wires(), s3_prefixes)`.
@@ -1974,7 +1988,7 @@ outside `_massive`'s allowed imports, so the script does it). Its modes:
 
 | Mode | Network | What it does |
 |---|---|---|
-| `--check` | yes | Downloads the live `openapi.json`, `websocket.json`, `llms.txt`, and flat-file pages into a temporary directory and runs the semantic comparison of `_massive/spec/drift.py`. Against the vendored snapshot it reports REST paths new, removed, or newly deprecated; response fields and parameters added, removed, or retyped; WebSocket channels and keys added or removed; CSV headers added, removed, or renamed in a known flat file's page; and the keys the naming gate would stop on. Against the catalog and `EXCLUSIONS` it reports **unaccounted items**: documented REST endpoints (spec or `llms.txt`), WebSocket channels, and flat-file pages that are neither covered nor excluded, plus, when `s3_prefixes` is given, bucket prefixes that no `flatkeys.py` entry or exclusion names (CI has no S3 credentials, so there it relies on the pages). JSON is compared canonically (`sort_keys`) and text normalized, so reordering and volatile fields are never reported. It prints a report, changes nothing, and exits non-zero when it finds drift or unaccounted items. |
+| `--check` | yes | Downloads the live `openapi.json`, `websocket.json`, `llms.txt`, and flat-file pages into a temporary directory and runs the semantic comparison of `_massive/spec/drift.py`. Against the vendored snapshot it reports REST paths new, removed, or newly deprecated; response fields and parameters added, removed, or retyped; WebSocket channels and keys added or removed; CSV headers added, removed, or renamed in a known flat file's page; and the keys the naming gate would stop on. Against the allow-list and `EXCLUSIONS` it reports **unaccounted items**: documented REST endpoints (spec or `llms.txt`), WebSocket channels, and flat-file pages that are neither allow-listed nor excluded, plus, when `s3_prefixes` is given, bucket prefixes that no `flatkeys.py` entry or exclusion names (CI has no S3 credentials, so there it relies on the pages). JSON is compared canonically (`sort_keys`) and text normalized, so reordering and volatile fields are never reported. It prints a report, changes nothing, and exits non-zero when it finds drift or unaccounted items. |
 | `--fetch` | yes | Replaces the vendored snapshot with the live sources and records their fetch date and SHA-256 in `manifest.json`. |
 | (none) | no | Regenerates `restspec.json` from the vendored snapshot and appends new name-lock entries. |
 | `--verify` | no | Exits non-zero when the regeneration would change anything (the parity test runs the same comparison). |
@@ -2080,9 +2094,12 @@ The tests that keep this honest:
   every declared dataset's schema builds (`_schema.dataset_schema`), so every wire path has a lock
   entry and every timestamp-like field a unit; every REST column of a tick dataset is a column
   of its tick schema with the same type; and every wire name a `DatasetSpec` declares (time-axis
-  pair, symbol parameter, path placeholders) is a parameter of its `RestPath`; and the pinned
-  snapshot has no unaccounted items: every documented REST path, WebSocket channel, and
-  flat-file prefix is covered by a dataset or on `EXCLUSIONS`.
+  pair, symbol parameter, path placeholders) is a parameter of its `RestPath`; and
+  once the rework finishes, `unused_allowlisted` returns nothing for the whole catalog (until
+  then each namespace's own test asserts it once that namespace's datasets are declared).
+- **Accounted for, inside `_massive`** (`tests/_massive/spec/test_allowlist.py`): the pinned
+  snapshot has no unaccounted items; every documented REST path, WebSocket channel, and
+  flat-file prefix is allow-listed or on `EXCLUSIONS`.
 - **Compatibility** (`tests/_massive/names/test_lock.py`): the lock at the **last release tag**
   is compared with the current lock, and any changed or removed entry, a changed type included,
   fails the test unless `BREAKING_RENAMES` lists it. The test first runs
@@ -2131,8 +2148,8 @@ documentation pages alone.
   second one: when the issue is open it rewrites the body; when it is closed it reopens it. The
   body lists, each item with the action to take:
   - **unaccounted items** (a documented REST endpoint, WebSocket channel, or flat-file dataset
-    neither covered nor excluded): add a dataset with `refresh_massive_spec.py`, or add an entry
-    to `EXCLUSIONS` with a reason;
+    neither allow-listed nor excluded): allow-list it and add a dataset, refreshing with
+    `refresh_massive_spec.py`, or add an entry to `EXCLUSIONS` with a reason;
   - **field, type, and column changes** (response fields and parameters added, removed, or
     retyped; WebSocket keys added or removed; CSV headers changed; keys the naming gate would
     stop on): run `refresh_massive_spec.py --fetch` and the plain refresh, adding a lexicon,
@@ -2410,7 +2427,8 @@ document already reflects them.
     date, listing unaccounted items, field, type, and column changes, and deprecations, each with
     its action; with no drift it does nothing, and it never opens a pull request or becomes a
     required check. Every documented REST endpoint, WebSocket channel, and flat-file prefix is
-    covered by a dataset or on the single `EXCLUSIONS` list. The WebSocket spec checks the WebSocket key maps for completeness,
+    allow-listed or on the single `EXCLUSIONS` list, and every allow-listed item is used by a
+    declared dataset once its namespace is declared. The WebSocket spec checks the WebSocket key maps for completeness,
     `llms.txt` checks the path allow-list, and the flat-file documentation tables check the CSV
     headers.
 24. **No client object is shared unless it is proven thread-safe** (2026-10-26). The REST client
