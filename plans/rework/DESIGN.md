@@ -53,7 +53,8 @@ The library runs inside an existing Deephaven worker. It never starts a JVM and 
 Deephaven server. It does not use Massive's Python SDK (`massive`). It speaks Massive's
 documented REST and WebSocket protocols directly, through its own REST client (on `urllib3`) and
 its own WebSocket client (on `websockets`), and it generates its REST parameters and columns
-from a pinned snapshot of Massive's OpenAPI spec
+from a pinned snapshot of Massive's OpenAPI spec. All of that lives in one private package,
+`deephaven_massive._api`, behind one small interface
 ([section 19](#19-wire-clients-and-the-spec-snapshot)). The runtime dependencies are
 `deephaven-core`, `pyarrow`, `boto3` (flat files), `urllib3`, `websockets`, and `certifi`.
 
@@ -88,8 +89,11 @@ There are no existing users. Backward compatibility with the previous code base 
 7. **Failures land where Deephaven users look.** Live tables fail through
    `TablePublisher.publish_failure`. Static verbs raise. Both log at ERROR and appear in the
    diagnostics tables.
-8. **Direct over Massive's documented APIs.** The library owns one REST client and one WebSocket
-   client ([section 19](#19-wire-clients-and-the-spec-snapshot)). They implement Massive's
+8. **Direct over Massive's documented APIs, in one package.** The library owns one REST client
+   and one WebSocket client, kept with the spec snapshot, the generator, and the name lock in
+   the private package `_api`, which imports nothing from Deephaven or the rest of the library
+   and is reached only through its interface
+   ([section 19](#19-wire-clients-and-the-spec-snapshot)). They implement Massive's
    documented protocols, and nothing works around a third-party client. REST parameters and
    columns are generated from a vendored, pinned snapshot of the OpenAPI spec; a parity test
    keeps the generated code in step with the snapshot, and an advisory weekly job reports
@@ -188,21 +192,17 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 | `_query.py` | The six query classes and their verbs ([section 7](#7-query-classes-and-verbs)). |
 | `_enums.py` | The fourteen public enums and the internal `Recency`, `ChannelFamily`, and `Transport` enums; the `_require_enum` runtime check. |
 | `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases, and `override` (`typing_extensions.override` for the type checker, a no-op at run time, since `typing.override` needs Python 3.12). |
-| `_errors.py` | `MassiveError`, `AuthenticationError`, `EntitlementError`. |
-| `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST path templates, `start`/`end` wire parameter pair, poll default, flat-file prefix, how symbols reach a REST request (`SymbolParam`: `ticker`, `tickers`, `ticker.any_of`, or path segments, where a forex or crypto pair fills `{from}` and `{to}`)). A REST dataset without a hand-written schema derives its schema at construction from the generated fields of its paths (`_restspec.py`) and the column names of its domain's name lock, so the poll-key and time-unit checks run at import for every dataset; a WebSocket dataset always has a hand-written schema and an asset class. Also the name-lock loader ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)) and filter validation against the generated parameters ([section 9](#9-filters)). |
-| `_schema.py` | The schema registry: column types, PascalCase naming, the dtype override table (`ColumnOverride`, keyed by wire path), columnar Arrow construction, the four hand-written tick schemas (trades, quotes, bars, index values) with per-transport key maps keyed by wire key or CSV header. |
-| `_restspec.py` | **Generated; never edited by hand.** For every allow-listed REST path template: its result key, its parameters (wire name, kind, enum values, path or query), and its response fields (wire path, column type, unit tag). Written by `scripts/refresh_massive_spec.py` from the vendored snapshot ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). |
-| `_specgen.py` | The generator's pure logic, used only by `scripts/refresh_massive_spec.py` and the tests, never imported at run time: spec flattening, the path allow-list, result keys, the per-record-family lexicon and family assignments, spec type overrides, the naming rule and its gate, and lock appending. |
-| `_names/<domain>.json` | The name lock, one append-only JSON file per domain module: `(dataset, transport, wire path) -> column`. Package data, read by `_catalog.py`; appended by the refresh script, never rewritten. |
+| `_errors.py` | `MassiveError`, `AuthenticationError`, `EntitlementError`; `from_api`, which turns an `_api` error into the public exception with the same message. |
+| `_api/` | **The Massive API package**: everything that talks to Massive or describes its wire format, behind one interface, `_api/__init__.py` ([section 19](#19-wire-clients-and-the-spec-snapshot)). Subpackages `rest/` (the REST client), `ws/` (the WebSocket client), `spec/` (the vendored snapshot, the generator, and the generated REST table), and `names/` (the lexicons, the WebSocket key maps, and the name lock). It imports nothing from Deephaven or from the rest of the library. |
+| `_catalog.py` | The dataset catalog: one frozen record per dataset (namespace, name, query class, channel, REST path templates, `start`/`end` wire parameter pair, poll default, flat-file prefix, how symbols reach a REST request (`SymbolParam`: `ticker`, `tickers`, `ticker.any_of`, or path segments, where a forex or crypto pair fills `{from}` and `{to}`)). A REST dataset without a hand-written schema derives its schema at construction from the generated fields of its paths (`_api.rest_path`) and the column names of its domain's name lock (`_api.column_names`), so the poll-key and time-unit checks run at import for every dataset; a WebSocket dataset always has a hand-written schema and an asset class. Also filter validation against the generated parameters ([section 9](#9-filters)). |
+| `_schema.py` | The schema registry: column types and the mapping from `_api`'s wire types to them, PascalCase naming, the dtype override table (`ColumnOverride`, keyed by wire path), columnar Arrow construction, the four hand-written tick schemas (trades, quotes, bars, index values) with their flat-file key maps (CSV header to column). Their WebSocket key maps come from `_api.ws_key_map`, and their REST names from the name lock. |
 | `_timeunits.py` | The `(dataset, transport, field) -> unit` table and the conversion rules ([section 12](#12-timestamp-units-and-day-boundaries)). |
 | `_symbols.py` | Symbol normalization and the `Symbol`/`Underlying` rule ([section 10](#10-symbols-and-all)). |
 | `_dates.py` | `DateLike` parsing, class day zones, session-date rules, `[start, end)` normalization. |
 | `_liveness.py` | Result scopes, stream scopes, result records, the reaper queue and thread. |
-| `_restclient.py` | The REST client ([section 19.1](#191-the-rest-client)): authentication, query encoding, `next_url` paging, retries, error mapping, strict JSON. Knows nothing of datasets or Deephaven. |
 | `_rest.py` | The REST transport: requests built from a `DatasetSpec` and the generated parameters, pages decoded into bounded columnar Arrow batches, 403/429 handling for `fetch()`, `history()`, and `poll()`. |
 | `_hosts.py` | Host resolution from REST evidence ([section 13.2](#132-host-decision)). The `HostDecision` record itself lives in `_query.py`, next to the transport protocols that return it (`RestTransport.resolve_host`). |
-| `_wsclient.py` | The WebSocket client ([section 19.2](#192-the-websocket-client)): one socket to one URL on its own loop thread; connect, authenticate, send subscription frames, reconnect with backoff, close. Knows nothing of datasets or Deephaven. |
-| `_ws.py` | One connection per URL over `_wsclient.py`: frame decoding, status routing, the reconcile loop, acknowledgement watchdogs, the explicit-verdict rule, the options contract cap. |
+| `_ws.py` | One connection per URL over `_api.WsClient`: frame decoding, status routing, the reconcile loop, acknowledgement watchdogs, the explicit-verdict rule, the options contract cap. |
 | `_stream.py` | Streams, per-stream publishers, the per-connection flush thread, shared-batch fan-out ([section 14](#14-publishers-fan-out-and-failure-semantics)). |
 | `_watchlist.py` | Reactive symbol tables: the listener, the diff, and dispatch off the UG thread. |
 | `_poll.py` | `poll()` tables: `REPLACE`, `UPSERT`, and `APPEND` modes, fan-out under `max_concurrency`. |
@@ -217,8 +217,7 @@ Supporting files outside the package:
 | File | Purpose |
 |---|---|
 | `scripts/check.sh [fast\|full] [--no-fix]` | The single verification entry point (lint, format, type check; `full` adds the test suite with coverage). |
-| `scripts/refresh_massive_spec.py` | Fetches the spec sources into `scripts/massive_spec/` (`--fetch`, the only step that uses the network), regenerates `_restspec.py`, and appends new entries to the name locks (offline, from the vendored snapshot). `--check` exits non-zero when regenerating would change anything. |
-| `scripts/massive_spec/` | The vendored, pinned spec sources: `openapi.json` (`https://api.massive.com/openapi`), `websocket.json` (`https://api.massive.com/specs/websocket.json`), `llms.txt` (`https://massive.com/docs/llms.txt`), the flat-file documentation pages, and `manifest.json` (fetch date and SHA-256 of each). |
+| `scripts/refresh_massive_spec.py` | A thin entry point that calls `deephaven_massive._api.spec.generate.main()` ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)): `--fetch` refreshes the snapshot (the only step that uses the network); without it, it regenerates `_api/spec/restspec.py` and appends new entries to the name locks, offline; `--check` exits non-zero when regenerating would change anything. |
 | `.github/workflows/spec-drift.yml` | The advisory weekly drift job ([section 20](#20-quality-gates)). |
 | `tests/data/` | Payload fixtures. |
 | `tests/_fakes/` | Fake REST transport, WebSocket server, and S3 opener used by the unit tests ([section 4.2](#42-test-layout)). |
@@ -243,6 +242,9 @@ mirrors the empty `_domains/__init__.py`. Examples:
 | `_config.py` | `tests/test_config.py` | |
 | `_hosts.py` | `tests/test_hosts.py` | `tests/test_hosts_integration.py` |
 | `_domains/__init__.py` | `tests/_domains/test_init.py` | |
+| `_api/__init__.py` | `tests/_api/test_init.py` | |
+| `_api/rest/client.py` | `tests/_api/rest/test_client.py` | |
+| `_api/spec/restspec.py` | `tests/_api/spec/test_restspec.py` (the parity test) | |
 | `_domains/stocks.py` | `tests/_domains/test_stocks.py` | `tests/_domains/test_stocks_integration.py` |
 
 Integration tests end in `_integration`. They are skipped unless `MASSIVE_API_KEY` is set and
@@ -254,10 +256,12 @@ the mirror rule, and no others:
   table-to-Python and fixture-loading helpers. Test modules never import from it.
 - `tests/test_layout.py`: walks `src/deephaven_massive/**/*.py` and asserts every module has its
   mirrored test file, and that every test file maps to a module or is one of these exceptions.
+  It also holds the import-boundary test of the `_api` package
+  ([section 19](#19-wire-clients-and-the-spec-snapshot)).
 - `tests/test_catalog.py`: asserts 100% Massive coverage against the vendored spec and the
   documentation index, with a reviewed exclusion list ([section 8.12](#812-excluded-endpoints)),
-  and holds the name-lock tests (parity, completeness, and compatibility with the last release,
-  [section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). Under the naming rule
+  and the name-lock completeness checks that need the declared datasets
+  ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). Under the naming rule
   it is also the mirror of `_catalog.py`, so the unit tests of the catalog records live in the
   same file.
 - `tests/test_readme.py`: runs every example of [section 21](#21-examples) in the embedded JVM
@@ -672,7 +676,7 @@ Notation:
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`.
 - The REST column names the path template as the OpenAPI spec writes it (the spec's own
   placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
-  Every path is in the generated `_restspec.py` ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)).
+  Every path is in the generated `_api/spec/restspec.py` ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)).
 
 ### 8.1 `m.stocks`
 
@@ -894,7 +898,7 @@ form (exact integer nanoseconds for a nanosecond timestamp parameter, ISO-8601 o
 naive one raises `ValueError` (§ 11).
 
 Validation is synchronous at query construction, against the generated parameters of the
-dataset's paths in `_restspec.py`
+dataset's paths (`_api.rest_path`)
 ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)), which carry each
 parameter's kind and, for an enum parameter, its values. A dataset's accepted filters are the
 union over its paths, minus the parameters the library sets itself (path segments, the symbol
@@ -1005,14 +1009,14 @@ are `double` (fractional sizes exist), condition codes are `int[]`, exchange ids
 
 `_timeunits.py` is a `(dataset, transport, field) -> unit` table. The normalizer refuses to
 convert an unregistered field. The catalog test asserts that every timestamp-like field of every
-REST path a dataset uses (from the generated `_restspec.py`), every WebSocket key map, and every
+REST path a dataset uses (from the generated table, `_api.rest_path`), every WebSocket key map, and every
 flat-file header has an entry.
 
 The table stays hand-verified. The OpenAPI spec tags some integer fields with a unit type in
 `x-polygon-go-type` (`INanoseconds`, `IMicroseconds`, `IMilliseconds`, `IDaysPolygonDateString`),
 but the tags are not reliable: all 20 `IMicroseconds` tags sit on indicator `timestamp` fields
 whose descriptions say "Unix Msec", and the indicator responses carry milliseconds. The generator
-copies each tag into `_restspec.py` as a cross-check only. The catalog test asserts that every
+copies each tag into `_api/spec/restspec.py` as a cross-check only. The catalog test asserts that every
 tagged field a dataset uses has a registered unit, and that a registered unit that differs from
 its tag is listed, with its reason, in a reviewed conflict list in `tests/test_catalog.py`; the
 indicator `timestamp` fields are its first entries.
@@ -1162,7 +1166,7 @@ replies; the live integration test must retire this note before 1.0.
 
 ### 13.3 Connection and subscription protocol
 
-Each connection is one `_wsclient.WsClient` ([section 19.2](#192-the-websocket-client)) bound to
+Each connection is one `_api.WsClient` ([section 19.2](#192-the-websocket-client)) bound to
 one `wss://host/path`. The client runs on its own daemon thread with its own asyncio loop, and
 owns the socket: connecting, authenticating, sending frames, reconnecting with backoff, and
 closing. `_ws.py` owns everything the library decides: the desired topics, the acknowledgements,
@@ -1204,11 +1208,11 @@ Responsibilities:
 | Step | Owner |
 |---|---|
 | Open the socket (TLS, proxy, keepalive pings), read `connected`, send auth, read the auth reply, all within the handshake timeout | client |
-| `auth_failed` | The client reports `FAILED` with `AuthenticationError` and stops; it never retries a rejected key. The library fails every stream on the path with `AuthenticationError`. |
+| `auth_failed` | The client reports `FAILED` with `ApiAuthError` and stops; it never retries a rejected key. The library fails every stream on the path with `AuthenticationError` (`_errors.from_api`). |
 | `max_connections` in the auth reply | The client reports `WAITING_SLOT`, lets the server close the socket, and retries after its backoff; streams stay alive. |
 | `max_connections` as a status frame after authentication | The status handler records it; when that generation's socket closes, the connection shows `WAITING_SLOT` instead of `RECONNECTING`. |
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
-| Classify a failed upgrade as fatal or retryable, by websockets' public rule | client; a fatal one is reported as `FAILED` with a `MassiveError` naming the HTTP status and the host |
+| Classify a failed upgrade as fatal or retryable, by websockets' public rule | client; a fatal one is reported as `FAILED` with an `ApiHandshakeError`, which the library turns into a `MassiveError` naming the HTTP status and the host |
 | Desired topic set, reference counts, single in-flight step, wildcard coverage | library |
 | Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
 | Per-topic acknowledgement parsing, watchdogs | library, from the status frames |
@@ -1581,13 +1585,84 @@ builds rather than unit tests alone.
 The library talks to Massive through two clients of its own and describes Massive's REST surface
 with code generated from a pinned snapshot of Massive's OpenAPI spec. It does not depend on
 Massive's Python SDK (`massive`), and nothing here works around a third-party client: each rule
-below implements Massive's documented protocol or a requirement of this design. Both clients
-know nothing of datasets or Deephaven, so their unit tests need only the fake servers of
-`tests/_fakes/`.
+below implements Massive's documented protocol or a requirement of this design.
+
+**One package.** Everything that talks to Massive's REST or WebSocket API or describes its wire
+format lives in one private package, `deephaven_massive._api`, split into four subpackages
+along the boundaries below:
+
+```
+src/deephaven_massive/_api/
+├── __init__.py        the interface: the only module the rest of the library imports
+├── errors.py          ApiError and its subclasses
+├── net.py             shared plumbing: CA bundle, proxy settings, User-Agent, JSON codec
+├── rest/              the REST client (section 19.1)
+│   ├── __init__.py    RestClient, Page
+│   ├── client.py      the pool, authentication, retries, next_url paging
+│   ├── query.py       path and query encoding (exact datetime nanoseconds, .any_of lists)
+│   └── response.py    strict decoding, envelopes, result keys, the error mapping
+├── ws/                the WebSocket client (section 19.2)
+│   ├── __init__.py    WsClient, WsState
+│   ├── client.py      the loop thread, the connect-and-reconnect task, the sender, close
+│   ├── protocol.py    the handshake and auth frames, subscribe frames, fatal classification
+│   └── backoff.py     the backoff policy and the stable-uptime reset
+├── spec/              the spec snapshot and the generator (section 19.3)
+│   ├── __init__.py    rest_path, rest_paths, RestPath, Param, Field, ParamKind, WireType,
+│   │                  the cross-check readers
+│   ├── allowlist.py   the path allow-list, the non-`results` result keys, the type overrides
+│   ├── generate.py    the generator; the refresh script's main(); never imported at run time
+│   ├── restspec.py    generated: the REST table
+│   └── snapshot/      data: openapi.json, websocket.json, llms.txt, the flat-file
+│                      documentation pages, manifest.json
+└── names/             column naming (section 19.3)
+    ├── __init__.py    column_names, ws_key_map, DatasetWire
+    ├── lexicon.py     the record families, their object-shape assignments, the lexicons,
+    │                  the identity entries, the WebSocket-only names
+    ├── wskeys.py      the WebSocket key maps, one per (cluster path, channel)
+    ├── lock.py        loading, appending, and comparing the name lock
+    └── locks/         data: <domain>.json, one append-only lock per domain module
+```
+
+**The interface.** `_api/__init__.py` re-exports exactly the names the rest of the library may
+use, and nothing else:
+
+| Name | What it is |
+|---|---|
+| `RestClient`, `Page` | The REST client and one decoded page (section 19.1). |
+| `WsClient`, `WsState` | The WebSocket client and the states it reports through `on_state` (section 19.2). |
+| `ApiError`, `ApiAuthError`, `ApiEntitlementError`, `ApiRateLimitError`, `ApiHandshakeError` | What the clients raise or report. Each carries the HTTP status (or `None`), the host, the path, the `request_id`, and the server's message. `_errors.from_api` turns one into the public exception (`AuthenticationError`, `EntitlementError`, or `MassiveError`) with the same message; the public exceptions gain no attribute. |
+| `rest_path(template) -> RestPath`, `rest_paths()` | The generated REST table: per path template, its result key, its parameters (`Param`: wire name, `ParamKind`, enum values, path or query), and its response fields (`Field`: wire path, `WireType`, unit tag). |
+| `ParamKind`, `WireType` | Parameter kinds and wire types (`long`, `double`, `bool`, `string`, `date`, `date-time`, `int-array`, `json-text`). `_schema.py` maps each `WireType` to a column type; `_api` knows no Deephaven type. |
+| `column_names(domain)` | The name lock of one domain: `(dataset, transport, wire path) -> column`, with transports named by the strings `rest`, `ws`, and `flat_files`. |
+| `DatasetWire` | The plain record of one dataset's wire facts (name, domain, REST path templates, primary time key, fan-out key, WebSocket channels, flat-file key map) that the refresh script builds from the catalog and hands the generator, and that the catalog's completeness checks use. |
+| `ws_key_map(cluster, channel)` | The WebSocket key map of one channel: wire key to column, plus the keys deliberately dropped. |
+| `spec_paths()`, `documented_paths()`, `ws_channels()`, `ws_channel_keys(cluster, channel)`, `flatfile_headers(prefix)` | Read the vendored `openapi.json`, `llms.txt`, `websocket.json`, and flat-file pages for the catalog's cross-checks. |
+
+Each name is documented in its module to the project's docstring standard. The clients take
+plain arguments (key, base URL, timeouts, backoff), never `MassiveConfig`, so they are tested
+alone against the fake servers of `tests/_fakes/`.
+
+**The boundary**, enforced by an import-boundary test in `tests/test_layout.py` that reads every
+module's imports with `ast`:
+
+- Inside `_api/`, a module imports only the standard library, `urllib3`, `websockets`,
+  `certifi`, the optional `orjson`, and other `_api` modules. It never imports `deephaven`,
+  `deephaven_server`, `jpy`, `pyarrow`, or any `deephaven_massive` module outside `_api`.
+- Outside `_api/` (the rest of `src/`, and `tests/` outside `tests/_api/` and `tests/_fakes/`), no
+  module imports `urllib3`, `websockets`, or `certifi`, and no module imports an `_api`
+  submodule: only `deephaven_massive._api` itself. No module outside `_api/` names a snapshot
+  file (`openapi.json`, `websocket.json`, `llms.txt`) or the `snapshot/` directory.
+- The single exception is `scripts/refresh_massive_spec.py`, which calls
+  `deephaven_massive._api.spec.generate.main()`.
+
+Tests mirror the package under `tests/_api/` (`tests/_api/rest/test_client.py`,
+`tests/_api/spec/test_restspec.py`, and so on), by the rule of
+[section 4.2](#42-test-layout). The snapshot is package data and ships in the wheel (about
+2 MB); nothing reads it at run time except the cross-check readers.
 
 ### 19.1 The REST client
 
-`_restclient.RestClient` is one object per session, created on first use and closed by
+`_api.RestClient` is one object per session, created on first use and closed by
 `m.close()` (a session closer). It is **safe to call from any number of threads at once**: its
 only shared mutable state is urllib3's connection pool, which locks internally, and the once-only
 rate-limit warning, which is a `threading.Event`. Every call is independent; no call mutates an
@@ -1619,8 +1694,8 @@ Page(status: str, request_id: str | None, rows: list[dict], body: dict)
   are omitted. Names arrive already in wire form (`strike_price.gte`); the dot mapping of
   [section 9](#9-filters) happens before the client.
 - **Paging.** `pages` follows each page's `next_url`, which carries the cursor and the query.
-  A `next_url` whose scheme and host differ from `rest_base_url` raises `MassiveError` and is
-  never requested. `limit` is the total-row cap: paging stops once that many rows have been
+  A `next_url` whose scheme and host differ from `rest_base_url` raises `ApiError` and is never
+  requested. `limit` is the total-row cap: paging stops once that many rows have been
   yielded, and the last page is truncated. Only one page of rows is held at a time.
 - **Retries.** A request is retried, up to 3 times, on HTTP 429, 500, 502, 503, and 504 and on
   connection errors (refused, reset, timed out, TLS failure). Every request is a `GET`, so a
@@ -1628,16 +1703,17 @@ Page(status: str, request_id: str | None, rows: list[dict], body: dict)
   HTTP-date), capped at 60 s; without it the wait is exponential from 0.5 s, doubling to a cap of
   30 s, with up to 20% upward jitter. A connection reset in the middle of paging retries **that
   page** (its `next_url`), never the first page, so a long history neither restarts nor skips.
-- **Error mapping.** After the retries, the client raises the exceptions of
-  [section 13.4](#134-rest): 401 is `AuthenticationError`; 403, and a 200 envelope with `status`
-  `NOT_AUTHORIZED`, are `EntitlementError`; 429 is `MassiveError("rate limited ...")`; every
-  other non-200 status, a 200 envelope with `status` `ERROR`, and a connection failure are
-  `MassiveError`. Each message names the status, the method and path (query without secrets),
-  the `request_id`, and the first 200 characters of the server's `message` or body.
+- **Error mapping.** After the retries, the client raises: 401 as `ApiAuthError`; 403, and a
+  200 envelope with `status` `NOT_AUTHORIZED`, as `ApiEntitlementError`; 429 as
+  `ApiRateLimitError`; every other non-200 status, a 200 envelope with `status` `ERROR`, and a
+  connection failure as `ApiError`. Each carries the status, the method and path (query without
+  secrets), the `request_id`, and the first 200 characters of the server's `message` or body,
+  and its message names them all. The REST transport turns each into the public exception of
+  [section 13.4](#134-rest) with `_errors.from_api`.
 - **Strict decoding.** The body is decoded once with the library's JSON codec. Bytes that are not
-  UTF-8, or text that is not JSON, raise `MassiveError` with the status and the first 200 bytes,
+  UTF-8, or text that is not JSON, raise `ApiError` with the status and the first 200 bytes,
   on any call and on any page. The page's rows come from the `result_key` the caller passes,
-  which the REST transport reads from the path's entry in the generated `_restspec.py`
+  which the REST transport reads from the path's entry in the generated `_api/spec/restspec.py`
   (`results` for most paths; one of the seven others, such as `last` or `ticker`, where the spec
   says so); the client itself reads no generated table. A single object is wrapped as one row;
   a bare JSON list (`/v1/marketstatus/upcoming`) is the rows. A missing result key is an empty page only when `status` is `OK` or `DELAYED`.
@@ -1653,7 +1729,7 @@ model class sits between the JSON and Arrow.
 
 ### 19.2 The WebSocket client
 
-`_wsclient.WsClient` is one object per connection (one `wss://host/path`), created by `_ws.py`
+`_api.WsClient` is one object per connection (one `wss://host/path`), created by `_ws.py`
 and run on its own daemon thread under `asyncio.run`. Its interface and callbacks are those of
 [section 13.3](#133-connection-and-subscription-protocol). **Apart from `start()` (called once by
 its creator, before the loop thread exists), `close()`, and `join(timeout)`, every method must be
@@ -1670,7 +1746,7 @@ the design correct on free-threaded 3.14t without locks.
 - **Handshake.** Read the `connected` status, send `{"action":"auth","params":"<key>"}`, and read
   the reply. The upgrade, the `connected` status, and the reply together must finish within a
   fixed 10 s handshake timeout, or the attempt fails and is retried. `auth_success` opens a
-  generation (`on_open`). `auth_failed` is fatal (`AuthenticationError`). `max_connections`
+  generation (`on_open`). `auth_failed` is fatal (`ApiAuthError`). `max_connections`
   reports `WAITING_SLOT`, and the attempt ends when the server closes the socket (or after the
   handshake timeout), then waits its backoff. The auth frame is never logged.
 - **Receiving.** After `auth_success`, every text frame goes to `on_frame` unparsed, in order.
@@ -1690,8 +1766,8 @@ the design correct on free-threaded 3.14t without locks.
 - **Fatal errors.** An exception from `connect()` is classified by websockets' public
   `websockets.asyncio.client.process_exception`: what it returns `None` for (EOF, `OSError`,
   timeouts, HTTP 500/502/503/504) is retried; anything it returns (for example HTTP 400 or 404,
-  an invalid URI) is fatal. A fatal error ends the client and is reported as `FAILED` with a
-  `MassiveError` naming the HTTP status and the host.
+  an invalid URI) is fatal. A fatal error ends the client and is reported as `FAILED` with an
+  `ApiHandshakeError` naming the HTTP status and the host.
 - **Closing.** `close()` sets the request flag and calls `loop.call_soon_threadsafe(task.cancel)`
   (a no-op once the loop has ended). Cancellation interrupts whatever the task awaits, a backoff
   wait included; a `finally` block closes an open socket with code 1000 and reports `CLOSED`.
@@ -1703,7 +1779,7 @@ the design correct on free-threaded 3.14t without locks.
 
 **Sources of truth.** The fields of a REST response, the parameters of a REST path, and their
 types come from Massive's OpenAPI spec, `https://api.massive.com/openapi`, vendored and pinned
-under `scripts/massive_spec/` (never `https://api.massive.com/specs/rest.json`, a stale 33-path
+under `src/deephaven_massive/_api/spec/snapshot/` (never `https://api.massive.com/specs/rest.json`, a stale 33-path
 subset). The documentation is rendered from the same spec, so it adds no naming information.
 The other vendored sources are cross-checks only:
 
@@ -1714,11 +1790,16 @@ The other vendored sources are cross-checks only:
 | `llms.txt` (`https://massive.com/docs/llms.txt`) | A check of the path allow-list: every allow-listed path is documented, and every documented path is allow-listed or excluded ([section 8.12](#812-excluded-endpoints)). |
 | The flat-file documentation pages | A cross-check of the flat-file key maps against the documented CSV headers (Massive publishes no machine-readable flat-file spec). |
 
-**The generator.** `scripts/refresh_massive_spec.py` is a thin command line over the pure
-functions of `_specgen.py`. With `--fetch` it downloads the four sources and records their fetch
-date and SHA-256 in `manifest.json`; that is the only step that uses the network. Without it, it
-works offline from the vendored files and writes two outputs: `_restspec.py` and new name-lock
-entries. For each allow-listed path it:
+**The generator.** `_api/spec/generate.py` holds the generator; `scripts/refresh_massive_spec.py`
+is a thin entry point that calls its `main()`. With `--fetch` it downloads the four sources
+into `_api/spec/snapshot/` and records their fetch date and SHA-256 in `manifest.json`; that is
+the only step that uses the network. Without it, it works offline from the vendored files and
+writes two outputs: `_api/spec/restspec.py` and new name-lock entries. The lock entries need the
+declared datasets, which `_api` cannot import, so the script starts an embedded Deephaven server
+(as `tests/conftest.py` does), reads `_catalog.datasets()`, and hands `main()` one plain
+`DatasetWire` record per dataset: its name, domain, REST path templates, primary time key,
+fan-out key, WebSocket channels, and flat-file key map. For each allow-listed path the
+generator:
 
 1. skips operations marked `x-polygon-ignore`, `x-polygon-draft`, or `deprecated`;
 2. merges `allOf` and flattens nested objects into dotted wire paths below the path's result
@@ -1731,7 +1812,7 @@ entries. For each allow-listed path it:
 
 The generator never guesses. A construct it has no rule for (`$ref`, `oneOf`, `anyOf`, an
 untyped leaf, an array of strings or objects, a free-form map, `number` with an integer format)
-fails the run with its path, unless an entry in the generator's override table (`_specgen.py`)
+fails the run with its path, unless an entry in the override table (`_api/spec/allowlist.py`)
 gives the leaf a type or drops it. An override that names a path the spec lacks also fails the
 run. Arrays and maps that a dataset keeps become JSON-text `String` columns through such an
 override.
@@ -1746,7 +1827,7 @@ recorded in the name lock. For a new REST entry the generator proposes it by thi
    value rows) becomes `Timestamp`; the dataset's fan-out key becomes `Underlying`
    ([section 10](#10-symbols-and-all)).
 3. Translate an abbreviated key through the lexicon of its **record family**: bar, trade, NBBO
-   quote, forex quote, or ticker, assigned per object shape in `_specgen.py` (the row of an
+   quote, forex quote, or ticker, assigned per object shape in `_api/names/lexicon.py` (the row of an
    aggregates response, the snapshot objects `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`,
    and so on). Each lexicon value is Massive's own long-form name for the field, as v3 REST,
    futures v1, and the flat-file headers write it: `o` is `open`, `vw` is `vwap`, `n` is
@@ -1765,13 +1846,15 @@ suggestion: a readable key elsewhere in the spec with the identical description.
 is for the reviewer; **names are never derived from descriptions**, which Massive edits about
 twenty times as often as it changes keys.
 
-WebSocket names come from the hand-written key maps, which use the same long-form vocabulary. The
+WebSocket names come from the hand-written key maps in `_api/names/wskeys.py`, one per (cluster
+path, channel), which use the same long-form vocabulary. The
 WebSocket-only concepts, which have no long form at Massive, are named `av` →
 `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`, aggregate `z` →
 `AverageTradeSize`, and `dav` → `AccumulatedDollarVolume`. Flat-file names come from the
-flat-file key maps; the headers are already long-form.
+flat-file key maps of `_schema.py` and the flat-file transport; the headers are already
+long-form.
 
-**The name lock.** `_names/<domain>.json`, one file per domain module, maps
+**The name lock.** `_api/names/locks/<domain>.json`, one file per domain module, maps
 `(dataset, transport, wire path)` to a column for every transport. REST entries are appended by
 the refresh from the rule above; WebSocket and flat-file entries are copied from the key maps.
 The lock is append-only, and once a name ships it outranks the spec and the rule:
@@ -1785,20 +1868,24 @@ The lock is append-only, and once a name ships it outranks the spec and the rule
 
 The tests that keep this honest:
 
-- **Parity** (`tests/test_restspec.py`): regenerating `_restspec.py` from the vendored snapshot
+- **Parity** (`tests/_api/spec/test_restspec.py`): regenerating `_api/spec/restspec.py` from the vendored snapshot
   and the generator's tables gives the committed file, byte for byte.
-- **Completeness** (`tests/test_catalog.py`): every wire path of every dataset has a lock entry
-  and no entry is missing for a key-map key; the WebSocket key maps are complete against
-  `websocket.json`; the allow-list matches `llms.txt`; the flat-file key maps match the
-  documented headers.
-- **Compatibility** (`tests/test_catalog.py`): the lock at the **last release tag** is compared
-  with the current lock, and any changed or removed entry fails the test unless a
-  `BREAKING_RENAMES` entry in the same file lists it, with the owner's approval recorded in the
-  PR. Before the first release there is no baseline and the test checks nothing. A shallow clone
-  without tags fails the test rather than passing it, so CI checks out the full history.
+- **Completeness, inside `_api`**: the WebSocket key maps are complete against
+  `websocket.json` (`tests/_api/names/test_wskeys.py`), and the allow-list matches `llms.txt`
+  (`tests/_api/spec/test_allowlist.py`).
+- **Completeness, across the boundary** (`tests/test_catalog.py`, through the `_api` interface
+  only): every wire path of every declared dataset has a lock entry, no entry is missing for a
+  key-map key, every REST column of a tick dataset is a column of its tick schema, and the
+  flat-file key maps match the documented headers (`_api.flatfile_headers`).
+- **Compatibility** (`tests/_api/names/test_lock.py`): the lock at the **last release tag** is
+  compared with the current lock, and any changed or removed entry fails the test unless the
+  `BREAKING_RENAMES` record in `_api/names/lock.py` lists it, with the owner's approval recorded
+  in the PR. Before the first release there is no baseline and the test checks nothing. A
+  shallow clone without tags fails the test rather than passing it, so CI checks out the full
+  history.
 
 **The refresh flow.** The drift job ([section 20](#20-quality-gates)) opens an issue. A person
-runs `scripts/refresh_massive_spec.py --fetch`, reviews three diffs (the snapshot, `_restspec.py`,
+runs `scripts/refresh_massive_spec.py --fetch`, reviews three diffs (the snapshot, `_api/spec/restspec.py`,
 and the lock), adds a lexicon line where the gate asks for one, and lands the result as one PR.
 A new endpoint additionally needs its path on the allow-list and a `DatasetSpec`.
 
@@ -1815,8 +1902,9 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   `ignore_missing_imports` for `pyarrow.*`. Pyright runs as a non-gating second checker.
 - **Pytest 9:** `strict = true`, `filterwarnings = ["error"]`, `--import-mode=importlib`,
   deadlock detection through `faulthandler_timeout` and `pytest-timeout`.
-- **Layout:** `tests/test_layout.py` and `tests/test_catalog.py` pass.
-- **Spec:** the parity test (`_restspec.py` equals what the vendored snapshot generates), the
+- **Layout:** `tests/test_layout.py` (the mirror rule and the `_api` import boundary of
+  [section 19](#19-wire-clients-and-the-spec-snapshot)) and `tests/test_catalog.py` pass.
+- **Spec:** the parity test (`_api/spec/restspec.py` equals what the vendored snapshot generates), the
   completeness checks, and the name-lock compatibility test
   ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)) pass. They read only
   vendored files and git history, never the network.
@@ -1824,7 +1912,7 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   owner merges.
 
 **Spec drift is advisory, never a gate.** `.github/workflows/spec-drift.yml` runs weekly (and on
-demand): it fetches the four spec sources, compares them with `scripts/massive_spec/`, and, when
+demand): it fetches the four spec sources, compares them with `src/deephaven_massive/_api/spec/snapshot/`, and, when
 they differ, opens one issue (or comments on the open one) labelled `spec-drift` with a summary:
 paths, parameters, and fields added or removed, and keys the naming gate would stop on. It never
 pushes, never opens a pull request, and is never a required check, because a change at Massive
@@ -2098,6 +2186,13 @@ document already reflects them.
     path, and only after the owner has reviewed the issue text. The fork
     `chipkent/massive-client-python` is no longer used; it is archived once the project has
     fully shipped.
+26. **One package for the Massive API** (2026-10-26). Everything that talks to Massive's REST or
+    WebSocket API or describes its wire format (the two clients, the spec snapshots, the
+    generator, the generated REST table, the lexicons, the WebSocket key maps, and the name
+    lock) lives in `deephaven_massive._api`, split into `rest/`, `ws/`, `spec/`, and `names/`.
+    It imports nothing from Deephaven or the rest of the library; the rest of the library
+    imports only its interface, `_api/__init__.py`. An import-boundary test enforces both
+    directions ([section 19](#19-wire-clients-and-the-spec-snapshot)).
 
 ## 23. Open verification items
 

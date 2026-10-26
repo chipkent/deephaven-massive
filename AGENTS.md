@@ -72,6 +72,13 @@ append-only name lock: never change or remove a shipped name without an owner-ap
     default, or table semantics updates `DESIGN.md` first (owner decision).
 12. **Dependencies** (the declarations in `pyproject.toml`) change only in dedicated
     `chore(deps):` PRs. `uv.lock` is not committed: every sync resolves the newest versions.
+13. **The Massive API lives in one package.** Everything that talks to Massive's REST or
+    WebSocket API or describes its wire format (the clients, the spec snapshot, the generator,
+    the generated REST table, the lexicons, the WebSocket key maps, the name lock) lives in
+    `src/deephaven_massive/_api/`. `_api` imports nothing from `deephaven` or from the rest of
+    the library; everything else imports only `deephaven_massive._api` (its interface), never a
+    submodule, and never `urllib3`, `websockets`, or `certifi`. The import-boundary test in
+    `tests/test_layout.py` enforces both directions. Its tests mirror it under `tests/_api/`.
 
 ## Documentation standard
 
