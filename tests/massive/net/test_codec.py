@@ -1,5 +1,6 @@
 import json
 import logging
+import subprocess
 import sys
 import types
 
@@ -18,7 +19,6 @@ MALFORMED = {
     "Infinity": b'{"a": Infinity}',
     "-Infinity": b'{"a": -Infinity}',
     "a number too large for a double": b'{"a": 1e400}',
-    "nesting too deep": b"[" * 100_000,
     "truncated": b'{"a": ',
     "two documents": b"{} {}",
     "an HTML error page": b"<html>502 Bad Gateway</html>",
@@ -115,6 +115,53 @@ def test_orjson_rejects_the_same_input_with_value_error(
 ) -> None:
     monkeypatch.setattr(codec, "_orjson", pytest.importorskip("orjson"))
     assert _value_error_of(data) is not None
+
+
+_TOO_DEEP = b"[" * 100_000
+
+
+@pytest.mark.usefixtures("stdlib")
+def test_stdlib_reports_a_recursion_error_as_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def overflow(*args: object, **kwargs: object) -> object:
+        raise RecursionError
+
+    monkeypatch.setattr(json, "loads", overflow)
+    error = _value_error_of(b"[]")
+    assert error is not None
+    assert str(error) == "JSON is nested too deeply"
+    assert isinstance(error.__cause__, RecursionError)
+
+
+def test_stdlib_rejects_deep_nesting_in_a_fresh_interpreter() -> None:
+    # Deep nesting recurses until Python's stack guard trips. On a thread whose stack the
+    # embedded JVM also manages, that guard can misjudge the stack and the process crashes,
+    # so the real recursion runs in an interpreter without a JVM. The script is a literal and
+    # the document travels on stdin.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys\n"
+                "from deephaven_massive._massive.net import codec\n"
+                "codec._orjson = None\n"
+                "try:\n"
+                "    codec.loads(sys.stdin.buffer.read())\n"
+                "except ValueError as error:\n"
+                "    print(type(error.__cause__).__name__)\n"
+            ),
+        ],
+        input=_TOO_DEEP,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.strip() == b"RecursionError"
+
+
+def test_orjson_rejects_deep_nesting(monkeypatch: pytest.MonkeyPatch) -> None:
+    # orjson stops at a fixed depth without recursing on the C stack, so this runs in-process.
+    monkeypatch.setattr(codec, "_orjson", pytest.importorskip("orjson"))
+    assert _value_error_of(_TOO_DEEP) is not None
 
 
 def test_orjson_decodes_a_valid_document_as_the_standard_library_does(
