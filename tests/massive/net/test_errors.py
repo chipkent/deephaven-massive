@@ -35,6 +35,12 @@ def test_attributes_are_read_only(attribute: str) -> None:
         setattr(error, attribute, "changed")
 
 
+def test_the_message_survives_a_change_to_args() -> None:
+    error = WireError("HTTP 503 from GET /v3/trades/AAPL", status=503)
+    error.args = ("rewritten",)
+    assert error.message == "HTTP 503 from GET /v3/trades/AAPL"
+
+
 def test_the_hierarchy() -> None:
     assert issubclass(WireAuthError, WireError)
     assert issubclass(WireEntitlementError, WireError)

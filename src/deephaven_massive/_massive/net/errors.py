@@ -31,9 +31,12 @@ class WireError(Exception):
 
     The base class of the wire errors, and the error for every failure that is neither an
     authentication nor an entitlement problem. A client builds one when it gives up on a
-    request; the library converts it with `_errors.from_wire` before a user sees it. Every
-    attribute is read-only, so one instance can be handed between threads (a WebSocket
-    `Reject` carries one from the client's loop thread to the library's flush thread).
+    request; the library converts it with `_errors.from_wire` before a user sees it. The
+    context attributes (`message`, `status`, `host`, `path`, `request_id`) are read-only, so
+    an instance can be handed between threads as a value (a WebSocket `Reject` carries one
+    from the client's loop thread to the library's flush thread). Python's own exception
+    attributes (`args`, `__traceback__`, `__cause__`, `__notes__`) stay writable, so one
+    instance must not be raised on two threads at once.
 
     Example:
         A REST client giving up on a rate limit::
@@ -73,6 +76,7 @@ class WireError(Exception):
                 `None` when the response had none.
         """
         super().__init__(message)
+        self._message = message
         self._status = status
         self._host = host
         self._path = path
@@ -80,9 +84,8 @@ class WireError(Exception):
 
     @property
     def message(self) -> str:
-        """The complete text of the error, equal to `str(error)`."""
-        message: str = self.args[0]
-        return message
+        """The complete text of the error, as given when it was created and as `str()` shows."""
+        return self._message
 
     @property
     def status(self) -> int | None:
