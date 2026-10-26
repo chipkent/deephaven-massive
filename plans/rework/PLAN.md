@@ -1215,8 +1215,8 @@ prefix half of G4, G5–G7).
   and overview parsers), `lexicon.py` (their `SHAPES`), `overrides.py` (`NAMES` including `dv`
   and `dav`, `UNITS`, `TYPE_FIXES`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, `VENUES`),
   `exclusions.py` (the executable WebSocket and flat-file rows of DESIGN § 8.12; a row absent
-  from `websocket.json` and the flat-file pages moves to the documentation-only list), `_massive/__init__.py`
-  and `_massive/spec/__init__.py` (the loaders for `ws.json` and `flatfiles.json`;
+  from `websocket.json` and the flat-file pages moves to the documentation-only list),
+  `_massive/__init__.py` and `_massive/spec/__init__.py` (the loaders for `ws.json` and `flatfiles.json`;
   `Source.memberships`), `tests/massive/spec/test_init.py`.
 
 **Tasks.**
@@ -1225,8 +1225,9 @@ prefix half of G4, G5–G7).
       and `PROJECTIONS` into its entry in all three `spec/*.json` files, and load them onto
       `Source.memberships`; a test loads `spec/` with `refresh/` absent.
 - [ ] A library test checks `VENUES` against `FuturesVenue`.
-- [ ] Check that the names DESIGN § 21 uses (`Symbol`, `Timestamp`, `BidPrice`, `AskPrice`) are
-      generated names.
+- [ ] Check that the wire-derived names DESIGN § 21 uses (`BidPrice`, `AskPrice`) are generated
+      names. `Symbol`, `Timestamp`, and `Underlying` come from the dataset key rename and are
+      checked in PC3b.
 
 **Acceptance criteria.**
 - [ ] Parity for all three files.
@@ -1401,6 +1402,9 @@ C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
       unchanged in the diagnostics tables.
 - [ ] A per-ticker REST path (`/v3/trades/{t}`) and a futures WebSocket channel pass C1 with
       `from_request` and absent session keys.
+- [ ] The renamed dataset schemas of the synthetic and test specs carry `Symbol`, `Timestamp`,
+      and `Underlying` where the dataset declares those keys (C1), including the DESIGN § 21
+      names `Symbol` and `Timestamp`.
 - [ ] Negative tests for C1–C7 on synthetic specs; C1's include a reference dataset that
       declares no key and passes.
 - [ ] A `stocks.trades`/`crypto.trades` fixture pair shows identical column sets with a single
