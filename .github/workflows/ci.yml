@@ -26,6 +26,8 @@ jobs:
         with:
           enable-cache: true
       - name: Check that uv.lock matches pyproject.toml
+        # The massive commit recorded in uv.lock may be stale: the source tracks the
+        # deephaven-fixes branch, and every other job installs its head (DESIGN § 19).
         run: uv lock --check
 
   lint:
@@ -42,8 +44,11 @@ jobs:
           enable-cache: true
       - name: Set up Python
         run: uv python install 3.11
-      - name: Sync dependencies
-        run: uv sync --locked --python 3.11
+      - name: Use the latest deephaven-fixes (DESIGN § 19), then sync dependencies
+        # Re-locks only massive to the branch head; every other dependency stays as locked.
+        run: |
+          uv lock --upgrade-package massive
+          uv sync --locked --python 3.11
       - name: Ruff and mypy (scripts/check.sh fast --no-fix)
         # GitHub sets CI=true, so ruff reports in GitHub annotation format.
         run: ./scripts/check.sh fast --no-fix
@@ -79,11 +84,17 @@ jobs:
           enable-cache: true
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
-      - name: Sync dependencies
+      - name: Use the latest deephaven-fixes (DESIGN § 19), then sync dependencies
+        # Re-locks only massive to the branch head; every other dependency stays as locked.
         # The orjson extra is tested on 3.14; orjson publishes no free-threaded wheels.
+        run: |
+          uv lock --upgrade-package massive
+          uv sync --locked --python ${{ matrix.python-version }} \
+            ${{ matrix.python-version == '3.14' && '--extra orjson' || '' }}
+      - name: Show the installed massive commit (the deephaven-fixes head)
         run: >-
-          uv sync --locked --python ${{ matrix.python-version }}
-          ${{ matrix.python-version == '3.14' && '--extra orjson' || '' }}
+          uv run --no-sync python -c "import json, importlib.metadata as m;
+          print(json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
       - name: Pytest with 100% statement and branch coverage
         run: uv run pytest --cov --cov-report=xml
       - name: Upload coverage XML
@@ -116,9 +127,11 @@ jobs:
       - name: Import the built wheel in a clean environment, inside a Deephaven server
         # The library imports deephaven at module level, so importing it needs a running
         # Deephaven JVM, exactly as it does for users. The wheel is installed next to
-        # deephaven-server, a server is started, and only then is the package imported.
+        # deephaven-server and the latest deephaven-fixes (the wheel's metadata names only
+        # massive>=2.9.0), a server is started, and only then is the package imported.
         run: >-
           uv run --isolated --no-project --python 3.11 --with dist/*.whl
+          --with "massive @ git+https://github.com/chipkent/massive-client-python@deephaven-fixes"
           --with deephaven-server python -c
           "from deephaven_server import Server; Server(port=0).start();
           import deephaven_massive; print(deephaven_massive.__version__)"

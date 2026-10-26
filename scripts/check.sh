@@ -3,7 +3,7 @@
 #
 # Usage: scripts/check.sh [fast|full] [--no-fix]
 #
-#   fast      ruff check --fix, ruff format, mypy src tests
+#   fast      refresh massive to the latest deephaven-fixes, ruff check --fix, ruff format, mypy
 #   full      fast, then pytest with coverage (the default)
 #   --no-fix  report instead of rewrite: ruff check and ruff format --check (CI and git hooks)
 #
@@ -45,6 +45,23 @@ step() {
     shift
     "$@"
 }
+
+# The SDK fork is always the latest `deephaven-fixes` commit (DESIGN § 19).
+# Re-lock only `massive` to the branch head, so every `uv run` below syncs the environment to
+# it; every other dependency stays as locked. The refreshed uv.lock serves this run only: the
+# file as it was is restored on exit, so the working tree is never left dirty, and the `massive`
+# commit recorded in the committed lock may go stale without anyone bumping it.
+lock_backup="$(mktemp)"
+cp uv.lock "$lock_backup"
+restore_lock() {
+    cp "$lock_backup" uv.lock
+    rm -f "$lock_backup"
+}
+trap restore_lock EXIT
+step "uv lock --upgrade-package massive (latest deephaven-fixes)" \
+    uv lock --quiet --upgrade-package massive
+step "installed massive commit" uv run --quiet python -c \
+    "import json, importlib.metadata as m; print(json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
 
 if ((fix)); then
     step "ruff check --fix" uv run ruff check --fix ${ruff_output[@]+"${ruff_output[@]}"} src tests

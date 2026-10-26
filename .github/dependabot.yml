@@ -8,6 +8,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # The SDK fork is always the latest deephaven-fixes, refreshed at every sync; its commit in
+      # uv.lock is never bumped by a pull request (DESIGN § 19).
+      - dependency-name: "massive"
   - package-ecosystem: "pre-commit"
     directory: "/"
     schedule:
