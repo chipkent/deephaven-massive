@@ -903,8 +903,8 @@ the `HistorySource.AUTO` choice between S3 and REST, with the S3 wire access in
 
 **How it is restructured.** #51 at 945d060 is restructured as a move with unchanged logic,
 built on a new local branch, `restructure/flat-file-history`, cut from `origin/main` after
-`git fetch` once PC1a has merged, in two commits: (1) 945d060 rebased with renames only
-(`_flatfiles.py` → `_flat_files.py`, `_sources.py` → `_history_source.py`); (2) the move of the
+`git fetch` once PC1a has merged, in two commits: (1) 945d060 rebased without its `plans/`
+changes, which PD already carries, and with renames only (`_flatfiles.py` → `_flat_files.py`, `_sources.py` → `_history_source.py`); (2) the move of the
 S3 wire code into `_massive/flatfiles/` (`client.py`, `layout.py`, `reader.py`). It replaces
 #51's branch with
 `git push --force-with-lease=feat/flat-file-history:945d060 origin HEAD:feat/flat-file-history`,
@@ -1160,9 +1160,10 @@ timestamp-like integers (68 of them untagged) and about 50 short keys.
 
 **Acceptance criteria.**
 - [ ] The parity test passes byte for byte.
-- [ ] documented − (DESIGN § 8 ∪ § 8.12) = ∅ at the pinned snapshot; any residue goes to the
-      owner before merge.
-- [ ] documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored).
+- [ ] For documented REST paths: documented − (DESIGN § 8 ∪ § 8.12) = ∅ at the pinned
+      snapshot; any residue goes to the owner before merge.
+- [ ] For documented REST paths: documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪
+      ignored). Channels and prefixes arrive in PC3a2.
 - [ ] Negative tests for G1–G4; a fixture exercises each `TYPE_FIXES` entry.
 - [ ] A test checks every "not documented in `llms.txt`" exclusion against the snapshot's
       `llms.txt`.
@@ -1225,6 +1226,8 @@ prefix half of G4, G5–G7).
 
 **Acceptance criteria.**
 - [ ] Parity for all three files.
+- [ ] For every documented path, channel, and prefix: documented − (DESIGN § 8 ∪ § 8.12) = ∅,
+      and documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored).
 - [ ] Negative tests for G5 (a type disagreement, including stocks `dv` against futures `dv`)
       and G6 (`s` → `Shares`).
 - [ ] All 37 channels and every documented prefix are accounted for.
@@ -1371,9 +1374,8 @@ C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
 `tests/data/catalog/undeclared/<namespace>.txt`.
 
 **Tasks.**
-- [ ] `DatasetSpec` gains `kind`, the per-source key columns (`KeySpec(column, from_request)`
-      for `symbol` and `time`, and `fanout` and `session` on the sources that carry them), and
-      the role paths (`fetch_path`,
+- [ ] `DatasetSpec` gains `kind`, the per-source key columns (`KeySpec(column, from_request)`,
+      optional per role, as DESIGN § 19.4 states), and the role paths (`fetch_path`,
       `history_path`, `grouped_daily_path`, `extra_paths`); `has_rest_history` and
       `has_grouped_daily` read the role paths.
 - [ ] `_schema.rename` and `dataset_schema` (DESIGN § 19.4), reading memberships and their
@@ -1392,7 +1394,8 @@ C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
       unchanged in the diagnostics tables.
 - [ ] A per-ticker REST path (`/v3/trades/{t}`) and a futures WebSocket channel pass C1 with
       `from_request` and absent session keys.
-- [ ] Negative tests for C1–C7 on synthetic specs.
+- [ ] Negative tests for C1–C7 on synthetic specs; C1's include a reference dataset that
+      declares no key and passes.
 - [ ] A `stocks.trades`/`crypto.trades` fixture pair shows identical column sets with a single
       `Timestamp`.
 

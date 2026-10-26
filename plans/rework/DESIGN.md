@@ -1004,7 +1004,8 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   `FilerCik`). Where a source does not carry the instrument in its rows (it takes the symbol
   as a path parameter, as `/v3/trades/{t}` and `/v2/aggs/ticker/{t}/…` do, or holds it outside
   the result key, as `/v1/last/crypto` and `/v1/last_quote` do), `Symbol` is filled from the
-  request ([section 19.4](#194-generated-schemas)).
+  request ([section 19.4](#194-generated-schemas)). A dataset whose rows describe no instrument
+  (`reference.exchanges`, `economy.*`) has no `Symbol` column.
 
 ## 11. Enums and types
 
@@ -2167,8 +2168,10 @@ reviewer, on:
 - **G1:** a short key (three characters or fewer, no underscore) with no lexicon, identity, or
   `NAMES` entry;
 - **G2:** two keys of one source producing one column;
-- **G3:** a timestamp-like field with no `UNITS` entry. G3 runs on the long name, after the
-  lexicon and `NAMES`: a field is timestamp-like when it has a unit tag, a doc type of
+- **G3:** a timestamp-like integer field with no `UNITS` entry. ISO date-time text fields
+  (`last_updated` on benzinga and futures products, `timestamp` on futures schedules) are
+  excluded; the representation rules decide them. G3 runs on the long name, after the
+  lexicon and `NAMES`: an integer field is timestamp-like when it has a unit tag, a doc type of
   `timestamp - integer`, or a long name matching `timestamp`, `*_timestamp`, `updated`,
   `*_updated`, `window_start`, `window_end`, or `*_time` (the bar lexicon gives `s` and `e`
   as `window_start` and `end_timestamp`, while a trade's `s` is `size`);
@@ -2179,8 +2182,8 @@ reviewer, on:
   conflict is first treated as a possible naming error (stocks and futures `dv` are exactly
   that);
 - **G6 (transport agreement):** within one `KINDS` group whose sources span two or more
-  transports, every column appears on at least two transports or is in `TRANSPORT_ONLY`, which catches a one-sided lexicon slip (`s` becoming
-  `Shares` while REST says `size`);
+  transports, every column appears on at least two transports or is in `TRANSPORT_ONLY`,
+  which catches a one-sided lexicon slip (`s` becoming `Shares` while REST says `size`);
 - **G7:** a futures kind whose venue pages differ.
 
 Descriptions differ across transports and change about twenty times as often as keys, so G5 and
@@ -2200,15 +2203,25 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
                                              # from the request adds a constant column;
                                              # nothing else changes
   schema = ordered union by column name of every cols(m, s):
-           Symbol, Timestamp first; then first appearance in member, then source, then field order
+           Symbol, then Timestamp, first where the dataset declares them; then first
+           appearance in member, then source, then field order
   each column's WireType = the lattice join over every contribution
 ```
 
 **Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
-columns as `KeySpec(column, from_request)`: `symbol` and `time` always, and `fanout` and
-(futures) `session` only on the sources that carry them. A key is `from_request` when the
-source does not carry it in its rows: the symbol of a source that takes it as a path parameter
-or holds it outside the result key ([section 10](#10-symbols-and-all)). The library fills a
+columns as `KeySpec(column, from_request)`, one optional declaration per role (`symbol`,
+`time`, `fanout`, `session`):
+
+- every source of a dataset in a kind declares `symbol` and `time`;
+- every source of any other instrument dataset declares `symbol`;
+- any other dataset declares only the keys its rows carry, possibly none: `reference.exchanges`,
+  `conditions`, `market_status`, `market_holidays`, and `ticker_types`, `futures.exchanges`,
+  and `benzinga.firms` declare none, and `economy.*` declares `time` and no `symbol`;
+- `fanout` and (futures) `session` are declared only on the sources that carry them.
+
+A key is `from_request` when the source does not carry it in its rows: the symbol of a source
+that takes it as a path parameter or holds it outside the result key
+([section 10](#10-symbols-and-all)). The library fills a
 `from_request` key as a constant column. `to_batch(..., required=)` and `ReadPlan.required`
 receive exactly the source's required keys, so a futures WebSocket row without
 `session_end_date` is not a missing key, while a futures flat file without it is. Every member
@@ -2220,9 +2233,13 @@ role paths under the same join.
 
 **Catalog gates** (`tests/test_catalog.py`, with negative tests on synthetic `DatasetSpec`s):
 
-- **C1:** every key a dataset declares for a source is either a field of that source or
-  `from_request`, and `symbol` and `time` are declared for every source of the dataset in one
-  of the two forms;
+- **C1:** every key a dataset declares for a source is either a field of that source after
+  the projection of the dataset's membership (the `indices.values` time key on
+  `/v3/snapshot/indices` is `timestamp` only after it), or `from_request`; every source of a
+  dataset in a kind declares `symbol` and `time`, and every source of an instrument dataset
+  declares `symbol`. Its negative tests cover an undeclared kind key, an undeclared instrument
+  symbol, a declared key the source lacks, and a reference dataset that declares none and
+  passes;
 - **C2:** after the rename, no source has a duplicate column;
 - **C3:** across members, one column name gets one `WireType`;
 - **C4:** each kind dataset's sources equal the sources holding a membership of its
@@ -2250,7 +2267,7 @@ routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
 |---|---|---|---|---|
 | **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field). Shown in `SchemaDrift`. |
-| **Missing required key** (a key the dataset declares for this source, not `from_request`) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
+| **Missing required key** (a key the dataset declares for this source, not `from_request`; a dataset that declares no key has none) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced; a lattice widening is not coercion. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_timeunits` | in `_timeunits`, in the flush thread as a vectorized mask | in `_timeunits` | Loud failure naming the dataset, the column, the unit, and the value. |
@@ -2624,8 +2641,8 @@ document already reflects them.
     exactly the verbs and namespaces, and the API key stays out of objects users routinely
     leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
-    its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares its four
-    long-form key columns, and `_schema.rename` maps them to `Symbol`, `Timestamp`, and
+    its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares the key
+    columns its sources carry, and `_schema.rename` maps them to `Symbol`, `Timestamp`, and
     `Underlying`. Names are never derived from descriptions, and gates G1–G7 and C1–C7 fail on a
     wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The final names:
     `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
