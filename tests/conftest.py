@@ -29,8 +29,8 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
-    from _fakes.stream import FakeStreamTransport
     from deephaven_massive import MassiveSession
+    from tests._fakes.stream import FakeStreamTransport
 
 _DATA_DIR = Path(__file__).parent / "data"
 
@@ -137,8 +137,9 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
 def load_fixture() -> Callable[[str, str], bytes]:
     """Return a function that reads a payload fixture from `tests/data/<owner>/<name>`.
 
-    `owner` names the module or transport the payloads belong to, so each owner's fixtures
-    stay together.
+    `owner` is the mirrored test's path under `tests/` without the `test_` prefix and `.py`
+    (`"symbols"` for `tests/test_symbols.py`), or a test package's path (`"massive/rest"`), so
+    each owner's fixtures stay together.
 
     Returns:
         A function mapping `(owner, name)` to the fixture file's bytes.
@@ -201,7 +202,7 @@ def fake_streams(
     Returns:
         The fake, for inspecting opened streams and shutdown callbacks.
     """
-    stream = importlib.import_module("_fakes.stream")
+    stream = importlib.import_module("tests._fakes.stream")
     fake: FakeStreamTransport = stream.FakeStreamTransport(massive_session._core)
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake)
     return fake

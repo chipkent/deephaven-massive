@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar, Final
 
-from deephaven_massive._domains.base import Namespace
+from deephaven_massive._namespaces.base import Namespace
 
 if TYPE_CHECKING:
     from deephaven_massive._catalog import DatasetSpec

@@ -28,17 +28,6 @@ from deephaven_massive import _errors, _session
 from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._config import json_codec
 from deephaven_massive._diagnostics import ConnectionRow, Diagnostics, StreamRow, StreamUpdate
-from deephaven_massive._domains.base import build_query
-from deephaven_massive._domains.crypto import _Crypto
-from deephaven_massive._domains.economy import _Economy
-from deephaven_massive._domains.forex import _Forex
-from deephaven_massive._domains.futures import _Futures
-from deephaven_massive._domains.indicators import _Indicators
-from deephaven_massive._domains.indices import _Indices
-from deephaven_massive._domains.options import _Options
-from deephaven_massive._domains.partners import _Benzinga, _EtfGlobal, _Fable, _Partners, _Tmx
-from deephaven_massive._domains.reference import _Reference
-from deephaven_massive._domains.stocks import _Stocks
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._liveness import (
     Reaper,
@@ -48,6 +37,17 @@ from deephaven_massive._liveness import (
     make_result,
     new_scope,
 )
+from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._namespaces.crypto import _Crypto
+from deephaven_massive._namespaces.economy import _Economy
+from deephaven_massive._namespaces.forex import _Forex
+from deephaven_massive._namespaces.futures import _Futures
+from deephaven_massive._namespaces.indicators import _Indicators
+from deephaven_massive._namespaces.indices import _Indices
+from deephaven_massive._namespaces.options import _Options
+from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable, _Partners, _Tmx
+from deephaven_massive._namespaces.reference import _Reference
+from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._query import Request, StreamQuery
 from deephaven_massive._schema import TRADES
 from deephaven_massive._symbols import SymbolTable
@@ -62,10 +62,10 @@ if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
 
-    from _fakes.stream import FakeStreamTransport
     from deephaven_massive._liveness import ResultRecord
     from deephaven_massive._query import StreamKey
     from deephaven_massive._session import SessionCore
+    from tests._fakes.stream import FakeStreamTransport
 
 TIMEOUT = 30.0
 
@@ -1062,7 +1062,7 @@ def test_a_session_with_released_results_is_collected() -> None:
     # for the next one kept the SessionCore alive, so its finalizer never stopped the threads.
     # A second, independent fake is needed here because the `fake_streams` fixture is bound to
     # the fixture session, and monkeypatch would hold this session's core until teardown.
-    fakes = importlib.import_module("_fakes.stream")
+    fakes = importlib.import_module("tests._fakes.stream")
     m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-session"))
     core = m._core
     fake = fakes.FakeStreamTransport(core)
@@ -1109,7 +1109,7 @@ def test_a_result_keeps_its_session_alive() -> None:
     # A result that outlives every reference to its session and query must still be released
     # when it is collected: the release path (registry, reaper, core) lives as long as it does.
     # An independent fake is needed for the same reason as in the test above.
-    fakes = importlib.import_module("_fakes.stream")
+    fakes = importlib.import_module("tests._fakes.stream")
     m = dm.MassiveSession(dm.MassiveConfig(api_key="outliving-result"))
     core = m._core
     fake = fakes.FakeStreamTransport(core)
@@ -1295,7 +1295,7 @@ def test_an_unclosed_core_is_collected_by_the_cyclic_collector() -> None:
     # fixture: that fixture is bound to the fixture session, whose core the fixture and
     # monkeypatch hold until teardown, and this test must own the only reference to the core it
     # watches being collected.
-    fakes = importlib.import_module("_fakes.stream")
+    fakes = importlib.import_module("tests._fakes.stream")
     m = dm.MassiveSession(dm.MassiveConfig(api_key="cyclic-core"))
     core = m._core
     fake = fakes.FakeStreamTransport(core)

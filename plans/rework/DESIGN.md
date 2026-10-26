@@ -269,9 +269,11 @@ Tests mirror the package. The test file for `deephaven_massive/<path>/<name>.py`
 `tests/<path>/test_init.py`, and a `__main__.py` by `tests/<path>/test_main.py`, so every source
 module has exactly one mirror. `tests/test_init.py` holds the public-surface tests (`dm.__all__`
 equals [section 3](#3-exports) and `__version__` equals the installed distribution's version).
-`tests/test_catalog.py` is the plain mirror of `_catalog.py`. A directory under `tests/` whose
-name starts with `_` is a helper package outside the mirror rule. Fixtures live in
-`tests/data/<test owner path>/` (for example `tests/data/massive/rest/`). Examples:
+`tests/test_catalog.py` is the plain mirror of `_catalog.py`. A directory directly under
+`tests/` whose name starts with `_` is a helper package outside the mirror rule; a test module
+(`test_*.py`, `*_test.py`, `conftest.py`) inside one is still checked. Fixtures live in
+`tests/data/<test owner path>/` (for example `tests/data/massive/rest/`), so no fixture
+directory starts with `_`. Examples:
 
 | Source | Unit test | Live integration test |
 |---|---|---|
@@ -2440,9 +2442,12 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   - Enforced on purpose: `E501` at 100 columns, `ANN401` (no `Any`), the `TC` import rules,
     `SLF001` in `src/`, `C901` at a maximum of 12, the `PLR091x` limits, and `PLR0917` with
     `max-positional-args = 3`.
-  - Ignored in `tests/` only: `S101`, `PLR2004`, `INP001`, `SLF001`, `ARG001`, `ARG002`,
-    `ARG005`, `FBT001`, `FBT002`, and `D100`–`D107` (test docstrings are optional, but any that
-    exist must be well formed).
+  - Ignored in `tests/` only: `S101`, `PLR2004`, `SLF001`, `ARG001`, `ARG002`, `ARG005`,
+    `FBT001`, `FBT002`, and `D100`–`D107` (test docstrings are optional, but any that exist
+    must be well formed).
+  - `src = ["src", "."]`, the same import roots as mypy and pytest, and
+    `namespace-packages = ["tests"]` (`tests/` has no `__init__.py`), so `INP001` needs no
+    ignore. `banned-api` bans both `conftest` and `tests.conftest`.
   - Google docstring convention; `docstring-code-format = true`.
 - **Mypy.** `strict`, `warn_unreachable`, `warn_unused_configs`, and `enable_error_code =
   ["ignore-without-code", "redundant-expr", "truthy-bool", "truthy-iterable",

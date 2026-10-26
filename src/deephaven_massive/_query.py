@@ -102,7 +102,7 @@ reactive table's wrapper and holds it strongly while the key exists."""
 class Request:
     """The normalized arguments of a dataset call, shared by every verb of its query.
 
-    Built by `_domains/base.py` when the query is created; immutable and hashable, so equal
+    Built by `_namespaces/base.py` when the query is created; immutable and hashable, so equal
     calls give equal queries and share streams.
 
     Attributes:

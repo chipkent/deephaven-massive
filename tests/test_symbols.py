@@ -191,7 +191,7 @@ def test_crypto_quotes_cover_the_vendored_tickers(
     # The fixture is assembled from well-known pairs, not from a live listing (no API key was
     # available). Regenerate it from /v3/reference/tickers?market=crypto with a live key, and
     # widen CRYPTO_QUOTES if this test then fails.
-    text = load_fixture("_symbols", "crypto_tickers.csv").decode()
+    text = load_fixture("symbols", "crypto_tickers.csv").decode()
     rows = list(csv.DictReader(io.StringIO(text)))
     assert len(rows) > 20
     for row in rows:

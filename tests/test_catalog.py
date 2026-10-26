@@ -13,9 +13,9 @@ from typing import Any, cast
 
 import pytest
 
-from deephaven_massive import _catalog, _domains
+from deephaven_massive import _catalog, _namespaces
 from deephaven_massive._catalog import (
-    DOMAIN_MODULES,
+    NAMESPACE_MODULES,
     SCHEMA_FROM_MODEL,
     SDK_PARAMS,
     DatasetSpec,
@@ -61,16 +61,16 @@ def _trades(**changes: object) -> DatasetSpec:
     return dataclasses.replace(BASE, **cast("dict[str, Any]", changes))
 
 
-def test_fixed_module_list_equals_the_domain_package() -> None:
-    package = Path(_domains.__file__).parent
+def test_fixed_module_list_equals_the_namespace_package() -> None:
+    package = Path(_namespaces.__file__).parent
     found = {info.name for info in pkgutil.iter_modules([str(package)])} - {"base"}
-    assert set(DOMAIN_MODULES) == found
-    assert len(DOMAIN_MODULES) == len(set(DOMAIN_MODULES))
+    assert set(NAMESPACE_MODULES) == found
+    assert len(NAMESPACE_MODULES) == len(set(NAMESPACE_MODULES))
 
 
-def test_every_domain_module_exports_datasets() -> None:
-    for name in DOMAIN_MODULES:
-        module = importlib.import_module(f"deephaven_massive._domains.{name}")
+def test_every_namespace_module_exports_datasets() -> None:
+    for name in NAMESPACE_MODULES:
+        module = importlib.import_module(f"deephaven_massive._namespaces.{name}")
         assert isinstance(module.DATASETS, tuple)
         assert all(isinstance(spec, DatasetSpec) for spec in module.DATASETS)
 
@@ -78,8 +78,8 @@ def test_every_domain_module_exports_datasets() -> None:
 def test_datasets_aggregate_every_module() -> None:
     specs = datasets()
     expected = sum(
-        len(importlib.import_module(f"deephaven_massive._domains.{n}").DATASETS)
-        for n in DOMAIN_MODULES
+        len(importlib.import_module(f"deephaven_massive._namespaces.{n}").DATASETS)
+        for n in NAMESPACE_MODULES
     )
     assert len(specs) == expected
     assert all(name == spec.name for name, spec in specs.items())
@@ -87,8 +87,8 @@ def test_datasets_aggregate_every_module() -> None:
 
 def test_datasets_reject_duplicates(fresh_catalog: None, monkeypatch: pytest.MonkeyPatch) -> None:
     spec = _trades()
-    stocks = importlib.import_module("deephaven_massive._domains.stocks")
-    options = importlib.import_module("deephaven_massive._domains.options")
+    stocks = importlib.import_module("deephaven_massive._namespaces.stocks")
+    options = importlib.import_module("deephaven_massive._namespaces.options")
     monkeypatch.setattr(stocks, "DATASETS", (spec,))
     monkeypatch.setattr(options, "DATASETS", (spec,))
     with pytest.raises(ValueError, match=r"test\.trades is declared twice"):
@@ -96,7 +96,7 @@ def test_datasets_reject_duplicates(fresh_catalog: None, monkeypatch: pytest.Mon
 
 
 def test_time_units_compose_the_specs(fresh_catalog: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    stocks = importlib.import_module("deephaven_massive._domains.stocks")
+    stocks = importlib.import_module("deephaven_massive._namespaces.stocks")
     monkeypatch.setattr(stocks, "DATASETS", (_trades(),))
     table = time_units()
     assert TimeField("test.trades", Transport.WS, "t") in table

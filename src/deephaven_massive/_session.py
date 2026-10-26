@@ -52,20 +52,20 @@ from deephaven_massive._diagnostics import (
     StreamUpdate,
     describe_symbols,
 )
-from deephaven_massive._domains.base import list_params
-from deephaven_massive._domains.crypto import _Crypto
-from deephaven_massive._domains.economy import _Economy
-from deephaven_massive._domains.forex import _Forex
-from deephaven_massive._domains.futures import _Futures
-from deephaven_massive._domains.indicators import _Indicators
-from deephaven_massive._domains.indices import _Indices
-from deephaven_massive._domains.options import _Options
-from deephaven_massive._domains.partners import _Partners
-from deephaven_massive._domains.reference import _Reference
-from deephaven_massive._domains.stocks import _Stocks
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._liveness import Reaper, ResultRegistry, entered, make_result
+from deephaven_massive._namespaces.base import list_params
+from deephaven_massive._namespaces.crypto import _Crypto
+from deephaven_massive._namespaces.economy import _Economy
+from deephaven_massive._namespaces.forex import _Forex
+from deephaven_massive._namespaces.futures import _Futures
+from deephaven_massive._namespaces.indicators import _Indicators
+from deephaven_massive._namespaces.indices import _Indices
+from deephaven_massive._namespaces.options import _Options
+from deephaven_massive._namespaces.partners import _Partners
+from deephaven_massive._namespaces.reference import _Reference
+from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:

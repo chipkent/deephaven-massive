@@ -7,8 +7,8 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._catalog import DatasetSpec, ParamKind
-from deephaven_massive._domains.base import Namespace, bar_query_class, build_query, list_params
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan
+from deephaven_massive._namespaces.base import Namespace, bar_query_class, build_query, list_params
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,

@@ -88,7 +88,11 @@ packages = ["src/deephaven_massive"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-src = ["src", "tests"]
+# First-party import roots, the same as mypy's and pytest's: `deephaven_massive` from `src/`,
+# `tests.…` from the repository root. `tests/` is not a root, so `massive` stays third-party.
+src = ["src", "."]
+# tests/ has no __init__.py; its modules are imported from the repository root as `tests.…`.
+namespace-packages = ["tests"]
 
 [tool.ruff.lint]
 select = ["ALL", "DOC201", "DOC501", "DOC502"]
@@ -123,7 +127,6 @@ ignore = [
 "tests/**" = [
     "S101",  # pytest uses bare assert statements
     "PLR2004",  # literal expected values in assertions are the point of a test
-    "INP001",  # tests are not a package; pytest runs with --import-mode=importlib
     "SLF001",  # white-box tests may inspect private members
     "ARG001",  # pytest fixtures are requested by parameter name even when unused
     "ARG002",  # fake methods keep the signature of the interface they replace
@@ -141,8 +144,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-# Fixtures are the only interface tests/conftest.py offers to test modules.
+# Fixtures are the only interface tests/conftest.py offers to test modules. The repository root
+# is on sys.path, so its importable name is `tests.conftest`; `conftest` covers a stray rootdir.
 "conftest".msg = "Request fixtures by name; never import conftest"
+"tests.conftest".msg = "Request fixtures by name; never import conftest"
 
 [tool.ruff.lint.mccabe]
 max-complexity = 12
@@ -175,10 +180,13 @@ enable_error_code = [
     "deprecated",
     "explicit-override",
 ]
-# `tests/` is not a package; module names are taken relative to these roots so that
-# `tests/_domains/test_init.py` and `tests/test_init.py` do not collide.
+# With explicit package bases, a file is named from the search root that contains it: modules
+# under `src/` from `src/` (`deephaven_massive._session`), test modules from the working
+# directory, the repository root (`tests.namespaces.test_init`). So `tests/test_init.py` and
+# `tests/namespaces/test_init.py` never collide, and since `tests/` is not a search root,
+# `import massive` never resolves to `tests/massive/`.
 files = ["src", "tests"]
-mypy_path = ["src", "tests"]
+mypy_path = ["src"]
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
@@ -206,9 +214,11 @@ strict = true
 filterwarnings = ["error"]
 addopts = ["-ra", "--import-mode=importlib"]
 testpaths = ["tests"]
-# Puts `tests/` on sys.path so tests/conftest.py can import the `_fakes` package under
-# --import-mode=importlib, which does not alter sys.path itself.
-pythonpath = ["tests"]
+# Puts the repository root on sys.path, which --import-mode=importlib does not do itself, so
+# test code imports helpers as `tests._fakes…` (`tests` is an implicit namespace package, as
+# are the other top-level directories). `tests/` itself is not on sys.path, so `import massive`
+# never resolves to `tests/massive/`.
+pythonpath = ["."]
 timeout = "60"  # pytest-timeout declares this option as a string, so TOML needs one
 faulthandler_timeout = "120"  # pytest declares this option as a string, so TOML needs one
 faulthandler_exit_on_timeout = true
