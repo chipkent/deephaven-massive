@@ -126,7 +126,7 @@ dm.MassiveConfig
 
 # Exceptions
 dm.MassiveError            # base class
-dm.AuthenticationError     # subclass of MassiveError: bad key
+dm.AuthenticationError     # subclass of MassiveError: bad key (API key or S3 credentials)
 dm.EntitlementError        # subclass of MassiveError: the plan lacks the dataset, host, or timeframe
 
 # Sentinel
@@ -989,6 +989,12 @@ registered SDK model and flat-file header has an entry.
 [1990, 2100]; otherwise `MassiveError("timestamp unit mismatch for <dataset>.<field>")`. Wrong
 units fail loudly, never silently.
 
+**Epoch 0 in flat files means absent.** Massive's flat files write `0` where a timestamp has no
+value (the documented stocks-trades sample has `trf_timestamp` `0` on every row without a TRF).
+In every flat-file `Instant` column except `Timestamp`, a `0` becomes null before unit
+conversion, matching WebSocket and REST, which omit the field. `Timestamp` keeps its value, and
+prices, sizes, and every other numeric column keep `0` (a one-sided quote has `ask_price` `0`).
+
 **Canonical time columns:** `Timestamp`, `ParticipantTimestamp`, `TrfTimestamp`,
 `BidTimestamp`, `AskTimestamp` (futures quotes), `ReceivedTimestamp` (crypto trades and
 quotes), `EndTimestamp` (bars), `LastUpdated` (snapshots). Calendar dates such as the futures
@@ -1455,11 +1461,18 @@ An `AUTO` call logs its choice and the reason once, for example
 `stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)`. Each
 transport then logs its own work: the flat-file transport `source=S3 files=<n> skipped=<dates>`
 (`skipped=none` when nothing was missing), the REST transport `source=REST requests=<n>`.
-Missing keys on non-trading dates are skipped. A missing weekday key logs a WARNING. A missing
-key for the last requested date raises
-`MassiveError("... not yet published; flat files land ~11:00 ET next day")`. Futures
-`venue=None` reads four prefixes per date; a 403 on any prefix raises `EntitlementError` naming
-the venue and the `venue=` parameter.
+Missing keys on non-trading dates are skipped. A missing weekday key logs a WARNING. The
+source choice has already required every partition to be past its `publish_time`, so a missing
+key for the last requested date is either late or a market holiday (there is no holiday
+calendar). Within one day after its `publish_time` it raises
+`MassiveError("<dataset>: <key> does not exist: <date> is not yet published (flat files land
+~11:00 ET next day), or was a market holiday")`. After that window it is treated as a holiday:
+a WARNING, and the date is skipped like any other missing weekday, so the rest of the range is
+returned. Futures `venue=None` reads four prefixes per date; a 403 on any prefix raises
+`EntitlementError` naming the venue and the `venue=` parameter. A 403 whose S3 error code says
+the credentials themselves are wrong (`InvalidAccessKeyId`, `SignatureDoesNotMatch`) raises
+`AuthenticationError` instead, for every asset class, naming `s3_access_key_id` and
+`s3_secret_access_key`.
 
 Flat files are streamed: `pyarrow.csv.open_csv` reads each `.csv.gz` key in 1 MiB blocks (gzip
 only: every documented key is `.csv.gz`). The CSV reader parses each header straight to its
