@@ -13,8 +13,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src" / "deephaven_massive"
 _TESTS = _ROOT / "tests"
 
-# Test files that mirror no source module. A new entry needs owner approval and a change to the
-# test-layout section of the design.
+# Test files that mirror no source module. A new entry needs owner approval.
 APPROVED_EXCEPTIONS = frozenset(
     {
         PurePosixPath("conftest.py"),  # embedded JVM and fixtures

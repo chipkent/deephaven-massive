@@ -692,7 +692,7 @@ def test_stream_ids_come_from_one_allocator(
     massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
 ) -> None:
     core = massive_session._core
-    assert core.next_stream_id() == 1  # a poll() row's id, as P3 will mint it
+    assert core.next_stream_id() == 1  # the id a poll() row takes
     result = stream_query(massive_session).blink()
     assert list(core._streams) == [2]  # the WebSocket stream never reuses it
     assert core.next_stream_id() == 3

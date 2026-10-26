@@ -35,7 +35,7 @@ def test_version_is_the_installed_distribution_version() -> None:
     assert dm.__version__ == importlib.metadata.version("deephaven-massive")
 
 
-def test_all_is_exactly_the_design_list() -> None:
+def test_all_is_exactly_the_public_api() -> None:
     assert len(EXPECTED_EXPORTS) == 21
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 

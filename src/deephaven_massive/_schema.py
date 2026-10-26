@@ -18,7 +18,7 @@ transport does not supply is null: crypto trades have no `Tape`, and stocks have
   key maps (wire key, SDK field, or CSV header to column) for the equity form: the stocks and
   options WebSocket frames, the SDK REST models, and the documented flat-file headers. Other
   asset classes declare their own key maps, and the units of their timestamp fields (crypto
-  `r` is milliseconds), in their `DatasetSpec` (P4 and P6).
+  `r` is milliseconds), in their `DatasetSpec`.
 
 Timestamp *units* are not decided here: a field becomes an `Instant` column because its dataset
 declares a unit for it (`_timeunits.py`), and the transports convert values to nanoseconds

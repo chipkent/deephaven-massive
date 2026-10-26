@@ -14,9 +14,10 @@ and each verb returns a Deephaven `Table` of a particular shape:
 | `HistoryLatestQuery`       | `history()` and `fetch()` (the previous session's bar)    |
 
 A verb that cannot work for a dataset does not exist on its query class, so tab completion is the
-contract. Verbs validate their parameter *values* synchronously on the calling thread and raise
-`ValueError`; every verb also raises `ValueError` on a Deephaven update-graph thread (for example
-inside a table listener), because verbs create tables and take the session's registry lock.
+contract. Verbs validate their parameters synchronously on the calling thread: a wrong type raises
+`TypeError` and an invalid value raises `ValueError`. Every verb also raises `ValueError` on a
+Deephaven update-graph thread (for example inside a table listener), because verbs create tables and
+take the session's registry lock.
 
 The verbs delegate the transport work to three interfaces, one per transport, which the session
 provides through its factory hooks: `RestTransport` (`fetch`, `poll`, REST `history`),

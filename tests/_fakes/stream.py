@@ -1,4 +1,4 @@
-"""A stand-in for the WebSocket transport's stream factory, for the P2 liveness tests.
+"""A stand-in for the WebSocket transport's stream factory, for the liveness tests.
 
 Each stream is a bare `table_publisher` blink table created in its own stream scope, exactly as
 the real transport creates one, without any network. The fake records every stream it opens and

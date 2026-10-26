@@ -166,7 +166,7 @@ def make_csv_gz() -> Callable[[str], bytes]:
     return compress
 
 
-# --- Session fixtures (P2) ---------------------------------------------------------------------
+# --- Session fixtures --------------------------------------------------------------------------
 
 
 @pytest.fixture
