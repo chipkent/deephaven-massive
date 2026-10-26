@@ -91,24 +91,21 @@ def loads(data: bytes | str) -> object:
     Call it once per REST body or WebSocket text frame; the caller then checks the shape of
     the result (an envelope object, a list of events) itself. Safe from any thread.
 
+    Malformed input raises `ValueError`: `data` that is not UTF-8, is not a single JSON
+    document, holds `NaN` or `Infinity`, or holds a number too large for a double. The
+    concrete class is `UnicodeDecodeError`, `json.JSONDecodeError`, or
+    `orjson.JSONDecodeError` (a subclass of `json.JSONDecodeError`), raised by the backend
+    itself; callers catch `ValueError`. Nesting depth is not limited here: orjson stops at its
+    own fixed depth, and the standard library recurses as deep as the interpreter allows.
+
     Args:
         data: The document, as UTF-8 bytes or as text.
 
     Returns:
         The decoded value: a `dict`, `list`, `str`, `int`, `float`, `bool`, or `None`.
-
-    Raises:
-        ValueError: If `data` is not UTF-8, is not a single JSON document, holds `NaN` or
-            `Infinity`, or holds a number too large for a double. The concrete class is
-            `UnicodeDecodeError`, `json.JSONDecodeError`, or `orjson.JSONDecodeError` (a
-            subclass of `json.JSONDecodeError`); callers catch `ValueError`.
     """
     if _orjson is not None:
         value: object = _orjson.loads(data)
         return value
     text = data.decode("utf-8") if isinstance(data, bytes) else data
-    try:
-        return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
-    except RecursionError as error:
-        # orjson rejects deep nesting with a JSONDecodeError; match it.
-        raise ValueError("JSON is nested too deeply") from error
+    return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
