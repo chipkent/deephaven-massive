@@ -133,10 +133,12 @@ def test_stdlib_reports_a_recursion_error_as_value_error(monkeypatch: pytest.Mon
 
 
 def test_stdlib_rejects_deep_nesting_in_a_fresh_interpreter() -> None:
-    # Deep nesting recurses until Python's stack guard trips. On a thread whose stack the
-    # embedded JVM also manages, that guard can misjudge the stack and the process crashes,
-    # so the real recursion runs in an interpreter without a JVM. The script is a literal and
-    # the document travels on stdin.
+    # Deep nesting recurses on the C stack. Where the stack is too small for the document,
+    # Python's stack guard raises RecursionError; where it is large enough (Linux, 3.14), the
+    # scanner reaches the end of input instead. Either way the caller sees a ValueError. On a
+    # thread whose stack the embedded JVM also manages, the guard can misjudge the stack and
+    # crash the process, so the recursion runs in an interpreter without a JVM. The script is
+    # a literal and the document travels on stdin.
     result = subprocess.run(
         [
             sys.executable,
@@ -147,15 +149,15 @@ def test_stdlib_rejects_deep_nesting_in_a_fresh_interpreter() -> None:
                 "codec._orjson = None\n"
                 "try:\n"
                 "    codec.loads(sys.stdin.buffer.read())\n"
-                "except ValueError as error:\n"
-                "    print(type(error.__cause__).__name__)\n"
+                "except ValueError:\n"
+                "    print('rejected')\n"
             ),
         ],
         input=_TOO_DEEP,
         capture_output=True,
         check=True,
     )
-    assert result.stdout.strip() == b"RecursionError"
+    assert result.stdout.strip() == b"rejected"
 
 
 def test_orjson_rejects_deep_nesting(monkeypatch: pytest.MonkeyPatch) -> None:
