@@ -1,4 +1,4 @@
-"""Tests for the public surface of `deephaven_massive` (DESIGN § 3)."""
+"""Tests for the public surface of `deephaven_massive`."""
 
 import importlib.metadata
 import types
@@ -6,7 +6,7 @@ from enum import StrEnum
 
 import deephaven_massive as dm
 
-DESIGN_EXPORTS = [
+EXPECTED_EXPORTS = [
     "MassiveSession",
     "MassiveConfig",
     "MassiveError",
@@ -35,9 +35,9 @@ def test_version_is_the_installed_distribution_version() -> None:
     assert dm.__version__ == importlib.metadata.version("deephaven-massive")
 
 
-def test_all_is_exactly_the_design_list() -> None:
-    assert len(DESIGN_EXPORTS) == 21
-    assert sorted(dm.__all__) == sorted(DESIGN_EXPORTS)
+def test_all_is_exactly_the_public_api() -> None:
+    assert len(EXPECTED_EXPORTS) == 21
+    assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 
 def test_every_export_is_defined() -> None:

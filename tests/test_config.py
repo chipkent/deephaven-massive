@@ -1,4 +1,4 @@
-"""Tests for `MassiveConfig` and the JSON codec choice (DESIGN § 5, § 23 item 12)."""
+"""Tests for `MassiveConfig` and the JSON codec choice."""
 
 import dataclasses
 import inspect

@@ -13,8 +13,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src" / "deephaven_massive"
 _TESTS = _ROOT / "tests"
 
-# Test files that mirror no source module. A new entry needs owner approval and a change to the
-# test-layout section of the design.
+# Test files that mirror no source module. A new entry needs owner approval.
 APPROVED_EXCEPTIONS = frozenset(
     {
         PurePosixPath("conftest.py"),  # embedded JVM and fixtures
@@ -27,8 +26,8 @@ APPROVED_EXCEPTIONS = frozenset(
 # The shared fake servers, an approved package that the mirror rule ignores entirely.
 FAKES_DIR = PurePosixPath("_fakes")
 
-# Paths relative to the repository root that predate the rework and are not mirrored.
-LEGACY_PATHS = (  # LEGACY-EXCLUSION: emptied and deleted in P7
+# Paths relative to the repository root that hold legacy code and are not mirrored.
+LEGACY_PATHS = (  # LEGACY-EXCLUSION: legacy code, to be removed
     PurePosixPath("src/deephaven_massive/engine"),
     PurePosixPath("src/deephaven_massive/domains"),
     PurePosixPath("src/deephaven_massive/schemas"),
@@ -114,7 +113,7 @@ def test_unit_test_of_maps_live_tests_to_their_mirror(test_file: str, expected: 
 
 def test_every_module_below_the_package_is_private() -> None:
     # The first path component below `deephaven_massive/` carries a leading underscore, so the
-    # public surface is `__init__.py` alone (DESIGN § 4.1).
+    # public surface is `__init__.py` alone.
     public = [
         str(module)
         for module in _source_modules()

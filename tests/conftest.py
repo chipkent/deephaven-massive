@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from _fakes.stream import FakeStreamTransport
     from deephaven_massive import MassiveSession
 
-collect_ignore_glob = ["legacy/*"]  # LEGACY-EXCLUSION: legacy tests, deleted in P7
+collect_ignore_glob = ["legacy/*"]  # LEGACY-EXCLUSION: legacy tests, to be removed
 
 _DATA_DIR = Path(__file__).parent / "data"
 
@@ -139,7 +139,8 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
 def load_fixture() -> Callable[[str, str], bytes]:
     """Return a function that reads a payload fixture from `tests/data/<owner>/<name>`.
 
-    Each work package keeps its payloads under its own `owner` directory.
+    `owner` names the module or transport the payloads belong to, so each owner's fixtures
+    stay together.
 
     Returns:
         A function mapping `(owner, name)` to the fixture file's bytes.
@@ -165,7 +166,7 @@ def make_csv_gz() -> Callable[[str], bytes]:
     return compress
 
 
-# --- Session fixtures (P2) ---------------------------------------------------------------------
+# --- Session fixtures --------------------------------------------------------------------------
 
 
 @pytest.fixture

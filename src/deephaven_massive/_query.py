@@ -2,7 +2,7 @@
 
 A dataset method such as `m.stocks.trades(["AAPL"])` returns a *query*: an immutable,
 hashable description of what to fetch. Nothing touches the network until a *verb* is called,
-and each verb returns a Deephaven `Table` of a particular shape (DESIGN § 7):
+and each verb returns a Deephaven `Table` of a particular shape:
 
 | Class                      | Verbs                                                     |
 |----------------------------|-----------------------------------------------------------|
@@ -13,11 +13,11 @@ and each verb returns a Deephaven `Table` of a particular shape (DESIGN § 7):
 | `StreamHistoryLatestQuery` | the above and `fetch()` (the "last" endpoint)             |
 | `HistoryLatestQuery`       | `history()` and `fetch()` (the previous session's bar)    |
 
-A verb that cannot work for a dataset does not exist on its query class, so tab completion is
-the contract. Verbs validate their parameter *values* synchronously on the calling thread and
-raise `ValueError` (DESIGN § 7.2); every verb also raises `ValueError` on a Deephaven
-update-graph thread (for example inside a table listener), because verbs create tables and take
-the session's registry lock.
+A verb that cannot work for a dataset does not exist on its query class, so tab completion is the
+contract. Verbs validate their parameters synchronously on the calling thread: a wrong type raises
+`TypeError` and an invalid value raises `ValueError`. Every verb also raises `ValueError` on a
+Deephaven update-graph thread (for example inside a table listener), because verbs create tables and
+take the session's registry lock.
 
 The verbs delegate the transport work to three interfaces, one per transport, which the session
 provides through its factory hooks: `RestTransport` (`fetch`, `poll`, REST `history`),
@@ -182,7 +182,7 @@ def _render(value: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class HostDecision:
-    """Which WebSocket host serves a (asset class, channel family), and why (DESIGN § 13.2).
+    """Which WebSocket host serves a (asset class, channel family), and why.
 
     Returned by `RestTransport.resolve_host`; immutable, so it can be cached and shared between
     threads.
@@ -207,7 +207,7 @@ class RestTransport(Protocol):
     """
 
     def resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
-        """Decide the WebSocket host of a (class, family), once per session (DESIGN § 13.2).
+        """Decide the WebSocket host of a (class, family), once per session.
 
         Called by the WebSocket transport on the caller thread at the first stream verb for the
         pair. The first call may make one REST request; the decision is then cached for the
@@ -265,13 +265,13 @@ class StreamTransport(Protocol):
         """Create a new stream: its publisher and blink table in a new stream scope.
 
         Runs on the caller thread; may resolve the host with one REST call. Must not hold the
-        session's registry lock while calling Deephaven. The session has already registered
-        the stream under `stream_id` (DESIGN § 6.1), so `SessionCore.fail_stream(stream_id,
-        ...)` and `SessionCore.stream_shut_down(stream_id)` may be called from the moment the
-        publisher exists, even before this method returns. The publisher is named
-        `massive.{dataset}#{stream_id}`, and the blink table's `on_shutdown_callback` must
-        first call `SessionCore.stream_shut_down(stream_id)` and only then release the stream's
-        topics. The returned handle carries `stream_id`.
+        session's registry lock while calling Deephaven. The session has already registered the
+        stream under `stream_id`, so `SessionCore.fail_stream(stream_id, ...)` and
+        `SessionCore.stream_shut_down(stream_id)` may be called from the moment the publisher
+        exists, even before this method returns. The publisher is named
+        `massive.{dataset}#{stream_id}`, and the blink table's `on_shutdown_callback` must first
+        call `SessionCore.stream_shut_down(stream_id)` and only then release the stream's topics.
+        The returned handle carries `stream_id`.
 
         Args:
             spec: The dataset.
@@ -335,7 +335,7 @@ def _interval(value: object) -> timedelta:
 
 
 def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
-    """Reject `dm.ALL` for a per-ticker `fetch()` endpoint (DESIGN § 7.2).
+    """Reject `dm.ALL` for a per-ticker `fetch()` endpoint.
 
     Args:
         spec: The dataset.
@@ -380,8 +380,8 @@ class QueryBase:
 class Query(QueryBase):
     """A REST list or snapshot dataset: a static `fetch()` or a live `poll()`.
 
-    The namespaces' dataset methods return these queries once the datasets are declared
-    (PLAN P6); until then no query can be built, so there is no example here yet.
+    No namespace declares a dataset of this kind yet, so no query can be built and there is no
+    example here yet.
     """
 
     __slots__ = ()
@@ -438,8 +438,8 @@ class StreamQuery(QueryBase):
     returns a new, distinct table held in its own liveness scope. The stream stays subscribed
     while any result, or any table derived from one, is alive.
 
-    The namespaces' dataset methods return these queries once the datasets are declared
-    (PLAN P6); until then no query can be built, so there is no example here yet.
+    No namespace declares a dataset of this kind yet, so no query can be built and there is no
+    example here yet.
     """
 
     __slots__ = ()
@@ -598,8 +598,8 @@ class StreamQuery(QueryBase):
 class HistoryQuery(QueryBase):
     """A dataset with a historical retrieval path: `history(start, end)`.
 
-    The namespaces' dataset methods return these queries once the datasets are declared
-    (PLAN P6); until then no query can be built, so there is no example here yet.
+    No namespace declares a dataset of this kind yet, so no query can be built and there is no
+    example here yet.
     """
 
     __slots__ = ()
@@ -669,8 +669,8 @@ class HistoryQuery(QueryBase):
 class StreamHistoryQuery(StreamQuery, HistoryQuery):
     """A WebSocket dataset that also has history: the stream verbs plus `history()`.
 
-    The namespaces' dataset methods return these queries once the datasets are declared
-    (PLAN P6); until then no query can be built, so there is no example here yet.
+    No namespace declares a dataset of this kind yet, so no query can be built and there is no
+    example here yet.
     """
 
     __slots__ = ()
@@ -679,8 +679,8 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
 class StreamHistoryLatestQuery(StreamHistoryQuery):
     """A stream-and-history dataset with a REST "last" endpoint, served by `fetch()`.
 
-    The namespaces' dataset methods return these queries once the datasets are declared
-    (PLAN P6); until then no query can be built, so there is no example here yet.
+    No namespace declares a dataset of this kind yet, so no query can be built and there is no
+    example here yet.
     """
 
     __slots__ = ()
@@ -707,8 +707,8 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
 class HistoryLatestQuery(HistoryQuery):
     """Daily bars: `history()` plus `fetch()` of the previous completed session's bar.
 
-    The namespaces' dataset methods return these queries once the datasets are declared
-    (PLAN P6); until then no query can be built, so there is no example here yet.
+    No namespace declares a dataset of this kind yet, so no query can be built and there is no
+    example here yet.
     """
 
     __slots__ = ()

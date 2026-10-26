@@ -68,7 +68,7 @@ exclude = [
     "plans",
     ".pre-commit-config.yaml",
     "AGENTS.md",
-    "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, deleted in P7
+    "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, to be removed
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -83,10 +83,10 @@ target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
 extend-exclude = [
-    "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, deleted in P7
+    "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
+    "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
+    "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
+    "tests/legacy",  # LEGACY-EXCLUSION: legacy tests, to be removed
 ]
 
 [tool.ruff.lint]
@@ -140,7 +140,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-# Fixtures are the only interface tests/conftest.py offers to test modules (DESIGN § 4.2).
+# Fixtures are the only interface tests/conftest.py offers to test modules.
 "conftest".msg = "Request fixtures by name; never import conftest"
 
 [tool.ruff.lint.mccabe]
@@ -180,8 +180,8 @@ files = ["src", "tests"]
 mypy_path = ["src", "tests"]
 explicit_package_bases = true
 exclude = [
-    '^src/deephaven_massive/(engine|domains|schemas)/',  # LEGACY-EXCLUSION: deleted in P7
-    '^tests/legacy/',  # LEGACY-EXCLUSION: legacy tests, deleted in P7
+    '^src/deephaven_massive/(engine|domains|schemas)/',  # LEGACY-EXCLUSION: legacy, to be removed
+    '^tests/legacy/',  # LEGACY-EXCLUSION: legacy tests, to be removed
 ]
 
 [[tool.mypy.overrides]]
@@ -197,9 +197,9 @@ ignore_missing_imports = true
 [tool.pyright]
 include = ["src"]
 exclude = [
-    "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "src/deephaven_massive/engine",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
+    "src/deephaven_massive/domains",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
+    "src/deephaven_massive/schemas",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
 ]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"
@@ -225,9 +225,9 @@ faulthandler_exit_on_timeout = true
 source = ["deephaven_massive"]
 branch = true
 omit = [
-    "*/deephaven_massive/engine/*",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "*/deephaven_massive/domains/*",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
-    "*/deephaven_massive/schemas/*",  # LEGACY-EXCLUSION: legacy subpackage, deleted in P7
+    "*/deephaven_massive/engine/*",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
+    "*/deephaven_massive/domains/*",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
+    "*/deephaven_massive/schemas/*",  # LEGACY-EXCLUSION: legacy subpackage, to be removed
 ]
 
 [tool.coverage.report]

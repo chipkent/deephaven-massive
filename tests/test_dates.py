@@ -1,4 +1,4 @@
-"""Tests for date parsing and the day rules (DESIGN § 12, § 16)."""
+"""Tests for date parsing and the day rules."""
 
 import re
 from datetime import UTC, date, datetime, time, timedelta
@@ -53,7 +53,7 @@ def test_naive_times_are_rejected(value: str | datetime) -> None:
         parse_date_like(value, "start")
 
 
-def test_the_naive_time_message_matches_the_design() -> None:
+def test_the_naive_time_message_names_the_parameter_and_the_fix() -> None:
     with pytest.raises(ValueError, match="needs a timezone") as caught:
         parse_date_like(datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None), "start")
     assert str(caught.value) == (

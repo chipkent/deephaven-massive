@@ -8,8 +8,8 @@
 - `DateLike` and `FilterValue` type the time-axis bounds and the `filters` mapping.
 - `override` marks the few dunder methods the library overrides, on every supported Python.
 - `StreamSpan`, `DaySpan`, and `FuturesSpan` are the `Literal` timespan sets the typed `bars()`
-  overloads use to pick a query class statically (DESIGN § 7.1). They are `Literal`s of enum
-  members, never of strings.
+  overloads use to pick a query class statically. They are `Literal`s of enum members, never of
+  strings.
 
 The aliases are importable from this private module for annotations; users never need to
 construct anything here except through `dm.ALL`.
@@ -104,10 +104,9 @@ column; streams follow its rows as they are added and removed, and polls re-read
 DateLike: TypeAlias = str | date | datetime
 """A time-axis bound: an ISO-8601 string, a `date`, or a timezone-aware `datetime`.
 
-A naive `datetime`, or an ISO string with a time but no UTC offset, raises
-a `ValueError` that names the parameter and the fix ("needs a timezone: pass an aware
-datetime or a date"). A date-only value is a whole day in the asset class's day
-zone (DESIGN § 12).
+A naive `datetime`, or an ISO string with a time but no UTC offset, raises a `ValueError` that names
+the parameter and the fix ("needs a timezone: pass an aware datetime or a date"). A date-only value
+is a whole day in the asset class's day zone.
 """
 
 FilterValue: TypeAlias = str | int | float | bool | date | datetime | Sequence[str]

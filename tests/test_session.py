@@ -1,4 +1,4 @@
-"""Tests for `MassiveSession` and `SessionCore` (DESIGN § 6, § 17, § 18)."""
+"""Tests for `MassiveSession` and `SessionCore`."""
 
 from __future__ import annotations
 
@@ -310,7 +310,7 @@ def test_all_and_reactive_symbols_in_stream_rows(
     massive_session.release(watch)
 
 
-# --- Opening a stream: registered first, one open per key (DESIGN § 6.1) ------------------
+# --- Opening a stream: registered first, one open per key ------------------------------------
 
 
 class _Gated:
@@ -692,14 +692,14 @@ def test_stream_ids_come_from_one_allocator(
     massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
 ) -> None:
     core = massive_session._core
-    assert core.next_stream_id() == 1  # a poll() row's id, as P3 will mint it
+    assert core.next_stream_id() == 1  # the id a poll() row takes
     result = stream_query(massive_session).blink()
     assert list(core._streams) == [2]  # the WebSocket stream never reuses it
     assert core.next_stream_id() == 3
     massive_session.release(result)
 
 
-# --- Record lifetime: holds and the shutdown callback, in any order (DESIGN § 6.1) ----------
+# --- Record lifetime: holds and the shutdown callback, in any order --------------------------
 
 
 def test_a_failure_that_shuts_the_stream_down_while_held(
@@ -1290,11 +1290,11 @@ def test_a_result_that_outlives_its_session_is_still_released() -> None:
 
 def test_an_unclosed_core_is_collected_by_the_cyclic_collector() -> None:
     # Each result record's owner callback refers back to the core (record -> partial -> core
-    # -> results -> record), so an unclosed core is collected by the cyclic collector, not
-    # by reference counting (DESIGN § 6). The fake is imported directly, not taken from the
-    # `fake_streams` fixture: that fixture is bound to the fixture session, whose core the
-    # fixture and monkeypatch hold until teardown, and this test must own the only reference
-    # to the core it watches being collected.
+    # -> results -> record), so an unclosed core is collected by the cyclic collector, not by
+    # reference counting. The fake is imported directly, not taken from the `fake_streams`
+    # fixture: that fixture is bound to the fixture session, whose core the fixture and
+    # monkeypatch hold until teardown, and this test must own the only reference to the core it
+    # watches being collected.
     fakes = importlib.import_module("_fakes.stream")
     m = dm.MassiveSession(dm.MassiveConfig(api_key="cyclic-core"))
     core = m._core
@@ -1436,7 +1436,7 @@ def test_a_failure_after_the_stream_left_the_registry_is_logged(
 def test_verbs_work_from_a_thread_without_an_execution_context(
     massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
 ) -> None:
-    # The library enters the session's context itself (DESIGN § 18); the caller need not.
+    # The library enters the session's context itself; the caller need not.
     q = stream_query(massive_session)
     reactive = stream_query(massive_session, new_table([string_col("Symbol", ["AAPL"])]))
     with ThreadPoolExecutor(1) as pool:  # a plain thread: no execution context of its own
@@ -1458,7 +1458,7 @@ def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
     drain: Callable[[], None],
 ) -> None:
     # blink() returns the failed table; the other shapes raise Deephaven's DHError while
-    # deriving from it (DESIGN § 6.1), and the hold is released either way.
+    # deriving from it, and the hold is released either way.
     core = massive_session._core
 
     class FailingDuringOpen:
@@ -1493,7 +1493,7 @@ def test_a_session_start_logs_the_json_codec_once(
     ]
 
 
-# --- Interrupt windows inside the verb's own bookkeeping (DESIGN § 6.1) ------------------------
+# --- Interrupt windows inside the verb's own bookkeeping -------------------------------------
 
 
 def _cleanup_loop_line() -> int:

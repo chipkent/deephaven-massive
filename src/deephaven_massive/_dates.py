@@ -1,4 +1,4 @@
-"""Date parsing and the day rules of `history()` and the time-axis filters (DESIGN § 12).
+"""Date parsing and the day rules of `history()` and the time-axis filters.
 
 Every time bound a user passes is a `DateLike`: an ISO-8601 string, a `date`, or a
 timezone-aware `datetime`. A bound with a time of day but no timezone is ambiguous across the
@@ -117,7 +117,7 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
 
 
 def require_aware(name: str, raw: object, moment: datetime) -> None:
-    """Reject a time without a timezone (DESIGN § 11).
+    """Reject a time without a timezone.
 
     Massive's day boundaries depend on the asset class's zone, so a naive time cannot be
     placed on the time axis. Shared by the time bounds and the `filters` and parameter checks,
@@ -301,7 +301,7 @@ def futures_sessions(start: date, end: date) -> FuturesSessions:
 
 
 def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
-    """Return the instant a day's flat file counts as published (DESIGN § 16).
+    """Return the instant a day's flat file counts as published.
 
     That is the first `cutoff` in New York strictly after the start of the next day,
     `partition + 1 day`, in the class's day zone. For a New York class it is the cutoff on the
@@ -326,7 +326,7 @@ def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
 
 
 def flat_file_published(partition: date, *, now: datetime, zone: tzinfo, cutoff: time) -> bool:
-    """Tell whether a day's flat file should exist yet (DESIGN § 16).
+    """Tell whether a day's flat file should exist yet.
 
     Files land "by approximately 11:00 AM ET the following day", so a partition counts as
     published once `now` reaches `publish_time(partition)`. Full instants are compared, which

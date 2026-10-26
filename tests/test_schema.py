@@ -1,4 +1,4 @@
-"""Tests for the schema registry, SDK-model flattening, and the tick schemas (DESIGN § 2, § 11)."""
+"""Tests for the schema registry, SDK-model flattening, and the tick schemas."""
 
 import dataclasses
 import inspect

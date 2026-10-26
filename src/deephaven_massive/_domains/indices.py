@@ -1,4 +1,4 @@
-"""The `m.indices` namespace: indices (DESIGN § 8.4).
+"""The `m.indices` namespace: indices.
 
 Datasets: index values, bars, snapshots, and daily open/close.
 
@@ -7,8 +7,7 @@ nothing touches the network until a verb is called on the query. This module own
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the catalog by
 `_catalog.datasets()`.
 
-Status: the datasets are declared by the namespace's own work package. Until it lands,
-`DATASETS` is empty and `_Indices` has no dataset methods.
+Status: no datasets are declared yet. `DATASETS` is empty and `_Indices` has no dataset methods.
 """
 
 from __future__ import annotations

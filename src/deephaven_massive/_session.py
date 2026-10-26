@@ -1,16 +1,16 @@
 """`MassiveSession`, the user's entry point, and `SessionCore`, its internal engine.
 
-`MassiveSession` is what users create: it exposes the dataset namespaces (`m.stocks`,
-`m.options`, ...), the diagnostics tables, and the lifecycle verbs `release()` and `close()`
-(DESIGN § 6), and nothing else. It delegates everything stateful to a `SessionCore`, which
-queries and namespaces share. The core owns:
+`MassiveSession` is what users create: it exposes the dataset namespaces (`m.stocks`, `m.options`,
+...), the diagnostics tables, and the lifecycle verbs `release()` and `close()`, and nothing else.
+It delegates everything stateful to a `SessionCore`, which queries and namespaces share. The core
+owns:
 
 - the session's label (`MassiveSession #1`, a per-process counter), used in its `repr`, the
   same-key WARNING, and error messages;
 - the configuration and the captured Deephaven `ExecutionContext`, entered on every library
   thread;
-- `registry_lock`, the one leaf lock that guards every session registry (DESIGN § 18): no
-  Deephaven call, network call, or blocking wait happens while it is held;
+- `registry_lock`, the one leaf lock that guards every session registry: no Deephaven call, network
+  call, or blocking wait happens while it is held;
 - the stream registry: every stream from just before it opens until its holds are released
   and its blink table has shut down, each with its diagnostics row (which carries its count of
   library-held results), and the key index that maps each `(dataset, channel, symbols)` to the
@@ -19,9 +19,9 @@ queries and namespaces share. The core owns:
   the order the registry changed;
 - the result registry and the reaper thread (`_liveness.py`);
 - the diagnostics tables and their writer thread (`_diagnostics.py`);
-- one factory hook per transport (`rest_transport`, `stream_transport`,
-  `flat_file_transport`), which the transport work packages fill in. Until then each raises
-  `NotImplementedError`, so the verbs that need it do too.
+- one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`). No
+  transport is implemented yet, so each raises `NotImplementedError`, and so do the verbs that need
+  it.
 
 Lock order: the update-graph (UG) lock, then `registry_lock`. A stream is registered under
 `registry_lock` before it opens (with a session-minted id), then opened with no lock held; a
@@ -168,7 +168,7 @@ _ON_UPDATE_GRAPH: Final = (
     "(for example inside a table listener) or while holding the update-graph lock"
 )
 """The `ValueError` text for a call on an update-graph thread: verbs create tables and take the
-registry lock, which would deadlock against the update cycle there (DESIGN § 18.3)."""
+registry lock, which would deadlock against the update cycle there."""
 
 
 def _next_label() -> str:
@@ -368,7 +368,7 @@ class SessionCore:
         """The guard every verb runs first: this is not a UG thread, and the session is open.
 
         The thread is checked first, so a verb on an update-graph thread raises `ValueError`
-        whether or not the session is closed (DESIGN § 6).
+        whether or not the session is closed.
 
         Raises:
             ValueError: On an update-graph thread, or while holding the update-graph lock.
@@ -1066,7 +1066,8 @@ class MassiveSession:
         `MassiveError` (see `SessionCore.require_open`).
 
         Returns:
-            The keyed `connections` table (columns in DESIGN § 17).
+            The `connections` table, keyed by `Transport`, `AssetClass`, and `Family`;
+            its columns are `_diagnostics.CONNECTIONS`.
         """
         self._core.require_open()
         return self._core.diagnostics.connections
@@ -1079,7 +1080,8 @@ class MassiveSession:
         raises `MassiveError`.
 
         Returns:
-            The keyed `streams` table (columns in DESIGN § 17).
+            The `streams` table, keyed by `StreamId`; its columns are
+            `_diagnostics.STREAMS`.
         """
         self._core.require_open()
         return self._core.diagnostics.streams

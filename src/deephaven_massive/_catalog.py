@@ -151,7 +151,7 @@ class DatasetSpec:
             (economy, most partner datasets).
         is_bars: True for a `bars()` dataset: its `channels` and `flat_file_prefixes` are keyed
             by `Timespan`, and the factory picks the query class from the timespan and
-            multiplier (DESIGN § 7.1). False datasets key them by None.
+            multiplier. False datasets key them by None.
         schema: The dataset's union schema. Leave it out for a REST dataset with a
             `rest_model`: the schema is then derived from the model at construction
             (`_schema.model_schema`, with the dataset's REST time units and `overrides`), so
@@ -342,7 +342,7 @@ _KINDS: Final[Mapping[ParamKind, tuple[type, ...]]] = {
 
 
 def check_filters(spec: DatasetSpec, filters: Mapping[str, object]) -> None:
-    """Validate a `filters` mapping against the dataset's SDK parameters (DESIGN § 9).
+    """Validate a `filters` mapping against the dataset's SDK parameters.
 
     Runs synchronously when the query is built. The parameter table is generated from the SDK
     (`SDK_PARAMS`); until it has been generated it is empty and the check accepts every key.

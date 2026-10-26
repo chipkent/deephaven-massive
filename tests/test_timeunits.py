@@ -1,4 +1,4 @@
-"""Tests for the declared timestamp units and their conversions (DESIGN § 12, § 23 items 1-2)."""
+"""Tests for the declared timestamp units and their conversions."""
 
 import logging
 import re
@@ -185,7 +185,7 @@ def test_values_beyond_64_bits_are_rejected() -> None:
 
 
 def test_fmv_threshold_is_ten_to_the_seventeenth() -> None:
-    assert FMV_NS_THRESHOLD == 10**17  # DESIGN § 12
+    assert FMV_NS_THRESHOLD == 10**17
 
 
 def test_unverified_range_boundaries() -> None:

@@ -33,12 +33,10 @@ Public API:
       `Timespan("minute")`.
 
 Status:
-    The library is being rebuilt from the specification in `plans/rework/DESIGN.md`, in the
-    work packages listed in `plans/rework/PLAN.md`. The public surface, configuration,
-    session lifecycle, and query classes are in place; the REST, WebSocket, and flat-file
-    transports and the datasets of each namespace arrive in later packages. Until a transport
-    lands, the verbs that need it raise `NotImplementedError`. Read `DESIGN.md` for the full
-    API and its semantics.
+    The library is under active development. The public surface, configuration, session
+    lifecycle, and query classes are in place; the REST, WebSocket, and flat-file transports
+    and the datasets of each namespace are not implemented yet, so the verbs that need a
+    transport raise `NotImplementedError`.
 
 Example:
     A session with a pinned stocks host, inside a Deephaven worker::

@@ -1,4 +1,4 @@
-"""Tests for the query classes and the verbs' synchronous validation (DESIGN § 7)."""
+"""Tests for the query classes and the verbs' synchronous validation."""
 
 import threading
 from collections.abc import Callable

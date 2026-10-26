@@ -1,4 +1,4 @@
-"""Tests for the shared dataset factory (DESIGN § 7.1, § 9, § 10)."""
+"""Tests for the shared dataset factory."""
 
 from datetime import UTC, date, datetime
 from typing import Any, cast
@@ -136,7 +136,7 @@ def test_limit_is_a_row_cap_not_an_sdk_parameter(massive_session: dm.MassiveSess
 def test_a_dataset_without_a_class_takes_any_class_by_prefix(
     massive_session: dm.MassiveSession,
 ) -> None:
-    # Indicators, reference data, and the unified snapshot span asset classes (DESIGN § 8.8).
+    # Indicators, reference data, and the unified snapshot span asset classes.
     q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "i:spx", "aapl", "C:EURUSD"])
     assert q._request.symbols == ("AAPL", "C:EURUSD", "I:SPX", "X:BTCUSD")
 
