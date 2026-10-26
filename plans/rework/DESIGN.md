@@ -887,10 +887,18 @@ named `reference.snapshots` and is declared in `_namespaces/reference.py` with
 
 ### 8.12 Excluded endpoints
 
-Each exclusion is an entry `(kind, item, reason)` of `EXCLUSIONS` in
-`_massive/refresh/exclusions.py`, the single list for REST paths, WebSocket channels, and
-flat-file prefixes. An entry that names an item the snapshot lacks fails the refresh as stale
-([section 19.4](#194-generated-schemas)).
+Excluded items fall into two lists.
+
+- **Executable exclusions** are entries `(kind, item, reason)` of `EXCLUSIONS` in
+  `_massive/refresh/exclusions.py`, the single list for REST paths, WebSocket channels, and
+  flat-file prefixes. Each names an item present in a vendor source at the pinned snapshot
+  (the OpenAPI spec, `websocket.json`, `llms.txt`, or the flat-file pages). An entry that names
+  an item the snapshot lacks fails the refresh as stale (G4,
+  [section 19.4](#194-generated-schemas)).
+- **Documentation-only exclusions** name endpoints that never existed or are absent from every
+  vendor source. They are recorded here so nobody re-adds them, and never appear in
+  `EXCLUSIONS`. A row of the first table that the snapshot shows absent from every vendor
+  source moves to the second.
 
 | Endpoint | Reason |
 |---|---|
@@ -903,19 +911,27 @@ flat-file prefixes. An entry that names an item the snapshot lacks fails the ref
 | WebSocket `/futures/{venue}` | Not documented: the futures WebSocket pages list `/futures` only. |
 | `/v1/historic/*`, `/v2/ticks/*` | Deprecated 2022; replaced by `/v3/trades` and `/v3/quotes`. |
 | Form 5, per-asset `/v1/exchanges`, `/options/v3/*`, `/v1/reference/ipos`, `/stocks/dev/*`, `vX_0` paths, and every path marked `x-polygon-draft` or `x-polygon-ignore` | Present only in the OpenAPI spec; not announced or documented in `llms.txt`. |
-| `/benzinga/v1/transcripts` | Never existed. |
 | Single-ticker v2 snapshots `/v2/snapshot/.../tickers/{t}` | Covered by `snapshots(symbols)` with the `tickers` filter. |
 | `/v3/snapshot/options/{u}/{o}` | Covered by `m.options.snapshots`; identical fields. |
 
+Documentation only:
+
+| Endpoint | Reason |
+|---|---|
+| `/benzinga/v1/transcripts` | Never existed. |
+
 **Coverage.** Everything documented is generated or excluded, and everything generated is
-used or explicitly undeclared:
+used or listed as still to be declared:
 
 - **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored)**, tested against the
   pinned snapshot in `tests/massive/refresh/test_generate.py`;
-- **generated = used ⊎ undeclared**, tested in `tests/test_catalog.py`, where the undeclared
-  items are listed, one namespace per file, in `tests/data/catalog/undeclared/<namespace>.txt`,
-  and the files are pairwise disjoint. A namespace's dataset package deletes its file; when all
-  are gone, generated = used.
+- **generated ⊆ used ∪ undeclared**, tested in `tests/test_catalog.py`. Every generated item
+  is used by a declared dataset or listed in some undeclared file. The file
+  `tests/data/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
+  declare, so a shared source (the aggregate range path, `/prev`) appears in the file of every
+  namespace that will use it, and the files may overlap. A namespace's file must not list a
+  source that namespace already uses. Each namespace's dataset package deletes only its own
+  file, so those packages land in any order; when all are gone, generated = used.
 
 `/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}` are ordinary
 generated paths: every path reaches the same REST client in the same way.
@@ -1845,7 +1861,7 @@ refresh/             build time only; excluded from the wheel; may import any of
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
   overrides.py       NAMES, KINDS, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
                      TRANSPORT_ONLY, RESULT_KEYS, VENUES
-  exclusions.py      EXCLUSIONS (kind, item, reason), exactly section 8.12
+  exclusions.py      EXCLUSIONS (kind, item, reason), the executable rows of section 8.12
   docs.py            flat-file "Columns" tables, overview prefix tables, llms.txt
   generate.py        snapshot -> spec/*.json: flatten, representation rules, type lattice, names, gates
   fetch.py           download and store canonically, manifest.json
@@ -2150,7 +2166,7 @@ names a source or field the snapshot lacks fails the refresh as stale (G4).
 | `TYPE_FIXES` | `overrides.py` | vendor type **errors** only; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | flat-file `conditions` `integer` → `int-array`; forex `x` (a quoted string) → `long`; crypto `XT` `i` (`integer`) → `string`; snapshot `lastQuote` sizes → `double` |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, column): reason}`: columns legitimately on one transport | `AccumulatedVolume` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results` | `/v1/last/crypto` → `last` |
-| `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, exactly section 8.12 | `/v1/summaries` |
+| `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, the executable rows of section 8.12 | `/v1/summaries` |
 
 **The naming rule.** A field's column is derived by splitting its wire path into segments and
 dropping the result key, translating each short key through the lexicon of its shape, applying
@@ -2248,8 +2264,8 @@ role paths under the same join.
   parameter of its `RestPath`;
 - **C6:** every path, channel, and prefix a dataset uses is generated; a miss names the dataset
   and says "deprecated or removed in the snapshot";
-- **C7:** generated = used ⊎ undeclared ([section 8.12](#812-excluded-endpoints)), and the
-  undeclared files are pairwise disjoint.
+- **C7:** generated ⊆ used ∪ undeclared, and no namespace's undeclared file lists a source
+  that namespace already uses ([section 8.12](#812-excluded-endpoints)).
 
 `KINDS` overlaps the catalog by design: the refresh checks names before any dataset is
 declared, and C4 keeps the two in step. A test loads `spec/` with `refresh/` absent, as in an
@@ -2353,7 +2369,7 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   [section 19](#19-wire-clients-and-the-spec-snapshot).
 - **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored), and refresh gates
-  G1–G7), and `tests/test_catalog.py` passes (catalog gates C1–C7, generated = used ⊎
+  G1–G7), and `tests/test_catalog.py` passes (catalog gates C1–C7, generated ⊆ used ∪
   undeclared) ([section 19.4](#194-generated-schemas)). They read only vendored files, never
   the network.
 - **Negative tests:** every gate has a negative test that fails when the gate is deleted.

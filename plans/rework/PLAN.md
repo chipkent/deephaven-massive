@@ -160,11 +160,11 @@ disjoint files:
   `_diagnostics.py`'s drift registry; PC3b owns `_catalog.py`, `_schema.py`, and
   `_timeunits.py`. `_session.py` has one factory hook per transport, so P3, P4, and P5 edit
   disjoint hunks.
-- **The fakes** follow the clients: PC1 `tests/_fakes/rest.py`, PC2 `ws.py`, P5 `s3.py`, P4
+- **The fakes** follow the clients: PC1 `tests/_fakes/rest.py`, PC2 `ws.py`, P5 `s3.py`, P2
   `stream.py`; each adds one self-contained fixture block to `tests/conftest.py`.
 - **Namespace packages** (P6) edit only `_namespaces/<ns>.py`, its tests and fixtures, and delete
-  `tests/data/catalog/undeclared/<ns>.txt`. There are no lock files and no column maps to
-  edit. A needed `refresh/` fix lands first in its own PR. P6g also fills
+  only their own `tests/data/catalog/undeclared/<ns>.txt`. There are no lock files and no
+  column maps to edit. A needed `refresh/` fix lands first in its own PR. P6g also fills
   `MassiveSession.snapshots()` in `_session.py`.
 - **Generated content** changes only through `python -m deephaven_massive._massive.refresh`; the
   check that it is current is `uv run pytest tests/massive/refresh -q`.
@@ -1141,8 +1141,8 @@ timestamp-like integers (68 of them untagged) and about 50 short keys.
 **Files.**
 - Create: `_massive/refresh/__main__.py`, `fetch.py`, `generate.py` (the REST half),
   `docs.py` (the `llms.txt` reader only), `lexicon.py` (REST shapes), `overrides.py` (`NAMES`,
-  REST `UNITS`, REST `TYPE_FIXES`, `RESULT_KEYS`), `exclusions.py` (the REST rows of
-  DESIGN § 8.12), `refresh/snapshot/` (every source, in one snapshot, with `manifest.json`),
+  REST `UNITS`, REST `TYPE_FIXES`, `RESULT_KEYS`), `exclusions.py` (the executable
+  REST rows of DESIGN § 8.12), `refresh/snapshot/` (every source, in one snapshot, with `manifest.json`),
   `_massive/spec/rest.json`; their mirrors under `tests/massive/refresh/`.
 - Modify: `AGENTS.md` (the refresh commands, and `uv run pytest tests/massive/refresh -q`),
   `_massive/__init__.py` (the spec block of `__all__`: `source`, `sources`, and the value
@@ -1156,7 +1156,10 @@ timestamp-like integers (68 of them untagged) and about 50 short keys.
       canonically in one snapshot (DESIGN § 19.6).
 - [ ] The REST generator with the § 19.4 rules and gates G1–G4 (G4's REST half), and the type
       lattice.
-- [ ] `EXCLUSIONS` with the REST rows of DESIGN § 8.12; the `llms.txt` reader in `docs.py`.
+- [ ] `EXCLUSIONS` with the executable REST rows of DESIGN § 8.12 (items present in the OpenAPI
+      spec or `llms.txt`), never the documentation-only rows; a REST row the snapshot shows
+      absent from every vendor source moves to the documentation-only list in DESIGN § 8.12;
+      the `llms.txt` reader in `docs.py`.
 
 **Acceptance criteria.**
 - [ ] The parity test passes byte for byte.
@@ -1211,7 +1214,8 @@ prefix half of G4, G5–G7).
 - Modify: `refresh/generate.py` (the WebSocket and flat-file halves), `docs.py` (the "Columns"
   and overview parsers), `lexicon.py` (their `SHAPES`), `overrides.py` (`NAMES` including `dv`
   and `dav`, `UNITS`, `TYPE_FIXES`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, `VENUES`),
-  `exclusions.py` (the WebSocket and flat-file rows of DESIGN § 8.12), `_massive/__init__.py`
+  `exclusions.py` (the executable WebSocket and flat-file rows of DESIGN § 8.12; a row absent
+  from `websocket.json` and the flat-file pages moves to the documentation-only list), `_massive/__init__.py`
   and `_massive/spec/__init__.py` (the loaders for `ws.json` and `flatfiles.json`;
   `Source.memberships`), `tests/massive/spec/test_init.py`.
 
@@ -1387,6 +1391,9 @@ C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
       serves every transport.
 - [ ] `tests/test_catalog.py`: C1–C7 and the undeclared files; `_enums` checked against
       `spec/rest.json`.
+- [ ] Each `tests/data/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
+      declare; a shared source (the aggregate range path, `/prev`) is listed in every namespace
+      that will use it.
 
 **Acceptance criteria.**
 - [ ] `git grep -nE "^\s*(from|import) massive" -- src tests` is empty.
@@ -1690,7 +1697,8 @@ needed `refresh/` fix lands first in its own PR.
 
 **Shared acceptance criteria.**
 - [ ] Every DESIGN § 8 row of the namespace is declared and tested.
-- [ ] C1–C7 pass for the namespace, and its undeclared file is deleted.
+- [ ] C1–C7 pass for the namespace, and only its own undeclared file is deleted, so the P6
+      packages land in any order.
 - [ ] No `_massive` diff.
 
 **Shared verification.**
@@ -1753,8 +1761,8 @@ move into `AGENTS.md`, and generated = used.
 
 **Depends on.** P6a–h, PC3c, PC4. **Parallel with.** P8.
 
-**Files.** Create `tests/test_readme.py`. Modify `README.md`, `AGENTS.md`. Delete
-`tests/data/catalog/undeclared/`.
+**Files.** Create `tests/test_readme.py`. Modify `README.md`, `AGENTS.md`, and
+`tests/test_catalog.py` (asserts that no undeclared file remains).
 
 **Tasks.**
 - [ ] `tests/test_readme.py`: each DESIGN § 21 example runs in the embedded JVM against the
@@ -2035,7 +2043,7 @@ The owner decisions of the final design (O-items), each recorded in DESIGN:
 | Item | Decision | DESIGN |
 |---|---|---|
 | O1 | Names from the lexicons, `NAMES`, and the declared key columns | § 19.4; § 22, decision 22 |
-| O2 | Coverage is derived: documented = generated ⊎ excluded ⊎ …; generated = used ⊎ undeclared | § 8.12; § 19.4 C7 |
+| O2 | Coverage is derived: documented = generated ⊎ excluded ⊎ …; generated ⊆ used ∪ undeclared | § 8.12; § 19.4 C7 |
 | O3 | One wire package, REST, WebSocket, and S3 | § 19; § 22, decision 26 |
 | O4 | #51 is restructured before merge as a move with unchanged logic | P5; process decision 1 |
 | O5 | The legacy code is deleted now (PL) | Process decision 2 |
