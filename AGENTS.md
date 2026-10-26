@@ -19,12 +19,24 @@ uv run pytest tests/test_layout.py -q      # one file, no coverage, debugger-fri
 uv build                                   # sdist and wheel
 ```
 
+The refresh commands (`uv run python -m deephaven_massive._massive.refresh [--check | --fetch]`)
+arrive with the `PLAN.md` package PC3a, which adds them here.
+
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
 
 `uv.lock` is not committed. Both `check.sh` tiers start with `uv sync --upgrade`, so every run
-uses the newest versions, including the latest `deephaven-fixes` commit of the SDK fork, and
-prints that commit. Offline, a local run warns and keeps what is installed; CI fails instead.
+uses the newest versions. Offline, a local run warns and keeps what is installed; CI fails
+instead.
+
+The library is moving off Massive's Python SDK (`massive`) to its own REST, WebSocket, and S3
+flat-file clients, with every schema generated from vendored, pinned vendor specs
+(`DESIGN.md` § 19). Until the `PLAN.md` package PC4 lands, the old dependency is still
+installed; PC4 removes it and adds a ruff `banned-api` entry for it. Never add an import of
+`massive`. Once the generated `spec/*.json` files exist, never edit them by hand: they change
+only through the refresh, and hand input lives only in `_massive/refresh/lexicon.py`,
+`overrides.py`, and `exclusions.py`, every entry with a reason. The library has no users, so
+nothing is kept or shimmed for compatibility.
 
 ## Hard rules
 
@@ -36,7 +48,7 @@ prints that commit. Offline, a local run warns and keeps what is installed; CI f
    it and summarize the fix, or explain why nothing changes. Never resolve a thread without a
    reply.
 4. **Branches** are named `<type>/<topic>` (`feat/`, `fix/`, `docs/`, `test/`, `refactor/`,
-   `ci/`, `chore/`), cut from `main`.
+   `ci/`, `chore/`), cut from `origin/main` after `git fetch`, never from a local `main`.
 5. **Commits and PR titles** follow Conventional Commits v1.0.0 (`feat:`, `fix:`, `docs:`,
    `test:`, `refactor:`, `ci:`, `chore:`).
 6. **`scripts/check.sh` (full) is green before every push**, and every CI job is green on the
@@ -49,7 +61,10 @@ prints that commit. Offline, a local run warns and keeps what is installed; CI f
    end in `_integration.py`. The only other files allowed are `tests/conftest.py`,
    `tests/test_layout.py`, `tests/test_catalog.py`, `tests/test_readme.py`, and the
    `tests/_fakes/` package. `tests/test_layout.py` enforces this; a new exception needs owner
-   approval and a change to `DESIGN.md` § 4.2.
+   approval and a change to `DESIGN.md` § 4.2. The `PLAN.md` package PN changes the rule to the
+   layout of `DESIGN.md` § 4.2 (every path component drops one leading underscore, the dunder
+   rule, `test_catalog.py` a plain mirror, import roots `pythonpath = ["."]` and
+   `mypy_path = ["src"]`) and updates this rule and the test paths below.
 8. **Linter ignores need a reason and, if new, owner approval.** Every entry in the ruff ignore
    lists and every inline `# noqa` or `# type: ignore[code]` carries a reason comment. Adding a
    rule to any ignore list, or a new `noqa` category, requires owner approval recorded in the
@@ -63,8 +78,20 @@ prints that commit. Offline, a local run warns and keeps what is installed; CI f
 11. **Docstrings meet the documentation standard below.** A change to a public signature,
     default, or table semantics updates `DESIGN.md` first (owner decision).
 12. **Dependencies** (the declarations in `pyproject.toml`) change only in dedicated
-    `chore(deps):` PRs. `uv.lock` is not committed: every sync resolves the newest versions,
-    including the latest `deephaven-fixes` commit of the SDK fork.
+    `chore(deps):` PRs. `uv.lock` is not committed: every sync resolves the newest versions.
+13. **One wire package** (from the `PLAN.md` package PC1a, which creates it and its boundary
+    tests). `src/deephaven_massive/_massive/` owns all Massive wire access
+    (REST, WebSocket, and S3 flat files), the vendored spec snapshot, the generated schemas,
+    the units, and the long-form names, in six subpackages: `net/`, `spec/`, `rest/`, `ws/`,
+    `flatfiles/`, `refresh/`. `_massive` imports nothing from `deephaven`, `deephaven_server`,
+    `jpy`, or the rest of the library. Layers: `net` and `spec` import nothing else in
+    `_massive`; `rest`, `ws`, and `flatfiles` import only `net` and `spec`; only `refresh` and
+    its tests import `refresh`. The wire package's own tests, under `tests/massive/`, may
+    import any `_massive` module. Everything else, the rest of `tests/` included, imports only
+    `deephaven_massive._massive` and uses only the names in its `__all__`: never a submodule
+    (by `import`, relative import, or `importlib`), never `urllib3`, `websockets`, `certifi`,
+    `boto3`, or `botocore`, and never a snapshot file. `tests/_fakes/` keeps its exception for
+    the network libraries. The AST tests in `tests/test_layout.py` enforce all of it.
 
 ## Documentation standard
 
@@ -150,7 +177,8 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | Hosts, connections, subscriptions | `DESIGN.md` § 13 |
 | Publishers and fan-out | `DESIGN.md` § 14 |
 | Threads and locks | `DESIGN.md` § 18 |
-| SDK fork (`chipkent/massive-client-python`) | `DESIGN.md` § 19 |
+| Wire clients, generated schemas, drift | `DESIGN.md` § 19 |
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
 | Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
-| Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `tests/legacy/`; every exclusion of it carries a grep-able `LEGACY-EXCLUSION` comment |
+| Legacy code (reference only; outside the gate; deleted by the `PLAN.md` package PL, after which it is read with `git show 519fad8:<path>`) | `src/deephaven_massive/{engine,domains,schemas}/`, `tests/legacy/`; every exclusion of it carries a grep-able `LEGACY-EXCLUSION` comment |
+| Namespace classes and dataset declarations | `src/deephaven_massive/_domains/` (renamed `_namespaces/` by PN), `DESIGN.md` § 8 |
