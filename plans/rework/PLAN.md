@@ -1027,8 +1027,8 @@ fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
   opener), `_session.py` (S3 factory hook). `history()` hands `source=AUTO` (and `FLAT_FILES`)
   to `FlatFileTransport.history(..., source=...)`, which runs `choose_source` and calls
   `core.rest_transport().history(...)` itself when REST is the better source.
-  - *As implemented (#51):* `_domains/base.py` is unchanged; prefix resolution is three lines in
-    the new `_sources.py`, which also holds `partition_dates`, `rest_history_problem`, and
+  - *As implemented (#51):* `_domains/base.py` has no flat-file prefix helper (it gained only
+    `build_query(adjusted=)`, below); prefix resolution is three lines in the new `_sources.py`, which also holds `partition_dates`, `rest_history_problem`, and
     `choose_source`. `HistoryQuery.history()` reads a reactive symbol table once, makes the
     source choice, logs it, and calls one transport; `FlatFileTransport.history` takes the
     partition dates (`dates=`) instead of `source=`, and `_flatfiles.py` is pure S3 I/O.

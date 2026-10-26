@@ -1342,7 +1342,10 @@ requests per minute and that fan-out `poll()` multiplies requests. A body that i
 raises `BadResponse` with `.status` on any call or page (fork F5.3), and the library maps it to
 `MassiveError`, so a malformed response never becomes an empty or truncated dataset.
 Per-ticker `NOT_ENTITLED` rows in snapshots keep their `Error` and `Message` columns and are
-logged once.
+logged once. The bars `adjusted` flag travels in its own typed field, `Request.adjusted`, which
+the REST transport sends, when not None, as the `adjusted` query parameter; `params` never holds
+`adjusted` (`build_query` rejects it there), so a request for unadjusted bars cannot silently
+fall back to Massive's adjusted default.
 
 ## 14. Publishers, fan-out, and failure semantics
 
