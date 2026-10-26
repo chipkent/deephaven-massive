@@ -103,12 +103,12 @@ def test_a_membership_without_projection() -> None:
 
 
 def test_a_projection_is_copied_and_read_only() -> None:
-    mapping = {"last_updated": "timestamp"}
+    mapping = {"last_updated": "Timestamp"}
     membership = Membership(kind="values", group="indices", position=0, projection=mapping)
-    mapping["value"] = "value"
-    assert membership.projection == {"last_updated": "timestamp"}
+    mapping["value"] = "Value"
+    assert membership.projection == {"last_updated": "Timestamp"}
     with pytest.raises(TypeError):
-        cast("dict[str, str]", membership.projection)["value"] = "value"
+        cast("dict[str, str]", membership.projection)["value"] = "Value"
 
 
 def test_memberships_with_equal_projections_are_equal_and_hashable() -> None:
@@ -201,15 +201,64 @@ def test_a_source_in_several_kinds_is_accepted() -> None:
     assert source.memberships == memberships
 
 
+def test_a_websocket_key_names_the_cluster_and_channel() -> None:
+    stocks = Source(key="stocks/T", transport=Transport.WS, fields=(_price(),))
+    options = Source(key="options/T", transport=Transport.WS, fields=(_price(),))
+    assert stocks != options
+
+
+# Projections.
+
+
+def test_a_projection_of_known_wire_keys_is_accepted() -> None:
+    membership = Membership(
+        kind="values", group="indices", position=0, projection={"p": "Value", "t": "Timestamp"}
+    )
+    source = Source(
+        key="indices/V",
+        transport=Transport.WS,
+        fields=(_price(), _time()),
+        memberships=(membership,),
+    )
+    assert source.memberships == (membership,)
+
+
+@pytest.mark.parametrize(
+    ("projection", "message"),
+    [
+        (
+            {"p": "Value", "zz": "Other"},
+            r"projection of values/indices names unknown wire keys \['zz'\]",
+        ),
+        (
+            {"p": "Value", "t": "Value"},
+            r"projection of values/indices repeats columns \['Value'\]",
+        ),
+    ],
+    ids=["unknown wire key", "repeated column"],
+)
+def test_an_inconsistent_projection_is_rejected(projection: dict[str, str], message: str) -> None:
+    membership = Membership(kind="values", group="indices", position=0, projection=projection)
+    with pytest.raises(ValueError, match=message):
+        Source(
+            key="indices/V",
+            transport=Transport.WS,
+            fields=(_price(), _time()),
+            memberships=(membership,),
+        )
+
+
 # RestPath.
+
+_TICKER = Param(name="stockTicker", kind=ParamKind.STRING, in_path=True)
 
 
 def test_a_rest_path_is_a_rest_source() -> None:
-    path = RestPath(key="/v3/trades/{stockTicker}", fields=(_price(),))
+    path = RestPath(key="/v3/trades/{stockTicker}", fields=(_price(),), params=(_TICKER,))
     assert isinstance(path, Source)
     assert path.transport is Transport.REST
     assert path.template == "/v3/trades/{stockTicker}"
-    assert (path.result_key, path.params) == ("results", ())
+    assert (path.result_key, path.params) == ("results", (_TICKER,))
 
 
 def test_a_rest_path_transport_cannot_be_passed() -> None:
@@ -224,11 +273,51 @@ def test_a_rest_path_checks_the_source_invariants() -> None:
 
 
 def test_a_rest_path_keeps_its_result_key_and_params() -> None:
-    ticker = Param(name="stocksTicker", kind=ParamKind.STRING, in_path=True)
-    path = RestPath(
-        key="/v1/last/crypto/{from}/{to}", fields=(), result_key="last", params=(ticker,)
+    params = (
+        Param(name="from", kind=ParamKind.STRING, in_path=True),
+        Param(name="to", kind=ParamKind.STRING, in_path=True),
     )
-    assert (path.result_key, path.params) == ("last", (ticker,))
+    path = RestPath(key="/v1/last/crypto/{from}/{to}", fields=(), result_key="last", params=params)
+    assert (path.result_key, path.params) == ("last", params)
+
+
+def test_query_parameters_need_no_placeholder() -> None:
+    limit = Param(name="limit", kind=ParamKind.INTEGER)
+    path = RestPath(key="/v3/trades/{stockTicker}", fields=(), params=(_TICKER, limit))
+    assert path.params == (_TICKER, limit)
+
+
+@pytest.mark.parametrize(
+    ("key", "params", "message"),
+    [
+        (
+            "/v3/trades/{stockTicker}",
+            (_TICKER, Param(name="stockTicker", kind=ParamKind.STRING)),
+            r"repeated parameters \['stockTicker'\]",
+        ),
+        (
+            "/v1/last/crypto/{from}/{to}",
+            (Param(name="from", kind=ParamKind.STRING, in_path=True),),
+            r"placeholders without a path parameter \['to'\]",
+        ),
+        (
+            "/v3/trades/{stockTicker}",
+            (Param(name="stockTicker", kind=ParamKind.STRING),),  # a query parameter
+            r"placeholders without a path parameter \['stockTicker'\]",
+        ),
+        (
+            "/v3/trades",
+            (_TICKER,),
+            r"path parameters without a placeholder \['stockTicker'\]",
+        ),
+    ],
+    ids=["repeated name", "missing path parameter", "placeholder as query", "extra path parameter"],
+)
+def test_an_inconsistent_rest_path_is_rejected(
+    key: str, params: tuple[Param, ...], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        RestPath(key=key, fields=(), params=params)
 
 
 # DriftReport.
@@ -241,20 +330,33 @@ def test_a_drift_report_defaults_to_no_drift() -> None:
 # Every value type.
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
+def _values() -> list[DataclassInstance]:
+    """Return one value of each type; each call builds new, equal instances.
+
+    Returns:
+        The values.
+    """
+    return [
         _price(),
-        Membership(kind="trades", group="stocks", position=0),
+        Membership(kind="values", group="indices", position=0, projection={"p": "Value"}),
         Param(name="limit", kind=ParamKind.INTEGER),
-        Source(key="T", transport=Transport.WS, fields=(_price(),)),
-        RestPath(key="/x", fields=()),
+        Source(key="stocks/T", transport=Transport.WS, fields=(_price(),)),
+        RestPath(key="/v3/trades/{stockTicker}", fields=(), params=(_TICKER,)),
         DriftReport(extra=frozenset({"zz"})),
-    ],
-    ids=lambda value: type(value).__name__,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "twin"),
+    list(zip(_values(), _values(), strict=True)),
+    ids=[type(value).__name__ for value in _values()],
 )
-def test_values_are_frozen_and_hashable(value: DataclassInstance) -> None:
+def test_values_are_frozen_and_hash_by_value(
+    value: DataclassInstance, twin: DataclassInstance
+) -> None:
     attribute = dataclasses.fields(value)[0].name
     with pytest.raises(dataclasses.FrozenInstanceError):
         setattr(value, attribute, None)
-    assert hash(value) == hash(value)
+    assert value is not twin
+    assert value == twin
+    assert hash(value) == hash(twin)

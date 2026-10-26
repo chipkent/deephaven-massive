@@ -1,7 +1,8 @@
 """The value types that describe Massive's wire format.
 
 A **source** is one thing Massive serves rows from: a REST path (`/v3/trades/{stockTicker}`),
-a WebSocket channel, or a flat-file prefix (`us_stocks_sip/trades_v1`). Each is described by
+a WebSocket channel of one cluster (`stocks/T`), or a flat-file prefix
+(`us_stocks_sip/trades_v1`). Each is described by
 its ordered **fields**: the key on the wire, the long-form column the library names it, the
 field's `WireType`, its timestamp `WireUnit` when it is an epoch, and whether the vendor marks
 it required. A REST source is a `RestPath`, which adds its result key and its parameters.
@@ -9,7 +10,7 @@ it required. A REST source is a `RestPath`, which adds its result key and its pa
 A source may belong to dataset **kinds** (trades, quotes, bars, ...): the sources whose rows
 merge into one table schema. Each `Membership` names the kind, the asset-class group within
 it, the source's position in that group, and optionally a projection that keeps only some of
-its fields under other names, for that membership only.
+its fields, under other column names, for that membership only.
 
 Decoders compare each payload with its source and return a `DriftReport` of the keys that
 were extra or missing.
@@ -18,7 +19,8 @@ The refresh generates every value of these types into `spec/*.json`, and the lib
 them from there; tests build them by hand. Every type is a frozen dataclass or a `StrEnum`,
 so every value is immutable and safe to share between threads. Constructors check the
 invariants a decoder relies on (an epoch has a unit, a source has no two fields with one
-column, ...) and raise `ValueError` when one fails.
+column, a REST path's path parameters are exactly its placeholders, ...) and raise
+`ValueError` when one fails.
 
 This module imports only the standard library.
 """
@@ -26,6 +28,7 @@ This module imports only the standard library.
 from __future__ import annotations
 
 import dataclasses
+import string
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
@@ -52,7 +55,8 @@ __all__ = [
 class Transport(StrEnum):
     """The transport a source is served on.
 
-    The one transport enum of the library and the wire package. Its values are the text the
+    It is meant to replace the library's own `_enums.Transport`, whose members and values it
+    copies exactly (a test pins the two together until then). Its values are the text the
     diagnostics tables show in their `Transport` column.
     """
 
@@ -106,7 +110,8 @@ class ParamKind(StrEnum):
     """The kind of value a REST parameter takes, which decides how a value is checked and sent.
 
     Every value is sent as text. An enum member is sent by its value, a `bool` as `true` or
-    `false`, and a `date` as ISO-8601 `YYYY-MM-DD`.
+    `false`, and a `date` as ISO-8601 `YYYY-MM-DD`. `DATE` and `TIMESTAMP` both accept a date
+    or an aware instant; they differ only in how an instant is sent.
     """
 
     STRING = "string"
@@ -120,9 +125,9 @@ class ParamKind(StrEnum):
     ENUM = "enum"
     """One of the parameter's `values`."""
     DATE = "date"
-    """A date, or an instant sent as ISO-8601 date-time text."""
+    """Date or instant; an instant is sent as ISO-8601 date-time text, not date-only."""
     TIMESTAMP = "timestamp"
-    """A date, or an instant sent as exact integer nanoseconds since the Unix epoch."""
+    """Date or instant; an instant is sent as exact integer nanoseconds since the Unix epoch."""
     LIST = "list"
     """A sequence of strings, sent joined with commas (the `.any_of` parameters)."""
 
@@ -181,9 +186,12 @@ class Membership:
         group: The asset-class group within the kind, such as `"stocks"`.
         position: The source's zero-based order within the group.
         projection: For this membership only, the wire keys to keep, each mapped to the
-            snake_case long name it takes instead of its own (for example
-            `{"last_updated": "timestamp"}`). `None` keeps every field under its own name.
-            The mapping is copied, so later changes to the caller's mapping have no effect.
+            PascalCase column it takes instead of its own (for example
+            `{"last_updated": "Timestamp"}`). `None` keeps every field under its own column.
+            The mapping is copied into a read-only view, so later changes to the caller's
+            mapping have no effect. That view cannot be pickled or deep-copied, and neither
+            can a membership with a projection; the values are built once from the spec and
+            shared, never copied.
 
     Example:
         ::
@@ -194,7 +202,7 @@ class Membership:
                 kind="values",
                 group="indices",
                 position=0,
-                projection={"ticker": "ticker", "value": "value", "last_updated": "timestamp"},
+                projection={"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"},
             )
     """
 
@@ -263,12 +271,14 @@ class Source:
 
     Attributes:
         key: The source's identity within its transport: the path template for REST (as
-            `RestPath.template` also gives it), the channel for WebSocket, and the S3 prefix
-            for flat files.
+            `RestPath.template` also gives it), `"<cluster>/<channel>"` for WebSocket (such as
+            `"stocks/T"`, since stocks, options, and futures share channel names), and the S3
+            prefix for flat files.
         transport: The transport the source is served on.
         fields: The fields, in the vendor's order. No two share a wire key or a column.
         memberships: The dataset kinds the source belongs to; empty for a source in no kind.
-            At most one per (kind, group).
+            At most one per (kind, group). A projection names only wire keys of `fields` and
+            maps no two of them to one column.
 
     Example:
         ::
@@ -289,19 +299,43 @@ class Source:
     memberships: tuple[Membership, ...] = ()
 
     def __post_init__(self) -> None:
-        """Check that wire keys, columns, and (kind, group) memberships are unique.
+        """Check the invariants of the source and, for a `RestPath`, of its parameters.
+
+        `RestPath` adds no `__post_init__` of its own: overriding one would need
+        `typing.override`, which Python 3.11 lacks and this standard-library-only module
+        cannot import from elsewhere. Its checks run here instead.
 
         Raises:
-            ValueError: If two fields share a wire key or a column, or two memberships share a
-                kind and group; the message names the source and the repeats.
+            ValueError: If two fields share a wire key or a column; two memberships share a
+                kind and group; a projection names a wire key the source lacks or maps two
+                keys to one column; or, for a `RestPath`, two parameters share a name or the
+                path parameters differ from the template's placeholders. The message names
+                the source and the offending names.
         """
-        for what, names in (
-            ("wire keys", [f.wire_key for f in self.fields]),
-            ("columns", [f.column for f in self.fields]),
-            ("memberships", [f"{m.kind}/{m.group}" for m in self.memberships]),
-        ):
-            if repeated := _duplicates(names):
-                raise ValueError(f"source {self.key!r}: repeated {what} {repeated}")
+        wire_keys = [f.wire_key for f in self.fields]
+        checks = [
+            ("repeated wire keys", _duplicates(wire_keys)),
+            ("repeated columns", _duplicates(f.column for f in self.fields)),
+            ("repeated memberships", _duplicates(f"{m.kind}/{m.group}" for m in self.memberships)),
+        ]
+        for m in self.memberships:
+            if m.projection is not None:
+                where = f"projection of {m.kind}/{m.group}"
+                checks.append(
+                    (f"{where} names unknown wire keys", sorted(set(m.projection) - set(wire_keys)))
+                )
+                checks.append((f"{where} repeats columns", _duplicates(m.projection.values())))
+        if isinstance(self, RestPath):
+            in_path = {p.name for p in self.params if p.in_path}
+            placeholders = {name for _, name, _, _ in string.Formatter().parse(self.key) if name}
+            checks += [
+                ("repeated parameters", _duplicates(p.name for p in self.params)),
+                ("placeholders without a path parameter", sorted(placeholders - in_path)),
+                ("path parameters without a placeholder", sorted(in_path - placeholders)),
+            ]
+        for what, names in checks:
+            if names:
+                raise ValueError(f"source {self.key!r}: {what} {names}")
 
     def field(self, column: str) -> Field:
         """Return the field named `column`, for example to read its unit.

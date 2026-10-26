@@ -2129,7 +2129,8 @@ verification, never a column list.
   fields in spec order, and records the parameters (wire name, `ParamKind`, enum values, path or
   query).
 - **WebSocket.** Every `websocket.json` channel not in `EXCLUSIONS`, keyed `(cluster,
-  channel)`. Fields are its message properties in spec order; `required` is copied where the
+  channel)` and spelled `"<cluster>/<channel>"` as its `Source.key` (`"stocks/T"`,
+  `"futures/AM"`), since stocks, options, and futures share channel names. Fields are its message properties in spec order; `required` is copied where the
   vendor gives it.
 - **Flat files.** Every dataset page with a row in its class's overview table. That row's
   `S3 <prefix>` is the source key, so no hand-written page-to-prefix map exists. A futures kind
@@ -2143,15 +2144,17 @@ verification, never a column list.
   `_utc`, becomes an `iso-instant`; a string with `format: date`, or named `date` or `*_date`,
   becomes a `date`.
 - **Projections.** `PROJECTIONS {(kind, source): {wire key: long name}}` limits a source to
-  the listed keys, and renames them, **inside one membership only**. Its first entry gives
+  the listed keys, and renames them, **inside one membership only**. The generator writes each
+  long name through the naming rule, so a generated projection maps wire keys to PascalCase
+  columns, the same vocabulary as `Field.column`. Its first entry gives
   `/v3/snapshot/indices`'s membership of the values kind
-  `{"ticker": "ticker", "value": "value", "last_updated": "timestamp"}`, for
+  `{"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"}`, for
   `indices.values.fetch()`; `indices.snapshots` uses the same source in full.
 - **Memberships are written into the generated files.** `KINDS` and `PROJECTIONS` are generator
   inputs in `refresh/`, which is not shipped. The generator writes each source's memberships
   onto its committed entry in `spec/rest.json`, `ws.json`, or `flatfiles.json`, and the `spec`
   loader exposes them as `Source.memberships: tuple[Membership, ...]`, where
-  `Membership(kind, group, position, projection: Mapping[wire_key, long_name] | None)`: the
+  `Membership(kind, group, position, projection: Mapping[wire_key, column] | None)`: the
   kind, the asset-class group, the source's order within the group, and its projection. A
   source in no kind has no memberships; a source may hold several. Everything at run time, the
   merge and gate C4 included, reads memberships from there and never from `refresh/`. Drift
