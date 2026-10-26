@@ -98,8 +98,8 @@ MAX_DEPTH = 512
 
 Decoding recurses on the C stack, about 160 bytes per level on Python 3.12, so depth 512 needs
 roughly 80 KB: safe on any Python or JVM thread (a JVM thread has 1 MB). It also stays below
-the 1,000-frame recursion limit of Python 3.11. orjson does not recurse and keeps its own limit
-of 1024. Massive's payloads nest fewer than ten levels deep.
+the 1,000-frame recursion limit of Python 3.11. orjson enforces its own limit of 1024.
+Massive's payloads nest fewer than ten levels deep.
 """
 
 # Every byte except the five that shape nesting outside strings: `[`, `]`, `{`, `}`, `"`.
@@ -113,9 +113,10 @@ def _too_deep(data: bytes) -> bool:
 
     The scan reads only the brackets outside strings, without parsing, so it never recurses.
     Escaped backslashes and escaped quotes are removed first, so every remaining `"` opens or
-    closes a string. Within a valid document this matches the parser exactly. After a syntax
-    error it may count too deep, never too shallow, and the parser rejects such a document
-    anyway.
+    closes a string. Adjacent `""` pairs (strings that held no bracket) are dropped before the
+    split, which keeps quote parity and shrinks the work. Within a valid document this matches
+    the parser exactly. After a syntax error it may count too deep, never too shallow, and the
+    parser rejects such a document anyway.
 
     Args:
         data: The document as UTF-8 bytes.
@@ -128,7 +129,7 @@ def _too_deep(data: bytes) -> bool:
         return False
     if b"\\" in data:
         data = data.replace(b"\\\\", b"").replace(b'\\"', b"")
-    skeleton = data.translate(None, _NOT_SKELETON)
+    skeleton = data.translate(None, _NOT_SKELETON).replace(b'""', b"")
     outside = b"".join(skeleton.split(b'"')[::2])
     return max(accumulate(array("b", outside.translate(_STEPS))), default=0) > MAX_DEPTH
 
@@ -137,8 +138,10 @@ def loads(data: bytes | str) -> object:
     """Decode one JSON document strictly.
 
     Call it once per REST body or WebSocket text frame; the caller then checks the shape of
-    the result (an envelope object, a list of events) itself. Safe from any thread: neither
-    path can exhaust the calling thread's stack.
+    the result (an envelope object, a list of events) itself. Safe from any thread: the
+    standard-library path bounds its recursion at `MAX_DEPTH`, and orjson enforces its own
+    limit. A text document with no more than `MAX_DEPTH` openers is never encoded for the
+    depth check.
 
     Malformed input raises `ValueError`: `data` that is not UTF-8, is not a single JSON
     document, holds `NaN` or `Infinity`, holds a number too large for a double, or nests
@@ -162,8 +165,12 @@ def loads(data: bytes | str) -> object:
         return value
     if isinstance(data, bytes):
         text = data.decode("utf-8")
+        too_deep = _too_deep(data)
     else:
-        text, data = data, data.encode("utf-8", "surrogatepass")
-    if _too_deep(data):
+        text = data
+        too_deep = text.count("[") + text.count("{") > MAX_DEPTH and _too_deep(
+            text.encode("utf-8", "surrogatepass")
+        )
+    if too_deep:
         raise ValueError(f"JSON nests deeper than {MAX_DEPTH} arrays and objects")
     return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)

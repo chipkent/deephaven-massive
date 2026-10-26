@@ -128,6 +128,23 @@ def _nested(depth: int, inner: str = "0") -> str:
     return "[" * depth + inner + "]" * depth
 
 
+def _assert_nested(value: object, depth: int) -> None:
+    """Assert `value` is `0` inside exactly `depth` one-element lists, without recursing.
+
+    Building, comparing, or printing a deeply nested value recursively can itself exceed
+    Python 3.11's recursion limit, so the check unwraps one list per loop iteration.
+
+    Args:
+        value: The decoded document.
+        depth: The expected number of lists.
+    """
+    for _ in range(depth):
+        assert isinstance(value, list)
+        assert len(value) == 1
+        value = value[0]
+    assert value == 0
+
+
 def test_the_depth_limit_is_512() -> None:
     assert codec.MAX_DEPTH == 512
 
@@ -136,8 +153,7 @@ def test_the_depth_limit_is_512() -> None:
 @pytest.mark.parametrize("as_bytes", [True, False], ids=["bytes", "str"])
 def test_stdlib_decodes_a_document_exactly_at_the_limit(as_bytes: bool) -> None:
     text = _nested(512)
-    expected = json.loads(text)
-    assert codec.loads(text.encode() if as_bytes else text) == expected
+    _assert_nested(codec.loads(text.encode() if as_bytes else text), 512)
 
 
 @pytest.mark.usefixtures("stdlib")
@@ -187,7 +203,7 @@ def test_stdlib_strings_do_not_hide_depth(inner: str) -> None:
 
 def test_orjson_keeps_its_own_limit_of_1024(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(codec, "_orjson", pytest.importorskip("orjson"))
-    assert codec.loads(_nested(1024)) == json.loads(_nested(1024))
+    _assert_nested(codec.loads(_nested(1024)), 1024)
     assert _value_error_of(_nested(1025).encode()) is not None
 
 
