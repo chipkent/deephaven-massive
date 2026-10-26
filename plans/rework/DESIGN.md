@@ -1709,13 +1709,15 @@ src/deephaven_massive/_massive/
 │   │                  and data events, wire-symbol normalization, failure classification
 │   └── backoff.py     the backoff policy and the stable-uptime reset
 ├── spec/              the spec snapshot and the generator (section 19.3)
-│   ├── __init__.py    rest_path, rest_paths, RestPath, Param, Field, ParamKind, WireType,
-│   │                  wire_unit, WireUnit, DatasetWire, unused_allowlisted, and the
-│   │                  cross-check readers
+│   ├── __init__.py    rest_path, rest_paths, wire_unit, unused_allowlisted, the cross-check
+│   │                  readers, and the re-exported value types
+│   ├── types.py       the value types RestPath, Param, Field, ParamKind, WireType, WireUnit,
+│   │                  DatasetWire: frozen, standard library only, safe at run time
 │   ├── allowlist.py   the path allow-list, the non-`results` result keys, the type overrides
 │   ├── units.py       the hand-verified wire-field unit table and its unit-tag conflict list
 │   ├── drift.py       the semantic comparison of a live fetch with the snapshot
-│   ├── generate.py    the generator and the refresh command's main(); never imported at run time
+│   ├── generate.py    the generator and the refresh command's main(); imports types.py;
+│   │                  never imported at run time
 │   ├── restspec.json  generated: the REST table, canonical JSON
 │   └── snapshot/      data (source tree only): openapi.json, websocket.json, llms.txt, the
 │                      flat-file documentation pages, manifest.json

@@ -63,9 +63,10 @@ flowchart LR
     P1 --> P2["P2 refactor: core skeleton"]
     P2 --> PC0["PC0 chore(deps): declare urllib3, certifi"]
     P2 --> P5["P5 feat: flat-file history (#51)"]
-    PC0 --> PC1["PC1 feat: REST client"]
-    PC0 --> PC2["PC2 feat: WebSocket client"]
-    PC0 --> PC3a["PC3a feat: spec snapshot,<br/>REST table, drift check"]
+    PC0 --> PC1a["PC1a feat: wire package scaffold"]
+    PC1a --> PC1["PC1 feat: REST client"]
+    PC1a --> PC2["PC2 feat: WebSocket client"]
+    PC1a --> PC3a["PC3a feat: spec snapshot,<br/>REST table, drift check"]
     PC3a & P5 --> PC3b["PC3b refactor: names, key maps,<br/>lock, Deephaven-free catalog"]
     PC3b --> PC4["PC4 chore(deps): remove massive"]
     PC1 & PC3b --> P3["P3 feat: REST + tier detection"]
@@ -77,12 +78,14 @@ flowchart LR
     P8 --> AF["Archive the fork<br/>(owner, after shipping)"]
 ```
 
-P0, P1, and P2 are merged; P5 is in review (#51). PC0 lands first. PC1, PC2, and PC3a own
+P0, P1, and P2 are merged; P5 is in review (#51). PC0 lands first, then the PC1a scaffold.
+PC1, PC2, and PC3a own
 disjoint files and run in parallel with each other and with P5. PC3b follows PC3a and P5: it
 moves the flat-file key maps #51 owns today into the wire package, so #51 is never broken.
 PC4 removes `massive` once PC3b has removed its last import; P3 and P4 do not wait for it.
 
-Critical path: `PC0 → PC3a → PC3b → P4 → P6 → P7`, with PC2 alongside PC3a. Start PC3a at once.
+Critical path: `PC0 → PC1a → PC3a → PC3b → P4 → P6 → P7`, with PC1 and PC2 alongside PC3a.
+Keep PC1a minimal so PC3a can start at once.
 
 ---
 
@@ -160,7 +163,7 @@ These rules apply to every package in both repositories. Package sections only a
 | Wave | Packages | Notes |
 |---|---|---|
 | 0–2 | P0, P1, P2 | Merged. |
-| 3 | PC0, then PC1, PC2, PC3a; P5 | PC0 is a small declaration PR and lands first. P5 is in review (#51). |
+| 3 | PC0, then PC1a, then PC1, PC2, PC3a; P5 | PC0 (declarations) and PC1a (the scaffold every client imports) are small and land first. P5 is in review (#51). |
 | 4 | PC3b | After PC3a and P5. |
 | 5 | PC4, P3, P4 | Disjoint files. |
 | 6 | P6a–P6h | Eight domain packages, disjoint files by construction. |
@@ -174,10 +177,11 @@ The module names are fixed by [DESIGN § 4.1 Source modules](DESIGN.md#41-source
 skeleton created in P2 is designed so that later packages own disjoint files:
 
 - **Client and transport packages own distinct modules.** The Massive wire package
-  `src/deephaven_massive/_massive/` is split by owner: PC1 owns the package root (`__init__.py`,
-  `errors.py`, `net.py`), `_massive/rest/`, and the import-boundary test in `tests/test_layout.py`;
-  PC2 owns `_massive/ws/`; PC3a owns `_massive/spec/` (snapshot, allow-list, exclusions, units,
-  generator, drift, generated table), `scripts/refresh_massive_spec.py`, and
+  `src/deephaven_massive/_massive/` is split by owner: PC1a owns the package root
+  (`__init__.py`, `errors.py`, `net.py`), the value types `_massive/spec/types.py`, and the
+  import-boundary test in `tests/test_layout.py`; PC1 owns `_massive/rest/`; PC2 owns
+  `_massive/ws/`; PC3a owns the rest of `_massive/spec/` (snapshot, allow-list, exclusions,
+  units, generator, drift, generated table), `scripts/refresh_massive_spec.py`, and
   `.github/workflows/spec-drift.yml`; PC3b owns `_massive/names/` (lexicons, key maps, lock code,
   and the empty locks) and `_datasets/`, and is the package that reworks `_schema.py`,
   `_catalog.py`, and `_timeunits.py`. PC2, PC3a, and PC3b each add one block of exports to
@@ -215,7 +219,7 @@ skeleton created in P2 is designed so that later packages own disjoint files:
   - The namespace classes (`_Stocks`, `_Options`, …) live in their domain modules; `_session.py`
     instantiates them from P2 on, so P6 packages never touch `__init__.py`.
   - Exclusions live only in `EXCLUSIONS` of `_massive/spec/allowlist.py` (PC3a, finalized in P7).
-- **The `_massive` package changes only in PC1–PC3b, P7, and dedicated spec refresh PRs**, never
+- **The `_massive` package changes only in PC1a–PC3b, P7, and dedicated spec refresh PRs**, never
   inside a transport or domain PR, except for the domain lock files below. Its generated table,
   snapshot, exclusions, unit table, lexicons, and key maps are complete for every path, channel,
   and prefix DESIGN § 8 uses when PC3b merges. A domain package runs
@@ -669,14 +673,17 @@ its wire format goes in one private package, the wire package `deephaven_massive
 | Package | Content | Depends on |
 |---|---|---|
 | PC0 `chore(deps)` | Declare `urllib3` and `certifi`; raise the `websockets` floor | P2 |
-| PC1 `feat` | The package root, the REST client, the boundary test, public `MassiveError.status`/`request_id` | PC0 |
-| PC2 `feat` | The WebSocket client, frame decoding, the 15 s `reconnect_backoff` floor | PC0 |
-| PC3a `feat` | The snapshot, allow-list, exclusions, unit table, REST-table generator, drift check, drift workflow | PC0 |
+| PC1a `feat` | The scaffold: package root and interface skeleton, `WireError` family, `net.py`, the spec value types, the boundary test | PC0 |
+| PC1 `feat` | The REST client, public `MassiveError.status`/`request_id` | PC1a |
+| PC2 `feat` | The WebSocket client, frame decoding, the 15 s `reconnect_backoff` floor | PC1a |
+| PC3a `feat` | The snapshot, allow-list, exclusions, unit table, REST-table generator, drift check, drift workflow | PC1a |
 | PC3b `feat` | Lexicons, key maps, the name lock, the catalog and schema rework, the Deephaven-free catalog | PC3a, P5 (#51) |
 | PC4 `chore(deps)` | Remove `massive` and its fork source; ban the import | PC3b |
 
-PC1, PC2, and PC3a run in parallel. PC1 creates `_massive/__init__.py`; PC2, PC3a, and PC3b each
-add their own block of exports to it, so a later merge rebases that one file.
+PC1a holds everything the clients and the generator import from each other, so PC1, PC2, and
+PC3a then run in parallel with no imports between them. PC1a creates `_massive/__init__.py`;
+PC1, PC2, PC3a, and PC3b each add their own block of exports to it, so a later merge rebases
+that one file.
 
 ---
 
@@ -720,6 +727,72 @@ rm -rf .venv && uv sync --upgrade
 
 ---
 
+<a id="pc1a"></a>
+### PC1a: `feat: wire package scaffold`
+
+| | |
+|---|---|
+| **Branch** | `feat/wire-package-scaffold` |
+| **Issue** | TBD (owner approval to create) |
+
+**Goal.** Create the wire package's skeleton and the pieces every later wire package imports, so
+PC1, PC2, and PC3a can run in parallel without importing each other. Types and skeletons with
+their tests only; no client, no generator.
+
+**DESIGN sections implemented.** The package, its interface skeleton, and its boundary
+([§ 19 Wire clients and the spec snapshot](DESIGN.md#19-wire-clients-and-the-spec-snapshot));
+the value types of [§ 19.3](DESIGN.md#193-the-spec-snapshot-the-generator-and-the-name-lock).
+
+**Depends on.** PC0. **Parallel with.** P5.
+
+**Files.**
+- Create: `src/deephaven_massive/_massive/__init__.py` (defines `__all__`; this package's block),
+  `_massive/errors.py`, `_massive/net.py`, `_massive/rest/__init__.py`, `_massive/ws/__init__.py`,
+  `_massive/names/__init__.py` (empty subpackage markers), `_massive/spec/__init__.py` (re-exports
+  the types), `_massive/spec/types.py`; their mirrors under `tests/_massive/`.
+- Modify: `tests/test_layout.py` (the import-boundary test).
+- Delete: none.
+
+**Tasks.**
+- [ ] `errors.py`: `WireError` (status, host, path, `request_id`, message) and its subclasses
+      `WireAuthError`, `WireEntitlementError`, `WireRateLimitError`, `WireHandshakeError`.
+- [ ] `net.py`: the CA bundle (`SSL_CERT_FILE`/`SSL_CERT_DIR`, else `certifi`), proxy selection
+      from the environment, the User-Agent, and the JSON codec (`orjson` when installed, logged
+      once at INFO).
+- [ ] `spec/types.py`, a runtime-safe module of frozen value types: `RestPath`, `Param`, `Field`,
+      `ParamKind`, `WireType`, `WireUnit`, and `DatasetWire`. It imports nothing but the
+      standard library; `spec/__init__.py` re-exports them, and the generator imports them from
+      here, so the generator is never needed at run time.
+- [ ] `_massive/__init__.py`: re-exports this package's block (the `WireError` family and the
+      value types) and defines `__all__`.
+- [ ] The import-boundary test in `tests/test_layout.py`, reading every module with `ast` and
+      resolving relative imports, with every rule of DESIGN § 19: allowed imports inside
+      `_massive/`; outside it, no `urllib3`, `websockets`, or `certifi`, no `_massive`
+      submodule by `import`, relative import, `importlib.import_module`, or `__import__`,
+      attribute reads on the package only for names in `_massive.__all__`, and no snapshot file
+      names; the `tests/_fakes/` and script exceptions; and the run-time check that no
+      generator or drift module is in `sys.modules` after importing the library. Negative tests
+      on synthetic source trees.
+
+**Acceptance criteria.**
+- [ ] The boundary test passes, and its negative tests prove every rule.
+- [ ] `./scripts/check.sh` green; CI green on all five test jobs.
+
+**Verification.**
+```bash
+./scripts/check.sh
+uv run pytest tests/_massive tests/test_layout.py -q
+```
+
+**Pitfalls.** Keep it minimal: anything beyond types, the codec and network plumbing, and the
+boundary belongs to PC1, PC2, or PC3a.
+
+**Out of scope.** The clients, the generator, the names.
+
+**Approval gates.** Opening the PR.
+
+---
+
 <a id="pc1"></a>
 ### PC1: `feat: REST client`
 
@@ -728,9 +801,9 @@ rm -rf .venv && uv sync --upgrade
 | **Branch** | `feat/rest-client` |
 | **Issue** | TBD (owner approval to create) |
 
-**Goal.** Create the wire package and its boundary, and a REST client that speaks Massive's
-documented REST protocol exactly, shared safely by every thread of a session, with a
-protocol-faithful fake server. Give the public `MassiveError` its `status` and `request_id`.
+**Goal.** A REST client that speaks Massive's documented REST protocol exactly, shared safely
+by every thread of a session, with a protocol-faithful fake server. Give the public
+`MassiveError` its `status` and `request_id`.
 
 **DESIGN sections implemented.** [§ 3 Exports](DESIGN.md#3-exports) (`MassiveError.status` and
 `request_id`); the package, its interface, and its boundary
@@ -740,33 +813,20 @@ protocol-faithful fake server. Give the public `MassiveError` its `status` and `
 [§ 18.2 Shared state and ownership](DESIGN.md#182-shared-state-and-ownership) and
 [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-threaded-specifics) (the shared client).
 
-**Depends on.** PC0. **Parallel with.** PC2, PC3a, P5.
+**Depends on.** PC1a. **Parallel with.** PC2, PC3a, P5.
 
 **Files.**
-- Create: `src/deephaven_massive/_massive/__init__.py` (the interface, defining `__all__`, with
-  PC1's block), `_massive/errors.py`, `_massive/net.py`, `_massive/rest/__init__.py`,
-  `rest/client.py`, `rest/query.py`, `rest/response.py`, `rest/extract.py`; their mirrors under
-  `tests/_massive/` and `tests/_massive/rest/`; `tests/_fakes/rest.py` (a real HTTP server on
-  `127.0.0.1`, a `ThreadingHTTPServer`, speaking Massive's envelope);
-  `tests/data/_massive/rest/`.
-- Modify: `tests/conftest.py` (one thin `fake_rest` fixture), `tests/test_layout.py` (the
-  import-boundary test), `src/deephaven_massive/_errors.py` and `tests/test_errors.py`
-  (`MassiveError.status` and `request_id`; `from_wire`).
+- Create: `src/deephaven_massive/_massive/rest/client.py`, `rest/query.py`,
+  `rest/response.py`, `rest/extract.py`; their mirrors under `tests/_massive/rest/`;
+  `tests/_fakes/rest.py` (a real HTTP server on `127.0.0.1`, a `ThreadingHTTPServer`, speaking
+  Massive's envelope); `tests/data/_massive/rest/`.
+- Modify: `_massive/__init__.py` and `_massive/rest/__init__.py` (PC1's block: `RestClient`,
+  `Page`, `extract`), `tests/conftest.py` (one thin `fake_rest` fixture),
+  `src/deephaven_massive/_errors.py` and `tests/test_errors.py` (`MassiveError.status` and
+  `request_id`; `from_wire`).
 - Delete: none.
 
 **Tasks.**
-- [ ] The package root: `_massive/__init__.py` re-exports only the names DESIGN § 19 lists
-      (PC1's block: `RestClient`, `Page`, `extract`, and the `WireError` family) and defines
-      `__all__`; `errors.py` (`WireError` with status, host, path, `request_id`, and message, and
-      its subclasses); `net.py` (CA bundle, proxy selection, User-Agent, the JSON codec, logged
-      once at INFO).
-- [ ] The import-boundary test in `tests/test_layout.py`, reading every module with `ast` and
-      resolving relative imports, with every rule of DESIGN § 19: allowed imports inside
-      `_massive/`; outside it, no `urllib3`, `websockets`, or `certifi`, no `_massive`
-      submodule by `import`, relative import, `importlib.import_module`, or `__import__`, attribute
-      reads on the package only for names in `_massive.__all__`, and no snapshot file names;
-      the script exception; and the run-time check that no generator or drift module is in
-      `sys.modules` after importing the library. Negative tests on synthetic source trees.
 - [ ] `_errors.py`: `MassiveError` gains read-only `status` and `request_id` (both `None` by
       default, keyword-only); `from_wire` maps each `WireError` subclass to the public
       exception with the same message, `status`, and `request_id`. A test per subclass.
@@ -774,8 +834,8 @@ protocol-faithful fake server. Give the public `MassiveError` its `status` and `
       `get(rest_path, path_params, query_params) -> Page`,
       `pages(rest_path, path_params, query_params, *, limit=None) -> Iterator[Page]`, and
       `close()`. It reads the template, result key, and parameter kinds from the `RestPath` it
-      is handed and imports no generated data; tests build `RestPath` values by hand, so PC1
-      does not depend on PC3a. Every bullet of DESIGN § 19.1 is implemented and has a named
+      is handed (the PC1a value type) and imports no generated data; tests build `RestPath`
+      values by hand, so PC1 does not depend on PC3a. Every bullet of DESIGN § 19.1 is implemented and has a named
       test: bearer authentication and no key in any URL (the fake rejects an `apiKey`
       parameter); proxy selection from `HTTPS_PROXY` and `NO_PROXY`; the CA bundle from
       `SSL_CERT_FILE`/`SSL_CERT_DIR` or `certifi`; query encoding by `ParamKind` (enum, `bool`,
@@ -798,7 +858,8 @@ protocol-faithful fake server. Give the public `MassiveError` its `status` and `
       `PYTHON_GIL=0`.
 
 **Acceptance criteria.**
-- [ ] The boundary test passes, and its negative tests prove every rule.
+- [ ] `urllib3` is imported only in `_massive/rest/` and `_massive/net.py`; the boundary test
+      passes.
 - [ ] Every rule of DESIGN § 19.1 has a named test; `caplog` proves the key never appears in a log
       record at any level.
 - [ ] `./scripts/check.sh` green; CI green on all five test jobs, including the stress test on
@@ -818,8 +879,8 @@ empty list; an error without its HTTP status; urllib3's `MaxRetryError` leaking 
 `ProxyManager` yourself. Construct the pool with `retries=False`, or urllib3 retries a second
 time underneath the client. The rate-limit WARNING is not the client's: P3 owns it.
 
-**Out of scope.** Datasets, Arrow, and Deephaven (P3); host resolution (P3); `ws/`, `spec/`, and
-`names/` (PC2, PC3a, PC3b).
+**Out of scope.** Datasets, Arrow, and Deephaven (P3); host resolution (P3); the scaffold
+(PC1a); `ws/`, `spec/`, and `names/` (PC2, PC3a, PC3b).
 
 **Approval gates.** Opening the PR. The public `MassiveError` attributes are approved
 (DESIGN § 22, decision 27).
@@ -845,15 +906,16 @@ the client's side of [§ 13.3 Connection and subscription protocol](DESIGN.md#13
 item 4 (backoff); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`reconnect_backoff` at least
 15 s, `max_reconnect_backoff`).
 
-**Depends on.** PC0. **Parallel with.** PC1, PC3a, P5.
+**Depends on.** PC1a (`errors.py`, `net.py`). **Parallel with.** PC1, PC3a, P5.
 
 **Files.**
-- Create: `src/deephaven_massive/_massive/ws/__init__.py`, `ws/client.py`, `ws/protocol.py`,
+- Create: `src/deephaven_massive/_massive/ws/client.py`, `ws/protocol.py`,
   `ws/backoff.py`; their mirrors under `tests/_massive/ws/`; `tests/_fakes/ws.py` (a fake Massive
   server on `websockets.asyncio.server`); `tests/data/_massive/ws/` (frame fixtures: `connected`,
   `auth_success`, `auth_failed`, `max_connections`, acknowledgements, refusals, data frames per
   cluster, including forex `EUR/USD` with a quoted `x`).
-- Modify: `_massive/__init__.py` (PC2's block: `WsClient`, `WsState`, `Status`, `StatusKind`),
+- Modify: `_massive/__init__.py` and `_massive/ws/__init__.py` (PC2's block: `WsClient`,
+  `WsState`, `Status`, `StatusKind`),
   `tests/conftest.py` (one thin `fake_ws_server` fixture), `src/deephaven_massive/_config.py` and
   `tests/test_config.py` (`reconnect_backoff` below 15 s raises `ValueError`; the docstring
   describes the client's single backoff, not websockets' own schedule).
@@ -947,20 +1009,20 @@ package; and give the owner a live drift check and its weekly workflow.
 unit table and the tag cross-check); [§ 20 Quality gates](DESIGN.md#20-quality-gates) (the spec
 gates, the drift workflow, the wheel exclusion).
 
-**Depends on.** PC0. **Parallel with.** PC1, PC2, P5.
+**Depends on.** PC1a (the value types). **Parallel with.** PC1, PC2, P5.
 
 **Files.**
 - Create:
-  - `src/deephaven_massive/_massive/spec/`: `__init__.py`, `allowlist.py`, `units.py`,
+  - `src/deephaven_massive/_massive/spec/`: `allowlist.py`, `units.py`,
     `drift.py`, `generate.py`, `restspec.json` (generated), and the data directory
     `snapshot/` (`openapi.json`, `websocket.json`, `llms.txt`, the flat-file documentation
     pages, `manifest.json`);
   - their mirrors under `tests/_massive/spec/`;
   - `scripts/refresh_massive_spec.py` (a thin entry point),
     `.github/workflows/spec-drift.yml`.
-- Modify: `_massive/__init__.py` (PC3a's block: `rest_path`, `rest_paths`, `RestPath`, `Param`,
-  `Field`, `ParamKind`, `WireType`, `wire_unit`, `WireUnit`, `DatasetWire`, the cross-check
-  readers),
+- Modify: `_massive/__init__.py` and `_massive/spec/__init__.py` (PC3a's block: `rest_path`,
+  `rest_paths`, `wire_unit`, `unused_allowlisted`, the cross-check readers; the value types
+  are PC1a's),
   `pyproject.toml` (the wheel exclusion of `_massive/spec/snapshot`; not a dependency change).
 - Delete: none.
 
@@ -978,8 +1040,9 @@ gates, the drift workflow, the wheel exclusion).
 - [ ] `generate.py`: spec flattening (`allOf`, nested objects), the failure on an allow-listed
       path that is missing, ignored, draft, or deprecated, the wire-type mapping, parameter
       extraction, canonical `restspec.json`, and `main(argv, wires, s3_prefixes)` with the
-      modes `--check`, `--fetch`, plain regeneration, and `--verify`. `DatasetWire` (the plain
-      record of one dataset's wire facts) is defined here; in PC3a the script passes no records,
+      modes `--check`, `--fetch`, plain regeneration, and `--verify`. It imports `DatasetWire`
+      and the other value types from `spec/types.py` (PC1a), never the reverse; in PC3a the
+      script passes no records,
       and lock appending comes in PC3b.
 - [ ] `spec/__init__.py`: load `restspec.json` once into frozen dataclasses; the cross-check
       readers, which raise `WireError` when the snapshot is absent (an installed wheel).
@@ -1553,7 +1616,7 @@ flat-file columns of [§ 8 Namespace tree](DESIGN.md#8-namespace-tree) (as `Data
 fields); [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig) (`s3_*`,
 `flat_file_symbol_threshold`, `flat_file_publish_cutoff`).
 
-**Depends on.** P2. **Parallel with.** PC0, PC1, PC2, PC3a. The move to own clients leaves P5
+**Depends on.** P2. **Parallel with.** PC0, PC1a, PC1, PC2, PC3a. The move to own clients leaves P5
 (open PR #51) unaffected: `HistoryQuery.history()` chooses the source (`_sources.choose_source`)
 and calls one transport, and the REST transport it calls is P3's, on the library's REST client.
 PC3b lands after P5 and then moves the flat-file key maps P5 owns into the wire package
