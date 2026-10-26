@@ -56,15 +56,18 @@ nothing is kept or shimmed for compatibility.
    advisory one. It is the only free-threaded target: pyarrow, numpy, and pandas no longer
    publish cp313t wheels. Locking must be correct without the GIL.
 7. **Tests mirror the package.** `src/deephaven_massive/<path>/<name>.py` is tested by
-   `tests/<path>/test_<name>.py`, with the leading underscore dropped from `<name>` and `<path>`
-   copied as is; a package `__init__.py` is tested by `tests/<path>/test_init.py`. Live tests
-   end in `_integration.py`. The only other files allowed are `tests/conftest.py`,
-   `tests/test_layout.py`, `tests/test_catalog.py`, `tests/test_readme.py`, and the
-   `tests/_fakes/` package. `tests/test_layout.py` enforces this; a new exception needs owner
-   approval and a change to `DESIGN.md` § 4.2. The `PLAN.md` package PN changes the rule to the
-   layout of `DESIGN.md` § 4.2 (every path component drops one leading underscore, the dunder
-   rule, `test_catalog.py` a plain mirror, import roots `pythonpath = ["."]` and
-   `mypy_path = ["src"]`) and updates this rule and the test paths below.
+   `tests/<path>/test_<name>.py`, where every path component drops one leading underscore
+   (`_namespaces/stocks.py` → `tests/namespaces/test_stocks.py`, `_massive/rest/client.py` →
+   `tests/massive/rest/test_client.py`). A package `__init__.py` is tested by
+   `tests/<path>/test_init.py` and a `__main__.py` by `tests/<path>/test_main.py`. Live tests
+   end in `_integration.py`. A directory under `tests/` whose name starts with `_` is a helper
+   package outside the rule; there is one, `tests/_fakes/`. The only other files allowed are
+   `tests/conftest.py`, `tests/test_layout.py`, and `tests/test_readme.py`
+   (`tests/test_catalog.py` is the plain mirror of `_catalog.py`). `tests/test_layout.py`
+   enforces this; a new exception needs owner approval and a change to `DESIGN.md` § 4.2. The
+   import roots are the repository root for pytest (`pythonpath = ["."]`) and `src/` for mypy
+   (`mypy_path = ["src"]`): test code imports helpers as `tests._fakes…`, so `tests/massive/`
+   can never shadow the top-level `massive` package.
 8. **Linter ignores need a reason and, if new, owner approval.** Every entry in the ruff ignore
    lists and every inline `# noqa` or `# type: ignore[code]` carries a reason comment. Adding a
    rule to any ignore list, or a new `noqa` category, requires owner approval recorded in the
@@ -73,8 +76,9 @@ nothing is kept or shimmed for compatibility.
    line and owner approval in the PR. Never write a dead defensive branch to satisfy the gate;
    delete the branch.
 10. **No live testing in unit tests.** Unit tests use the fake REST, WebSocket, and S3 servers in
-    `tests/_fakes/` and payload fixtures under `tests/data/<owner>/`. Only `_integration` tests
-    touch Massive, and only when `MASSIVE_API_KEY` is set.
+    `tests/_fakes/` and payload fixtures under `tests/data/<test owner path>/` (for example
+    `tests/data/symbols/`, `tests/data/massive/rest/`). Only `_integration` tests touch
+    Massive, and only when `MASSIVE_API_KEY` is set.
 11. **Docstrings meet the documentation standard below.** A change to a public signature,
     default, or table semantics updates `DESIGN.md` first (owner decision).
 12. **Dependencies** (the declarations in `pyproject.toml`) change only in dedicated
@@ -181,4 +185,4 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
 | Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
 | Legacy code (deleted; reference only) | `git show 519fad8:<path>` for `src/deephaven_massive/{engine,domains,schemas}/` and `tests/legacy/` |
-| Namespace classes and dataset declarations | `src/deephaven_massive/_domains/` (renamed `_namespaces/` by PN), `DESIGN.md` § 8 |
+| Namespace classes and dataset declarations | `src/deephaven_massive/_namespaces/`, `DESIGN.md` § 8 |
