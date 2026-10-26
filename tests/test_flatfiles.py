@@ -394,6 +394,7 @@ def test_trades_are_renamed_typed_and_converted(
         "ReportSequence": None,
     }
     assert (msft["Symbol"], msft["Conditions"]) == ("MSFT", None)
+    assert msft["TrfTimestamp"] is None  # the file says 0: no TRF
     assert (second["Size"], second["Correction"], second["Conditions"]) == (0.5, 1, [14])
     assert (second["TrfId"], second["TrfTimestamp"]) == (201, 1741013999999999000)
     assert spy["Symbol"] == "SPY"
@@ -421,6 +422,25 @@ def test_an_unverified_unit_out_of_range_is_a_massive_error(
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row))
     with pytest.raises(dm.MassiveError, match="timestamp unit mismatch"):
         query(session, spec, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+
+
+def test_epoch_zero_is_null_except_in_timestamp(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # Stocks: a 0 participant or TRF timestamp is absent; a 0 price and size are data.
+    row = "12,,4,1,0,0,1,1741012200000000000,0,1,AAPL,,0\n"
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row))
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    assert pick(t, "Timestamp", "ParticipantTimestamp", "TrfTimestamp", "Price", "Size") == [
+        (1741012200000000000, None, None, 0.0, 0.0)
+    ]
+    # Futures sessions are not filtered on Timestamp, so a 0 there shows that it is kept.
+    fake_s3.put(
+        FUTURES_0304.format("cme"),
+        make_csv_gz(FUTURES_HEADER + ",0,0,1,1,1,2025-03-04,ESH5,0\n"),
+    )
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    assert pick(q.history("2025-03-04", "2025-03-04"), "Timestamp", "Price") == [(0, 0.0)]
 
 
 def test_quote_lists_are_parsed(
@@ -712,24 +732,62 @@ def test_a_weekend_only_range_is_an_empty_table(
     ]
 
 
-def test_a_missing_last_trading_date_is_not_yet_published(
-    *, session: dm.MassiveSession, put: Callable[[str, str], None]
+def test_a_missing_last_date_within_a_day_of_publication_names_both_causes(
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    clock: Callable[[datetime], None],
 ) -> None:
+    # March 4's file counts as published from 11:30 New York time on March 5; for a day after
+    # that, a missing file may still just be late.
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    clock(datetime(2025, 3, 6, 11, 29, tzinfo=NEW_YORK))
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(
-            f"stocks.trades: {TRADES_0304} is not yet published; flat files land ~11:00 ET next day"
+            f"stocks.trades: {TRADES_0304} does not exist: 2025-03-04 is not yet published (flat "
+            "files land ~11:00 ET next day), or was a market holiday"
         ),
     ):
         q.history("2025-03-03", "2025-03-04")
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        pytest.param(datetime(2025, 3, 6, 11, 30, tzinfo=NEW_YORK), id="when-the-day-ends"),
+        pytest.param(NOW, id="days-later"),
+    ],
+)
+def test_a_missing_last_date_after_a_day_is_skipped_as_a_holiday(
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    clock: Callable[[datetime], None],
+    caplog: pytest.LogCaptureFixture,
+    now: datetime,
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    clock(now)
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        t = q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+    assert pick(t, "Id") == [("1",), ("2",), ("3",), ("4",)]  # the rest of the range
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            f"stocks.trades: {TRADES_0304} does not exist; skipping 2025-03-04 (a market holiday?)",
+        ),
+        (logging.INFO, "stocks.trades history: source=S3 files=1 skipped=2025-03-04"),
+    ]
 
 
 def test_crypto_trades_every_day(
     *,
     session: dm.MassiveSession,
     put: Callable[[str, str], None],
+    clock: Callable[[datetime], None],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     saturday = "global_crypto/trades_v1/2025/03/2025-03-01.csv.gz"
@@ -739,9 +797,12 @@ def test_crypto_trades_every_day(
     assert pick(t, "Symbol", "Timestamp", "Size", "Id") == [
         ("X:BTCUSD", 1740830400000000000, 0.015, "a1")
     ]
-    # A crypto file is missing on a Sunday only if it is not yet published ...
-    with pytest.raises(dm.MassiveError, match=r"2025-03-02\.csv\.gz is not yet published"):
+    # A missing Sunday file is no weekend for crypto: within a day after its publication time
+    # (11:30 New York on March 3) it may be late ...
+    clock(datetime(2025, 3, 3, 12, tzinfo=NEW_YORK))
+    with pytest.raises(dm.MassiveError, match=r"2025-03-02 is not yet published .*holiday"):
         q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
+    clock(NOW)
     # ... or if that weekend day was a holiday, which warns like a missing weekday.
     put(
         "global_crypto/trades_v1/2025/03/2025-03-02.csv.gz",
@@ -966,20 +1027,34 @@ def test_a_refused_file_is_an_entitlement_error(
 
 
 @pytest.mark.parametrize("code", ["InvalidAccessKeyId", "SignatureDoesNotMatch"])
-def test_rejected_credentials_name_the_s3_credentials(
-    *, session: dm.MassiveSession, fake_s3: FakeS3, code: str
+@pytest.mark.parametrize(
+    ("spec", "key", "venue"),
+    [
+        pytest.param(STOCK_TRADES, TRADES_0304, None, id="stocks"),
+        pytest.param(FUTURES_TRADES, FUTURES_0304.format("cme"), FuturesVenue.CME, id="futures"),
+    ],
+)
+def test_rejected_credentials_are_an_authentication_error(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    code: str,
+    spec: DatasetSpec,
+    key: str,
+    venue: FuturesVenue | None,
 ) -> None:
-    fake_s3.refuse("us_futures_", status=403, code=code, message="Rejected")
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    fake_s3.refuse("us_", status=403, code=code, message="Rejected")
+    q = query(session, spec, symbols=dm.ALL, venue=venue)
     with pytest.raises(
-        dm.EntitlementError,
+        dm.AuthenticationError,
         match=re.escape(
-            f"S3 rejected the flat-file credentials: HTTP 403 for "
-            f"s3://flatfiles/{FUTURES_0304.format('cme')} at https://files.massive.com "
-            f"({code}: Rejected); check MassiveConfig s3_access_key_id and s3_secret_access_key"
+            f"S3 rejected the flat-file credentials: HTTP 403 for s3://flatfiles/{key} at "
+            f"https://files.massive.com ({code}: Rejected); check MassiveConfig "
+            "s3_access_key_id and s3_secret_access_key"
         ),
-    ):
+    ) as info:
         q.history("2025-03-04", "2025-03-04")
+    assert not isinstance(info.value, dm.EntitlementError)
 
 
 def test_a_server_error_is_a_massive_error(session: dm.MassiveSession, fake_s3: FakeS3) -> None:

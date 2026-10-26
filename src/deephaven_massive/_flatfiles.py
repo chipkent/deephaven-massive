@@ -26,12 +26,17 @@ text such as `NA` or `NULL` is data (both are valid tickers).
 
 A missing file is judged by its date: on a weekend (for every class but crypto, which trades
 every day) it is skipped silently; on a weekday it is skipped with a WARNING, since it is most
-likely a market holiday; for the last requested date it raises `MassiveError`, since that file
-is most likely not yet published.
+likely a market holiday. A missing file for the last requested date may instead be late: within
+a day after its publication time (`_sources.within_publication_grace`) it raises `MassiveError`
+naming both causes, and after that it is skipped with a WARNING like any other weekday.
+
+Massive writes `0` where a timestamp has no value (`trf_timestamp` of a trade without a TRF), so
+in every `Instant` column except `Timestamp` a `0` becomes null before unit conversion.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix
 holds the placeholder `{venue}`, `venue=None` reads all four venues, and HTTP 403 on any venue
-raises `EntitlementError` naming the venue and the `venue=` parameter. Futures files are assumed
+raises `EntitlementError` naming the venue and the `venue=` parameter; a 403 that rejects the S3
+credentials themselves raises `AuthenticationError` for every class. Futures files are assumed
 to be keyed by trading session (`session_end_date`), which Massive's documentation does not
 state outright, so every block of every futures file is checked against its key's date, and a
 mismatch (or a missing session date) raises `MassiveError` rather than return rows of the wrong
@@ -66,10 +71,10 @@ from deephaven.arrow import to_table
 from deephaven_massive._catalog import unit_rules
 from deephaven_massive._dates import TimeRange
 from deephaven_massive._enums import AssetClass, FuturesVenue, Transport
-from deephaven_massive._errors import EntitlementError, MassiveError
+from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
 from deephaven_massive._liveness import entered
 from deephaven_massive._schema import ColumnType
-from deephaven_massive._sources import NOT_PUBLISHED
+from deephaven_massive._sources import within_publication_grace
 from deephaven_massive._timeunits import TimeField, TimeUnitTable
 
 if TYPE_CHECKING:
@@ -299,12 +304,16 @@ class _Transform:
             header: The header that fills the column, or None.
 
         Returns:
-            An Arrow array of the column's type, one value per row of `block`.
+            An Arrow array of the column's type, one value per row of `block`. In an `Instant`
+            column other than `Timestamp`, an epoch value of `0` is null.
         """
         if header is None:
             return pa.nulls(block.num_rows, column_type.arrow_type)
         values = block[header]
         if column_type is ColumnType.INSTANT:
+            if header != self.timestamp_header:
+                # Massive writes 0 where a timestamp has no value; WebSocket and REST omit it.
+                values = pc.if_else(pc.equal(values, 0), pa.scalar(None, pa.int64()), values)
             return pc.cast(self._nanos(header, values), column_type.arrow_type)
         if column_type is ColumnType.INT_ARRAY:
             return pc.cast(pc.split_pattern(values, ","), column_type.arrow_type)
@@ -483,11 +492,12 @@ class FlatFileHistory:
             futures, venue order within a date), each file's rows in file order. A range
             without rows gives an empty table with every column.
 
-        Errors, all raised on the calling thread: `EntitlementError` when S3 answers HTTP 403
-        for a file, naming the venue and the `venue=` parameter for futures, or the S3
-        credentials when S3 rejects them; `MassiveError` when the file for the last requested
-        date is missing on a trading day (`"... not yet published; flat files land ~11:00 ET
-        next day"`), when the S3 client cannot be created, the bucket is unreachable or answers
+        Errors, all raised on the calling thread: `AuthenticationError` when S3 rejects the S3
+        credentials; `EntitlementError` when S3 answers HTTP 403 for a file otherwise, naming
+        the venue and the `venue=` parameter for futures; `MassiveError` when the file for the
+        last requested date is missing on a trading day within a day after its publication time
+        (`"... is not yet published (flat files land ~11:00 ET next day), or was a market
+        holiday"`), when the S3 client cannot be created, the bucket is unreachable or answers
         another error, a file is not the expected gzip CSV (for example, a documented header is
         missing), a futures file holds another session, or the session is closed during the
         call.
@@ -641,11 +651,13 @@ class FlatFileHistory:
             location: The file's location, for messages.
 
         Raises:
-            EntitlementError: On HTTP 403. The server's code and message are quoted. When S3
-                rejects the credentials themselves (`InvalidAccessKeyId`,
-                `SignatureDoesNotMatch`), the message names `s3_access_key_id` and
-                `s3_secret_access_key`; otherwise it says the plan lacks the files, and for a
-                futures file names the venue and the `venue=` parameter.
+            AuthenticationError: On HTTP 403 when S3 rejects the credentials themselves
+                (`InvalidAccessKeyId`, `SignatureDoesNotMatch`), for every asset class; the
+                message quotes the server and names `s3_access_key_id` and
+                `s3_secret_access_key`.
+            EntitlementError: On any other HTTP 403: the plan lacks the files. The server's code
+                and message are quoted, and for a futures file the message names the venue and
+                the `venue=` parameter.
             MassiveError: On any status other than 403 and 404.
         """
         status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
@@ -656,7 +668,7 @@ class FlatFileHistory:
         server = f"{code}: {details.get('Message', '')}"
         if status == HTTPStatus.FORBIDDEN:
             if code in _CREDENTIAL_ERRORS:
-                raise EntitlementError(
+                raise AuthenticationError(
                     f"S3 rejected the flat-file credentials: HTTP 403 for {location} ({server}); "
                     "check MassiveConfig s3_access_key_id and s3_secret_access_key"
                 ) from error
@@ -672,12 +684,13 @@ class FlatFileHistory:
             ) from error
         raise MassiveError(f"cannot read {location}: HTTP {status} ({server})") from error
 
-    @staticmethod
-    def _skip_missing(spec: DatasetSpec, missing: Sequence[_Key], *, last: date) -> None:
+    def _skip_missing(self, spec: DatasetSpec, missing: Sequence[_Key], *, last: date) -> None:
         """Apply the missing-file rules to the files that did not exist.
 
         A weekend file is skipped silently (except for crypto, which trades every day); a
-        weekday file is skipped with a WARNING (most likely a market holiday).
+        weekday file is skipped with a WARNING (most likely a market holiday). The file for the
+        last requested date may instead be late, so within `_sources.PUBLICATION_GRACE` after
+        its publication time it raises; after that it is skipped with a WARNING too.
 
         Args:
             spec: The dataset.
@@ -685,20 +698,23 @@ class FlatFileHistory:
             last: The last partition date of the request.
 
         Raises:
-            MassiveError: If the file for `last` is missing on a trading day:
-                `"... not yet published; flat files land ~11:00 ET next day"`.
+            MassiveError: If the file for `last` is missing on a trading day within a day after
+                its publication time: `"<dataset>: <key> does not exist: <date> is not yet
+                published (flat files land ~11:00 ET next day), or was a market holiday"`.
         """
+        cutoff = self._core.config.flat_file_publish_cutoff
         for key in missing:
             trading = spec.asset_class is AssetClass.CRYPTO or key.day.weekday() < _SATURDAY
             if not trading:
                 continue
-            if key.day == last:
-                raise MassiveError(f"{spec.name}: {key.key} is {NOT_PUBLISHED}")
+            day = key.day.isoformat()
+            if key.day == last and within_publication_grace(spec, key.day, cutoff=cutoff):
+                raise MassiveError(
+                    f"{spec.name}: {key.key} does not exist: {day} is not yet published (flat "
+                    "files land ~11:00 ET next day), or was a market holiday"
+                )
             logger.warning(
-                "%s: %s does not exist; skipping %s (a market holiday?)",
-                spec.name,
-                key.key,
-                key.day.isoformat(),
+                "%s: %s does not exist; skipping %s (a market holiday?)", spec.name, key.key, day
             )
 
 

@@ -24,7 +24,7 @@ Chicago session date. Massive says files land "by approximately 11:00 AM ET the 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 from deephaven_massive._dates import (
@@ -34,6 +34,7 @@ from deephaven_massive._dates import (
     FuturesSessions,
     flat_file_published,
     futures_session,
+    publish_time,
 )
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._types import _All
@@ -49,17 +50,22 @@ if TYPE_CHECKING:
 
 __all__ = [
     "NOT_PUBLISHED",
+    "PUBLICATION_GRACE",
     "SourceChoice",
     "choose_source",
     "flat_file_prefix",
     "partition_dates",
     "rest_history_problem",
+    "within_publication_grace",
 ]
 
 logger = logging.getLogger(__name__)
 
 NOT_PUBLISHED: Final = "not yet published; flat files land ~11:00 ET next day"
 """The wording for a flat file that cannot be expected to exist yet."""
+
+PUBLICATION_GRACE: Final = timedelta(days=1)
+"""How long after its publication time a missing file may still just be late."""
 
 _PARTITION_ZONES: Final[Mapping[AssetClass | None, tzinfo]] = dict(
     [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (None, NEW_YORK)]
@@ -106,6 +112,30 @@ def partition_dates(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> t
         dates = window.partition_dates(_PARTITION_ZONES[spec.asset_class])
         first, last = dates[0], dates[-1]
     return tuple(first + timedelta(days=n) for n in range((last - first).days + 1))
+
+
+def within_publication_grace(
+    spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | None = None
+) -> bool:
+    """Tell whether a missing file for `day` may still just be late, rather than a holiday.
+
+    A file counts as published from `publish_time` (the configured cutoff, New York time, after
+    the day ends in the class's day zone). For `PUBLICATION_GRACE` after that, a missing file
+    is treated as late; from then on, as a market holiday that has no file. There is no holiday
+    calendar, so this window is the only way to tell the two apart.
+
+    Args:
+        spec: The dataset; its asset class picks the day zone (Chicago sessions for futures).
+        day: The file's partition date.
+        cutoff: `MassiveConfig.flat_file_publish_cutoff`, a New York wall-clock time.
+        now: The current instant; None reads the clock.
+
+    Returns:
+        True before `publish_time(day) + PUBLICATION_GRACE`.
+    """
+    moment = _now() if now is None else now
+    published = publish_time(day, zone=_PARTITION_ZONES[spec.asset_class], cutoff=cutoff)
+    return moment.astimezone(UTC) < (published + PUBLICATION_GRACE).astimezone(UTC)
 
 
 def flat_file_prefix(spec: DatasetSpec, request: Request) -> str | None:

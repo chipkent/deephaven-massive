@@ -20,6 +20,7 @@ from deephaven_massive._sources import (
     flat_file_prefix,
     partition_dates,
     rest_history_problem,
+    within_publication_grace,
 )
 from deephaven_massive._timeunits import TimeUnit
 
@@ -431,3 +432,32 @@ def test_the_clock_is_read_when_no_instant_is_given(monkeypatch: pytest.MonkeyPa
         choose_source(
             STOCK_TRADES, request(), MARCH_3, requested=HistorySource.FLAT_FILES, config=config()
         )
+
+
+@pytest.mark.parametrize(
+    ("spec", "day", "now", "late"),
+    [
+        # March 4's stocks file is published at 11:30 New York on March 5, so it may be late
+        # until 11:30 on March 6.
+        (STOCK_TRADES, date(2025, 3, 4), datetime(2025, 3, 5, 11, tzinfo=NEW_YORK), True),
+        (STOCK_TRADES, date(2025, 3, 4), datetime(2025, 3, 6, 11, 29, tzinfo=NEW_YORK), True),
+        (STOCK_TRADES, date(2025, 3, 4), datetime(2025, 3, 6, 11, 30, tzinfo=NEW_YORK), False),
+        # A futures session's clock starts at Chicago's midnight, 01:00 New York, so its first
+        # 11:30 New York is the same morning; a forex day's at UTC midnight.
+        (FUTURES_TRADES, date(2025, 3, 4), datetime(2025, 3, 6, 11, 29, tzinfo=NEW_YORK), True),
+        (FUTURES_TRADES, date(2025, 3, 4), datetime(2025, 3, 6, 11, 30, tzinfo=NEW_YORK), False),
+        (FOREX_BARS, date(2025, 3, 4), datetime(2025, 3, 6, 11, 29, tzinfo=NEW_YORK), True),
+    ],
+)
+def test_within_publication_grace(
+    *, spec: DatasetSpec, day: date, now: datetime, late: bool
+) -> None:
+    assert within_publication_grace(spec, day, cutoff=time(11, 30), now=now) is late
+
+
+def test_publication_grace_reads_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    def much_later() -> datetime:
+        return datetime(2025, 4, 1, tzinfo=UTC)
+
+    monkeypatch.setattr(_sources, "_now", much_later)
+    assert within_publication_grace(STOCK_TRADES, date(2025, 3, 4), cutoff=time(11, 30)) is False
