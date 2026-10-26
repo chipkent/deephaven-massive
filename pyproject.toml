@@ -22,6 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
     "Topic :: Office/Business :: Financial :: Investment",
     "Typing :: Typed",
 ]
@@ -63,20 +64,17 @@ dev = [
 ]
 
 [tool.uv.sources]
-# The fork's `deephaven-fixes` integration branch. uv.lock is not committed, so every sync
-# resolves its latest commit.
-# The fork builds as version 0.0.0, so no code or test may check the massive version.
+# The fork's `deephaven-fixes` integration branch. uv.lock is not committed: CI resolves the
+# branch head on every run and scripts/check.sh refreshes it locally (uv sync --upgrade); a
+# plain `uv sync` keeps the local lock. With a source set, uv takes this git source and ignores
+# the `massive>=2.9.0` specifier, which matters only in published metadata. The fork builds as
+# version 0.0.0, so no code or test may check the massive version.
 massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }
 
 [tool.hatch.build.targets.sdist]
-# Development-only files stay out of the source distribution.
-exclude = [
-    ".claude",
-    ".github",
-    "plans",
-    ".pre-commit-config.yaml",
-    "AGENTS.md",
-]
+# The sdist carries the package and its tests; hatchling adds README.md, LICENSE, and
+# pyproject.toml itself.
+only-include = ["src", "tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deephaven_massive"]
@@ -86,7 +84,6 @@ packages = ["src/deephaven_massive"]
 # ---------------------------------------------------------------------------------------------
 
 [tool.ruff]
-target-version = "py311"
 line-length = 100
 # First-party import roots, the same as mypy's and pytest's: `deephaven_massive` from `src/`,
 # `tests.…` from the repository root. `tests/` is not a root, so `massive` stays third-party.
@@ -95,31 +92,22 @@ src = ["src", "."]
 namespace-packages = ["tests"]
 
 [tool.ruff.lint]
-select = ["ALL", "DOC201", "DOC501", "DOC502"]
-# Preview is on only so the three DOC rules above can be selected by name; no other preview
-# rule is enabled.
+# Besides ALL: the preview rules selected by name. DOC201, DOC501, and DOC502 check that
+# docstring Returns and Raises sections match the code; PLR0904, PLR0914, and PLR0916 are the
+# pylint limits on public methods, local variables, and boolean expressions.
+select = ["ALL", "DOC201", "DOC501", "DOC502", "PLR0904", "PLR0914", "PLR0916"]
+# Preview is on so the preview rules above can be selected by name; explicit-preview-rules keeps
+# every other preview rule off. Preview also switches some stable rules (F401, UP007, the S3xx
+# family, ...) to their preview behavior.
 preview = true
 explicit-preview-rules = true
 ignore = [
-    # Rules that conflict with `ruff format` (ruff documents these as formatter conflicts).
-    "COM812",  # formatter manages trailing commas
-    "COM819",  # formatter manages trailing commas
-    "W191",  # formatter manages indentation
-    "E111",  # formatter manages indentation
-    "E114",  # formatter manages indentation
-    "E117",  # formatter manages indentation
-    "D206",  # formatter manages docstring indentation
-    "D300",  # formatter manages docstring quotes
-    "Q000",  # formatter manages quotes
-    "Q001",  # formatter manages quotes
-    "Q002",  # formatter manages quotes
-    "Q003",  # formatter manages quotes
+    "COM812",  # conflicts with `ruff format`, which manages trailing commas
     # Project policy.
     "TRY003",  # exception messages carry context inline; no exception subclass per message
     "EM101",  # raising with a literal message is clearer than binding it to a variable first
     "EM102",  # raising with an f-string message is clearer than binding it to a variable first
     "PLR0913",  # keyword-only parameters are the API style; PLR0917 caps positional ones at 3
-    "FBT003",  # boolean positional values in calls to third-party APIs are outside our control
     "CPY001",  # the license is declared once in LICENSE and pyproject.toml, not per file
 ]
 
@@ -130,16 +118,11 @@ ignore = [
     "SLF001",  # white-box tests may inspect private members
     "ARG001",  # pytest fixtures are requested by parameter name even when unused
     "ARG002",  # fake methods keep the signature of the interface they replace
-    "ARG005",  # stub lambdas keep the signature of the callback they replace
-    "FBT001",  # boolean parametrize arguments are positional by pytest's design
-    "FBT002",  # fake methods keep the boolean defaults of the interface they replace
+    "FBT001",  # listener stand-ins keep Deephaven's on_update(update, is_replay) signature
     "D100",  # test docstrings are optional (any that exist must be well formed)
     "D101",  # test docstrings are optional (any that exist must be well formed)
     "D102",  # test docstrings are optional (any that exist must be well formed)
     "D103",  # test docstrings are optional (any that exist must be well formed)
-    "D104",  # test docstrings are optional (any that exist must be well formed)
-    "D105",  # test docstrings are optional (any that exist must be well formed)
-    "D106",  # test docstrings are optional (any that exist must be well formed)
     "D107",  # test docstrings are optional (any that exist must be well formed)
 ]
 
@@ -209,7 +192,6 @@ typeCheckingMode = "standard"
 # ---------------------------------------------------------------------------------------------
 
 [tool.pytest]
-minversion = "9.0"
 strict = true
 filterwarnings = ["error"]
 addopts = ["-ra", "--import-mode=importlib"]
@@ -230,4 +212,7 @@ branch = true
 [tool.coverage.report]
 fail_under = 100
 show_missing = true
-exclude_also = ["if TYPE_CHECKING:", "@(typing\\.)?overload"]
+exclude_also = [
+    "if TYPE_CHECKING:",  # imports for type checkers only; never executed
+    "@(typing\\.)?overload",  # overload stubs are signatures for type checkers; they never run
+]
