@@ -345,7 +345,8 @@ class _Transform:
     Attributes:
         dataset: The dataset name, for time-unit lookups and messages.
         read_options: Block size and threading of the CSV reader.
-        convert_options: The headers to read and the type each is parsed as.
+        convert_options: The headers to read, the type each is parsed as, and the one null
+            marker, the empty field.
         columns: Per schema column, in order: its type and the header that fills it, or None
             for a column the files do not carry (null).
         arrow_schema: The dataset's Arrow schema.
@@ -407,6 +408,9 @@ class _Transform:
             convert_options=pacsv.ConvertOptions(
                 column_types=read_types,
                 include_columns=list(read_types),
+                # Massive writes a missing value as an empty field and nothing else. Arrow's
+                # default null markers include `NA` and `NULL`, which are real tickers.
+                null_values=[""],
                 strings_can_be_null=True,
             ),
             columns=tuple((c.type, header_of.get(c.name)) for c in spec.schema.columns),

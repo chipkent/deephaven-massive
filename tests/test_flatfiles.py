@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, date, datetime, time
-from typing import Any, cast
+from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -19,7 +19,6 @@ from deephaven.column import string_col
 from deephaven.table import Table
 
 import deephaven_massive as dm
-from _fakes.s3 import FakeS3
 from deephaven_massive import _flatfiles
 from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._dates import CHICAGO, FuturesSessions, TimeRange, bounds
@@ -35,6 +34,18 @@ NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
 NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
 """A Monday afternoon, when every file of the first week of March 2025 is published."""
+
+
+class FakeS3(Protocol):
+    # What the tests use of the `fake_s3` fixture (tests/conftest.py, tests/_fakes/s3.py).
+    requests: list[tuple[str, str]]
+    clients: list[dict[str, object]]
+
+    def put(self, key: str, data: bytes) -> None: ...
+    def put_dropped(self, key: str, data: bytes) -> None: ...
+    def refuse(self, prefix: str, *, status: int, code: str, message: str) -> None: ...
+    def fail(self, key: str, error: Exception) -> None: ...
+    def keys(self) -> list[str]: ...
 
 
 def _ns(*fields: str) -> dict[tuple[Transport, str], TimeUnit]:
@@ -494,6 +505,26 @@ def test_symbol_pushdown_keeps_only_the_requested_symbols(
     q = query(session, STOCK_TRADES, symbols=["aapl"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert pick(t, "Symbol", "Id") == [("AAPL", "1"), ("AAPL", "3")]
+
+
+@pytest.mark.parametrize("ticker", ["NA", "NULL"])
+def test_tickers_that_look_like_null_markers_are_symbols(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], ticker: str
+) -> None:
+    # Only an empty field is null: NA and NULL are valid tickers, which Arrow's default null
+    # markers would read as null, while the empty correction and trf fields stay null.
+    header = (
+        "conditions,correction,exchange,id,participant_timestamp,price,sequence_number,"
+        "sip_timestamp,size,tape,ticker,trf_id,trf_timestamp\n"
+    )
+    row = f"12,,4,1,1741012200000000000,1.5,1,1741012200000000000,10,1,{ticker},,\n"
+    other = "12,,4,2,1741012200000000000,2.5,2,1741012200000000000,10,1,SPY,,\n"
+    fake_s3.put(TRADES_0303, make_csv_gz(header + row + other))
+    q = query(session, STOCK_TRADES, symbols=[ticker])
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert pick(t, "Symbol", "Correction", "TrfId") == [(ticker, None, None)]
+    every = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    assert pick(every, "Symbol") == [(ticker,), ("SPY",)]
 
 
 def test_no_matching_rows_gives_an_empty_table_with_every_column(
