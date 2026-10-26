@@ -17,10 +17,10 @@ uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once p
 ./scripts/check.sh fast --no-fix           # report only (what CI's lint job and the commit hook run)
 uv run pytest tests/test_layout.py -q      # one file, no coverage, debugger-friendly
 uv build                                   # sdist and wheel
-uv run python scripts/refresh_massive_spec.py --check    # live: report Massive API drift; changes nothing
-uv run python scripts/refresh_massive_spec.py --verify   # offline: generated table and locks are current
-uv run python scripts/refresh_massive_spec.py --fetch    # replace the vendored snapshot (then refresh)
-uv run python scripts/refresh_massive_spec.py            # regenerate restspec.json, append lock entries
+uv run python -m deephaven_massive._massive.refresh            # regenerate spec/*.json from the snapshot
+uv run python -m deephaven_massive._massive.refresh --fetch    # replace the vendored snapshot (then refresh)
+uv run python -m deephaven_massive._massive.refresh --check    # live: report Massive API drift; changes nothing
+uv run pytest tests/massive/refresh -q                         # offline: spec/*.json are current
 ```
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
@@ -30,15 +30,13 @@ environment, and the Claude Code hook blocks them.
 uses the newest versions. Offline, a local run warns and keeps what is installed; CI fails
 instead.
 
-The library does not build on Massive's Python SDK (`massive`). It has its own REST and
-WebSocket clients, and its REST parameters and columns are generated from a vendored snapshot of
-Massive's OpenAPI spec (`DESIGN.md` § 19); until the `PLAN.md` package PC4 lands, the old
-dependency is still installed. Never add an import of `massive` (ruff's `banned-api` rejects it
-once the dependency is gone). Never edit `restspec.json` by hand: it changes only through
-`scripts/refresh_massive_spec.py`. The name lock is written by that refresh, which never renames
-an existing entry; renaming, retyping, or removing an entry by hand is an ordinary edit,
-reviewed as a diff in its PR. The library has no users, so nothing is kept or shimmed for
-compatibility.
+The library does not build on Massive's Python SDK (`massive`). It has its own REST,
+WebSocket, and S3 flat-file clients, and every schema is generated from vendored, pinned vendor
+specs (`DESIGN.md` § 19); until the `PLAN.md` package PC4 lands, the old dependency is still
+installed. Never add an import of `massive` (ruff's `banned-api` rejects it). Never edit
+`spec/*.json` by hand: they change only through the refresh. Hand input lives only in
+`_massive/refresh/lexicon.py`, `overrides.py`, and `exclusions.py`, every entry with a reason.
+The library has no users, so nothing is kept or shimmed for compatibility.
 
 ## Hard rules
 
@@ -58,12 +56,15 @@ compatibility.
    advisory one. It is the only free-threaded target: pyarrow, numpy, and pandas no longer
    publish cp313t wheels. Locking must be correct without the GIL.
 7. **Tests mirror the package.** `src/deephaven_massive/<path>/<name>.py` is tested by
-   `tests/<path>/test_<name>.py`, with the leading underscore dropped from `<name>` and `<path>`
-   copied as is; a package `__init__.py` is tested by `tests/<path>/test_init.py`. Live tests
-   end in `_integration.py`. The only other files allowed are `tests/conftest.py`,
-   `tests/test_layout.py`, `tests/test_catalog.py`, `tests/test_readme.py`, and the
-   `tests/_fakes/` package. `tests/test_layout.py` enforces this; a new exception needs owner
-   approval and a change to `DESIGN.md` § 4.2.
+   `tests/<path>/test_<name>.py`, where every path component drops one leading underscore
+   (`_massive/rest/client.py` → `tests/massive/rest/test_client.py`); `__init__.py` maps to
+   `test_init.py` and `__main__.py` to `test_main.py`. Live tests end in `_integration.py`. A
+   `_` directory under `tests/` is a helper package outside the rule (`tests/_fakes/`); the only
+   other files allowed are `tests/conftest.py`, `tests/test_layout.py`, and
+   `tests/test_readme.py`. Fixtures live in `tests/data/<test owner path>/`. Import roots are
+   `pythonpath = ["."]` and `mypy_path = ["src"]`; import fakes as `tests._fakes…`.
+   `tests/test_layout.py` enforces this; a new exception needs owner approval and a change to
+   `DESIGN.md` § 4.2.
 8. **Linter ignores need a reason and, if new, owner approval.** Every entry in the ruff ignore
    lists and every inline `# noqa` or `# type: ignore[code]` carries a reason comment. Adding a
    rule to any ignore list, or a new `noqa` category, requires owner approval recorded in the
@@ -72,24 +73,23 @@ compatibility.
    line and owner approval in the PR. Never write a dead defensive branch to satisfy the gate;
    delete the branch.
 10. **No live testing in unit tests.** Unit tests use the fake REST, WebSocket, and S3 servers in
-    `tests/_fakes/` and payload fixtures under `tests/data/<owner>/`. Only `_integration` tests
+    `tests/_fakes/` and payload fixtures under `tests/data/<test owner path>/`. Only `_integration` tests
     touch Massive, and only when `MASSIVE_API_KEY` is set.
 11. **Docstrings meet the documentation standard below.** A change to a public signature,
     default, or table semantics updates `DESIGN.md` first (owner decision).
 12. **Dependencies** (the declarations in `pyproject.toml`) change only in dedicated
     `chore(deps):` PRs. `uv.lock` is not committed: every sync resolves the newest versions.
-13. **Massive's wire format lives in one package.** Everything that talks to Massive's REST or
-    WebSocket API or describes its wire format (the clients, frame decoding, the spec snapshot,
-    the generator, the generated REST table, the lexicons, the WebSocket and flat-file key maps,
-    the wire-field unit table, the name lock) lives in `src/deephaven_massive/_massive/`.
-    `_massive` imports nothing from `deephaven` or from the rest of the library. Everything else
-    imports only `deephaven_massive._massive` and uses only the names in its `__all__`: never a
-    submodule (by `import`, relative import, or `importlib`), never `urllib3`, `websockets`, or
-    `certifi`, and never a snapshot file. Two exceptions: the fake servers in `tests/_fakes/`
-    may import `websockets` and the standard library's HTTP server, and
-    `scripts/refresh_massive_spec.py` calls `deephaven_massive._massive.spec.generate.main()`.
-    The import-boundary test in `tests/test_layout.py` enforces both directions. Its tests
-    mirror it under `tests/_massive/`.
+13. **One wire package.** `src/deephaven_massive/_massive/` owns all Massive wire access
+    (REST, WebSocket, and S3 flat files), the vendored spec snapshot, the generated schemas,
+    the units, and the long-form names, in six subpackages: `net/`, `spec/`, `rest/`, `ws/`,
+    `flatfiles/`, `refresh/`. `_massive` imports nothing from `deephaven`, `deephaven_server`,
+    `jpy`, or the rest of the library. Layers: `net` and `spec` import nothing else in
+    `_massive`; `rest`, `ws`, and `flatfiles` import only `net` and `spec`; only `refresh` and
+    its tests import `refresh`. Everything else imports only `deephaven_massive._massive` and
+    uses only the names in its `__all__`: never a submodule (by `import`, relative import, or
+    `importlib`), never `urllib3`, `websockets`, `certifi`, `boto3`, or `botocore`, and never a
+    snapshot file. The one exception is `tests/_fakes/`. The AST tests in
+    `tests/test_layout.py` enforce all of it.
 
 ## Documentation standard
 
@@ -175,7 +175,8 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | Hosts, connections, subscriptions | `DESIGN.md` § 13 |
 | Publishers and fan-out | `DESIGN.md` § 14 |
 | Threads and locks | `DESIGN.md` § 18 |
-| REST and WebSocket clients, the spec snapshot, the name lock | `DESIGN.md` § 19 |
+| Wire clients, generated schemas, drift | `DESIGN.md` § 19 |
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
 | Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
-| Legacy code (reference only; outside the gate, removed in P7) | `src/deephaven_massive/{engine,domains,schemas}/`, `tests/legacy/`; every exclusion of it carries a grep-able `LEGACY-EXCLUSION` comment |
+| Legacy code (reference only; deleted by PL) | `git show 519fad8:<path>` |
+| Namespace classes and dataset declarations | `src/deephaven_massive/_namespaces/`, `DESIGN.md` § 8 |

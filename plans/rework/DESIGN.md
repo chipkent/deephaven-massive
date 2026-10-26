@@ -5,9 +5,10 @@ library that exposes Massive.com (formerly Polygon.io) market data as live and s
 [Deephaven](https://deephaven.io) tables. It is the source of truth for every implementation
 work package in `PLAN.md`. It changes only by owner decision.
 
-The design was checked against Massive's OpenAPI spec (`https://api.massive.com/openapi`) and
-WebSocket spec (`https://api.massive.com/specs/websocket.json`) as of 2026-10-26,
-`deephaven-core` 42.7 (Python package; Java behaviour from the `deephaven-core` `main` branch),
+The design was checked against Massive's OpenAPI spec (`https://api.massive.com/openapi`,
+147 paths), its WebSocket spec (`https://api.massive.com/specs/websocket.json`, 37 channels),
+`llms.txt`, and the flat-file dataset and overview pages, all as of 2026-10-26;
+`deephaven-core` 42.7 (Python package; Java behaviour from the `deephaven-core` `main` branch);
 and the massive.com documentation as of 2026-10-23. Facts that could not be verified from those
 sources are marked **UNVERIFIED**, carry the conservative handling that applies, and are
 collected in [section 23](#23-open-verification-items).
@@ -50,13 +51,12 @@ collected in [section 23](#23-open-verification-items).
 - **Flat files** (gzip CSV on S3 at `files.massive.com`) become static tables.
 
 The library runs inside an existing Deephaven worker. It never starts a JVM and never embeds a
-Deephaven server. It does not use Massive's Python SDK. It speaks Massive's
-documented REST and WebSocket protocols directly, through its own REST client (on `urllib3`) and
-its own WebSocket client (on `websockets`), and it generates its REST parameters and columns
-from a pinned snapshot of Massive's OpenAPI spec. All of that lives in one private package,
+Deephaven server. It does not use Massive's Python SDK. It speaks Massive's documented REST,
+WebSocket, and S3 flat-file protocols directly, through its own clients, and it generates every
+schema from vendored, pinned vendor specs. All wire access lives in one private package,
 `deephaven_massive._massive`, behind one small interface
 ([section 19](#19-wire-clients-and-the-spec-snapshot)). The runtime dependencies are
-`deephaven-core`, `pyarrow`, `boto3` (flat files), `urllib3`, `websockets`, and `certifi`.
+`deephaven-core`, `pyarrow`, `boto3`, `botocore`, `urllib3`, `websockets`, and `certifi`.
 
 There are no existing users. Backward compatibility with the previous code base is not a goal,
 and nothing in this design exists to avoid breaking a user: no compatibility shim, no
@@ -67,13 +67,13 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 ### 2.1 Principles
 
 1. **Datasets are named by what they are, not how they travel.** One method per dataset. One
-   schema per dataset kind: the union of the fields Massive documents across asset classes and
-   transports (the REST fields of the OpenAPI spec, the WebSocket keys, and the flat-file
-   headers), flattened to PascalCase. Column names come from the committed name lock
-   ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)), never from an
-   SDK or a field description. A column a class or transport does not supply is null (crypto
-   trades have no `Tape`; stock bars have no `SettlementPrice`). `Timestamp` is the primary time
-   column on every tick, bar, and value row. `Symbol` is the instrument on every instrument row.
+   schema per dataset kind: the union of the fields Massive documents for the kind's sources
+   across asset classes and transports, merged at run time from the generated tables
+   ([section 19.4](#194-generated-schemas)). Column names come from the generated tables
+   (the lexicons and `NAMES`) and from each dataset's declared key columns, never from a field
+   description. A column a class or transport does not supply is null (crypto trades have no
+   `Tape`; stock bars have no `SettlementPrice`). `Timestamp` is the primary time column on
+   every tick, bar, and value row. `Symbol` is the instrument on every instrument row.
 2. **Shape is the user's choice; transport and host are the library's.** Verbs name the
    Deephaven table shape. No feed, host, channel, or S3 prefix appears in user code.
 3. **Tier is a property of the key.** Identical code runs on every plan. The library learns
@@ -91,19 +91,21 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 7. **Failures land where Deephaven users look.** Live tables fail through
    `TablePublisher.publish_failure`. Static verbs raise. Both log at ERROR and appear in the
    diagnostics tables.
-8. **Direct over Massive's documented APIs, in one package.** The library owns one REST client
-   and one WebSocket client, kept with the spec snapshot, the generator, and the name lock in
-   the private package `_massive`, which imports nothing from Deephaven or the rest of the library
-   and is reached only through its interface
-   ([section 19](#19-wire-clients-and-the-spec-snapshot)). They implement Massive's
-   documented protocols, and nothing works around a third-party client. REST parameters and
-   columns are generated from a vendored, pinned snapshot of the OpenAPI spec; a parity test
-   keeps the generated code in step with the snapshot, and an advisory weekly job reports
-   drift in the live spec.
+8. **Direct over Massive's documented APIs, in one package.** The library owns its REST,
+   WebSocket, and S3 flat-file clients. They live with the vendored spec snapshot, the
+   generator, and the generated schemas in the private package `_massive`, split into six
+   subpackages (`net/`, `spec/`, `rest/`, `ws/`, `flatfiles/`, `refresh/`). `_massive` imports
+   nothing from Deephaven or the rest of the library and is reached only through its interface
+   ([section 19](#19-wire-clients-and-the-spec-snapshot)). A parity test keeps the generated
+   files in step with the snapshot, and an advisory weekly job reports drift in the live specs.
 9. **No live testing as design input.** Unverifiable facts get the conservative choice and a
    fixture test. Live integration tests are a later work package.
 10. **Closed categorical sets are enums.** Every closed set of values in a public signature is a
     `StrEnum`. No public signature accepts a string in place of an enum member.
+11. **Schemas are generated at build time and fixed before data.** No schema is hand-written,
+    and none is inferred from data. A live table must know its full column set and types before
+    its first row, the first message may omit optional fields (stocks `T` omits `pt` on OTC
+    trades), and two sessions must agree on a dataset's shape.
 
 ### 2.2 Terms
 
@@ -119,6 +121,10 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 | cluster path | The WebSocket URL path: `/stocks`, `/options`, `/futures`, `/indices`, `/forex`, `/crypto`. |
 | connection | One WebSocket to one `wss://host/path`. |
 | topic | One subscription parameter, `<channel>.<symbol>` or `<channel>.*`. |
+| source | One generated wire schema: a REST path template, a WebSocket `(cluster, channel)`, or a flat-file prefix. |
+| kind | A dataset kind: the datasets whose sources share one merged schema (trades, quotes, bars, …), listed in `FAMILIES`. |
+| shape | An object shape in a payload (an aggregate row, a snapshot `day` object, a WebSocket channel), which selects a lexicon. |
+| drift | A difference between a payload on the wire and its committed generated schema. |
 | UG thread | A thread of Deephaven's update graph (UG), which refreshes live tables while holding the UG lock. |
 | blink table | A Deephaven table whose rows exist for exactly one update cycle. `TablePublisher` produces one. |
 | result scope | A library-owned `LivenessScope` that holds exactly one result. |
@@ -138,7 +144,7 @@ dm.MassiveConfig
 
 # Exceptions
 dm.MassiveError            # base class
-dm.AuthenticationError     # subclass of MassiveError: bad key
+dm.AuthenticationError     # subclass of MassiveError: bad key (API key or S3 credentials)
 dm.EntitlementError        # subclass of MassiveError: the plan lacks the dataset, host, or timeframe
                            # every MassiveError has .status (HTTP status or None) and .request_id (or None)
 
@@ -173,13 +179,12 @@ for the same purpose.
 
 `MassiveError` and its two subclasses carry two read-only attributes, set when the error came
 from an HTTP response and `None` otherwise: `status`, the HTTP status (`int | None`), and
-`request_id`, the `request_id` of Massive's response envelope (`str | None`). Users branch on
-`status` (for example 404 or 429) instead of parsing messages. The exception set is unchanged.
+`request_id`, the `request_id` of Massive's response (`str | None`). Users branch on `status`
+(for example 404 or 429) instead of parsing messages.
 
 `__init__.py` resolves these names lazily, through a module `__getattr__` (PEP 562), with the
-eager imports under `TYPE_CHECKING` for type checkers. Importing a private submodule, such as
-`deephaven_massive._catalog`, therefore never imports Deephaven
-([section 4.1](#41-source-modules)).
+eager imports under `TYPE_CHECKING` mirroring `__all__`. Importing
+`deephaven_massive._massive` therefore never imports Deephaven.
 
 A test asserts that `dm.__all__` equals this list, that `getattr(dm, name)` resolves every name
 in it through the lazy `__getattr__`, and that no public signature in the package
@@ -198,105 +203,110 @@ Inside the private modules, a name used by other modules is bare (`QueryBase`, `
 names this document fixes with an underscore: `_All`, `_require_enum`, and the namespace classes
 (`_Stocks`, `_Partners`, ...), whose underscore keeps them out of users' completion lists.
 
-| Module | Contents |
-|---|---|
-| `__init__.py` | The public names of [section 3](#3-exports), `__all__`, `__version__`, resolved lazily so that importing a private submodule imports no Deephaven module. |
-| `_config.py` | `MassiveConfig` ([section 5](#5-massiveconfig)). |
-| `_session.py` | `MassiveSession`: namespaces, `snapshots`, `release`, `close`, the registry lock, the reaper thread, the stream-id allocator ([section 6](#6-massivesession-and-lifecycle)). The host-decision cache belongs to the REST transport ([section 13.2](#132-host-decision)). |
-| `_query.py` | The six query classes and their verbs ([section 7](#7-query-classes-and-verbs)). |
-| `_enums.py` | The fourteen public enums and the internal `Recency`, `ChannelFamily`, and `Transport` enums; the `_require_enum` runtime check. |
-| `_types.py` | `Symbols`, `ALL` and its type `_All`, `DateLike`, `FilterValue`, the `bars` overload aliases, and `override` (`typing_extensions.override` for the type checker, a no-op at run time, since `typing.override` needs Python 3.12). |
-| `_errors.py` | `MassiveError` (with `status` and `request_id`), `AuthenticationError`, `EntitlementError`; `from_wire`, which turns a `WireError` into the public exception with the same message, `status`, and `request_id`. |
-| `_massive/` | **The Massive wire package**: everything that talks to Massive or describes its wire format, behind one interface, `_massive/__init__.py` ([section 19](#19-wire-clients-and-the-spec-snapshot)). Subpackages `rest/` (the REST client), `ws/` (the WebSocket client), `spec/` (the vendored snapshot, the generator, and the generated REST table), and `names/` (the lexicons, the WebSocket key maps, and the name lock). It imports nothing from Deephaven or from the rest of the library. |
-| `_catalog.py` | The dataset catalog. One frozen `DatasetSpec` per dataset: namespace, name, `query_kind` (a `QueryKind` member naming one of the six query classes, so a record needs no import of `_query.py`), channel and family, the REST **role paths** `fetch_path` (backs `fetch()` and `poll()`), `history_path` (backs REST `history()`), `grouped_daily_path`, and `extra_paths` (per-symbol variants such as `/v3/reference/options/contracts/{o}`), the `start`/`end` wire parameter pair, poll default and keys, flat-file prefixes, how symbols reach a REST request (`SymbolParam`: `ticker`, `tickers`, `ticker.any_of`, or path segments, where a forex or crypto pair fills `{from}` and `{to}`), the primary time key and fan-out key, overrides, and the page size. `has_rest_history` is `history_path is not None`, and `has_grouped_daily` likewise. `DatasetSpec.__post_init__` validates only the declaration, including that every wire name it declares is a parameter of its `RestPath`; **import never requires the dataset's lock entries** (the catalog test does). Also the aggregation of `_datasets/<domain>.py`, `dataset_wires()` (one `_massive.DatasetWire` per dataset, never reading the lock), and filter validation ([section 9](#9-filters)). Importable without Deephaven. |
-| `_datasets/<domain>.py` | One module per domain module, each exporting `DATASETS: tuple[DatasetSpec, ...]`: the declarations only, importable without Deephaven, so `scripts/refresh_massive_spec.py` reads them without a JVM. |
-| `_schema.py` | The schema registry: column types and the mapping from `_massive`'s wire types to them, PascalCase naming, the dtype override table (`ColumnOverride`, keyed by wire path), columnar Arrow construction, the four hand-written tick schemas (trades, quotes, bars, index values), and `dataset_schema(spec)`, which derives a dataset's schema lazily (cached) from its lock entries, their types included; verbs and the catalog test call it. Key maps live in `_massive`. |
-| `_timeunits.py` | Timestamp conversion ([section 12](#12-timestamp-units-and-day-boundaries)): each field's unit comes from `_massive.wire_unit`; conversion to nanoseconds, the FMV magnitude rule, and the [1990, 2100] guard. |
-| `_symbols.py` | Symbol normalization and the `Symbol`/`Underlying` rule ([section 10](#10-symbols-and-all)). |
-| `_dates.py` | `DateLike` parsing, class day zones, session-date rules, `[start, end)` normalization. |
-| `_liveness.py` | Result scopes, stream scopes, result records, the reaper queue and thread. |
-| `_rest.py` | The REST transport: requests built from a `DatasetSpec` and the generated parameters, pages decoded into bounded columnar Arrow batches, 403/429 handling for `fetch()`, `history()`, and `poll()`. |
-| `_hosts.py` | Host resolution from REST evidence ([section 13.2](#132-host-decision)). The `HostDecision` record itself lives in `_query.py`, next to the transport protocols that return it (`RestTransport.resolve_host`). |
-| `_ws.py` | One connection per URL over `_massive.WsClient`: the reconcile loop over the client's decoded `Status` and data events, wildcard transitions, acknowledgement watchdogs, the explicit-verdict rule, the options contract cap. It parses no frame text. |
-| `_stream.py` | Streams, per-stream publishers, the per-connection flush thread, shared-batch fan-out ([section 14](#14-publishers-fan-out-and-failure-semantics)). |
-| `_watchlist.py` | Reactive symbol tables: the listener, the diff, and dispatch off the UG thread. |
-| `_poll.py` | `poll()` tables: `REPLACE`, `UPSERT`, and `APPEND` modes, fan-out under `max_concurrency`. |
-| `_sources.py` | Where `history()` reads from: partition dates, the REST capability check, and the `AUTO` choice ([section 16](#16-historysourceauto)). Pure: no I/O. |
-| `_flatfiles.py` | S3 streaming of `.csv.gz` keys, pure-Arrow per-batch transforms, symbol pushdown, the missing-file rules ([section 16](#16-historysourceauto)). Pure S3 I/O: it never chooses a source. Its CSV header maps come from `_massive.flatfile_key_map`. |
-| `_diagnostics.py` | The `connections()` and `streams()` input tables ([section 17](#17-diagnostics)). |
-| `_domains/__init__.py` | Empty. |
-| `_domains/base.py` | The shared dataset factory: builds a query from a catalog record, validates symbols and filters, applies the `bars` overload selection. |
-| `_domains/stocks.py`, `options.py`, `futures.py`, `indices.py`, `forex.py`, `crypto.py`, `reference.py`, `indicators.py`, `economy.py`, `partners.py` | One namespace class per module ([section 8](#8-namespace-tree)), whose methods build queries from the matching `_datasets/<domain>.py` records. `partners.py` holds the four vendor classes. |
+```
+src/deephaven_massive/
+__init__.py          public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
+_config.py           MassiveConfig (section 5)
+_session.py          MassiveSession, SessionCore, closers, reaper, stream ids (section 6)
+_query.py            the six query classes and their verbs; HostDecision; transport protocols (section 7)
+_enums.py            the fourteen public enums, Recency, ChannelFamily, _require_enum
+_types.py            Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
+_errors.py           MassiveError (.status, .request_id), AuthenticationError, EntitlementError, from_wire
+_catalog.py          DatasetSpec (role paths, family, symbol/time/fanout/session columns, channels,
+                     prefixes, poll defaults, page size), datasets(), members(family), filter validation
+_namespaces/
+  __init__.py        empty
+  base.py            the shared dataset factory
+  stocks.py options.py futures.py indices.py forex.py crypto.py
+  reference.py indicators.py economy.py partners.py      namespace class + DATASETS
+_schema.py           ColumnType, Schema, WireType -> ColumnType, rename(), dataset_schema() (section 19.4)
+_timeunits.py        the one timestamp routine (section 12), the FMV magnitude rule
+_symbols.py          normalization, canonical_view, the Symbol/Underlying rule (section 10)
+_dates.py            DateLike parsing, day zones, sessions, publish_time, [start, end)
+_liveness.py         result and stream scopes, records, reaper queue (section 6.1)
+_diagnostics.py      connections() and streams() with SchemaDrift; DriftRegistry (section 17)
+_rest.py             REST transport: requests from a DatasetSpec, batches renamed and converted,
+                     403/429 policy, drift routing, host-decision cache (single-flight)
+_hosts.py            host resolution from REST evidence (section 13.2)
+_ws.py               connections over WsClient: reconcile, wildcards, watchdogs, the NO_ACK rule,
+                     the verdict rule, the options cap, rejects and drift routing (section 13.3)
+_stream.py           streams, publishers, flush thread, fan-out, bound-failure routing (section 14)
+_watchlist.py        reactive symbol tables
+_poll.py             poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> publish_failure
+_flat_files.py       flat-file transport: read plans, reader pool, cancellation, conversion,
+                     merge to tables, missing-file policy, drift routing (section 16)
+_history_source.py   partition dates, publication grace, REST capability, the AUTO choice; pure, no I/O
+_massive/            the wire package (section 19)
+py.typed
+```
+
+`_namespaces/` holds plain modules, one namespace class each; it is not a PEP 420 namespace
+package. Each namespace module also declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`).
+`_history_source.py` decides where `history()` reads from; `_flat_files.py` does flat-file I/O
+through `_massive` and never chooses a source.
 
 Supporting files outside the package:
 
 | File | Purpose |
 |---|---|
 | `scripts/check.sh [fast\|full] [--no-fix]` | The single verification entry point (lint, format, type check; `full` adds the test suite with coverage). |
-| `scripts/refresh_massive_spec.py` | A thin entry point that calls `deephaven_massive._massive.spec.generate.main()` with `_catalog.dataset_wires()` and, when S3 credentials are set, the bucket's top-level prefixes; no JVM. Modes `--check` (live drift report), `--fetch`, the plain offline regeneration, and `--verify` ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). |
+| `python -m deephaven_massive._massive.refresh [--check \| --fetch]` | The refresh command, run from a source checkout ([section 19.6](#196-refresh-and-drift)). |
 | `.github/workflows/spec-drift.yml` | The advisory weekly drift job ([section 20](#20-quality-gates)). |
+| `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag ([section 20.1](#201-tooling-configuration)). |
 | `tests/data/` | Payload fixtures. |
-| `tests/_fakes/` | Fake REST transport, WebSocket server, and S3 opener used by the unit tests ([section 4.2](#42-test-layout)). |
+| `tests/_fakes/` | Fake REST server, WebSocket server, S3, and stream helpers ([section 4.2](#42-test-layout)). |
 
 Deephaven is imported at module level where it is used at runtime. Type-only imports go under
-`TYPE_CHECKING`. The library imports nothing from `deephaven_server`.
-
-**The Deephaven-free layer.** `_catalog.py`, `_datasets/`, `_enums.py`, `_errors.py`,
-`_dates.py`, `_config.py`, and `_massive/` import no Deephaven module, directly or through
-another module, and the package `__init__.py` resolves its public names lazily
-([section 3](#3-exports)). So `from deephaven_massive import _catalog` and
-`_catalog.dataset_wires()` work with no JVM. `tests/test_catalog.py` proves it in a
-subprocess that starts no server and asserts that `deephaven` is not in `sys.modules`
-afterwards.
+`TYPE_CHECKING`. The library imports nothing from `deephaven_server`. Only the two lazy
+`__init__.py` files (the package's and `_massive`'s) defer imports.
 
 ### 4.2 Test layout
 
 Tests mirror the package. The test file for `deephaven_massive/<path>/<name>.py` is
-`tests/<path>/test_<name>.py`, where `<name>` has its leading underscore removed and `<path>`
-is copied as is (a private subpackage such as `_domains/` keeps its underscore under `tests/`).
-A package's `__init__.py` is mirrored like any other module, by `tests/<path>/test_init.py`, so
-the rule stays mechanical: every source module has exactly one mirror. `tests/test_init.py`
-therefore holds the public-surface tests (`dm.__all__` equals [section 3](#3-exports) and
-`__version__` equals the installed distribution's version), and `tests/_domains/test_init.py`
-mirrors the empty `_domains/__init__.py`. Examples:
+`tests/<path>/test_<name>.py`, where **every path component drops one leading underscore**
+(`_namespaces/stocks.py` → `tests/namespaces/test_stocks.py`, `_massive/rest/client.py` →
+`tests/massive/rest/test_client.py`). A package's `__init__.py` is mirrored by
+`tests/<path>/test_init.py`, and a `__main__.py` by `tests/<path>/test_main.py`, so every source
+module has exactly one mirror. `tests/test_init.py` holds the public-surface tests (`dm.__all__`
+equals [section 3](#3-exports) and `__version__` equals the installed distribution's version).
+`tests/test_catalog.py` is the plain mirror of `_catalog.py`. A directory under `tests/` whose
+name starts with `_` is a helper package outside the mirror rule. Fixtures live in
+`tests/data/<test owner path>/` (for example `tests/data/massive/rest/`). Examples:
 
 | Source | Unit test | Live integration test |
 |---|---|---|
 | `__init__.py` | `tests/test_init.py` | |
 | `_config.py` | `tests/test_config.py` | |
 | `_hosts.py` | `tests/test_hosts.py` | `tests/test_hosts_integration.py` |
-| `_domains/__init__.py` | `tests/_domains/test_init.py` | |
-| `_massive/__init__.py` | `tests/_massive/test_init.py` | |
-| `_massive/rest/client.py` | `tests/_massive/rest/test_client.py` | |
-| `_massive/spec/generate.py` | `tests/_massive/spec/test_generate.py` (also the parity test of `restspec.json`) | |
-| `_domains/stocks.py` | `tests/_domains/test_stocks.py` | `tests/_domains/test_stocks_integration.py` |
+| `_flat_files.py` | `tests/test_flat_files.py` | `tests/test_flat_files_integration.py` |
+| `_namespaces/__init__.py` | `tests/namespaces/test_init.py` | |
+| `_namespaces/stocks.py` | `tests/namespaces/test_stocks.py` | `tests/namespaces/test_stocks_integration.py` |
+| `_massive/__init__.py` | `tests/massive/test_init.py` | |
+| `_massive/rest/client.py` | `tests/massive/rest/test_client.py` | |
+| `_massive/refresh/__main__.py` | `tests/massive/refresh/test_main.py` | |
+| `_massive/refresh/generate.py` | `tests/massive/refresh/test_generate.py` (also the parity test) | |
+
+**Import roots.** `[tool.pytest] pythonpath = ["."]` and `[tool.mypy] mypy_path = ["src"]`;
+test code imports helpers as `tests._fakes…`. So `tests/massive/` can never shadow a top-level
+`massive` package.
 
 Integration tests end in `_integration`. They are skipped unless `MASSIVE_API_KEY` is set and
-run only in the later live-testing work package. The owner approved exactly these exceptions to
-the mirror rule, and no others:
+run only in the later live-testing work package. The exceptions to the mirror rule, and no
+others:
 
 - `tests/conftest.py`: starts the embedded JVM in `pytest_configure`, before collection, and
-  provides fixtures: thin fixtures that build the fake servers from `tests/_fakes/`, plus the
+  provides fixtures: thin fixtures that build the fakes from `tests/_fakes/`, plus the
   table-to-Python and fixture-loading helpers. Test modules never import from it.
 - `tests/test_layout.py`: walks `src/deephaven_massive/**/*.py` and asserts every module has its
-  mirrored test file, and that every test file maps to a module or is one of these exceptions.
-  It also holds the import-boundary test of the `_massive` package
-  ([section 19](#19-wire-clients-and-the-spec-snapshot)).
-- `tests/test_catalog.py`: asserts 100% Massive coverage against the vendored spec and the
-  documentation index, with a reviewed exclusion list ([section 8.12](#812-excluded-endpoints)),
-  and the name-lock completeness checks that need the declared datasets
-  ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). Under the naming rule
-  it is also the mirror of `_catalog.py`, so the unit tests of the catalog records live in the
-  same file.
+  mirrored test file and that every test file maps to a module or is one of these exceptions.
+  It also holds the import-boundary and layer tests of `_massive`
+  ([section 19](#19-wire-clients-and-the-spec-snapshot)), with a negative test per rule.
 - `tests/test_readme.py`: runs every example of [section 21](#21-examples) in the embedded JVM
-  against the fake servers. It mirrors `README.md`, not a source module; the lowercase name
-  follows PEP 8 module naming (ruff `N999`).
-- `tests/_fakes/`: a package of protocol-faithful fake servers, one module per transport
-  (`rest.py`, `ws.py`, `s3.py`, plus an empty `__init__.py`). `tests/test_layout.py` ignores the
-  whole directory. Only `tests/conftest.py` imports it; test modules receive fakes through
-  fixtures. A test module may import from `tests/_fakes/` directly only when a fixture cannot
-  provide what it needs (for example a second, independently scripted server), and says why
-  in a comment.
+  against the fakes. It mirrors `README.md`, not a source module.
+- `_` helper directories, of which there is one: `tests/_fakes/` (`__init__.py`, `rest.py`,
+  `ws.py`, `s3.py`, `stream.py`), protocol-faithful fakes. Only `tests/conftest.py` imports it;
+  test modules receive fakes through fixtures, and import a fake directly only when a fixture
+  cannot provide it, saying why in a comment.
 
 ## 5. `MassiveConfig`
 
@@ -327,10 +337,12 @@ Not configurable:
   `deephaven-massive[orjson]`); otherwise the standard library. The choice is logged once at
   INFO.
 - The evidence endpoints of [section 13.2](#132-host-decision).
-- The REST client's retry policy, timeouts, and pool size, and the WebSocket client's handshake
-  timeout and stable-uptime rule ([section 19](#19-wire-clients-and-the-spec-snapshot)).
-- Proxies and CA certificates: both clients read the standard environment variables
-  (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`), as section 19 specifies.
+- The shared retry policy (REST and S3), the REST client's timeouts and pool size, and the
+  WebSocket client's handshake timeout and stable-uptime rule
+  ([section 19](#19-wire-clients-and-the-spec-snapshot)).
+- Proxies and CA certificates: all three clients read the standard environment variables
+  (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`), as section 19 specifies, except
+  that `SSL_CERT_DIR` does not apply to S3.
 
 There is no `tier` field. No entitlement endpoint exists, so a tier field would be a claim the
 server corrects.
@@ -572,7 +584,9 @@ class HistoryLatestQuery(HistoryQuery):   # daily bars only
 **`fetch()`.** Returns exactly what the dataset's REST endpoint returns for the request. On
 `Query` that is a list or snapshot endpoint. On `StreamHistoryLatestQuery` it is the dataset's
 "last" endpoint: `/v2/last/trade`, `/v2/last/nbbo`, `/v1/last_quote/currencies`,
-`/v1/last/crypto`, or `/v3/snapshot/indices` projected to the values schema. On
+`/v1/last/crypto`, or `/v3/snapshot/indices` projected to the values schema by its
+`PROJECTIONS` entry ([section 19.4](#194-generated-schemas)). Each "last" path is a member of
+its dataset's kind, so its rows come out in the stream schema. On
 `HistoryLatestQuery` it is `/v2/aggs/ticker/{t}/prev`, documented as "the prior session's open,
 high, low, close, and volume"; the docstring says "previous completed session". No streamed
 dataset has `poll()`. Current state on every tier is `m.<class>.snapshots(symbols).poll(n)`, one
@@ -603,7 +617,12 @@ tier-identical way to get current state.
 **`history()`.** Static. `start` and `end` follow the day rules of
 [section 12](#12-timestamp-units-and-day-boundaries). There is no `limit`: the library pages
 internally. (The aggregates endpoint's `limit` counts base aggregates, not rows, so it cannot
-serve as a row cap.)
+serve as a row cap.) A reactive `Table` passed as `symbols` is read once, when the verb is
+called, on the caller thread inside the session's execution context: its valid rows become the
+sorted canonical symbol tuple that every source receives (`REST`, `FLAT_FILES`, and the `AUTO`
+choice), rows that are not valid symbols of the class are ignored (logged once per process
+per class, at WARNING), and a table with no valid symbol raises `ValueError`, as an empty
+symbol list does.
 
 **Backfill plus live.** There is no seeding verb. The documented recipe is:
 
@@ -700,9 +719,9 @@ Notation:
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`.
 - The REST column names the path template as the OpenAPI spec writes it (the spec's own
   placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
-  Every path is in the generated REST table (`_massive.rest_path`,
-  [section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). Each dataset names
-  its paths by role (`fetch_path`, `history_path`, `grouped_daily_path`, `extra_paths`).
+  Every path is a generated REST source (`_massive.source(Transport.REST, template)`,
+  [section 19.4](#194-generated-schemas)). Each dataset names its paths by role (`fetch_path`,
+  `history_path`, `grouped_daily_path`, `extra_paths`).
 
 ### 8.1 `m.stocks`
 
@@ -860,16 +879,18 @@ All return `Query`.
 ### 8.11 `m.snapshots`
 
 `m.snapshots(symbols, *, …F) -> Query` calls the unified `/v3/snapshot` with `ticker.any_of`,
-250 tickers per request, any mix of asset classes. Rows are the union schema of the unified snapshot. `ALL` is not accepted here (the
-endpoint requires tickers). Its catalog record is named `reference.snapshots` and is declared
-in `_datasets/reference.py` with `asset_class=None` (each ticker's prefix selects its class,
+250 tickers per request, any mix of asset classes. Rows are the union schema of the unified
+snapshot. `ALL` is not accepted here (the endpoint requires tickers). Its catalog record is
+named `reference.snapshots` and is declared in `_namespaces/reference.py` with
+`asset_class=None` (each ticker's prefix selects its class,
 § 10), so `_catalog.datasets()` finds it; `m.streams()` and messages show that name.
 
 ### 8.12 Excluded endpoints
 
-Each exclusion is an entry of `EXCLUSIONS` in `_massive/spec/allowlist.py`, the single list for
-REST paths, WebSocket channels, and flat-file prefixes, each with its reason
-([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)).
+Each exclusion is an entry `(kind, item, reason)` of `EXCLUSIONS` in
+`_massive/refresh/exclusions.py`, the single list for REST paths, WebSocket channels, and
+flat-file prefixes. An entry that names an item the snapshot lacks fails the refresh as stale
+([section 19.4](#194-generated-schemas)).
 
 | Endpoint | Reason |
 |---|---|
@@ -886,12 +907,18 @@ REST paths, WebSocket channels, and flat-file prefixes, each with its reason
 | Single-ticker v2 snapshots `/v2/snapshot/.../tickers/{t}` | Covered by `snapshots(symbols)` with the `tickers` filter. |
 | `/v3/snapshot/options/{u}/{o}` | Covered by `m.options.snapshots`; identical fields. |
 
-**The allow-list.** The REST paths above are the generator's allow-list
-([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). Each one is in the
-vendored OpenAPI snapshot and in the vendored `llms.txt` index; the catalog test fails on an
-allow-listed path missing from either, and on a documented path that is neither allow-listed nor
-excluded above. `/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}` are
-ordinary entries: every path reaches the same REST client in the same way.
+**Coverage.** Everything documented is generated or excluded, and everything generated is
+used or explicitly undeclared:
+
+- **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored)**, tested against the
+  pinned snapshot in `tests/massive/refresh/test_generate.py`;
+- **generated = used ⊎ undeclared**, tested in `tests/test_catalog.py`, where the undeclared
+  items are listed, one namespace per file, in `tests/data/catalog/undeclared/<namespace>.txt`,
+  and the files are pairwise disjoint. A namespace's dataset package deletes its file; when all
+  are gone, generated = used.
+
+`/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}` are ordinary
+generated paths: every path reaches the same REST client in the same way.
 
 ## 9. Filters
 
@@ -925,8 +952,8 @@ form (exact integer nanoseconds for a nanosecond timestamp parameter, ISO-8601 o
 naive one raises `ValueError` (§ 11).
 
 Validation is synchronous at query construction, against the generated parameters of the
-dataset's paths (`_massive.rest_path`)
-([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)), which carry each
+dataset's paths (`RestPath.params` of `spec/rest.json`,
+[section 19.4](#194-generated-schemas)), which carry each
 parameter's kind and, for an enum parameter, its values. A dataset's accepted filters are the
 union over its paths, minus the parameters the library sets itself (path segments, the symbol
 parameter, the axis pair, `limit`, `sort`, `order`, and the typed keyword parameters). An unknown
@@ -972,8 +999,10 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   symbol for the class matches nothing and is logged once at WARNING.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
   instrument, it is `Underlying` on every options row (from `underlying_ticker` or
-  `underlying_asset.ticker`) and on `related_companies` rows. Non-instrument fan-out keys use
-  the column name the name lock gives the wire key (`filer_cik` becomes `FilerCik`).
+  `underlying_asset.ticker`) and on `related_companies` rows. A non-instrument fan-out key
+  keeps the generated column the dataset declares as `fanout_column` (`filer_cik` becomes
+  `FilerCik`). Where the instrument sits outside the result key (`/v1/last/crypto`,
+  `/v1/last_quote`), `Symbol` comes from the request.
 
 ## 11. Enums and types
 
@@ -992,8 +1021,8 @@ console, and typo safety at both type-check time and run time.
 ([section 7.3](#73-runtime-enum-check)).
 
 **Enforcement.** `tests/test_enums.py` asserts that no public signature in the package contains a
-`Literal` of strings, and that every enum that mirrors a parameter enum of the vendored
-OpenAPI snapshot has the same value set as that parameter.
+`Literal` of strings, and that every enum that mirrors a parameter enum of `spec/rest.json`
+has the same value set as that parameter.
 
 | Enum | Members | Wire values | Used by |
 |---|---|---|---|
@@ -1012,8 +1041,9 @@ OpenAPI snapshot has the same value set as that parameter.
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
 
-Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}`, `ChannelFamily {TICK, FMV}`,
-and `Transport {WS, REST, FLAT_FILES}`.
+Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}` and `ChannelFamily {TICK, FMV}`.
+`Transport {REST, WS, FLAT_FILES}` is defined once, in `_massive.spec.types`, and used on both
+sides of the boundary.
 
 **Dates.** Parameters accept an ISO-8601 `str`, a `date`, or a timezone-aware `datetime`. A
 naive `datetime`, or an ISO string with a time but no offset, raises a `ValueError` that names
@@ -1022,35 +1052,31 @@ needs a timezone: pass an aware datetime or a date`. The same rule and message a
 `datetime` passed as a `filters` value or a typed parameter.
 
 **ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
-becomes an `Instant`; text without a UTC offset is read as UTC. A spec string field with
-`format: date-time`, or with no format and a name ending in `_utc`, maps to `Instant`
-automatically; one with `format: date`, or with no format and named `date` or `*_date`, maps to
-`LocalDate`; any other text timestamp needs an explicit override.
+becomes an `Instant`; text without a UTC offset is read as UTC. The generator's
+representation rules ([section 19.4](#194-generated-schemas)) decide which fields are ISO
+`Instant`s and which are dates; any other text timestamp needs a `TYPE_FIXES` entry.
 
-**Column types.** `Instant` for timestamps, `LocalDate` for calendar dates, `double`, `long`,
-`int`, `String`, `boolean`, and `int[]` for condition lists. Each union column has exactly one
-dtype, fixed in the schema registry with a test per dataset: sequence numbers are `long`, sizes
-are `double` (fractional sizes exist), condition codes are `int[]`, exchange ids are `int`.
+**Column types.** Every column's type comes from the type lattice of
+[section 19.4](#194-generated-schemas): each generated field has a `WireType`, the merge joins
+the `WireType`s of one column across a kind's sources, and `_schema` maps the result to a
+Deephaven column type (`long`, `double`, `boolean`, `String`, `LocalDate`, `Instant`, `int[]`).
+Sizes come out as `double` wherever any source says `number`; condition codes come out as
+`int[]`; exchange and tape ids come out as `long`.
 
 ## 12. Timestamp units and day boundaries
 
-The unit of every timestamp-like wire field is a fact about Massive's wire format, so it lives in
-the wire package: `_massive/spec/units.py`, keyed by `(transport, source, field)`, where the
-source is a REST path template, a `(cluster path, channel)`, or a flat-file prefix, and read
-through `_massive.wire_unit`. `_timeunits.py` converts: it refuses a field without a unit, and
-it applies the FMV magnitude rule and the [1990, 2100] guard below. Building a dataset's schema
-fails on any timestamp-like field without a unit, so the catalog test covers every REST field,
-WebSocket key, and flat-file header a dataset uses. The table is complete for everything § 8
-uses, so no dataset package edits it.
+The unit of every timestamp-like wire field is a fact about Massive's wire format. It is the
+hand-verified `UNITS` table in `_massive/refresh/overrides.py`, and the generator writes it onto
+each generated field, so callers read it as `source(...).field(column).unit`. A timestamp-like
+field without a `UNITS` entry fails the refresh (gate G3, [section 19.4](#194-generated-schemas)).
+The table is complete for every generated source, so no dataset package edits it.
 
-The table stays hand-verified. The OpenAPI spec tags some integer fields with a unit type in
-`x-polygon-go-type` (`INanoseconds`, `IMicroseconds`, `IMilliseconds`, `IDaysPolygonDateString`),
-but the tags are not reliable: all 20 `IMicroseconds` tags sit on indicator `timestamp` fields
-whose descriptions say "Unix Msec", and the indicator responses carry milliseconds. The generator
-copies each tag into the generated table as a cross-check only. A test inside the wire package
-asserts that every tagged field has a unit in the table, and that a unit that differs from its
-tag is listed, with its reason, in the reviewed conflict list beside the table; the indicator
-`timestamp` fields are its first entries.
+The OpenAPI spec tags some integer fields with a unit type in `x-polygon-go-type`
+(`INanoseconds`, `IMicroseconds`, `IMilliseconds`, `IDaysPolygonDateString`), but the tags are
+not reliable: all 20 `IMicroseconds` tags sit on indicator `timestamp` fields whose descriptions
+say "Unix Msec", and the indicator responses carry milliseconds. The tags are a cross-check: a
+`UNITS` entry that differs from its tag is listed, with its reason, in the tag-conflict list
+beside the table, and the indicator `timestamp` fields are its first entries.
 
 | Transport and fields | Unit |
 |---|---|
@@ -1058,17 +1084,32 @@ tag is listed, with its reason, in the reviewed conflict list beside the table; 
 | WebSocket `FMV` `t` | Documented as ns; the documentation sample is `1678220098130` (13 digits, ms). Rule, FMV only: `t >= 10**17` means ns, otherwise ms. Every ns value after 1973-03-03 is at least 10^17, and an ms value reaches 10^17 only in the year 3,170,000, so the rule cannot misclassify. Logged once; tested. |
 | REST `/v3/trades`, `/v3/quotes`, `/v2/last/trade`, `/v2/last/nbbo`; snapshot `last_updated`, `fmv_last_updated`; futures `/trades` and `/quotes` (`timestamp`, `bid_timestamp`, `ask_timestamp`); futures aggregates `window_start` (documented as "nanosecond Unix timestamp") | ns |
 | REST aggregates `t`; `/prev` `t`; indicators `timestamp`; futures snapshot `last_minute.last_updated` | ms |
-| REST forex `/v1/last_quote` `timestamp`; crypto `/v1/last` `timestamp` | **UNVERIFIED**. Registered as ms with a fixture test, plus the defensive rule below. |
+| REST forex `/v1/last_quote` `timestamp`; crypto `/v1/last` `timestamp` | **UNVERIFIED** (`unverified-ms`). The spec tags both `last.timestamp` fields `IMilliseconds`, which agrees; registered as ms with a fixture test. |
 | Flat files: all tick files; `*_aggs_v1.window_start`; `us_indices/values_v1.timestamp` (the documentation says ms, the sample is 19 digits) | ns |
 
-**Defensive rule for UNVERIFIED entries.** After conversion the `Instant` must fall within
-[1990, 2100]; otherwise `MassiveError("timestamp unit mismatch for <dataset>.<field>")`. Wrong
-units fail loudly, never silently.
+**The timestamp routine.** One routine in `_timeunits.py` converts every epoch-integer
+`Instant` on every transport, in this order:
 
-**Canonical time columns:** `Timestamp`, `ParticipantTimestamp`, `TrfTimestamp`,
-`BidTimestamp`, `AskTimestamp` (futures quotes), `ReceivedTimestamp` (crypto trades and
-quotes), `EndTimestamp` (bars), `LastUpdated` (snapshots). Calendar dates such as the futures
-`SessionEndDate` are `LocalDate`.
+1. **Epoch 0 means absent.** In every epoch `Instant` column except the dataset's declared time
+   column, a `0` becomes null. Massive's flat files write `0` where a timestamp has no value
+   (the documented stocks-trades sample has `trf_timestamp` `0` on every row without a TRF),
+   and WebSocket and REST omit the field. The time column keeps its value, so a `0` there fails
+   step 3. Prices, sizes, and every other numeric column keep `0` (a one-sided quote has
+   `ask_price` `0`).
+2. **Checked multiply.** The integer is multiplied to nanoseconds from its unit (`s`, `ms`,
+   `us`, or `ns`) with an overflow check.
+3. **Bound.** The result must lie in [1990, 2100]; otherwise
+   `MassiveError("timestamp unit mismatch for <dataset>.<field>")` names the dataset, the
+   column, the unit, and the value.
+
+The bound applies to epoch-integer `Instant`s only, never to ISO-8601 text, so a pre-1990 ISO
+date stays valid. The overflow check and the bound together catch every unit confusion. For
+FMV `t`, the magnitude rule above picks the unit per value first, then the routine runs.
+
+**Examples of generated time column names:** `Timestamp`, `ParticipantTimestamp`,
+`TrfTimestamp`, `BidTimestamp`, `AskTimestamp` (futures quotes), `ReceivedTimestamp` (crypto
+trades and quotes), `EndTimestamp` (bars), `LastUpdated` (snapshots). Calendar dates such as
+the futures `SessionEndDate` are `LocalDate`.
 
 **`history(start, end)` normalization.** Each bound converts independently to an `Instant`. The
 range is half-open: `[start, end)`. A `date` or `"YYYY-MM-DD"` `start` is that day's 00:00 in
@@ -1086,8 +1127,14 @@ timezone-aware `datetime` is used as is.
   widened by one day on each side in America/Chicago and post-filter
   `SessionEndDate` within `[start, end]`. Flat-file keys are assumed to be keyed by session date
   (**UNVERIFIED**: the futures flat-file overview says only "standardized in Central Time"; the
-  implementation reads one file and asserts that the date column matches the key, failing
-  loudly otherwise). With `datetime` bounds, futures filter on `Timestamp`.
+  implementation checks every block of every futures file against its key, and a
+  `session_end_date` that differs from the key's date, or is empty, fails loudly). With
+  `datetime` bounds, futures filter on `Timestamp`, and flat files read the sessions the
+  instants belong to. The futures trading day rolls at 17:00 America/Chicago (the weekly open is
+  Sunday 17:00 CT; 16:00 to 17:00 CT is the daily maintenance break), so the session of an
+  instant `t` is the date of `t` in Chicago plus 7 hours, and the files read are the sessions
+  from the session of `start` to the session of `end - 1 µs`. An intraday window reads one
+  file; an evening window reads only the next session's file.
 
 ## 13. Host resolution and connection protocol
 
@@ -1115,12 +1162,14 @@ timezone-aware `datetime` is used as is.
 
 Resolution runs synchronously on the calling thread at the first stream verb for a
 (class, family) and is cached in the session. The seam is
-`RestTransport.resolve_host(asset_class, family) -> HostDecision` (a protocol method defined in
-P2 and implemented in P3), where `HostDecision(host, recency, evidence)` is a frozen record.
-The WebSocket transport calls it. The REST transport is the one place the decision is
-cached: per session, for the session's life, under its own leaf lock (never `registry_lock`),
-released before the REST call. Each new decision writes the pair's `Transport=REST` row of
-`m.connections()`.
+`RestTransport.resolve_host(asset_class, family) -> HostDecision`, where
+`HostDecision(host, recency, evidence)` is a frozen record. The WebSocket transport calls it.
+The REST transport is the one place the decision is cached, per session, for the session's
+life, and resolution is **single-flight**: the cache holds one future per (class, family),
+created under the transport's own leaf lock (never `registry_lock`); the first caller makes
+the REST call and completes the future, and later callers wait on it outside every lock. A
+failed resolution completes the future with the error and removes it, so nothing is cached.
+Each new decision writes the pair's `Transport=REST` row of `m.connections()`.
 
 ```
 resolve(asset_class, family) -> HostDecision(host, recency, evidence)
@@ -1151,6 +1200,8 @@ TICK family:
         If any value is DELAYED  -> delayed.massive.com, DELAYED, evidence="<field>=DELAYED"
                                     (DELAYED wins conflicts; the field used is logged)
         elif any is REAL-TIME    -> socket.massive.com,  REALTIME, evidence="<field>=REAL-TIME"
+        Any other value          -> raise MassiveError naming the field, the value, and
+                                    MassiveConfig.ws_hosts; nothing is cached
      c. No timeframe found:
           STOCKS, OPTIONS with a top-level "fmv" field (Business key without a trades/quotes
           expansion)
@@ -1180,7 +1231,9 @@ Basic has no chain snapshot (403, rule 4a) and no WebSocket. The option-chain sa
 `underlying_asset` is excluded. The forex and crypto WebSocket pages list only
 `socket.massive.com`, with Starter real-time, so no REST call is made. The futures snapshot
 documentation lists no `timeframe` (only the OpenAPI spec has it), so absence proves nothing, and a
-real-time customer must never be routed to delayed data by inference.
+real-time customer must never be routed to delayed data by inference. For the same reason, a
+`timeframe` value other than the documented `DELAYED` and `REAL-TIME` fails loudly at the first
+stream verb for that class instead of being guessed at.
 
 **Base Business key, TICK family.** A Business key without a trades/quotes expansion is routed
 to `business.massive.com` with a WARNING. A wrong guess cannot misbehave silently: the server
@@ -1211,8 +1264,11 @@ The client reports to `_ws.py` through four callbacks, each called on the loop t
   **generation** is one authenticated socket; the number increases by one per `on_open`.
 - `on_status(generation, status)`: one decoded status object (`Status`: `kind` `ACK`,
   `REFUSED`, `MAX_CONNECTIONS`, or `OTHER`; `topics`; `message`; `realtime_verdict`).
-- `on_data(generation, channel, rows)`: one channel's data rows from one frame, keyed by column
-  name, symbols already in Massive's REST form.
+- `on_data(generation, channel, rows, rejects, drift)`: one channel's data from one frame,
+  decoded against `ws.json`. `rows` are keyed by **long-form** column (the library renames
+  them), with symbols already in Massive's REST form. `rejects` are the rows that failed
+  validation, one `Reject(channel, symbol or None, WireError)` each; `drift` is the frame's
+  `DriftReport` ([section 19.5](#195-runtime-drift)).
 - `on_state(state, detail)`: `CONNECTING`, `RECONNECTING` (with the next attempt's time),
   `WAITING_SLOT` (the auth reply was `max_connections`), `FAILED` (with the `WireError`), or
   `CLOSED` (after `close()`).
@@ -1222,7 +1278,9 @@ The client reports to `_ws.py` through four callbacks, each called on the loop t
 call order, at most 1,000 topics per frame (the frame-size limit is **UNVERIFIED**; the chunk
 size is conservative). A call for a generation that is no longer current is discarded: the next
 generation re-sends the whole desired set. `reconnect()` closes the current socket so the client
-reconnects under its backoff rules. Rows from `on_data` go to the per-channel row buffer.
+reconnects under its backoff rules. Rows from `on_data` go to the per-channel row buffer;
+rejects fail their streams ([section 19.5](#195-runtime-drift)) and never enter a buffer; drift
+goes to the session's `DriftRegistry`.
 
 **Topics are exact strings.** `A.*` and `AM.AAPL` are unrelated topics; nothing in the library
 matches one topic as a prefix of another. On one channel, while that channel's acknowledged
@@ -1253,8 +1311,8 @@ Responsibilities:
 | `max_connections` in the auth reply | The client reports `WAITING_SLOT`, lets the server close the socket, and retries after its backoff; streams stay alive. |
 | `max_connections` as a status after authentication | The client reports `Status(MAX_CONNECTIONS)`; the library records it, and when that generation's socket closes, the connection shows `WAITING_SLOT` instead of `RECONNECTING`. |
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
-| Classify a failed upgrade as fatal or retryable (section 19.2) | client; a fatal one is reported as `FAILED` with a `WireHandshakeError`, which the library turns into a `MassiveError` naming the HTTP status and the host |
-| Decode frames into `Status` and data rows; apply the key maps; normalize wire symbols | client |
+| Classify a failed upgrade as fatal or retryable (section 19.2) | client; a fatal one is reported as `FAILED` with `WireError(status=<http>)`, which the library turns into a `MassiveError` naming the HTTP status and the host |
+| Decode frames against `ws.json`; report rows, rejects, and drift; normalize wire symbols | client |
 | Desired topic set, reference counts, single in-flight step, wildcard transitions | library |
 | Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
 | Per-topic acknowledgement bookkeeping, watchdogs, the explicit-verdict rule | library, from `Status` events |
@@ -1301,8 +1359,10 @@ Status(MAX_CONNECTIONS) after authentication
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
    -> client.subscribe(generation, [topic]): that topic alone, once
 still none after another ack_timeout, same check
-   -> topic state NO_ACK; ERROR logged; client.reconnect(), so the backoff rules apply;
-      streams are not failed
+   -> topic state NO_ACK; ERROR logged; the first NO_ACK of this topic in the session calls
+      client.reconnect(), so the backoff rules apply; a later NO_ACK of the same topic only
+      logs at ERROR and counts in NoAckTopics. The topic stays desired; streams never fail
+      on it
 watchdog fires but its topic left S or W, or its generation is no longer current
    -> cancelled without escalating
 socket closed or failed (not by close())
@@ -1346,8 +1406,9 @@ at most once per (class, family) per session. In every other case the verdict is
 
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
 `error` for the stream's topic, or REST 403 for `poll()`), a fatal WebSocket handshake error
-(`MassiveError` with the HTTP status and host), and unrecoverable library errors such as a
-schema mismatch. `max_connections`, closes, and `NO_ACK` are diagnostic states.
+(`MassiveError` with the HTTP status and host), and the data failures of
+[section 19.5](#195-runtime-drift) (a missing declared key column, an unconvertible value, a
+timestamp out of bounds). `max_connections`, closes, and `NO_ACK` are diagnostic states.
 
 ### 13.4 REST
 
@@ -1361,8 +1422,8 @@ sees:
   `status` is `NOT_AUTHORIZED`, raise `EntitlementError` from `fetch()` and `history()` and fail
   the table from `poll()`.
 - **HTTP 429** is retried as section 19.1 specifies (the `Retry-After` value, or 15, 30, then
-  60 s; a `Retry-After` above 60 s fails at once); if it persists it raises
-  `MassiveError("rate limited ...")` with `status=429`. The REST transport (`_rest.py`, not the
+  60 s; a `Retry-After` above 60 s fails at once); if it persists the client raises
+  `WireError(status=429)`, which becomes `MassiveError("rate limited ...")` with `status=429`. The REST transport (`_rest.py`, not the
   client) then logs once per session at WARNING that Basic keys allow 5 requests per minute and
   that fan-out `poll()` multiplies requests.
 - **HTTP 5xx** and connection failures are retried; if they persist they raise `MassiveError`
@@ -1378,13 +1439,18 @@ sees:
 - **Fan-out.** In a per-symbol `fetch()` or `poll()` cycle (`ticker_details`,
   `daily_open_close` on a holiday, `/prev`, the "last" endpoints), an HTTP 404 for one symbol
   drops that symbol, with one WARNING per symbol; every other error fails the call.
-- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError` fails the
-  table through `publish_failure`. Any other error is logged at ERROR, sets the stream's `Error`
-  in `m.streams()`, keeps the previous rows, and the next cycle runs as scheduled; it never
-  fails the table.
-- **Request parameters.** Besides the path, symbols, axis bounds, and `filters`, the transport
-  sends the typed `Request.adjusted` as the `adjusted` query parameter (`true` or `false`) on
-  every path whose `RestPath` lists it.
+- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, or hits
+  a data failure of [section 19.5](#195-runtime-drift) (a missing declared key column, an
+  unconvertible value, a timestamp out of bounds), fails the table through `publish_failure`.
+  Any other error is logged at ERROR, sets the stream's `Error` in `m.streams()`, keeps the
+  previous rows, and the next cycle runs as scheduled.
+- **Drift.** `to_batch` returns each page's `DriftReport`; the transport routes it to the
+  session's `DriftRegistry` (one WARNING per (dataset, transport, field), and `SchemaDrift` in
+  `m.streams()` for `poll()`). Static verbs report drift only in the log.
+- **`adjusted`.** The bars `adjusted` flag travels in its own typed field, `Request.adjusted`,
+  which the REST transport sends, when not None, as the `adjusted` query parameter (`true` or
+  `false`); `params` never holds `adjusted` (`build_query` rejects it there), so a request for
+  unadjusted bars cannot silently fall back to Massive's adjusted default.
 - Every error message names the HTTP status, the path, and the response's `request_id`, and is
   logged at ERROR with the same text; the API key never appears in a message or a log.
 
@@ -1415,7 +1481,11 @@ logged once.
   `blink_to_append_only(blink)`; `ring(n)` is `ring_table(blink, n)`; `last_by()` is as in
   [section 7](#7-query-classes-and-verbs).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
-  row buffer once, builds one Arrow batch in the dataset schema, and converts it once with
+  row buffer once. The rows arrive keyed by long-form column; the flush renames them
+  (`_schema.rename`), converts them (`_timeunits`), and builds one Arrow batch in the dataset
+  schema. The timestamp bound is applied as a vectorized mask: rows that fail it fail only the
+  streams that would have received them ([section 19.5](#195-runtime-drift)) and are dropped
+  from the batch. Rejected rows never enter a buffer. The batch is converted once with
   `deephaven.arrow.to_table`: one Python-to-Arrow-to-Java conversion per channel per flush.
   Then, for each stream subscribed to that channel: `ALL` streams get `publisher.add(batch)`;
   symbol-list streams get `publisher.add(batch.where_in(stream.filter_table, "Symbol"))`, where
@@ -1502,7 +1572,7 @@ flat-file only.
 
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
 nothing is split between the sources. A dataset without instruments counts as `ALL`.
-`HistoryQuery.history()` makes the choice (`_sources.choose_source`) and then calls one
+`HistoryQuery.history()` makes the choice (`_history_source.choose_source`) and then calls one
 transport; the transports only do I/O. The REST predicate depends only on the dataset's REST
 capabilities (`DatasetSpec.has_rest_history`, `has_grouped_daily`), and the `adjusted` check on
 the typed `Request.adjusted`.
@@ -1524,17 +1594,26 @@ the credentials themselves are wrong (`InvalidAccessKeyId`, `SignatureDoesNotMat
 `AuthenticationError` instead, for every asset class, naming `s3_access_key_id` and
 `s3_secret_access_key`.
 
-Flat files are streamed: `pyarrow.csv.open_csv` reads each `.csv.gz` key in 1 MiB blocks (gzip
-only: every documented key is `.csv.gz`). The CSV reader parses each header straight to its
+Flat files are read through `_massive.FlatFileClient` and `FlatFile`
+([section 19.3](#193-the-flat-file-client)); `_flat_files.py` builds each file's `ReadPlan`.
+`pyarrow.csv.open_csv` reads each `.csv.gz` key in 1 MiB blocks (gzip only: every documented
+key is `.csv.gz`). Columns are matched **by name, never by position**: the reader first reads
+the header line and passes those names as `ReadOptions(column_names=…)`, then sets
+`include_columns` to the documented headers with `include_missing_columns=True`, so a reordered
+file reads identically, an extra header is reported as drift and ignored, a missing header
+becomes a null column of its declared type, and a missing declared key header raises at once
+([section 19.5](#195-runtime-drift)). The CSV reader parses each header straight to its
 column's type (epoch integers for `Instant`s, text for lists), and only an empty field is null:
 `NA` and `NULL` are text, since both are valid tickers. Each block then goes through pure Arrow
 operations in this order: the futures session check on the whole block, the `Symbol` filter
-(`pyarrow.compute.is_in`), the half-open `[start, end)` filter on `Timestamp` (not applied to
-date-bounded futures, whose files hold exactly the requested sessions), and, on the surviving
-rows only, the rename to PascalCase, unit conversion, and parsing of the list columns
-(`Conditions`, `Indicators`). No block is converted to Python objects. A file's surviving rows
-become one static Deephaven table per 16 blocks of data and at the end of the file (usually one
-table per file, since each table carries a fixed JVM-heap cost), and the tables are merged.
+(`pyarrow.compute.is_in`), the half-open `[start, end)` filter on the time column through the
+plan's converter to nanoseconds (not applied to date-bounded futures, whose files hold exactly
+the requested sessions), and, on the surviving rows only, the rename to long-form names and
+parsing of the list columns (`Conditions`, `Indicators`). `_flat_files.py` then applies
+`_schema.rename` and the `_timeunits` routine. No block is converted to Python objects. A
+file's surviving rows become one static Deephaven table per 16 blocks of data and at the end of
+the file (usually one table per file, since each table carries a fixed JVM-heap cost), and the
+tables are merged.
 
 Memory is bounded per concurrent reader, not per range: Arrow reads about 32 blocks ahead of the
 consumer, so a reader holds about 32 MiB of decompressed text plus at most 16 blocks of
@@ -1575,6 +1654,7 @@ table, so the queue stays bounded however fast rows arrive.
 | `Reconnects` | count |
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant` |
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
+| `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra) and `channel:field-` (missing), sorted, truncated at 200 characters |
 
 **`m.streams()`**: one row per stream. A row is written when the stream has opened and on
 every change until the stream leaves the registry (its holds released and its blink table shut
@@ -1598,10 +1678,15 @@ caller kept alive in a liveness scope of their own.
 | `State` | `RUNNING`, `FAILED`, `RELEASED`, `CLOSED` |
 | `Error` | text |
 | `CreatedAt` | `Instant` |
+| `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra) and `transport:field-` (missing), sorted, truncated at 200 characters |
 
 `RELEASED` means "no library-held results; still publishing until the blink table dies"
 ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). `FAILED` can follow `RUNNING`
 or `RELEASED`; a failed stream's row keeps `FAILED` when its last result is released.
+
+`SchemaDrift` is separate from `Error` and `LastError`, so drift never overwrites a failure. The
+session's `DriftRegistry` collects it ([section 19.5](#195-runtime-drift)). Static verbs
+(`fetch()`, `history()`) report drift only in the log.
 
 Every failure is logged at ERROR with the text the exception carries: hosts, the HTTP status and
 `request_id` of a REST failure, the server message verbatim, the decision evidence, and the
@@ -1619,9 +1704,10 @@ without the GIL.
 | Thread | Created by | Does | Must not |
 |---|---|---|---|
 | caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key | hold the registry lock while calling Deephaven or waiting |
-| WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once; route status frames; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
+| WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
+| flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
@@ -1630,11 +1716,21 @@ without the GIL.
 ### 18.2 Shared state and ownership
 
 - `SessionCore.registry_lock` (a `threading.RLock`) guards every mutable registry: streams
-  by key, results by id, connections by URL, topic reference counts. (Host decisions are
-  cached by the REST transport under its own leaf lock, § 13.2.) It is a
+  by key, results by id, connections by URL, topic reference counts. It is a
   **leaf lock**: no Deephaven call, no network call, no blocking wait, and no wait on a
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
   atomically under the lock; readers copy references out and release the lock before working.
+- The other locks are leaf locks too, each guarding one thing and making no Deephaven,
+  network, or blocking call while held:
+  - the REST transport's host-decision cache, which holds one future per (class, family);
+    callers wait on a future outside every lock (§ 13.2);
+  - `FlatFileClient`'s lock, one per session, which guards the creation and the close of the
+    boto3 S3 client (creation reads local AWS configuration but makes no request); its closed
+    flag is a `threading.Event`, read without the lock by the reader threads;
+  - the `_massive.spec` loaders, which load each generated file once;
+  - `RestClient`'s not-before instant (section 19.1);
+  - the session's `DriftRegistry`, whose WARNINGs are logged after the lock is released;
+  - the `dataset_schema` cache.
 - Per-connection mutable state (desired, acknowledged, and pending sets; the in-flight step;
   watchdogs; the `WsClient` and its socket) is **loop-confined**: only the connection's client
   thread touches it. Other threads reach it through `loop.call_soon_threadsafe` with plain data
@@ -1643,8 +1739,9 @@ without the GIL.
   across threads; the loop thread enqueues diagnostics row snapshots on the diagnostics writer's
   queue, and the writer is the only thread that writes the diagnostics tables.
 - The session's `RestClient` is shared by every thread that makes REST calls. It is safe per
-  call: its only shared mutable state is urllib3's internally locked pool (section 19.1). The
-  once-per-session rate-limit WARNING belongs to the REST transport, behind a `threading.Event`.
+  call: its shared mutable state is urllib3's internally locked pool and the not-before
+  instant (section 19.1). The once-per-session rate-limit WARNING belongs to the REST transport,
+  behind a `threading.Event`.
 - Row buffers are one `queue.SimpleQueue` per (connection, channel). The WS thread is the only
   producer; the flush thread is the only consumer.
 - The reaper queue is a `queue.SimpleQueue`. The producers are the result finalizers,
@@ -1678,7 +1775,9 @@ paging through one `RestClient` against the fake REST server (including a 429 wi
 `Retry-After` and a reset in the middle of paging). The only free-threaded target is 3.14t,
 because pyarrow, numpy, and pandas no longer publish cp313t wheels. Wheel availability on 3.14t:
 `jpy 2.2.0`, `pyarrow`, `numpy`, and `pandas` ship cp314t wheels; `deephaven-core` is
-`py3-none-any`; `websockets 17.3` ships cp314t wheels; `urllib3` and `certifi` are pure Python. `orjson 3.13.0` publishes no free-threaded wheels, so `orjson` is an optional extra and
+`py3-none-any`; `websockets 17.3` ships cp314t wheels; `urllib3`, `certifi`, `boto3`, and
+`botocore` are pure Python. `orjson 3.13.0` publishes no free-threaded wheels, so `orjson` is an
+optional extra and
 the standard-library codec is the default. `PythonDeephavenSession.setVariable` carries the
 comment "relying on the GIL being kind to us"; the library never mutates script globals, so this
 does not affect it, but it is why the Deephaven integration tests must run on the free-threaded
@@ -1686,137 +1785,141 @@ builds rather than unit tests alone.
 
 ## 19. Wire clients and the spec snapshot
 
-The library talks to Massive through two clients of its own and describes Massive's REST surface
-with data generated from a pinned snapshot of Massive's OpenAPI spec. It does not depend on
-Massive's Python SDK (`massive`), and nothing here works around a third-party client: each rule
-below implements Massive's documented protocol or a requirement of this design.
+The library talks to Massive through three clients of its own (REST, WebSocket, and S3 flat
+files) and generates every wire schema from vendored, pinned vendor specs. It does not depend
+on Massive's Python SDK, and nothing here works around a third-party client: each rule below
+implements Massive's documented protocol or a requirement of this design.
 
-**One package.** Everything that talks to Massive's REST or WebSocket API or describes its wire
-format lives in one private package, `deephaven_massive._massive`, the **wire package**, split
-into four subpackages along the boundaries below. Reading flat files from S3 stays in
-`_flatfiles.py`; their wire format (the CSV header maps) is here.
+**One package.** `deephaven_massive._massive` owns all Massive wire access: REST, WebSocket,
+and S3 flat files (the bucket client, the key layout, CSV decoding, the S3 error mapping), the
+vendored spec snapshot, the generated wire schemas, the units, and the long-form names. What
+stays outside is the library's: Deephaven tables, sessions and liveness, dataset semantics
+(`Symbol`, `Timestamp`, `Underlying`, the merged dataset schemas, conversion to nanoseconds,
+the timestamp bound), the source choice, the missing-file policy, reader pools, cancellation,
+public error text, and drift reporting. The clients take plain arguments, never
+`MassiveConfig`, so they are tested alone against the fakes of `tests/_fakes/`.
 
 ```
 src/deephaven_massive/_massive/
-├── __init__.py        the interface: the only module the rest of the library imports
-├── errors.py          WireError and its subclasses
-├── net.py             shared plumbing: CA bundle, proxy settings, User-Agent, the JSON codec
-├── rest/              the REST client (section 19.1)
-│   ├── __init__.py    RestClient, Page
-│   ├── client.py      the pool, authentication, retries, next_url paging
-│   ├── query.py       path and query encoding (exact datetime nanoseconds, .any_of lists)
-│   ├── response.py    strict decoding, envelopes, result keys, the error mapping
-│   └── extract.py     wire-path extraction: decoded rows to one list per wire path
-├── ws/                the WebSocket client (section 19.2)
-│   ├── __init__.py    WsClient, WsState, Status, StatusKind
-│   ├── client.py      the loop thread, the connect-and-reconnect task, the sender, close
-│   ├── protocol.py    handshake and auth frames, subscribe frames, frame decoding into status
-│   │                  and data events, wire-symbol normalization, failure classification
-│   └── backoff.py     the backoff policy and the stable-uptime reset
-├── spec/              the spec snapshot and the generator (section 19.3)
-│   ├── __init__.py    rest_path, rest_paths, wire_unit, unused_allowlisted, the cross-check
-│   │                  readers, and the re-exported value types
-│   ├── types.py       the value types RestPath, Param, Field, ParamKind, WireType, WireUnit,
-│   │                  DatasetWire: frozen, standard library only, safe at run time
-│   ├── allowlist.py   the path allow-list, the non-`results` result keys, the type overrides
-│   ├── units.py       the hand-verified wire-field unit table and its unit-tag conflict list
-│   ├── drift.py       the semantic comparison of a live fetch with the snapshot
-│   ├── generate.py    the generator and the refresh command's main(); imports types.py;
-│   │                  never imported at run time
-│   ├── restspec.json  generated: the REST table, canonical JSON
-│   └── snapshot/      data (source tree only): openapi.json, websocket.json, llms.txt, the
-│                      flat-file documentation pages, manifest.json
-└── names/             column naming (section 19.3)
-    ├── __init__.py    column_names, ws_key_map, flatfile_key_map
-    ├── lexicon.py     the record families, their object-shape assignments, the lexicons,
-    │                  the identity entries, the WebSocket-only names
-    ├── wskeys.py      the WebSocket key maps, one per (cluster path, channel)
-    ├── flatkeys.py    the flat-file key maps, one per prefix
-    ├── lock.py        loading, updating, and comparing the lock
-    └── locks/         data: <domain>.json, one lock per domain module
+__init__.py          lazy interface: __all__ and re-exports only
+net/                 shared by every client; imports nothing else in _massive
+  __init__.py        USER_AGENT; re-exports
+  errors.py          WireError, WireAuthError, WireEntitlementError
+  http.py            CA bundle (SSL_CERT_FILE/SSL_CERT_DIR, else certifi); proxy from HTTPS_PROXY/NO_PROXY
+  retry.py           the retry schedule (0.5/1/2 s, +20 % jitter; Retry-After; 15/30/60 s for 429),
+                     retryable classification; TLS never retried
+  codec.py           JSON codec: orjson when installed (logged once), else stdlib
+spec/                run-time wire vocabulary; imports nothing else in _massive
+  __init__.py        source(transport, key), sources(transport): load once under a lock
+  types.py           Transport, Source(key, transport, fields), RestPath(Source + template,
+                     result key, params), Field(wire key, column, WireType, unit, required),
+                     Param, ParamKind, WireType, WireUnit, DriftReport(extra, missing)
+  rest.json  ws.json  flatfiles.json        generated, committed
+rest/                imports net, spec
+  __init__.py        RestClient, Page, to_batch
+  client.py          pool, bearer auth, retries, not-before instant (leaf lock), next_url paging, close
+  query.py           path and query encoding by ParamKind
+  response.py        strict decoding, envelopes, result keys, error mapping
+  batch.py           to_batch(rows, rest_path, *, required) -> (RecordBatch, DriftReport)
+ws/                  imports net, spec
+  __init__.py        WsClient, WsState, Status, StatusKind, Reject
+  client.py          loop thread, connect/reconnect task, sender, close/join
+  protocol.py        handshake and auth frames, subscribe frames, frame decoding against ws.json,
+                     rows + rejects + DriftReport, symbol normalization, failure classification
+  backoff.py         backoff policy, stable-uptime reset
+flatfiles/           imports net, spec
+  __init__.py        FlatFileClient, FlatFile, ReadPlan, ReadColumn, object_key
+  client.py          FlatFileClient: lazy boto3 client under a leaf lock, closed flag,
+                     open(key) -> FlatFile | None, S3 error mapping, prefixes(), close()
+  layout.py          object_key(prefix, day, venue): <prefix>/<YYYY>/<MM>/<date>.csv.gz; {venue} template
+  reader.py          FlatFile.batches(plan) -> (RecordBatch, DriftReport) per block; header peek
+refresh/             build time only; excluded from the wheel; may import any of the above
+  __init__.py        empty
+  __main__.py        [--check | --fetch]; the plain run regenerates spec/*.json
+  lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
+  overrides.py       NAMES, FAMILIES, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
+                     TRANSPORT_ONLY, RESULT_KEYS
+  exclusions.py      EXCLUSIONS (kind, item, reason), exactly section 8.12
+  docs.py            flat-file "Columns" tables, overview prefix tables, llms.txt
+  generate.py        snapshot -> spec/*.json: flatten, representation rules, type lattice, names, gates
+  fetch.py           download and store canonically, manifest.json
+  drift.py           live-against-snapshot comparison, unaccounted items, deprecations
+  snapshot/          openapi.json, websocket.json, llms.txt, flat-file pages, manifest.json
 ```
 
-**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these names:
+The package is spelled `flatfiles` because PEP 8 forbids the underscore in a package name; the
+library module is `_flat_files.py`. The docstrings say so.
 
-| Name | What it is |
-|---|---|
-| `RestClient`, `Page` | The REST client and one decoded page (section 19.1). |
-| `extract(rows, fields)` | One Python list per wire path, read from decoded rows by the generated field paths; the only code that walks a wire path. |
-| `WsClient`, `WsState`, `Status`, `StatusKind` | The WebSocket client, the states it reports, and the status events it decodes (section 19.2). |
-| `WireError`, `WireAuthError`, `WireEntitlementError`, `WireRateLimitError`, `WireHandshakeError` | What the clients raise or report. Each carries the HTTP status (or `None`), the host, the path, the `request_id` (or `None`), and the server's message. `_errors.from_wire` turns one into the public exception with the same message, `status`, and `request_id` ([section 3](#3-exports)). |
-| `rest_path(template) -> RestPath`, `rest_paths()` | The generated REST table: per path template, its result key, its parameters (`Param`: wire name, `ParamKind`, enum values, path or query), and its response fields (`Field`: wire path, `WireType`, unit tag). |
-| `ParamKind`, `WireType` | Parameter kinds and wire types (`long`, `double`, `bool`, `string`, `date`, `date-time`, `int-array`, `json-text`). `_schema.py` maps each `WireType` to a column type; `_massive` knows no Deephaven type. |
-| `wire_unit(transport, source, field) -> WireUnit`, `WireUnit` | The unit of one timestamp-like wire field (`ns`, `us`, `ms`, `s`, the FMV magnitude rule, or `unverified-ms`), where `source` is a path template, a `(cluster path, channel)`, or a flat-file prefix. `_timeunits.py` converts. |
-| `column_names(domain)` | The name lock of one domain: `(dataset, transport, wire path) -> (column, WireType)`, with transports named by the strings `rest`, `ws`, and `flat_files`. |
-| `ws_key_map(cluster, channel)`, `flatfile_key_map(prefix)` | The key map of one WebSocket channel or flat-file prefix: wire key or CSV header to `(column, WireType)`, plus the keys deliberately dropped. |
-| `unused_allowlisted(wires, namespace=None)` | The allow-listed paths, channels, and prefixes no declared dataset uses ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)). |
-| `DatasetWire` | The plain record of one dataset's wire facts: name, domain, role paths, primary time key, fan-out key, WebSocket channels, flat-file prefixes. `_catalog.dataset_wires()` builds them. |
-| `spec_paths()`, `documented_paths()`, `ws_channels()`, `ws_channel_keys(cluster, channel)`, `flatfile_headers(prefix)` | Read the vendored snapshot for the catalog's cross-checks. They read the source tree; in an installed wheel, which excludes the snapshot, they raise `WireError` naming the missing file. |
+**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 26
+names, resolving them lazily (PEP 562), so a REST-only session never imports boto3 or
+websockets:
 
-Each name is documented in its module to the project's docstring standard. The clients take
-plain arguments (key, base URL, timeouts, backoff), never `MassiveConfig`, so they are tested
-alone against the fake servers of `tests/_fakes/`.
+- errors: `WireError`, `WireAuthError`, `WireEntitlementError`;
+- REST: `RestClient`, `Page`, `to_batch`;
+- WebSocket: `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`;
+- flat files: `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`;
+- spec: `source`, `sources`, `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`,
+  `WireType`, `WireUnit`, `DriftReport`.
 
-**The boundary**, enforced by an import-boundary test in `tests/test_layout.py` that reads every
-module with `ast`, resolving relative imports:
+`Param` is reached as an attribute of `RestPath`. `Transport` (`REST`, `WS`, `FLAT_FILES`) is
+the library's one transport enum.
 
-- Inside `_massive/`, a module imports only the standard library, `urllib3`, `websockets`,
-  `certifi`, the optional `orjson`, and other `_massive` modules. It never imports `deephaven`,
-  `deephaven_server`, `jpy`, `pyarrow`, or any `deephaven_massive` module outside `_massive`.
-- Outside `_massive/` (the rest of `src/`, and `tests/` outside `tests/_massive/` and
-  `tests/_fakes/`), no module imports `urllib3`, `websockets`, or `certifi`; no module imports a
-  `_massive` submodule, directly, relatively, or through `importlib.import_module` or
-  `__import__` with a literal name; an attribute read on the package (`_massive.X`) names only a
-  member of `_massive.__all__`; and no module names a snapshot file (`openapi.json`,
-  `websocket.json`, `llms.txt`) or the `snapshot/` directory.
-- The single exception is `scripts/refresh_massive_spec.py`, which calls
-  `deephaven_massive._massive.spec.generate.main()`.
-- A run-time check: after importing `deephaven_massive` and every `_domains` module, neither
-  `deephaven_massive._massive.spec.generate` nor `deephaven_massive._massive.spec.drift` is in
-  `sys.modules`.
+**Wire errors.** There are three: `WireError`, `WireAuthError`, and `WireEntitlementError`,
+each carrying `status` (or `None`), `host`, `path`, `request_id` (or `None`), and `message`. A
+429 that persists after the retries is `WireError(status=429)`; a fatal WebSocket handshake is
+`WireError(status=<http>)`. `_errors.from_wire` turns each into `MassiveError`,
+`AuthenticationError`, or `EntitlementError` with the same message, `status`, and
+`request_id`.
 
-Tests mirror the package under `tests/_massive/` (`tests/_massive/rest/test_client.py`,
-`tests/_massive/spec/test_generate.py`, and so on), by the rule of
-[section 4.2](#42-test-layout).
+**The boundary and the layers**, enforced by an AST test in `tests/test_layout.py` with a
+negative test per rule:
 
-**The snapshot is not shipped.** `pyproject.toml` excludes it from the wheel:
+- Inside `_massive`, a module imports only the standard library, `urllib3`, `websockets`,
+  `certifi`, the optional `orjson`, `boto3`, `botocore`, `pyarrow`, and other `_massive`
+  modules. It never imports `deephaven`, `deephaven_server`, `jpy`, or any module outside
+  `_massive`.
+- **Layers.** `net` and `spec` import nothing else in `_massive`. `rest`, `ws`, and `flatfiles`
+  import only `net` and `spec`. `refresh` may import any of them, and only `refresh` and its
+  tests import `refresh`.
+- Outside `_massive`: no module imports `urllib3`, `websockets`, `certifi`, `boto3`, or
+  `botocore` (except `tests/_fakes/`); no module imports a `_massive` submodule (by `import`,
+  relative import, or `importlib.import_module`/`__import__` with a literal name); an attribute
+  read on `_massive` names only a member of `_massive.__all__`; and no module names a snapshot
+  file.
+- A subprocess import of `deephaven_massive._massive` leaves `deephaven` out of `sys.modules`.
 
-```toml
-[tool.hatch.build.targets.wheel]
-exclude = ["src/deephaven_massive/_massive/spec/snapshot"]
-```
-
-The sdist keeps it. Nothing reads it at run time; the tests, the refresh command, and the drift
-job read it from the source tree. `restspec.json` and the locks are package data and ship.
+**Not shipped.** The wheel excludes all of `refresh/`, the snapshot included. `spec/*.json` ship
+as package data.
 
 ### 19.1 The REST client
 
 `_massive.RestClient` is one object per session, created on first use and closed by
 `m.close()` (a session closer). It is **safe to call from any number of threads at once**: its
-only shared mutable state is urllib3's connection pool, which locks internally. Every call is
-independent; no call mutates an argument (the parameters are copied before they are encoded).
+shared mutable state is urllib3's connection pool, which locks internally, and a client-wide
+**not-before instant** under a leaf lock. Every call is independent; no call mutates an
+argument (the parameters are copied before they are encoded).
 
 ```python
 client.get(rest_path, path_params, query_params) -> Page             # one request
 client.pages(rest_path, path_params, query_params, *, limit=None) -> Iterator[Page]
                                                                     # follows next_url
 Page(status: str, request_id: str | None, rows: list[dict], body: dict | list)
+to_batch(rows, rest_path, *, required) -> (pyarrow.RecordBatch, DriftReport)
 ```
 
-`rest_path` is the path's `RestPath` from the generated table; the client reads its template,
-result key, and parameter kinds from that value and imports no generated data, so its tests
-build `RestPath` values by hand.
+`rest_path` is the path's `RestPath` from `spec/rest.json`; the client reads its template,
+result key, and parameter kinds from that value, so its tests build `RestPath` values by hand.
 
 - **Transport.** One `urllib3.PoolManager` (or `ProxyManager`, below) with `retries=False` (the
   client retries itself), a 10 s connect and 30 s read timeout, `maxsize` at least
   `max_concurrency` so fan-out never discards connections, and `Accept-Encoding: gzip`
-  (urllib3 decodes it). `User-Agent: deephaven-massive/<version>`.
+  (urllib3 decodes it). `User-Agent: deephaven-massive/<version>` (`net.USER_AGENT`).
 - **Authentication.** `Authorization: Bearer <key>` on every request. The key never appears in
   a URL: an `apiKey` parameter in a `next_url` is removed before the request.
-- **Proxies and certificates.** The proxy comes from the standard environment, read once at
-  construction: `urllib.request.getproxies()` for `HTTPS_PROXY` and `urllib.request.proxy_bypass`
-  for `NO_PROXY` select a `ProxyManager` for the REST host or a plain `PoolManager`. The CA
-  bundle is the system default when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an
+- **Proxies and certificates** come from `net.http`: `urllib.request.getproxies()` for
+  `HTTPS_PROXY` and `urllib.request.proxy_bypass` for `NO_PROXY` select a `ProxyManager` for
+  the REST host or a plain `PoolManager`, read once at construction. The CA bundle is the
+  system default when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an
   `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise.
 - **Query encoding.** Path parameters are percent-encoded into the template. Query values, by
   the parameter's `ParamKind`: an enum by its value, `bool` as `true`/`false`, a `date` as
@@ -1829,42 +1932,35 @@ build `RestPath` values by hand.
   A `next_url` whose scheme and host differ from `rest_base_url` raises `WireError` and is never
   requested. `limit` is the total-row cap: paging stops once that many rows have been yielded,
   and the last page is truncated. Only one page of rows is held at a time.
-- **Retries.** At most 3 retries (4 attempts). Every request is a `GET`, so a retry is always
-  safe. Retried, with these waits:
-  - HTTP 500, 502, 503, 504 and connection errors (refused, reset, timed out): 0.5, 1, then
-    2 s, each with up to 20% upward jitter;
-  - HTTP 429: the `Retry-After` value in either form (delta-seconds or HTTP-date) when present,
-    otherwise 15, 30, then 60 s. A `Retry-After` above 60 s raises `WireRateLimitError` at once,
-    naming the requested wait.
-
-  A TLS certificate failure (`ssl.SSLCertVerificationError`) is never retried: it raises
+- **Retries** follow `net/retry.py`. At most 3 retries (4 attempts); every request is a `GET`,
+  so a retry is always safe. HTTP 500, 502, 503, 504 and connection errors wait 0.5, 1, then
+  2 s, each with up to 20% upward jitter. HTTP 429 waits the `Retry-After` value in either form
+  (delta-seconds or HTTP-date), otherwise 15, 30, then 60 s; a `Retry-After` above 60 s raises
+  `WireError(status=429)` at once, naming the requested wait. After a 429 the client sets its
+  not-before instant, so concurrent workers back off together instead of multiplying 429s. A
+  TLS certificate failure (`ssl.SSLCertVerificationError`) is never retried: it raises
   `WireError` at once, naming `SSL_CERT_FILE`. A connection reset in the middle of paging
-  retries **that page** (its `next_url`), never the first page, so a long history neither
-  restarts nor skips.
+  retries **that page** (its `next_url`), never the first page.
 - **Error mapping.** After the retries, the client raises: 401 as `WireAuthError`; 403, and a
-  200 envelope with `status` `NOT_AUTHORIZED`, as `WireEntitlementError`; 429 as
-  `WireRateLimitError`; every other non-200 status, a 200 envelope with `status` `ERROR`, and a
-  connection failure as `WireError`. Each carries the status, the method and path (query without
-  secrets), the `request_id`, and the first 200 characters of the server's `message` or body,
-  and its message names them all. The REST transport turns each into the public exception of
-  [section 13.4](#134-rest) with `_errors.from_wire`.
-- **Strict decoding.** The body is decoded once with the JSON codec of `_massive/net.py`
-  (`orjson` when it is installed, logged once at INFO, otherwise the standard library). Bytes
-  that are not UTF-8, or text that is not JSON, raise `WireError` with the status and the first
-  200 bytes, on any call and on any page. The page's rows come from the `RestPath`'s result key
-  (`results` for most paths; one of the seven others, such as `last` or `ticker`, where the spec
-  says so). A single object is wrapped as one row; a bare JSON list
-  (`/v1/marketstatus/upcoming`) is the rows, with `status=""` and `request_id=None`. A missing
-  result key is an empty page only when `status` is `OK` or `DELAYED`. The envelope's `status`
-  and `request_id` are kept on the `Page`, so callers can read `DELAYED`.
+  200 envelope with `status` `NOT_AUTHORIZED`, as `WireEntitlementError`; every other non-200
+  status (429 included), a 200 envelope with `status` `ERROR`, and a connection failure as
+  `WireError`. Each carries the status, the method and path (query without secrets), the
+  `request_id`, and the first 200 characters of the server's `message` or body, and its message
+  names them all.
+- **Strict decoding.** The body is decoded once with the `net.codec` JSON codec. Bytes that are
+  not UTF-8, or text that is not JSON, raise `WireError` with the status and the first 200
+  bytes, on any call and on any page. The page's rows come from the `RestPath`'s result key
+  (`results`, or the `RESULT_KEYS` entry). A single object is wrapped as one row; a bare JSON
+  list (`/v1/marketstatus/upcoming`) is the rows, with `status=""` and `request_id=None`. A
+  missing result key is an empty page only when `status` is `OK` or `DELAYED`. The envelope's
+  `status` and `request_id` are kept on the `Page`, so callers can read `DELAYED`.
+- **Batches.** `to_batch` turns a page's rows into one Arrow batch of the path's generated
+  fields, in long-form column names, and returns its `DriftReport`; it validates every value
+  per [section 19.5](#195-runtime-drift). It is the only code that walks a wire path; no row
+  object or model class sits between the JSON and Arrow.
 - **Logging.** Each request logs at DEBUG: method, path, query (with no secret), status,
   `request_id`, row count, and elapsed time. Retries log at INFO with the wait, and exhausted
   retries at ERROR. The `Authorization` header is never logged.
-
-The REST transport (`_rest.py`) turns pages into columns with `_massive.extract(page.rows,
-fields)`, which returns one Python list per wire path the dataset's schema names, and builds one
-Arrow array per column. No row object or model class sits between the JSON and Arrow, and no
-code outside `_massive` walks a wire path.
 
 ### 19.2 The WebSocket client
 
@@ -1874,34 +1970,34 @@ and run on its own daemon thread under `asyncio.run`. Its interface and callback
 its creator, before the loop thread exists), `close()`, and `join(timeout)`, every method must be
 called on the client's loop thread.** All its state is confined to that thread except the
 `close()` request flag (a `threading.Event`), and `close()` touches nothing else: it hands its
-work to the loop. No other client state is ever reached from two threads, which is what makes
-the design correct on free-threaded 3.14t without locks.
+work to the loop. That is what makes the design correct on free-threaded 3.14t without locks.
 
 - **Connecting.** `websockets.asyncio.client.connect(url, ssl=..., max_size=None,
-  open_timeout=None, user_agent_header="deephaven-massive/<version>")`, the whole handshake
-  (below) running under `asyncio.timeout(10)`. `max_size=None` lifts websockets' 1 MiB frame
-  cap; keepalive pings stay at websockets' defaults; the proxy comes from the environment
-  through websockets' own proxy support; the CA bundle follows the REST rule of
-  [section 19.1](#191-the-rest-client).
+  open_timeout=None, user_agent_header=net.USER_AGENT)`, the whole handshake (below) running
+  under `asyncio.timeout(10)`. `max_size=None` lifts websockets' 1 MiB frame cap; keepalive
+  pings stay at websockets' defaults; the proxy comes from the environment through websockets'
+  own proxy support; the CA bundle comes from `net.http`.
 - **Handshake.** Read the `connected` status, send `{"action":"auth","params":"<key>"}`, and read
-  the reply. The upgrade, the `connected` status, and the reply together must finish within the
-  fixed 10 s handshake timeout, or the attempt fails and is retried. `auth_success` opens a
-  generation (`on_open`). `auth_failed` is fatal (`WireAuthError`). `max_connections` reports
-  `WAITING_SLOT`, and the attempt ends when the server closes the socket (or after the
-  handshake timeout), then waits its backoff. The auth frame is never logged.
-- **Receiving.** After `auth_success`, `protocol.py` decodes each text frame once, with the JSON
-  codec of `_massive/net.py`, into events delivered in order:
+  the reply, all within the fixed 10 s handshake timeout, or the attempt fails and is retried.
+  `auth_success` opens a generation (`on_open`). `auth_failed` is fatal (`WireAuthError`).
+  `max_connections` reports `WAITING_SLOT`, and the attempt ends when the server closes the
+  socket (or after the handshake timeout), then waits its backoff. The auth frame is never
+  logged.
+- **Receiving.** After `auth_success`, `protocol.py` decodes each text frame once, with the
+  `net.codec` JSON codec, against the channel's generated fields in `ws.json`, into events
+  delivered in order:
   - `on_status(generation, Status)` for each `ev == "status"` object. `Status.kind` is `ACK`
     (`topics` parsed from "subscribed to: <p1>[,<p2>...]", cluster-agnostic, a comma list
     tolerated; empty when the message cannot be parsed), `REFUSED` (`topics` holds the topic the
     message names, or is empty when it names none), `MAX_CONNECTIONS`, or `OTHER`. `message` is
     the server's text verbatim, and `realtime_verdict` is true when a refusal's message contains
     "real-time" (case-insensitive).
-  - `on_data(generation, channel, rows)` for each channel's data objects in the frame, each row
-    keyed by **column name** through `ws_key_map`, with the wire symbol normalized to Massive's
-    REST form (`EUR/USD` to `C:EURUSD`, `BTC-USD` to `X:BTCUSD`) and the forex `x` given as a
-    quoted string turned into an integer. A key the map neither names nor drops is counted and
-    logged once at WARNING.
+  - `on_data(generation, channel, rows, rejects, drift)` for each channel's data objects in the
+    frame. Rows are keyed by **long-form** column (the library renames them), with the wire
+    symbol normalized to Massive's REST form (`EUR/USD` to `C:EURUSD`, `BTC-USD` to
+    `X:BTCUSD`). A row that fails validation becomes a `Reject(channel, symbol or None,
+    WireError)` instead; the frame's other rows are delivered. `drift` is the frame's
+    `DriftReport` ([section 19.5](#195-runtime-drift)).
 
   No frame text is parsed outside `_massive`.
 - **Sending.** `subscribe` and `unsubscribe` put their frames
@@ -1910,13 +2006,13 @@ the design correct on free-threaded 3.14t without locks.
   to arrive. Frames for a generation that is no longer current are dropped.
 - **Reconnecting.** After every close and every failed attempt that `close()` did not request
   and that is not fatal (a server's clean close included), the client waits and tries again,
-  forever. The first wait is `reconnect_backoff`; each further consecutive failure doubles it up
-  to `max_reconnect_backoff`; jitter adds up to 20%, clamped, so at the cap the wait is drawn
-  from `[max(reconnect_backoff, max_reconnect_backoff / 1.2), max_reconnect_backoff]` and every
-  wait lies in `[reconnect_backoff, max_reconnect_backoff]`. The failure count and the backoff
-  reset only after a generation has stayed open for 60 s (stable uptime), never on
-  `auth_success` alone, so a server that accepts and then drops at once still backs off. The
-  client reports `RECONNECTING` with the next attempt's time before each wait.
+  forever. The first wait is `reconnect_backoff` (at least 15 s, [section 5](#5-massiveconfig));
+  each further consecutive failure doubles it up to `max_reconnect_backoff`; jitter adds up to
+  20%, clamped, so at the cap the wait is drawn from
+  `[max(reconnect_backoff, max_reconnect_backoff / 1.2), max_reconnect_backoff]` and every wait
+  lies in `[reconnect_backoff, max_reconnect_backoff]`. The failure count and the backoff reset
+  only after a generation has stayed open for 60 s (stable uptime), never on `auth_success`
+  alone. The client reports `RECONNECTING` with the next attempt's time before each wait.
 - **Fatal and retryable failures.** `protocol.py` classifies an exception from `connect()`:
   - an HTTP 429 at the upgrade is retryable, and its wait is the larger of its `Retry-After`
     and the backoff;
@@ -1926,8 +2022,8 @@ the design correct on free-threaded 3.14t without locks.
     what it returns `None` for (EOF, `OSError`, timeouts, HTTP 500/502/503/504) is retried, and
     anything it returns (for example HTTP 400 or 404, an invalid URI) is fatal.
 
-  A fatal error ends the client and is reported as `FAILED` with a `WireHandshakeError` naming
-  the HTTP status and the host.
+  A fatal error ends the client and is reported as `FAILED` with `WireError(status=<http>)`
+  naming the host.
 - **Closing.** `close()` sets the request flag and calls `loop.call_soon_threadsafe(task.cancel)`
   (a no-op once the loop has ended). Cancellation interrupts whatever the task awaits, a backoff
   wait included; a `finally` block closes an open socket with code 1000 and reports `CLOSED`.
@@ -1935,180 +2031,251 @@ the design correct on free-threaded 3.14t without locks.
 - **Logging.** INFO on connect, authentication, and close; WARNING on `max_connections` and on
   each reconnect wait (with its length); ERROR on a fatal error.
 
-### 19.3 The spec snapshot, the generator, and the name lock
+### 19.3 The flat-file client
 
-**Sources of truth.** The fields of a REST response, the parameters of a REST path, and their
-types come from Massive's OpenAPI spec, `https://api.massive.com/openapi`, vendored and pinned
-in `_massive/spec/snapshot/` (never `https://api.massive.com/specs/rest.json`, a stale 33-path
-subset). The documentation is rendered from the same spec, so it adds no naming information.
-The other vendored sources are cross-checks only:
+`_massive.FlatFileClient(access_key_id, secret_access_key, endpoint_url, bucket, max_pool)` is
+one object per session, closed by `m.close()`. It creates its boto3 S3 client lazily, under a
+leaf lock, and keeps a closed flag (a `threading.Event`); once closed, it makes no request.
 
-| Source | Use |
-|---|---|
-| `openapi.json` (`/openapi`) | REST paths, parameters, response fields, types, formats, enums, unit tags. The generator's only input. |
-| `websocket.json` (`/specs/websocket.json`, OpenAPI 3.0.3) | A completeness check over the WebSocket key maps: every key of every channel a dataset uses is mapped or listed as dropped, with a reason. |
-| `llms.txt` (`https://massive.com/docs/llms.txt`) | A check of the path allow-list: every allow-listed path is documented, and every documented path is allow-listed or excluded ([section 8.12](#812-excluded-endpoints)). |
-| The flat-file documentation pages | A cross-check of the flat-file key maps against the documented CSV headers (Massive publishes no machine-readable flat-file spec). |
+- **`open(key) -> FlatFile | None`.** `None` for a missing key (404). `object_key(prefix, day,
+  venue)` builds keys as `<prefix>/<YYYY>/<MM>/<date>.csv.gz`, filling a `{venue}` template.
+- **Error mapping.** An S3 error code `InvalidAccessKeyId` or `SignatureDoesNotMatch` is
+  `WireAuthError`; any other 403 is `WireEntitlementError`; anything else is `WireError`. The
+  messages keep the flat-file transport's texts ([section 16](#16-historysourceauto)).
+  `request_id` comes from `x-amz-request-id`. Credentials are never logged.
+- **TLS, proxies, retries.** The botocore `Config` takes `verify=` the `net.http` CA bundle
+  (`SSL_CERT_FILE`, else certifi; `SSL_CERT_DIR` does not apply to S3) and `proxies=` from
+  `net.http`. botocore's own retries are off (`total_max_attempts=1`); the shared
+  `net/retry.py` schedule retries HTTP 500, 503 `SlowDown`, `RequestTimeout`, and connection
+  errors before the first byte. A TLS failure is never retried, and neither is a failure partway
+  through a body.
+- **`prefixes()`** lists the bucket's top-level prefixes, for `--check`.
 
-**Hand-maintained wire data**, reviewed like code:
+`FlatFile.batches(plan)` yields one `(RecordBatch, DriftReport)` per block, in this order:
+(1) the futures session check; (2) the symbol filter (`is_in`); (3) `[start, end)` on
+`plan.to_ns(time column)`; (4) on the survivors, the rename to long-form names and list
+parsing. Instants stay in their wire unit; the library converts them. The reader first peeks the
+header line and reads by name ([section 16](#16-historysourceauto)). `close()` is idempotent and
+safe from any thread.
 
-- `_massive/spec/allowlist.py`: the allow-list (every REST path of § 8), the seven non-`results`
-  result keys, the type overrides, and `EXCLUSIONS`, the **single exclusion list** of
-  [section 8.12](#812-excluded-endpoints): every documented REST path, WebSocket channel, and
-  flat-file prefix the library does not support, each entry `(kind, item, reason)` with
-  `kind` one of `rest`, `ws`, `flat_files`.
-- `_massive/spec/units.py`: the unit of every timestamp-like wire field the library reads,
-  keyed by `(transport, source, field)`, verified against the documentation as § 12 describes,
-  and the reviewed list of fields whose verified unit differs from the spec's
-  `x-polygon-go-type` tag (the 20 indicator `IMicroseconds` tags first).
-- `_massive/names/lexicon.py`, `wskeys.py`, `flatkeys.py`: the lexicons, the WebSocket key maps,
-  and the flat-file key maps (each key with its column and `WireType`).
-
-They are complete for every path, channel, and prefix that § 8 uses, so a dataset package never
-edits them.
-
-**Everything documented is accounted for.** Every documented REST path (in `openapi.json` or
-`llms.txt`), every WebSocket channel (in `websocket.json`), and every flat-file prefix (a
-flat-file page in `llms.txt`, each mapped to its prefix in `flatkeys.py`) is **accounted for**:
-either allow-listed (a path in `allowlist.py`, a channel in `wskeys.py`, a prefix in
-`flatkeys.py`, each entry naming the § 8 namespace that owns it) or on `EXCLUSIONS`. The union
-lives entirely in the wire package, so the check needs no declared dataset:
-`tests/_massive/spec/test_allowlist.py` enforces it against the pinned snapshot, and
-`drift.py` and `--check` use the same union, so drift always shows up as **unaccounted items**,
-never as silence.
-
-**Every allow-listed item is used.** A separate check, `_massive.unused_allowlisted(wires,
-namespace=None)`, returns the allow-listed paths, channels, and prefixes that no declared
-dataset (`DatasetWire`) uses, optionally for one namespace. It is tested on synthetic
-declarations from the start, is required to return nothing for a namespace once that
-namespace's dataset package has merged, and becomes strict for the whole catalog when the
-rework finishes; until then empty namespaces are expected.
-
-**The refresh command.** `scripts/refresh_massive_spec.py` is a thin entry point: it calls
-`deephaven_massive._massive.spec.generate.main(argv, _catalog.dataset_wires(), s3_prefixes)`.
-No JVM is involved: the catalog is importable without Deephaven
-([section 4.1](#41-source-modules)). `s3_prefixes` is `None` unless the S3 credentials of
-[section 5](#5-massiveconfig) are set in the environment, in which case the script lists the
-bucket's top-level prefixes with one `boto3` `list_objects_v2(Delimiter="/")` call (`boto3` is
-outside `_massive`'s allowed imports, so the script does it). Its modes:
-
-| Mode | Network | What it does |
-|---|---|---|
-| `--check` | yes | Downloads the live `openapi.json`, `websocket.json`, `llms.txt`, and flat-file pages into a temporary directory and runs the semantic comparison of `_massive/spec/drift.py`. Against the vendored snapshot it reports REST paths new, removed, or newly deprecated; response fields and parameters added, removed, or retyped; WebSocket channels and keys added or removed; CSV headers added, removed, or renamed in a known flat file's page; and the keys the naming gate would stop on. Against the allow-list and `EXCLUSIONS` it reports **unaccounted items**: documented REST endpoints (spec or `llms.txt`), WebSocket channels, and flat-file pages that are neither allow-listed nor excluded, plus, when `s3_prefixes` is given, bucket prefixes that no `flatkeys.py` entry or exclusion names (CI has no S3 credentials, so there it relies on the pages). JSON is compared canonically (`sort_keys`) and text normalized, so reordering and volatile fields are never reported. It prints a report, changes nothing, and exits non-zero when it finds drift or unaccounted items. |
-| `--fetch` | yes | Replaces the vendored snapshot with the live sources and records their fetch date and SHA-256 in `manifest.json`. |
-| (none) | no | Regenerates `restspec.json` from the vendored snapshot and updates the name locks: new wire paths get entries, and entries whose wire path left the spec are removed. |
-| `--verify` | no | Exits non-zero when the regeneration would change anything (the parity test runs the same comparison). |
-
-**The generator.** For each allow-listed path it:
-
-1. fails, naming the path and the datasets that use it, when the path is missing from the spec
-   or marked `x-polygon-ignore`, `x-polygon-draft`, or `deprecated`, so an endpoint Massive
-   retires never drops out silently;
-2. merges `allOf` and flattens nested objects into dotted wire paths below the path's result
-   key;
-3. maps each leaf to a `WireType`: `integer` to `long`, `number` to `double`, `boolean`,
-   `string` (with the format and name rules of [section 11](#11-enums-and-types)), and an array
-   of integers to `int-array`; a leaf with a unit tag keeps it for the cross-check of
-   [section 12](#12-timestamp-units-and-day-boundaries);
-4. records each parameter: wire name, kind, enum values, and whether it is a path segment.
-
-It writes `restspec.json` canonically (`sort_keys=True`, a one-space indent, a trailing newline),
-which `_massive/spec/__init__.py` loads once into frozen dataclasses. Ruff and mypy never see the
-generated data, so a formatter release cannot break parity. The generator never guesses. A
-construct it has no rule for (`$ref`, `oneOf`, `anyOf`, an untyped leaf, an array of strings or
-objects, a free-form map, `number` with an integer format) fails the run with its path, unless
-an entry in the override table gives the leaf a type or drops it. An override that names a path
-the spec lacks also fails the run. Arrays and maps that a dataset keeps become `json-text`
-through such an override.
-
-**The naming rule.** A column name is fixed once per `(dataset, transport, wire path)` and
-recorded in the name lock. For a new REST entry the generator proposes it by this rule:
-
-1. Split the wire path into segments and drop the result key (`results[]`, `tickers[]`,
-   `ticker`, `last`).
-2. Apply the library-wide names: the row's instrument key (`ticker`, `T`, `sym`) becomes
-   `Symbol`; the dataset's primary time key (declared in its `DatasetSpec` for tick, bar, and
-   value rows) becomes `Timestamp`; the dataset's fan-out key becomes `Underlying`
-   ([section 10](#10-symbols-and-all)).
-3. Translate an abbreviated key through the lexicon of its **record family**: bar, trade, NBBO
-   quote, forex quote, or ticker, assigned per object shape in `lexicon.py` (the row of an
-   aggregates response, the snapshot objects `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`,
-   and so on). Each lexicon value is Massive's own long-form name for the field, as v3 REST,
-   futures v1, and the flat-file headers write it: `o` is `open`, `vw` is `vwap`, `n` is
-   `transactions`, `q` is `sequence_number`, `y` is `participant_timestamp`, `f` is
-   `trf_timestamp`, `P` is `ask_price`, `X` is `ask_exchange`, `ds` is `decimal_size`, and so on.
-   The snapshot object `min` is named `minute`, so its columns are `MinuteOpen`, `MinuteVwap`,
-   and so on (`Min…` would read as "minimum").
-4. Keep every other segment as it is, and PascalCase-join the segments (`prevDay.vw` becomes
-   `PrevDayVwap`, `lastQuote.P` becomes `LastQuoteAskPrice`).
-
-The refresh **fails instead of guessing** in two cases: a key of three characters or fewer, with
-no underscore, that has no lexicon entry (short real words and acronyms such as `id`, `cik`,
-`url`, `low`, `fmv`, `mic` have explicit identity entries); and two wire keys of one row that
-produce the same column. The failure prints the key, its path, its description, and a
-suggestion: a readable key elsewhere in the spec with the identical description. The suggestion
-is for the reviewer; **names are never derived from descriptions**, which Massive edits about
-twenty times as often as it changes keys.
-
-WebSocket names come from the key maps in `wskeys.py`, one per (cluster path, channel), which use
-the same long-form vocabulary. The WebSocket-only concepts, which have no long form at Massive,
-are named `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
-aggregate `z` → `AverageTradeSize`, and `dav` → `AccumulatedDollarVolume`. Flat-file names come
-from `flatkeys.py`; the headers are already long-form.
-
-**The name lock.** `_massive/names/locks/<domain>.json`, one file per domain module, records for
-every transport `(dataset, transport, wire path) -> (column, WireType)`:
-
-```json
-{"stocks.trades": {"flat_files": {"price": {"column": "Price", "type": "double"}},
-                   "rest": {"price": {"column": "Price", "type": "double"}},
-                   "ws": {"p": {"column": "Price", "type": "double"}}}}
+```python
+ReadPlan(columns: tuple[ReadColumn, ...], symbol_header, symbols, time_header, window_ns,
+         to_ns, session_header, required)
+ReadColumn(header, column, read_type: pyarrow.DataType, list_type)
 ```
 
-It is written canonically (sorted keys, a one-space indent, a trailing newline), so each change
-reads as a small diff. REST entries are proposed by the rule above; WebSocket and flat-file
-entries are copied from the key maps. A dataset's schema is derived from its lock entries,
-column types included ([section 4.1](#41-source-modules), `_schema.dataset_schema`), so a change
-of name or type at Massive always shows up in the lock diff. The lock exists for correctness:
-every name is chosen by a person, the generator refuses to guess, and a refresh never renames a
-column silently.
+`_flat_files.py` builds the plan from `source(Transport.FLAT_FILES, prefix)`. `to_ns` is the
+`_timeunits` converter, so a wrongly declared unit still raises; the window is never converted
+into wire units.
 
-- The generator never recomputes an existing entry, so a lexicon edit or a spec refresh cannot
-  rename a column without a visible diff.
-- A new readable field gets its entry automatically when a dataset's path exposes it, and the
-  reviewer sees it in the lock diff. A description-only change produces no lock diff.
-- A wire key that leaves the spec loses its entry in the refresh, and its column leaves the
-  schema; a key that Massive renames is a removed entry plus a new one.
-- Renaming, retyping, or removing an entry by hand is an ordinary edit, reviewed as a diff in
-  its PR.
+### 19.4 Generated schemas
 
-The tests that keep this honest:
+No schema is hand-written. The refresh generates three committed, canonical files from the
+vendored snapshot: `spec/rest.json` (from `openapi.json`), `spec/ws.json` (from
+`websocket.json`), and `spec/flatfiles.json` (from the flat-file "Columns" tables). Each holds,
+per source, an ordered list of fields `(wire key, column, WireType, unit, required)`. Every
+change shows up as a reviewed diff of a generated file. Hand input is naming, grouping, and
+verification, never a column list.
 
-- **Parity** (`tests/_massive/spec/test_generate.py`): regenerating `restspec.json` from the
-  vendored snapshot and the hand-maintained tables gives the committed file, byte for byte.
-- **Completeness, inside `_massive`**: the WebSocket key maps are complete against
-  `websocket.json` (`tests/_massive/names/test_wskeys.py`); the flat-file key maps match the
-  documented headers (`tests/_massive/names/test_flatkeys.py`); the allow-list matches
-  `llms.txt` (`tests/_massive/spec/test_allowlist.py`); `drift.py` finds each kind of change
-  in synthetic before-and-after snapshots (`tests/_massive/spec/test_drift.py`); every tagged
-  field in the unit table
-  agrees with its tag or is in the conflict list (`tests/_massive/spec/test_units.py`).
-- **Completeness, across the boundary** (`tests/test_catalog.py`, through the interface only):
-  every declared dataset's schema builds (`_schema.dataset_schema`), so every wire path has a lock
-  entry and every timestamp-like field a unit; every REST column of a tick dataset is a column
-  of its tick schema with the same type; and every wire name a `DatasetSpec` declares (time-axis
-  pair, symbol parameter, path placeholders) is a parameter of its `RestPath`; and
-  once the rework finishes, `unused_allowlisted` returns nothing for the whole catalog (until
-  then each namespace's own test asserts it once that namespace's datasets are declared).
-- **Accounted for, inside `_massive`** (`tests/_massive/spec/test_allowlist.py`): the pinned
-  snapshot has no unaccounted items; every documented REST path, WebSocket channel, and
-  flat-file prefix is allow-listed or on `EXCLUSIONS`.
+**Sources and flattening.**
 
-**The refresh flow.** The drift job ([section 20](#20-quality-gates)) runs `--check` and opens an
-issue from its report. A person runs `--fetch`, then the plain refresh, reviews three diffs (the
-snapshot, `restspec.json`, and the lock), adds a lexicon or unit line where the
-generator asks for one, and lands the result as one PR. A new endpoint additionally needs its
-path on the allow-list and a `DatasetSpec`.
+- **REST.** Every `openapi.json` path that is not deprecated, draft, or ignored and not in
+  `EXCLUSIONS`. The generator resolves `$ref`, merges `allOf`, flattens nested objects into
+  dotted wire paths below the result key (`results` unless `RESULT_KEYS` names another), keeps
+  fields in spec order, and records the parameters (wire name, `ParamKind`, enum values, path or
+  query).
+- **WebSocket.** Every `websocket.json` channel not in `EXCLUSIONS`, keyed `(cluster,
+  channel)`. Fields are its message properties in spec order; `required` is copied where the
+  vendor gives it.
+- **Flat files.** Every dataset page with a row in its class's overview table. That row's
+  `S3 <prefix>` is the source key, so no hand-written page-to-prefix map exists. A futures kind
+  keyed by `{venue}` requires its four venue pages to list identical columns. Fields are the
+  page's "Columns" table (name, type) in table order; the example rows are ignored. A dataset
+  page with no overview row is reported as unaccounted by `--check`.
+- **Representation rules** (generator rules, not hand entries): an array of strings or objects,
+  a free-form object, and `oneOf`/`anyOf` become `json-text`; an array of integers becomes
+  `int-array`; the WebSocket envelope key `ev` is dropped; a field with a `UNITS` entry becomes
+  an `epoch` in that unit; a string with `format: date-time`, or no format and a name ending in
+  `_utc`, becomes an `iso-instant`; a string with `format: date`, or named `date` or `*_date`,
+  becomes a `date`.
+- **Projections.** `PROJECTIONS {(family, source): keys}` limits a source that joins a family
+  for one verb to the listed keys. Its first entry is `/v3/snapshot/indices` → `value`,
+  `last_updated`, `ticker`, for `indices.values.fetch()`.
+
+**The type lattice.** `WireType` is one of `long`, `double`, `bool`, `string`, `date`, `epoch`
+(an integer with a unit), `iso-instant`, `int-array`, and `json-text`. OpenAPI `integer`, and
+`number` with `format: integer`, map to `long`, and `number` to `double`. Doc pages map
+`integer` to `long`, `number` to `double`, `string` to `string`, and `timestamp - integer` to
+`epoch` (with its `UNITS` entry). Two types meet for one column name within one kind by these
+joins: `long ⊔ double = double`; `long ⊔ int-array = int-array` (a scalar becomes a
+one-element list); `epoch ⊔ epoch = epoch`, each source keeping its own unit. Any other pair is a
+**type conflict** (gate G5). `_schema` maps `long` to `long`, `double` to `double`, `bool` to
+`boolean`, `string` and `json-text` to `String`, `date` to `LocalDate`, `epoch` and
+`iso-instant` to `Instant`, and `int-array` to `int[]`. An `int-array` element outside the
+`int32` range is an unconvertible value.
+
+**Hand input.** All of it lives in `refresh/`, every entry carries a reason, and an entry that
+names a source or field the snapshot lacks fails the refresh as stale (G4).
+
+| Kind | Where | What | Example |
+|---|---|---|---|
+| Lexicon | `lexicon.py` | `SHAPES` maps each object shape (aggregate row; snapshot `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`; each WebSocket channel; each futures object) to its lexicon. A lexicon translates a short key to Massive's own long form; identity entries cover short real words (`id`, `cik`, `url`, `low`, `fmv`, `mic`). | trade lexicon `p` → `price`, `t` → `sip_timestamp`; segment `min` → `minute` |
+| `NAMES` | `overrides.py` | `{(source, wire key): (long name, reason)}` for a column the lexicon cannot name | stocks `A`/`AM` `dv` → `decimal_volume`, `dav` → `accumulated_decimal_volume`; futures `A`/`AM` `dv` → `dollar_volume`; `av`, `op`, aggregate `a`, aggregate `z` |
+| `FAMILIES` | `overrides.py` | `{kind: {group: [sources]}}`: the sources of one dataset kind, grouped per asset class, in source order. Every dataset with a stream or flat-file source has a kind, WebSocket-only `luld`, `imbalances`, and `fmv` included. | `trades: {stocks: [/v3/trades/{stockTicker}, /v2/last/trade/{stocksTicker}, (stocks, T), us_stocks_sip/trades_v1], crypto: […]}` |
+| `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values |
+| `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp"; with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
+| `TYPE_FIXES` | `overrides.py` | vendor type **errors** only; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | flat-file `conditions` `integer` → `int-array`; forex `x` (a quoted string) → `long`; crypto `XT` `i` (`integer`) → `string`; snapshot `lastQuote` sizes → `double` |
+| `TRANSPORT_ONLY` | `overrides.py` | `{(kind, column): reason}`: columns legitimately on one transport | `AccumulatedVolume` (WebSocket only) |
+| `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results` | `/v1/last/crypto` → `last` |
+| `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, exactly section 8.12 | `/v1/summaries` |
+
+**The naming rule.** A field's column is derived by splitting its wire path into segments and
+dropping the result key, translating each short key through the lexicon of its shape, applying
+`NAMES`, and PascalCase-joining the segments (`prevDay.vw` becomes `PrevDayVwap`). Names are
+never derived from descriptions. The generator never emits `Symbol` or `Underlying`, and emits
+`Timestamp` only where the vendor's long name is `timestamp` (futures). The WebSocket-only
+names are `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
+aggregate `z` → `AverageTradeSize`, `dav` → `AccumulatedDecimalVolume`, stocks `dv` →
+`DecimalVolume`, and futures `dv` → `DollarVolume`; the snapshot object `min` gives
+`Minute…` columns.
+
+**Refresh gates.** The refresh fails, printing the source, the key, and its description for the
+reviewer, on:
+
+- **G1:** a short key (three characters or fewer, no underscore) with no lexicon, identity, or
+  `NAMES` entry;
+- **G2:** two keys of one source producing one column;
+- **G3:** a timestamp-like field (one with a unit tag, or named `timestamp`, `*_timestamp`, or
+  `last_updated`, or `t`/`pt`/`trft`/`r`/`s`/`e` in a tick or bar shape) with no `UNITS`
+  entry;
+- **G4:** a stale hand entry: a `NAMES`, `UNITS`, `TYPE_FIXES`, `PROJECTIONS`, `FAMILIES`,
+  `RESULT_KEYS`, or `EXCLUSIONS` entry naming a source or field the snapshot lacks;
+- **G5 (type agreement):** within one kind, one column name joins to one `WireType`, unless a
+  `TYPE_FIXES` entry resolves it; the message prints both keys' descriptions, because a
+  conflict is first treated as a possible naming error (stocks and futures `dv` are exactly
+  that);
+- **G6 (transport agreement):** within one `FAMILIES` group, every column appears on at least
+  two transports or is in `TRANSPORT_ONLY`, which catches a one-sided lexicon slip (`s` becoming
+  `Shares` while REST says `size`);
+- **G7:** a futures kind whose venue pages differ.
+
+Descriptions differ across transports and change about twenty times as often as keys, so G5 and
+G6, not description matching, are the mechanical checks.
+
+**Dataset schemas** are merged at run time, after the rename, never inferred from data:
+
+```
+dataset_schema(spec):                       # cached per dataset; leaf lock
+  members = datasets of spec.family in FAMILIES group order   (spec alone for a non-tick dataset)
+  for each member m, each source s of m (its role paths, channels, prefixes; PROJECTIONS applied):
+      cols(m, s) = rename(m, fields of s)    # symbol_column -> Symbol, time_column -> Timestamp,
+                                             # fanout_column -> Underlying; nothing else changes
+  schema = ordered union by column name of every cols(m, s):
+           Symbol, Timestamp first; then first appearance in member, then source, then field order
+  each column's WireType = the lattice join over every contribution
+```
+
+Each `DatasetSpec` declares four long-form key columns: `symbol_column`, `time_column`,
+`fanout_column`, and (futures) `session_column`. Every member of a kind gets the identical
+column set: crypto's `ParticipantTimestamp` is renamed to `Timestamp`, while stocks keeps its
+`ParticipantTimestamp` column, so crypto rows hold `ParticipantTimestamp` null. A non-tick
+dataset with several role paths (`options.contracts` list and per-contract) is the union of its
+role paths under the same join.
+
+**Catalog gates** (`tests/test_catalog.py`, with negative tests on synthetic `DatasetSpec`s):
+
+- **C1:** each declared key column (symbol, time, fan-out, session) exists in every source of
+  its dataset;
+- **C2:** after the rename, no source has a duplicate column;
+- **C3:** across members, one column name gets one `WireType`;
+- **C4:** each tick dataset's sources equal its `FAMILIES` group;
+- **C5:** every declared wire name (time-axis pair, symbol parameter, path placeholders) is a
+  parameter of its `RestPath`;
+- **C6:** every path, channel, and prefix a dataset uses is generated; a miss names the dataset
+  and says "deprecated or removed in the snapshot";
+- **C7:** generated = used ⊎ undeclared ([section 8.12](#812-excluded-endpoints)), and the
+  undeclared files are pairwise disjoint.
+
+`FAMILIES` overlaps the catalog by design: the refresh checks names before any dataset is
+declared, and C4 keeps the two in step.
+
+### 19.5 Runtime drift
+
+Data on the wire can differ from the committed schema until the next refresh. **Detection** is in
+`_massive`: each decoder compares a payload with its generated source and returns a
+`DriftReport(extra, missing)`. A decoder never raises for drift; REST and flat files raise
+`WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
+session's `_diagnostics.DriftRegistry` (a leaf lock, WARNINGs logged after release) and the
+routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
+
+| Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
+|---|---|---|---|---|
+| **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field). Shown in `SchemaDrift`. |
+| **Missing declared key column** (symbol, time, fan-out, session) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
+| **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
+| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced; a lattice widening is not coercion. |
+| **Timestamp out of [1990, 2100], or overflow** | in `_timeunits` | in `_timeunits`, in the flush thread as a vectorized mask | in `_timeunits` | Loud failure naming the dataset, the column, the unit, and the value. |
+| **Undocumented value of an interpreted field** (`timeframe`) | `_hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
+
+**A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
+`MassiveError` through `from_wire`; `poll()` fails its table through `publish_failure`; a
+WebSocket failure fails, through `publish_failure`, only the streams that would have received
+the row (the channel's `ALL` streams and the streams holding that symbol, or every stream on the
+channel when the symbol itself is missing). Rejected rows are never published, and the rest of
+the batch is. A drift failure goes through `SessionCore.fail_stream`, like an entitlement
+failure.
+
+**`SchemaDrift`** is a text column of both diagnostics tables ([section 17](#17-diagnostics)):
+`transport:field+` for extra and `transport:field-` for missing, sorted, truncated at 200
+characters.
+
+### 19.6 Refresh and drift
+
+```
+uv run python -m deephaven_massive._massive.refresh            # regenerate spec/*.json from the snapshot
+uv run python -m deephaven_massive._massive.refresh --fetch    # replace the snapshot with the live sources
+uv run python -m deephaven_massive._massive.refresh --check    # live: report drift; changes nothing
+```
+
+The command runs from a source checkout; `refresh/` is not in the wheel. The parity test in
+`tests/massive/refresh/test_generate.py` regenerates `spec/*.json` from the snapshot and
+requires it byte for byte, and checks documented = generated ⊎ excluded ⊎ (deprecated ∪ draft
+∪ ignored).
+
+**The snapshot is stored canonically.** `fetch.py` writes JSON with `sort_keys`, `indent=1`,
+and a final newline, and text with trailing whitespace stripped and a final newline, so refresh
+diffs read line by line and no hook exception is needed. `manifest.json` records the fetch date
+and the SHA-256 of the fetched bytes and of the stored file.
+
+**`--check`** downloads the live `openapi.json`, `websocket.json`, `llms.txt`, and flat-file
+pages and overviews, compares them semantically with the snapshot (`refresh/drift.py`), prints a
+report, changes nothing, and exits non-zero on drift. It reports REST paths new, removed, or
+newly deprecated (including deprecated paths still in `rest.json`); fields and parameters
+added, removed, or retyped; WebSocket channels and keys; flat-file pages, headers, and overview
+rows; changed unit tags; the keys the gates would stop on; and **unaccounted items**:
+documented REST endpoints, channels, and flat-file pages neither generated nor excluded, plus,
+when S3 credentials are set, bucket prefixes from `FlatFileClient.prefixes()` that nothing
+names.
+
+**The drift job.** `.github/workflows/spec-drift.yml` runs `--check` weekly and on demand. With
+drift it keeps one standing "Massive API drift" issue (found by title and the `spec-drift`
+label, which it creates when missing; reopened if closed; never a duplicate) listing each item
+with its action; with no drift it does nothing. It has `issues: write` only, never opens a
+pull request, and is never a gate.
+
+**Closing the loop.** A person runs `--fetch` and the plain refresh, then reviews one PR holding
+the snapshot diff, the `spec/*.json` diff, and any hand-input lines, and `check.sh` runs G1–G7
+and C1–C7. What each change does:
+
+| Change at Massive | At run time | In the refresh |
+|---|---|---|
+| Field added | Dropped, one WARNING, `SchemaDrift`. | It gets a name (G1 asks for a lexicon or `NAMES` line for a short key) and joins its kind (G5 checks the type, G6 the transports). |
+| Field removed | Null; a required field or CSV header warns; a declared key column fails loudly. | It leaves its source; C1 fails if it was a declared key. |
+| Field renamed | A removal plus an addition. | The column is renamed in the diff, or stays the same if the long form is unchanged; G6 catches a one-sided rename. |
+| Type changed | A value that no longer converts fails loudly. | G5 or C3 fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
+| Unit changed | The overflow check or the bound fails loudly. | `--check` reports the changed tag, and the `UNITS` entry is re-verified. |
+| New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and C7 fails until a `DatasetSpec` or an `EXCLUSIONS` entry is added. |
+| Endpoint deprecated or removed | `MassiveError` with the HTTP status. | It leaves the generated set, and C6 names every dataset that uses it. |
 
 ## 20. Quality gates
 
@@ -2123,38 +2290,38 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   `ignore_missing_imports` for `pyarrow.*`. Pyright runs as a non-gating second checker.
 - **Pytest 9:** `strict = true`, `filterwarnings = ["error"]`, `--import-mode=importlib`,
   deadlock detection through `faulthandler_timeout` and `pytest-timeout`.
-- **Layout:** `tests/test_layout.py` (the mirror rule and the `_massive` import boundary of
-  [section 19](#19-wire-clients-and-the-spec-snapshot)) and `tests/test_catalog.py` pass.
-- **Spec:** the parity test (`restspec.json` equals what the vendored snapshot generates), the
-  completeness checks (no unaccounted documented endpoint, channel, or flat-file prefix), and
-  the lock tests ([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)) pass.
-  They read only vendored files, never the network.
+- **Layout:** `tests/test_layout.py` passes: the mirror rule and naming of
+  [section 4.2](#42-test-layout), and the `_massive` boundary and layers of
+  [section 19](#19-wire-clients-and-the-spec-snapshot).
+- **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
+  byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored), and refresh gates
+  G1–G7), and `tests/test_catalog.py` passes (catalog gates C1–C7, generated = used ⊎
+  undeclared) ([section 19.4](#194-generated-schemas)). They read only vendored files, never
+  the network.
+- **Negative tests:** every gate has a negative test that fails when the gate is deleted.
 - **Process:** conventional-commit titles; every change lands through a pull request; only the
   owner merges.
 
-**Spec drift is advisory, never a gate.** `.github/workflows/spec-drift.yml` runs weekly and on
-demand (`workflow_dispatch`). It runs `scripts/refresh_massive_spec.py --check`
-([section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock)), the same semantic
-comparison a person runs locally, without S3 credentials, so flat-file coverage comes from the
-documentation pages alone.
+**Spec drift is advisory, never a gate.** `.github/workflows/spec-drift.yml` runs
+`python -m deephaven_massive._massive.refresh --check` weekly and on demand, the same command a
+person runs locally ([section 19.6](#196-refresh-and-drift)). It runs without S3 credentials,
+so flat-file coverage comes from the documentation pages and overviews.
 
 - **No drift:** the job does nothing: no issue, no comment.
-- **Drift:** it opens, or updates in place, the **single standing issue** titled
-  "Massive API drift", found by that title and the `spec-drift` label. It never creates a
-  second one: when the issue is open it rewrites the body; when it is closed it reopens it. The
-  body lists, each item with the action to take:
+- **Drift:** it opens, or updates in place, the single standing issue "Massive API drift"
+  (found by that title and the `spec-drift` label, which it creates when missing; reopened if
+  closed; never a duplicate). The body lists each item with its action:
   - **unaccounted items** (a documented REST endpoint, WebSocket channel, or flat-file dataset
-    neither allow-listed nor excluded): allow-list it and add a dataset, refreshing with
-    `refresh_massive_spec.py`, or add an entry to `EXCLUSIONS` with a reason;
-  - **field, type, and column changes** (response fields and parameters added, removed, or
-    retyped; WebSocket keys added or removed; CSV headers changed; keys the naming gate would
-    stop on): run `refresh_massive_spec.py --fetch` and the plain refresh, adding a lexicon,
-    or unit line where the generator asks;
-  - **deprecations** (an allow-listed path newly deprecated or removed): replace the dataset's
-    path or move it to `EXCLUSIONS` with a reason.
+    neither generated nor excluded): refresh and add a dataset, or add an `EXCLUSIONS` entry
+    with a reason;
+  - **field, type, and column changes** (fields and parameters added, removed, or retyped;
+    WebSocket keys; CSV headers; changed unit tags; keys the gates would stop on): run
+    `--fetch` and the plain refresh, adding a lexicon, `NAMES`, or `UNITS` line where a gate
+    asks;
+  - **deprecations** (a generated path newly deprecated or removed): replace the dataset's path
+    or add it to `EXCLUSIONS` with a reason.
 - It has `permissions: issues: write` only, never pushes, never opens a pull request, and is
   never a required check, because a change at Massive must not block unrelated pull requests.
-  The refresh itself is a reviewed PR.
 
 ### 20.1 Tooling configuration
 
@@ -2182,12 +2349,15 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   - Google docstring convention; `docstring-code-format = true`.
 - **Mypy.** `strict`, `warn_unreachable`, `warn_unused_configs`, and `enable_error_code =
   ["ignore-without-code", "redundant-expr", "truthy-bool", "truthy-iterable",
-  "possibly-undefined", "unused-awaitable", "deprecated", "explicit-override"]`. The dev group
-  adds `types-boto3[s3]`. The only override is `ignore_missing_imports` for `pyarrow.*`, which
-  ships no type information; `urllib3`, `websockets`, and `certifi` ship their own. No other
-  override is allowed. Pyright runs as a non-gating second checker.
+  "possibly-undefined", "unused-awaitable", "deprecated", "explicit-override"]`, with
+  `mypy_path = ["src"]`. The dev group adds `types-boto3[s3]`. The only override is
+  `ignore_missing_imports` for `pyarrow.*`, which ships no type information; `urllib3`,
+  `websockets`, and `certifi` ship their own. No other override is allowed. Pyright runs as a
+  non-gating second checker.
 - **Pytest 9** (native `[tool.pytest]` table). `strict = true`, `filterwarnings = ["error"]`,
-  `addopts = ["-ra", "--import-mode=importlib"]`, `faulthandler_timeout = 120` with
+  `addopts = ["-ra", "--import-mode=importlib"]`, `pythonpath = ["."]` (test code imports
+  helpers as `tests._fakes…`, so `tests/massive/` never shadows a top-level `massive`),
+  `faulthandler_timeout = 120` with
   `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Coverage is not in
   `addopts`, so single-test runs and debuggers work.
 - **Coverage.** `branch = true`, `fail_under = 100`, `exclude_also = ["if TYPE_CHECKING:",
@@ -2208,22 +2378,24 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   `no-commit-to-branch` (main), `check-yaml`, `end-of-file-fixer`, and `trailing-whitespace`.
   The full tier runs at the pre-push stage.
 - **Packaging.** `uv.lock` is not committed, and CI resolves afresh on every run. The wheel
-  excludes the spec snapshot (`[tool.hatch.build.targets.wheel] exclude =
-  ["src/deephaven_massive/_massive/spec/snapshot"]`); the sdist keeps it, and `restspec.json`
-  and the locks ship as package data.
+  excludes all of `refresh/` (`[tool.hatch.build.targets.wheel] exclude =
+  ["src/deephaven_massive/_massive/refresh"]`), the snapshot included; `spec/*.json` ship as
+  package data, and the CI build job asserts both. Development dependencies use a PEP 735
+  `[dependency-groups]` table; license metadata follows PEP 639. `__version__` comes from
+  `importlib.metadata`. `deephaven-server` is a development dependency only. The runtime
+  dependencies are declared directly, with floors: `deephaven-core`, `pyarrow`, `boto3`,
+  `botocore` (a floor whose `Config` takes `proxies` and `total_max_attempts`), `urllib3`,
+  `websockets` (a floor with proxy support in `websockets.asyncio.client.connect`), and
+  `certifi`. There is no `massive` dependency and no `[tool.uv.sources]` table: every
+  dependency comes from PyPI. `.gitignore` lists only the files this project produces.
 - **Banned import.** `[tool.ruff.lint.flake8-tidy-imports.banned-api]` bans `massive` with the
   message "The library has its own clients; see deephaven_massive._massive". A ban is not an
   ignore, so it needs no approval.
-  Development dependencies use a PEP 735 `[dependency-groups]` table; license metadata follows
-  PEP 639. `__version__` comes from `importlib.metadata`. `deephaven-server` is a development dependency only.
-  The runtime dependencies are declared directly, with floors: `deephaven-core`, `pyarrow`,
-  `boto3`, `urllib3`, `websockets` (a floor with proxy support in
-  `websockets.asyncio.client.connect`), and `certifi`. There is no `massive` dependency and no
-  `[tool.uv.sources]` table: every dependency comes from PyPI. `.gitignore` lists only the files
-  this project produces.
+- **Release.** `.github/workflows/release.yml` runs on a `v*` tag: it builds the sdist and the
+  wheel, checks that the tag equals `project.version`, and publishes to PyPI through trusted
+  publishing (`id-token: write`, no long-lived token). The first version is 0.1.0.
 - **Metadata.** `authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]`; repository
-  `https://github.com/chipkent/deephaven-massive`. No dependency blocks publication to PyPI;
-  when to publish is an owner decision.
+  `https://github.com/chipkent/deephaven-massive`.
 
 ## 21. Examples
 
@@ -2351,12 +2523,12 @@ document already reflects them.
    through a float, and REST decoding 2.5–5 times slower than columnar decoding. The fork that
    fixed them could not be published to PyPI as a dependency. Owning the clients costs about one
    week before 1.0 and permanent ownership of HTTP and WebSocket edge cases.
-2. **All documented fields as columns, generated from the OpenAPI spec** (revised 2026-10-26).
-   REST datasets expose every field the spec documents for their paths, flattened to PascalCase,
-   from a vendored, pinned snapshot; a parity test keeps the generated code in step with it, and
-   an explicit, tested override table covers spec type errors; units are the hand-verified table
-   of section 12. The WebSocket and
-   flat-file schemas keep hand-written per-transport key maps. Fallback chains are gone.
+2. **Every schema is generated from the vendor's specs.** No schema is hand-written and none is
+   inferred from data. The refresh generates `spec/rest.json`, `spec/ws.json`, and
+   `spec/flatfiles.json` from the vendored, pinned `openapi.json`, `websocket.json`, and
+   flat-file pages; dataset schemas are merged from them at run time
+   ([section 19.4](#194-generated-schemas)). Hand input is naming, grouping, and verification
+   only. Fallback chains are gone.
 3. **No seeding.** `last_by()` never seeds from REST, and there is no `seed_since`. The
    documented recipe is `merge([q.history(start, end), q.append_only()])`.
 4. **Reactive Deephaven-table watchlists are kept.**
@@ -2387,10 +2559,10 @@ document already reflects them.
     live integration test. A wrong guess yields an explicit server refusal that fails one stream
     and names `ws_hosts`; it cannot misbehave silently, and it spares every base Business user a
     configuration line.
-16. **WebSocket status handling.** Every frame after authentication reaches the library
-    undecoded; the library decodes it once and routes status frames itself. `max_connections`,
-    in the auth reply or as a later status, shows `WAITING_SLOT`, and streams stay alive
-    (section 13.3).
+16. **WebSocket frames are decoded by the client.** `WsClient` decodes each frame once, against
+    `ws.json`, into status events, rows, rejects, and drift; the library parses no frame text.
+    `max_connections`, in the auth reply or as a later status, shows `WAITING_SLOT`, and
+    streams stay alive (section 13.3).
 17. **The context manager is kept**, documented as static-results-only.
 18. **`m.options.snapshots(dm.ALL)` is allowed.** It paginates the whole OPRA universe, which is
     slow and documented as such. The rule "`ALL` is accepted by every per-class `snapshots()`"
@@ -2405,56 +2577,97 @@ document already reflects them.
     messages, and a query's dataset and arguments only in its repr. The public surface stays
     exactly the verbs and namespaces, and the API key stays out of objects users routinely
     leave in console globals.
-22. **Column names come from a committed name lock** (2026-10-26). Fields come
-    from the spec; names come from the lock, `(dataset, transport, wire path) -> column`, filled
-    by the rule of [section 19.3](#193-the-spec-snapshot-the-generator-and-the-name-lock): drop
-    the result key, apply `Symbol`, `Timestamp`, and `Underlying`, translate abbreviated keys
-    through per-record-family lexicons of Massive's own long-form names, then PascalCase. The
-    refresh fails instead of guessing on an unknown key of three characters or fewer and on a
-    PascalCase collision. Names are never derived from descriptions, and a refresh never
-    renames a column silently; renaming, retyping, or removing an entry is an ordinary edit,
-    reviewed as a diff. The library has no users, so no rule guards existing names. The snapshot
-    `min` object's columns are `Minute…`. WebSocket-only names: `av` →
-    `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`, aggregate `z` →
-    `AverageTradeSize`, `dav` → `AccumulatedDollarVolume`.
+22. **Names come from the generated tables** (2026-10-26). The generator names every field from
+    its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares its four
+    long-form key columns, and `_schema.rename` maps them to `Symbol`, `Timestamp`, and
+    `Underlying`. Names are never derived from descriptions, and gates G1–G7 and C1–C7 fail on a
+    wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The final names:
+    `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
+    aggregate `z` → `AverageTradeSize`, `dav` → `AccumulatedDecimalVolume`, stocks `dv` →
+    `DecimalVolume`, futures `dv` → `DollarVolume`, and the snapshot object `min` → `Minute…`.
 23. **Spec drift is reported, not gated** (2026-10-26). A weekly workflow runs
-    `refresh_massive_spec.py --check` and keeps one standing "Massive API drift" issue up to
-    date, listing unaccounted items, field, type, and column changes, and deprecations, each with
-    its action; with no drift it does nothing, and it never opens a pull request or becomes a
-    required check. Every documented REST endpoint, WebSocket channel, and flat-file prefix is
-    allow-listed or on the single `EXCLUSIONS` list, and every allow-listed item is used by a
-    declared dataset once its namespace is declared. The WebSocket spec checks the WebSocket key maps for completeness,
-    `llms.txt` checks the path allow-list, and the flat-file documentation tables check the CSV
-    headers.
+    `python -m deephaven_massive._massive.refresh --check` and keeps one standing "Massive API
+    drift" issue, creating its label when missing; with no drift it does nothing, and it never
+    opens a pull request or becomes a gate ([section 19.6](#196-refresh-and-drift)).
 24. **No client object is shared unless it is proven thread-safe** (2026-10-26). The REST client
     is safe per call and shared by the session's threads; each WebSocket client is confined to
     its own loop thread. Free-threaded 3.14t remains a required CI job.
-25. **Upstream SDK issues are optional goodwill** (2026-10-26). Real bugs in
-    `massive-com/client-python` may be reported as issues only, never pull requests, off the 1.0
-    path, and only after the owner has reviewed the issue text. The fork
-    `chipkent/massive-client-python` is no longer used; it is archived once the project has
-    fully shipped.
-26. **One package for the Massive wire format** (2026-10-26). Everything that talks to Massive's
-    REST or WebSocket API or describes its wire format (the two clients, frame decoding, the spec
-    snapshots, the generator, the generated REST table, the lexicons, the WebSocket and flat-file
-    key maps, the wire-field unit table, and the name lock) lives in `deephaven_massive._massive`,
-    split into `rest/`, `ws/`, `spec/`, and `names/`. It imports nothing from Deephaven or the
-    rest of the library; the rest of the library imports only its interface,
-    `_massive/__init__.py`. An import-boundary test enforces both directions
-    ([section 19](#19-wire-clients-and-the-spec-snapshot)). Reading flat files from S3 stays in
-    `_flatfiles.py`.
+25. **Upstream SDK issues are optional, issues only** (2026-10-26). Four real bugs in
+    `massive-com/client-python` may be filed as issues, never pull requests, off the path: a
+    clean close ends the client, a wildcard drops sibling topics, a datetime goes through a
+    float, and invalid JSON yields `[]`. Each is reproduced against the latest PyPI `massive`,
+    passes a clarity critique, and is posted only after the owner approves its text. The fork
+    `chipkent/massive-client-python` is no longer used; what happens to it is the owner's own
+    action.
+26. **One wire package** (2026-10-26). `deephaven_massive._massive` owns all Massive wire
+    access (REST, WebSocket, and S3 flat files), the vendored snapshot, the generated schemas,
+    the units, and the long-form names, in six subpackages (`net/`, `spec/`, `rest/`, `ws/`,
+    `flatfiles/`, `refresh/`). It imports nothing from Deephaven or the rest of the library,
+    and the rest of the library imports only its interface; an AST test enforces the boundary
+    and the layers ([section 19](#19-wire-clients-and-the-spec-snapshot)).
 27. **`MassiveError` carries `status` and `request_id`** (2026-10-26). Both are read-only and
     `None` when the error did not come from an HTTP response ([section 3](#3-exports)).
 28. **`reconnect_backoff` is at least 15 s** (2026-10-26). `MassiveConfig` rejects a smaller
     value with `ValueError` ([section 5](#5-massiveconfig)).
-29. **The spec snapshot is not shipped** (2026-10-26). The wheel excludes it; tests, the refresh
-    command, and the drift job read it from the source tree ([section 19](#19-wire-clients-and-the-spec-snapshot)).
+29. **`refresh/` is not shipped** (2026-10-26). The wheel excludes all of `refresh/`, the
+    snapshot included; `spec/*.json` ship ([section 19](#19-wire-clients-and-the-spec-snapshot)).
 30. **Wire behaviour settled in review** (2026-10-26). A 429 without `Retry-After` waits 15, 30,
     then 60 s, and a `Retry-After` above 60 s fails at once; a TLS certificate failure is never
     retried; a 429 at the WebSocket upgrade is retried; wildcard transitions make before they
     break, accepting a brief duplicate rather than a gap
     ([section 13.3](#133-connection-and-subscription-protocol),
     [section 19](#19-wire-clients-and-the-spec-snapshot)).
+31. **No hand-written schema anywhere.** There are no hand tick schemas, key maps, column
+    overrides, or name lock; every change to a schema is a reviewed diff of a generated file
+    ([section 19.4](#194-generated-schemas)).
+32. **Dataset schemas are merged at run time, after the rename**, from the committed generated
+    files and the catalog, cached per dataset; never inferred from data
+    ([section 19.4](#194-generated-schemas)).
+33. **Schemas are fixed before data arrives** (principle 11): a live table needs its full column
+    set before its first row, the first message may omit optional fields, and two sessions must
+    agree on a dataset's shape.
+34. **Hand input is naming, grouping, and verification, never a column list.** It lives in
+    `refresh/`, every entry carries a reason, and a stale entry fails the refresh. The
+    page-to-prefix map is derived from the vendor's overview tables
+    ([section 19.4](#194-generated-schemas)).
+35. **The runtime drift policy** of [section 19.5](#195-runtime-drift): an extra field is
+    dropped and reported; a missing declared key column, an unconvertible value, or a timestamp
+    out of bounds fails loudly (a `poll()` table through `publish_failure`; on WebSocket only
+    the affected topic's streams). The table never silently lies.
+36. **One timestamp routine** for every transport: epoch 0 to null except in the time column,
+    a checked multiply to nanoseconds, and the [1990, 2100] bound on epoch integers only
+    ([section 12](#12-timestamp-units-and-day-boundaries)).
+37. **An undocumented value of an interpreted field fails loudly.** An unknown `timeframe`
+    value raises at the first stream verb for that class and nothing is cached
+    ([section 13.2](#132-host-decision)).
+38. **A never-acknowledged topic** triggers at most one reconnect per topic per session; later
+    `NO_ACK`s only log and count ([section 13.3](#133-connection-and-subscription-protocol)).
+39. **S3 follows the shared network rules:** the `net` CA bundle and proxy, botocore retries off
+    in favour of the shared schedule, TLS never retried ([section 19.3](#193-the-flat-file-client)).
+40. **REST rate limits and host resolution are shared.** A client-wide not-before instant after
+    a 429, and single-flight host resolution through one future per (class, family)
+    ([section 13.2](#132-host-decision), [section 19.1](#191-the-rest-client)).
+41. **The flat-file implementation is restructured before merge** as a move with unchanged
+    logic into the wire package, so `main` never carries another boundary.
+42. **The legacy implementation is deleted.** References to it read
+    `git show 519fad8:<path>`.
+43. **Test layout:** every path component drops one leading underscore, `__init__.py` maps to
+    `test_init.py` and `__main__.py` to `test_main.py`, `_` directories under `tests/` are
+    helpers, and `test_catalog.py` is a plain mirror ([section 4.2](#42-test-layout)).
+44. **Import roots:** `pythonpath = ["."]` and `mypy_path = ["src"]`, fakes imported as
+    `tests._fakes…`; the ruff ban on `massive` stays.
+45. **Module names:** `_namespaces/` (plain modules of namespace classes), `_flat_files.py`,
+    `_history_source.py`, and the wire package `_massive/flatfiles/` (PEP 8 forbids the
+    underscore in a package name).
+46. **The flat-file design text** settled in the flat-file work package is part of this
+    document, under the final module names.
+47. **Release:** `.github/workflows/release.yml` publishes to PyPI with trusted publishing from a
+    `v*` tag; the first version is 0.1.0 ([section 20.1](#201-tooling-configuration)).
+48. **The fork is left alone.** The plan has no archive, pull-request-closing, or branch-cleanup
+    step for `chipkent/massive-client-python`.
+49. **Upstream SDK issues** are optional and off the path (decision 25).
+50. **The live integration suite runs alongside the finishing package**, and the last package
+    retires the verified UNVERIFIED notes and deletes `plans/rework/`.
 
 ## 23. Open verification items
 
@@ -2465,9 +2678,9 @@ before 1.0.
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
-| 1 | Unit of REST forex `/v1/last_quote` `timestamp` and crypto `/v1/last` `timestamp` | Registered as ms; the [1990, 2100] range check raises `MassiveError` on a mismatch | `tests/test_timeunits.py`: ms and ns fixtures; the out-of-range path raises | `tests/test_timeunits_integration.py`: one request each; the converted `Instant` is within 1 day of now |
-| 2 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/test_timeunits.py`: both magnitudes convert correctly | `tests/_domains/test_stocks_integration.py` (Business key): one FMV frame converts to a current `Instant` |
-| 3 | Futures flat files keyed by session date | Read one file and assert the date column matches the key; fail loudly otherwise | `tests/test_flatfiles.py`: matching and mismatching fixtures | `tests/test_flatfiles_integration.py` (S3 credentials): one key per venue |
+| 1 | Unit of REST forex `/v1/last_quote` `timestamp` and crypto `/v1/last` `timestamp` | Registered as ms (`unverified-ms`); the spec tags both `last.timestamp` fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/test_timeunits.py`: ms and ns fixtures; the out-of-range path raises | `tests/test_timeunits_integration.py`: one request each; the converted `Instant` is within 1 day of now |
+| 2 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/test_timeunits.py`: both magnitudes convert correctly | `tests/namespaces/test_stocks_integration.py` (Business key): one FMV frame converts to a current `Instant` |
+| 3 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/test_flat_files_integration.py` (S3 credentials): one key per venue |
 | 4 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/test_hosts.py`: both replies | `tests/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |
 | 5 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/test_hosts.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/test_hosts_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
 | 6 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/test_hosts.py`: with and without the fields | `tests/test_hosts_integration.py`: record which fields the live payload carries |
@@ -2476,6 +2689,6 @@ before 1.0.
 | 9 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/test_ws.py`: 2,500 topics produce three frames | `tests/test_ws_integration.py`: a 1,000-topic frame is acknowledged |
 | 10 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/test_ws_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
 | 11 | Exact `max_connections` status text and timing | Any status `max_connections`, in the auth reply or after it, shows `WAITING_SLOT` | `tests/test_ws.py`: both placements | `tests/test_ws_integration.py`: two sessions with one individual key |
-| 12 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/test_config.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
-| 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/test_flatfiles.py`: AUTO before and after the cutoff | `tests/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |
+| 12 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/massive/net/test_codec.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
+| 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/test_history_source.py`: AUTO before and after the cutoff | `tests/test_flat_files_integration.py`: yesterday's key exists after the cutoff |
 | 14 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
