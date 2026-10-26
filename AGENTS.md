@@ -15,12 +15,18 @@ uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once p
 ./scripts/check.sh                         # full gate: lint, format, types, tests + coverage
 ./scripts/check.sh fast                    # lint and types only; fixes what ruff can fix
 ./scripts/check.sh fast --no-fix           # report only (what CI's lint job and the commit hook run)
-uv run pytest tests/test_layout.py -q      # one file, no coverage, debugger-friendly
+uv run --no-sync pytest tests/test_layout.py -q   # one file, no coverage (after check.sh)
 uv build                                   # sdist and wheel
 ```
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
+
+The SDK fork is always the latest `deephaven-fixes` commit (`DESIGN.md` § 19). Both `check.sh`
+tiers, and CI, first run `uv lock --upgrade-package massive`, which moves only `massive` to the
+branch head; `check.sh` restores `uv.lock` on exit, so the committed lock's `massive` commit may be
+stale and is never bumped. A plain `uv run` or `uv sync` installs that stale commit, so run a
+`check.sh` tier first and use `uv run --no-sync` for one-off commands.
 
 ## Hard rules
 
@@ -59,6 +65,7 @@ environment, and the Claude Code hook blocks them.
 11. **Docstrings meet the documentation standard below.** A change to a public signature,
     default, or table semantics updates `DESIGN.md` first (owner decision).
 12. **Dependencies** change only in dedicated `chore(deps):` PRs. `uv.lock` is committed.
+    Exception: the SDK fork is always the latest `deephaven-fixes` and is never bumped.
 
 ## Documentation standard
 

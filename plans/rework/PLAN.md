@@ -44,7 +44,7 @@ catalog, endpoint status, tooling research, and the bug lists for the current co
    - [P6a–P6h feat: domain datasets](#p6)
    - [P7 chore: finish rework](#p7)
    - [P8 test: live integration suite](#p8)
-   - [D1–Dn chore(deps): fork rev bumps](#d-bumps)
+   - [Using the fork: always the latest `deephaven-fixes`](#fork-usage)
 7. Fork packages (`chipkent/massive-client-python`)
    - [Fork workflow](#fork-workflow)
    - [F0 fork setup](#f0)
@@ -71,8 +71,8 @@ flowchart LR
         F0 --> F1 & F2 & F3 & F4 & F5 & F6 & F7 & F8
     end
 
-    D2["D2 chore(deps): track the restructured series (#48)<br/>(each later rebuild gets its own bump)"]
-    F1 & F2 & F3 & F4 & F5 & F6 & F7 & F8 --> D2
+    DF["deephaven-fixes<br/>(the whole series; always the latest, no lock bumps)"]
+    F1 & F2 & F3 & F4 & F5 & F6 & F7 & F8 --> DF
 
     P0["P0 docs: design + plan"] --> P1["P1 chore: tooling foundation"]
     F0 --> P1
@@ -80,19 +80,20 @@ flowchart LR
     P2 --> P3["P3 feat: REST + tier detection"]
     P2 --> P4["P4 feat: WebSocket layer"]
     P2 --> P5["P5 feat: flat-file history"]
-    D2 --> P3 & P4
+    DF --> P3 & P4
     P3 & P4 & P5 --> P6["P6a–P6h feat: domain datasets<br/>(parallel)"]
     P6 --> P7["P7 chore: finish rework"]
     P7 --> P8["P8 test: live integration suite"]
 ```
 
-Every fork fix reaches this repository through a D-bump, and because `deephaven-fixes` is always
-the merge of the whole series, each bump carries all of it. D1 (#45) locked the first version;
-each rebuild of the series gets a bump of its own. Inside the fork, some pull requests build on
+Every fork fix reaches this repository through `deephaven-fixes`, which is always the merge of
+the whole series, and this repository always uses its latest commit: there are no lock-bump
+pull requests ([Using the fork](#fork-usage)). Inside the fork, some pull requests build on
 others; the table under [F1–F8](#f1-f7) lists those edges.
 
-Critical path: `F0 → P1 → P2 → P4 → P6 → P7`, with `fork series → D2` joining at P3 and P4.
-The fork series proceeds while P1–P3 are in flight, so D2 should be ready by the time P2 merges.
+Critical path: `F0 → P1 → P2 → P4 → P6 → P7`, with the fork series on `deephaven-fixes` joining
+at P3 and P4. The fork series proceeds while P1–P3 are in flight, so it should be on
+`deephaven-fixes` by the time P2 merges.
 
 ---
 
@@ -177,10 +178,10 @@ These rules apply to every package in both repositories. Package sections only a
 
 | Wave | Packages | Notes |
 |---|---|---|
-| 0 | P0, F0 | F0 needs the fork to exist (owner step). P1 pins the fork, so F0 precedes P1. |
+| 0 | P0, F0 | F0 needs the fork to exist (owner step). P1 points the source at `deephaven-fixes`, so F0 precedes P1. |
 | 1 | P1; the fork series (F1–F8) | Independent of P1–P3; inside the fork, PRs build on others only as [F1–F8](#f1-f7) lists. |
-| 2 | P2; D2 (when the series is in `deephaven-fixes`) | P2 is the only writer of the new package skeleton. |
-| 3 | P3, P4, P5 | Disjoint files (see below). P3 and P4 wait for D2. |
+| 2 | P2 | P2 is the only writer of the new package skeleton. |
+| 3 | P3, P4, P5 | Disjoint files (see below). P3 and P4 need the fork series on `deephaven-fixes`. |
 | 4 | P6a–P6h | Eight domain packages, disjoint files by construction. |
 | 5 | P7 | Serial: deletes legacy code, rewrites docs, adds the catalog coverage assertions. |
 | 6 | P8 | After P7; needs a key; owner runs it. |
@@ -225,10 +226,11 @@ skeleton created in P2 is designed so that later packages own disjoint files:
     instantiates them from P2 on, so P6 packages never touch `__init__.py`.
   - Catalog exclusions with `# reason:` live only in `tests/test_catalog.py` (P7).
 - **Generated content is regenerated in one place.** The `SDK_PARAMS` block of `_catalog.py`
-  and `tests/data/massive_docs_index.txt` are regenerated only by P3, P7, and D-bump PRs, never
-  inside a domain PR. A domain package that needs a parameter the generated table lacks (the
+  and `tests/data/massive_docs_index.txt` are regenerated only by P3 and P7 (and whenever the
+  fork's signatures change), never inside a domain PR. A domain package that needs a parameter the generated table lacks (the
   two SDK-gap endpoints) declares it in its own `DatasetSpec.extra_params`.
-- **`uv.lock` and `pyproject.toml` dependency changes** happen only in P1, D-bump PRs, and P7.
+- **`uv.lock` and `pyproject.toml` dependency changes** happen only in P1, P7, and `chore(deps):`
+  PRs. The fork is the exception: it is always the latest `deephaven-fixes` and is never bumped.
   Feature PRs do not add dependencies; if one is needed, open a `chore(deps):` PR first.
 - **Fixture data is per package.** Never add a shared fixture file; put payloads in
   `tests/data/<owner>/` and load them through the `load_fixture` fixture from `conftest.py`.
@@ -298,7 +300,7 @@ a stable source of truth, and open the tracking issues that hold the live checkl
       runtime `TypeError`; base Business TICK host rule with WARNING; diagnostics scope; fork list
       minus #9/#10 plus the handshake `max_connections` item (F2.6); owner answers to §20).
 - [ ] Write this file.
-- [ ] Draft the parent tracking issue and one issue per package (P0–P8, D-bumps, F0–F7) using
+- [ ] Draft the parent tracking issue and one issue per package (P0–P8, F0–F7) using
       each package's goal, checklist, and acceptance criteria. **Stop for owner approval before
       creating any issue.**
 - [ ] After approval: create the issues, replace every `Issue: TBD` in this file, commit.
@@ -339,16 +341,16 @@ them into `DESIGN.md`.
 **Goal.** Replace the permissive, four-way-duplicated gate with one strict, agent-friendly
 toolchain: ruff `ALL` on the latest release, strict mypy, pytest 9 native config, a single `scripts/check.sh`
 entry point, git and Claude Code hooks, a CI matrix that includes free-threaded CPython, and a
-committed lockfile that pins the SDK fork. Legacy code is excluded from the gate until P7.
+committed lockfile, with the SDK fork tracked by branch. Legacy code is excluded from the gate until P7.
 
 **DESIGN sections implemented.** [§ 20 Quality gates](DESIGN.md#20-quality-gates) (the whole
 section); [§ 4.2 Test layout](DESIGN.md#42-test-layout) (`tests/conftest.py` and
 `tests/test_layout.py`); [§ 11 Enums and types](DESIGN.md#11-enums-and-types) (the `>=3.11`
 floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-threaded-specifics)
 (free-threaded CI is gating); [§ 19 SDK fork: fix list and responsibility split](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)
-(the `[tool.uv.sources]` pin). The exact configuration is [§ 20.1 Tooling configuration](DESIGN.md#201-tooling-configuration).
+(the `[tool.uv.sources]` branch source). The exact configuration is [§ 20.1 Tooling configuration](DESIGN.md#201-tooling-configuration).
 
-**Depends on.** P0 (merged), F0 (the `deephaven-fixes` branch must exist to be pinned).
+**Depends on.** P0 (merged), F0 (the `deephaven-fixes` branch must exist to be tracked).
 **Parallel with.** F1–F7.
 
 **Files.**
@@ -528,7 +530,7 @@ bodies raise `NotImplementedError` until their transport lands);
 [§ 18 Concurrency model](DESIGN.md#18-concurrency-model) (registry lock, reaper thread, lock
 order).
 
-**Depends on.** P1. **Parallel with.** F1–F7, D1.
+**Depends on.** P1. **Parallel with.** F1–F7.
 
 **Files.** Module names are those of DESIGN § 4.1; every module below `deephaven_massive/`
 other than `__init__.py` is private, and the public surface is `__init__.py` alone. The six
@@ -678,8 +680,8 @@ including reactive symbol tables. After P3, `Query.fetch()`, `Query.poll()`,
 [§ 18 Concurrency model](DESIGN.md#18-concurrency-model) (poller thread,
 `ThreadPoolExecutor(max_concurrency)`).
 
-**Depends on.** P2; **D2** (#48: the lock carries `BadResponse.status`, `raise_on_status`, and
-the F6 methods). **Parallel with.** P4, P5 (disjoint files; P3 lands first if `_session.py`
+**Depends on.** P2; the fork series on `deephaven-fixes` (`BadResponse.status`,
+`raise_on_status`, #31, and the F6 methods). **Parallel with.** P4, P5 (disjoint files; P3 lands first if `_session.py`
 hunks overlap).
 
 **Files.**
@@ -823,7 +825,7 @@ thread, flush thread, loop-confined state, lock order);
 [§ 19 SDK fork: fix list and responsibility split](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)
 (what the library relies on versus what it owns).
 
-**Depends on.** P2; **D2** (#48: the lock carries the restructured F1 and F2, including
+**Depends on.** P2; the fork series on `deephaven-fixes` (the restructured F1 and F2, including
 `set_subscriptions`/`resubscribe`, the reconnect options, `max_connections_reached`, and
 `request_close`). **Parallel with.** P3, P5.
 
@@ -898,7 +900,7 @@ thread, flush thread, loop-confined state, lock order);
       host is not pinned, at most once per (class, family).
 - [ ] `auth_failed` → fail every stream on the path with `AuthenticationError`;
       `max_connections` → `State=WAITING_SLOT`, streams alive, whether it arrives as a raw frame
-      after the handshake or is surfaced by the fork during the handshake (F2.6, in D2);
+      after the handshake or is surfaced by the fork during the handshake (F2.6);
       reconnect states.
 - [ ] `_stream.py`: `open_stream(spec, request, channel, *, stream_id)` creates
       `table_publisher(name=f"massive.{dataset}#{stream_id}",
@@ -964,7 +966,7 @@ for WS sends (`dumps` returns bytes, H §3) — decode only; `websockets` defaul
 **Out of scope.** REST (P3); S3 (P5); channel definitions for datasets (P6; P4 uses `T`/`Q`
 fixtures only); live tests (P8).
 
-**Approval gates.** Opening the PR. The PR must link the D2 PR (#48) that bumped the fork SHA.
+**Approval gates.** Opening the PR.
 
 **Follow-ups from the P2 review (PR #46).** The transport review of P2 (B1–B9) left these notes
 for the implementer:
@@ -1109,8 +1111,8 @@ namespace's input forms); [§ 11 Enums and types](DESIGN.md#11-enums-and-types) 
 namespace's parameters).
 
 **Depends on.** P3, P4, P5. **Parallel with.** every other P6 package. P6f and P6g use the
-fork's F6 methods (`get_daily_open_close_crypto`, `list_funding_conditions`), which the lock
-already carries. No other P6 package depends on a fork fix.
+fork's F6 methods (`get_daily_open_close_crypto`, `list_funding_conditions`), which
+`deephaven-fixes` already carries. No other P6 package depends on a fork fix.
 
 **Shared files.** Replace the P2 stub `src/deephaven_massive/_domains/<domain>.py`, and create
 or extend `tests/_domains/test_<domain>.py` and `tests/data/<domain>/*.json` (plus `*.csv` for
@@ -1404,54 +1406,29 @@ current fixture, and note the date of the snapshot in the PR.
 
 ---
 
-<a id="d-bumps"></a>
-## D1, D2, … — `chore(deps): <what the bump brings in>`
+<a id="fork-usage"></a>
+## Using the fork: always the latest `deephaven-fixes`
 
-| | |
-|---|---|
-| **Branch** | `chore/<topic>`, for example `chore/deps-fork-series` |
-| **Issue** | One issue per bump: D1 #27 (PR #45, the first fork pin), D2 #28 (PR #48, the restructured series) |
+This repository always uses the latest `deephaven-fixes` commit, and there are no lock-bump pull
+requests ([DESIGN § 19](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)).
 
-**Goal.** Move `uv.lock` to the latest `deephaven-fixes` commit once its CI is green (the source
-tracks the branch, so only the lock changes), and remove any temporary accommodation that the
-newly included fork fixes make unnecessary. The fork builds as version `0.0.0` (its packaging carries no release version), so nothing may check the installed `massive` version; `uv` accepts the source pin despite `massive>=2.9.0`.
-
-**DESIGN sections implemented.**
-[§ 19 SDK fork: fix list and responsibility split](DESIGN.md#19-sdk-fork-fix-list-and-responsibility-split)
-(the commit pin).
-
-**Depends on.** The fork series moved into `deephaven-fixes` ([Fork workflow](#fork-workflow)).
-**Parallel with.** anything that does not touch `pyproject.toml`/`uv.lock`.
-
-**Files.** Modify `uv.lock`, and `pyproject.toml` only if the source itself changes. A bump
-touches nothing else, except to remove an accommodation that the fork fixes it brings in make
-unnecessary: it then regenerates the `SDK_PARAMS` block of `_catalog.py`
-(`scripts/refresh_massive_catalog.py`) if SDK signatures changed. When the series itself
-changes shape (pull requests added, split, or dropped, or an API renamed), the same bump also
-updates DESIGN § 19 and every DESIGN and PLAN passage that describes the fork's API, so the
-documents never describe a fork other than the one locked.
-
-**Tasks.**
-- [ ] Confirm the target `deephaven-fixes` SHA has green CI in the fork (every job, including
-      `3.14t`), and that its tree equals the integration branch it was built from.
-- [ ] Run `uv lock --upgrade-package massive`, `uv sync --locked`, `./scripts/check.sh`.
-- [ ] Since the series restructure, every bump carries the whole series (F1 to F8, fork PRs #4,
-      #7 to #24, and #31); the PR body names the `deephaven-fixes` commit and the fork PRs it contains.
-
-**Acceptance criteria.**
-- [ ] `uv lock --check` passes; CI green; the PR body lists the fork commits included.
-
-**Verification.**
-```bash
-uv lock --upgrade-package massive && uv sync --locked && ./scripts/check.sh
-grep -n 'massive-client-python?branch=deephaven-fixes#' uv.lock   # the locked commit
-git -C <fork> rev-parse origin/deephaven-fixes                      # must match it
-```
-
-**Pitfalls.** Never bump the rev inside a feature PR (lockfile conflicts across parallel
-packages). Never pin a SHA whose fork CI is red.
-
-**Approval gates.** Opening the PR.
+- **Source.** `[tool.uv.sources] massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }`,
+  with `[project]` keeping `massive>=2.9.0`. The fork builds as version `0.0.0` (its packaging
+  carries no release version), so nothing may check the installed `massive` version.
+- **Refresh at sync.** `scripts/check.sh` (both tiers, and so the commit and pre-push hooks) and
+  every CI job that installs the project run `uv lock --upgrade-package massive` before they sync.
+  That re-locks only `massive` to the branch head; every other dependency stays as locked.
+  `check.sh` restores `uv.lock` when it exits, so the working tree is never left dirty. The CI
+  build job installs the built wheel next to the same branch head.
+- **The committed lock may go stale.** The `massive` commit recorded in the committed `uv.lock`
+  is not maintained, nobody bumps it, and `uv lock --check` still passes with a stale commit.
+- **One-off commands.** A plain `uv run` syncs to the committed lock and so can install an older
+  `massive`. Run `./scripts/check.sh fast` first and then `uv run --no-sync …` to use the latest
+  fork outside `check.sh`.
+- **A change to the fork** lands in the fork series (see [Fork workflow](#fork-workflow)); the
+  next sync here picks it up. When the change alters the fork's API or the series' shape, a
+  `docs:` PR updates DESIGN § 19 and the passages that describe the fork's API, and the
+  `SDK_PARAMS` block of `_catalog.py` is regenerated if SDK signatures changed.
 
 ---
 <a id="fork-workflow"></a>
@@ -1477,19 +1454,18 @@ Everything this repository needs from the SDK goes upstream, and the fork carrie
   The series is submitted upstream all at once, after owner review; opening an upstream pull
   request needs owner approval each time. Agents never merge a pull request.
 - **`master`** tracks upstream `massive-com/client-python` `master` and is never edited.
-- **`deephaven-fixes`** is the branch this repository tracks; `uv.lock` records the exact
-  commit. To change it, build an integration branch `integrate/series-<date>` from
-  `origin/master`, merge every pull request head in dependency order with `--no-ff` (message
-  `Merge #N <title>`), and wait for every CI job on it, including `3.14t`. Then make one commit on
+- **`deephaven-fixes`** is the branch this repository tracks, always at its latest commit
+  ([Using the fork](#fork-usage)). To change it, build an integration branch
+  `integrate/series-<date>` from `origin/master`, merge every pull request head in dependency
+  order with `--no-ff` (message `Merge #N <title>`), and wait for every CI job on it, including `3.14t`. Then make one commit on
   top of `origin/deephaven-fixes` whose tree is the integration tree and whose second parent is
   the integration head, check that `git diff` between the two is empty, and push it as a fast
   forward. `deephaven-fixes` is **never reset, rebased, or force-pushed**, because a rewritten
-  history could make a locked commit unreachable and break `uv sync` here. A ruleset blocks
+  history would break the fork's own history. A ruleset blocks
   deletion, force pushes, and pushes without the required status checks.
 - **Upstream merges.** When upstream merges a pull request or moves `master`, rebuild the
   integration branch on the new `master` from the pull requests still open, and move
-  `deephaven-fixes` as above. A D-bump PR here refreshes the lock with
-  `uv lock --upgrade-package massive`.
+  `deephaven-fixes` as above. This repository picks up the new head at its next sync.
 - **Never in the fork:** connection sharing, ref-counting, publishers, failure semantics,
   reactive watchlists, tier detection, the options cap, schema mapping, S3 (DESIGN § 19,
   "stays in this library").
@@ -1509,7 +1485,7 @@ Everything this repository needs from the SDK goes upstream, and the fork carrie
 | **Issue** | #29 |
 
 **Status.** Done. The fork exists, `deephaven-fixes` exists and is protected by a ruleset
-against deletion and force pushes, and P1 pins it by branch.
+against deletion and force pushes, and P1 tracks it by branch.
 
 ---
 
@@ -1604,4 +1580,4 @@ file and `DESIGN.md`; this list records them in one place.
    decision: `deephaven_server.Server(port=0)` if supported, else fixed port `10099` with a
    comment.
 5. **F2.6:** in scope. It is part of fork PR #23 (the `max_connections_reached` attribute), and
-   P4 relies on it through the D-bump of the restructured series.
+   P4 relies on it through `deephaven-fixes`.

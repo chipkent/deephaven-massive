@@ -1592,14 +1592,22 @@ The fork's `deephaven-fixes` branch is exactly the merge of the series. An integ
 cut from upstream `master` merges every pull request head in dependency order with `--no-ff`;
 once CI is green on it, `deephaven-fixes` moves to a commit whose tree is the integration tree
 and whose second parent is the integration head. The branch therefore only moves forward. It is
-never reset or force-pushed, so every commit a lock has recorded stays reachable, and a fork
-ruleset blocks deletion and force pushes. This project tracks the branch:
+never reset or force-pushed, and a fork ruleset blocks deletion and force pushes. When upstream
+merges a pull request or moves `master`, the series is rebuilt on the new `master` the same way.
+Agents may push fork branches and open draft pull requests in the fork; opening an upstream pull
+request needs explicit owner approval each time.
+
+**This project always uses the latest `deephaven-fixes`**, and there are no lock-bump pull
+requests. The source is
 `[tool.uv.sources] massive = { git = "<fork>", branch = "deephaven-fixes" }`, with `[project]`
-keeping `massive>=2.9.0`. `uv.lock` records the exact commit, so every install is reproducible,
-and `uv lock --upgrade-package massive` moves the lock to the branch's latest commit. When
-upstream merges a pull request or moves `master`, the series is rebuilt on the new `master` the
-same way. Agents may push fork branches and open draft pull requests in the fork; opening an
-upstream pull request needs explicit owner approval each time.
+keeping `massive>=2.9.0`. Every run refreshes it at sync: `scripts/check.sh` (both tiers, and so
+the git hooks) and every CI job that installs the project run `uv lock --upgrade-package massive`
+before they sync, which re-locks only `massive` to the branch head; every other dependency stays
+as locked. `check.sh` restores `uv.lock` when it exits, so the working tree stays clean, and the
+`massive` commit recorded in the committed `uv.lock` may go stale: nobody bumps it, and
+`uv lock --check` still passes. A plain `uv run` outside `check.sh` syncs to the committed lock;
+run `./scripts/check.sh fast` first and use `uv run --no-sync` for a one-off command against the
+latest fork. The build job installs the wheel next to the same branch head.
 
 The topic IDs F1 to F7 group the series by concern and keep the item numbers used elsewhere in
 this document (F2.3, F2.6, …). F8 is a REST bug found while writing the series.
@@ -1785,8 +1793,10 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Deephaven imports.** Module-level wherever used at run time; imports used only in
   annotations go under `TYPE_CHECKING` (enforced by `TC`). `tests/conftest.py` starts the
   embedded JVM in `pytest_configure`, before collection.
-- **One entry point.** `scripts/check.sh [fast|full] [--no-fix]`. The fast tier (about 2 s) runs
-  ruff fix, ruff format, and mypy; the full tier adds pytest with coverage. Local hooks and CI call
+- **One entry point.** `scripts/check.sh [fast|full] [--no-fix]`. Both tiers first refresh `massive`
+  to the latest `deephaven-fixes` (`uv lock --upgrade-package massive`, with `uv.lock` restored on
+  exit; [section 19](#19-sdk-fork-fix-list-and-responsibility-split)). The fast tier then runs ruff
+  fix, ruff format, and mypy; the full tier adds pytest with coverage. Local hooks and CI call
   the same script; CI passes `--output-format github` to ruff.
 - **Agent hooks** (committed `.claude/settings.json`). After an agent edits a `.py` file, ruff
   fixes and formats it and reports remaining diagnostics to the agent. Before an agent ends its
@@ -1795,12 +1805,15 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Git hooks** (`.pre-commit-config.yaml`). The commit stage runs the fast tier plus
   `no-commit-to-branch` (main), `check-yaml`, `end-of-file-fixer`, `trailing-whitespace`, and
   `uv-lock`. The full tier runs at the pre-push stage.
-- **Packaging.** `uv.lock` is committed and CI runs `uv sync --locked`. Development dependencies
-  use a PEP 735 `[dependency-groups]` table; license metadata follows PEP 639. `__version__`
-  comes from `importlib.metadata`. `deephaven-server` is a development dependency only.
-  `websockets>=14`. `[project]` declares `massive>=2.9.0`, and `[tool.uv.sources]` tracks the fork's
-  `deephaven-fixes` branch, with `uv.lock` recording the exact commit. `.gitignore` lists only the files this project
-  produces.
+- **Packaging.** `uv.lock` is committed and CI runs `uv sync --locked`, after refreshing `massive`.
+  Development dependencies use a PEP 735 `[dependency-groups]` table; license metadata follows
+  PEP 639. `__version__` comes from `importlib.metadata`. `deephaven-server` is a development dependency only.
+  `websockets>=14`. `[project]` declares `massive>=2.9.0`, and `[tool.uv.sources]` tracks the
+  fork's `deephaven-fixes` branch. The project always uses its latest commit: `check.sh` and CI run
+  `uv lock --upgrade-package massive` before they sync, so `massive` is the branch head while every
+  other dependency stays locked, and the `massive` commit in the committed `uv.lock` may go stale
+  ([section 19](#19-sdk-fork-fix-list-and-responsibility-split)). `.gitignore` lists only the
+  files this project produces.
 - **Metadata.** `authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]`; repository
   `https://github.com/chipkent/deephaven-massive`. Not published to PyPI until the fork fixes are
   released upstream.
@@ -1977,7 +1990,8 @@ document already reflects them.
     every pull request, and once CI is green on it, `deephaven-fixes` moves to a commit with the
     integration tree by fast-forward only. The fork's CI runs on pull requests, so the integration
     branch and each candidate head get their CI through draft pull requests. The branch is never
-    reset or force-pushed, and is tracked here by branch, with `uv.lock` recording the exact commit.
+    reset or force-pushed. This project always uses its latest commit, refreshed at every sync, and
+    no pull request ever moves the lock to it.
 21. **Sessions and queries expose no introspection attributes; their reprs are defined.**
     `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
     appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error
