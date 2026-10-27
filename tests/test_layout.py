@@ -646,16 +646,29 @@ def _wire_reads(tree: ast.Module, aliases: set[str]) -> list[tuple[int, str]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and ast.unparse(node.value) in aliases:
             found.append((node.lineno, node.attr))
-        elif (
-            isinstance(node, ast.Call)
-            and ast.unparse(node.func) == "getattr"
-            and len(node.args) >= 2  # getattr(object, name[, default])
-            and ast.unparse(node.args[0]) in aliases
-            and isinstance(node.args[1], ast.Constant)
-            and isinstance(node.args[1].value, str)
-        ):
-            found.append((node.lineno, node.args[1].value))
+        elif isinstance(node, ast.Call) and (name := _getattr_name(node, aliases)) is not None:
+            found.append((node.lineno, name))
     return found
+
+
+def _getattr_name(call: ast.Call, aliases: set[str]) -> str | None:
+    """Return the attribute a literal `getattr(package, "name"[, default])` call reads.
+
+    Args:
+        call: A call expression.
+        aliases: The expressions that name the `_massive` package, from `_wire_aliases`.
+
+    Returns:
+        The attribute name, or None unless the call is `getattr` on the package with a
+        literal name.
+    """
+    # getattr(object, name[, default])
+    if ast.unparse(call.func) != "getattr" or len(call.args) < 2:
+        return None
+    target, name = call.args[0], call.args[1]
+    if ast.unparse(target) not in aliases:
+        return None
+    return name.value if isinstance(name, ast.Constant) and isinstance(name.value, str) else None
 
 
 def _snapshot_names(tree: ast.Module) -> list[tuple[int, str]]:
