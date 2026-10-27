@@ -16,9 +16,12 @@ imports only the standard library, `urllib3`, `websockets`, `certifi`, `orjson`,
 Interface:
     - `WireError`, `WireAuthError`, `WireEntitlementError`: the errors every client raises;
       `deephaven_massive._errors.from_wire` turns each into its public counterpart.
+    - `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`: the client of one WebSocket
+      endpoint, its connection states, the status objects and rejected rows it reports.
 
 Names resolve lazily on first access (PEP 562), so importing this package imports none of
-its clients' dependencies, and never Deephaven.
+its clients' dependencies (a REST-only session never imports `websockets`), and never
+Deephaven.
 
 Example:
     ::
@@ -35,9 +38,14 @@ from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
 __all__ = [
+    "Reject",
+    "Status",
+    "StatusKind",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WsClient",
+    "WsState",
 ]
 
 # Each name of the interface, and the module that defines it.
@@ -45,6 +53,11 @@ _EXPORTS: dict[str, str] = {
     "WireAuthError": "deephaven_massive._massive.net.errors",
     "WireEntitlementError": "deephaven_massive._massive.net.errors",
     "WireError": "deephaven_massive._massive.net.errors",
+    "Reject": "deephaven_massive._massive.ws",
+    "Status": "deephaven_massive._massive.ws",
+    "StatusKind": "deephaven_massive._massive.ws",
+    "WsClient": "deephaven_massive._massive.ws",
+    "WsState": "deephaven_massive._massive.ws",
 }
 
 # Type checkers read the imports, so they see each name's real type and flag a name outside
@@ -55,6 +68,7 @@ if TYPE_CHECKING:
         WireEntitlementError,
         WireError,
     )
+    from deephaven_massive._massive.ws import Reject, Status, StatusKind, WsClient, WsState
 else:
 
     def __getattr__(name: str) -> object:

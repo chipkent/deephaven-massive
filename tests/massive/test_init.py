@@ -10,9 +10,19 @@ from types import ModuleType
 import pytest
 
 from deephaven_massive import _massive
+from deephaven_massive._massive import ws
 from deephaven_massive._massive.net import errors
 
-EXPECTED_INTERFACE = ["WireAuthError", "WireEntitlementError", "WireError"]
+EXPECTED_INTERFACE = [
+    "Reject",
+    "Status",
+    "StatusKind",
+    "WireAuthError",
+    "WireEntitlementError",
+    "WireError",
+    "WsClient",
+    "WsState",
+]
 
 
 def test_all_is_exactly_the_interface() -> None:
@@ -23,6 +33,11 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.WireError is errors.WireError
     assert _massive.WireAuthError is errors.WireAuthError
     assert _massive.WireEntitlementError is errors.WireEntitlementError
+    assert _massive.WsClient is ws.WsClient
+    assert _massive.WsState is ws.WsState
+    assert _massive.Status is ws.Status
+    assert _massive.StatusKind is ws.StatusKind
+    assert _massive.Reject is ws.Reject
 
 
 def test_every_lazy_name_is_in_all_and_none_is_bound() -> None:
@@ -120,6 +135,30 @@ def _deephaven_imports_attempted_by(module: str, names: list[str]) -> list[str]:
     )
     attempted: list[str] = json.loads(result.stdout)
     return attempted
+
+
+@pytest.mark.parametrize(("name", "imported"), [("WireError", False), ("WsClient", True)])
+def test_only_the_websocket_names_import_websockets(name: str, imported: bool) -> None:
+    # A REST-only session reads the errors and never the WebSocket names. The name travels as
+    # data on stdin; `-P` keeps the working directory off `sys.path`.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            (
+                "import sys\n"
+                "import deephaven_massive._massive as wire\n"
+                "getattr(wire, sys.stdin.read())\n"
+                "print('websockets' in sys.modules)"
+            ),
+        ],
+        input=name,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == str(imported)
 
 
 def test_importing_the_interface_never_imports_deephaven() -> None:

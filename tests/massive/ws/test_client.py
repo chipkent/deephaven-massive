@@ -1,0 +1,743 @@
+"""Tests for `WsClient` against the fake Massive WebSocket server.
+
+Each client runs on its own thread, as in production. The tests synchronize with it through
+conditions (the recorder's and the fake server's), never by sleeping: backoff waits go through
+an injected `Sleeper` that records each wait and either returns at once or holds until
+`close()` cancels it, and time comes from an injected `Clock`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import threading
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from deephaven_massive._massive.net import USER_AGENT
+from deephaven_massive._massive.net.errors import WireAuthError, WireError
+from deephaven_massive._massive.spec.types import (
+    DriftReport,
+    Field,
+    Source,
+    Transport,
+    WireType,
+    WireUnit,
+)
+from deephaven_massive._massive.ws import client as client_module
+from deephaven_massive._massive.ws.client import WsClient, WsState
+from deephaven_massive._massive.ws.protocol import Status, StatusKind
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+    from tests._fakes.ws import FakeMassiveServer
+
+KEY = "test-api-key-1234"
+
+SOURCES = (
+    Source(
+        key="stocks/T",
+        transport=Transport.WS,
+        fields=(
+            Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE),
+            Field(wire_key="s", column="Size", wire_type=WireType.LONG),
+            Field(wire_key="t", column="SipTimestamp", wire_type=WireType.EPOCH, unit=WireUnit.MS),
+        ),
+    ),
+    Source(
+        key="stocks/A",
+        transport=Transport.WS,
+        fields=(
+            Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="c", column="Close", wire_type=WireType.DOUBLE),
+        ),
+    ),
+    Source(
+        key="stocks/AM",
+        transport=Transport.WS,
+        fields=(
+            Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="c", column="Close", wire_type=WireType.DOUBLE),
+        ),
+    ),
+)
+
+
+def _status(status: str, message: str) -> str:
+    return json.dumps([{"ev": "status", "status": status, "message": message}])
+
+
+class Recorder:
+    """Records every callback, in order, and lets the test thread wait for one."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self.events: list[tuple[Any, ...]] = []
+        self.threads: set[int] = set()
+        self.open_hook: Callable[[int], None] | None = None
+
+    def _add(self, event: tuple[Any, ...]) -> None:
+        with self._cond:
+            self.events.append(event)
+            self.threads.add(threading.get_ident())
+            self._cond.notify_all()
+
+    def on_open(self, generation: int) -> None:
+        self._add(("open", generation))
+        if self.open_hook is not None:
+            self.open_hook(generation)
+
+    def on_status(self, generation: int, status: Status) -> None:
+        self._add(("status", generation, status))
+
+    def on_data(self, *args: object) -> None:
+        # The arguments are the generation, channel, rows, rejects, and drift.
+        self._add(("data", *args))
+
+    def on_state(self, state: WsState, detail: float | WireError | None) -> None:
+        self._add(("state", state, detail))
+
+    def wait_for(self, predicate: Callable[[list[tuple[Any, ...]]], bool]) -> None:
+        with self._cond:
+            assert self._cond.wait_for(lambda: predicate(self.events), 10.0), self.events
+
+    def wait_state(self, state: WsState) -> None:
+        self.wait_for(lambda events: bool(events) and events[-1][:2] == ("state", state))
+
+    def wait_open(self, generation: int) -> None:
+        self.wait_for(lambda events: ("open", generation) in events)
+
+    def of(self, kind: str) -> list[tuple[Any, ...]]:
+        with self._cond:
+            return [e[1:] for e in self.events if e[0] == kind]
+
+    def states(self) -> list[WsState]:
+        return [state for state, _ in self.of("state")]
+
+    def count(self, kind: str, value: object = None) -> Callable[[list[tuple[Any, ...]]], int]:
+        return lambda events: sum(
+            1 for e in events if e[0] == kind and (value is None or e[1] == value)
+        )
+
+
+class Sleeper:
+    """The injected backoff wait: records each wait; returns at once for the first `free`."""
+
+    def __init__(self, free: int) -> None:
+        self._cond = threading.Condition()
+        self.waits: list[float] = []
+        self.free = free
+
+    async def __call__(self, delay: float) -> None:
+        with self._cond:
+            self.waits.append(delay)
+            held = len(self.waits) > self.free
+            self._cond.notify_all()
+        if held:
+            await asyncio.sleep(3600)  # until close() cancels it
+
+    def wait_for_count(self, count: int) -> list[float]:
+        with self._cond:
+            assert self._cond.wait_for(lambda: len(self.waits) >= count, 10.0), self.waits
+            return list(self.waits)
+
+
+class Clock:
+    """The injected wall clock, advanced by the test."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._now = 1_000_000.0
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self._now
+
+    def advance(self, seconds: float) -> None:
+        with self._lock:
+            self._now += seconds
+
+
+@dataclass
+class Harness:
+    client: WsClient
+    recorder: Recorder
+    sleeper: Sleeper
+    clock: Clock
+
+    def on_loop(self, action: Callable[[], object]) -> object:
+        # Run `action` on the client's loop thread; its result or exception comes back here.
+        async def run() -> object:
+            return action()
+
+        return asyncio.run_coroutine_threadsafe(run(), self.client.loop).result(10.0)
+
+
+@pytest.fixture
+def make_client(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[..., Harness]]:
+    made: list[WsClient] = []
+
+    def make(
+        *,
+        url: str | None = None,
+        free_waits: int = 100,
+        backoff: tuple[float, float] = (1.0, 1.0),
+        start: bool = True,
+        recorder: Recorder | None = None,
+    ) -> Harness:
+        recorder = recorder or Recorder()
+        sleeper, clock = Sleeper(free_waits), Clock()
+        client = WsClient(
+            url or fake_ws_server.url(),
+            api_key=KEY,
+            sources=SOURCES,
+            on_open=recorder.on_open,
+            on_status=recorder.on_status,
+            on_data=recorder.on_data,
+            on_state=recorder.on_state,
+            reconnect_backoff=backoff[0],
+            max_reconnect_backoff=backoff[1],
+            clock=clock,
+            sleep=sleeper,
+        )
+        made.append(client)
+        if start:
+            client.start()
+        return Harness(client, recorder, sleeper, clock)
+
+    yield make
+    for client in made:
+        client.close()
+    assert all(client.join(10.0) for client in made)
+
+
+# --- connecting and authenticating ----------------------------------------------------------
+
+
+def test_it_authenticates_and_opens_generation_one(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    connection = fake_ws_server.connections[0]
+    assert json.loads(connection.auth or "") == {"action": "auth", "params": KEY}
+    assert connection.path == "/stocks"
+    assert connection.user_agent == USER_AGENT
+    assert h.recorder.states() == [WsState.CONNECTING]
+    assert h.recorder.threads == {h.client._thread.ident}
+
+
+def test_the_key_is_never_logged(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive._massive.ws")
+    fake_ws_server.auth_replies.append("auth_failed")
+    h = make_client()
+    h.recorder.wait_for(lambda e: ("state", WsState.FAILED) in [x[:2] for x in e])
+    assert caplog.records
+    assert KEY not in caplog.text
+
+
+def test_auth_failed_is_fatal_and_never_retried(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    fake_ws_server.auth_replies.append("auth_failed")
+    h = make_client()
+    h.recorder.wait_state(WsState.FAILED)
+    assert h.client.join(10.0)
+    [(_, error)] = [s for s in h.recorder.of("state") if s[0] is WsState.FAILED]
+    assert isinstance(error, WireAuthError)
+    assert error.host == "127.0.0.1"
+    assert error.path == "/stocks"
+    assert "authentication failed" in error.message
+    assert len(fake_ws_server.connections) == 1
+    assert h.sleeper.waits == []
+    assert h.recorder.of("open") == []
+
+
+def test_max_connections_waits_for_a_slot_then_retries(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    fake_ws_server.auth_replies.append("max_connections")
+    h = make_client(backoff=(1.0, 1.0))
+    h.recorder.wait_open(1)
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.WAITING_SLOT, WsState.CONNECTING]
+    [(_, at)] = [s for s in h.recorder.of("state") if s[0] is WsState.WAITING_SLOT]
+    assert at == h.clock() + 1.0
+    assert h.sleeper.waits == [1.0]
+    assert len(fake_ws_server.connections) == 2
+
+
+def test_max_connections_without_a_close_ends_at_the_handshake_timeout(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "HANDSHAKE_TIMEOUT", 0.2)
+    fake_ws_server.auth_replies.append("max_connections")
+    fake_ws_server.close_after_refusal = False
+    h = make_client(free_waits=0)
+    h.sleeper.wait_for_count(1)
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.WAITING_SLOT]
+
+
+@pytest.fixture(
+    params=[
+        ("greeting", None),  # silent: the handshake times out
+        ("greeting", _status("auth_success", "early")),  # no `connected` greeting first
+        ("greeting", "not json"),
+        ("reply", "auth_timeout"),  # an unknown reply to the key
+    ],
+    ids=["silent", "no-greeting", "not-json", "unknown-reply"],
+)
+def broken_handshake(
+    request: pytest.FixtureRequest,
+    fake_ws_server: FakeMassiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Script the fake's next handshake to fail one way, with a short handshake timeout."""
+    monkeypatch.setattr(client_module, "HANDSHAKE_TIMEOUT", 0.2)
+    step, value = request.param
+    if step == "greeting":
+        fake_ws_server.greet_next(value)
+    else:
+        fake_ws_server.auth_replies.append(value)
+
+
+def test_a_failed_handshake_is_retried(
+    broken_handshake: None,
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.RECONNECTING, WsState.CONNECTING]
+    assert len(fake_ws_server.connections) == 2
+
+
+# --- failures while opening the socket ------------------------------------------------------
+
+
+def test_an_http_404_is_fatal_and_names_the_host(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    fake_ws_server.reject_next(404)
+    h = make_client()
+    h.recorder.wait_state(WsState.FAILED)
+    error = h.recorder.of("state")[-1][1]
+    assert type(error) is WireError
+    assert error.status == 404
+    assert "127.0.0.1/stocks" in error.message
+    assert h.sleeper.waits == []
+
+
+def test_an_http_503_is_retried_after_the_backoff(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    fake_ws_server.reject_next(503)
+    h = make_client(backoff=(2.0, 2.0))
+    h.recorder.wait_open(1)
+    assert h.sleeper.waits == [2.0]
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.RECONNECTING, WsState.CONNECTING]
+
+
+@pytest.mark.parametrize("case", [("500", 500.0), ("1", 2.0)], ids=["retry-after", "backoff"])
+def test_an_http_429_waits_the_longer_of_retry_after_and_the_backoff(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    case: tuple[str, float],
+) -> None:
+    retry_after, wait = case
+    fake_ws_server.reject_next(429, {"Retry-After": retry_after})
+    h = make_client(backoff=(2.0, 2.0))
+    h.recorder.wait_open(1)
+    assert h.sleeper.waits == [wait]
+    [(_, at)] = [s for s in h.recorder.of("state") if s[0] is WsState.RECONNECTING]
+    assert at == h.clock() + wait
+
+
+def test_a_refused_connection_is_retried(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    port = fake_ws_server.port
+    fake_ws_server.stop()  # nothing listens on the port any more
+    h = make_client(url=f"wss://127.0.0.1:{port}/stocks", free_waits=1)
+    assert h.sleeper.wait_for_count(2) == [1.0, 1.0]
+    assert WsState.FAILED not in h.recorder.states()
+
+
+def test_a_url_must_be_a_websocket_url() -> None:
+    for url in ("https://socket.massive.com/stocks", "wss:///stocks"):
+        with pytest.raises(ValueError, match="not a WebSocket URL"):
+            WsClient(
+                url,
+                api_key=KEY,
+                sources=SOURCES,
+                on_open=print,
+                on_status=print,
+                on_data=print,
+                on_state=print,
+                reconnect_backoff=1.0,
+                max_reconnect_backoff=1.0,
+            )
+
+
+# --- reconnecting -----------------------------------------------------------------------------
+
+
+def test_a_clean_server_close_reconnects_and_drops_old_frames(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    fake_ws_server.close(1000)
+    h.recorder.wait_open(2)
+    assert h.recorder.states() == [
+        WsState.CONNECTING,
+        WsState.RECONNECTING,
+        WsState.CONNECTING,
+    ]
+    assert fake_ws_server.connections[0].close_code == 1000
+    h.on_loop(lambda: h.client.subscribe(1, ["T.OLD"]))
+    h.on_loop(lambda: h.client.subscribe(2, ["T.NEW"]))
+    fake_ws_server.wait_for(lambda s: len(s.connections[1].frames) == 1)
+    assert fake_ws_server.frames() == ['{"action":"subscribe","params":"T.NEW"}']
+
+
+def test_an_abnormal_server_close_reconnects(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    fake_ws_server.close(1011)
+    h.recorder.wait_open(2)
+    assert h.sleeper.waits == [1.0]
+
+
+def test_the_backoff_doubles_and_resets_only_after_a_stable_connection(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client(backoff=(1.0, 100.0))
+    for generation in (1, 2, 3):
+        h.recorder.wait_open(generation)
+        if generation == 3:
+            h.clock.advance(60.0)  # this one stays up long enough to count as stable
+        fake_ws_server.close(1000)
+    h.recorder.wait_open(4)
+    first, second, after_stable = h.sleeper.waits
+    assert 1.0 <= first <= 1.2
+    assert 2.0 <= second <= 2.4
+    assert 1.0 <= after_stable <= 1.2
+
+
+def test_auth_success_alone_does_not_reset_the_backoff(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client(backoff=(1.0, 100.0))
+    for generation in (1, 2):
+        h.recorder.wait_open(generation)
+        h.clock.advance(59.0)
+        fake_ws_server.close(1000)
+    h.recorder.wait_open(3)
+    assert 2.0 <= h.sleeper.waits[1] <= 2.4
+
+
+def test_reconnect_closes_after_the_queued_frames(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+
+    def subscribe_then_reconnect() -> None:
+        h.client.subscribe(1, ["T.AAPL"])
+        h.client.reconnect()
+
+    h.on_loop(subscribe_then_reconnect)
+    h.recorder.wait_open(2)
+    assert fake_ws_server.frames(0) == ['{"action":"subscribe","params":"T.AAPL"}']
+    assert fake_ws_server.connections[0].close_code == 1000
+    assert h.sleeper.waits == [1.0]
+
+
+def test_reconnect_without_a_generation_does_nothing(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    fake_ws_server.reject_next(503)
+    h = make_client(free_waits=0)
+    h.sleeper.wait_for_count(1)
+    h.on_loop(h.client.reconnect)
+    assert len(fake_ws_server.connections) == 0
+
+
+# --- frames -----------------------------------------------------------------------------------
+
+
+def test_subscribe_sends_at_once_and_the_ack_is_decoded(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    recorder = Recorder()
+    h = make_client(start=False, recorder=recorder)
+    recorder.open_hook = lambda g: h.client.subscribe(g, ["T.AAPL", "Q.AAPL"])
+    h.client.start()
+    recorder.wait_for(lambda e: any(x[0] == "status" for x in e))
+    [(generation, status)] = recorder.of("status")
+    assert generation == 1
+    assert status == Status(
+        kind=StatusKind.ACK, topics=("T.AAPL", "Q.AAPL"), message="subscribed to: T.AAPL,Q.AAPL"
+    )
+
+
+def test_subscribe_splits_large_sets_into_frames_of_1000(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    topics = [f"T.S{i}" for i in range(2500)]
+    h.on_loop(lambda: h.client.unsubscribe(1, topics))
+    fake_ws_server.wait_for(lambda s: len(s.connections[0].frames) == 3)
+    frames = [json.loads(f) for f in fake_ws_server.frames()]
+    assert [f["action"] for f in frames] == ["unsubscribe"] * 3
+    assert [len(f["params"].split(",")) for f in frames] == [1000, 1000, 500]
+    assert ",".join(f["params"] for f in frames).split(",") == topics
+
+
+def test_a_wildcard_and_an_explicit_topic_stay_independent(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    h.on_loop(lambda: h.client.subscribe(1, ["A.*"]))
+    h.on_loop(lambda: h.client.subscribe(1, ["AM.X"]))
+    h.on_loop(lambda: h.client.unsubscribe(1, ["A.*"]))
+    fake_ws_server.wait_for(lambda s: len(s.connections[0].frames) == 3)
+    assert [json.loads(f)["params"] for f in fake_ws_server.frames()] == ["A.*", "AM.X", "A.*"]
+    h.recorder.wait_for(lambda e: h.recorder.count("status")(e) == 2)
+    assert [s.topics for _, s in h.recorder.of("status")] == [("A.*",), ("AM.X",)]
+    fake_ws_server.send(
+        json.dumps([{"ev": "A", "sym": "X", "c": 1.5}, {"ev": "AM", "sym": "X", "c": 2.5}])
+    )
+    h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 2)
+    assert [(d[1], d[2]) for d in h.recorder.of("data")] == [
+        ("A", [{"Ticker": "X", "Close": 1.5}]),
+        ("AM", [{"Ticker": "X", "Close": 2.5}]),
+    ]
+
+
+def test_a_bad_row_rejects_only_itself_with_the_raw_symbol(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    h.on_loop(lambda: h.client.set_required("T", frozenset({"Ticker"}), symbol="Ticker"))
+    fake_ws_server.send(load_fixture("massive/ws", "trades_with_bad_row.json").decode())
+    h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
+    [(generation, channel, rows, rejects, drift)] = h.recorder.of("data")
+    assert (generation, channel) == (1, "T")
+    assert [r["Ticker"] for r in rows] == ["AAPL", "MSFT"]
+    [reject] = rejects
+    assert reject.channel == "T"
+    assert reject.symbol == "BRK.A"
+    assert "'p' (Price)" in reject.error.message
+    assert drift == DriftReport(extra=frozenset({"x"}), missing=frozenset({"s"}))
+
+
+def test_required_keys_survive_a_reconnect(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    h.on_loop(lambda: h.client.set_required("T", frozenset({"SipTimestamp"}), symbol="Ticker"))
+    fake_ws_server.close(1000)
+    h.recorder.wait_open(2)
+    fake_ws_server.send(json.dumps([{"ev": "T", "sym": "AAPL", "p": 1.0}]))
+    h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
+    [(generation, _, rows, [reject], _)] = h.recorder.of("data")
+    assert (generation, rows, reject.symbol) == (2, [], "AAPL")
+    assert "missing required key 't' (SipTimestamp)" in reject.error.message
+
+
+def test_a_status_after_authentication_is_delivered_in_order_with_data(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    fake_ws_server.send(
+        json.dumps(
+            [
+                {"ev": "status", "status": "max_connections", "message": "too many"},
+                {"ev": "T", "sym": "AAPL", "p": 1.0},
+            ]
+        )
+    )
+    h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
+    kinds = [e[0] for e in h.recorder.events if e[0] in {"status", "data"}]
+    assert kinds == ["status", "data"]
+    assert h.recorder.of("status")[0][1].kind is StatusKind.MAX_CONNECTIONS
+
+
+# --- loop-thread methods ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [
+        ("set_required", ("T", frozenset())),
+        ("subscribe", (1, ["T.AAPL"])),
+        ("unsubscribe", (1, ["T.AAPL"])),
+        ("reconnect", ()),
+    ],
+)
+def test_loop_thread_methods_refuse_other_threads(
+    make_client: Callable[..., Harness], method: str, args: tuple[object, ...]
+) -> None:
+    h = make_client()
+    with pytest.raises(RuntimeError, match=rf"WsClient\.{method} must be called on the client"):
+        getattr(h.client, method)(*args)
+
+
+def test_set_required_rejects_an_unknown_column(make_client: Callable[..., Harness]) -> None:
+    h = make_client()
+    with pytest.raises(ValueError, match=r"has no columns \['Bid'\]"):
+        h.on_loop(lambda: h.client.set_required("T", frozenset({"Bid"})))
+
+
+# --- closing ----------------------------------------------------------------------------------
+
+
+def test_close_during_a_long_backoff_returns_within_a_second(
+    fake_ws_server: FakeMassiveServer,
+) -> None:
+    recorder = Recorder()
+    fake_ws_server.reject_next(503)
+    client = WsClient(
+        fake_ws_server.url(),
+        api_key=KEY,
+        sources=SOURCES,
+        on_open=recorder.on_open,
+        on_status=recorder.on_status,
+        on_data=recorder.on_data,
+        on_state=recorder.on_state,
+        reconnect_backoff=120.0,
+        max_reconnect_backoff=120.0,
+    )
+    client.start()
+    recorder.wait_state(WsState.RECONNECTING)
+    began = time.monotonic()
+    client.close()
+    assert client.join(1.0)
+    assert time.monotonic() - began < 1.0
+    assert recorder.states()[-1] is WsState.CLOSED
+
+
+def test_close_closes_an_open_socket_with_1000(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    h.client.close()
+    assert h.client.join(10.0)
+    fake_ws_server.wait_for(lambda s: s.connections[0].close_code is not None)
+    assert fake_ws_server.connections[0].close_code == 1000
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.CLOSED]
+
+
+def test_close_from_a_callback_stops_the_client(
+    make_client: Callable[..., Harness],
+) -> None:
+    recorder = Recorder()
+    h = make_client(start=False, recorder=recorder)
+    recorder.open_hook = lambda _: h.client.close()
+    h.client.start()
+    assert h.client.join(10.0)
+    assert recorder.states() == [WsState.CONNECTING, WsState.CLOSED]
+
+
+def test_close_before_start_ends_at_once(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client(start=False)
+    assert h.client.join(0.0)  # never started: nothing to wait for
+    h.client.close()
+    h.client.start()
+    assert h.client.join(10.0)
+    assert h.recorder.states() == [WsState.CLOSED]
+    assert fake_ws_server.connections == []
+
+
+def test_close_after_the_client_failed_does_nothing(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    fake_ws_server.reject_next(404)
+    h = make_client()
+    assert h.client.join(10.0)
+    h.client.close()
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.FAILED]
+
+
+def test_a_raising_callback_stops_the_client_and_is_logged(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    recorder = Recorder()
+    h = make_client(start=False, recorder=recorder)
+
+    def boom(_: int) -> None:
+        raise ZeroDivisionError
+
+    recorder.open_hook = boom
+    h.client.start()
+    assert h.client.join(10.0)
+    fake_ws_server.wait_for(lambda s: s.connections[0].close_code is not None)
+    assert "stopped on an error" in caplog.text
+    assert recorder.states() == [WsState.CONNECTING]
+
+
+# --- free-threaded stress -----------------------------------------------------------------------
+
+
+def test_close_from_16_threads_at_once(make_client: Callable[..., Harness]) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    barrier = threading.Barrier(16)
+
+    def close() -> None:
+        barrier.wait()
+        h.client.close()
+
+    threads = [threading.Thread(target=close) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10.0)
+    assert h.client.join(10.0)
+    assert h.recorder.states().count(WsState.CLOSED) == 1
+
+
+def test_16_clients_at_once(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    harnesses = []
+    for i in range(16):
+        recorder = Recorder()
+        h = make_client(start=False, recorder=recorder)
+        recorder.open_hook = lambda g, c=h.client, i=i: c.subscribe(g, [f"T.S{i}"])
+        harnesses.append(h)
+    for h in harnesses:
+        h.client.start()
+    for h in harnesses:
+        h.recorder.wait_for(lambda e: any(x[0] == "status" for x in e))
+    acked = sorted(h.recorder.of("status")[0][1].topics[0] for h in harnesses)
+    assert acked == sorted(f"T.S{i}" for i in range(16))
+    threads = {h.recorder.threads.pop() for h in harnesses}
+    assert len(threads) == 16

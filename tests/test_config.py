@@ -118,9 +118,15 @@ def test_frozen_and_secrets_hidden() -> None:
 
 
 def test_reconnect_backoff_bounds(base: MassiveConfig) -> None:
-    assert _replace(base, reconnect_backoff=0.01).reconnect_backoff == 0.01
+    assert _replace(base, reconnect_backoff=15.0).reconnect_backoff == 15.0
     with pytest.raises(ValueError, match="reconnect_backoff"):
         _replace(base, reconnect_backoff=0)
+    with pytest.raises(
+        ValueError,
+        match=r"reconnect_backoff must be at least 15 s, not 14\.99: Massive takes roughly 10 to "
+        r"30 s to release a dropped connection",
+    ):
+        _replace(base, reconnect_backoff=14.99)
     with pytest.raises(ValueError, match="max_reconnect_backoff must not be below"):
         _replace(base, reconnect_backoff=30.0, max_reconnect_backoff=20.0)
 

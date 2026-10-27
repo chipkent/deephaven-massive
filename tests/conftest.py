@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive import MassiveSession
     from tests._fakes.stream import FakeStreamTransport
+    from tests._fakes.ws import FakeMassiveServer
 
 _DATA_DIR = Path(__file__).parent / "data"
 
@@ -163,6 +164,19 @@ def make_csv_gz() -> Callable[[str], bytes]:
         return gzip.compress(csv_text.encode())
 
     return compress
+
+
+@pytest.fixture
+def fake_ws_server() -> Iterator[FakeMassiveServer]:
+    """Yield a fake Massive WebSocket server (`tests/_fakes/ws.py`), stopped at teardown.
+
+    Yields:
+        The running server; its `url()` is the endpoint to connect to.
+    """
+    ws = importlib.import_module("tests._fakes.ws")
+    server: FakeMassiveServer = ws.FakeMassiveServer()
+    yield server
+    server.stop()
 
 
 # --- Session fixtures --------------------------------------------------------------------------

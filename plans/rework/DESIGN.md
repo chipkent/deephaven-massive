@@ -1290,19 +1290,25 @@ The client reports to `_ws.py` through four callbacks, each called on the loop t
   `REFUSED`, `MAX_CONNECTIONS`, or `OTHER`; `topics`; `message`; `realtime_verdict`).
 - `on_data(generation, channel, rows, rejects, drift)`: one channel's data from one frame,
   decoded against `ws.json`. `rows` are keyed by **long-form** column (the library renames
-  them), with symbols already in Massive's REST form. `rejects` are the rows that failed
-  validation, one `Reject(channel, symbol or None, WireError)` each; `drift` is the frame's
+  them), with symbols as the wire spells them (`EUR/USD`, `BTC-USD`). `rejects` are the rows
+  that failed validation, one `Reject(channel, symbol or None, WireError)` each, whose
+  `symbol` is the raw wire value of the channel's declared symbol column; `drift` is the frame's
   `DriftReport` ([section 19.5](#195-runtime-drift)).
 - `on_state(state, detail)`: `CONNECTING`, `RECONNECTING` (with the next attempt's time),
   `WAITING_SLOT` (the auth reply was `max_connections`), `FAILED` (with the `WireError`), or
   `CLOSED` (after `close()`).
 
 `_ws.py` parses no frame text. Before it first subscribes a channel on a connection, it calls
-the client's loop-thread method `set_required(channel, keys)`: `keys` is a `frozenset` of
-long-form key columns, built by `_ws.py` from the `KeySpec`s that the channel's dataset
-declares for that channel's source, excluding `from_request` keys. The client keeps it across
-generations and hands it to the decoder, so a row missing one of those keys is a `Reject`,
-while any other absent field becomes null. A channel with no entry has no required keys. It
+the client's loop-thread method `set_required(channel, keys, *, symbol=None)`: `keys` is a
+`frozenset` of long-form key columns, built by `_ws.py` from the `KeySpec`s that the channel's
+dataset declares for that channel's source, excluding `from_request` keys, and `symbol` is the
+long-form column of the channel's `symbol` key (`None` when it declares none). The client keeps
+both across generations and hands them to the decoder, so a row missing one of those keys is a
+`Reject` carrying the row's raw symbol, while any other absent field becomes null. A channel
+with no entry has no required keys and no symbol. Wire symbols are never rewritten in
+`_massive`: `_ws.py` maps the raw values of rows and rejects to canonical symbols with
+`_symbols` when it routes them, and topics use the wire's own form, as the subscribe frames
+do. It
 then calls the loop-thread methods `subscribe(generation, topics)` and
 `unsubscribe(generation, topics)`. Each sends at once, in
 call order, at most 1,000 topics per frame (the frame-size limit is **UNVERIFIED**; the chunk
@@ -1342,7 +1348,8 @@ Responsibilities:
 | `max_connections` as a status after authentication | The client reports `Status(MAX_CONNECTIONS)`; the library records it, and when that generation's socket closes, the connection shows `WAITING_SLOT` instead of `RECONNECTING`. |
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
 | Classify a failed upgrade as fatal or retryable (section 19.2) | client; a fatal one is reported as `FAILED` with `WireError(status=<http>)`, which the library turns into a `MassiveError` naming the HTTP status and the host |
-| Decode frames against `ws.json`; report rows, rejects, and drift; normalize wire symbols | client |
+| Decode frames against `ws.json`; report rows, rejects, and drift | client |
+| Map raw wire symbols to canonical symbols (`_symbols`) when routing rows and rejects | library |
 | Desired topic set, reference counts, single in-flight step, wildcard transitions | library |
 | Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
 | Per-topic acknowledgement bookkeeping, watchdogs, the explicit-verdict rule | library, from `Status` events |
@@ -1858,7 +1865,7 @@ ws/                  imports net, spec
   client.py          loop thread, connect/reconnect task, sender, close/join, per-channel
                      required keys (set_required)
   protocol.py        handshake and auth frames, subscribe frames, frame decoding against ws.json,
-                     rows + rejects + DriftReport, symbol normalization, failure classification
+                     rows + rejects + DriftReport, failure classification
   backoff.py         backoff policy, stable-uptime reset
 flatfiles/           imports net, spec
   __init__.py        FlatFileClient, FlatFile, ReadPlan, ReadColumn, object_key
@@ -2025,7 +2032,8 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
   logged.
 - **Receiving.** After `auth_success`, `protocol.py` decodes each text frame once, with the
   `net.codec` JSON codec, against the channel's generated fields in `ws.json` and the channel's
-  required-key set from `set_required` (empty when none was set), into events delivered in
+  required-key set and symbol column from `set_required` (none when none was set), into
+  events delivered in
   order:
   - `on_status(generation, Status)` for each `ev == "status"` object. `Status.kind` is `ACK`
     (`topics` parsed from "subscribed to: <p1>[,<p2>...]", cluster-agnostic, a comma list
@@ -2034,10 +2042,12 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
     the server's text verbatim, and `realtime_verdict` is true when a refusal's message contains
     "real-time" (case-insensitive).
   - `on_data(generation, channel, rows, rejects, drift)` for each channel's data objects in the
-    frame. Rows are keyed by **long-form** column (the library renames them), with the wire
-    symbol normalized to Massive's REST form (`EUR/USD` to `C:EURUSD`, `BTC-USD` to
-    `X:BTCUSD`). A row that fails validation becomes a `Reject(channel, symbol or None,
-    WireError)` instead; the frame's other rows are delivered. `drift` is the frame's
+    frame. Rows are keyed by **long-form** column (the library renames them) and hold every
+    column of the channel's source, null when absent; values are validated and converted to
+    their Python form (an epoch keeps its integer count), and symbols stay as the wire spells
+    them. A row that fails validation becomes a `Reject(channel, symbol or None, WireError)`
+    instead, with the raw value of the declared symbol column (`None` when none is declared or
+    the value is missing); the frame's other rows are delivered. `drift` is the frame's
     `DriftReport` ([section 19.5](#195-runtime-drift)).
 
   No frame text is parsed outside `_massive`.
@@ -2059,14 +2069,19 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
     and the backoff;
   - a TLS certificate failure (`ssl.SSLCertVerificationError`) is fatal, naming
     `SSL_CERT_FILE`, although it is an `OSError`;
-  - everything else follows websockets' public rule, `websockets.client.process_exception`:
-    what it returns `None` for (EOF, `OSError`, timeouts, HTTP 500/502/503/504) is retried, and
+  - everything else follows websockets' public rule, the default `process_exception` of
+    `connect()`, read from the `connect` object that raised (the function lives in
+    `websockets.asyncio.client` before websockets 17 and in `websockets.client` from 17, and
+    the floor is 15): what it returns `None` for (EOF, `OSError`, timeouts, HTTP 500/502/503/504) is retried, and
     anything it returns (for example HTTP 400 or 404, an invalid URI) is fatal.
 
   A fatal error ends the client and is reported as `FAILED` with `WireError(status=<http>)`
   naming the host.
-- **Closing.** `close()` sets the request flag and calls `loop.call_soon_threadsafe(task.cancel)`
-  (a no-op once the loop has ended). Cancellation interrupts whatever the task awaits, a backoff
+- **Closing.** `close()` sets the request flag and calls `loop.call_soon_threadsafe` with a
+  callback that cancels the task once, so a second `close()` cannot interrupt the socket's
+  closing (a no-op once the loop has ended; the task checks the flag when it starts, so a
+  `close()` before `start()` also ends it). The loop is created at construction, so
+  `WsClient.loop` is valid before `start()`. Cancellation interrupts whatever the task awaits, a backoff
   wait included; a `finally` block closes an open socket with code 1000 and reports `CLOSED`.
   `close()` never waits; `join(timeout)` waits for the thread with a bound.
 - **Logging.** INFO on connect, authentication, and close; WARNING on `max_connections` and on
@@ -2269,7 +2284,7 @@ A key is `from_request` when the source does not carry it in its rows: the symbo
 that takes it as a path parameter or holds it outside the result key
 ([section 10](#10-symbols-and-all)). The library fills a
 `from_request` key as a constant column. `to_batch(..., required=)` and `ReadPlan.required`
-(per request) and `WsClient.set_required(channel, keys)` (per channel, before its first
+(per request) and `WsClient.set_required(channel, keys, *, symbol)` (per channel, before its first
 subscription, [section 13.3](#133-connection-and-subscription-protocol)) receive exactly the
 source's required keys, so a futures WebSocket row without
 `session_end_date` is not a missing key, while a futures flat file without it is. Every member
