@@ -38,13 +38,17 @@ The function is pure and safe from any thread. This module imports only the stan
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
 
 from deephaven_massive._massive.net.errors import WireError
-from deephaven_massive._massive.spec.convert import UnconvertibleError, convert_field
+from deephaven_massive._massive.spec.convert import (
+    UnconvertibleError,
+    convert_field,
+    excerpt,
+    missing_key_message,
+)
 from deephaven_massive._massive.spec.types import DriftReport, WireType
 
 if TYPE_CHECKING:
@@ -53,9 +57,6 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.spec.types import Field, RestPath
 
 __all__ = ["to_batch"]
-
-_EXCERPT = 50
-"""How many characters of a bad value an error quotes."""
 
 # The Arrow type of each wire type's column.
 _ARROW: dict[WireType, pa.DataType] = {
@@ -112,22 +113,6 @@ def _leaves(
             yield path, value
 
 
-def _unconvertible(rest_path: RestPath, key: str, *, expected: str, value: object) -> str:
-    """Return the message of the error for a value that does not fit its type.
-
-    Args:
-        rest_path: The path.
-        key: The dotted wire key of the value.
-        expected: The type expected, such as `"long"` or `"an object"`.
-        value: The value received.
-
-    Returns:
-        The message, quoting the first 50 characters of the value's JSON text.
-    """
-    text = json.dumps(value, ensure_ascii=False)[:_EXCERPT]
-    return f"{rest_path.template}: {key} must be {expected}, got {text}"
-
-
 def _row(
     row: Mapping[str, object],
     rest_path: RestPath,
@@ -155,7 +140,7 @@ def _row(
     for key, value in _leaves(row, "", objects=objects):
         if key in objects:
             raise WireError(
-                _unconvertible(rest_path, key, expected="an object", value=value),
+                f"{rest_path.template}: wire key {key!r} expects an object, got {excerpt(value)}",
                 path=rest_path.template,
             )
         if key in keys:
@@ -187,10 +172,13 @@ def to_batch(
 
     Raises:
         ValueError: If `required` names a column the path does not have.
-        WireError: If a row lacks a `required` column or holds it as null (naming the row and
-            the column), or a value does not fit its field's type (naming the field, the
-            expected type, and the first 50 characters of the value). Its `path` is the
-            path's template and its `status` is `None`.
+        WireError: If a row lacks a `required` column or holds it as null, or a value does not
+            fit its field's type or named conversion: the message is the path's template and
+            the row's index, then the clause `spec.convert` shares with every decoder (the
+            field, the expected type, and the first 50 characters of the value's JSON text).
+            Also if an object the fields reach into is neither an object nor null, naming its
+            wire key and quoting the value the same way. Its `path` is the path's template and
+            its `status` is `None`.
     """
     fields = rest_path.fields
     unknown = set(required) - {f.column for f in fields}
@@ -207,8 +195,7 @@ def to_batch(
             value = found.get(f.wire_key)
             if value is None and f.column in required:
                 raise WireError(
-                    f"{rest_path.template}: row {index} has no {f.column} "
-                    f"(wire key {f.wire_key!r}), which the dataset needs",
+                    f"{rest_path.template}: row {index}: {missing_key_message(f)}",
                     path=rest_path.template,
                 )
             if value is None:
@@ -218,11 +205,8 @@ def to_batch(
                 continue
             try:
                 column.append(convert_field(f, value))
-            except UnconvertibleError:
-                expected = str(f.wire_type)
-                if f.conversion is not None:
-                    expected += f" (by the conversion {f.conversion})"
-                message = _unconvertible(rest_path, f.wire_key, expected=expected, value=value)
+            except UnconvertibleError as error:
+                message = f"{rest_path.template}: row {index}: {error}"
                 raise WireError(message, path=rest_path.template) from None
     types = [_ARROW[f.wire_type] for f in fields]
     schema = pa.schema([pa.field(f.column, t) for f, t in zip(fields, types, strict=True)])

@@ -1486,19 +1486,29 @@ The client reports to `_ws.py` through four callbacks, each called on the loop t
   `REFUSED`, `MAX_CONNECTIONS`, or `OTHER`; `topics`; `message`; `realtime_verdict`).
 - `on_data(generation, channel, rows, rejects, drift)`: one channel's data from one frame,
   decoded against `ws.json`. `rows` are keyed by **long-form** column (the library renames
-  them), with symbols already in Massive's REST form. `rejects` are the rows that failed
-  validation, one `Reject(channel, symbol or None, WireError)` each; `drift` is the frame's
+  them), with symbols as the wire spells them (`EUR/USD`, `BTC-USD`). `rejects` are the rows
+  that failed validation, one `Reject(channel, symbol or None, WireError)` each, whose
+  `symbol` is the raw wire value of the channel's declared symbol column; `drift` is the frame's
   `DriftReport` ([section 19.5](#195-runtime-drift)).
 - `on_state(state, detail)`: `CONNECTING`, `RECONNECTING` (with the next attempt's time),
-  `WAITING_SLOT` (the auth reply was `max_connections`), `FAILED` (with the `WireError`), or
-  `CLOSED` (after `close()`).
+  `WAITING_SLOT` (with the next attempt's time; the auth reply was `max_connections`, or the
+  server sent a `max_connections` status before closing an authenticated socket), `FAILED`
+  (with the `WireError`; also any internal failure, such as a callback that raised, with the
+  original exception as its `__cause__`), or `CLOSED` (after `close()`). `FAILED` and
+  `CLOSED` are terminal, and exactly one of them is reported. The client is the only owner of
+  `WAITING_SLOT`; the library displays what it reports.
 
 `_ws.py` parses no frame text. Before it first subscribes a channel on a connection, it calls
-the client's loop-thread method `set_required(channel, keys)`: `keys` is a `frozenset` of
-long-form key columns, built by `_ws.py` from the `KeySpec`s that the channel's dataset
-declares for that channel's source, excluding `from_request` keys. The client keeps it across
-generations and hands it to the decoder, so a row missing one of those keys is a `Reject`,
-while any other absent field becomes null. A channel with no entry has no required keys. It
+the client's loop-thread method `set_required(channel, keys, *, symbol=None)`: `keys` is a
+`frozenset` of long-form key columns, built by `_ws.py` from the `KeySpec`s that the channel's
+dataset declares for that channel's source, excluding `from_request` keys, and `symbol` is the
+long-form column of the channel's `symbol` key (`None` when it declares none). The client keeps
+both across generations and hands them to the decoder, so a row missing one of those keys is a
+`Reject` carrying the row's raw symbol, while any other absent field becomes null. A channel
+with no entry has no required keys and no symbol. Wire symbols are never rewritten in
+`_massive`: `_ws.py` maps the raw values of rows and rejects to canonical symbols with
+`_symbols` when it routes them, and topics use the wire's own form, as the subscribe frames
+do. It
 then calls the loop-thread methods `subscribe(generation, topics)` and
 `unsubscribe(generation, topics)`. Each sends at once, in
 call order, at most 1,000 topics per frame (the frame-size limit is **UNVERIFIED**; the chunk
@@ -1535,10 +1545,11 @@ Responsibilities:
 | Open the socket (TLS, proxy, keepalive pings), read `connected`, send auth, read the auth reply, all within the handshake timeout | client |
 | `auth_failed` | The client reports `FAILED` with `WireAuthError` and stops; it never retries a rejected key. The library fails every stream on the path with `AuthenticationError` (`_errors.from_wire`). |
 | `max_connections` in the auth reply | The client reports `WAITING_SLOT`, lets the server close the socket, and retries after its backoff; streams stay alive. |
-| `max_connections` as a status after authentication | The client reports `Status(MAX_CONNECTIONS)`; the library records it, and when that generation's socket closes, the connection shows `WAITING_SLOT` instead of `RECONNECTING`. |
+| `max_connections` as a status after authentication | The client reports `Status(MAX_CONNECTIONS)`, remembers it for the generation, and when that generation's socket closes reports `WAITING_SLOT` instead of `RECONNECTING`. The library only displays the state. |
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
 | Classify a failed upgrade as fatal or retryable (section 19.2) | client; a fatal one is reported as `FAILED` with `WireError(status=<http>)`, which the library turns into a `MassiveError` naming the HTTP status and the host |
-| Decode frames against `ws.json`; report rows, rejects, and drift; normalize wire symbols | client |
+| Decode frames against `ws.json`; report rows, rejects, and drift | client |
+| Map raw wire symbols to canonical symbols (`_symbols`) when routing rows and rejects | library |
 | Desired topic set, reference counts, single in-flight step, wildcard transitions | library |
 | Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
 | Per-topic acknowledgement bookkeeping, watchdogs, the explicit-verdict rule | library, from `Status` events |
@@ -1581,7 +1592,7 @@ Status(REFUSED, no topic)
    -> applies to every topic of the in-flight step (exact attribution, because one step is in
       flight). See the explicit-verdict rule below.
 Status(MAX_CONNECTIONS) after authentication
-   -> recorded for the generation; State=WAITING_SLOT once its socket closes
+   -> nothing for the library to do: the client reports WAITING_SLOT once its socket closes
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
    -> client.subscribe(generation, [topic]): that topic alone, once
 still none after another ack_timeout, same check
@@ -1592,8 +1603,8 @@ still none after another ack_timeout, same check
 watchdog fires but its topic left S or W, or its generation is no longer current
    -> cancelled without escalating
 socket closed or failed (not by close())
-   -> the generation ends; its watchdogs are cancelled; State=RECONNECTING with
-      NextReconnectAt, or WAITING_SLOT after a max_connections status; on the next on_open,
+   -> the generation ends; its watchdogs are cancelled; State is what the client reports,
+      RECONNECTING or WAITING_SLOT, with NextReconnectAt; on the next on_open,
       W is re-sent
 fatal handshake error, or auth_failed
    -> every stream on the connection fails through publish_failure (MassiveError naming the
@@ -2055,7 +2066,9 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
                      ENVELOPE_KEYS, DriftReport(extra, missing, statuses)
   convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
                      every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError;
-                     convert_field applies a field's named conversion
+                     convert_field applies a field's named conversion and raises with the
+                     shared bad-value message; missing_key_message and excerpt, so both
+                     decoders word a row failure alike and add only their own context
   rest.json  ws.json  flatfiles.json        generated, committed
 rest/                imports net, spec
   __init__.py        RestClient, Page, to_batch
@@ -2068,7 +2081,7 @@ ws/                  imports net, spec
   client.py          loop thread, connect/reconnect task, sender, close/join, per-channel
                      required keys (set_required)
   protocol.py        handshake and auth frames, subscribe frames, frame decoding against ws.json,
-                     rows + rejects + DriftReport, symbol normalization, failure classification
+                     rows + rejects + DriftReport, failure classification
   backoff.py         backoff policy, stable-uptime reset
 flatfiles/           imports net, spec
   __init__.py        docstring only: _massive's interface maps each name to its submodule,
@@ -2311,11 +2324,17 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
   the reply, all within the fixed 10 s handshake timeout, or the attempt fails and is retried.
   `auth_success` opens a generation (`on_open`). `auth_failed` is fatal (`WireAuthError`).
   `max_connections` reports `WAITING_SLOT`, and the attempt ends when the server closes the
-  socket (or after the handshake timeout), then waits its backoff. The auth frame is never
-  logged.
+  socket (or after the handshake timeout), then waits its backoff. A `max_connections` status
+  received after authentication is delivered as a `Status` and also makes the client report
+  `WAITING_SLOT`, not `RECONNECTING`, when that socket closes. A greeting other than
+  `connected`, a reply other than `auth_success`, `auth_failed`, or `max_connections`, or a
+  handshake frame that is not JSON is vendor drift: logged at ERROR and retried. The auth frame
+  is never logged, by this library or by websockets: every connection is given a logger on
+  which DEBUG, the level of websockets' frame log, is disabled.
 - **Receiving.** After `auth_success`, `protocol.py` decodes each text frame once, with the
   `net.codec` JSON codec, against the channel's generated fields in `ws.json` and the channel's
-  required-key set from `set_required` (empty when none was set), into events delivered in
+  required-key set and symbol column from `set_required` (none when none was set), into
+  events delivered in
   order:
   - `on_status(generation, Status)` for each `ev == "status"` object. `Status.kind` is `ACK`
     (`topics` parsed from "subscribed to: <p1>[,<p2>...]", cluster-agnostic, a comma list
@@ -2324,10 +2343,12 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
     the server's text verbatim, and `realtime_verdict` is true when a refusal's message contains
     "real-time" (case-insensitive).
   - `on_data(generation, channel, rows, rejects, drift)` for each channel's data objects in the
-    frame. Rows are keyed by **long-form** column (the library renames them), with the wire
-    symbol normalized to Massive's REST form (`EUR/USD` to `C:EURUSD`, `BTC-USD` to
-    `X:BTCUSD`). A row that fails validation becomes a `Reject(channel, symbol or None,
-    WireError)` instead; the frame's other rows are delivered. `drift` is the frame's
+    frame. Rows are keyed by **long-form** column (the library renames them) and hold every
+    column of the channel's source, null when absent; values are validated and converted to
+    their Python form (an epoch keeps its integer count; an ISO-8601 instant becomes exact
+    integer nanoseconds since the epoch), and symbols stay as the wire spells them. A row that fails validation becomes a `Reject(channel, symbol or None, WireError)`
+    instead, with the raw value of the declared symbol column (`None` when none is declared or
+    the value is missing); the frame's other rows are delivered. `drift` is the frame's
     `DriftReport` ([section 19.5](#195-runtime-drift)).
 
   No frame text is parsed outside `_massive`.
@@ -2346,17 +2367,24 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
   alone. The client reports `RECONNECTING` with the next attempt's time before each wait.
 - **Fatal and retryable failures.** `protocol.py` classifies an exception from `connect()`:
   - an HTTP 429 at the upgrade is retryable, and its wait is the larger of its `Retry-After`
-    and the backoff;
+    and the backoff, with the `Retry-After` capped at `max_reconnect_backoff`, so every wait
+    still lies in `[reconnect_backoff, max_reconnect_backoff]`. This differs from REST, which
+    gives up on a `Retry-After` above 60 s because a caller is blocked on the request: the
+    WebSocket client never gives up, and an unbounded `Retry-After` would leave its streams
+    silent for as long as the server named;
   - a TLS certificate failure (`ssl.SSLCertVerificationError`) is fatal, naming
     `SSL_CERT_FILE`, although it is an `OSError`;
-  - everything else follows websockets' public rule, `websockets.client.process_exception`:
-    what it returns `None` for (EOF, `OSError`, timeouts, HTTP 500/502/503/504) is retried, and
+  - everything else follows websockets' public rule, `websockets.client.process_exception`
+    (the floor is websockets 17.1, its first release there): what it returns `None` for (EOF, `OSError`, timeouts, HTTP 500/502/503/504) is retried, and
     anything it returns (for example HTTP 400 or 404, an invalid URI) is fatal.
 
   A fatal error ends the client and is reported as `FAILED` with `WireError(status=<http>)`
   naming the host.
-- **Closing.** `close()` sets the request flag and calls `loop.call_soon_threadsafe(task.cancel)`
-  (a no-op once the loop has ended). Cancellation interrupts whatever the task awaits, a backoff
+- **Closing.** `close()` sets the request flag and calls `loop.call_soon_threadsafe` with a
+  callback that cancels the task once, so a second `close()` cannot interrupt the socket's
+  closing (a no-op once the loop has ended; the task checks the flag when it starts, so a
+  `close()` before `start()` also ends it). The loop is created at construction, so
+  `WsClient.loop` is valid before `start()`. Cancellation interrupts whatever the task awaits, a backoff
   wait included; a `finally` block closes an open socket with code 1000 and reports `CLOSED`.
   `close()` never waits; `join(timeout)` waits for the thread with a bound.
 - **Logging.** INFO on connect, authentication, and close; WARNING on `max_connections` and on
@@ -2727,7 +2755,7 @@ A key is `from_request` when the source does not carry it in its rows: the symbo
 that takes it as a path parameter or holds it outside the result key
 ([section 10](#10-symbols-and-all)). The library fills a
 `from_request` key as a constant column. `to_batch(..., required=)` and `ReadPlan.required`
-(per request) and `WsClient.set_required(channel, keys)` (per channel, before its first
+(per request) and `WsClient.set_required(channel, keys, *, symbol)` (per channel, before its first
 subscription, [section 13.3](#133-connection-and-subscription-protocol)) receive exactly the
 source's required keys, so a futures WebSocket row without
 `session_end_date` is not a missing key, while a futures flat file without it is. Every member

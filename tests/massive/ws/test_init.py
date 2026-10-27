@@ -1,13 +1,11 @@
-from types import ModuleType
-
 from deephaven_massive._massive import ws
+from deephaven_massive._massive.ws import client, protocol
 
 
-def test_the_package_defines_no_names_yet() -> None:
-    # Submodules imported elsewhere in the process are bound on the package; they do not count.
-    defined = [
-        name
-        for name, value in vars(ws).items()
-        if not name.startswith("__") and not isinstance(value, ModuleType)
-    ]
-    assert defined == []
+def test_the_package_re_exports_the_client_interface() -> None:
+    assert sorted(ws.__all__) == ["Reject", "Status", "StatusKind", "WsClient", "WsState"]
+    assert ws.WsClient is client.WsClient
+    assert ws.WsState is client.WsState
+    assert ws.Status is protocol.Status
+    assert ws.StatusKind is protocol.StatusKind
+    assert ws.Reject is protocol.Reject

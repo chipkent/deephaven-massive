@@ -137,7 +137,7 @@ def test_dotted_wire_keys_reach_into_nested_objects() -> None:
 
 
 def test_a_nested_object_that_is_not_an_object_is_unconvertible() -> None:
-    with pytest.raises(WireError, match=r"/v3/x: day must be an object, got 5"):
+    with pytest.raises(WireError, match=r"^/v3/x: wire key 'day' expects an object, got 5$"):
         to_batch([{"day": 5}], _path(_field("day.c", WireType.DOUBLE)), required=())
 
 
@@ -184,7 +184,7 @@ def test_a_missing_required_key_is_an_error_naming_it(row: dict[str, object]) ->
     with pytest.raises(WireError) as caught:
         to_batch(rows, _TRADES, required={"SipTimestamp"})
     assert str(caught.value) == (
-        "/v3/trades/{stockTicker}: row 1 has no SipTimestamp (wire key 'sip_timestamp'), "
+        "/v3/trades/{stockTicker}: row 1: no SipTimestamp (wire key 'sip_timestamp'), "
         "which the dataset needs"
     )
     assert (caught.value.status, caught.value.path) == (None, "/v3/trades/{stockTicker}")
@@ -238,12 +238,14 @@ def test_an_iso_instant_lands_as_exact_utc_nanoseconds() -> None:
     ],
 )
 def test_a_value_that_does_not_fit_is_a_wire_error(wire_type: WireType, value: object) -> None:
-    assert f"v must be {wire_type}" in str(_bad(wire_type, value))
+    expected = f"/v3/x: row 0: V (wire key 'v') expects {wire_type}, got "
+    assert str(_bad(wire_type, value)).startswith(expected)
 
 
 def test_an_unconvertible_value_names_the_field_type_and_50_characters() -> None:
+    # The clause after the row is the one `spec.convert` shares with the WebSocket decoder.
     error = _bad(WireType.LONG, "x" * 100)
-    assert str(error) == f'/v3/x: v must be long, got "{"x" * 49}'
+    assert str(error) == f"/v3/x: row 0: V (wire key 'v') expects long, got \"{'x' * 49}"
     assert (error.status, error.path, error.host) == (None, "/v3/x", None)
     assert error.__cause__ is None
 

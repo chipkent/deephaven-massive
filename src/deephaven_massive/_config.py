@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 __all__ = [
+    "MIN_RECONNECT_BACKOFF",
     "HostMap",
     "JsonCodec",
     "MassiveConfig",
@@ -44,6 +45,13 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+MIN_RECONNECT_BACKOFF: Final = 15.0
+"""The shortest `reconnect_backoff` accepted, in seconds.
+
+Massive releases a dropped connection only after roughly 10 to 30 seconds; a client that
+retries sooner can be refused for holding the allowance it just lost.
+"""
 
 _HOSTNAME: Final = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
@@ -126,16 +134,17 @@ class MassiveConfig:
             or path. The FMV family is never pinned; it is always `business.massive.com`.
         ack_timeout: Seconds to wait for a subscription acknowledgement before re-sending it
             once.
-        reconnect_backoff: Seconds of the first wait before reconnecting after a connection
-            that opened has closed (including a `max_connections` refusal); later waits double
-            up to `max_reconnect_backoff`. Before a connection opens, a TCP failure, a
-            timeout, a connection closed during the handshake, or a retryable handshake failure
-            (HTTP 500/502/503/504) retries on the websockets library's own schedule (up to
-            5 s, growing to 90 s), and any other handshake error is fatal. Any positive value
-            is accepted (tests use milliseconds). The 30-second default waits out the
-            "roughly 10 to 30 seconds" Massive's knowledge base says the server takes to
-            release a dropped connection; an earlier retry can be refused for holding the
-            allowance it just lost.
+        reconnect_backoff: Seconds of the first wait before the WebSocket client tries again
+            after any failure that is not fatal: a connection that opened and closed (cleanly
+            or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake
+            or authentication timeout, or a retryable HTTP status during the upgrade (500,
+            502, 503, 504). Each further consecutive failure doubles it, up to
+            `max_reconnect_backoff`, and the count resets only once a connection has stayed
+            up for 60 seconds. Must be at least `MIN_RECONNECT_BACKOFF` (15 s): Massive's
+            knowledge base says the server takes "roughly 10 to 30 seconds" to release a
+            dropped connection, and an earlier retry can be refused for holding the allowance
+            it just lost, which on an individual plan wastes the one connection there is. The
+            30-second default waits out that whole window.
         max_reconnect_backoff: Cap, in seconds, of the doubling reconnect backoff. Jitter only
             lengthens a wait, so every wait lies in `[reconnect_backoff,
             max_reconnect_backoff]`.
@@ -177,7 +186,8 @@ class MassiveConfig:
             TypeError: If `api_key` is not a `str` or `flat_file_publish_cutoff` is not a
                 `datetime.time`.
             AuthenticationError: If no API key was given and none is in the environment.
-            ValueError: If `max_reconnect_backoff` is below `reconnect_backoff`, a timeout,
+            ValueError: If `reconnect_backoff` is below `MIN_RECONNECT_BACKOFF`,
+                `max_reconnect_backoff` is below `reconnect_backoff`, a timeout,
                 backoff, interval, or count is not positive,
                 `flat_file_publish_cutoff` carries a timezone, only one of the two S3
                 credentials is set, or a `ws_hosts` value is not a bare hostname.
@@ -197,6 +207,12 @@ class MassiveConfig:
             require_positive_number(name, getattr(self, name))
         for name in ("flat_file_symbol_threshold", "max_concurrency"):
             require_positive_int(name, getattr(self, name))
+        if self.reconnect_backoff < MIN_RECONNECT_BACKOFF:
+            raise ValueError(
+                f"reconnect_backoff must be at least {MIN_RECONNECT_BACKOFF:g} s, not "
+                f"{self.reconnect_backoff:g}: Massive takes roughly 10 to 30 s to release a "
+                "dropped connection, and a sooner retry can be refused for holding it"
+            )
         if self.max_reconnect_backoff < self.reconnect_backoff:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
         cutoff: object = self.flat_file_publish_cutoff  # checked at run time, whatever the hint

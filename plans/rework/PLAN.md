@@ -1146,7 +1146,7 @@ flat-file-history.
 **Tasks.**
 - [ ] Every rule of DESIGN § 19.2, each with a named test. Decoding takes injected `Source`s, so
       websocket-client needs no generated file.
-- [ ] `set_required(channel, keys)` on the loop thread, kept across generations and passed to
+- [ ] `set_required(channel, keys, *, symbol=None)` on the loop thread, kept across generations and passed to
       the decoder; `tests/massive/ws/test_protocol.py` shows a missing required key becomes a
       `Reject` while a missing optional field becomes null, and `test_client.py` shows the set
       survives a reconnect.
@@ -1796,8 +1796,11 @@ massive-sdk-removal.
 - [ ] The reconcile loop with make-before-break wildcard transitions, single-topic re-send,
       and the `NO_ACK` rule (one reconnect per topic per session).
 - [ ] `_ws.py` builds each channel's required-key set from the dataset's `KeySpec`s for the
-      channel's source (no `from_request` keys) and calls `set_required` before the channel's
+      channel's source (no `from_request` keys) and its symbol column, calls `set_required`
+      before the channel's
       first subscribe; `tests/test_ws.py` asserts the set and the call order against the fake.
+- [ ] Raw wire symbols of rows and rejects are mapped to canonical symbols with `_symbols`
+      when routed (the client passes them through unchanged).
 - [ ] Rejects fail only their streams; a row with no symbol fails only the channel's `ALL`
       streams and logs at ERROR; drift goes to the `DriftRegistry`.
 - [ ] The flush renames, converts, applies the bound mask, and fans out with `where_in`.

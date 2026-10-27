@@ -9,6 +9,8 @@ from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
     convert,
     convert_field,
+    excerpt,
+    missing_key_message,
 )
 from deephaven_massive._massive.spec.types import Conversion, Field, WireType, WireUnit
 
@@ -244,3 +246,46 @@ def test_each_conversion_widens_or_retypes_exactly_as_it_says(
     else:
         assert not conversion.widens
         assert conversion.wire_type is not declared
+
+
+# Messages: every decoder shows these after its own context.
+
+
+def test_a_plain_field_refusal_names_the_field_type_and_value() -> None:
+    field = Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE)
+    with pytest.raises(UnconvertibleError) as caught:
+        convert_field(field, "1.5")
+    assert str(caught.value) == "Price (wire key 'p') expects double, got \"1.5\""
+
+
+def test_a_named_conversion_refusal_names_the_conversion() -> None:
+    with pytest.raises(UnconvertibleError) as caught:
+        convert_field(_with(Conversion.QUOTED_INTEGER), [4])
+    assert str(caught.value) == (
+        "X (wire key 'x') expects long (by the conversion quoted-integer), got [4]"
+    )
+
+
+def test_convert_alone_refuses_without_a_message() -> None:
+    with pytest.raises(UnconvertibleError) as caught:
+        convert(WireType.LONG, "1")
+    assert str(caught.value) == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "quoted"),
+    [
+        (True, "true"),
+        (None, "null"),
+        ("é", '"é"'),
+        ({"a": [1]}, '{"a": [1]}'),
+        ("x" * 100, '"' + "x" * 49),
+    ],
+)
+def test_an_excerpt_is_the_json_text_cut_to_50_characters(value: object, quoted: str) -> None:
+    assert excerpt(value) == quoted
+
+
+def test_the_missing_key_clause_names_the_column_and_wire_key() -> None:
+    field = Field(wire_key="t", column="SipTimestamp", wire_type=WireType.EPOCH, unit=WireUnit.MS)
+    assert missing_key_message(field) == "no SipTimestamp (wire key 't'), which the dataset needs"

@@ -10,7 +10,7 @@ from types import ModuleType
 import pytest
 
 from deephaven_massive import _massive
-from deephaven_massive._massive import spec
+from deephaven_massive._massive import spec, ws
 from deephaven_massive._massive.flatfiles import client as flatfiles_client
 from deephaven_massive._massive.flatfiles import layout, reader
 from deephaven_massive._massive.net import errors
@@ -26,15 +26,20 @@ EXPECTED_INTERFACE = [
     "ParamKind",
     "ReadColumn",
     "ReadPlan",
+    "Reject",
     "RestClient",
     "RestPath",
     "Source",
+    "Status",
+    "StatusKind",
     "Transport",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
     "WireType",
     "WireUnit",
+    "WsClient",
+    "WsState",
     "object_key",
     "source",
     "sources",
@@ -50,6 +55,11 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.WireError is errors.WireError
     assert _massive.WireAuthError is errors.WireAuthError
     assert _massive.WireEntitlementError is errors.WireEntitlementError
+    assert _massive.WsClient is ws.WsClient
+    assert _massive.WsState is ws.WsState
+    assert _massive.Status is ws.Status
+    assert _massive.StatusKind is ws.StatusKind
+    assert _massive.Reject is ws.Reject
     assert _massive.source is spec.source
     assert _massive.sources is spec.sources
     for name in ("DriftReport", "Field", "ParamKind", "RestPath", "Source", "Transport"):
@@ -105,9 +115,9 @@ def test_type_checking_imports_mirror_all() -> None:
 
 def test_an_unknown_name_raises_attribute_error() -> None:
     with pytest.raises(
-        AttributeError, match=r"module 'deephaven_massive\._massive' has no attribute 'WsClient'"
+        AttributeError, match=r"module 'deephaven_massive\._massive' has no attribute 'NoSuchName'"
     ):
-        _ = _massive.WsClient  # type: ignore[attr-defined]  # the missing attribute is the point
+        _ = _massive.NoSuchName  # type: ignore[attr-defined]  # the missing attribute is the point
 
 
 def test_dir_lists_exactly_the_interface() -> None:
@@ -161,6 +171,30 @@ def _deephaven_imports_attempted_by(module: str, names: list[str]) -> list[str]:
     )
     attempted: list[str] = json.loads(result.stdout)
     return attempted
+
+
+@pytest.mark.parametrize(("name", "imported"), [("WireError", False), ("WsClient", True)])
+def test_only_the_websocket_names_import_websockets(name: str, imported: bool) -> None:
+    # A REST-only session reads the errors and never the WebSocket names. The name travels as
+    # data on stdin; `-P` keeps the working directory off `sys.path`.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            (
+                "import sys\n"
+                "import deephaven_massive._massive as wire\n"
+                "getattr(wire, sys.stdin.read())\n"
+                "print('websockets' in sys.modules)"
+            ),
+        ],
+        input=name,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == str(imported)
 
 
 def test_importing_the_interface_never_imports_deephaven() -> None:

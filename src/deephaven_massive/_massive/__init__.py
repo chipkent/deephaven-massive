@@ -26,9 +26,12 @@ Interface:
       dataset's file for a day lives.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
+    - `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`: the client of one WebSocket
+      endpoint, its connection states, the status objects and rejected rows it reports.
 
 Names resolve lazily on first access (PEP 562), so importing this package imports none of
-its clients' dependencies, and never Deephaven.
+its clients' dependencies (a REST-only session never imports `websockets`), and never
+Deephaven.
 
 Example:
     ::
@@ -56,15 +59,20 @@ __all__ = [
     "ParamKind",
     "ReadColumn",
     "ReadPlan",
+    "Reject",
     "RestClient",
     "RestPath",
     "Source",
+    "Status",
+    "StatusKind",
     "Transport",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
     "WireType",
     "WireUnit",
+    "WsClient",
+    "WsState",
     "object_key",
     "source",
     "sources",
@@ -82,6 +90,11 @@ _EXPORTS: dict[str, str] = {
     "WireAuthError": "deephaven_massive._massive.net.errors",
     "WireEntitlementError": "deephaven_massive._massive.net.errors",
     "WireError": "deephaven_massive._massive.net.errors",
+    "Reject": "deephaven_massive._massive.ws",
+    "Status": "deephaven_massive._massive.ws",
+    "StatusKind": "deephaven_massive._massive.ws",
+    "WsClient": "deephaven_massive._massive.ws",
+    "WsState": "deephaven_massive._massive.ws",
     "source": "deephaven_massive._massive.spec",
     "sources": "deephaven_massive._massive.spec",
     "DriftReport": "deephaven_massive._massive.spec.types",
@@ -121,6 +134,7 @@ if TYPE_CHECKING:
         WireType,
         WireUnit,
     )
+    from deephaven_massive._massive.ws import Reject, Status, StatusKind, WsClient, WsState
 else:
 
     def __getattr__(name: str) -> object:

@@ -1,8 +1,8 @@
 """Check one decoded JSON value against its field's `WireType` and convert it, exactly.
 
 Every decoder that reads JSON (the REST client's `to_batch`, the WebSocket client's frame
-decoder) converts each field value through `convert`, so one value means the same thing on
-every transport. The result is a plain Python scalar, independent of Arrow; each decoder
+decoder) converts each field value through `convert_field`, so one value means the same thing
+on every transport. The result is a plain Python scalar, independent of Arrow; each decoder
 builds its own columns from it.
 
 | `WireType` | Accepts | Returns |
@@ -48,6 +48,17 @@ digit is lost to a float or to `datetime`'s microsecond precision. Text without 
 refused, not assumed to be UTC: a field that Massive really sends offset-less would need a
 named conversion, so the assumption is never silent.
 
+**Messages.** The decoders share the text of their two row failures, so a failure reads the
+same on every transport and each decoder adds only its own context (the REST path and row, or
+the WebSocket channel, symbol, and host):
+
+- `convert_field` raises `UnconvertibleError` whose message names the field, the expected type
+  and any named conversion, and quotes the value: `Price (wire key 'p') expects double, got
+  "1.5"`.
+- `missing_key_message` gives the clause for a row that lacks a key the dataset needs:
+  `no SipTimestamp (wire key 't'), which the dataset needs`.
+- `excerpt` quotes a value as every message does: its JSON text, cut to 50 characters.
+
 The functions are pure and safe from any thread. This module imports only the standard
 library and `spec.types`.
 """
@@ -68,7 +79,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._massive.spec.types import Field
 
-__all__ = ["UnconvertibleError", "convert", "convert_field"]
+__all__ = ["UnconvertibleError", "convert", "convert_field", "excerpt", "missing_key_message"]
 
 _T = TypeVar("_T")
 
@@ -84,15 +95,19 @@ _INSTANT = re.compile(
     re.ASCII | re.IGNORECASE,
 )
 _EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
+# How many characters of a value's JSON text a message quotes.
+_EXCERPT = 50
 _SECONDS_PER_DAY = 86_400
 _NANOS_PER_SECOND = 1_000_000_000
 
 
 class UnconvertibleError(ValueError):
-    """A value does not fit its field's `WireType`.
+    """A value does not fit its field's `WireType`, or its field's named conversion.
 
-    Raised by `convert` with no message; the decoder that called it names the source, the
-    field, the expected type, and the value in its own error (a `WireError` or a `Reject`).
+    `convert_field` raises it with the shared message (the field, the expected type and any
+    named conversion, and the value's excerpt); the decoder that called it puts that message
+    after its own context in its own error (a `WireError` or a `Reject`). `convert` raises it
+    with no message, since it knows no field.
     """
 
 
@@ -260,9 +275,10 @@ _CONVERTERS: dict[WireType, Callable[[object], object]] = {
 def convert(wire_type: WireType, value: object) -> object:
     """Check a decoded JSON value against a wire type and return its converted form.
 
-    Call it once per non-null field value; a null is absent, never converted. Each type's
-    accepted values and result are in the module's table. A value that does not fit raises
-    `UnconvertibleError`, which the caller turns into its own error naming the field.
+    Call it once per non-null value of a type with no field at hand (the refresh checks
+    vendor samples this way); a decoder calls `convert_field`. A null is absent, never
+    converted. Each type's accepted values and result are in the module's table. A value that
+    does not fit raises `UnconvertibleError` with no message.
 
     Args:
         wire_type: The field's type.
@@ -409,7 +425,7 @@ def convert_field(field: Field, value: object) -> object:
     For a field with no `conversion` this is `convert(field.wire_type, value)`. For a field
     with one, the value arrives in the vendor's documented form and that named conversion
     (see the module's table) turns it into the form `convert` gives for `field.wire_type`.
-    Call it once per non-null value; a value that does not fit raises `UnconvertibleError`.
+    Call it once per non-null value.
 
     Args:
         field: The field the value belongs to.
@@ -417,7 +433,48 @@ def convert_field(field: Field, value: object) -> object:
 
     Returns:
         The value in the form `convert` gives for `field.wire_type`.
+
+    Raises:
+        UnconvertibleError: If the value does not fit, with the message every decoder shows
+            after its own context, such as `Exchange (wire key 'x') expects long (by the
+            conversion quoted-integer), got "4.8"`.
     """
-    if field.conversion is None:
-        return convert(field.wire_type, value)
-    return _NAMED[field.conversion](value)
+    try:
+        if field.conversion is None:
+            return convert(field.wire_type, value)
+        return _NAMED[field.conversion](value)
+    except UnconvertibleError:
+        expected = str(field.wire_type)
+        if field.conversion is not None:
+            expected += f" (by the conversion {field.conversion})"
+        raise UnconvertibleError(
+            f"{field.column} (wire key {field.wire_key!r}) expects {expected}, got {excerpt(value)}"
+        ) from None
+
+
+def excerpt(value: object) -> str:
+    """Quote a decoded JSON value for a message.
+
+    Args:
+        value: Any decoded JSON value.
+
+    Returns:
+        The value's JSON text (so `true`, `"1.5"`, `null`), non-ASCII kept, cut to its first
+        50 characters.
+    """
+    return json.dumps(value, ensure_ascii=False)[:_EXCERPT]
+
+
+def missing_key_message(field: Field) -> str:
+    """Return the clause for a row that lacks a key the dataset needs, or holds it as null.
+
+    Every decoder that fails a row for it (REST raises, WebSocket rejects the row) puts this
+    clause after its own context, so the failure reads the same on every transport.
+
+    Args:
+        field: The field the dataset needs.
+
+    Returns:
+        Such as `no SipTimestamp (wire key 't'), which the dataset needs`.
+    """
+    return f"no {field.column} (wire key {field.wire_key!r}), which the dataset needs"
