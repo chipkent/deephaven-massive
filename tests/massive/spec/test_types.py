@@ -116,21 +116,6 @@ def test_a_conversion_must_give_the_field_s_type() -> None:
         )
 
 
-def test_every_conversion_has_its_two_types() -> None:
-    assert {c: (c.declared, c.wire_type) for c in Conversion} == {
-        Conversion.ISO_TEXT_INSTANT: (WireType.STRING, WireType.ISO_INSTANT),
-        Conversion.ISO_DATE_TEXT: (WireType.ISO_INSTANT, WireType.DATE),
-        Conversion.QUOTED_INTEGER: (WireType.STRING, WireType.LONG),
-        Conversion.INTEGER_ID_AS_TEXT: (WireType.LONG, WireType.STRING),
-        Conversion.INTEGER_OR_TEXT_ID: (WireType.LONG, WireType.STRING),
-        Conversion.TEXT_OR_INTEGER_ID: (WireType.STRING, WireType.STRING),
-        Conversion.NUMBER_LABEL: (WireType.DOUBLE, WireType.STRING),
-        Conversion.ONE_CODE: (WireType.LONG, WireType.INT_ARRAY),
-        Conversion.MIDNIGHT_UTC_DATE: (WireType.DATE, WireType.DATE),
-        Conversion.DATE_AS_EPOCH: (WireType.DATE, WireType.EPOCH),
-    }
-
-
 # Membership.
 
 

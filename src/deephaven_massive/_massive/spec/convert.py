@@ -31,16 +31,14 @@ converters above are never loosened:
 | `iso-date-text` | `YYYY-MM-DD` text declared a date-time | `datetime.date` |
 | `quoted-integer` | decimal digits in text, such as `"48"` | `int` |
 | `integer-id-as-text` | an integer in the signed 64-bit range; text is refused | `str` |
-| `integer-or-text-id` | text, or an integer in the signed 64-bit range | `str` |
 | `text-or-integer-id` | text, or an integer in the signed 64-bit range | `str` |
-| `number-label` | text as sent, or a number as a decimal with a fraction (`1.0`) | `str` |
+| `number-label` | text as sent, or a finite number as float text (`1` gives `"1.0"`) | `str` |
 | `one-code` | one integer in the signed 32-bit range | `list[int]` |
 | `midnight-utc-date` | `YYYY-MM-DD`, or ISO-8601 midnight at offset `Z` or `+00:00` | `date` |
 | `date-as-epoch` | an integer in the signed 64-bit range (a count in the field's unit) | `int` |
 
-`integer-or-text-id` and `text-or-integer-id` accept the same forms; they differ in the type
-the specification declares (an integer or text), so each field's entry stays stale-checkable
-against its specification. A value the conversion cannot read (`"4.8"` for `quoted-integer`,
+`text-or-integer-id` serves a field the specification declares either an integer or text
+(`Conversion.declarations`). A value the conversion cannot read (`"4.8"` for `quoted-integer`,
 `"7"` for `integer-id-as-text`, a non-zero clock or another offset for `midnight-utc-date`)
 raises `UnconvertibleError` like any other bad value.
 
@@ -57,6 +55,7 @@ library and `spec.types`.
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import date
 from types import MappingProxyType
@@ -323,19 +322,25 @@ def _integer_id(value: object) -> str:
 def _number_label(value: object) -> str:
     """Return a label the specification types as a number (a version such as `"1.0"`) as text.
 
-    Text is kept as sent. A number is written as a decimal with a fractional part, so `1`
-    and `1.0` both give `"1.0"`, the form the vendor's samples use; anything else (a `bool`,
-    a number too large for a double) raises `UnconvertibleError`.
+    Text is kept as sent. A finite number is written as Python writes a float, so `1` and
+    `1.0` both give `"1.0"`, the form the vendor's samples use, and `1e20` gives `"1e+20"`.
 
     Args:
         value: A decoded JSON value.
 
     Returns:
         The label's text.
+
+    Raises:
+        UnconvertibleError: If `value` is neither text nor a finite number that fits a
+            double (a `bool` is not a number).
     """
     if isinstance(value, str):
         return value
-    return json.dumps(_double(value))
+    number = _double(value)
+    if not math.isfinite(number):
+        raise UnconvertibleError
+    return repr(number)
 
 
 def _midnight_date(value: object) -> date:
@@ -389,7 +394,6 @@ _NAMED: Mapping[Conversion, Callable[[object], object]] = MappingProxyType(
         Conversion.ISO_DATE_TEXT: _date,
         Conversion.QUOTED_INTEGER: _quoted_integer,
         Conversion.INTEGER_ID_AS_TEXT: _integer_id,
-        Conversion.INTEGER_OR_TEXT_ID: _identifier,
         Conversion.TEXT_OR_INTEGER_ID: _identifier,
         Conversion.NUMBER_LABEL: _number_label,
         Conversion.ONE_CODE: _one_code,

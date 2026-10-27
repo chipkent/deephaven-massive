@@ -210,6 +210,8 @@ class _PathGenerator:
         self.example: Json = None
         self.field_examples: dict[str, Json] = {}
         self.converted: set[str] = set()
+        # Each generated field's type by the representation rules, before any conversion.
+        self.declared_types: dict[str, WireType] = {}
         self.needed_conversions: set[str] = set()
 
     def use(self) -> PathUse:
@@ -342,15 +344,17 @@ class _PathGenerator:
         if item.conversion is not None:
             self.converted.add(item.wire_key)
         if item.conversion is not None and any(
-            not _converts(item.conversion.declared, v) for v in values
+            not _converts(self.declared_types[item.wire_key], v) for v in values
         ):
             self.needed_conversions.add(item.wire_key)
         refused = [v for v in values if not _converts_field(item, v)]
         for error in self.hand.sample_errors:
             if (error.path, error.wire_key) != (self.path, item.wire_key):
                 continue
-            if error.sample in refused:
-                refused = [v for v in refused if v != error.sample]
+            # Samples compare as JSON text, so `1`, `1.0`, and `true` stay three samples.
+            wrong = _json_text(error.sample)
+            if any(_json_text(v) == wrong for v in refused):
+                refused = [v for v in refused if _json_text(v) != wrong]
             else:
                 self.problem(
                     Gate.STALE_ENTRY,
@@ -543,15 +547,16 @@ class _PathGenerator:
         if spec_type is None:
             return None
         description = text(raw.schema, "description")
+        self.declared_types[raw.wire_key] = spec_type
         if "example" in raw.schema:
             self.field_examples[raw.wire_key] = raw.schema["example"]
         entry = self.hand.type_fixes.get((self.path, raw.wire_key))
         fix = entry.conversion if entry is not None else None
-        if fix is not None and fix.declared is not spec_type:
+        if fix is not None and spec_type not in fix.declarations:
             self.problem(
                 Gate.STALE_ENTRY,
                 raw.wire_key,
-                f"TYPE_FIXES expects the vendor type {fix.declared}, but the "
+                f"TYPE_FIXES expects a vendor type in {sorted(fix.declarations)}, but the "
                 f"specification now gives {spec_type}",
                 description=description,
             )
@@ -779,6 +784,18 @@ class _PathGenerator:
         if entry.unit is None:
             return ParamKind.DATE, (), None
         return ParamKind.TIMESTAMP, (), entry.unit
+
+
+def _json_text(value: Json) -> str:
+    """Return a documented value as canonical JSON text, for comparing samples exactly.
+
+    Args:
+        value: A JSON value.
+
+    Returns:
+        Its JSON text, object keys sorted.
+    """
+    return json.dumps(value, sort_keys=True)
 
 
 def _converts(wire_type: WireType, value: Json) -> bool:

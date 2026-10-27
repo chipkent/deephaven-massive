@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from deephaven_massive._massive.refresh import overrides
-from deephaven_massive._massive.refresh.exclusions import Exclusion
+from deephaven_massive._massive.refresh.exclusions import Exclusion, SampleError
 from deephaven_massive._massive.refresh.gates import (
     Gate,
     PathUse,
@@ -144,6 +144,10 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
         },
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},
         param_units={(_PATH, "gone"): ms},
+        sample_errors=(
+            SampleError(path=_PATH, wire_key="renamed", sample=1, reason="test"),
+            SampleError(path="/gone", wire_key="price", sample=1, reason="test"),
+        ),
     )
     uses = {_PATH: PathUse(wire_keys=frozenset({"price"}), identities=frozenset({"id"}))}
     assert _found(stale_entries(hand, uses)) == sorted(
@@ -157,6 +161,8 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
             ("stale-entry", "/gone", ""),  # result keys
             ("stale-entry", _PATH, "gone"),  # param units
             ("stale-entry", "", "zz"),  # identity
+            ("stale-entry", _PATH, "renamed"),  # a sample error of a field that is gone
+            ("stale-entry", "/gone", "price"),  # a sample error of a path that is gone
         ]
     )
 
@@ -202,11 +208,27 @@ def test_a_type_fix_whose_field_was_not_generated_is_left_to_other_checks() -> N
     assert list(unneeded_type_fixes(hand, {"/a": PathUse(wire_keys=frozenset({"i"}))})) == []
 
 
-def test_a_type_fix_from_untyped_text_is_never_unneeded() -> None:
-    fix = overrides.TypeFix(conversion=Conversion.QUOTED_INTEGER, reason="test")
+@pytest.mark.parametrize("conversion", [c for c in Conversion if not c.widens])
+def test_a_type_fix_that_only_retypes_is_never_unneeded(conversion: Conversion) -> None:
+    # A sample its declared type accepts is exactly what such a fix converts, so no sample
+    # ever "needs" it; it lasts while the specification declares the type.
+    fix = overrides.TypeFix(conversion=conversion, reason="test")
     hand = dataclasses.replace(_EMPTY, type_fixes={("/a", "x"): fix})
     use = PathUse(converted=frozenset({"x"}))
     assert list(unneeded_type_fixes(hand, {"/a": use})) == []
+
+
+def test_fixes_written_separately_are_separate_decisions_however_alike() -> None:
+    # Equal values, separate objects: one path's need does not keep the other's fix alive.
+    first = overrides.TypeFix(conversion=Conversion.TEXT_OR_INTEGER_ID, reason="same")
+    second = overrides.TypeFix(conversion=Conversion.TEXT_OR_INTEGER_ID, reason="same")
+    assert first == second
+    hand = dataclasses.replace(_EMPTY, type_fixes={("/a", "i"): first, ("/b", "i"): second})
+    needed = PathUse(converted=frozenset({"i"}), needed_conversions=frozenset({"i"}))
+    unneeded = PathUse(converted=frozenset({"i"}))
+    assert _found(unneeded_type_fixes(hand, {"/a": needed, "/b": unneeded})) == [
+        ("stale-entry", "/b", "i")
+    ]
 
 
 # --- Exclusions -----------------------------------------------------------------------------

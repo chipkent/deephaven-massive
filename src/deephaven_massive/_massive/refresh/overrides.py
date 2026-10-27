@@ -103,9 +103,9 @@ class TypeFix:
     """The named conversion of a field whose documented samples its declared type does not fit.
 
     The conversion (`spec.types.Conversion`) fixes both ends: the type the specification must
-    still declare (`conversion.declared`; if the specification changes it, the entry is stale)
-    and the type the field gets (`conversion.wire_type`). A conversion to an `epoch` takes its
-    unit from the field's `UNITS` entry, which it then requires.
+    still declare (one of `conversion.declarations`; if the specification changes it, the
+    entry is stale) and the type the field gets (`conversion.wire_type`). A conversion to an
+    `epoch` takes its unit from the field's `UNITS` entry, which it then requires.
 
     Attributes:
         conversion: The conversion the decoder applies to every value of the field; a value it
@@ -390,7 +390,7 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
             ),
         ),
         ("/tmx/v1/corporate-events", "tmx_company_id"): TypeFix(
-            conversion=Conversion.INTEGER_OR_TEXT_ID,
+            conversion=Conversion.TEXT_OR_INTEGER_ID,
             reason="The specification types the ID as an int64, but its example and the "
             'documentation sample are the text "2208". An identifier is text: either form is '
             "kept as its digits.",

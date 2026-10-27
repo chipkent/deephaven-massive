@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from deephaven_massive._massive.spec.types import Transport, WireType
+from deephaven_massive._massive.spec.types import Transport
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
@@ -213,9 +213,9 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
     """Report the hand entries that name a path, field, object, or parameter not generated.
 
     The entries checked here are those whose staleness shows only once every path has run:
-    `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, lexicon `SHAPES`, `PARAM_UNITS`,
-    `IDENTITY`, and `RESULT_KEYS`. An entry the snapshot contradicts on a field it does generate
-    is reported by the generator that meets the field.
+    `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `SAMPLE_ERRORS`, lexicon `SHAPES`,
+    `PARAM_UNITS`, `IDENTITY`, and `RESULT_KEYS`. An entry the snapshot contradicts on a field
+    it does generate is reported by the generator that meets the field.
 
     Args:
         hand: The hand input.
@@ -229,6 +229,7 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
         ("UNITS", hand.units),
         ("TAG_CONFLICTS", hand.tag_conflicts),
         ("TYPE_FIXES", hand.type_fixes),
+        ("SAMPLE_ERRORS", [(e.path, e.wire_key) for e in hand.sample_errors]),
     ]
     for table, keys in field_tables:
         for path, wire_key in keys:
@@ -279,30 +280,29 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
 def unneeded_type_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
     """Report the `TYPE_FIXES` entries no documented example needs any more.
 
-    A fix exists because a documented sample is a value the declared type refuses. Once no
-    example value of any field the fix names is such a value (Massive corrected its sample),
-    the fix is stale: the entries that share one fix (`_for` over a group of paths) are one
-    decision, needed while any of them is. A conversion from untyped text to a typed value
-    (`iso-text-instant`, `quoted-integer`) is exempt: plain text accepts its samples, so it is
-    needed for as long as the specification leaves the field untyped, and the declared-type
-    check retires it once the specification types the field.
+    A widening conversion (`Conversion.widens`) exists because a documented sample is in a form
+    the declared type refuses. Once no example value of any field the fix names is such a value
+    (Massive corrected its sample), the fix is stale. One `TypeFix` object is one decision: the
+    entries `_for` makes from it over a group of paths are needed while any of them is, while
+    two fixes written separately are judged separately, however alike. A conversion that only
+    retypes values its declared type accepts (`iso-text-instant`, `quoted-integer`,
+    `integer-id-as-text`, `one-code`) is exempt: it is needed for as long as the specification
+    declares the type, and the declared-type check retires it once that changes. A field that
+    was not generated with its conversion (it stopped on another problem, or the entry is
+    already stale) is left to the check that reported it.
 
     Args:
         hand: The hand input.
         uses: What each generated path consumed.
 
-    A field that was not generated with its conversion (it stopped on another problem, or
-    the entry is already stale) is left to the check that reported it.
-
     Yields:
         One `stale-entry` problem per generated field of each unneeded fix.
     """
-    decisions: dict[TypeFix, list[tuple[str, str]]] = {}
+    decisions: dict[int, tuple[TypeFix, list[tuple[str, str]]]] = {}
     for key, fix in hand.type_fixes.items():
-        decisions.setdefault(fix, []).append(key)
-    for fix, keys in decisions.items():
-        conversion = fix.conversion
-        if conversion.declared is WireType.STRING and conversion.wire_type is not WireType.STRING:
+        decisions.setdefault(id(fix), (fix, []))[1].append(key)
+    for fix, keys in decisions.values():
+        if not fix.conversion.widens:
             continue
         generated = [(p, k) for p, k in keys if p in uses and k in uses[p].converted]
         if any(k in uses[p].needed_conversions for p, k in generated):
@@ -312,8 +312,8 @@ def unneeded_type_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterato
                 gate=Gate.STALE_ENTRY,
                 source=path,
                 key=wire_key,
-                message=f"TYPE_FIXES entry ({conversion}) that no documented example needs: "
-                "the declared type now accepts every sample",
+                message=f"TYPE_FIXES entry ({fix.conversion}) that no documented example "
+                "needs: the declared type now accepts every sample",
             )
 
 

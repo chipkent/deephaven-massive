@@ -144,13 +144,14 @@ _CONVERSIONS = [
     (Conversion.ISO_DATE_TEXT, "2025-02-22", date(2025, 2, 22)),
     (Conversion.QUOTED_INTEGER, "48", 48),
     (Conversion.INTEGER_ID_AS_TEXT, 7, "7"),
-    (Conversion.INTEGER_OR_TEXT_ID, "2208", "2208"),  # the documented form
-    (Conversion.INTEGER_OR_TEXT_ID, 2208, "2208"),  # the declared form
+    (Conversion.TEXT_OR_INTEGER_ID, "2208", "2208"),
+    (Conversion.TEXT_OR_INTEGER_ID, 2208, "2208"),
     (Conversion.TEXT_OR_INTEGER_ID, "517478762", "517478762"),
     (Conversion.TEXT_OR_INTEGER_ID, 413131, "413131"),  # an identifier sent as an integer
     (Conversion.NUMBER_LABEL, "1.0", "1.0"),
     (Conversion.NUMBER_LABEL, 1.0, "1.0"),
     (Conversion.NUMBER_LABEL, 2, "2.0"),  # one spelling for a whole-number version
+    (Conversion.NUMBER_LABEL, 1e20, "1e+20"),
     (Conversion.ONE_CODE, 12, [12]),
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10", date(2023, 3, 10)),
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00.000Z", date(2023, 3, 10)),
@@ -178,8 +179,10 @@ def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> No
         (Conversion.QUOTED_INTEGER, str(2**63)),
         (Conversion.INTEGER_ID_AS_TEXT, "7"),  # integer only: text fails loudly
         (Conversion.INTEGER_ID_AS_TEXT, True),
-        (Conversion.INTEGER_OR_TEXT_ID, 7.5),
-        (Conversion.INTEGER_OR_TEXT_ID, True),
+        (Conversion.TEXT_OR_INTEGER_ID, 7.5),
+        (Conversion.TEXT_OR_INTEGER_ID, True),
+        (Conversion.NUMBER_LABEL, float("nan")),
+        (Conversion.NUMBER_LABEL, float("inf")),
         (Conversion.TEXT_OR_INTEGER_ID, False),
         (Conversion.TEXT_OR_INTEGER_ID, 2**63),
         (Conversion.NUMBER_LABEL, True),
@@ -204,30 +207,40 @@ def test_a_value_the_conversion_cannot_read_fails(conversion: Conversion, value:
         convert_field(_with(conversion), value)
 
 
-# A value the plain converter of each conversion's declared type refuses, and the conversion
-# accepts, or (for a conversion from untyped text) the value the conversion retypes.
-_NOT_A_NO_OP = {
-    Conversion.ISO_TEXT_INSTANT: "1970-01-01T00:00:01Z",
-    Conversion.ISO_DATE_TEXT: "2025-02-22",
-    Conversion.QUOTED_INTEGER: "48",
-    Conversion.INTEGER_ID_AS_TEXT: 7,
-    Conversion.INTEGER_OR_TEXT_ID: "2208",
-    Conversion.TEXT_OR_INTEGER_ID: 413131,
-    Conversion.NUMBER_LABEL: "1.0",
-    Conversion.ONE_CODE: 12,
-    Conversion.MIDNIGHT_UTC_DATE: "2023-03-10T00:00:00Z",
-    Conversion.DATE_AS_EPOCH: 1,
+# For each conversion and each type a specification may declare for it: a value the conversion
+# accepts. For a widening conversion the plain converter of the declared type refuses it; for
+# one that only retypes values its declared type accepts, the plain converter accepts it too.
+_SAMPLES = {
+    (Conversion.ISO_TEXT_INSTANT, WireType.STRING): "1970-01-01T00:00:01Z",
+    (Conversion.ISO_DATE_TEXT, WireType.ISO_INSTANT): "2025-02-22",
+    (Conversion.QUOTED_INTEGER, WireType.STRING): "48",
+    (Conversion.INTEGER_ID_AS_TEXT, WireType.LONG): 7,
+    (Conversion.TEXT_OR_INTEGER_ID, WireType.STRING): 413131,
+    (Conversion.TEXT_OR_INTEGER_ID, WireType.LONG): "2208",
+    (Conversion.NUMBER_LABEL, WireType.DOUBLE): "1.0",
+    (Conversion.ONE_CODE, WireType.LONG): 12,
+    (Conversion.MIDNIGHT_UTC_DATE, WireType.DATE): "2023-03-10T00:00:00Z",
+    (Conversion.DATE_AS_EPOCH, WireType.DATE): 1,
 }
 
 
-@pytest.mark.parametrize("conversion", list(Conversion))
-def test_no_conversion_is_a_no_op(conversion: Conversion) -> None:
-    # Each conversion changes what is accepted or what comes out, so no field ever declares
-    # a conversion that leaves its values as the plain converter would.
-    value = _NOT_A_NO_OP[conversion]
-    converted = convert_field(_with(conversion), value)
+@pytest.mark.parametrize(
+    ("conversion", "declared"),
+    [(c, d) for c in Conversion for d in sorted(c.declarations)],
+    ids=str,
+)
+def test_each_conversion_widens_or_retypes_exactly_as_it_says(
+    conversion: Conversion, declared: WireType
+) -> None:
+    # `widens` is what the converters do, not a table to keep in step: a widening conversion
+    # accepts a form the declared type refuses, and any other conversion changes the type of
+    # values the declared type accepts. So no conversion is a no-op.
+    value = _SAMPLES[conversion, declared]
+    convert_field(_with(conversion), value)
     try:
-        plain = convert(conversion.declared, value)
+        convert(declared, value)
     except UnconvertibleError:
-        return
-    assert (plain, conversion.declared) != (converted, conversion.wire_type)
+        assert conversion.widens
+    else:
+        assert not conversion.widens
+        assert conversion.wire_type is not declared

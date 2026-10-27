@@ -2,10 +2,10 @@
 
 The generators produce `RestPath` values; this module turns them into the text of the
 committed file the runtime loads (`spec.sources()`), and nothing else; `generate` writes it.
-The text is deterministic, so a refresh
-that changes nothing leaves the file byte for byte as it was, and the parity test can compare
-the committed file with a fresh rendering. It is JSON with one line per field and per
-parameter, so a refresh diff shows each changed field or parameter as one changed line.
+The text is deterministic, so a refresh that changes nothing leaves the file byte for byte as
+it was, and the parity test can compare the committed file with a fresh rendering. It is JSON
+with one line per field and per parameter, so a refresh diff shows each changed field or
+parameter as one changed line.
 
 It imports the standard library and `spec.types` only.
 """

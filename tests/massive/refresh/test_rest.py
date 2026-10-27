@@ -816,7 +816,7 @@ def test_gate_example_type_a_documented_value_the_type_refuses() -> None:
         ("example-type", _PATH, "bar.close"),
         ("example-type", _PATH, "code"),
     ]
-    fix = overrides.TypeFix(conversion=Conversion.INTEGER_OR_TEXT_ID, reason="test")
+    fix = overrides.TypeFix(conversion=Conversion.TEXT_OR_INTEGER_ID, reason="test")
     fixed = _snapshot({_PATH: _item(_row(code={"type": "integer"}), example=example)})
     (field,) = _one_of(fixed, _hand(type_fixes={(_PATH, "code"): fix})).fields
     assert field.wire_type is WireType.STRING
@@ -854,6 +854,31 @@ def test_gate_example_type_checks_a_field_s_own_example() -> None:
     )
     snapshot = _snapshot({_PATH: _item(row)})
     assert _problems(snapshot) == [("example-type", _PATH, "cusip")]
+
+
+def test_a_sample_error_matches_its_sample_as_json_text() -> None:
+    # `true`, `1`, and `1.0` are three samples: an entry for `1` does not excuse `true`.
+    row = _row(label={"type": "string", "example": True})
+    error = exclusions.SampleError(path=_PATH, wire_key="label", sample=1, reason="t")
+    snapshot = _snapshot({_PATH: _item(row)})
+    assert sorted(_problems(snapshot, _hand(sample_errors=(error,)))) == [
+        ("example-type", _PATH, "label"),
+        ("stale-entry", _PATH, "label"),
+    ]
+
+
+def test_an_integer_id_kept_as_text_is_not_stale_for_its_integer_sample() -> None:
+    # The conversion only retypes integers, so an integer sample never makes it stale.
+    fix = overrides.TypeFix(conversion=Conversion.INTEGER_ID_AS_TEXT, reason="t")
+    row = _row(trade_id={"type": "integer", "example": 413131})
+    (field,) = _one(row, _hand(type_fixes={(_PATH, "trade_id"): fix})).fields
+    assert (field.wire_type, field.conversion) == (WireType.STRING, Conversion.INTEGER_ID_AS_TEXT)
+
+
+def test_gate_stale_entry_a_sample_error_for_a_field_that_is_gone() -> None:
+    error = exclusions.SampleError(path=_PATH, wire_key="us_code", sample=1, reason="t")
+    snapshot = _snapshot({_PATH: _item(_row(price={"type": "number"}))})
+    assert _problems(snapshot, _hand(sample_errors=(error,))) == [("stale-entry", _PATH, "us_code")]
 
 
 def test_a_sample_error_skips_exactly_its_wrong_sample() -> None:
@@ -894,7 +919,7 @@ def test_a_type_fix_from_untyped_text_is_needed_while_the_text_is_untyped() -> N
 
 def test_gate_stale_entry_a_type_fix_no_sample_needs() -> None:
     # A corrected sample makes the identifier fix unnecessary.
-    fix = overrides.TypeFix(conversion=Conversion.INTEGER_OR_TEXT_ID, reason="t")
+    fix = overrides.TypeFix(conversion=Conversion.TEXT_OR_INTEGER_ID, reason="t")
     row = _row(company={"type": "integer", "example": 2208})
     snapshot = _snapshot({_PATH: _item(row)})
     assert _problems(snapshot, _hand(type_fixes={(_PATH, "company"): fix})) == [

@@ -3,9 +3,9 @@
 Everything the refresh does not read from the vendor's own files is hand input: the lexicons
 and identity keys (`lexicon`), the names, units, conversions, result keys, parameter units, and
 dataset kinds (`overrides`), and the excluded vendor items and disbelieved vendor samples
-(`exclusions`). Those modules hold
-the tables, each entry with its reason; this one only bundles them as `HandInput`, so a test can
-pass small tables of its own instead of the real ones.
+(`exclusions`). Those modules hold the tables, each entry with its reason; this one only
+bundles them as `HandInput`, so a test can pass small tables of its own instead of the real
+ones.
 """
 
 from __future__ import annotations
