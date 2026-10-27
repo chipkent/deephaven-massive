@@ -1,13 +1,19 @@
+import io
 import threading
 from collections.abc import Callable, Iterator
 from typing import Protocol
 
 import pyarrow as pa
 import pytest
+from botocore.exceptions import BotoCoreError
+from botocore.response import StreamingBody
+from urllib3.exceptions import ProtocolError
 
+from deephaven_massive._massive.flatfiles import client as client_module
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
+from deephaven_massive._types import override
 
 TIMEOUT = 30.0
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
@@ -237,3 +243,18 @@ def test_a_request_in_flight_at_close_closes_the_client_again(
     assert fake_s3.closes == 2
     if file is not None:
         file.close()
+
+
+class _BrokenRaw(io.BytesIO):
+    # A raw HTTP stream whose connection drops on the first read.
+    @override
+    def read(self, size: int | None = -1, /) -> bytes:
+        raise ProtocolError("Connection broken: IncompleteRead")
+
+
+def test_a_failed_body_read_is_an_os_error() -> None:
+    # botocore turns the dropped connection into its own error; the reader sees an OSError.
+    body = client_module._Body(StreamingBody(_BrokenRaw(), 10))
+    with pytest.raises(OSError, match="IncompleteRead") as info:
+        body.read(4)
+    assert isinstance(info.value.__cause__, BotoCoreError)
