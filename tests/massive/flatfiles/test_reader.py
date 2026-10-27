@@ -1,3 +1,4 @@
+import csv
 import gzip
 import io
 from collections.abc import Callable
@@ -9,6 +10,7 @@ import pytest
 
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.spec.types import DriftReport
 from deephaven_massive._types import override
 
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
@@ -49,6 +51,7 @@ def plan(
     to_ns: Callable[[pa.Array], pa.Array] = identity,
     session: tuple[str, date] | None = None,
     block_size: int = 1 << 20,
+    required: frozenset[str] | None = None,
 ) -> ReadPlan:
     return ReadPlan(
         columns=columns,
@@ -59,6 +62,7 @@ def plan(
         to_ns=to_ns,
         session=session,
         block_size=block_size,
+        required=frozenset({"ticker", time_header}) if required is None else required,
     )
 
 
@@ -87,7 +91,15 @@ def trades(
 
 def table(file: FlatFile, read: ReadPlan) -> pa.Table:
     with file:
-        return pa.Table.from_batches(list(file.batches(read)))
+        return pa.Table.from_batches([batch for batch, _ in file.batches(read)])
+
+
+def drift(file: FlatFile, read: ReadPlan) -> DriftReport:
+    # The drift of every block of a file is the same report.
+    with file:
+        reports = {report for _, report in file.batches(read)}
+    (report,) = reports
+    return report
 
 
 def test_headers_are_renamed_typed_and_lists_parsed(trades: FlatFile) -> None:
@@ -176,7 +188,8 @@ def test_every_block_yields_a_batch_even_when_empty(
     rows = "".join(f"12,,4,{n},1,1.5,{n},1,10,1,AAPL,,\n" for n in range(400))
     file = opened(KEY, TRADE_HEADER + rows)
     with file:
-        batches = list(file.batches(plan(symbols=pa.array(["ZZZZ"]), block_size=1024)))
+        read = plan(symbols=pa.array(["ZZZZ"]), block_size=1024)
+        batches = [batch for batch, _ in file.batches(read)]
     assert len(batches) > 10
     assert all(batch.num_rows == 0 for batch in batches)
     assert batches[0].schema.names == [column.column for column in TRADE_COLUMNS]
@@ -305,3 +318,156 @@ def test_a_filtered_out_row_is_never_parsed(opened: Callable[[str, str | bytes],
     result = table(opened(KEY, TRADE_HEADER + rows), read)
     assert result["Id"].to_pylist() == ["3"]
     assert result["Conditions"].to_pylist() == [[12, 37]]
+
+
+# Matching by name, and drift.
+
+TRADE_NAMES = TRADE_HEADER.strip().split(",")
+TRADE_ROWS = (
+    '"12,37",,4,1,1,227.48,100,1741012200000000123,100,3,AAPL,,\n'
+    ",,4,2,2,388.5,101,1741012200000002000,50,3,MSFT,,0\n"
+)
+
+
+def reorder(text: str, order: list[str]) -> str:
+    # The same rows under the given headers, in their order: a name the text lacks is an
+    # empty field, and a name the order lacks is not written.
+    lines = list(csv.reader(io.StringIO(text)))
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(order)
+    for line in lines[1:]:
+        row = dict(zip(lines[0], line, strict=True))
+        writer.writerow([row.get(name, "") for name in order])
+    return out.getvalue()
+
+
+def test_a_reordered_header_reads_identically(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    text = TRADE_HEADER + TRADE_ROWS
+    shuffled = reorder(text, list(reversed(TRADE_NAMES)))
+    assert shuffled.startswith("trf_timestamp,trf_id,ticker,")
+    expected = table(opened(KEY, text), plan())
+    assert expected.num_rows == 2
+    assert table(opened(KEY, shuffled), plan()).equals(expected)
+    assert drift(opened(KEY, shuffled), plan()) == drift(opened(KEY, text), plan())
+
+
+def test_an_extra_header_is_dropped_and_reported(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    text = TRADE_HEADER + TRADE_ROWS
+    wider = reorder(text, [*TRADE_NAMES[:3], "halted", *TRADE_NAMES[3:]])
+    assert table(opened(KEY, wider), plan()).equals(table(opened(KEY, text), plan()))
+    # The plan documents seven of the file's headers; the others, and the new one, are extra.
+    documented = {column.header for column in TRADE_COLUMNS}
+    assert drift(opened(KEY, wider), plan()) == DriftReport(
+        extra=frozenset({*TRADE_NAMES, "halted"} - documented)
+    )
+
+
+def test_a_missing_header_is_a_null_column_and_reported(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    names = [n for n in TRADE_NAMES if n not in {"price", "conditions"}]
+    narrower = reorder(TRADE_HEADER + TRADE_ROWS, names)
+    result = table(opened(KEY, narrower), plan())
+    assert result.schema.field("Price").type == pa.float64()
+    assert result["Price"].to_pylist() == [None, None]
+    assert result.schema.field("Conditions").type == pa.list_(pa.int32())
+    assert result["Conditions"].to_pylist() == [None, None]
+    assert result["Symbol"].to_pylist() == ["AAPL", "MSFT"]
+    assert drift(opened(KEY, narrower), plan()).missing == {"price", "conditions"}
+
+
+@pytest.mark.parametrize("key_header", ["ticker", "sip_timestamp"])
+def test_a_missing_key_header_fails_before_the_first_block(
+    *, opened: Callable[[str, str | bytes], FlatFile], key_header: str
+) -> None:
+    names = [n for n in TRADE_NAMES if n != key_header]
+    file = opened(KEY, reorder(TRADE_HEADER + TRADE_ROWS, names))
+    with file:
+        batches = file.batches(plan())
+        with pytest.raises(WireError) as info:
+            next(batches)
+    assert info.value.message == (
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: the header lacks the "
+        f"key column {key_header}"
+    )
+    assert (info.value.path, info.value.host) == (KEY, HOST)
+
+
+def test_every_missing_key_header_is_named(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    with pytest.raises(WireError, match=r"lacks the key column sip_timestamp, ticker$"):
+        table(opened(KEY, "price\n1.5\n"), plan())
+    with pytest.raises(WireError, match=r"lacks the key column sip_timestamp, ticker$"):
+        table(opened(KEY, ""), plan())  # an empty file has no header at all
+
+
+def test_a_header_without_rows_yields_nothing(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    for text in (TRADE_HEADER, TRADE_HEADER.rstrip("\n")):
+        file = opened(KEY, text)
+        with file:
+            assert list(file.batches(plan())) == []
+
+
+def test_a_quoted_header_with_crlf_line_ends_is_parsed(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    quoted = ",".join(f'"{name}"' for name in TRADE_NAMES) + "\r\n"
+    text = quoted + TRADE_ROWS.replace("\n", "\r\n")
+    assert table(opened(KEY, text), plan()).equals(
+        table(opened(KEY, TRADE_HEADER + TRADE_ROWS), plan())
+    )
+    assert drift(opened(KEY, text), plan()).missing == frozenset()
+
+
+def test_a_header_longer_than_a_block_is_a_wire_error(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    columns = TRADE_COLUMNS[:2]
+    long = "ticker,sip_timestamp," + ",".join(f"h{n}" for n in range(200)) + "\n"
+    with pytest.raises(WireError, match=r"the header line is longer than 256 bytes$"):
+        table(opened(KEY, long + "AAPL,5\n"), plan(columns=columns, block_size=256))
+    # A header of exactly one block, line end included, still reads.
+    exact = "ticker,sip_timestamp,x" + "x" * (256 - 23) + "\n"
+    assert len(exact) == 256
+    result = table(opened(KEY, exact + "AAPL,5,\n"), plan(columns=columns, block_size=256))
+    assert result["Timestamp"].to_pylist() == [5]
+
+
+def test_a_header_that_is_not_utf8_is_a_wire_error() -> None:
+    file, _ = flat_file(KEY, gzip.compress(b"ticker,\xffprice\nAAPL,1\n"))
+    with pytest.raises(WireError, match=r"^cannot read .*'utf-8' codec can't decode") as info:
+        table(file, plan())
+    assert isinstance(info.value.__cause__, UnicodeDecodeError)
+
+
+def test_a_value_that_does_not_convert_names_its_header(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Reordered, so the header named is found by name, not by its documented position.
+    text = reorder(TRADE_HEADER + "12,,4,1,1,1.5,1,1,10,1,AAPL,,x\n", list(reversed(TRADE_NAMES)))
+    with pytest.raises(WireError) as info:
+        table(opened(KEY, text), plan())
+    assert info.value.message.startswith(
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: trf_timestamp is not "
+        "int64: In CSV column #0: "
+    )
+    assert "'x'" in info.value.message
+
+
+def test_a_row_of_the_wrong_width_keeps_arrows_message(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    with pytest.raises(WireError) as info:
+        table(opened(KEY, TRADE_HEADER + "AAPL,1\n"), plan())
+    assert info.value.message.startswith(
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: CSV parse error: "
+    )
+    assert "Expected 13 columns, got 2" in info.value.message

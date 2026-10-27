@@ -1,4 +1,4 @@
-"""Tests for the declared timestamp units and their conversions."""
+"""Tests for the declared timestamp units and the timestamp routine."""
 
 import logging
 import re
@@ -8,13 +8,14 @@ import pyarrow as pa
 import pytest
 
 from deephaven_massive import _errors
-from deephaven_massive._datasets.catalog import unit_rules
+from deephaven_massive._datasets.catalog import declared_units
 from deephaven_massive._datasets.timestamps import (
     FMV_NS_THRESHOLD,
+    MAX_INSTANT_NS,
+    MIN_INSTANT_NS,
     TimeField,
     TimeUnit,
     TimeUnitTable,
-    UnitRule,
 )
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
@@ -30,53 +31,66 @@ def is_timestamp_like(field: str) -> bool:
 
 
 MS = TimeField("stocks.trades", Transport.WS, "t")
-NS = TimeField("stocks.trades", Transport.REST, "sip_timestamp")
+NS = TimeField("stocks.trades", Transport.FLAT_FILES, "sip_timestamp")
+US = TimeField("test.micros", Transport.REST, "timestamp")
+S = TimeField("test.seconds", Transport.REST, "updated")
 FMV = TimeField("stocks.fmv", Transport.WS, "t")
-FOREX_LAST = TimeField("forex.quotes", Transport.REST, "timestamp")
 
 TABLE = TimeUnitTable(
     {
-        MS: UnitRule(TimeUnit.MILLISECONDS),
-        NS: UnitRule(TimeUnit.NANOSECONDS),
-        FMV: UnitRule(TimeUnit.FMV_MAGNITUDE),
-        FOREX_LAST: UnitRule(TimeUnit.MILLISECONDS, unverified=True),
+        MS: TimeUnit.MILLISECONDS,
+        NS: TimeUnit.NANOSECONDS,
+        US: TimeUnit.MICROSECONDS,
+        S: TimeUnit.SECONDS,
+        FMV: TimeUnit.FMV_MAGNITUDE,
     }
 )
 
 # 2023-11-14T22:13:20Z
 SECONDS = 1_700_000_000
+NANOS = SECONDS * 10**9
 
 
-def test_table_membership() -> None:
+def ints(*values: int | None) -> pa.Array:
+    return pa.array(values, pa.int64())
+
+
+def test_table_membership_and_lookup() -> None:
     assert MS in TABLE
-    assert FOREX_LAST in TABLE
     assert TimeField("x.y", Transport.WS, "t") not in TABLE
+    assert TABLE.unit(US) is TimeUnit.MICROSECONDS
 
 
-def test_milliseconds_and_nanoseconds() -> None:
-    assert TABLE.to_epoch_ns(MS, SECONDS * 1_000) == SECONDS * 10**9
-    assert TABLE.to_epoch_ns(NS, SECONDS * 10**9) == SECONDS * 10**9
+def test_every_fixed_unit_scales_to_nanoseconds() -> None:
+    assert TABLE.to_epoch_ns(S, SECONDS) == NANOS
+    assert TABLE.to_epoch_ns(MS, SECONDS * 10**3) == NANOS
+    assert TABLE.to_epoch_ns(US, SECONDS * 10**6) == NANOS
+    assert TABLE.to_epoch_ns(NS, NANOS) == NANOS
 
 
 def test_unregistered_fields_are_refused() -> None:
     with pytest.raises(LookupError, match=r"stocks\.trades\.q on WS"):
-        TABLE.rule(TimeField("stocks.trades", Transport.WS, "q"))
+        TABLE.unit(TimeField("stocks.trades", Transport.WS, "q"))
     with pytest.raises(LookupError):
         TABLE.to_epoch_ns(TimeField("stocks.trades", Transport.WS, "q"), 1)
 
 
-def test_fmv_rule_at_the_boundary(
+def test_fmv_rule_classifies_at_the_threshold(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_errors, "_logged", set())
     with caplog.at_level(logging.INFO, logger="deephaven_massive._datasets.timestamps"):
-        assert TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD) == FMV_NS_THRESHOLD
-        # Just below the threshold is milliseconds; such a value overflows (see the test below).
         # The documentation sample, 13 digits: milliseconds.
         assert TABLE.to_epoch_ns(FMV, 1678220098130) == 1678220098130 * 10**6
-    detected = [r for r in caplog.records if "FMV timestamps detected" in r.getMessage()]
-    assert len(detected) == 1
-    assert "in ns" in detected[0].getMessage()
+        assert TABLE.to_epoch_ns(FMV, NANOS) == NANOS
+    detected = [r.getMessage() for r in caplog.records if "FMV timestamps" in r.getMessage()]
+    assert detected == ["FMV timestamps detected in ms (magnitude rule)"]
+    # The threshold itself is nanoseconds (1973, so out of bounds); just below it is
+    # milliseconds, which overflows.
+    with pytest.raises(MassiveError, match=rf"{FMV_NS_THRESHOLD} ms\|ns is outside 1990 to 2100"):
+        TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD)
+    with pytest.raises(MassiveError, match=rf"{FMV_NS_THRESHOLD - 1} ms overflows"):
+        TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD - 1)
 
 
 def test_fmv_rule_logs_only_a_decided_unit(
@@ -84,50 +98,90 @@ def test_fmv_rule_logs_only_a_decided_unit(
 ) -> None:
     monkeypatch.setattr(_errors, "_logged", set())
     with caplog.at_level(logging.INFO, logger="deephaven_massive._datasets.timestamps"):
-        nulls = pa.array([None, None], type=pa.int64())
-        assert TABLE.to_epoch_ns_array(FMV, nulls).to_pylist() == [None, None]
+        assert TABLE.to_epoch_ns_array(FMV, ints(None, None)).to_pylist() == [None, None]
         assert not [r for r in caplog.records if "FMV timestamps detected" in r.getMessage()]
-        TABLE.to_epoch_ns_array(FMV, pa.array([1678220098130]))
+        TABLE.to_epoch_ns_array(FMV, ints(NANOS))
     detected = [r.getMessage() for r in caplog.records if "FMV timestamps" in r.getMessage()]
-    assert detected == ["FMV timestamps detected in ms (magnitude rule)"]
-
-
-def test_unverified_range_check() -> None:
-    assert TABLE.to_epoch_ns(FOREX_LAST, SECONDS * 1_000) == SECONDS * 10**9
-    # Nanoseconds registered as milliseconds land far after 2100.
-    with pytest.raises(MassiveError, match=r"timestamp unit mismatch for forex\.quotes\.timestamp"):
-        TABLE.to_epoch_ns(FOREX_LAST, SECONDS * 10**9)
-    # Seconds land in 1970.
-    with pytest.raises(MassiveError):
-        TABLE.to_epoch_ns(FOREX_LAST, SECONDS)
-
-
-def test_verified_rules_skip_the_range_check() -> None:
-    assert TABLE.to_epoch_ns(NS, 5) == 5
+    assert detected == ["FMV timestamps detected in ns (magnitude rule)"]
 
 
 def test_array_conversions() -> None:
-    values = pa.array([SECONDS * 1_000, None], pa.int64())
-    assert TABLE.to_epoch_ns_array(MS, values).to_pylist() == [SECONDS * 10**9, None]
-    assert TABLE.to_epoch_ns_array(NS, pa.array([7], pa.int32())).to_pylist() == [7]
-    fmv = pa.array([FMV_NS_THRESHOLD, 1678220098130])
-    assert TABLE.to_epoch_ns_array(FMV, fmv).to_pylist() == [
-        FMV_NS_THRESHOLD,
-        1678220098130 * 10**6,
-    ]
-    assert TABLE.to_epoch_ns_array(FMV, pa.array([1678220098130])).to_pylist() == [
-        1678220098130 * 10**6
-    ]
+    assert TABLE.to_epoch_ns_array(MS, ints(SECONDS * 1_000, None)).to_pylist() == [NANOS, None]
+    assert TABLE.to_epoch_ns_array(NS, pa.array([NANOS], pa.uint64())).to_pylist() == [NANOS]
+    fmv = ints(NANOS, 1678220098130, None)
+    assert TABLE.to_epoch_ns_array(FMV, fmv).to_pylist() == [NANOS, 1678220098130 * 10**6, None]
 
 
-def test_array_range_check() -> None:
-    good = pa.array([SECONDS * 1_000, None])
-    assert TABLE.to_epoch_ns_array(FOREX_LAST, good).to_pylist() == [SECONDS * 10**9, None]
-    assert TABLE.to_epoch_ns_array(FOREX_LAST, pa.array([None], pa.int64())).to_pylist() == [None]
-    with pytest.raises(MassiveError, match="unit mismatch"):
-        TABLE.to_epoch_ns_array(FOREX_LAST, pa.array([SECONDS * 1_000, SECONDS * 10**9]))
-    with pytest.raises(MassiveError, match="unit mismatch"):
-        TABLE.to_epoch_ns_array(FOREX_LAST, pa.array([SECONDS]))
+def test_the_bound_includes_1990_and_all_of_2100() -> None:
+    assert datetime.fromtimestamp(MIN_INSTANT_NS / 10**9, UTC) == datetime(1990, 1, 1, tzinfo=UTC)
+    assert datetime.fromtimestamp(MAX_INSTANT_NS / 10**9, UTC) == datetime(2101, 1, 1, tzinfo=UTC)
+    assert TABLE.to_epoch_ns(NS, MIN_INSTANT_NS) == MIN_INSTANT_NS
+    assert TABLE.to_epoch_ns(NS, MAX_INSTANT_NS - 1) == MAX_INSTANT_NS - 1
+    with pytest.raises(MassiveError, match=rf"{MIN_INSTANT_NS - 1} ns is outside 1990 to 2100"):
+        TABLE.to_epoch_ns(NS, MIN_INSTANT_NS - 1)
+    with pytest.raises(MassiveError, match=rf"{MAX_INSTANT_NS} ns is outside"):
+        TABLE.to_epoch_ns(NS, MAX_INSTANT_NS)
+    seconds = MAX_INSTANT_NS // 10**9
+    assert TABLE.to_epoch_ns(S, seconds - 1) == MAX_INSTANT_NS - 10**9
+    with pytest.raises(MassiveError, match=rf"{seconds} s is outside"):
+        TABLE.to_epoch_ns(S, seconds)
+
+
+def test_milliseconds_declared_as_nanoseconds_fail_the_bound() -> None:
+    # A 13-digit millisecond value read as nanoseconds is in January 1970.
+    with pytest.raises(
+        MassiveError,
+        match=r"^timestamp unit mismatch for stocks\.trades\.sip_timestamp: "
+        r"1700000000000 ns is outside 1990 to 2100$",
+    ):
+        TABLE.to_epoch_ns_array(NS, ints(NANOS, SECONDS * 1_000, 5))
+
+
+def test_nanoseconds_declared_as_milliseconds_overflow() -> None:
+    with pytest.raises(
+        MassiveError,
+        match=rf"^timestamp unit mismatch for stocks\.trades\.t: {NANOS} ms overflows "
+        r"64-bit nanoseconds$",
+    ):
+        TABLE.to_epoch_ns_array(MS, ints(SECONDS * 1_000, NANOS))
+    # A negative value overflows too, and the message names the first offending value.
+    with pytest.raises(MassiveError, match=rf"{-NANOS} ms overflows"):
+        TABLE.to_epoch_ns_array(MS, ints(None, -NANOS, NANOS))
+
+
+def test_seconds_declared_as_microseconds_fail_the_bound() -> None:
+    with pytest.raises(MassiveError, match=rf"{SECONDS} us is outside"):
+        TABLE.to_epoch_ns(US, SECONDS)
+
+
+def test_values_beyond_64_bits_are_rejected() -> None:
+    with pytest.raises(
+        MassiveError, match=rf"^timestamp unit mismatch for stocks\.trades\.t: {2**64} does not"
+    ):
+        TABLE.to_epoch_ns(MS, 2**64)
+
+
+def test_nulls_pass_the_bound() -> None:
+    assert TABLE.to_epoch_ns_array(NS, ints(None)).to_pylist() == [None]
+    assert TABLE.to_epoch_ns_array(NS, ints()).to_pylist() == []
+
+
+def test_the_routine_turns_epoch_zero_into_null_outside_the_time_column() -> None:
+    values = ints(NANOS, 0, None)
+    assert TABLE.instants(NS, values, time_column=False).to_pylist() == [NANOS, None, None]
+    assert TABLE.instants(MS, ints(0, SECONDS * 1_000), time_column=False).to_pylist() == [
+        None,
+        NANOS,
+    ]
+    # The time column keeps its 0, which then fails the bound.
+    with pytest.raises(MassiveError, match=r"stocks\.trades\.sip_timestamp: 0 ns is outside"):
+        TABLE.instants(NS, values, time_column=True)
+    assert TABLE.instants(NS, ints(NANOS), time_column=True).to_pylist() == [NANOS]
+
+
+def test_the_routine_bounds_every_column() -> None:
+    with pytest.raises(MassiveError, match="5 ns is outside"):
+        TABLE.instants(NS, ints(0, 5), time_column=False)
 
 
 def test_labels() -> None:
@@ -148,56 +202,15 @@ def test_not_timestamp_like(name: str) -> None:
 
 
 def test_every_declared_timestamp_field_of_every_dataset_has_a_unit() -> None:
-    table = TimeUnitTable(unit_rules(CATALOG.by_name))
+    table = TimeUnitTable(declared_units(CATALOG.by_name))
     for spec in CATALOG.by_name.values():
         for key_map_transport, key_map in spec.key_maps.items():
             for key in key_map:
                 if is_timestamp_like(key):
                     assert TimeField(spec.name, key_map_transport, key) in table
-    for field in unit_rules(CATALOG.by_name):
+    for field in declared_units(CATALOG.by_name):
         assert field in table
-
-
-def test_fmv_millisecond_overflow_is_rejected() -> None:
-    # Just below the threshold is milliseconds; times 10**6 it exceeds a 64-bit nanosecond.
-    with pytest.raises(MassiveError, match=r"timestamp unit mismatch for stocks\.fmv\.t"):
-        TABLE.to_epoch_ns_array(FMV, pa.array([FMV_NS_THRESHOLD, FMV_NS_THRESHOLD - 1]))
-    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
-        TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD - 1)
-
-
-def test_scalar_millisecond_overflow_is_rejected() -> None:
-    with pytest.raises(MassiveError, match=r"timestamp unit mismatch for stocks\.trades\.t"):
-        TABLE.to_epoch_ns(MS, 2**62)
-
-
-def test_fmv_millisecond_value_that_overflows_is_rejected_on_both_paths() -> None:
-    # Below the FMV threshold, so classified as milliseconds; 10**19 ns does not fit int64.
-    value = 10_000_000_000_000
-    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
-        TABLE.to_epoch_ns(FMV, value)
-    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
-        TABLE.to_epoch_ns_array(FMV, pa.array([value]))
-
-
-def test_values_beyond_64_bits_are_rejected() -> None:
-    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
-        TABLE.to_epoch_ns(NS, 2**64)
 
 
 def test_fmv_threshold_is_ten_to_the_seventeenth() -> None:
     assert FMV_NS_THRESHOLD == 10**17
-
-
-def test_unverified_range_boundaries() -> None:
-    key = TimeField("x.y", Transport.REST, "timestamp")
-    table = TimeUnitTable({key: UnitRule(TimeUnit.NANOSECONDS, unverified=True)})
-    epoch = datetime(1970, 1, 1, tzinfo=UTC)
-    low = int((datetime(1990, 1, 1, tzinfo=UTC) - epoch).total_seconds()) * 10**9
-    high = int((datetime(2101, 1, 1, tzinfo=UTC) - epoch).total_seconds()) * 10**9
-    assert table.to_epoch_ns(key, low) == low  # 1990-01-01T00:00Z is inside
-    assert table.to_epoch_ns(key, high - 1) == high - 1  # the last nanosecond of 2100 too
-    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
-        table.to_epoch_ns(key, low - 1)
-    with pytest.raises(MassiveError, match="timestamp unit mismatch"):
-        table.to_epoch_ns(key, high)

@@ -15,7 +15,8 @@ one `SessionCore`, which queries and namespaces share. The core owns:
   every diagnostics row is queued while `registry_lock` is held, so rows reach the tables in
   the order the registry changed;
 - the result registry and the reaper thread (`liveness.py`);
-- the diagnostics tables and their writer thread (`diagnostics.py`);
+- the diagnostics tables and their writer thread, and the drift registry that every transport
+  reports schema drift to (`diagnostics.py`);
 - the closers that run when the session closes, or when it is collected without `close()`;
 - one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`),
   each returning one of the ports defined here: `RestTransport` (`fetch`, `poll`, REST
@@ -58,6 +59,7 @@ from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
+    DriftRegistry,
     StreamRow,
     StreamState,
     StreamUpdate,
@@ -423,7 +425,7 @@ class SessionCore:
     def __init__(
         self, config: MassiveConfig, exec_ctx: ExecutionContext, label: str, *, catalog: Catalog
     ) -> None:
-        """Create the core, its reaper thread, and the diagnostics tables and writer.
+        """Create the core, its reaper, the diagnostics tables and writer, and the drift registry.
 
         Args:
             config: The validated configuration.
@@ -446,6 +448,7 @@ class SessionCore:
             self.diagnostics.stop()
             raise
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
+        self.drift: Final = DriftRegistry()
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamState] = {}
         # Set once by `attach`, right after construction and before any verb can run.

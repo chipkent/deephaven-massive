@@ -4,8 +4,8 @@ Every dataset (`m.stocks.trades`, `m.reference.news`, ...) is described once, de
 a `DatasetSpec` in its namespace module under `_namespaces/`. Each of those modules exports
 `DATASETS: tuple[DatasetSpec, ...]`, and `_session.py` composes them, once, at import, into the
 process's `Catalog` (`CATALOG`), which every session core holds. Adding a dataset never touches
-a shared file: the time-unit rules, the schema registry, and the coverage tests are all derived
-from the specs. This module names no namespace module and imports nothing above the dataset
+a shared file: the declared time units, the schema registry, and the coverage tests are all
+derived from the specs. This module names no namespace module and imports nothing above the dataset
 layer, so the catalog is built by the code that owns the namespaces and handed down.
 
 A spec says which transports serve the dataset, and its query class follows from them:
@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.dates import require_aware
 from deephaven_massive._datasets.schema import ColumnType, Schema, model_schema
-from deephaven_massive._datasets.timestamps import TimeField, TimeUnit, UnitRule
+from deephaven_massive._datasets.timestamps import TimeField, TimeUnit
 from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan, Transport
 
 if TYPE_CHECKING:
@@ -47,9 +47,9 @@ __all__ = [
     "ParamKind",
     "SymbolParam",
     "check_filters",
+    "declared_units",
     "filter_params",
     "sdk_params",
-    "unit_rules",
 ]
 
 logger = logging.getLogger(__name__)
@@ -168,8 +168,6 @@ class DatasetSpec:
         flat_file_prefixes: The S3 key prefix per bar timespan, or under None for non-bar
             datasets. A futures prefix contains the placeholder `{venue}`.
         time_units: The unit of every timestamp field, keyed by `(transport, field)`.
-        unverified_time_units: The keys of `time_units` whose unit could not be verified;
-            they get the 1990 to 2100 range check.
         time_axis: The SDK parameter pair that `start` and `end` map to, such as
             `("timestamp_gte", "timestamp_lt")`, for datasets with a `…T` time axis.
         poll_mode: The default `poll()` mode.
@@ -198,7 +196,6 @@ class DatasetSpec:
     family: ChannelFamily = ChannelFamily.TICK
     flat_file_prefixes: Mapping[Timespan | None, str] = field(default_factory=dict)
     time_units: Mapping[tuple[Transport, str], TimeUnit] = field(default_factory=dict)
-    unverified_time_units: frozenset[tuple[Transport, str]] = frozenset()
     time_axis: tuple[str, str] | None = None
     poll_mode: PollMode = PollMode.REPLACE
     poll_keys: tuple[str, ...] = ("Symbol",)
@@ -214,8 +211,8 @@ class DatasetSpec:
             ValueError: If the name is not `"<namespace>.<dataset>"`, the keys of `channels`
                 or `flat_file_prefixes` do not match `is_bars`, not exactly one of `schema` and
                 `rest_model` is given, a WebSocket dataset (one with `channels`) has a
-                `rest_model` instead of a hand-written schema or no `asset_class`, an
-                unverified unit is not among `time_units`, a key map fills an `Instant` column
+                `rest_model` instead of a hand-written schema or no `asset_class`, a key map
+                fills an `Instant` column
                 from a field with no `time_units` entry, a key column is not in `schema`, or a
                 dataset with flat files has no `FLAT_FILES` key map filling `Symbol` and
                 `Timestamp` (and, for futures, `SessionEndDate`, against which every futures
@@ -254,11 +251,6 @@ class DatasetSpec:
                 raise ValueError(f"{self.name}: give exactly one of schema and rest_model")
             object.__setattr__(self, "schema", model.schema)
             object.__setattr__(self, "rest_columns", model.columns_by_path)
-        stray = sorted(
-            f"{t.value}:{f}" for t, f in self.unverified_time_units - set(self.time_units)
-        )
-        if stray:
-            raise ValueError(f"{self.name}: unverified units {stray} are not in time_units")
         missing = sorted(set(self.poll_keys) - set(self.schema.column_names))
         if missing:
             raise ValueError(f"{self.name}: poll_keys {missing} are not columns")
@@ -465,19 +457,17 @@ def _is_date(kind: ParamKind, value: object) -> bool:
     return not isinstance(value, datetime)
 
 
-def unit_rules(specs: Mapping[str, DatasetSpec]) -> dict[TimeField, UnitRule]:
-    """Collect the declared timestamp units of a set of datasets.
+def declared_units(specs: Mapping[str, DatasetSpec]) -> dict[TimeField, TimeUnit]:
+    """Collect the declared timestamp units of a set of datasets, for a `TimeUnitTable`.
 
     Args:
         specs: Datasets keyed by name, as `Catalog.by_name` holds them.
 
     Returns:
-        One rule per declared `(dataset, transport, field)`.
+        The unit of every declared `(dataset, transport, field)`.
     """
     return {
-        TimeField(spec.name, transport, name): UnitRule(
-            unit, unverified=(transport, name) in spec.unverified_time_units
-        )
+        TimeField(spec.name, transport, name): unit
         for spec in specs.values()
         for (transport, name), unit in spec.time_units.items()
     }

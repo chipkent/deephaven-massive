@@ -8,16 +8,19 @@ signed or sent. Answers have the shape S3 itself gives: a `StreamingBody` for an
 an error an HTTP status with S3's error code and message and an `x-amz-request-id` header,
 which botocore raises as `ClientError`. Nothing leaves the process.
 
-Objects are stored by key. A key can also be refused with any status (403 `AccessDenied` for a
-plan without the dataset, 500 for a server error), fail before any response by name
-(`"unreachable"`: the endpoint cannot be reached), or fail part-way through its body (a dropped
-connection while streaming). Every request, every client close, and every body close is
+Objects are stored by key, as bytes or, through `put_csv`, as a flat file with any header (to
+reorder, add, or drop columns by name). A key can also be refused with any status (403
+`AccessDenied` for a plan without the dataset, 500 for a server error), fail before any response
+by name (`"unreachable"`: the endpoint cannot be reached), or fail part-way through its body (a
+dropped connection while streaming). Every request, every client close, and every body close is
 recorded. Built by the `fake_s3` fixture in `tests/conftest.py`; thread-safe, since the library
 reads several keys at once.
 """
 
 from __future__ import annotations
 
+import csv
+import gzip
 import io
 import threading
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -31,7 +34,7 @@ from urllib3.exceptions import ProtocolError
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     import pytest
     from types_boto3_s3.client import S3Client
@@ -107,6 +110,26 @@ class FakeS3:
         """Store an object."""
         with self._lock:
             self._objects[key] = data
+
+    def put_csv(
+        self, key: str, header: Sequence[str], rows: Iterable[Mapping[str, object]]
+    ) -> None:
+        """Store a gzip CSV flat file with exactly the given header, in the given order.
+
+        Each row is written by header name, so the same rows can be stored under a reordered
+        header, a header with an extra name, or one that lacks a name: a name the header lacks
+        is not written, and a header name the row lacks is an empty field (Massive's null).
+
+        Args:
+            key: The object key.
+            header: The header names, in file order.
+            rows: The rows, each mapping header names to values.
+        """
+        text = io.StringIO()
+        writer = csv.DictWriter(text, header, extrasaction="ignore", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        self.put(key, gzip.compress(text.getvalue().encode()))
 
     def put_dropped(self, key: str, data: bytes) -> None:
         """Store an object whose body fails after `data`, as a connection dropped mid-read."""
