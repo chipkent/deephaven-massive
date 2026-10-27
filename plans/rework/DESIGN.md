@@ -3136,7 +3136,10 @@ names.
 **The drift job.** `.github/workflows/spec-drift.yml` runs `--check` weekly and on demand. With
 drift it keeps one standing "Massive API drift" issue (found by title and the `spec-drift`
 label, which it creates when missing; reopened if closed; never a duplicate) listing each item
-with its action; with no drift it does nothing. Its permissions are `contents: read` and
+with its action; with no drift it does nothing. GitHub notifies no one of an edited issue
+body, so when the report differs from the open issue's body the job also posts one short
+comment giving the new and the previous item counts, with no vendor text; an unchanged report
+posts nothing, and opening or reopening the issue, which notifies, adds no comment. Its permissions are `contents: read` and
 `issues: write` and nothing else: the checkout needs read access because the repository is
 private, and the issue and its label need write access to issues. It never pushes, never opens
 a pull request, and is never a gate.
@@ -3191,7 +3194,8 @@ so flat-file coverage comes from the documentation pages and overviews.
 - **No drift:** the job does nothing: no issue, no comment.
 - **Drift:** it opens, or updates in place, the single standing issue "Massive API drift"
   (found by that title and the `spec-drift` label, which it creates when missing; reopened if
-  closed; never a duplicate). The body lists each item with its action:
+  closed; never a duplicate), and comments once when the report of an open issue changed. The
+  body lists each item with its action:
   - **unaccounted items** (a documented REST endpoint, WebSocket channel, or flat-file dataset
     neither generated nor excluded): refresh and add a dataset, or add an `EXCLUSIONS` entry
     with a reason;

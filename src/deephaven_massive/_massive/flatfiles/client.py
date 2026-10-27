@@ -83,7 +83,7 @@ from deephaven_massive._massive.net.retry import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from botocore.response import StreamingBody
     from types_boto3_s3.client import S3Client
@@ -323,11 +323,17 @@ class FlatFileClient:
         Errors: as for `open`, except that HTTP 404 (S3's `NoSuchBucket`) is a `WireError`
         too. A message names the bucket instead of an object, such as `"HTTP 403 for
         s3://flatfiles/ at https://files.massive.com (AccessDenied: Access Denied)"`, and its
-        `path` is `""`.
+        `path` is `""`. A page that says the listing goes on but gives no continuation token,
+        or repeats the one it was asked with, is a `WireError` too: following it would stop
+        early or never end.
 
         Returns:
             The prefixes without their trailing `/` (`"us_stocks_sip"`), in the order S3 lists
             them (UTF-8 binary order).
+
+        Raises:
+            WireError: For a truncated page without a new continuation token; the request
+                errors, described above, propagate from each page's request.
         """
         location = f"s3://{self._bucket}/ at {self._endpoint_url}"
         found: list[str] = []
@@ -340,9 +346,18 @@ class FlatFileClient:
                 verb="list",
             )
             found += [entry["Prefix"].removesuffix("/") for entry in page.get("CommonPrefixes", [])]
-            if not page["IsTruncated"]:
+            # Read as plain data: a server other than S3 may leave either field out.
+            fields: Mapping[str, object] = page
+            if not fields.get("IsTruncated"):
                 return found
-            token = page["NextContinuationToken"]
+            following = fields.get("NextContinuationToken")
+            if not isinstance(following, str) or not following or following == token:
+                fault = "the same" if isinstance(following, str) and following else "no"
+                raise WireError(
+                    f"cannot list {location}: a truncated page gave {fault} continuation token",
+                    host=self._host,
+                )
+            token = following
 
     def _list_page(self, client: S3Client, *, token: str | None) -> ListObjectsV2OutputTypeDef:
         """Request one page of the bucket's top-level prefixes.

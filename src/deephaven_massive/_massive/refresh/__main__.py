@@ -15,10 +15,11 @@ reads (`vendor/massive/`) is in a distribution.
 - With `--check`, it downloads the same live sources into a scratch directory, compares them
   with the vendored snapshot and the committed schemas (`drift`), prints the drift report as
   Markdown to standard output, and changes nothing. It exits with status 0 when there is no
-  drift, 1 when there is, and 2 when the check could not be made (a download failed, the
-  vendored snapshot does not match its manifest, or the flat-file bucket could not be
-  listed), with the reason on standard error. With `MASSIVE_S3_ACCESS_KEY_ID` and
-  `MASSIVE_S3_SECRET_ACCESS_KEY` set, it also lists the flat-file bucket's top-level prefixes.
+  drift, 1 when there is, and 2 when the check could not be made (a download failed, a
+  vendored snapshot file is missing, unreadable, not JSON, or does not match the manifest, or
+  the flat-file bucket could not be listed), with the reason on standard error. With
+  `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` set, it also lists the
+  flat-file bucket's top-level prefixes.
   The weekly drift workflow runs this same command.
 
 Review the snapshot diff and the `spec/*.json` diff together in one pull request.
@@ -104,7 +105,17 @@ def _check() -> int:
     """
     try:
         report = drift.check()
-    except (RefreshError, fetch.FetchError, WireError) as error:
+    # OSError and ValueError (JSONDecodeError among them) are a vendored snapshot file that is
+    # missing, unreadable, or not JSON, and RecursionError a vendor schema nested past what the
+    # interpreter allows: the check could not be made, which is not drift.
+    except (
+        RefreshError,
+        fetch.FetchError,
+        WireError,
+        OSError,
+        ValueError,
+        RecursionError,
+    ) as error:
         sys.stderr.write(f"the drift check could not be made: {error}\n")
         return _CHECK_FAILED
     sys.stdout.write(report.text())

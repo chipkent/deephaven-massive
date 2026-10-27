@@ -74,6 +74,7 @@ class FakeS3(Protocol):
     before_answer: Callable[[str], object] | None
     listings: list[str | None]
     page_size: int
+    pagination: str | None
 
     def put(self, key: str, data: bytes) -> None: ...
     def put_dropped(self, key: str, data: bytes) -> None: ...
@@ -1099,6 +1100,40 @@ def test_prefixes_of_a_bucket_that_fits_one_page_is_one_request(
     assert client.prefixes() == ["us_stocks_sip"]
     assert fake_s3.listings == [None, None]
     assert len(fake_s3.clients) == 1
+
+
+def test_a_last_page_without_its_pagination_fields_ends_the_listing(
+    *, client: FlatFileClient, fake_s3: FakeS3
+) -> None:
+    _store_prefixes(fake_s3, "a", "b", "c")
+    fake_s3.page_size = 2
+    fake_s3.pagination = "bare"
+    assert client.prefixes() == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize(
+    ("pagination", "listings", "message"),
+    [
+        ("missing", [None], "a truncated page gave no continuation token"),
+        ("repeat", [None, "after-2"], "a truncated page gave the same continuation token"),
+    ],
+)
+def test_a_truncated_page_without_a_new_token_is_a_wire_error(
+    *,
+    client: FlatFileClient,
+    fake_s3: FakeS3,
+    pagination: str,
+    listings: list[str | None],
+    message: str,
+) -> None:
+    _store_prefixes(fake_s3, "a", "b", "c", "d", "e")
+    fake_s3.page_size = 2
+    fake_s3.pagination = pagination
+    with pytest.raises(WireError) as info:
+        client.prefixes()
+    assert info.value.message == f"cannot list {BUCKET}: {message}"
+    assert info.value.host == "files.massive.com"
+    assert fake_s3.listings == listings
 
 
 def test_prefixes_of_an_empty_bucket_is_empty(*, client: FlatFileClient, fake_s3: FakeS3) -> None:

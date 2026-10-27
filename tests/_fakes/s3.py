@@ -93,6 +93,10 @@ class FakeS3:
         self.listings: list[str | None] = []
         # The most prefixes one listing page holds; S3's own pages hold 1000.
         self.page_size = 1000
+        # How listing pages bend S3's pagination fields, as a server other than S3 might:
+        # "missing" sends no token on a truncated page, "repeat" sends back the token it was
+        # asked with (after a first page), and "bare" leaves both fields out of a last page.
+        self.pagination: str | None = None
         # Called with the key on the requesting thread before each answer, so a test can hold a
         # read in flight or act at that moment; set it before the library's first read.
         self.before_answer: Callable[[str], object] | None = None
@@ -232,6 +236,7 @@ class FakeS3:
             refusal = self._refusals.get("")
             stored = {*self._objects, *self._dropped}
             size = self.page_size
+            pagination = self.pagination
         if failure is not None:
             raise EndpointConnectionError(endpoint_url="https://files.massive.com")
         if refusal is not None:
@@ -244,8 +249,14 @@ class FakeS3:
             "CommonPrefixes": [{"Prefix": prefix} for prefix in prefixes[start : start + size]],
             "ResponseMetadata": {"HTTPStatusCode": 200},
         }
-        if more:
-            answer["NextContinuationToken"] = f"after-{start + size}"
+        if more and pagination != "missing":
+            answer["NextContinuationToken"] = (
+                (token or f"after-{start + size}")
+                if pagination == "repeat"
+                else f"after-{start + size}"
+            )
+        if not more and pagination == "bare":
+            del answer["IsTruncated"]
         return AWSResponse("", 200, HTTPHeaders(), None), answer
 
     def _answer(self, context: dict[str, Any], **_: object) -> tuple[AWSResponse, dict[str, Any]]:

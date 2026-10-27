@@ -8,14 +8,19 @@ in-memory repository and nothing reaches GitHub.
 and every run of the program reads and rewrites; a test seeds it before the script runs and
 reads `labels`, `issues`, and `calls` afterwards. The program answers exactly the commands the
 script uses, with the output shapes real `gh` gives for `--json` (issue states `OPEN` and
-`CLOSED`, newest issue first), and fails on anything else, so a new command in the script
-fails its tests until the fake learns it:
+`CLOSED`, newest issue first, at most `--limit` of them), and fails on anything else, so a new
+command in the script fails its tests until the fake learns it:
 
-- `label list --search S --limit N --json name`;
-- `label create NAME --color C --description D` (an existing name fails, as with `gh`);
-- `issue list --label L --state all --limit N --json number,title,state`;
+- `label list --search S --limit 1000 --json name`;
+- `label create NAME --color C --description D` (a name that exists in any case fails, as
+  GitHub's label names compare without regard to case);
+- `issue list --label L --state all --limit 1000 --json number,title,state`;
 - `issue create --title T --label L --body-file F`;
-- `issue edit N --body-file F` and `issue reopen N`.
+- `issue view N --json body`, `issue edit N --body-file F`, `issue reopen N`, and
+  `issue comment N --body B` (recorded in the issue's `comments`).
+
+Like GitHub, it stores a body without its trailing newlines, so the script must compare
+bodies as text, not byte for byte.
 
 Like `gh`, it refuses to run without `GH_TOKEN` and `GH_REPO`, and a command can be made to
 fail (`fail`) to test that the script stops on it.
@@ -52,7 +57,9 @@ class FakeGh:
         self.failing: list[str] = []
         self.calls: list[list[str]] = []
 
-    def issue(self, title: str, *, labels: Sequence[str], state: str = "OPEN") -> int:
+    def issue(
+        self, title: str, *, labels: Sequence[str], state: str = "OPEN", body: str = ""
+    ) -> int:
         """Add an existing issue.
 
         Returns:
@@ -60,7 +67,14 @@ class FakeGh:
         """
         number = len(self.issues) + 1
         self.issues.append(
-            {"number": number, "title": title, "state": state, "labels": list(labels), "body": ""}
+            {
+                "number": number,
+                "title": title,
+                "state": state,
+                "labels": list(labels),
+                "body": _stored(body),
+                "comments": [],
+            }
         )
         return number
 
@@ -120,45 +134,68 @@ def _expect(options: dict[str, str], **expected: str) -> None:
         raise SystemExit(f"fake gh: unexpected options {options}, wanted {wanted}")
 
 
-def _run(fake: FakeGh, arguments: list[str]) -> str:
-    # Answer one command, changing `fake`, and return what it prints.
+def _stored(body: str) -> str:
+    # GitHub keeps a body without its trailing newlines.
+    return body.rstrip("\n")
+
+
+def _label(fake: FakeGh, arguments: list[str]) -> str:
+    # Answer one `label` command, changing `fake`, and return what it prints.
     match arguments:
-        case ["label", "list", *rest]:
+        case ["list", *rest]:
             options = _options(rest)
-            _expect(options, limit="100", json="name")
+            _expect(options, limit="1000", json="name")
             search = options["--search"]
-            return json.dumps([{"name": name} for name in fake.labels if search in name])
-        case ["label", "create", name, *rest]:
+            found = [name for name in fake.labels if search.lower() in name.lower()]
+            return json.dumps([{"name": name} for name in found])
+        case ["create", name, *rest]:
             _options(rest)
-            if name in fake.labels:
+            if name.lower() in {label.lower() for label in fake.labels}:
                 raise SystemExit(f"label with name {name!r} already exists")
             fake.labels.append(name)
             return ""
-        case ["issue", "list", *rest]:
+    raise SystemExit(f"fake gh: unknown command label {arguments}")
+
+
+def _listed(fake: FakeGh, options: dict[str, str]) -> str:
+    # The issues `issue list` prints: newest first, at most `--limit` of them.
+    _expect(options, state="all", limit="1000", json="number,title,state")
+    found = [i for i in reversed(fake.issues) if options["--label"] in i["labels"]]
+    found = found[: int(options["--limit"])]
+    return json.dumps([{k: i[k] for k in ("number", "title", "state")} for i in found])
+
+
+def _issue(fake: FakeGh, arguments: list[str]) -> str:
+    # Answer one `issue` command, changing `fake`, and return what it prints.
+    output = ""
+    match arguments:
+        case ["list", *rest]:
+            output = _listed(fake, _options(rest))
+        case ["create", *rest]:
             options = _options(rest)
-            _expect(options, state="all", limit="100", json="number,title,state")
-            label = options["--label"]
-            found = [i for i in reversed(fake.issues) if label in i["labels"]]
-            return json.dumps([{k: i[k] for k in ("number", "title", "state")} for i in found])
-        case ["issue", "create", *rest]:
-            options = _options(rest)
-            number = len(fake.issues) + 1
-            fake.issues.append(
-                {
-                    "number": number,
-                    "title": options["--title"],
-                    "state": "OPEN",
-                    "labels": [options["--label"]],
-                    "body": Path(options["--body-file"]).read_text(),
-                }
-            )
-            return f"https://github.com/owner/repo/issues/{number}"
-        case ["issue", "edit", number, "--body-file", path]:
-            fake.issues[int(number) - 1]["body"] = Path(path).read_text()
-            return ""
-        case ["issue", "reopen", number]:
+            number = fake.issue(options["--title"], labels=[options["--label"]])
+            fake.issues[-1]["body"] = _stored(Path(options["--body-file"]).read_text())
+            output = f"https://github.com/owner/repo/issues/{number}"
+        case ["view", number, "--json", "body"]:
+            output = json.dumps({"body": fake.issues[int(number) - 1]["body"]})
+        case ["edit", number, "--body-file", path]:
+            fake.issues[int(number) - 1]["body"] = _stored(Path(path).read_text())
+        case ["comment", number, "--body", text]:
+            fake.issues[int(number) - 1]["comments"].append(text)
+        case ["reopen", number]:
             fake.issues[int(number) - 1]["state"] = "OPEN"
-            return ""
+        case _:
+            raise SystemExit(f"fake gh: unknown command issue {arguments}")
+    return output
+
+
+def _run(fake: FakeGh, arguments: list[str]) -> str:
+    # Answer one command, changing `fake`, and return what it prints.
+    match arguments:
+        case ["label", *rest]:
+            return _label(fake, rest)
+        case ["issue", *rest]:
+            return _issue(fake, rest)
     raise SystemExit(f"fake gh: unknown command {arguments}")
 
 

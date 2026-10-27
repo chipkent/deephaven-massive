@@ -45,8 +45,9 @@ what differs from the snapshot and the committed schemas, each item under the ac
 resolves it; it exits 0 without drift, 1 with drift, and 2 when the check cannot be made. With
 `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` set it also lists the flat-file
 bucket's top-level prefixes. `.github/workflows/spec-drift.yml` runs it weekly and on demand
-and keeps one standing "Massive API drift" issue (`scripts/spec-drift-issue.sh`); it is
-advisory, never a required check.
+and keeps one standing "Massive API drift" issue (`scripts/spec-drift-issue.sh`), with a
+short comment when the report of an open issue changed; it is advisory, never a required
+check.
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.

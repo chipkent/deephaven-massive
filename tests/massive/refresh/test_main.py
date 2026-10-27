@@ -110,8 +110,9 @@ def test_check_prints_the_report_and_exits_one_on_drift(
         fetch.FetchError("GET https://api.massive.com/openapi answered HTTP 503"),
         RefreshError([Problem(gate=Gate.SNAPSHOT, source="", key="x", message="edited")]),
         WireError("HTTP 403 for s3://flatfiles/ at https://files.massive.com", status=403),
+        RecursionError("maximum recursion depth exceeded"),
     ],
-    ids=["download", "snapshot", "bucket"],
+    ids=["download", "snapshot", "bucket", "recursion"],
 )
 def test_a_check_that_cannot_be_made_exits_two(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], error: Exception
@@ -124,6 +125,23 @@ def test_a_check_that_cannot_be_made_exits_two(
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err == f"the drift check could not be made: {error}\n"
+
+
+@pytest.mark.parametrize("damage", ["missing", "not-json"])
+def test_a_check_against_a_damaged_snapshot_exits_two(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    # The vendored snapshot is read before anything is downloaded, so no network is needed.
+    (tmp_path / snapshot.MANIFEST).write_text("{not json" if damage == "not-json" else "{}")
+    monkeypatch.setattr(snapshot, "DIRECTORY", tmp_path)
+    assert command.main(["--check"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err.startswith("the drift check could not be made: ")
 
 
 def test_check_and_fetch_exclude_each_other(capsys: pytest.CaptureFixture[str]) -> None:

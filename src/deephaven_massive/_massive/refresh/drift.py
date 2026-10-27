@@ -16,7 +16,8 @@ sections, each with the action a person takes:
   new in the specifications, removed while not generated, unreadable, or whose status changed
   otherwise than to deprecated (draft to current, say); response and message fields added,
   removed, or retyped, or whose unit tag (`x-polygon-go-type`) or requiredness changed; REST
-  parameters added, removed, or changed; documentation pages added to or removed from
+  parameters added, removed, or changed; a live channel whose `ev` values leave out the
+  channel its path names; documentation pages added to or removed from
   `llms.txt`; a REST page that documents another endpoint, or a WebSocket page another feed;
   a flat-file page's "Columns" table, its "Example Data" header, or an overview's dataset
   rows; and every problem a refresh gate would stop on if the live sources were fetched and
@@ -27,10 +28,12 @@ sections, each with the action a person takes:
   committed flat-file prefix no live overview names any more.
 
 The comparison is semantic: descriptions, examples, key order, and formatting are ignored,
-so a reworded page or a reordered document reports nothing. Fields are compared on the vendor
-document's own terms (dotted keys below the response body, such as `results[].p`, with their
-schema type, format, unit tag, and requiredness), independently of the refresh's naming rules,
-so a change is reported even where a refresh gate would stop on it.
+so a reworded page or a reordered document reports nothing. Paths and channels are read and
+compared by `spec_diff`, on the vendor document's own terms (dotted keys below the response
+body, such as `results[].p`, with a bounded type signature, unit tag, and requiredness each),
+independently of the refresh's naming rules, so a change is reported even where a refresh gate
+would stop on it. A live specification without paths is a vendor error, not the removal of
+every path: the check refuses it.
 
 **Untrusted text.** Every vendor value in a report (a path, key, type, header, or gate
 message) is quoted as Markdown code with its backticks replaced and its whitespace collapsed,
@@ -48,15 +51,22 @@ import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Final, NamedTuple
+from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
-from deephaven_massive._massive.refresh import docs, fetch, generate, rest, ws
+from deephaven_massive._massive.refresh import docs, fetch, generate, ws
 from deephaven_massive._massive.refresh.flatfiles import venue_template
-from deephaven_massive._massive.refresh.gates import RefreshError
+from deephaven_massive._massive.refresh.gates import Gate, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
-from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required
-from deephaven_massive._massive.refresh.snapshot import Snapshot
+from deephaven_massive._massive.refresh.snapshot import OPENAPI, WEBSOCKET, Snapshot
+from deephaven_massive._massive.refresh.spec_diff import (
+    Operation,
+    changed,
+    labelled,
+    operation_changes,
+    operations,
+    quote,
+)
 from deephaven_massive._massive.spec import sources
 from deephaven_massive._massive.spec.types import Transport
 
@@ -64,7 +74,7 @@ if TYPE_CHECKING:
     import datetime as dt
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
-    from deephaven_massive._massive.refresh.openapi import Json, JsonObject
+    from deephaven_massive._massive.refresh.openapi import JsonObject
 
 __all__ = [
     "S3_BUCKET",
@@ -91,9 +101,6 @@ S3_BUCKET: Final = "flatfiles"
 
 # The documentation pages that describe an area rather than one endpoint, feed, or dataset.
 _OVERVIEW_PAGES: Final = frozenset({"overview", "quickstart"})
-# How deep fields nest before a nested object is compared as one opaque value. Massive's
-# deepest response nests five levels; the bound only stops a schema that refers to itself.
-_MAX_NESTING: Final = 16
 # The vendor statuses that account for a path or channel without generating it.
 _NOT_GENERATED: Final = frozenset({"deprecated", "draft"})
 # The command a person runs to see the report locally.
@@ -164,7 +171,7 @@ class Drift:
         Returns:
             `"- <area> <item as code>: <detail>"`.
         """
-        return f"- {self.area} {_code(self.item)}: {self.detail}"
+        return f"- {self.area} {quote(self.item)}: {self.detail}"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -257,302 +264,6 @@ class Committed:
         )
 
 
-class _Leaf(NamedTuple):
-    """One field of a response or message, as the drift check compares it.
-
-    Attributes:
-        type: Its schema type as text (`_type_text`).
-        tag: Its unit tag, or `None`.
-        required: Whether it is required, as the generators decide it: listed as required by
-            its object and by every enclosing object up to the row.
-    """
-
-    type: str
-    tag: str | None
-    required: bool
-
-
-@dataclass(frozen=True)
-class _Operation:
-    """What the drift check compares of one path or channel of a specification.
-
-    Attributes:
-        status: `"deprecated"`, `"draft"`, or `"current"`.
-        parameters: Each parameter's name mapped to its location, type, and constraints.
-        fields: Each dotted field key below the body mapped to its type, unit tag, and
-            requiredness.
-    """
-
-    status: str
-    parameters: Mapping[str, str]
-    fields: Mapping[str, _Leaf]
-
-
-def _code(value: str) -> str:
-    """Quote a vendor value as Markdown code that cannot break out or become markup.
-
-    Args:
-        value: Any text, such as a field key or a gate's message.
-
-    Returns:
-        The text with its backticks replaced by `'` and its whitespace collapsed to single
-        spaces, in backticks; a value with nothing left is `(none)` in backticks.
-    """
-    text = " ".join(value.replace("`", "'").split())
-    return f"`{text or '(none)'}`"
-
-
-def _walk(spec: OpenApi, node: Json, keys: Sequence[str], *, where: str) -> Json:
-    """Follow a chain of keys through objects that may be references.
-
-    Args:
-        spec: The specification.
-        node: Where to start.
-        keys: The keys to follow, in order.
-        where: The path, for messages.
-
-    A `RefreshError` from `OpenApi.deref` (a value on the way that is neither an object nor
-    `None`, or a reference that cannot be followed) propagates.
-
-    Returns:
-        The value at the end of the chain, or `None` when a key is missing on the way.
-    """
-    for key in keys:
-        if node is None:
-            return None
-        node = spec.deref(node, where).get(key)
-    return node
-
-
-def _type_text(spec: OpenApi, schema: JsonObject, where: str) -> str:
-    """Describe a resolved schema's type as the report shows it.
-
-    Args:
-        spec: The specification.
-        schema: A resolved schema.
-        where: The path, for messages.
-
-    Returns:
-        The type and format (`"string (date-time)"`), `"array of <item type>"`, `"oneOf of 2
-        shapes"` for a choice, or `"untyped"`.
-    """
-    for choice in ("oneOf", "anyOf"):
-        branches = schema.get(choice)
-        if isinstance(branches, list):
-            return f"{choice} of {len(branches)} shapes"
-    kind = schema.get("type")
-    text = kind if isinstance(kind, str) else "untyped"
-    form = schema.get("format")
-    if isinstance(form, str):
-        text += f" ({form})"
-    if kind == "array":
-        text += f" of {_type_text(spec, spec.schema(schema.get('items', {}), where), where)}"
-    return text
-
-
-def _tag(schema: JsonObject) -> str | None:
-    """Return a schema's unit tag: the name of its `x-polygon-go-type`, if it has one.
-
-    Args:
-        schema: A resolved schema.
-
-    Returns:
-        The tag's name, such as `"IMilliseconds"`, or `None`.
-    """
-    tag = schema.get("x-polygon-go-type")
-    name = tag.get("name") if isinstance(tag, dict) else None
-    return name if isinstance(name, str) else None
-
-
-def _leaves(
-    spec: OpenApi,
-    node: Json,
-    *,
-    prefix: str,
-    where: str,
-    depth: int = 0,
-    is_required: bool = True,
-) -> Iterator[tuple[str, _Leaf]]:
-    """Flatten a body or message schema into its dotted field keys.
-
-    Object properties are joined with `.`; an array of objects adds `[]` to its key and goes
-    on into the objects (`results[].day.c`). Anything else is a leaf. A property is required
-    when its object lists it in `required` and the object itself is required; the body and
-    each object of an array (a row) count as required, as the generators count them.
-
-    Args:
-        spec: The specification.
-        node: The schema, possibly a reference.
-        prefix: The key of `node`; `""` for the body itself.
-        where: The path, for messages.
-        depth: How many objects and arrays enclose `node`.
-        is_required: Whether `node` itself is required.
-
-    A `RefreshError` from resolving a schema (a reference that cannot be followed)
-    propagates.
-
-    Yields:
-        Each leaf's key (`"(body)"` for a body that is itself a leaf) and its type and tag.
-    """
-    schema = spec.schema(node, where)
-    found = properties(schema)
-    if depth < _MAX_NESTING and found is not None:
-        needed = required(schema)
-        for name, child in found.items():
-            yield from _leaves(
-                spec,
-                child,
-                prefix=f"{prefix}.{name}" if prefix else name,
-                where=where,
-                depth=depth + 1,
-                is_required=is_required and name in needed,
-            )
-        return
-    if depth < _MAX_NESTING and schema.get("type") == "array":
-        items = spec.schema(schema.get("items", {}), where)
-        if properties(items) is not None:
-            yield from _leaves(spec, items, prefix=f"{prefix}[]", where=where, depth=depth + 1)
-            return
-    yield prefix or "(body)", _Leaf(_type_text(spec, schema, where), _tag(schema), is_required)
-
-
-def _parameter(spec: OpenApi, node: Json, where: str) -> tuple[str, str]:
-    """Describe one parameter as the report compares it.
-
-    Args:
-        spec: The specification.
-        node: The parameter object, possibly a reference.
-        where: The path, for messages.
-
-    A `RefreshError` from resolving it (a reference that cannot be followed) propagates.
-
-    Returns:
-        Its name, and its location, type, whether it is required, and its allowed values.
-    """
-    parameter = spec.deref(node, where)
-    schema = spec.schema(parameter.get("schema", {}), where)
-    text = f"{parameter.get('in')} {_type_text(spec, schema, where)}"
-    if parameter.get("required") is True:
-        text += ", required"
-    enum = schema.get("enum")
-    if isinstance(enum, list):
-        text += f", one of {', '.join(sorted(str(value) for value in enum))}"
-    return str(parameter.get("name")), text
-
-
-def _operation(spec: OpenApi, path: str, node: Json) -> _Operation | str:
-    """Read what the drift check compares of one path or channel.
-
-    Args:
-        spec: The specification.
-        path: The path, as the specification spells it.
-        node: Its path item, possibly a reference.
-
-    Returns:
-        The operation, or the reason it cannot be read (a reference that names nothing, say).
-    """
-    try:
-        item = spec.deref(node, path)
-        operation = spec.deref(item.get("get", {}), path)
-        parameters = [
-            _parameter(spec, parameter, path)
-            for holder in (item, operation)
-            if isinstance(listed := holder.get("parameters"), list)
-            for parameter in listed
-        ]
-        body = _walk(
-            spec,
-            operation,
-            ("responses", "200", "content", "application/json", "schema"),
-            where=path,
-        )
-        fields = {} if body is None else dict(_leaves(spec, body, prefix="", where=path))
-    except RefreshError as error:
-        return "; ".join(problem.message for problem in error.problems)
-    return _Operation(
-        status=rest.path_status(item) or "current", parameters=dict(parameters), fields=fields
-    )
-
-
-def _operations(document: JsonObject) -> dict[str, _Operation | str]:
-    """Read every path or channel of a specification.
-
-    Args:
-        document: An OpenAPI specification: the REST one, or the WebSocket one, whose paths
-            are its channels.
-
-    Returns:
-        Each path mapped to its operation or the reason it cannot be read.
-    """
-    spec = OpenApi(document)
-    paths = document.get("paths")
-    found = paths if isinstance(paths, dict) else {}
-    return {path: _operation(spec, path, node) for path, node in found.items()}
-
-
-def _changed(old: Mapping[str, str], new: Mapping[str, str]) -> Iterator[str]:
-    """Describe how one mapping of labelled values changed.
-
-    Args:
-        old: The snapshot's values, by a label that is already Markdown with every vendor
-            name in it quoted (`"field `price`"`).
-        new: The live values, by the same labels.
-
-    Yields:
-        One detail per label added, removed, or whose value changed, in label order.
-    """
-    for label in sorted(old.keys() | new.keys()):
-        before, after = old.get(label), new.get(label)
-        if before is None:
-            yield f"{label} added: {_code(str(after))}"
-        elif after is None:
-            yield f"{label} removed (was {_code(before)})"
-        elif before != after:
-            yield f"{label} changed from {_code(before)} to {_code(after)}"
-
-
-def _labelled(what: str, values: Mapping[str, str]) -> dict[str, str]:
-    """Label each vendor name of a mapping for `_changed`.
-
-    Args:
-        what: What a name is, such as `"field"`.
-        values: Values by vendor name.
-
-    Returns:
-        The values by `"<what> <name as code>"`.
-    """
-    return {f"{what} {_code(name)}": value for name, value in values.items()}
-
-
-def _field_changes(old: Mapping[str, _Leaf], new: Mapping[str, _Leaf]) -> Iterator[str]:
-    """Describe how a response's or message's fields changed.
-
-    Args:
-        old: The snapshot's fields.
-        new: The live fields.
-
-    Yields:
-        One detail per field added or removed, and per field whose type, requiredness, or
-        unit tag changed.
-    """
-    yield from _changed(
-        _labelled("field", {key: leaf.type for key, leaf in old.items() if key not in new}),
-        _labelled("field", {key: leaf.type for key, leaf in new.items() if key not in old}),
-    )
-    for key in sorted(old.keys() & new.keys()):
-        before, after = old[key], new[key]
-        if before.type != after.type:
-            yield f"field {_code(key)} retyped from {_code(before.type)} to {_code(after.type)}"
-        if before.required != after.required:
-            now = "now required" if after.required else "no longer required"
-            yield f"field {_code(key)} {now}"
-        if before.tag != after.tag:
-            yield (
-                f"field {_code(key)} unit tag changed from {_code(before.tag or 'none')} to "
-                f"{_code(after.tag or 'none')}"
-            )
-
-
 def _specification_changes(
     area: str,
     snapshot: JsonObject,
@@ -582,7 +293,7 @@ def _specification_changes(
     def generated(path: str) -> bool:
         return key(path) in committed
 
-    old, new = _operations(snapshot), _operations(live)
+    old, new = operations(snapshot), operations(live)
     specified = {key(path) for path in old.keys() | new.keys()}
     yield from (
         Drift(
@@ -606,20 +317,14 @@ def _specification_changes(
                     section=Section.CHANGES,
                     area=area,
                     item=path,
-                    detail=f"can no longer be read: {_code(after)}",
+                    detail=f"can no longer be read: {quote(after)}",
                 )
             continue
         yield from _status_changes(
             area, path, before=before, after=after, generated=generated(path), file=file
         )
-        if isinstance(before, _Operation):
-            details = [
-                *_changed(
-                    _labelled("parameter", before.parameters),
-                    _labelled("parameter", after.parameters),
-                ),
-                *_field_changes(before.fields, after.fields),
-            ]
+        if isinstance(before, Operation):
+            details = operation_changes(before, after)
             yield from (
                 Drift(section=Section.CHANGES, area=area, item=path, detail=detail)
                 for detail in details
@@ -630,8 +335,8 @@ def _status_changes(
     area: str,
     path: str,
     *,
-    before: _Operation | str | None,
-    after: _Operation,
+    before: Operation | str | None,
+    after: Operation,
     generated: bool,
     file: str,
 ) -> Iterator[Drift]:
@@ -649,7 +354,7 @@ def _status_changes(
     Yields:
         At most one deprecation and one change.
     """
-    was = before.status if isinstance(before, _Operation) else None
+    was = before.status if isinstance(before, Operation) else None
     if after.status == "deprecated" and generated:
         yield Drift(
             section=Section.DEPRECATIONS,
@@ -688,11 +393,11 @@ def _page_facts(area: docs.Area, page: str) -> dict[str, str]:
             return {"the endpoint": docs.endpoint(page) or "none"}
         if area is docs.WEBSOCKET:
             return {"the feed": "/".join(docs.feed(page) or ("none",))}
-        facts = _labelled("column", {column.name: column.type for column in docs.columns(page)})
+        facts = labelled("column", {column.name: column.type for column in docs.columns(page)})
         header = docs.example_header(page)
         if header:
             facts["the Example Data header"] = ", ".join(header)
-        facts |= _labelled("overview row", {prefix: url for url, prefix in docs.datasets(page)})
+        facts |= labelled("overview row", {prefix: url for url, prefix in docs.datasets(page)})
     except docs.DocsError as error:
         return {"the page": f"unreadable: {error}"}
     return facts
@@ -735,7 +440,7 @@ def _page_changes(before: Snapshot, after: Snapshot) -> Iterator[Drift]:
                 details = ["removed from `llms.txt`"]
             else:
                 details = list(
-                    _changed(_page_facts(area, old_pages[name]), _page_facts(area, new_pages[name]))
+                    changed(_page_facts(area, old_pages[name]), _page_facts(area, new_pages[name]))
                 )
             yield from (
                 Drift(section=Section.CHANGES, area="documentation", item=url, detail=detail)
@@ -860,7 +565,7 @@ def _unaccounted(
 
 
 def _not_generated(
-    operations: Mapping[str, _Operation | str], key: Callable[[str], str | None]
+    operations: Mapping[str, Operation | str], key: Callable[[str], str | None]
 ) -> set[str]:
     """Return the keys of the paths a specification marks deprecated or draft.
 
@@ -874,10 +579,70 @@ def _not_generated(
     return {
         found
         for path, operation in operations.items()
-        if isinstance(operation, _Operation)
+        if isinstance(operation, Operation)
         and operation.status in _NOT_GENERATED
         and (found := key(path)) is not None
     }
+
+
+def _event_mismatches(channels: Mapping[str, Operation | str]) -> Iterator[Drift]:
+    """Check each live channel's `ev` values against the channel its path names.
+
+    The WebSocket client routes every message by its `ev` value, so a channel whose message
+    no longer lists its own channel among its `ev` values would be misrouted.
+
+    Args:
+        channels: The live WebSocket specification's operations, by path.
+
+    Yields:
+        A change per channel whose message lists `ev` values that leave out its channel.
+    """
+    for path, operation in sorted(channels.items()):
+        key = ws.channel_key(path)
+        if key is None or not isinstance(operation, Operation) or operation.events is None:
+            continue
+        channel = key.rpartition("/")[2]
+        if channel not in operation.events:
+            yield Drift(
+                section=Section.CHANGES,
+                area="WebSocket",
+                item=path,
+                detail=(
+                    f"the `ev` values {quote(', '.join(operation.events))} leave out the "
+                    f"channel {quote(channel)}"
+                ),
+            )
+
+
+def _require_paths(snapshot: Snapshot) -> None:
+    """Refuse live specifications without paths: a vendor error, not the removal of all.
+
+    A vendor that answers a specification's URL with an error document (`{"status":
+    "ERROR"}`) would otherwise read as every path removed.
+
+    Args:
+        snapshot: The live sources.
+
+    Raises:
+        RefreshError: If the OpenAPI or the WebSocket specification has no non-empty `paths`
+            object.
+    """
+    problems = [
+        Problem(
+            gate=Gate.SNAPSHOT,
+            source="",
+            key=name,
+            message="the live specification has no paths; the vendor may have answered with "
+            "an error document",
+        )
+        for name, document in (
+            (OPENAPI, snapshot.openapi),
+            (WEBSOCKET, snapshot.websocket),
+        )
+        if not isinstance(paths := document.get("paths"), dict) or not paths
+    ]
+    if problems:
+        raise RefreshError(problems)
 
 
 def compare(
@@ -916,9 +681,11 @@ def compare(
         ),
         *_page_changes(before, after),
     ]
+    channels = operations(after.websocket)
+    found += _event_mismatches(channels)
     live = {
-        Transport.REST: _not_generated(_operations(after.openapi), lambda path: path),
-        Transport.WS: _not_generated(_operations(after.websocket), ws.channel_key),
+        Transport.REST: _not_generated(operations(after.openapi), lambda path: path),
+        Transport.WS: _not_generated(channels, ws.channel_key),
     }
     found += _unaccounted(after, committed=committed, hand=hand, live=live)
     return _ordered(found)
@@ -944,8 +711,8 @@ def gate_stops(after: Snapshot, hand: HandInput) -> list[Drift]:
                 area="refresh",
                 item=problem.source,
                 detail=f"the {problem.gate} gate would stop"
-                + (f" on {_code(problem.key)}" if problem.key else "")
-                + f": {_code(problem.message)}",
+                + (f" on {quote(problem.key)}" if problem.key else "")
+                + f": {quote(problem.message)}",
             )
             for problem in error.problems
         )
@@ -1010,6 +777,7 @@ def check(
     environ: Mapping[str, str] | None = None,
     committed: Committed | None = None,
     hand: HandInput | None = None,
+    scratch: Path | None = None,
 ) -> Report:
     """Download the live vendor sources and report how they differ from the repository.
 
@@ -1019,8 +787,10 @@ def check(
     the generated files are only read.
 
     A `fetch.FetchError` (a download failed), a `RefreshError` (the vendored snapshot is
-    missing or does not match its manifest, or the live sources cannot be loaded), and a
-    `WireError` from listing the bucket propagate: the check could not be made.
+    missing or does not match its manifest, the live sources cannot be loaded, or a live
+    specification has no paths), an `OSError` or `ValueError` from reading a damaged vendored
+    snapshot, and a `WireError` from listing the bucket propagate: the check could not be
+    made.
 
     Args:
         snapshot_directory: The vendored snapshot; `snapshot.DIRECTORY` when omitted.
@@ -1029,18 +799,21 @@ def check(
             `os.environ` when omitted. Without both, the bucket is not listed.
         committed: The committed keys; `Committed.load()` when omitted.
         hand: The hand input; the real tables when omitted.
+        scratch: Where the scratch directory is made; the system's temporary directory when
+            omitted.
 
     Returns:
         The report.
     """
     environ = os.environ if environ is None else environ
-    committed = committed or Committed.load()
-    hand = hand or HandInput()
+    committed = Committed.load() if committed is None else committed
+    hand = HandInput() if hand is None else hand
     before = Snapshot.load(snapshot_directory)
-    with tempfile.TemporaryDirectory(prefix="massive-drift-") as scratch:
-        directory = Path(scratch) / "massive"
-        fetch.fetch(directory, get=get)
-        after = Snapshot.load(directory)
+    with tempfile.TemporaryDirectory(prefix="massive-drift-", dir=scratch) as directory:
+        live = Path(directory) / "massive"
+        fetch.fetch(live, get=get)
+        after = Snapshot.load(live)
+    _require_paths(after)
     items = compare(before, after, committed=committed, hand=hand) + gate_stops(after, hand)
     access_key, secret_key = (environ.get(name, "").strip() for name in S3_CREDENTIAL_VARIABLES)
     listed = bool(access_key and secret_key)

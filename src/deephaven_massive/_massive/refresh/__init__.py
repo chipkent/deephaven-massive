@@ -17,6 +17,8 @@ Modules:
     - `fetch`: downloads the vendor sources and puts them in canonical form.
     - `drift`: the drift check: compares the live vendor sources with the snapshot, the
       committed schemas, and the flat-file bucket, and reports what changed.
+    - `spec_diff`: reads each path or channel of a specification as the drift check compares
+      it, and describes how two copies differ.
     - `docs`: reads the documentation index (`llms.txt`) and the REST, WebSocket, and
       flat-file pages it links.
     - `openapi`: resolves references and merged schemas in the OpenAPI specifications.

@@ -15,16 +15,16 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 
 from deephaven_massive._massive.net.errors import WireEntitlementError
-from deephaven_massive._massive.refresh import drift, fetch, snapshot
+from deephaven_massive._massive.refresh import drift, fetch, snapshot, spec_diff
 from deephaven_massive._massive.refresh.drift import Committed, Drift, Report, Section
 from deephaven_massive._massive.refresh.exclusions import Exclusion
+from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.snapshot import Snapshot
 from deephaven_massive._massive.spec.types import Transport
@@ -296,7 +296,7 @@ def test_parameters_added_removed_and_changed() -> None:
     assert compare(after, before) == [
         (
             "CHANGES - REST `/v1/widgets`: parameter `kind` changed from "
-            "`query string, one of a, b` to `query string, one of a, b, c`"
+            "`query string enum [a, b]` to `query string enum [a, b, c]`"
         ),
         "CHANGES - REST `/v1/widgets`: parameter `limit` removed (was `query integer`)",
         "CHANGES - REST `/v1/widgets`: parameter `sort` added: `query string`",
@@ -378,7 +378,11 @@ def test_a_tag_added_is_reported_against_none() -> None:
 @pytest.mark.parametrize(
     ("schema", "expected"),
     [
-        ({"oneOf": [{"type": "string"}, {"type": "number"}]}, "oneOf of 2 shapes"),
+        ({"oneOf": [{"type": "string"}, {"type": "number"}]}, "oneOf of [number | string]"),
+        (
+            {"anyOf": [{"type": "object", "properties": {"b": {}, "a": {"type": "integer"}}}, {}]},
+            "anyOf of [object {a: integer, b: untyped} | untyped]",
+        ),
         ({"description": "no type"}, "untyped"),
         ({"type": ["string", "null"]}, "untyped"),
         ({"type": "array", "items": {"type": "array", "items": {}}}, "array of array of untyped"),
@@ -414,8 +418,43 @@ def test_a_schema_that_refers_to_itself_is_compared_to_a_bounded_depth() -> None
     )
     (line,) = compare(after)
     # The body, `results`, its items, and `tree` take four of the levels.
-    key = ".".join(["results[]", "tree", *["child"] * (drift._MAX_NESTING - 3)])
-    assert line == f"CHANGES - REST `/v1/widgets`: field `{key}` added: `object`"
+    key = ".".join(["results[]", "tree", *["child"] * (spec_diff.MAX_NESTING - 3)])
+    assert line == f"CHANGES - REST `/v1/widgets`: field `{key}` added: `(nested too deep)`"
+
+
+def test_an_array_that_contains_itself_is_described_to_a_bounded_depth() -> None:
+    nested = {"type": "array", "items": {"$ref": "#/components/schemas/Nested"}}
+    after = make(
+        rest={"/v1/widgets": item({**PRICE, "n": {"$ref": "#/components/schemas/Nested"}})},
+        components={"schemas": {"Nested": nested}},
+    )
+    (line,) = compare(after)
+    # The body, `results`, its items, and `n` take four of the levels.
+    described = "array of " * (spec_diff.MAX_NESTING - 3) + "(nested too deep)"
+    assert line == f"CHANGES - REST `/v1/widgets`: field `results[].n` added: `{described}`"
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ([{"type": "string"}, {"type": "number"}], [{"type": "string"}, {"type": "boolean"}]),
+        (
+            [{"type": "object", "properties": {"a": {"type": "integer"}}}, {"type": "string"}],
+            [{"type": "object", "properties": {"a": {"type": "number"}}}, {"type": "string"}],
+        ),
+    ],
+    ids=["branch-type", "inside-an-object-branch"],
+)
+def test_a_choice_with_the_same_number_of_branches_can_still_change(
+    old: list[dict[str, Any]], new: list[dict[str, Any]]
+) -> None:
+    before = make(rest={"/v1/widgets": item({"x": {"oneOf": old}})})
+    after = make(rest={"/v1/widgets": item({"x": {"oneOf": new}})})
+    (line,) = compare(after, before)
+    assert line.startswith("CHANGES - REST `/v1/widgets`: field `results[].x` retyped from")
+    # Branch order, descriptions, and examples are not drift.
+    reordered = [{**branch, "description": "d", "example": 1} for branch in reversed(old)]
+    assert compare(make(rest={"/v1/widgets": item({"x": {"oneOf": reordered}})}), before) == []
 
 
 def test_a_path_that_can_no_longer_or_can_again_be_read() -> None:
@@ -436,6 +475,31 @@ def test_a_specification_without_paths_has_none() -> None:
     before = make(rest={}, rest_pages={})
     after = dataclasses.replace(before, openapi={"openapi": "3.0.3"})
     assert compare(after, before, committed=dataclasses.replace(COMMITTED, rest=frozenset())) == []
+
+
+def test_a_channel_whose_ev_values_leave_out_its_channel() -> None:
+    def message(events: list[str] | None) -> dict[str, Any]:
+        event: dict[str, Any] = {"type": "string"}
+        if events is not None:
+            event["enum"] = events
+        schema = {"type": "object", "properties": {**PRICE, "ev": event}}
+        return {
+            "get": {"responses": {"200": {"content": {"application/json": {"schema": schema}}}}}
+        }
+
+    before = make(ws={"/stocks/W": message(["W"])})
+    after = make(ws={"/stocks/W": message(["X", "Y"])})
+    assert compare(after, before) == [
+        (
+            "CHANGES - WebSocket `/stocks/W`: field `ev` retyped from `string enum [W]` to "
+            "`string enum [X, Y]`"
+        ),
+        "CHANGES - WebSocket `/stocks/W`: the `ev` values `X, Y` leave out the channel `W`",
+    ]
+    assert compare(before, before) == []
+    # An `ev` without listed values, or a channel no source key has, is not checked.
+    unlisted = make(ws={"/stocks/W": message(None), "/launchpad/stocks/Z": message(["Q"])})
+    assert compare(unlisted, unlisted) == []
 
 
 def test_websocket_channels_new_removed_deprecated_and_changed() -> None:
@@ -799,25 +863,58 @@ CREDENTIALS = {
 }
 
 
-def test_check_without_drift_or_credentials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {},
+        {"MASSIVE_S3_ACCESS_KEY_ID": "AKIDONLY"},
+        {"MASSIVE_S3_ACCESS_KEY_ID": "AKIDBLANK", "MASSIVE_S3_SECRET_ACCESS_KEY": "  \t"},
+    ],
+    ids=["none", "one", "blank-secret"],
+)
+def test_check_without_drift_or_credentials(tmp_path: Path, environ: dict[str, str]) -> None:
     before = store(make(), tmp_path / "vendor")
     stored = sorted(p.read_bytes() for p in before.rglob("*") if p.is_file())
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    # No S3 fake is installed: listing the bucket here would fail the test.
     report = drift.check(
         snapshot_directory=before,
         get=served(make()).__getitem__,
-        environ={"MASSIVE_S3_ACCESS_KEY_ID": "AKIDONLY"},
+        environ=environ,
         committed=COMMITTED,
         hand=NO_HAND,
+        scratch=scratch,
     )
     assert report == Report(items=(), fetched=FETCHED, bucket_listed=False)
     # The vendored snapshot is only read, and the downloads' scratch directory is removed.
     assert sorted(p.read_bytes() for p in before.rglob("*") if p.is_file()) == stored
     assert list(scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("which", ["openapi", "websocket"])
+@pytest.mark.parametrize("document", [{"status": "ERROR"}, {"paths": {}}], ids=["error", "empty"])
+def test_a_live_specification_without_paths_fails_the_check(
+    tmp_path: Path, which: str, document: dict[str, Any]
+) -> None:
+    before = store(make(), tmp_path / "vendor")
+    live = make()
+    live = (
+        dataclasses.replace(live, openapi=document)
+        if which == "openapi"
+        else dataclasses.replace(live, websocket=document)
+    )
+    with pytest.raises(RefreshError) as info:
+        drift.check(
+            snapshot_directory=before,
+            get=served(live).__getitem__,
+            environ={},
+            committed=COMMITTED,
+            hand=NO_HAND,
+        )
+    (problem,) = info.value.problems
+    assert problem.key == f"{which}.json"
+    assert "no paths" in problem.message
 
 
 def test_check_reports_drift_gate_stops_and_unnamed_bucket_prefixes(
@@ -929,7 +1026,8 @@ def test_the_script_creates_the_label_and_the_issue(tmp_path: Path) -> None:
         "title": TITLE,
         "state": "OPEN",
         "labels": ["spec-drift"],
-        "body": REPORT,
+        "body": REPORT.rstrip("\n"),
+        "comments": [],  # opening the issue notifies; no comment is needed
     }
     assert [call[:2] for call in fake.calls] == [
         ["label", "list"],
@@ -940,30 +1038,65 @@ def test_the_script_creates_the_label_and_the_issue(tmp_path: Path) -> None:
 
 
 @needs_jq
-def test_the_script_updates_the_open_standing_issue_in_place(tmp_path: Path) -> None:
+def test_the_script_keeps_a_label_that_differs_only_in_case(tmp_path: Path) -> None:
     fake = FakeGh(tmp_path)
-    fake.labels = ["spec-drift-old", "spec-drift"]
-    number = fake.issue(TITLE, labels=["spec-drift"])
+    fake.labels = ["Spec-Drift"]
     result = run_script(fake, REPORT)
     assert result.returncode == 0, result.stderr
-    assert fake.labels == ["spec-drift-old", "spec-drift"]
-    assert [(i["state"], i["body"]) for i in fake.issues] == [("OPEN", REPORT)]
-    listing = ["--label", "spec-drift", "--state", "all", "--limit", "100"]
+    assert fake.labels == ["Spec-Drift"]
+    assert ["label", "create"] not in [call[:2] for call in fake.calls]
+
+
+@needs_jq
+def test_a_changed_report_updates_the_open_issue_and_comments_once(tmp_path: Path) -> None:
+    fake = FakeGh(tmp_path)
+    fake.labels = ["spec-drift"]
+    old = "# Massive API drift\n\n- REST `/v1/a`: documented\n- REST `/v1/b`: documented\n"
+    number = fake.issue(TITLE, labels=["spec-drift"], body=old)
+    result = run_script(fake, REPORT)
+    assert result.returncode == 0, result.stderr
+    assert len(fake.issues) == 1
+    issue = fake.issues[0]
+    assert (issue["state"], issue["body"]) == ("OPEN", REPORT.rstrip("\n"))
+    # GitHub notifies no one of an edited body; the comment does, and holds no vendor text.
+    assert issue["comments"] == ["The drift report changed: 1 item(s), was 2."]
+    listing = ["--label", "spec-drift", "--state", "all", "--limit", "1000"]
     assert fake.calls[1:] == [
         ["issue", "list", *listing, "--json", "number,title,state"],
-        ["issue", "edit", str(number), "--body-file", fake.calls[-1][-1]],
+        ["issue", "view", str(number), "--json", "body"],
+        ["issue", "edit", str(number), "--body-file", fake.calls[3][-1]],
+        ["issue", "comment", str(number), "--body", issue["comments"][0]],
     ]
 
 
 @needs_jq
-def test_the_script_reopens_the_oldest_standing_issue(tmp_path: Path) -> None:
+def test_an_unchanged_report_touches_nothing(tmp_path: Path) -> None:
     fake = FakeGh(tmp_path)
     fake.labels = ["spec-drift"]
-    fake.issue(TITLE, labels=["spec-drift"], state="CLOSED")
+    fake.issue(TITLE, labels=["spec-drift"], body=REPORT)
+    result = run_script(fake, REPORT)
+    assert result.returncode == 0, result.stderr
+    assert fake.issues[0]["comments"] == []
+    assert [call[:2] for call in fake.calls] == [
+        ["label", "list"],
+        ["issue", "list"],
+        ["issue", "view"],
+    ]
+
+
+@needs_jq
+@pytest.mark.parametrize("body", ["", REPORT], ids=["changed", "unchanged"])
+def test_the_script_reopens_the_oldest_standing_issue(tmp_path: Path, body: str) -> None:
+    fake = FakeGh(tmp_path)
+    fake.labels = ["spec-drift"]
+    fake.issue(TITLE, labels=["spec-drift"], state="CLOSED", body=body)
     fake.issue(TITLE, labels=["spec-drift"])
     result = run_script(fake, REPORT)
     assert result.returncode == 0, result.stderr
-    assert [(i["state"], i["body"]) for i in fake.issues] == [("OPEN", REPORT), ("OPEN", "")]
+    assert [(i["state"], i["body"], i["comments"]) for i in fake.issues] == [
+        ("OPEN", REPORT.rstrip("\n"), []),  # reopening notifies; no comment is needed
+        ("OPEN", "", []),
+    ]
     assert fake.calls[-1] == ["issue", "reopen", "1"]
 
 
@@ -999,7 +1132,9 @@ def test_the_script_refuses_an_empty_report(tmp_path: Path) -> None:
 
 
 @needs_jq
-@pytest.mark.parametrize("command", [("label", "list"), ("issue", "list"), ("issue", "edit")])
+@pytest.mark.parametrize(
+    "command", [("label", "list"), ("issue", "list"), ("issue", "view"), ("issue", "edit")]
+)
 def test_the_script_stops_when_gh_fails(tmp_path: Path, command: tuple[str, ...]) -> None:
     fake = FakeGh(tmp_path)
     fake.labels = ["spec-drift"]

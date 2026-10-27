@@ -2,8 +2,8 @@ name: Spec drift
 
 # Compares Massive's live published API (the OpenAPI and WebSocket specifications, the
 # documentation index, and the pages it links) with the vendored snapshot, weekly and on
-# demand. With drift it keeps one standing "Massive API drift" issue up to date; without drift
-# it does nothing. It is advisory: it never pushes, never opens a pull request, and is never a
+# demand. With drift it keeps one standing "Massive API drift" issue up to date, commenting
+# once when an open issue's report changed; without drift it does nothing. It is advisory: it never pushes, never opens a pull request, and is never a
 # required check, so a change at Massive cannot block unrelated pull requests. It runs without
 # S3 credentials, so flat-file coverage comes from the documentation pages and overviews.
 
@@ -45,16 +45,20 @@ jobs:
       - name: Compare the live Massive API with the vendored snapshot
         id: check
         # Status 0 is no drift and 1 is drift; anything else means the check could not be
-        # made, which fails the job instead of touching the issue.
+        # made, which fails the job instead of touching the issue. An uncaught error also
+        # exits 1, so drift additionally needs the report's own title as its first line.
         run: |
           status=0
           uv run --no-sync python -m deephaven_massive._massive.refresh --check > drift.md || status=$?
           cat drift.md
-          case "$status" in
-            0) echo "drift=false" >> "$GITHUB_OUTPUT" ;;
-            1) echo "drift=true" >> "$GITHUB_OUTPUT" ;;
-            *) exit "$status" ;;
-          esac
+          if [ "$status" -eq 0 ]; then
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+          elif [ "$status" -eq 1 ] && [ "$(head -n 1 drift.md)" = "# Massive API drift" ]; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "the drift check could not be made (status $status)" >&2
+            exit 2
+          fi
       - name: Update the standing drift issue
         if: steps.check.outputs.drift == 'true'
         env:
