@@ -2674,13 +2674,18 @@ verification, never a column list.
   an `epoch` in that unit; a string with `format: date-time`, or no format and a name ending in
   `_utc`, becomes an `iso-instant`; a string with `format: date`, or named `date` or `*_date`,
   becomes a `date`.
-- **Projections.** `PROJECTIONS {(kind, source): {wire key: long name}}` limits a source to
-  the listed keys, and renames them, **inside one membership only**. The generator writes each
-  long name through the naming rule, so a generated projection maps wire keys to PascalCase
-  columns, the same vocabulary as `Field.column`. Its first entry gives
-  `/v3/snapshot/indices`'s membership of the values kind
-  `{"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"}`, for
-  `indices.values.fetch()`; `indices.snapshots` uses the same source in full.
+- **Projections.** `PROJECTIONS {(kind, source): Projection}` changes how a source joins
+  one kind, **inside one membership only**, in one of two forms. `fields` keeps only the
+  listed keys, under the listed long names: `/v3/snapshot/indices`'s membership of the values
+  kind is `{"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"}`, for
+  `indices.values.fetch()`, while `indices.snapshots` uses the same source in full. `renames`
+  keeps every field and renames only the listed ones, so a field the vendor adds later joins
+  under its own name: the forex last quote and the crypto `XQ` stream join the quotes kind
+  with `ask`/`ap` as `AskPrice` and `bid`/`bp` as `BidPrice`. The generator writes each long
+  name through the naming rule, and the recorded projection maps every wire key it keeps to
+  its PascalCase column, the same vocabulary as `Field.column`. A member whose projection
+  renames is ordered, and gives the order, like an unprojected one (rule 6); a member that
+  keeps only some fields does neither, and its source keeps its own order.
 - **Memberships are written into the generated files.** `KINDS` and `PROJECTIONS` are generator
   inputs in `refresh/`, which is not shipped. The generator writes each source's memberships
   onto its committed entry in `spec/rest.json`, `ws.json`, or `flatfiles.json`, and the `spec`
@@ -2754,16 +2759,29 @@ per-column exceptions:
    file's field lists. Massive's REST documentation lists every object's fields
    alphabetically (the specification's keys, its pages' response-attribute tables, and their
    sample responses all agree), so a REST source keeps that documented order, and a
-   REST-only dataset's columns are alphabetical. The sources of a dataset kind take their order
-   from the kind's flat-file "Columns" table or WebSocket message, which list fields in their
-   vendor's order (the stocks aggregate files: `ticker, volume, open, close, high, low,
-   window_start, transactions`); the WebSocket and flat-file generators apply it. The snapshot stores every document in the order served, never re-sorted. The
+   REST-only dataset's columns are alphabetical. The sources of each group of a dataset kind
+   take their order from the group's flat-file "Example Data" headers and WebSocket messages,
+   which list fields in their vendor's order (the stocks aggregate files: `ticker, volume,
+   open, close, high, low, window_start, transactions`), then the group's other sources' own
+   fields; every member that keeps all its fields (unprojected, or with a projection that only
+   renames) takes that order. A group with no flat-file or WebSocket member keeping all its
+   fields fails the refresh (`column-order`). The snapshot stores every document in the order served, never re-sorted. The
    dataset's key columns come first at run time.
 7. **Consistency.** Within one dataset kind, one column for two concepts fails the refresh
    (the `concept-collision` gate); one concept always gets one column, by rules 1–4.
 
 Names are never derived from descriptions except under rule 3, and the generator emits
 `Timestamp` only where the vendor's long name is `timestamp`.
+
+**Cross-table naming.** Massive sometimes spells one concept differently on different
+endpoints, for example `day.open` and `session.open`, `ask` and `ask_price`, or a nested
+`details.strike_price` and a top-level `strike_price`. Within one table every field has
+exactly one column. Across tables, each table keeps the spelling of its own endpoint, so its
+columns match Massive's documentation for it. Unifying the names across tables (about 30
+concepts, 59 REST columns) and a documented "same concept as" map were both considered and
+declined: the canonical names would shift with Massive's endpoint mix, some concepts look
+alike but differ (a futures session is not a calendar day), and no automatic check can find
+synonyms reliably.
 
 **Refresh gates.** The refresh fails, printing the gate, the source, the key, and its
 description for the reviewer. Every gate has a descriptive name, which is how the code
@@ -2798,8 +2816,8 @@ description for the reviewer. Every gate has a descriptive name, which is how th
   which catches a one-sided lexicon slip (`s` becoming `Shares` while REST says `size`);
 - **`venue-agreement`:** a futures kind whose venue pages differ;
 - **`column-order`:** a source whose column order cannot be taken from its kind: its
-  `KINDS` group has no flat-file or WebSocket source to give the order, or two of its groups
-  order its columns differently (naming policy, rule 6);
+  `KINDS` group has no flat-file or WebSocket member keeping all its fields to give the
+  order, or two of its groups order its columns differently (naming policy, rule 6);
 - **`concept-collision` (one concept, one column):** within one kind, one column name holding
   two concepts. A concept is a field's full long-name path, each segment in snake case, so `DayClose` and
   `PrevDayClose` are two concepts, while the v2 snapshot's `lastTrade.p` and the unified
@@ -3555,6 +3573,9 @@ document already reflects them.
     holds every field's vendor description, normalized to plain text by fixed rules, with no
     gate on a missing one, and is joined into `Field.description` at load; one rule picks each
     dataset column's description ([section 19.4](#194-generated-schemas)).
+49. **Each table keeps its endpoint's spelling** (2026-10-27). One concept spelled two ways by
+    Massive gets one column within a table, but no cross-table unification or synonym map
+    ([section 19.4](#194-generated-schemas), "Cross-table naming").
 
 ## 23. Open verification items
 
