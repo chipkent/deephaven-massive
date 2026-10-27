@@ -1359,11 +1359,13 @@ WIRE_VOCABULARY = frozenset(
         "DriftReport",
         "Field",
         "ParamKind",
+        "Provenance",
         "RestPath",
         "Source",
         "Transport",
         "WireType",
         "WireUnit",
+        "provenance",
         "source",
         "sources",
     }
