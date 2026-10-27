@@ -166,8 +166,9 @@ class FakeS3:
         credentials = cast("Any", client)._request_signer._credentials
         recorded: dict[str, object] = {
             "endpoint_url": client.meta.endpoint_url,
-            "access_key": credentials.access_key,
-            "secret_key": credentials.secret_key,
+            # None when boto3 found no credentials: the fake answers unsigned requests too.
+            "access_key": None if credentials is None else credentials.access_key,
+            "secret_key": None if credentials is None else credentials.secret_key,
             "signature_version": settings.signature_version,
             "max_pool_connections": settings.max_pool_connections,
         }

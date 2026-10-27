@@ -1,10 +1,10 @@
 """Decoding one flat file: a gzip CSV object streamed into Arrow batches, one per block.
 
-`FlatFile` wraps the body of one S3 object, which `FlatFileClient.open` returns, and decodes it
-with `pyarrow.csv.open_csv` in blocks of `ReadPlan.block_size` bytes of decompressed text.
-Python's `gzip` decompresses on the reader's own read calls; Arrow asks for one block per call
-and reads about 32 blocks ahead of the consumer on its own I/O thread, so a reader holds about
-32 blocks of text whatever the file's length.
+`FlatFile` wraps the body of one S3 object, as a binary stream that `FlatFileClient.open`
+provides, and decodes it with `pyarrow.csv.open_csv` in blocks of `ReadPlan.block_size`
+bytes of decompressed text. Python's `gzip` decompresses on the reader's own read calls; Arrow
+asks for one block per call and reads about 32 blocks ahead of the consumer on its own I/O
+thread, so a reader holds about 32 blocks of text whatever the file's length.
 
 Each block goes through pure Arrow operations, in this order:
 
@@ -20,8 +20,9 @@ null; text such as `NA` or `NULL` is data (both are valid tickers). No block is 
 Python objects.
 
 `ReadPlan` and `ReadColumn` describe what to read; the library builds them from a dataset, so
-this module knows no dataset. It imports only the standard library, `pyarrow`, `botocore`, and
-`net`. The package is spelled `flatfiles`; the library module that uses it is `_flat_files.py`.
+this module knows no dataset. It imports only the standard library, `pyarrow`, and `net`: the
+client hands it a stream whose read errors are `OSError`s, so it needs no botocore. The package
+is spelled `flatfiles`; the library module that uses it is `_flat_files.py`.
 """
 
 from __future__ import annotations
@@ -29,23 +30,32 @@ from __future__ import annotations
 import gzip
 import zlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, BinaryIO, Protocol, Self, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.csv as pacsv
-from botocore.exceptions import BotoCoreError
 
 from deephaven_massive._massive.net.errors import WireError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator
     from datetime import date
     from types import TracebackType
 
-    from botocore.response import StreamingBody
-
 __all__ = ["FlatFile", "ReadColumn", "ReadPlan"]
+
+
+class _Stream(Protocol):
+    """The binary stream a flat file is read from: an object's body, or any file of bytes."""
+
+    def read(self, size: int = -1, /) -> bytes:
+        """Read up to `size` bytes; raise `OSError` if the read fails."""
+        ...
+
+    def close(self) -> None:
+        """Release the stream; idempotent."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,9 +113,10 @@ class ReadPlan:
 class FlatFile:
     """One flat file being read: the open body of an S3 object and how to decode it.
 
-    `FlatFileClient.open` creates one per existing key. A single reader thread iterates
-    `batches()`; `close()` releases the response body and may be called from any thread, any
-    number of times. Use it as a context manager so the body is closed however the read ends.
+    `FlatFileClient.open` creates one per existing key, around the object's body. A single
+    reader thread iterates `batches()`; `close()` releases the body and may be called from any
+    thread, any number of times. Use it as a context manager so the body is closed however the
+    read ends.
 
     Example:
         ::
@@ -117,11 +128,11 @@ class FlatFile:
 
     __slots__ = ("_body", "_host", "_key", "_location")
 
-    def __init__(self, body: StreamingBody, key: str, *, location: str, host: str | None) -> None:
-        """Wrap an object's response body; nothing is read yet.
+    def __init__(self, body: _Stream, key: str, *, location: str, host: str | None) -> None:
+        """Wrap an object's body; nothing is read yet.
 
         Args:
-            body: The body of a successful `GetObject` response.
+            body: The gzip bytes of the object, as a stream whose failed reads raise `OSError`.
             key: The object key, for messages.
             location: Where the object is (`s3://<bucket>/<key> at <endpoint>`), for messages.
             host: The endpoint's host, for the errors' `host`.
@@ -160,14 +171,14 @@ class FlatFile:
         self.close()
 
     def close(self) -> None:
-        """Close the response body, which returns or drops its connection.
+        """Close the body, which returns or drops its connection.
 
         Idempotent and safe from any thread. The library closes a file on its reader thread,
         once the read has ended.
         """
         self._body.close()
 
-    def batches(self, plan: ReadPlan) -> Iterator[pa.RecordBatch]:
+    def batches(self, plan: ReadPlan) -> Generator[pa.RecordBatch, None, None]:
         """Decode the file block by block, keeping the rows the plan asks for.
 
         Yields one batch per block, possibly empty, so the consumer can check for cancellation
@@ -186,11 +197,15 @@ class FlatFile:
                 drops; if a documented header is missing or a value does not parse as its
                 type (the message quotes Arrow's); or if a futures block holds a session
                 date other than the plan's session, or none. Every message names the file. An
-                error raised by `plan.to_ns` propagates unchanged.
+                error that `plan.to_ns` raises propagates unchanged, unless it is an Arrow
+                error, which becomes `WireError` like any other.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         try:
-            stream = pa.PythonFile(gzip.GzipFile(fileobj=self._body, mode="rb"), mode="r")
+            # gzip only reads its file object; its stub also asks for `seek`, which a response
+            # body has no use for.
+            body = cast("BinaryIO", self._body)
+            stream = pa.PythonFile(gzip.GzipFile(fileobj=body, mode="rb"), mode="r")
             reader = pacsv.open_csv(
                 stream,
                 read_options=pacsv.ReadOptions(block_size=plan.block_size, use_threads=False),
@@ -205,7 +220,7 @@ class FlatFile:
             )
             for block in reader:
                 yield self._apply(block, plan)
-        except (pa.ArrowException, OSError, EOFError, zlib.error, BotoCoreError) as error:
+        except (pa.ArrowException, OSError, EOFError, zlib.error) as error:
             raise WireError(
                 f"cannot read {self._location}: {error}", host=self._host, path=self._key
             ) from error
@@ -221,8 +236,8 @@ class FlatFile:
             The surviving rows, possibly none.
 
         Raises:
-            WireError: If a futures block holds a session date other than the plan's session, or
-                none; the message names the first such row's date.
+            WireError: If a futures block holds a session date other than the plan's session,
+                or none; the message names the first such row's date.
         """
         if plan.session is not None:
             header, day = plan.session

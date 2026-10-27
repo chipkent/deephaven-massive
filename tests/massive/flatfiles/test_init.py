@@ -1,17 +1,15 @@
+from types import ModuleType
+
 from deephaven_massive._massive import flatfiles
-from deephaven_massive._massive.flatfiles import client, layout, reader
 
 
-def test_the_package_re_exports_the_client_the_reader_and_the_layout() -> None:
-    assert sorted(flatfiles.__all__) == [
-        "FlatFile",
-        "FlatFileClient",
-        "ReadColumn",
-        "ReadPlan",
-        "object_key",
+def test_the_package_defines_no_names() -> None:
+    # Re-exporting here would import `client`, and boto3 with it, whenever any flat-file name
+    # resolved. Submodules imported elsewhere in the process are bound on the package; they do
+    # not count.
+    defined = [
+        name
+        for name, value in vars(flatfiles).items()
+        if not name.startswith("__") and not isinstance(value, ModuleType)
     ]
-    assert flatfiles.FlatFileClient is client.FlatFileClient
-    assert flatfiles.FlatFile is reader.FlatFile
-    assert flatfiles.ReadPlan is reader.ReadPlan
-    assert flatfiles.ReadColumn is reader.ReadColumn
-    assert flatfiles.object_key is layout.object_key
+    assert defined == []

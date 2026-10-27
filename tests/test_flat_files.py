@@ -283,6 +283,13 @@ def applied(monkeypatch: pytest.MonkeyPatch) -> Applied:
     return record
 
 
+def flat_file_client(m: dm.MassiveSession) -> _massive.FlatFileClient:
+    # The session's flat-file client, which its first flat-file read created.
+    client = m._core._flat_files
+    assert client is not None
+    return client
+
+
 def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> HistoryQuery:
     q = build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
     assert isinstance(q, HistoryQuery)
@@ -1249,7 +1256,7 @@ def test_a_cancelled_or_closed_read_makes_no_request(
     cancel.set()
     with pytest.raises(_flat_files._CancelledError):
         transport._read_key(transform, key, cancel=cancel)
-    session._core._flat_files.close()
+    flat_file_client(session).close()
     with pytest.raises(dm.MassiveError, match="is closed"):
         transport._read_key(transform, key, cancel=threading.Event())
     assert fake_s3.requests == []
@@ -1364,7 +1371,7 @@ def test_a_close_during_a_request_reports_the_close(
     if stored:
         put(TRADES_KEY.format(day), "us_stocks_sip_trades_v1_2025-03-03.csv")
     m = dm.MassiveSession(config())
-    fake_s3.before_answer = lambda _key: m._core._flat_files.close()
+    fake_s3.before_answer = lambda _key: flat_file_client(m).close()
     when = f"2025-03-{day:02d}"
     try:
         with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
@@ -1434,7 +1441,7 @@ def test_closing_the_session_closes_the_boto_client(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    client = session._core._flat_files
+    client = flat_file_client(session)
     session.close()
     assert fake_s3.closes == 1
     assert client.closed
@@ -1456,7 +1463,7 @@ def test_a_session_collected_unclosed_closes_its_bucket(
     m = dm.MassiveSession(config(api_key="collected-with-flat-files"))
     name = repr(m).removeprefix("<").removesuffix(" open>")
     table = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    client = m._core._flat_files
+    client = flat_file_client(m)
     reaper = m._core._reaper.thread
     assert fake_s3.closes == 0
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
@@ -1598,3 +1605,70 @@ def test_outcome_of_a_cancelled_read_is_skipped() -> None:
     cancelled: Future[list[Table] | None] = Future()
     assert cancelled.cancel()
     assert _flat_files._outcome(cancelled) is None
+
+
+# --- The session's client and the library's own errors -------------------------------------
+
+
+def test_a_session_without_a_flat_file_read_creates_no_client(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = dm.MassiveSession(config())
+    rest = RestRecorder()
+    monkeypatch.setattr(m._core, "rest_transport", lambda: rest)
+    query(m, STOCK_TRADES, symbols=["AAPL"]).history("2025-03-03", "2025-03-03")
+    assert len(rest.calls) == 1  # AUTO chose REST for one symbol
+    m.close()
+    assert m._core._flat_files is None
+    assert (fake_s3.clients, fake_s3.closes) == ([], 0)
+
+
+def test_every_read_of_a_session_shares_one_client(session: dm.MassiveSession) -> None:
+    first = session._core.flat_file_transport()
+    second = session._core.flat_file_transport()
+    assert isinstance(first, _flat_files.FlatFileHistory)
+    assert isinstance(second, _flat_files.FlatFileHistory)
+    assert first._client is second._client is flat_file_client(session)
+
+
+def test_a_client_created_after_close_is_closed_at_once(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+) -> None:
+    m = dm.MassiveSession(config())
+    m.close()
+    m._core.flat_file_transport()
+    assert flat_file_client(m).closed
+
+
+def test_the_flat_file_transport_needs_s3_credentials(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+) -> None:
+    m = dm.MassiveSession(NO_S3)
+    try:
+        with pytest.raises(ValueError, match="flat files need MassiveConfig s3_access_key_id"):
+            m._core.flat_file_transport()
+    finally:
+        m.close()
+    assert m._core._flat_files is None
+
+
+def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
+    *, session: dm.MassiveSession, put: Callable[[str, str], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Converting a file's rows can fail in Arrow (out of memory, say): it is a failed read of
+    # that file, named like any other.
+    def exhausted(transform: _flat_files._Transform, batch: pa.RecordBatch) -> pa.RecordBatch:
+        raise pa.ArrowMemoryError("malloc of size 1048576 failed")
+
+    monkeypatch.setattr(_flat_files._Transform, "apply", exhausted)
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(
+        dm.MassiveError,
+        match=re.escape(
+            f"cannot read s3://flatfiles/{TRADES_0303} at https://files.massive.com: malloc of "
+            "size 1048576 failed"
+        ),
+    ) as info:
+        q.history("2025-03-03", "2025-03-03")
+    assert isinstance(info.value.__cause__, pa.ArrowMemoryError)

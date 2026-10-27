@@ -7,21 +7,27 @@ library's configuration, and maps every S3 failure to the wire errors of `net.er
 - a 404 is no error: `open` returns None, and the library applies its missing-file policy;
 - a 403 whose S3 error code says the credentials themselves are wrong (`InvalidAccessKeyId`,
   `SignatureDoesNotMatch`) is `WireAuthError`;
-- any other 403 is `WireEntitlementError`, naming the futures venue when there is one;
+- any other 403 is `WireEntitlementError`;
 - anything else (another status, an unreachable endpoint, a client that cannot be created) is
   `WireError`.
 
 Each error carries the HTTP status, the endpoint's host, the object key, and the
-`x-amz-request-id` of the response as its `request_id`. Credentials are never logged or put in
-a message. This module imports only the standard library, `boto3`, `botocore`, and the rest of
-`flatfiles` and `net`.
+`x-amz-request-id` of the response as its `request_id`. Its message states what happened to
+which object; what a user should do about it is the library's to say. Credentials are never
+logged or put in a message.
+
+The body of an object reaches `FlatFile` through a small stream that turns botocore's read
+errors (a connection dropped part-way through the body) into `OSError`, so the reader needs no
+botocore. This module imports only the standard library, `boto3`, `botocore`, and the rest of
+`flatfiles` and `net`; the package's interface resolves it only when `FlatFileClient` is first
+used, so a session that reads no flat file never imports boto3.
 """
 
 from __future__ import annotations
 
 import threading
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Final, NamedTuple
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
 import boto3
@@ -32,7 +38,8 @@ from deephaven_massive._massive.flatfiles.reader import FlatFile
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from botocore.response import StreamingBody
+    from types_boto3_s3.client import S3Client
 
 __all__ = ["FlatFileClient"]
 
@@ -40,29 +47,56 @@ _CREDENTIAL_ERRORS: Final = frozenset({"InvalidAccessKeyId", "SignatureDoesNotMa
 """S3 error codes, answered with HTTP 403, that mean the S3 credentials themselves are wrong."""
 
 
-class _S3(NamedTuple):
-    """What the client uses of a boto3 S3 client, as bound methods of the client.
+class _Body:
+    """An object's response body, read as a plain binary stream.
 
-    Holding the two methods rather than the client keeps the stubs' own types
-    (`types_boto3_s3`) out of this package's imports while boto3's stubs still check, where the
-    client is created, that both methods exist.
+    botocore raises its own errors when the connection drops part-way through a body; this
+    stream raises them as `OSError` (chained to the original), the error every other stream
+    raises for a failed read. Used by one reader thread; `close()` is safe from any thread.
     """
 
-    get_object: Callable[..., Mapping[str, Any]]
-    """`S3Client.get_object`: request one object."""
-    close: Callable[[], None]
-    """`S3Client.close`: close the client's connection pool."""
+    __slots__ = ("_body",)
+
+    def __init__(self, body: StreamingBody) -> None:
+        """Wrap a response body.
+
+        Args:
+            body: The body of a successful `GetObject` response.
+        """
+        self._body = body
+
+    def read(self, size: int = -1, /) -> bytes:
+        """Read up to `size` bytes, or the rest of the body when `size` is negative.
+
+        Args:
+            size: The most bytes to return.
+
+        Returns:
+            The bytes read; empty at the end of the body.
+
+        Raises:
+            OSError: If the connection fails while the body is read.
+        """
+        try:
+            return self._body.read(None if size < 0 else size)
+        except BotoCoreError as error:
+            raise OSError(str(error)) from error
+
+    def close(self) -> None:
+        """Close the body, which returns or drops its connection. Idempotent."""
+        self._body.close()
 
 
 class FlatFileClient:
     """The connection to Massive's flat-file bucket: one S3 client, created on first use.
 
-    The library creates one per session (`SessionCore`) and closes it when the session closes.
-    The boto3 client is created by the first `open`, under the client's own leaf lock (no
-    network call and no wait happen while it is held), and shared by every reader thread,
-    since boto3 clients are thread-safe. Once `close()` has run, no request starts; a request
-    already in flight when the client closed is answered, and its connection pool is closed
-    once more as it returns, so nothing it opened outlives the close.
+    The library's session creates one on its first flat-file read and closes it when the
+    session closes. The boto3 client is created by the first `open`, under the client's own
+    leaf lock (no network call and no wait happen while it is held, since the credentials are
+    given and boto3 need not look for them), and shared by every reader thread, since boto3
+    clients are thread-safe. Once `close()` has run, no request starts; a request already in
+    flight when the client closed is answered, and its connection pool is closed once more as
+    it returns, so nothing it opened outlives the close.
 
     Example:
         ::
@@ -100,8 +134,8 @@ class FlatFileClient:
     def __init__(
         self,
         *,
-        access_key_id: str | None,
-        secret_access_key: str | None,
+        access_key_id: str,
+        secret_access_key: str,
         endpoint_url: str,
         bucket: str,
         max_pool: int,
@@ -109,8 +143,8 @@ class FlatFileClient:
         """Remember the settings; no client is created and nothing touches the network.
 
         Args:
-            access_key_id: The S3 access key id, or None to let boto3 find credentials itself.
-            secret_access_key: The S3 secret access key, or None.
+            access_key_id: The S3 access key id.
+            secret_access_key: The S3 secret access key.
             endpoint_url: The S3 endpoint, such as `"https://files.massive.com"`.
             bucket: The bucket, such as `"flatfiles"`.
             max_pool: The most connections the client keeps open: one per concurrent reader.
@@ -122,7 +156,7 @@ class FlatFileClient:
         self._bucket = bucket
         self._max_pool = max_pool
         self._lock = threading.Lock()
-        self._client: _S3 | None = None
+        self._client: S3Client | None = None
         self._closed = threading.Event()
 
     @property
@@ -130,7 +164,7 @@ class FlatFileClient:
         """True once `close()` has run."""
         return self._closed.is_set()
 
-    def open(self, key: str, *, venue: str | None = None) -> FlatFile | None:
+    def open(self, key: str) -> FlatFile | None:
         """Request one object and return it for reading, or None if it does not exist.
 
         Blocks for one HTTP round trip; the body is read later, through the returned file. The
@@ -138,28 +172,25 @@ class FlatFileClient:
 
         Args:
             key: The object key (`object_key`).
-            venue: The futures venue of the key (`"cme"`, ...), named in an entitlement error;
-                None otherwise.
 
         Returns:
             The object, open for reading, or None if the bucket answered 404.
 
         Raises:
-            WireError: If the client is closed (no request is made), cannot be created (for
-                example, `AWS_PROFILE` names a profile that does not exist), the endpoint is
-                unreachable, or S3 answers any status but 200 and 404. On HTTP 403 it is the
-                subclass `WireAuthError` when S3 rejects the credentials themselves (the message
-                names `s3_access_key_id` and `s3_secret_access_key`), and otherwise
-                `WireEntitlementError`: the plan lacks the files, and for a futures key the
-                message names the venue and the `venue=` parameter. S3's error code and message
-                are quoted.
+            WireError: If the client is closed (no request is made), cannot be created, the
+                endpoint is unreachable, or S3 answers any status but 200 and 404. On HTTP 403
+                it is the subclass `WireAuthError` when S3 rejects the credentials themselves,
+                and otherwise `WireEntitlementError`: the plan lacks the files. The message
+                names the object and quotes S3's error code and message, such as
+                `"HTTP 403 for s3://flatfiles/<key> at https://files.massive.com (AccessDenied:
+                Access Denied)"`.
         """
         client = self._client_for(key)
         location = f"s3://{self._bucket}/{key} at {self._endpoint_url}"
         try:
             body = client.get_object(Bucket=self._bucket, Key=key)["Body"]
         except ClientError as error:
-            refusal = self._refusal(error, key=key, venue=venue, location=location)
+            refusal = self._refusal(error, key=key, location=location)
             if refusal is None:
                 return None
             raise refusal from error
@@ -172,7 +203,7 @@ class FlatFileClient:
                 # The client was closed while this request was in flight, and the request may
                 # have opened a new connection pool: close it again now that it has returned.
                 client.close()
-        return FlatFile(body, key, location=location, host=self._host)
+        return FlatFile(_Body(body), key, location=location, host=self._host)
 
     def close(self) -> None:
         """Close the boto3 client, if one was created, and refuse every further request.
@@ -186,7 +217,7 @@ class FlatFileClient:
         if client is not None:
             client.close()
 
-    def _client_for(self, key: str) -> _S3:
+    def _client_for(self, key: str) -> S3Client:
         """Return the boto3 client, creating it on the first call.
 
         Creating the client reads local AWS configuration but makes no request, so it is done
@@ -199,7 +230,8 @@ class FlatFileClient:
             The shared boto3 S3 client.
 
         Raises:
-            WireError: If the client is closed, or boto3 cannot create the client.
+            WireError: If the client is closed, or boto3 cannot create the client (for
+                example, `AWS_PROFILE` names a profile that does not exist).
         """
         with self._lock:
             if self._closed.is_set():
@@ -218,7 +250,7 @@ class FlatFileClient:
                     ) from error
             return self._client
 
-    def _create(self) -> _S3:
+    def _create(self) -> S3Client:
         """Create the boto3 S3 client.
 
         A dedicated boto3 session is created, because boto3's default session is not safe to
@@ -232,23 +264,19 @@ class FlatFileClient:
             aws_access_key_id=self._access_key_id,
             aws_secret_access_key=self._secret_access_key,
         )
-        client = session.client(
+        return session.client(
             "s3",
             endpoint_url=self._endpoint_url,
             config=Config(signature_version="s3v4", max_pool_connections=self._max_pool),
         )
-        return _S3(client.get_object, client.close)
 
-    def _refusal(
-        self, error: ClientError, *, key: str, venue: str | None, location: str
-    ) -> WireError | None:
+    def _refusal(self, error: ClientError, *, key: str, location: str) -> WireError | None:
         """Map an S3 error response to the wire error it means, or None for a missing object.
 
         Args:
             error: The SDK error, carrying the HTTP status, S3's code and message, and the
                 response headers.
             key: The key that was requested.
-            venue: The futures venue of the key, or None.
             location: The object's location, for messages.
 
         Returns:
@@ -272,20 +300,7 @@ class FlatFileClient:
         }
         if status != HTTPStatus.FORBIDDEN:
             return WireError(f"cannot read {location}: HTTP {status} ({server})", **context)
+        refused = f"HTTP 403 for {location} ({server})"
         if code in _CREDENTIAL_ERRORS:
-            return WireAuthError(
-                f"S3 rejected the flat-file credentials: HTTP 403 for {location} ({server}); "
-                "check MassiveConfig s3_access_key_id and s3_secret_access_key",
-                **context,
-            )
-        if venue is None:
-            return WireEntitlementError(
-                f"the plan does not include these flat files: HTTP 403 for {location} ({server})",
-                **context,
-            )
-        return WireEntitlementError(
-            f"the plan does not include {venue.upper()} futures flat files: HTTP 403 for "
-            f"{location} ({server}); pass venue=dm.FuturesVenue.<VENUE> for a venue the "
-            "plan includes",
-            **context,
-        )
+            return WireAuthError(refused, **context)
+        return WireEntitlementError(refused, **context)

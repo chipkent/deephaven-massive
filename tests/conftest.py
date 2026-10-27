@@ -249,16 +249,41 @@ def stream_rows(
     return rows
 
 
+_AWS_IDENTITY_VARIABLES = (
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+)
+"""The environment variables through which boto3 finds a profile or credentials of its own."""
+
+
 @pytest.fixture
-def fake_s3(monkeypatch: pytest.MonkeyPatch) -> FakeS3:
+def fake_s3(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeS3:
     """Answer every flat-file S3 client the library creates from a `FakeS3` (`tests/_fakes/s3.py`).
 
     The library's own client factory still runs (credentials, endpoint, signing configuration);
     the fake then answers the client's requests inside botocore, so nothing leaves the process.
+    The machine's AWS settings are hidden for the test, so every machine sees the same thing:
+    the AWS configuration and credentials files are an empty file, the variables that name a
+    profile or credentials are unset, and the instance metadata service is never asked. A test
+    may set its own on top.
+
+    Args:
+        monkeypatch: Undoes the environment changes after the test.
+        tmp_path: Holds the empty AWS configuration file.
 
     Returns:
         The fake, for storing objects and inspecting requests.
     """
+    empty = tmp_path / "aws-empty"
+    empty.write_text("")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(empty))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(empty))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    for name in _AWS_IDENTITY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
     s3 = importlib.import_module("tests._fakes.s3")
     fake: FakeS3 = s3.FakeS3()
     fake.install(monkeypatch)

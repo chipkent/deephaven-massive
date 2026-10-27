@@ -42,8 +42,11 @@ credentials themselves raises `AuthenticationError` for every class. Futures fil
 to be keyed by trading session (`session_end_date`), which Massive's documentation does not
 state outright, so every block of every futures file is checked against its key's date, and a
 mismatch (or a missing session date) raises `MassiveError` rather than return rows of the wrong
-session. Every error of the wire package becomes its public counterpart through
-`_errors.from_wire`, with its message, status, and request id.
+session. Every error of the wire package becomes its public counterpart, with its status and
+request id: a rejected credential or a refusal gains the remedy (the settings to check, the plan,
+the `venue=` parameter), and any other wire error goes through `_errors.from_wire`. An Arrow
+error while converting or gathering a file's rows (out of memory, say) is a failed read of that
+file.
 
 A failed read, a `KeyboardInterrupt`, or `m.close()` stops every other read of the call at its
 next block, and reads not yet started are cancelled. After a close, no request starts once a
@@ -53,6 +56,7 @@ reader has seen it; a request already in flight is discarded, and the call raise
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import threading
@@ -68,15 +72,27 @@ from deephaven.arrow import to_table
 from deephaven_massive._catalog import unit_rules
 from deephaven_massive._dates import TimeRange
 from deephaven_massive._enums import AssetClass, FuturesVenue, Transport
-from deephaven_massive._errors import MassiveError, from_wire
+from deephaven_massive._errors import (
+    AuthenticationError,
+    EntitlementError,
+    MassiveError,
+    from_wire,
+)
 from deephaven_massive._history_source import within_publication_grace
 from deephaven_massive._liveness import entered
-from deephaven_massive._massive import ReadColumn, ReadPlan, WireError, object_key
+from deephaven_massive._massive import (
+    ReadColumn,
+    ReadPlan,
+    WireAuthError,
+    WireEntitlementError,
+    WireError,
+    object_key,
+)
 from deephaven_massive._schema import ColumnType
 from deephaven_massive._timeunits import TimeField, TimeUnitTable
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
     from concurrent.futures import Future
     from datetime import date
 
@@ -465,8 +481,8 @@ class FlatFileHistory:
         calls. Surviving rows are gathered per file and converted once they reach
         `_TABLE_BLOCKS` blocks of data and at the end of the file, so a file usually becomes
         one table; when a selective read gathers `_TABLE_BLOCKS` small batches first, they are
-        merged into one, so the per-batch overhead never grows with the file. The file is
-        closed however the read ends.
+        merged into one, so the per-batch overhead never grows with the file. The file, and
+        its batch generator, are closed however the read ends.
 
         Args:
             transform: The request's block transform.
@@ -476,49 +492,73 @@ class FlatFileHistory:
         Returns:
             The file's tables, or None if the file does not exist.
 
-        A failed request or read (for example, a file that is not the expected gzip CSV)
-        raises the wire error's public counterpart, `_errors.from_wire`: `MassiveError`,
-        `AuthenticationError`, or `EntitlementError`. A closed session raises the
-        `MassiveError` of `_check_open`, and a cancelled call `_CancelledError`.
+        Raises:
+            MassiveError: If converting or gathering the file's rows fails in Arrow (out of
+                memory, say): `"cannot read <location>: <Arrow's message>"`. A failed request
+                or read (for example, a file that is not the expected gzip CSV) raises the
+                public error of `_public`: `MassiveError`, `AuthenticationError`, or
+                `EntitlementError`. A closed session raises the `MassiveError` of
+                `_check_open`, and a cancelled call `_CancelledError`.
         """
+        config = self._core.config
+        location = f"s3://{config.s3_bucket}/{key.key} at {config.s3_endpoint_url}"
         self._check(cancel)
-        venue = None if key.venue is None else key.venue.value
         try:
-            file = self._client.open(key.key, venue=venue)
+            file = self._client.open(key.key)
+            if file is None:
+                return None
+            plan = transform.plan_for(key)
+            with file, contextlib.closing(file.batches(plan)) as batches:
+                self._check(cancel)
+                return self._gather(
+                    batches, transform, limit=_TABLE_BLOCKS * plan.block_size, cancel=cancel
+                )
         except WireError as error:
-            public = from_wire(error)
+            public = _public(error, key)
             raise public from error
-        if file is None:
-            return None
-        plan = transform.plan_for(key)
-        limit = _TABLE_BLOCKS * plan.block_size
+        except pa.ArrowException as error:
+            raise MassiveError(f"cannot read {location}: {error}") from error
+
+    def _gather(
+        self,
+        batches: Iterator[pa.RecordBatch],
+        transform: _Transform,
+        *,
+        limit: int,
+        cancel: threading.Event,
+    ) -> list[Table]:
+        """Convert a file's batches to the schema and gather them into static tables.
+
+        Args:
+            batches: The file's batches, one per block.
+            transform: The request's block transform.
+            limit: The bytes of surviving rows that make one table.
+            cancel: The call's cancel event, checked after each block.
+
+        Returns:
+            The file's tables, in file order.
+        """
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
         size = 0
-        with file:
-            self._check(cancel)
-            try:
-                with entered(self._core.exec_ctx):
-                    for batch in file.batches(plan):
-                        rows = transform.apply(batch)
-                        if rows.num_rows:
-                            pending.append(rows)
-                            size += rows.nbytes
-                        if size >= limit:
-                            tables.append(_convert(pending, transform))
-                            pending, size = [], 0
-                        elif len(pending) >= _TABLE_BLOCKS:
-                            # Every batch carries allocation overhead that nbytes does not
-                            # count; merging the small batches of a selective read keeps its
-                            # memory flat however long the file is.
-                            gathered = pa.Table.from_batches(pending, schema=transform.arrow_schema)
-                            pending = gathered.combine_chunks().to_batches()
-                        self._check(cancel)
-                    if pending:
-                        tables.append(_convert(pending, transform))
-            except WireError as error:
-                public = from_wire(error)
-                raise public from error
+        with entered(self._core.exec_ctx):
+            for batch in batches:
+                rows = transform.apply(batch)
+                if rows.num_rows:
+                    pending.append(rows)
+                    size += rows.nbytes
+                if size >= limit:
+                    tables.append(_convert(pending, transform))
+                    pending, size = [], 0
+                elif len(pending) >= _TABLE_BLOCKS:
+                    # Every batch carries allocation overhead that nbytes does not count;
+                    # merging the small batches of a selective read keeps its memory flat
+                    # however long the file is.
+                    gathered = pa.Table.from_batches(pending, schema=transform.arrow_schema)
+                    pending = gathered.combine_chunks().to_batches()
+                self._check(cancel)
+            if pending:
+                tables.append(_convert(pending, transform))
         return tables
 
     def _skip_missing(self, spec: DatasetSpec, missing: Sequence[_Key], *, last: date) -> None:
@@ -554,6 +594,44 @@ class FlatFileHistory:
             logger.warning(
                 "%s: %s does not exist; skipping %s (a market holiday?)", spec.name, key.key, day
             )
+
+
+def _public(error: WireError, key: _Key) -> MassiveError:
+    """Return the public error for a wire error of one file, with the user's remedy.
+
+    A rejected credential names the settings to check; a refusal names the plan and, for a
+    futures file, the venue and the `venue=` parameter. Every other wire error becomes its
+    public counterpart through `_errors.from_wire`. Each keeps the wire error's status and
+    request id.
+
+    Args:
+        error: The wire error.
+        key: The file it came from.
+
+    Returns:
+        `AuthenticationError`, `EntitlementError`, or `MassiveError`.
+    """
+    if isinstance(error, WireAuthError):
+        return AuthenticationError(
+            f"S3 rejected the flat-file credentials: {error.message}; check MassiveConfig "
+            "s3_access_key_id and s3_secret_access_key",
+            status=error.status,
+            request_id=error.request_id,
+        )
+    if isinstance(error, WireEntitlementError):
+        if key.venue is None:
+            return EntitlementError(
+                f"the plan does not include these flat files: {error.message}",
+                status=error.status,
+                request_id=error.request_id,
+            )
+        return EntitlementError(
+            f"the plan does not include {key.venue.name} futures flat files: {error.message}; "
+            "pass venue=dm.FuturesVenue.<VENUE> for a venue the plan includes",
+            status=error.status,
+            request_id=error.request_id,
+        )
+    return from_wire(error)
 
 
 def _convert(batches: list[pa.RecordBatch], transform: _Transform) -> Table:

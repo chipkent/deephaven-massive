@@ -1,21 +1,20 @@
 import gzip
-from collections.abc import Callable, Iterator
+import io
+from collections.abc import Callable
 from datetime import date
-from typing import Protocol
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
-from botocore.response import StreamingBody
 
-from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._types import override
 
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
 FUTURES_KEY = "us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz"
 OWNER = "massive/flatfiles"
-PRIVATE_KEY = "flat-file-secret"
+HOST = "files.massive.com"
 TRADE_HEADER = (
     "conditions,correction,exchange,id,participant_timestamp,price,sequence_number,"
     "sip_timestamp,size,tape,ticker,trf_id,trf_timestamp\n"
@@ -35,14 +34,6 @@ FUTURES_COLUMNS = (
     ReadColumn("report_sequence", "ReportSequence", pa.int64()),
     ReadColumn("session_end_date", "SessionEndDate", pa.date32()),
 )
-
-
-class FakeS3(Protocol):
-    # What the tests use of the `fake_s3` fixture (tests/conftest.py, tests/_fakes/s3.py).
-    closed_bodies: list[str]
-
-    def put(self, key: str, data: bytes) -> None: ...
-    def put_dropped(self, key: str, data: bytes) -> None: ...
 
 
 def identity(values: pa.Array) -> pa.Array:
@@ -71,31 +62,20 @@ def plan(
     )
 
 
-@pytest.fixture
-def client(fake_s3: FakeS3) -> Iterator[FlatFileClient]:
-    flat_files = FlatFileClient(
-        access_key_id="AKIDFLATFILES",
-        secret_access_key=PRIVATE_KEY,
-        endpoint_url="https://files.massive.com",
-        bucket="flatfiles",
-        max_pool=1,
-    )
-    yield flat_files
-    flat_files.close()
+def flat_file(key: str, data: bytes) -> tuple[FlatFile, io.BytesIO]:
+    # A flat file over bytes in memory: the reader needs only a binary stream, no client.
+    stream = io.BytesIO(data)
+    location = f"s3://flatfiles/{key} at https://{HOST}"
+    return FlatFile(stream, key, location=location, host=HOST), stream
 
 
 @pytest.fixture
-def opened(
-    *, client: FlatFileClient, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
-) -> Callable[[str, str | bytes], FlatFile]:
-    # Stores CSV text (gzip-compressed) or raw bytes under a key and opens it.
-    def store(key: str, text: str | bytes) -> FlatFile:
-        fake_s3.put(key, text if isinstance(text, bytes) else make_csv_gz(text))
-        file = client.open(key)
-        assert file is not None
-        return file
+def opened(make_csv_gz: Callable[[str], bytes]) -> Callable[[str, str | bytes], FlatFile]:
+    # Opens CSV text (gzip-compressed here) or raw bytes as a flat file.
+    def open_text(key: str, text: str | bytes) -> FlatFile:
+        return flat_file(key, text if isinstance(text, bytes) else make_csv_gz(text))[0]
 
-    return store
+    return open_text
 
 
 @pytest.fixture
@@ -270,39 +250,58 @@ def test_a_malformed_file_is_a_wire_error(
     assert (info.value.status, info.value.path) == (None, KEY)
 
 
-def test_a_dropped_connection_is_a_wire_error(
-    *,
-    client: FlatFileClient,
-    fake_s3: FakeS3,
-    make_csv_gz: Callable[[str], bytes],
-    load_fixture: Callable[[str, str], bytes],
+class _BrokenStream(io.BytesIO):
+    # Serves its bytes, then fails as a connection dropped mid-body does.
+    @override
+    def read(self, size: int | None = -1, /) -> bytes:
+        chunk = super().read(size)
+        if not chunk:
+            raise OSError("Connection broken: IncompleteRead")
+        return chunk
+
+
+def test_a_failed_read_of_the_stream_is_a_wire_error(
+    *, make_csv_gz: Callable[[str], bytes], load_fixture: Callable[[str, str], bytes]
 ) -> None:
     data = make_csv_gz(load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode())
-    fake_s3.put_dropped(KEY, data[: len(data) // 2])
-    file = client.open(KEY)
-    assert file is not None
-    with pytest.raises(WireError, match=f"cannot read s3://flatfiles/{KEY}"):
+    location = f"s3://flatfiles/{KEY} at https://{HOST}"
+    file = FlatFile(_BrokenStream(data[: len(data) // 2]), KEY, location=location, host=HOST)
+    with pytest.raises(WireError, match=f"cannot read s3://flatfiles/{KEY}") as info:
         table(file, plan())
+    assert isinstance(info.value.__cause__, OSError)
 
 
 def test_the_body_is_closed_however_the_read_ends(
-    *, trades: FlatFile, opened: Callable[[str, str | bytes], FlatFile], fake_s3: FakeS3
+    make_csv_gz: Callable[[str], bytes],
 ) -> None:
-    table(trades, plan())
+    good, good_stream = flat_file(
+        KEY, make_csv_gz(TRADE_HEADER + "12,,4,1,1,1.5,1,1,10,1,AAPL,,\n")
+    )
+    table(good, plan())
+    bad, bad_stream = flat_file(KEY, b"not gzip")
     with pytest.raises(WireError):
-        table(opened(KEY.replace("03-03", "03-04"), b"not gzip"), plan())
-    assert fake_s3.closed_bodies == [KEY, KEY.replace("03-03", "03-04")]
+        table(bad, plan())
+    assert good_stream.closed
+    assert bad_stream.closed
 
 
-def test_close_is_idempotent(*, trades: FlatFile, monkeypatch: pytest.MonkeyPatch) -> None:
-    closes: list[bool] = []
-    close = StreamingBody.close
+def test_close_is_idempotent() -> None:
+    file, stream = flat_file(KEY, b"")
+    file.close()
+    assert stream.closed
+    file.close()  # a second close is harmless
+    assert stream.closed
 
-    def recorded(body: StreamingBody) -> None:
-        closes.append(True)
-        close(body)
 
-    monkeypatch.setattr(StreamingBody, "close", recorded)
-    trades.close()
-    trades.close()
-    assert closes == [True, True]
+def test_a_filtered_out_row_is_never_parsed(opened: Callable[[str, str | bytes], FlatFile]) -> None:
+    # Lists are parsed on the surviving rows only: a malformed list in a row that the symbol
+    # filter or the window drops never fails the read.
+    rows = (
+        '"12,x",,4,1,100,1.5,1,100,10,1,MSFT,,\n'  # dropped by the symbol filter
+        '"14,x",,4,2,999,1.5,2,999,10,1,AAPL,,\n'  # dropped by the window
+        '"12,37",,4,3,200,1.5,3,200,10,1,AAPL,,\n'
+    )
+    read = plan(symbols=pa.array(["AAPL"], pa.string()), window_ns=(0, 500))
+    result = table(opened(KEY, TRADE_HEADER + rows), read)
+    assert result["Id"].to_pylist() == ["3"]
+    assert result["Conditions"].to_pylist() == [[12, 37]]

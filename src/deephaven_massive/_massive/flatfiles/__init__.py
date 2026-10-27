@@ -9,15 +9,10 @@ them, and knows nothing of datasets, sessions, or Deephaven:
 - `reader`: `FlatFile`, one object's body decoded block by block into Arrow batches, filtered
   and renamed as a `ReadPlan` of `ReadColumn`s says.
 
-It imports only `net` from `_massive`. PEP 8 forbids an underscore in a package name, so it is
-spelled `flatfiles`; the library module that uses it is `_flat_files.py`, which builds the read
-plans and owns the missing-file policy, the reader pool, and cancellation.
+The package defines and imports nothing itself: `deephaven_massive._massive` maps each of these
+names straight to its submodule, so using `object_key` or `ReadPlan` never imports `client`,
+and with it boto3. It imports only `net` from `_massive`. PEP 8 forbids an underscore in a
+package name, so it is spelled `flatfiles`; the library module that uses it is
+`_flat_files.py`, which builds the read plans and owns the missing-file policy, the reader pool,
+and cancellation.
 """
-
-from __future__ import annotations
-
-from deephaven_massive._massive.flatfiles.client import FlatFileClient
-from deephaven_massive._massive.flatfiles.layout import object_key
-from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
-
-__all__ = ["FlatFile", "FlatFileClient", "ReadColumn", "ReadPlan", "object_key"]

@@ -1,18 +1,19 @@
 import threading
 from collections.abc import Callable, Iterator
-from pathlib import Path
 from typing import Protocol
 
+import pyarrow as pa
 import pytest
 
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
-from deephaven_massive._massive.flatfiles.reader import FlatFile
+from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 
 TIMEOUT = 30.0
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
 FUTURES_KEY = "us_futures_nymex/trades_v1/2025/03/2025-03-04.csv.gz"
 PRIVATE_KEY = "flat-file-secret"
+OWNER = "massive/flatfiles"
 
 
 class FakeS3(Protocol):
@@ -20,10 +21,12 @@ class FakeS3(Protocol):
     requests: list[tuple[str, str]]
     clients: list[dict[str, object]]
     closes: int
+    closed_bodies: list[str]
     request_id: str
     before_answer: Callable[[str], object] | None
 
     def put(self, key: str, data: bytes) -> None: ...
+    def put_dropped(self, key: str, data: bytes) -> None: ...
     def refuse(self, prefix: str, *, status: int, code: str, message: str) -> None: ...
     def fail(self, key: str, failure: str) -> None: ...
     def keys(self) -> list[str]: ...
@@ -56,6 +59,7 @@ def test_an_existing_object_opens_and_a_missing_one_is_none(
     assert isinstance(file, FlatFile)
     with file:
         assert file.key == KEY
+    assert fake_s3.closed_bodies == [KEY]
     assert client.open(KEY.replace("03-03", "03-04")) is None
     assert fake_s3.requests == [("flatfiles", KEY), ("flatfiles", KEY.replace("03-03", "03-04"))]
 
@@ -73,7 +77,7 @@ def test_the_client_is_created_once_on_first_use_from_its_settings(fake_s3: Fake
         {
             "endpoint_url": "https://s3.example.com",
             "access_key": "AKIDFLATFILES",
-            "secret_key": "flat-file-secret",
+            "secret_key": PRIVATE_KEY,
             "signature_version": "s3v4",
             "max_pool_connections": 3,
         }
@@ -107,12 +111,11 @@ def test_rejected_credentials_are_a_wire_auth_error(
 ) -> None:
     fake_s3.refuse("us_", status=403, code=code, message="Rejected")
     with pytest.raises(WireAuthError) as info:
-        client.open(FUTURES_KEY, venue="nymex")
+        client.open(FUTURES_KEY)
     error = info.value
+    # The message says what happened to which object; the remedy is the library's to add.
     assert error.message == (
-        f"S3 rejected the flat-file credentials: HTTP 403 for s3://flatfiles/{FUTURES_KEY} at "
-        f"https://files.massive.com ({code}: Rejected); check MassiveConfig s3_access_key_id "
-        "and s3_secret_access_key"
+        f"HTTP 403 for s3://flatfiles/{FUTURES_KEY} at https://files.massive.com ({code}: Rejected)"
     )
     assert (error.status, error.host, error.path) == (403, "files.massive.com", FUTURES_KEY)
     assert error.request_id == fake_s3.request_id
@@ -124,24 +127,14 @@ def test_another_403_is_a_wire_entitlement_error(
 ) -> None:
     fake_s3.refuse("us_", status=403, code="AccessDenied", message="Access Denied")
     with pytest.raises(WireEntitlementError) as info:
-        client.open(KEY)
+        client.open(FUTURES_KEY)
     assert info.value.message == (
-        f"the plan does not include these flat files: HTTP 403 for s3://flatfiles/{KEY} at "
-        "https://files.massive.com (AccessDenied: Access Denied)"
+        f"HTTP 403 for s3://flatfiles/{FUTURES_KEY} at https://files.massive.com "
+        "(AccessDenied: Access Denied)"
     )
-    assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
+    assert (info.value.status, info.value.path) == (403, FUTURES_KEY)
+    assert info.value.request_id == fake_s3.request_id
     assert not isinstance(info.value, WireAuthError)
-
-
-def test_a_refused_futures_key_names_its_venue(*, client: FlatFileClient, fake_s3: FakeS3) -> None:
-    fake_s3.refuse("us_futures_nymex/", status=403, code="AccessDenied", message="Access Denied")
-    with pytest.raises(WireEntitlementError) as info:
-        client.open(FUTURES_KEY, venue="nymex")
-    assert info.value.message == (
-        f"the plan does not include NYMEX futures flat files: HTTP 403 for "
-        f"s3://flatfiles/{FUTURES_KEY} at https://files.massive.com (AccessDenied: Access "
-        "Denied); pass venue=dm.FuturesVenue.<VENUE> for a venue the plan includes"
-    )
 
 
 def test_another_status_is_a_wire_error(*, client: FlatFileClient, fake_s3: FakeS3) -> None:
@@ -167,13 +160,38 @@ def test_an_unreachable_endpoint_is_a_wire_error(
     assert (info.value.status, info.value.request_id, info.value.path) == (None, None, KEY)
 
 
-def test_a_client_that_cannot_be_created_is_a_wire_error(
-    *, fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_a_dropped_connection_is_a_wire_error(
+    *,
+    client: FlatFileClient,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    load_fixture: Callable[[str, str], bytes],
 ) -> None:
-    empty = tmp_path / "aws-config"
-    empty.write_text("")
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(empty))
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(empty))
+    # botocore's own error for a body cut short reaches the reader as an OSError.
+    data = make_csv_gz(load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode())
+    fake_s3.put_dropped(KEY, data[: len(data) // 2])
+    file = client.open(KEY)
+    assert file is not None
+    plan = ReadPlan(
+        columns=(ReadColumn("ticker", "Symbol", pa.string()),),
+        symbol_header="ticker",
+        symbols=None,
+        time_header="sip_timestamp",
+        window_ns=None,
+        to_ns=lambda values: values,
+        session=None,
+        block_size=1 << 20,
+    )
+    with file, pytest.raises(WireError) as info:
+        list(file.batches(plan))
+    assert info.value.message.startswith(f"cannot read s3://flatfiles/{KEY} at ")
+    assert isinstance(info.value.__cause__, OSError)
+    assert fake_s3.closed_bodies == [KEY]
+
+
+def test_a_client_that_cannot_be_created_is_a_wire_error(
+    *, fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("AWS_PROFILE", "no-such-profile")
     client = make_client()
     with pytest.raises(
