@@ -7,9 +7,10 @@ one spelling per value, tab completion in every IDE and in the Deephaven web con
 safety at type-check time. At run time `_require_enum` turns a plain string into a `TypeError` that
 names the member to use; `Timespan("minute")` is the documented way to convert text.
 
-Three further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
-data is), `ChannelFamily` (which host a channel is served from), and `Transport` (WebSocket,
-REST, or flat files). All three appear as values in the diagnostics tables.
+Two further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
+data is) and `ChannelFamily` (which host a channel is served from). Both appear as values in
+the diagnostics tables, beside the wire package's `Transport`, which names WebSocket, REST, or
+flat files once for both sides of the wire boundary.
 
 The fourteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
 private.
@@ -38,7 +39,6 @@ __all__ = [
     "Sip",
     "Timeframe",
     "Timespan",
-    "Transport",
 ]
 
 logger = logging.getLogger(__name__)
@@ -326,18 +326,6 @@ class ChannelFamily(StrEnum):
 
     TICK = "TICK"
     FMV = "FMV"
-
-
-class Transport(StrEnum):
-    """The transport a row arrives on (internal).
-
-    One axis of the timestamp-unit table and the key maps, and the `Transport` column of the
-    diagnostics tables.
-    """
-
-    WS = "WS"
-    REST = "REST"
-    FLAT_FILES = "FLAT_FILES"
 
 
 def _require_enum(value: object, enum_type: type[_E], name: str) -> _E:

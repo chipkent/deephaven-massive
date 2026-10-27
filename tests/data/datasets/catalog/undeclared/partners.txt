@@ -1,0 +1,19 @@
+# The generated sources the partners namespace will declare, one per line as
+# `<transport> <source key>`. A source shared by several namespaces is listed in each.
+REST /benzinga/v1/analyst-insights
+REST /benzinga/v1/analysts
+REST /benzinga/v1/bulls-bears-say
+REST /benzinga/v1/consensus-ratings/{ticker}
+REST /benzinga/v1/earnings
+REST /benzinga/v1/firms
+REST /benzinga/v1/guidance
+REST /benzinga/v1/ratings
+REST /benzinga/v2/news
+REST /consumer-spending/eu/v1/merchant-aggregates
+REST /consumer-spending/eu/v1/merchant-hierarchy
+REST /etf-global/v1/analytics
+REST /etf-global/v1/constituents
+REST /etf-global/v1/fund-flows
+REST /etf-global/v1/profiles
+REST /etf-global/v1/taxonomies
+REST /tmx/v1/corporate-events

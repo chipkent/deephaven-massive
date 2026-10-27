@@ -1031,7 +1031,20 @@ Notation:
   placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
   Every path is a generated REST source (`_massive.source(Transport.REST, template)`,
   [section 19.4](#194-generated-schemas)). Each dataset names its paths by role (`fetch_path`,
-  `history_path`, `grouped_daily_path`, `extra_paths`).
+  `history_path`, `grouped_daily_path`, `extra_paths`), and declares the key columns of each
+  source it reads as `KeySpec`s ([section 19.4](#194-generated-schemas), "Keys are declared
+  per source"): the `symbol`, `time`, and instrument `fanout` keys become `Symbol`,
+  `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column. A
+  `time` key is always an instant, so `Timestamp` is an `Instant`. Every axis below that is
+  a calendar date (all but the instants `published_utc`, `published`, and the indicators'
+  `timestamp`: the dividends, splits, IPOs, short interest and volume, float, financials,
+  filings, futures schedules, economy, and TMX axes) keeps its `LocalDate` column under its
+  own name, such as `Date` or `ExDividendDate`, and declares no `time` key. Datasets whose
+  rows each list several tickers (a JSON `tickers` field) describe a filing, a company, or
+  an article, not one instrument: the three financial statements, `filings.insider_holdings`
+  and `filings.insider_transactions` (Forms 3 and 4), `filings.disclosures_8k`,
+  `reference.news`, and `partners.benzinga.news` have no `Symbol`, keep their `Tickers`
+  column, and use `symbols` only as a request filter ([section 10](#10-symbols-and-all)).
 
 ### 8.1 `m.stocks`
 
@@ -1299,8 +1312,13 @@ Validation is synchronous at query construction, against the generated parameter
 dataset's paths (`RestPath.params` of `spec/rest.json`,
 [section 19.4](#194-generated-schemas)), which carry each
 parameter's kind and, for an enum parameter, its values. A dataset's accepted filters are the
-union over its paths, minus the parameters the library sets itself (path segments, the symbol
-parameter, the axis pair, `limit`, `sort`, `order`, and the typed keyword parameters). An unknown
+union over its paths, minus the parameters the library sets itself: path segments; the
+equality forms of the symbol parameter (its base name, `.any_of`, and `.all_of`: `ticker`,
+`ticker.any_of`, `ticker.all_of`), while its range forms (`ticker.gte`, `ticker.lt`) stay
+filters, since `symbols` cannot express an alphabetical range; the whole family of the time
+axis (its base name and every `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and `.all_of` form,
+so `date.any_of` is reserved too although `start` and `end` cannot express a list of dates);
+`limit`, `sort`, `order`; and the typed keyword parameters. An unknown
 key, a value of the wrong kind, or a value outside a parameter's enum raises `ValueError` naming
 the valid keys or values. When Massive adds a filter, refreshing the snapshot adds it; no code
 changes.
@@ -1308,8 +1326,9 @@ changes.
 `start` and `end` map to the wire parameter pair recorded per dataset in the catalog
 (`timestamp.gte`/`timestamp.lt`, `published_utc.gte`/`published_utc.lte`,
 `ex_dividend_date.gte`/`ex_dividend_date.lte`, `filing_date.gte`/`filing_date.lte`,
-`session_end_date.gte`/`session_end_date.lte`, and so on). Passing the same axis through
-`filters` (as `timestamp_gte`, for example) raises `ValueError`.
+`session_end_date.gte`/`session_end_date.lte`, and so on). Passing any form of the same axis
+through `filters` (as `timestamp_gte`, `timestamp_lte`, or `timestamp`, for example) raises
+`ValueError`.
 
 ## 10. Symbols and `ALL`
 
@@ -1345,11 +1364,16 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   instrument, it is `Underlying` on every options row (from `underlying_ticker` or
   `underlying_asset.ticker`) and on `related_companies` rows. A non-instrument fan-out key
   keeps the generated column the dataset declares as its `fanout` key (`filer_cik` becomes
-  `FilerCik`). Where a source does not carry the instrument in its rows (it takes the symbol
+  `FilerCik`), declared with `KeySpec(..., instrument=False)`
+  ([section 19.4](#194-generated-schemas)). Where a source does not carry the instrument in its rows (it takes the symbol
   as a path parameter, as `/v3/trades/{t}` and `/v2/aggs/ticker/{t}/…` do, or holds it outside
   the result key, as `/v1/last/crypto` and `/v1/last_quote` do), `Symbol` is filled from the
   request ([section 19.4](#194-generated-schemas)). A dataset whose rows describe no instrument
-  (`reference.exchanges`, `economy.*`) has no `Symbol` column.
+  (`reference.exchanges`, `economy.*`) has no `Symbol` column. Nor does a dataset whose rows
+  each list several tickers, because no single instrument is the row's: the three financial
+  statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, and
+  `partners.benzinga.news` keep their `Tickers` column (JSON text), and `symbols` there only
+  filters the request (`tickers.any_of` or `ticker`). `Symbol` is never a list.
 
 ## 11. Enums and types
 
@@ -2924,9 +2948,10 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
   for each member m, each source s of m (its role paths, channels, prefixes):
       fields = s.fields through the projection of s's membership of (m.kind, m's group), if any
       cols(m, s) = rename(m, s, fields)      # m's keys for s: symbol -> Symbol, time ->
-                                             # Timestamp, fanout -> Underlying; a key filled
-                                             # from the request adds a constant column;
-                                             # nothing else changes
+                                             # Timestamp, an instrument fanout -> Underlying
+                                             # (any other fanout and session keep their
+                                             # columns); a key filled from the request adds
+                                             # a constant column; nothing else changes
   schema = ordered union by column name of every cols(m, s):
            Symbol, then Timestamp, first where the dataset declares them; then first
            appearance in member, then source, then field order
@@ -2976,15 +3001,32 @@ longer shows its sample, the field accepts it, or the field is gone; samples com
 text, so `1`, `1.0`, and `true` are three samples.
 
 **Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
-columns as `KeySpec(column, from_request)`, one optional declaration per role (`symbol`,
-`time`, `fanout`, `session`):
+columns as `KeySpec(column, from_request=False, instrument=True)`, grouped per source in a
+`SourceKeys`, one optional declaration per role (`symbol`, `time`, `fanout`, `session`):
 
 - every source of a dataset in a kind declares `symbol` and `time`;
-- every source of any other instrument dataset declares `symbol`;
+- every source of any other instrument dataset declares `symbol`. A dataset is an instrument
+  dataset when it takes symbols: it has channels, flat files, `per_symbol`, a symbol
+  filled from the request, or a `symbol_param` that filters a single-ticker field. A
+  `symbol_param` over a list-valued field (the generated `tickers` field of a filing or an
+  article is `json-text`) does not make one: those rows have no `Symbol`
+  ([section 10](#10-symbols-and-all)). The field is the row field of the parameter's base
+  name, singular or plural, read from the generated path, never from a hand list. Its asset
+  class alone does not make a dataset one either: `futures.exchanges` and
+  `futures.schedules` keep `FUTURES` for the session-day rule and take no symbols;
+- a `symbol` key from the rows is a `string` field: a list of tickers is never `Symbol`;
 - any other dataset declares only the keys its rows carry, possibly none: `reference.exchanges`,
   `conditions`, `market_status`, `market_holidays`, and `ticker_types`, `futures.exchanges`,
-  and `benzinga.firms` declare none, and `economy.*` declares `time` and no `symbol`;
-- `fanout` and (futures) `session` are declared only on the sources that carry them.
+  and `benzinga.firms` declare none, and `economy.*` declares none either: it keeps its `Date`
+  column (its axis is `time_axis` on `date`);
+- a `time` key is an instant: its field (after the projection) is an `epoch` or an
+  `iso-instant`, so `Timestamp` is always an `Instant`. A dataset whose row time is a
+  calendar date keeps that `LocalDate` column under its own name and declares no `time` key;
+- `fanout` and (futures) `session` are declared only on the sources that carry them;
+- `instrument` says whether a `fanout` key names an instrument: True, the default, renames it
+  to `Underlying` (the options underlying, the related company asked about); False keeps its
+  generated column (`filer_cik` stays `FilerCik`). Only a `fanout` key may set it False, and
+  such a key is a column of the rows, never `from_request`.
 
 A key is `from_request` when the source does not carry it in its rows: the symbol of a source
 that takes it as a path parameter or holds it outside the result key
@@ -3035,8 +3077,11 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
   after the projection of the dataset's membership (the `indices.values` time key on
   `/v3/snapshot/indices` is `timestamp` only after it), or `from_request`; every source of a
   dataset in a kind declares `symbol` and `time`, and every source of an instrument dataset
-  declares `symbol`. Its negative tests cover an undeclared kind key, an undeclared instrument
-  symbol, a declared key the source lacks, and a reference dataset that declares none and passes;
+  (one that takes symbols) declares `symbol`; a `time` key is an `epoch` or `iso-instant`
+  field; a dataset's `fanout` keys agree on `instrument` across its sources and across the
+  members of its kind. Its negative tests cover an undeclared kind key, an undeclared
+  instrument symbol, a declared key the source lacks, a date as the time key, and reference
+  datasets that declare none and pass, one of them with an asset class (`futures.exchanges`);
 - **Unique columns:** after the rename, no source has a duplicate column;
 - **Member types:** across members, one column name gets one `WireType`;
 - **Kind membership:** each kind dataset's sources equal the sources holding a membership of its

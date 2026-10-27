@@ -19,9 +19,9 @@ from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 
 import deephaven_massive as dm
-from deephaven_massive._datasets.catalog import DatasetSpec
-from deephaven_massive._datasets.schema import TRADES
+from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass
+from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._tables.liveness import (
@@ -48,8 +48,8 @@ TIMEOUT = 30.0
 SPEC = DatasetSpec(
     name="test.trades",
     asset_class=AssetClass.STOCKS,
-    schema=TRADES.schema,
     channels={None: "T"},
+    keys={(Transport.WS, "stocks/T"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 
 

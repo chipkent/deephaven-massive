@@ -17,13 +17,12 @@ module does the work they share when a dataset method is called:
   does not accept.
 - `list_params` validates the `sort` and `order` parameters of the `…F` block shared by the
   REST list datasets; its `limit` goes to `build_query(limit=...)` (`Request.limit`), because
-  it is a total-row cap, not the SDK's page-size parameter.
+  it is a total-row cap, not the endpoint's page-size parameter.
 
-Filter keys and value kinds are checked against the generated SDK parameter table
-(`check_filters` in `_datasets/catalog.py`) synchronously at construction, so a bad filter
-fails before any verb runs; the check is active once that table has been generated.
-Everything here runs synchronously on the calling thread, makes no network call, and creates no
-table.
+Filter keys and value kinds are checked against the generated parameters of the dataset's REST
+paths (`Catalog.check_filters` in `_datasets/catalog.py`) synchronously at construction, so a
+bad filter fails before any verb runs. Everything here runs synchronously on the calling
+thread, makes no network call, and creates no table.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ from typing import TYPE_CHECKING, ClassVar
 from deephaven.table import Table
 
 from deephaven_massive._config import require_positive_int
-from deephaven_massive._datasets.catalog import check_filters
+from deephaven_massive._datasets.catalog import filter_key
 from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
@@ -100,7 +99,7 @@ def query_class(spec: DatasetSpec) -> type[QueryBase]:
 
     A dataset's verbs are exactly what its transports can serve, so the class follows from the
     spec: channels give the stream verbs, a history source (a REST history or grouped-daily
-    method, or flat-file prefixes) gives `history()`, and a fetch method gives `fetch()`. Each
+    path, or flat-file prefixes) gives `history()`, and a fetch path gives `fetch()`. Each
     namespace factory's return annotation is this class, which the namespace tests check.
 
     | Channels | History | Fetch | Class                      |
@@ -161,7 +160,7 @@ def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> 
         raise ValueError("Timespan.SESSION exists only for futures bars")
     if count == 1 and span in spec.channels:
         return StreamHistoryQuery
-    if count == 1 and span is Timespan.DAY and spec.fetch_method is not None:
+    if count == 1 and span is Timespan.DAY and spec.has_fetch:
         return HistoryLatestQuery
     return HistoryQuery
 
@@ -169,16 +168,16 @@ def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> 
 def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValue]:
     """Validate the `sort` and `order` parameters of a REST list dataset.
 
-    The third member of the `…F` block, `limit`, is not an SDK parameter: it caps the total
+    The third member of the `…F` block, `limit`, is not a wire parameter: it caps the total
     number of rows across pages and goes to `build_query(limit=...)`, which stores it in
     `Request.limit`. An `order` that is not a `dm.Order` raises `TypeError`.
 
     Args:
-        sort: The SDK's sort field name, or None for the endpoint's default.
+        sort: The field to sort by, or None for the endpoint's default.
         order: The sort direction, or None for the endpoint's default.
 
     Returns:
-        The parameters that are set, by SDK name.
+        The parameters that are set, by wire name.
 
     Raises:
         TypeError: If `sort` is not a `str`.
@@ -242,7 +241,8 @@ def _filters(spec: DatasetSpec, filters: object) -> tuple[tuple[str, ParamValue]
     Raises:
         TypeError: If `filters` is not a mapping, a key is not a `str`, or a value has an
             unsupported type.
-        ValueError: If a key is one of the dataset's `start`/`end` parameters, or `adjusted`,
+        ValueError: If a key is a parameter of the dataset's time axis (`DatasetSpec.axis_params`,
+            the `start`/`end` pair's base name and every suffixed form), or `adjusted`,
             which has its own typed argument: a filter would reach REST but not the flat-file
             source choice, which reads only `Request.adjusted`.
     """
@@ -252,7 +252,7 @@ def _filters(spec: DatasetSpec, filters: object) -> tuple[tuple[str, ParamValue]
     for key, value in filters.items():
         if not isinstance(key, str):
             raise TypeError(f"filter names must be str, not {type(key).__name__}")
-        if spec.time_axis is not None and key in spec.time_axis:
+        if key in {filter_key(name) for name in spec.axis_params}:
             raise ValueError(f"{key} is set through start= and end=, not filters")
         if key == "adjusted":
             raise ValueError("adjusted is set through build_query(adjusted=...), not filters")
@@ -294,8 +294,9 @@ def build_query(
             parameter; None for a dataset without one (`Request.adjusted`).
         start: The lower bound of the dataset's time axis, or None.
         end: The upper bound of the dataset's time axis, or None.
-        params: The dataset's other typed parameters by SDK name; None values are dropped.
-        filters: The `filters` mapping by SDK parameter name.
+        params: The dataset's other typed parameters by wire name; None values are dropped.
+        filters: The `filters` mapping, by key: a wire parameter name with its dots written
+            as underscores (`Catalog.check_filters`).
         limit: The cap on the total number of rows (`Request.limit`), or None for every row;
             a positive `int`.
 
@@ -350,5 +351,5 @@ def build_query(
         filters=() if filters is None else _filters(spec, filters),
         limit=None if limit is None else require_positive_int("limit", limit),
     )
-    check_filters(spec, dict(request.filters))
+    core.catalog.check_filters(spec, dict(request.filters))
     return cls(core, spec, request)

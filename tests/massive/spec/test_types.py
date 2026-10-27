@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from deephaven_massive import _enums
 from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
     Conversion,
@@ -38,10 +37,13 @@ def _time() -> Field:
 # Enums.
 
 
-def test_transport_matches_the_library_enum() -> None:
-    # The library's own `Transport` feeds the diagnostics tables; until it is replaced by this
-    # one, the two must not drift apart.
-    assert [(m.name, m.value) for m in Transport] == [(m.name, m.value) for m in _enums.Transport]
+def test_transport_values_are_the_diagnostics_text() -> None:
+    # The diagnostics tables show these values in their `Transport` column.
+    assert [(m.name, m.value) for m in Transport] == [
+        ("WS", "WS"),
+        ("REST", "REST"),
+        ("FLAT_FILES", "FLAT_FILES"),
+    ]
 
 
 def test_wire_type_values_are_the_generated_spellings() -> None:

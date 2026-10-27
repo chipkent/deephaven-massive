@@ -1,0 +1,19 @@
+# The generated sources the futures namespace will declare, one per line as
+# `<transport> <source key>`. A source shared by several namespaces is listed in each.
+REST /futures/v1/aggs/{ticker}
+REST /futures/v1/contracts
+REST /futures/v1/exchanges
+REST /futures/v1/market-status
+REST /futures/v1/products
+REST /futures/v1/quotes/{ticker}
+REST /futures/v1/schedules
+REST /futures/v1/snapshot
+REST /futures/v1/trades/{ticker}
+WS futures/T
+WS futures/Q
+WS futures/A
+WS futures/AM
+FLAT_FILES us_futures_{venue}/session_aggs_v1
+FLAT_FILES us_futures_{venue}/minute_aggs_v1
+FLAT_FILES us_futures_{venue}/trades_v1
+FLAT_FILES us_futures_{venue}/quotes_v1

@@ -22,10 +22,10 @@ from deephaven.table_listener import listen
 
 import deephaven_massive as dm
 from deephaven_massive import _namespaces, _session
-from deephaven_massive._datasets.catalog import DatasetSpec
-from deephaven_massive._datasets.schema import TRADES
+from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
@@ -58,8 +58,8 @@ TIMEOUT = 30.0
 SPEC = DatasetSpec(
     name="test.trades",
     asset_class=AssetClass.STOCKS,
-    schema=TRADES.schema,
     channels={None: "T"},
+    keys={(Transport.WS, "stocks/T"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 
 

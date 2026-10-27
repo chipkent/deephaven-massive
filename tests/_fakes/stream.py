@@ -51,14 +51,16 @@ class FakeStreamTransport:
     def open_stream(
         self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
     ) -> StreamHandle:
-        assert spec.schema is not None
+        core = self._core()
+        assert core is not None  # a verb holds its session's core while it opens a stream
+        schema = core.catalog.dataset_schema(spec)
         with self._lock:
             self.shutdown[stream_id] = threading.Event()
         scope = new_scope()
         with scope.open():
             blink, publisher = table_publisher(
                 f"massive.{spec.name}#{stream_id}",
-                col_defs(spec.schema),
+                col_defs(schema),
                 on_shutdown_callback=lambda: self._on_shutdown(stream_id),
             )
         with self._lock:

@@ -1776,7 +1776,7 @@ duplicate the wire package's `ParamKind` and `Transport`; both go.
 **Tasks.**
 - [ ] `Catalog.members(kind)`: the specs of one kind, in the order of their memberships,
       for the merge below (layer-rules left it out, since no spec had a `kind` yet).
-- [ ] `DatasetSpec` gains `kind`, the per-source key columns (`KeySpec(column, from_request)`,
+- [ ] `DatasetSpec` gains `kind`, the per-source key columns (`KeySpec(column, from_request, instrument)`,
       optional per role, as DESIGN § 19.4 states), and the role paths (`fetch_path`,
       `history_path`, `grouped_daily_path`, `extra_paths`); `has_rest_history` and
       `has_grouped_daily` read the role paths.

@@ -1,39 +1,39 @@
-"""Tests for the schema registry, SDK-model flattening, and the tick schemas."""
+"""Tests for the column types, `Schema`, the key rename, and the merge of a kind's sources."""
 
-import dataclasses
-import inspect
-import re
-from collections.abc import Callable
 from datetime import UTC, date, datetime
-from typing import Protocol, cast
 
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from massive.rest.models import Agg, LastTrade, Quote, Ticker, TickerSnapshot, Trade
-from massive.rest.models.contracts import OptionsContract, Underlying
-from massive.rest.models.snapshot import OptionContractSnapshot
-from massive.websocket.models import EquityAgg, EquityQuote, EquityTrade, IndexValue
 
+from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import (
-    BARS,
-    INDEX_VALUES,
-    QUOTES,
-    TRADES,
+    COLUMN_TYPES,
+    KEY_COLUMNS,
     Column,
-    ColumnOverride,
     ColumnType,
     Schema,
-    TickSchema,
-    flatten,
-    model_schema,
+    SourceColumn,
+    dataset_schema,
+    join,
+    key_column,
     pascal_case,
+    rename,
+    required_fields,
 )
-from deephaven_massive._enums import Transport
+from deephaven_massive._datasets.timestamps import TimeUnit
+from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
 from deephaven_massive._tables.columns import col_defs
 
+R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 ALL_TYPES = Schema("all", tuple(Column(t.name.title().replace("_", ""), t) for t in ColumnType))
+# The wire interface names `Source.memberships` but exports no constructor for an element.
+MEMBERSHIP = type(source(R, "/v3/snapshot/indices").memberships[0])
+
+
+# --- Column types and Schema -----------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -42,9 +42,7 @@ ALL_TYPES = Schema("all", tuple(Column(t.name.title().replace("_", ""), t) for t
         ("sip_timestamp", "SipTimestamp"),
         ("last_trade.sip_timestamp", "LastTradeSipTimestamp"),
         ("id", "Id"),
-        ("vwap", "Vwap"),
         ("filer_cik", "FilerCik"),
-        ("underlying_asset.ticker", "UnderlyingAssetTicker"),
         ("alreadyCamel", "AlreadyCamel"),
     ],
 )
@@ -55,6 +53,7 @@ def test_pascal_case(path: str, expected: str) -> None:
 def test_column_types_map_to_arrow() -> None:
     assert ColumnType.INSTANT.arrow_type == pa.timestamp("ns", tz="UTC")
     assert ColumnType.INT.arrow_type == pa.int32()
+    assert ColumnType.INT_ARRAY.arrow_type == pa.list_(pa.int32())
     assert {t.value for t in ColumnType} == {
         "Instant",
         "LocalDate",
@@ -65,6 +64,17 @@ def test_column_types_map_to_arrow() -> None:
         "boolean",
         "int[]",
     }
+
+
+def test_every_wire_type_has_a_column_type() -> None:
+    assert set(COLUMN_TYPES) == set(WireType)
+    assert COLUMN_TYPES[WireType.EPOCH] is COLUMN_TYPES[WireType.ISO_INSTANT] is ColumnType.INSTANT
+    assert COLUMN_TYPES[WireType.JSON_TEXT] is ColumnType.STRING
+    assert COLUMN_TYPES[WireType.BOOL] is ColumnType.BOOLEAN
+    assert COLUMN_TYPES[WireType.DATE] is ColumnType.LOCAL_DATE
+    assert COLUMN_TYPES[WireType.INT_ARRAY] is ColumnType.INT_ARRAY
+    # A dataset column is never a 32-bit int: exchange and tape ids are long.
+    assert ColumnType.INT not in COLUMN_TYPES.values()
 
 
 def test_schema_rejects_duplicate_columns() -> None:
@@ -105,6 +115,8 @@ def test_to_arrow_reports_schema_mismatches() -> None:
         ALL_TYPES.to_arrow([{"Double": "x"}])
     with pytest.raises(MassiveError, match="LocalDate"):
         ALL_TYPES.to_arrow([{"LocalDate": "03/03/2025"}])
+    with pytest.raises(MassiveError, match=r"schema mismatch in all\.String"):
+        ALL_TYPES.to_arrow([{"String": {"a": {1, 2}}}])  # JSON cannot encode a set
 
 
 def test_to_arrow_never_truncates_floats_in_integer_columns() -> None:
@@ -137,280 +149,7 @@ def test_to_arrow_reads_a_naive_datetime_as_utc() -> None:
     assert values[0] == values[1]
 
 
-def test_flatten_nested_models() -> None:
-    snapshot = TickerSnapshot(
-        ticker="AAPL",
-        last_trade=LastTrade(price=189.5, size=100, sip_timestamp=1_700_000_000_000_000_000),
-    )
-    flat = flatten(snapshot)
-    assert flat["ticker"] == "AAPL"
-    assert flat["last_trade.price"] == 189.5
-    assert flat["last_trade.sip_timestamp"] == 1_700_000_000_000_000_000
-    assert "day.open" not in flat
-
-
-def test_flatten_rejects_non_models() -> None:
-    with pytest.raises(ValueError, match="not an SDK model instance"):
-        flatten({"ticker": "AAPL"})
-    with pytest.raises(ValueError, match="not an SDK model instance"):
-        flatten(Trade)
-
-
-def test_model_schema_from_a_flat_model() -> None:
-    derived = model_schema(
-        "stocks.trades",
-        Trade,
-        instant_fields=("sip_timestamp", "participant_timestamp", "trf_timestamp"),
-        overrides={"exchange": ColumnOverride(type=ColumnType.INT)},
-    )
-    columns = {c.name: c.type for c in derived.schema.columns}
-    assert columns["Conditions"] is ColumnType.INT_ARRAY
-    assert columns["SipTimestamp"] is ColumnType.INSTANT
-    assert columns["Exchange"] is ColumnType.INT
-    assert columns["Size"] is ColumnType.DOUBLE
-    assert columns["SequenceNumber"] is ColumnType.LONG
-    assert columns["DecimalSize"] is ColumnType.STRING
-    assert derived.schema.column_names[0] == "Conditions"
-    row = derived.row(Trade(price=1.5, size=10.0, exchange=4))
-    assert row["Price"] == 1.5
-    assert row["Exchange"] == 4
-    assert row["Id"] is None
-
-
-def test_model_schema_flattens_nested_models_and_maps_dates() -> None:
-    derived = model_schema("options.snapshots", OptionContractSnapshot)
-    names = derived.schema.column_names
-    assert "DetailsStrikePrice" in names
-    assert "GreeksDelta" in names
-    assert "UnderlyingAssetTicker" in names
-    assert derived.columns_by_path["last_quote.midpoint"] == "LastQuoteMidpoint"
-    columns = {c.name: c.type for c in derived.schema.columns}
-    assert columns["DetailsExpirationDate"] is ColumnType.LOCAL_DATE
-    assert columns["LastTradeConditions"] is ColumnType.INT_ARRAY
-
-
-def test_overrides_rename_and_drop() -> None:
-    derived = model_schema(
-        "stocks.last_trade",
-        LastTrade,
-        overrides={
-            "ticker": ColumnOverride(name="Symbol"),
-            "fractional_size": ColumnOverride(drop=True),
-        },
-    )
-    assert "Symbol" in derived.schema.column_names
-    assert "FractionalSize" not in derived.schema.column_names
-    assert "fractional_size" not in derived.columns_by_path
-
-
-def test_unmapped_hints_need_an_override() -> None:
-    with pytest.raises(TypeError, match=r"'additional_underlyings' .* declare a ColumnOverride"):
-        model_schema("options.contracts", OptionsContract)
-    derived = model_schema(
-        "options.contracts",
-        OptionsContract,
-        overrides={"additional_underlyings": ColumnOverride(type=ColumnType.STRING)},
-    )
-    assert "AdditionalUnderlyings" in derived.schema.column_names
-
-
-def test_model_schema_validation() -> None:
-    with pytest.raises(ValueError, match="not an SDK model class"):
-        model_schema("x.y", dict)
-    with pytest.raises(ValueError, match=r"Agg has no fields \['nope'\]"):
-        model_schema("x.y", Agg, instant_fields=("nope",))
-    with pytest.raises(ValueError, match="no fields"):
-        model_schema("x.y", Agg, overrides={"missing": ColumnOverride(drop=True)})
-
-
-def test_union_hints_need_an_override() -> None:
-    @dataclasses.dataclass
-    class Weird:
-        value: int | str | None = None
-
-    with pytest.raises(TypeError, match="no column mapping"):
-        model_schema("x.y", Weird)
-
-
-def test_non_optional_hints_map_directly() -> None:
-    @dataclasses.dataclass
-    class Plain:
-        count: int = 0
-        name: str = ""
-
-    columns = {c.name: c.type for c in model_schema("x.y", Plain).schema.columns}
-    assert columns == {"Count": ColumnType.LONG, "Name": ColumnType.STRING}
-
-
-@pytest.mark.parametrize("tick", [TRADES, QUOTES, BARS, INDEX_VALUES])
-def test_tick_schemas_lead_with_symbol_and_timestamp(tick: TickSchema) -> None:
-    assert tick.schema.column_names[:2] == ("Symbol", "Timestamp")
-
-
-@pytest.mark.parametrize(
-    ("tick", "columns"),
-    [
-        (
-            TRADES,
-            {
-                "ReceivedTimestamp": ColumnType.INSTANT,
-                "SessionEndDate": ColumnType.LOCAL_DATE,
-                "Channel": ColumnType.INT,
-                "ReportSequence": ColumnType.LONG,
-            },
-        ),
-        (
-            QUOTES,
-            {
-                "Exchange": ColumnType.INT,
-                "ReceivedTimestamp": ColumnType.INSTANT,
-                "SessionEndDate": ColumnType.LOCAL_DATE,
-                "Channel": ColumnType.INT,
-                "ReportSequence": ColumnType.LONG,
-                "BidTimestamp": ColumnType.INSTANT,
-                "AskTimestamp": ColumnType.INSTANT,
-            },
-        ),
-        (
-            BARS,
-            {
-                "DollarVolume": ColumnType.DOUBLE,
-                "SessionEndDate": ColumnType.LOCAL_DATE,
-                "SettlementPrice": ColumnType.DOUBLE,
-            },
-        ),
-    ],
-)
-def test_tick_schemas_are_unions_across_asset_classes(
-    tick: TickSchema, columns: dict[str, ColumnType]
-) -> None:
-    # Crypto and futures fields are nullable columns of the shared schemas; the equity key
-    # maps leave them null.
-    types = {c.name: c.type for c in tick.schema.columns}
-    assert {name: types[name] for name in columns} == columns
-    for key_map in tick.key_maps.values():
-        assert not set(columns) & set(key_map.values())
-    row = tick.schema.to_arrow([{"Symbol": "AAPL"}]).to_pylist()[0]
-    assert all(row[name] is None for name in columns)
-
-
-class _WsModel(Protocol):
-    from_dict: Callable[..., object]
-
-
-def _ws_keys(model: _WsModel) -> set[str]:
-    # The single-letter keys an SDK WebSocket model's from_dict reads, minus the event type.
-    source = inspect.getsource(model.from_dict)
-    keys = set(re.findall(r'd\.get\("([^"]+)"', source))
-    return keys - {"ev"}
-
-
-@pytest.mark.parametrize(
-    ("tick", "model", "unmapped"),
-    [
-        (TRADES, EquityTrade, set()),
-        (QUOTES, EquityQuote, set()),
-        (BARS, EquityAgg, {"dv", "dav"}),
-        (INDEX_VALUES, IndexValue, set()),
-    ],
-)
-def test_ws_key_maps_cover_the_sdk_models(
-    tick: TickSchema, model: _WsModel, unmapped: set[str]
-) -> None:
-    assert set(tick.key_maps[Transport.WS]) == _ws_keys(model) - unmapped
-
-
-@pytest.mark.parametrize(
-    ("tick", "model"),
-    [
-        (TRADES, Trade),
-        (QUOTES, Quote),
-        (BARS, Agg),
-    ],
-)
-def test_rest_key_maps_cover_the_sdk_models(tick: TickSchema, model: type) -> None:
-    assert set(tick.key_maps[Transport.REST]) == {f.name for f in dataclasses.fields(model)}
-
-
-@pytest.mark.parametrize(
-    ("tick", "headers"),
-    [
-        (
-            TRADES,
-            (
-                "conditions,correction,exchange,id,participant_timestamp,price,sequence_number,"
-                "sip_timestamp,size,tape,ticker,trf_id,trf_timestamp"
-            ),
-        ),
-        (
-            QUOTES,
-            (
-                "ask_exchange,ask_price,ask_size,bid_exchange,bid_price,bid_size,conditions,"
-                "indicators,participant_timestamp,sequence_number,sip_timestamp,tape,ticker,"
-                "trf_timestamp"
-            ),
-        ),
-        (BARS, "ticker,volume,open,close,high,low,window_start,transactions"),
-        (INDEX_VALUES, "ticker,timestamp,value"),
-    ],
-)
-def test_flat_file_key_maps_cover_the_documented_headers(tick: TickSchema, headers: str) -> None:
-    assert set(tick.key_maps[Transport.FLAT_FILES]) == set(headers.split(","))
-
-
-def test_tick_schema_key_maps_must_target_columns() -> None:
-    with pytest.raises(ValueError, match=r"WS key map targets unknown \['Nope'\]"):
-        TickSchema(TRADES.schema, {Transport.WS: {"x": "Nope"}})
-
-
-def test_tick_rows_fill_the_schema(dh_exec_ctx: object) -> None:
-    frame = {"ev": "T", "sym": "AAPL", "p": 1.5, "s": 100, "c": [12], "t": 1_700_000_000_000}
-    key_map = TRADES.key_maps[Transport.WS]
-    row = {key_map[k]: v for k, v in frame.items() if k in key_map}
-    row["Timestamp"] = cast("int", row["Timestamp"]) * 1_000_000
-    table = dh_arrow.to_table(TRADES.schema.to_arrow([row]))
-    assert {c.name: c.data_type for c in table.columns} == col_defs(TRADES.schema)
-
-
-def test_iso_timestamps_become_instants(dh_exec_ctx: object) -> None:
-    derived = model_schema("reference.tickers", Ticker)
-    columns = {c.name: c.type for c in derived.schema.columns}
-    assert columns["LastUpdatedUtc"] is ColumnType.INSTANT
-    assert columns["DelistedUtc"] is ColumnType.INSTANT
-    rows = [
-        derived.row(Ticker(ticker="AAPL", last_updated_utc="2024-06-24T18:33:53Z")),
-        derived.row(Ticker(ticker="MSFT", last_updated_utc="2024-06-24T18:33:53.5")),
-        derived.row(Ticker(ticker="NVDA", last_updated_utc="2024-06-24T14:33:53-04:00")),
-    ]
-    table = dh_arrow.to_table(derived.schema.to_arrow(rows))
-    values = [r["LastUpdatedUtc"] for r in dh_arrow.to_arrow(table).to_pylist()]
-    expected = datetime(2024, 6, 24, 18, 33, 53, tzinfo=UTC)
-    assert values == [expected, expected.replace(microsecond=500_000), expected]
-
-
-def test_instant_overrides_parse_iso_text() -> None:
-    schema = Schema("x", (Column("At", ColumnType.INSTANT),))
-    batch = schema.to_arrow([{"At": "2025-03-03T09:30:00-05:00"}, {"At": 1}])
-    assert batch.column("At").to_pylist()[0] == datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
-    with pytest.raises(MassiveError, match=r"schema mismatch in x\.At"):
-        schema.to_arrow([{"At": "not a time"}])
-
-
-def test_flattened_names_that_collide_are_rejected() -> None:
-    @dataclasses.dataclass
-    class Inner:
-        b: int | None = None
-
-    @dataclasses.dataclass
-    class Outer:
-        a_b: int | None = None
-        a: Inner | None = None
-
-    with pytest.raises(ValueError, match=r"repeats columns \['AB'\]"):
-        model_schema("x.y", Outer)
-
-
-def test_iso_text_keeps_nanoseconds() -> None:
+def test_iso_text_becomes_an_instant_to_the_nanosecond() -> None:
     schema = Schema("x", (Column("At", ColumnType.INSTANT),))
     batch = schema.to_arrow(
         [
@@ -428,25 +167,400 @@ def test_iso_text_keeps_nanoseconds() -> None:
         1719254033123456789,
         1719254033000000000,
     ]
+    with pytest.raises(MassiveError, match=r"schema mismatch in x\.At"):
+        schema.to_arrow([{"At": "not a time"}])
 
 
-def test_string_overrides_serialize_nested_models() -> None:
-    derived = model_schema(
-        "options.contracts",
-        OptionsContract,
-        overrides={"additional_underlyings": ColumnOverride(type=ColumnType.STRING)},
+# --- The lattice -----------------------------------------------------------------------------
+
+
+def test_join_widens_only_by_the_lattice() -> None:
+    long, double, ints = WireType.LONG, WireType.DOUBLE, WireType.INT_ARRAY
+    assert join(long, double) is join(double, long) is WireType.DOUBLE
+    assert join(long, ints) is join(ints, long) is WireType.INT_ARRAY
+    assert join(WireType.EPOCH, WireType.EPOCH) is WireType.EPOCH
+    for same in WireType:
+        assert join(same, same) is same
+    assert join(double, ints) is None
+    assert join(WireType.EPOCH, WireType.ISO_INSTANT) is None
+    assert join(WireType.STRING, WireType.JSON_TEXT) is None
+
+
+# --- The rename ------------------------------------------------------------------------------
+
+
+def spec(
+    name: str,
+    one: dict[tuple[Transport, str], SourceKeys],
+    *,
+    asset_class: AssetClass,
+    kind: str | None = None,
+) -> DatasetSpec:
+    # A dataset of one REST path or one channel, with that source's keys.
+    ((transport, key),) = one
+    return DatasetSpec(
+        name=name,
+        asset_class=asset_class,
+        kind=kind,
+        fetch_path=key if transport is R else None,
+        channels={None: key.split("/")[1]} if transport is W else {},
+        keys=one,
     )
-    contract = OptionsContract(
-        ticker="O:AAPL250117C00150000",
-        additional_underlyings=[Underlying(amount=100.0, type="equity", underlying="AAPL")],
+
+
+def test_rename_renames_only_the_declared_keys() -> None:
+    nbbo = (R, "/v2/last/nbbo/{stocksTicker}")
+    quotes = spec(
+        "stocks.quotes",
+        {nbbo: SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
+        asset_class=AssetClass.STOCKS,
     )
-    batch = derived.schema.to_arrow([derived.row(contract)])
-    assert batch.column("AdditionalUnderlyings").to_pylist() == [
-        '[{"amount": 100.0, "type": "equity", "underlying": "AAPL"}]'
+    columns = rename(quotes, source(*nbbo))
+    names = [c.column for c in columns]
+    assert names[0] == "Symbol"
+    assert "Timestamp" in names
+    assert {"Ticker", "SipTimestamp"}.isdisjoint(names)
+    assert "ParticipantTimestamp" in names  # every other field keeps its generated column
+    time = next(c for c in columns if c.column == "Timestamp")
+    assert time.unit is TimeUnit.NANOSECONDS
+    assert time.field is not None
+    assert time.field.wire_key == "t"
+    assert next(c for c in columns if c.column == "AskPrice").unit is None
+
+
+def test_a_key_from_the_request_comes_first_as_text() -> None:
+    trades = (R, "/v3/trades/{stockTicker}")
+    history = spec(
+        "stocks.trades",
+        {trades: SourceKeys(KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp"))},
+        asset_class=AssetClass.STOCKS,
+    )
+    first = rename(history, source(*trades))[0]
+    assert first == SourceColumn("Symbol", WireType.STRING, parameter="stockTicker")
+
+
+def test_the_session_key_keeps_its_column() -> None:
+    files = (F, "us_futures_{venue}/trades_v1")
+    futures = DatasetSpec(
+        name="futures.trades",
+        asset_class=AssetClass.FUTURES,
+        flat_file_prefixes={None: files[1]},
+        keys={
+            files: SourceKeys(
+                KeySpec("Ticker"), KeySpec("Timestamp"), session=KeySpec("SessionEndDate")
+            )
+        },
+    )
+    names = [c.column for c in rename(futures, source(*files))]
+    assert names[:2] == ["Symbol", "Timestamp"]
+    assert "SessionEndDate" in names
+    assert KEY_COLUMNS == {"symbol": "Symbol", "time": "Timestamp", "fanout": "Underlying"}
+
+
+def test_a_projection_keeps_and_names_the_member_fields() -> None:
+    last_quote = (R, "/v1/last_quote/currencies/{from}/{to}")
+    forex = spec(
+        "forex.quotes",
+        {last_quote: SourceKeys(KeySpec("from", from_request=True), KeySpec("Timestamp"))},
+        asset_class=AssetClass.FOREX,
+        kind="quotes",
+    )
+    names = [c.column for c in rename(forex, source(*last_quote))]
+    # The forex last quote's `ask` and `bid` join the quotes kind as AskPrice and BidPrice.
+    assert names == ["Symbol", "AskPrice", "BidPrice", "Exchange", "Timestamp"]
+    # Outside the kind, the same source keeps its own names.
+    alone = spec("forex.last", {last_quote: SourceKeys()}, asset_class=AssetClass.FOREX)
+    assert [c.column for c in rename(alone, source(*last_quote))] == [
+        "Ask",
+        "Bid",
+        "Exchange",
+        "Timestamp",
     ]
 
 
-def test_string_overrides_reject_values_json_cannot_encode() -> None:
-    schema = Schema("x", (Column("S", ColumnType.STRING),))
-    with pytest.raises(MassiveError, match=r"schema mismatch in x\.S"):
-        schema.to_arrow([{"S": {"a": {1, 2}}}])
+def test_a_projection_belongs_to_the_dataset_group() -> None:
+    # One source in two groups of one kind, projected differently in each.
+    shared = Source(
+        key="/shared",
+        transport=R,
+        fields=(
+            Field(wire_key="ticker", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="ask", column="Ask", wire_type=WireType.DOUBLE),
+        ),
+        memberships=(
+            MEMBERSHIP(kind="quotes", group="stocks", position=0, projection={"ask": "AskPrice"}),
+            MEMBERSHIP(
+                kind="quotes",
+                group="forex",
+                position=0,
+                projection={"ticker": "Ticker", "ask": "Offer"},
+            ),
+        ),
+    )
+    forex = spec(
+        "forex.quotes",
+        {(R, "/shared"): SourceKeys(KeySpec("Ticker"))},
+        asset_class=AssetClass.FOREX,
+        kind="quotes",
+    )
+    assert [c.column for c in rename(forex, shared)] == ["Symbol", "Offer"]
+
+
+def test_required_keys_resolve_to_the_fields_behind_them() -> None:
+    snapshot = (R, "/v3/snapshot/indices")
+    values = spec(
+        "indices.values",
+        {snapshot: SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
+        asset_class=AssetClass.INDICES,
+        kind="values",
+    )
+    # The kind's Timestamp is the snapshot's own LastUpdated, which the wire client decodes.
+    fields = required_fields(values, source(*snapshot))
+    assert [(f.wire_key, f.column) for f in fields] == [
+        ("ticker", "Ticker"),
+        ("last_updated", "LastUpdated"),
+    ]
+    # A key filled from the request is no column of the rows, so it is never required.
+    files = (F, "us_futures_{venue}/trades_v1")
+    trades = (R, "/futures/v1/trades/{ticker}")
+    futures = DatasetSpec(
+        name="futures.trades",
+        asset_class=AssetClass.FUTURES,
+        history_path=trades[1],
+        flat_file_prefixes={None: files[1]},
+        keys={
+            trades: SourceKeys(
+                KeySpec("ticker", from_request=True),
+                KeySpec("Timestamp"),
+                session=KeySpec("SessionEndDate"),
+            ),
+            files: SourceKeys(
+                KeySpec("Ticker"), KeySpec("Timestamp"), session=KeySpec("SessionEndDate")
+            ),
+        },
+    )
+    assert [f.wire_key for f in required_fields(futures, source(*trades))] == [
+        "timestamp",
+        "session_end_date",
+    ]
+    assert [f.wire_key for f in required_fields(futures, source(*files))] == [
+        "ticker",
+        "timestamp",
+        "session_end_date",
+    ]
+
+
+def test_the_fmv_channel_takes_the_magnitude_rule() -> None:
+    fmv = (W, "stocks/FMV")
+    stream = spec(
+        "stocks.fmv",
+        {fmv: SourceKeys(KeySpec("Ticker"), KeySpec("FmvLastUpdated"))},
+        asset_class=AssetClass.STOCKS,
+    )
+    time = next(c for c in rename(stream, source(*fmv)) if c.column == "Timestamp")
+    assert time.unit is TimeUnit.FMV_MAGNITUDE
+
+
+def test_rename_refuses_a_key_the_source_lacks() -> None:
+    trades = (W, "stocks/T")
+    lacking = spec(
+        "stocks.trades",
+        {trades: SourceKeys(KeySpec("Symbol"))},
+        asset_class=AssetClass.STOCKS,
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"^declared keys: stocks\.trades: WS stocks/T: the symbol key 'Symbol' is not",
+    ):
+        rename(lacking, source(*trades))
+
+
+def test_rename_refuses_two_keys_on_one_column() -> None:
+    contracts = (R, "/v3/reference/options/contracts")
+    overlapping = spec(
+        "options.contracts",
+        {contracts: SourceKeys(KeySpec("Ticker"), fanout=KeySpec("Ticker"))},
+        asset_class=AssetClass.OPTIONS,
+    )
+    message = (
+        r"^declared keys: options\.contracts: REST /v3/reference/options/contracts: the fanout "
+        r"key 'Ticker' is already the symbol key$"
+    )
+    with pytest.raises(ValueError, match=message):
+        rename(overlapping, source(*contracts))
+    # The gate reports it, and nothing raises past it.
+    assert Catalog((overlapping,)).problems() == (message[1:-1].replace("\\", ""),)
+
+
+def test_rename_refuses_a_repeated_column() -> None:
+    open_close = (R, "/v1/open-close/{stocksTicker}/{date}")
+    dup = spec(
+        "stocks.daily_open_close",
+        {open_close: SourceKeys(KeySpec("stocksTicker", from_request=True))},
+        asset_class=AssetClass.STOCKS,
+    )
+    # The open-close rows already carry a Symbol column of their own.
+    with pytest.raises(
+        ValueError,
+        match=r"^unique columns: stocks\.daily_open_close: REST /v1/open-close/\{stocksTicker\}"
+        r"/\{date\}: columns \['Symbol'\] repeat after the rename$",
+    ):
+        rename(dup, source(*open_close))
+
+
+def test_the_column_of_each_key() -> None:
+    assert key_column("symbol", KeySpec("Ticker")) == "Symbol"
+    assert key_column("time", KeySpec("SipTimestamp")) == "Timestamp"
+    assert key_column("fanout", KeySpec("UnderlyingTicker")) == "Underlying"
+    assert key_column("fanout", KeySpec("FilerCik", instrument=False)) == "FilerCik"
+    assert key_column("session", KeySpec("SessionEndDate")) == "SessionEndDate"
+
+
+def test_a_fanout_key_that_is_no_instrument_keeps_its_column_and_is_required() -> None:
+    holdings = (R, "/stocks/filings/vX/13-F")
+    filings = DatasetSpec(
+        name="stocks.institutional_holdings",
+        fetch_path=holdings[1],
+        keys={holdings: SourceKeys(fanout=KeySpec("FilerCik", instrument=False))},
+    )
+    names = [c.column for c in rename(filings, source(*holdings))]
+    assert "FilerCik" in names
+    assert "Underlying" not in names
+    assert [f.wire_key for f in required_fields(filings, source(*holdings))] == ["filer_cik"]
+
+
+def test_a_fanout_key_from_the_request_precedes_the_fields() -> None:
+    trades = (W, "stocks/T")
+    fanout = spec(
+        "stocks.trades",
+        {trades: SourceKeys(KeySpec("Ticker"), fanout=KeySpec("x", from_request=True))},
+        asset_class=AssetClass.STOCKS,
+    )
+    names = [c.column for c in rename(fanout, source(*trades))]
+    assert names[:2] == ["Underlying", "Symbol"]
+
+
+# --- The merge -------------------------------------------------------------------------------
+
+
+def lookup(transport: Transport, key: str) -> Source:
+    return source(transport, key)
+
+
+def test_the_merge_puts_the_declared_keys_first() -> None:
+    contracts = (R, "/v3/reference/options/contracts")
+    dataset = spec(
+        "options.contracts",
+        {contracts: SourceKeys(KeySpec("Ticker"), fanout=KeySpec("UnderlyingTicker"))},
+        asset_class=AssetClass.OPTIONS,
+    )
+    schema = dataset_schema(dataset, (dataset,), lookup)
+    names = schema.column_names
+    assert names[:3] == ("Symbol", "AdditionalUnderlyings", "Cfi")
+    assert schema.name == "options.contracts"
+    # Only Symbol and Timestamp lead; Underlying keeps its field's place in the source.
+    fields = [f.column for f in source(*contracts).fields if f.column != "Ticker"]
+    assert names[1:] == tuple("Underlying" if c == "UnderlyingTicker" else c for c in fields)
+
+
+def test_the_merge_follows_the_membership_positions() -> None:
+    # Declared fetch, history, stream, files; the stocks trades group puts the history path
+    # (position 0) before the last-trade path (position 1).
+    sip = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
+    history = (R, "/v3/trades/{stockTicker}")
+    last = (R, "/v2/last/trade/{stocksTicker}")
+    trades = DatasetSpec(
+        name="stocks.trades",
+        asset_class=AssetClass.STOCKS,
+        kind="trades",
+        fetch_path=last[1],
+        history_path=history[1],
+        channels={None: "T"},
+        keys={
+            last: sip,
+            history: SourceKeys(KeySpec("stockTicker", from_request=True), sip.time),
+            (W, "stocks/T"): sip,
+        },
+    )
+    made = Source(
+        key=last[1],
+        transport=R,
+        fields=(
+            Field(wire_key="T", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="z", column="Zeta", wire_type=WireType.LONG),
+            Field(wire_key="t", column="SipTimestamp", wire_type=WireType.EPOCH, unit=WireUnit.NS),
+        ),
+        memberships=(MEMBERSHIP(kind="trades", group="stocks", position=1),),
+    )
+
+    def tables(transport: Transport, key: str) -> Source:
+        return made if key == last[1] else source(transport, key)
+
+    names = dataset_schema(trades, (trades,), tables).column_names
+    # The history path's columns come before the last-trade path's own Zeta.
+    assert names.index("Conditions") < names.index("Zeta")
+    assert names[-1] == "Zeta"
+
+
+def test_the_merge_joins_types_across_sources() -> None:
+    # The quote stream sends one condition code as an integer; REST sends a list.
+    nbbo, stream = (R, "/v2/last/nbbo/{stocksTicker}"), (W, "stocks/Q")
+    both = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
+    quotes = DatasetSpec(
+        name="stocks.quotes",
+        asset_class=AssetClass.STOCKS,
+        fetch_path=nbbo[1],
+        history_path="/v3/quotes/{stockTicker}",
+        channels={None: "Q"},
+        keys={nbbo: both, stream: both},
+    )
+    schema = dataset_schema(quotes, (quotes,), lookup)
+    types = {c.name: c.type for c in schema.columns}
+    assert types["Conditions"] is ColumnType.INT_ARRAY
+    assert types["AskSize"] is ColumnType.DOUBLE  # long on the stream, double on /v3/quotes
+    assert schema.column_names[:2] == ("Symbol", "Timestamp")
+
+
+def test_the_merge_reports_a_type_conflict() -> None:
+    made = Source(
+        key="stocks/T",
+        transport=W,
+        fields=(
+            Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="p", column="Price", wire_type=WireType.STRING),
+        ),
+    )
+    stream = DatasetSpec(
+        name="stocks.trades",
+        asset_class=AssetClass.STOCKS,
+        history_path="/v3/trades/{stockTicker}",
+        channels={None: "T"},
+    )
+
+    def made_up(transport: Transport, key: str) -> Source:
+        return made if transport is W else source(transport, key)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^member types: stocks\.trades: column 'Price' is double elsewhere but string "
+        r"in stocks\.trades WS stocks/T$",
+    ):
+        dataset_schema(stream, (stream,), made_up)
+
+
+def test_epochs_of_different_units_share_a_column() -> None:
+    made = Source(
+        key="stocks/T",
+        transport=W,
+        fields=(Field(wire_key="t", column="At", wire_type=WireType.EPOCH, unit=WireUnit.MS),),
+    )
+    other = Source(
+        key="stocks/Q",
+        transport=W,
+        fields=(Field(wire_key="t", column="At", wire_type=WireType.EPOCH, unit=WireUnit.NS),),
+    )
+    stream = DatasetSpec(name="stocks.x", asset_class=AssetClass.STOCKS, channels={None: "T"})
+    second = DatasetSpec(name="stocks.y", asset_class=AssetClass.STOCKS, channels={None: "Q"})
+    tables = {"stocks/T": made, "stocks/Q": other}
+    schema = dataset_schema(stream, (stream, second), lambda _, key: tables[key])
+    assert schema.columns == (Column("At", ColumnType.INSTANT),)

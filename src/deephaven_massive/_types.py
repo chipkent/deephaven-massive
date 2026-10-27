@@ -110,8 +110,8 @@ is a whole day in the asset class's day zone.
 """
 
 FilterValue: TypeAlias = str | int | float | bool | date | datetime | Sequence[str]
-"""A value in the `filters` mapping, keyed by the SDK's parameter names such as
-`strike_price_gte` or `ticker_any_of`."""
+"""A value in the `filters` mapping, keyed by a wire parameter name with its dots written as
+underscores, such as `strike_price_gte` or `ticker_any_of`."""
 
 StreamSpan: TypeAlias = Literal[Timespan.SECOND, Timespan.MINUTE]
 """Bar timespans that have a WebSocket channel (with `multiplier=1`)."""

@@ -29,7 +29,6 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive._datasets import catalog as _catalog
 from deephaven_massive._datasets.catalog import DatasetSpec
-from deephaven_massive._datasets.schema import TRADES
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._massive import DriftReport
@@ -70,7 +69,6 @@ TIMEOUT = 30.0
 SPEC = DatasetSpec(
     name="test.trades",
     asset_class=AssetClass.STOCKS,
-    schema=TRADES.schema,
     channels={None: "T"},
 )
 

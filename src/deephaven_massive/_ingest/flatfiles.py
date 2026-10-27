@@ -14,8 +14,13 @@ to keep.
   `MassiveConfig.max_concurrency` at a time, each in blocks of `BLOCK_SIZE` bytes. Each block
   is first checked (futures sessions), then filtered to the requested symbols with
   `pyarrow.compute.is_in` (symbol pushdown) and to the half-open `[start, end)` range on
-  `Timestamp`; only the surviving rows are renamed to the dataset's PascalCase columns, have
-  their condition and indicator lists parsed, and are converted to the column types here. A
+  `Timestamp`; only the surviving rows are renamed to the dataset's columns, have their
+  condition and indicator lists parsed, and are converted to the column types here. The
+  headers, their types, and their timestamp units are the prefix's generated fields
+  (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
+  columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
+  do not carry is null and a column a kind widens (an integer size in a `double` column) is
+  widened. A
   file's surviving rows become one static Deephaven table per `_TABLE_BLOCKS` blocks of data
   (usually one table per file), and the tables are merged at the end. No block is ever
   converted to Python objects. Arrow reads about 32 blocks ahead of the consumer on its own
@@ -37,8 +42,9 @@ Columns are matched by header name, never by position, so a file whose columns a
 reads identically. Every `Instant` column goes through the timestamp routine of
 `_datasets/timestamps.py`: Massive writes `0` where a timestamp has no value (`trf_timestamp` of
 a trade without a TRF), so in every `Instant` column except `Timestamp` a `0` becomes null; each
-value is then scaled to nanoseconds by its declared unit, with an overflow check, and must lie in
-1990 to 2100, so a wrongly declared unit fails the read instead of returning wrong instants.
+value is then scaled to nanoseconds by its field's unit, with an overflow check, and must lie in
+1990 to 2100, so a file in another unit than documented fails the read instead of returning
+wrong instants.
 
 Schema drift is reported, not raised: a header the dataset does not document is dropped, and a
 documented header the file lacks becomes a column of nulls; each logs one WARNING per
@@ -73,19 +79,22 @@ import logging
 import threading
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
 from deephaven import merge
 from deephaven.arrow import to_table
 
-from deephaven_massive._datasets.catalog import declared_units
 from deephaven_massive._datasets.dates import TimeRange
 from deephaven_massive._datasets.history_source import within_publication_grace
-from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._datasets.timestamps import TimeField, TimeUnitTable, UnitMismatchError
-from deephaven_massive._enums import AssetClass, FuturesVenue, Transport
+from deephaven_massive._datasets.schema import rename, required_fields
+from deephaven_massive._datasets.timestamps import (
+    UnitMismatchError,
+    instants,
+    to_epoch_ns_array,
+)
+from deephaven_massive._enums import AssetClass, FuturesVenue
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
@@ -95,25 +104,29 @@ from deephaven_massive._errors import (
 from deephaven_massive._massive import (
     ReadColumn,
     ReadPlan,
+    Transport,
     WireAuthError,
     WireEntitlementError,
     WireError,
+    WireType,
     object_key,
 )
 from deephaven_massive._tables.liveness import entered
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
     from concurrent.futures import Future
     from datetime import date
 
     from deephaven.table import Table
 
-    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.dates import FuturesSessions
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
-    from deephaven_massive._massive import DriftReport, FlatFileClient
+    from deephaven_massive._datasets.timestamps import TimeUnit
+    from deephaven_massive._massive import DriftReport, Field, FlatFileClient
     from deephaven_massive._tables.core import SessionCore
 
 __all__ = ["BLOCK_SIZE", "FlatFileHistory"]
@@ -171,21 +184,44 @@ def _keys(prefix: str, venue: FuturesVenue | None, dates: Sequence[date]) -> tup
     return tuple(keys)
 
 
-def _read_type(column_type: ColumnType) -> pa.DataType:
-    """Return the Arrow type the CSV reader parses a column's header as.
+_READ_TYPES: Final[Mapping[WireType, pa.DataType]] = {
+    WireType.LONG: pa.int64(),
+    WireType.DOUBLE: pa.float64(),
+    WireType.BOOL: pa.bool_(),
+    WireType.STRING: pa.string(),
+    WireType.JSON_TEXT: pa.string(),
+    WireType.DATE: pa.date32(),
+    WireType.EPOCH: pa.int64(),
+    WireType.ISO_INSTANT: pa.timestamp("ns", tz="UTC"),
+    WireType.INT_ARRAY: pa.string(),
+}
+"""The Arrow type the CSV reader parses each wire type as: an epoch as its raw integer count
+(converted by its unit afterwards), a list as text (parsed into `list<int32>` after filtering),
+and every other type as its column's own Arrow type."""
+
+_INT_LIST: Final = pa.list_(pa.int32())
+
+
+def _conform(values: pa.Array, target: pa.DataType) -> pa.Array:
+    """Widen one source column to its dataset column's type, by the merge's lattice joins.
+
+    A source joins its kind with its own wire type, which the merged column may widen: a
+    `long` in a `double` column is cast, and a `long` in an `int[]` column becomes a
+    one-element list (a null stays null). A column already of its type is cast to itself, at
+    no cost.
 
     Args:
-        column_type: The type of the column the header fills.
+        values: The column as read, in its wire type's Arrow type.
+        target: The dataset column's Arrow type.
 
     Returns:
-        `int64` for an `Instant` (epoch integers, converted by declared unit), `string` for an
-        `int[]` list (parsed after filtering), and the column's own Arrow type otherwise.
+        The column in `target`.
     """
-    if column_type is ColumnType.INSTANT:
-        return pa.int64()
-    if column_type is ColumnType.INT_ARRAY:
-        return pa.string()
-    return column_type.arrow_type
+    if pa.types.is_list(target) and not pa.types.is_list(values.type):
+        offsets = pa.array(range(len(values) + 1), pa.int32())
+        items = pc.cast(values, target.value_type)
+        return pa.ListArray.from_arrays(offsets, items, mask=values.is_null())
+    return pc.cast(values, target)
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -197,37 +233,42 @@ class _Transform:
     for; `apply` then converts each surviving batch to the dataset's schema.
 
     Attributes:
-        dataset: The dataset name, for time-unit lookups and messages.
+        dataset: The dataset name, for messages.
         plan: What every file of the request reads and keeps; `plan_for` adds a futures
             file's session.
-        columns: Per schema column, in order: its type, its name, and the header that fills
-            it, or None for a column the files do not carry (null).
+        columns: Per schema column, in order: its type, its name, and the source column that
+            fills it, or None for a column the files do not carry (null).
         arrow_schema: The dataset's Arrow schema.
-        units: The dataset's declared timestamp units.
         session_header: For futures, the header that holds the session date; None otherwise.
     """
 
     dataset: str
     plan: ReadPlan
-    columns: tuple[tuple[ColumnType, str, str | None], ...]
+    columns: tuple[tuple[ColumnType, str, SourceColumn | None], ...]
     arrow_schema: pa.Schema
-    units: TimeUnitTable
     session_header: str | None
 
     @classmethod
     def build(
         cls,
+        catalog: Catalog,
         spec: DatasetSpec,
+        *,
+        prefix: str,
         symbols: NormalizedSymbols | None,
         window: TimeRange | FuturesSessions,
     ) -> _Transform:
-        """Prepare the transform of a request from the dataset's flat-file key map.
+        """Prepare the transform of a request from the prefix's generated source.
 
-        `DatasetSpec` guarantees, at import, that a dataset with flat files has a `FLAT_FILES`
-        key map filling `Symbol` and `Timestamp`, and `SessionEndDate` for futures.
+        The headers to read are the generated fields of `source(FLAT_FILES, prefix)`, renamed
+        for the dataset (`schema.rename`), and the schema is the dataset's merged schema.
+        `DatasetSpec` guarantees, when it is created, that every prefix declares its `symbol`
+        and `time` keys from its own columns, and its `session` key for futures.
 
         Args:
-            spec: The dataset; its `FLAT_FILES` key map names the headers to read.
+            catalog: The catalog, for the generated source and the dataset's schema.
+            spec: The dataset.
+            prefix: The dataset's prefix for the request; a futures prefix holds `{venue}`.
             symbols: The canonical symbols to keep, as a tuple; anything else (`dm.ALL`, or
                 None for a dataset without instruments) keeps every row.
             window: The normalized `history()` bounds. Futures sessions keep every time,
@@ -236,42 +277,43 @@ class _Transform:
         Returns:
             The transform.
         """
-        key_map = spec.key_maps[Transport.FLAT_FILES]
-        header_of = {column: header for header, column in key_map.items()}
-        types = {column.name: column.type for column in spec.schema.columns}
-        futures = spec.asset_class is AssetClass.FUTURES
-        units = TimeUnitTable(declared_units({spec.name: spec}))
-        timestamp_header = header_of["Timestamp"]
-        session_header = header_of["SessionEndDate"] if futures else None
-        keys = {header_of["Symbol"], timestamp_header}
+        schema = catalog.dataset_schema(spec)
+        source = catalog.source(Transport.FLAT_FILES, prefix)
+        renamed = rename(spec, source)
+        by_column = {c.column: c for c in renamed}
+        # Every column of a flat-file source is a field: no key of one comes from the request.
+        header = {c.column: cast("Field", c.field).wire_key for c in renamed}
+        keys = spec.keys_for(Transport.FLAT_FILES, prefix)
+        session = keys.session
+        session_header = None if session is None else header[session.column]
+        time = by_column["Timestamp"]
         to_ns = functools.partial(
-            units.to_epoch_ns_array, TimeField(spec.name, Transport.FLAT_FILES, timestamp_header)
+            to_epoch_ns_array, f"{spec.name}.Timestamp", cast("TimeUnit", time.unit)
         )
         plan = ReadPlan(
             columns=tuple(
                 ReadColumn(
-                    header,
-                    column,
-                    _read_type(types[column]),
-                    types[column].arrow_type if types[column] is ColumnType.INT_ARRAY else None,
+                    header[c.column],
+                    c.column,
+                    _READ_TYPES[c.wire_type],
+                    _INT_LIST if c.wire_type is WireType.INT_ARRAY else None,
                 )
-                for header, column in key_map.items()
+                for c in renamed
             ),
-            symbol_header=header_of["Symbol"],
+            symbol_header=header["Symbol"],
             symbols=pa.array(symbols, pa.string()) if isinstance(symbols, tuple) else None,
-            time_header=timestamp_header,
+            time_header=header["Timestamp"],
             window_ns=((window.start_ns, window.end_ns) if isinstance(window, TimeRange) else None),
             to_ns=to_ns,
             session=None,
             block_size=BLOCK_SIZE,
-            required=frozenset(keys if session_header is None else {*keys, session_header}),
+            required=frozenset(f.wire_key for f in required_fields(spec, source)),
         )
         return cls(
             dataset=spec.name,
             plan=plan,
-            columns=tuple((c.type, c.name, header_of.get(c.name)) for c in spec.schema.columns),
-            arrow_schema=spec.schema.arrow_schema(),
-            units=units,
+            columns=tuple((c.type, c.name, by_column.get(c.name)) for c in schema.columns),
+            arrow_schema=schema.arrow_schema(),
             session_header=session_header,
         )
 
@@ -291,8 +333,9 @@ class _Transform:
     def apply(self, batch: pa.RecordBatch) -> pa.RecordBatch:
         """Turn one batch of surviving rows into a block of the dataset's schema.
 
-        Pure Arrow: the timestamp routine on every `Instant`, and nulls for the schema columns
-        the dataset reads from no header. The lists are already parsed, the rows already
+        Pure Arrow: the timestamp routine on every epoch `Instant`, the merge's widening of a
+        column whose source type is narrower than the dataset's, and nulls for the schema
+        columns the prefix does not carry. The lists are already parsed, the rows already
         filtered, and a documented header the file lacks already a column of nulls, by the
         reader.
 
@@ -303,34 +346,32 @@ class _Transform:
             The block in the dataset's schema.
 
         A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
-        `TimeUnitTable.instants`.
+        `timestamps.instants`.
         """
         arrays = [self._column(batch, column) for column in self.columns]
         return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
 
     def _column(
-        self, batch: pa.RecordBatch, column: tuple[ColumnType, str, str | None]
+        self, batch: pa.RecordBatch, column: tuple[ColumnType, str, SourceColumn | None]
     ) -> pa.Array:
         """Convert one column's values to its type, or make the column of nulls it lacks.
 
         Args:
             batch: The filtered batch.
-            column: The column's type, its name, and the header that fills it, or None.
+            column: The column's type, its name, and the source column that fills it, or None.
 
         Returns:
             An Arrow array of the column's type, one value per row of `batch`. In an `Instant`
             column other than `Timestamp`, an epoch value of `0` is null.
         """
-        column_type, name, header = column
-        if header is None:
+        column_type, name, source = column
+        if source is None:
             return pa.nulls(batch.num_rows, column_type.arrow_type)
         values = batch[name]
-        if column_type is ColumnType.INSTANT:
-            field_id = TimeField(self.dataset, Transport.FLAT_FILES, header)
-            time_column = header == self.plan.time_header
-            nanos = self.units.instants(field_id, values, time_column=time_column)
-            return pc.cast(nanos, column_type.arrow_type)
-        return values
+        if source.unit is not None:
+            label = f"{self.dataset}.{name}"
+            values = instants(label, source.unit, values, time_column=name == "Timestamp")
+        return _conform(values, column_type.arrow_type)
 
 
 class _CancelledError(Exception):
@@ -404,7 +445,9 @@ class FlatFileHistory:
         session.
         """
         prefix = spec.flat_file_prefixes[request.timespan]
-        transform = _Transform.build(spec, request.symbols, window)
+        transform = _Transform.build(
+            self._core.catalog, spec, prefix=prefix, symbols=request.symbols, window=window
+        )
         return self._read(spec, transform, _keys(prefix, request.venue, dates), last=dates[-1])
 
     def _read(

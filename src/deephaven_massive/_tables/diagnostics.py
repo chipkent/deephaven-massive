@@ -53,8 +53,8 @@ if TYPE_CHECKING:
     from deephaven.table_factory import InputTable
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
-    from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Transport
-    from deephaven_massive._massive import DriftReport
+    from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
+    from deephaven_massive._massive import DriftReport, Transport
 
 __all__ = [
     "CONNECTIONS",
@@ -380,8 +380,7 @@ class DriftRegistry:
     Example:
         ::
 
-            from deephaven_massive._enums import Transport
-            from deephaven_massive._massive import DriftReport
+            from deephaven_massive._massive import DriftReport, Transport
             from deephaven_massive._tables.diagnostics import DriftRegistry
 
             drift = DriftReport(extra=frozenset({"halted"}), missing=frozenset({"trf_id"}))

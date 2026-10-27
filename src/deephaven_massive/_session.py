@@ -331,10 +331,10 @@ class MassiveSession:
         Args:
             symbols: The tickers, in canonical form with their class prefixes (`AAPL`,
                 `O:SPY251219C00600000`, `C:EURUSD`, ...).
-            sort: The SDK's sort field, or None.
+            sort: The field to sort by, or None for the endpoint's default.
             order: The sort direction, or None.
             limit: The maximum number of rows, or None for all.
-            filters: Further SDK parameters by name, such as `{"type": "stocks"}`.
+            filters: Further query parameters of the path, by key, such as `{"type": "stocks"}`.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
@@ -351,7 +351,7 @@ class MassiveSession:
                 "m.snapshots() needs tickers; use a class's snapshots(dm.ALL), such as "
                 "m.stocks.snapshots(dm.ALL), for a whole market"
             )
-        del filters  # validated against the dataset's SDK parameters once it is implemented
+        del filters  # validated against the generated parameters once it is implemented
         raise NotImplementedError("m.snapshots() is not implemented yet")
 
     def connections(self) -> Table:

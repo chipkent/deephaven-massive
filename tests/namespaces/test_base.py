@@ -18,11 +18,10 @@ from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive import _enums, _query, _types
-from deephaven_massive._datasets.catalog import DatasetSpec, ParamKind
-from deephaven_massive._datasets.schema import BARS, TRADES, Column, ColumnType, Schema
+from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._datasets.timestamps import TimeUnit
-from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, Transport
+from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan
+from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
     Namespace,
     bar_query_class,
@@ -42,61 +41,52 @@ from deephaven_massive._query import (
 from deephaven_massive._session import CATALOG
 from deephaven_massive._types import DaySpan, StreamSpan
 
-S, LD = ColumnType.STRING, ColumnType.LOCAL_DATE
+FF = Transport.FLAT_FILES
+SESSION_FILES = "us_futures_{venue}/session_aggs_v1"
+INDEX_FILES = "us_indices/minute_aggs_v1"
 
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
     is_bars=True,
     asset_class=AssetClass.STOCKS,
-    schema=BARS.schema,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
-    fetch_method="get_previous_close_agg",
-    history_method="list_aggs",
+    fetch_path="/v2/aggs/ticker/{stocksTicker}/prev",
+    history_path="/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}",
 )
 FUTURES_BARS = DatasetSpec(
     name="futures.bars",
     is_bars=True,
     asset_class=AssetClass.FUTURES,
-    schema=BARS.schema,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
-    history_method="list_futures_aggregates",
-    flat_file_prefixes={Timespan.SESSION: "us_futures_{venue}/session_aggs_v1"},
-    key_maps={
-        Transport.FLAT_FILES: {
-            "ticker": "Symbol",
-            "window_start": "Timestamp",
-            "session_end_date": "SessionEndDate",
-        }
+    history_path="/futures/v1/aggs/{ticker}",
+    flat_file_prefixes={Timespan.SESSION: SESSION_FILES},
+    keys={
+        (FF, SESSION_FILES): SourceKeys(
+            KeySpec("Ticker"), KeySpec("WindowStart"), session=KeySpec("SessionEndDate")
+        )
     },
-    time_units={(Transport.FLAT_FILES, "window_start"): TimeUnit.NANOSECONDS},
 )
 INDEX_BARS = DatasetSpec(
     name="indices.bars",
     is_bars=True,
     asset_class=AssetClass.INDICES,
-    schema=BARS.schema,
-    flat_file_prefixes={Timespan.MINUTE: "us_indices/minute_aggs_v1"},
-    key_maps={Transport.FLAT_FILES: {"ticker": "Symbol", "window_start": "Timestamp"}},
-    time_units={(Transport.FLAT_FILES, "window_start"): TimeUnit.NANOSECONDS},
+    flat_file_prefixes={Timespan.MINUTE: INDEX_FILES},
+    keys={(FF, INDEX_FILES): SourceKeys(KeySpec("Ticker"), KeySpec("WindowStart"))},
 )
 TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
     asset_class=AssetClass.STOCKS,
-    schema=TRADES.schema,
     channels={None: "T"},
 )
 DIVIDENDS = DatasetSpec(
     name="stocks.dividends",
     asset_class=AssetClass.STOCKS,
-    schema=Schema("stocks.dividends", (Column("Symbol", S), Column("ExDividendDate", LD))),
-    fetch_method="list_stocks_dividends",
-    time_axis=("ex_dividend_date_gte", "ex_dividend_date_lte"),
+    fetch_path="/stocks/v1/dividends",
+    keys={(Transport.REST, "/stocks/v1/dividends"): SourceKeys(KeySpec("Ticker"))},
+    time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
+    symbol_param="ticker.any_of",
 )
-INDICATOR = DatasetSpec(
-    name="indicators.sma",
-    schema=Schema("indicators.sma", (Column("Symbol", S), Column("Value", ColumnType.DOUBLE))),
-    fetch_method="get_sma",
-)
+INDICATOR = DatasetSpec(name="indicators.sma", fetch_path="/v1/indicators/sma/{stockTicker}")
 
 
 def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
@@ -147,8 +137,8 @@ def test_list_params() -> None:
         list_params(sort=None, order=cast("Order", "desc"))
 
 
-def test_limit_is_a_row_cap_not_an_sdk_parameter(massive_session: dm.MassiveSession) -> None:
-    # The total-row cap is kept apart from the SDK parameters, whose `limit` is a page size.
+def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSession) -> None:
+    # The total-row cap is kept apart from the wire parameters, whose `limit` is a page size.
     q = build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=5)
     assert q._request.limit == 5
     assert "limit" not in dict(q._request.params)
@@ -178,7 +168,7 @@ def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) 
         start="2025-01-01",
         end=datetime(2025, 6, 30, tzinfo=UTC),
         params={"sort": "ex_dividend_date", "limit": None, "tickers": ["B", "A"]},
-        filters={"pay_date_lte": date(2025, 12, 31), "frequency": 4, "cash_amount_gt": 0.5},
+        filters={"frequency_lte": 12, "frequency": 4, "distribution_type": "recurring"},
     )
     assert isinstance(q, Query)
     request = q._request
@@ -187,9 +177,9 @@ def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) 
     assert request.end == datetime(2025, 6, 30, tzinfo=UTC)
     assert request.params == (("sort", "ex_dividend_date"), ("tickers", ("B", "A")))
     assert request.filters == (
-        ("cash_amount_gt", 0.5),
+        ("distribution_type", "recurring"),
         ("frequency", 4),
-        ("pay_date_lte", date(2025, 12, 31)),
+        ("frequency_lte", 12),
     )
     assert hash(q)
 
@@ -205,7 +195,6 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
     fx = DatasetSpec(
         name="forex.quotes",
         asset_class=AssetClass.FOREX,
-        schema=TRADES.schema,
         channels={None: "C"},
     )
     assert build(massive_session, fx, symbols="EUR/USD")._request.symbols == ("C:EURUSD",)
@@ -235,8 +224,10 @@ def test_venue_is_an_enum(massive_session: dm.MassiveSession) -> None:
 
 
 def test_filter_validation(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match="set through start= and end="):
-        build(massive_session, DIVIDENDS, filters={"ex_dividend_date_gte": "2025-01-01"})
+    # Every form of the axis, not only the start/end pair, is set through start= and end=.
+    for key in ("ex_dividend_date_gte", "ex_dividend_date", "ex_dividend_date_gt"):
+        with pytest.raises(ValueError, match=rf"^{key} is set through start= and end="):
+            build(massive_session, DIVIDENDS, filters={key: "2025-01-01"})
     with pytest.raises(TypeError, match="filters must be a mapping"):
         build(massive_session, DIVIDENDS, filters=[("a", 1)])
     with pytest.raises(TypeError, match="filter names must be str"):
@@ -245,8 +236,10 @@ def test_filter_validation(massive_session: dm.MassiveSession) -> None:
         build(massive_session, DIVIDENDS, filters={"a": {"b": 1}})
     with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str$"):
         build(massive_session, DIVIDENDS, filters={"a": ["A", 1]})
-    # A dataset without a time axis accepts any filter name.
-    assert build(massive_session, INDICATOR, filters={"timestamp_gte": "x"})._request.filters
+    # A dataset without a time axis takes its timestamp filters through `filters`.
+    assert build(
+        massive_session, INDICATOR, filters={"timestamp_gte": "2025-01-02"}
+    )._request.filters
 
 
 def test_time_bounds_must_be_aware(massive_session: dm.MassiveSession) -> None:
@@ -259,15 +252,15 @@ def test_naive_datetime_filters_and_params_are_rejected(
 ) -> None:
     naive = datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     message = (
-        r"^updated_gte=datetime\.datetime\(2025, 1, 2, 9, 30\) needs a timezone: "
+        r"^timestamp_gte=datetime\.datetime\(2025, 1, 2, 9, 30\) needs a timezone: "
         r"pass an aware datetime or a date$"
     )
     with pytest.raises(ValueError, match=message):
-        build(massive_session, INDICATOR, filters={"updated_gte": naive})
+        build(massive_session, INDICATOR, filters={"timestamp_gte": naive})
     with pytest.raises(ValueError, match=message):
-        build(massive_session, INDICATOR, params={"updated_gte": naive})
+        build(massive_session, INDICATOR, params={"timestamp_gte": naive})
     aware = naive.replace(tzinfo=UTC)
-    assert build(massive_session, INDICATOR, filters={"updated_gte": aware})._request.filters
+    assert build(massive_session, INDICATOR, filters={"timestamp_gte": aware})._request.filters
 
 
 def test_namespaces_hold_the_core(massive_session: dm.MassiveSession) -> None:
@@ -276,16 +269,12 @@ def test_namespaces_hold_the_core(massive_session: dm.MassiveSession) -> None:
     assert not hasattr(namespace, "_query")
 
 
-def test_filters_go_through_the_sdk_check(
-    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        "deephaven_massive._datasets.catalog.SDK_PARAMS",
-        {"list_stocks_dividends": {"pay_date_lte": ParamKind.DATE}},
-    )
-    build(massive_session, DIVIDENDS, filters={"pay_date_lte": "2025-12-31"})
-    with pytest.raises(ValueError, match="has no filter 'frequency'"):
-        build(massive_session, DIVIDENDS, filters={"frequency": 4})
+def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession) -> None:
+    build(massive_session, DIVIDENDS, filters={"frequency": 4})
+    with pytest.raises(ValueError, match="has no filter 'pay_date_lte'"):
+        build(massive_session, DIVIDENDS, filters={"pay_date_lte": "2025-12-31"})
+    with pytest.raises(ValueError, match="filter 'frequency' takes a integer value"):
+        build(massive_session, DIVIDENDS, filters={"frequency": "4"})
 
 
 def test_timespan_is_an_enum_on_every_dataset(massive_session: dm.MassiveSession) -> None:
@@ -376,8 +365,8 @@ def test_a_symbol_table_needs_a_symbol_column(
 
 # The query class of a dataset.
 
-_FETCH = {"fetch_method": "get_last_trade"}
-_HISTORY = {"history_method": "list_trades"}
+_FETCH = {"fetch_path": "/v2/last/trade/{stocksTicker}"}
+_HISTORY = {"history_path": "/v3/trades/{stockTicker}"}
 _CHANNELS = {"channels": {None: "T"}}
 
 
@@ -387,7 +376,7 @@ _CHANNELS = {"channels": {None: "T"}}
         ({**_FETCH}, Query),
         ({**_CHANNELS}, StreamQuery),
         ({**_HISTORY}, HistoryQuery),
-        ({"grouped_daily_method": "get_grouped_daily_aggs"}, HistoryQuery),
+        ({"grouped_daily_path": "/v2/aggs/grouped/locale/us/market/stocks/{date}"}, HistoryQuery),
         ({**_CHANNELS, **_HISTORY}, StreamHistoryQuery),
         ({**_CHANNELS, **_HISTORY, **_FETCH}, StreamHistoryLatestQuery),
     ],
@@ -395,9 +384,7 @@ _CHANNELS = {"channels": {None: "T"}}
 def test_the_query_class_follows_the_transports(
     changes: dict[str, Any], expected: type[QueryBase]
 ) -> None:
-    spec = DatasetSpec(
-        name="stocks.trades", asset_class=AssetClass.STOCKS, schema=TRADES.schema, **changes
-    )
+    spec = DatasetSpec(name="stocks.trades", asset_class=AssetClass.STOCKS, **changes)
     assert query_class(spec) is expected
 
 
@@ -406,11 +393,9 @@ def test_flat_files_are_a_history_source() -> None:
     values = DatasetSpec(
         name="indices.values",
         asset_class=AssetClass.INDICES,
-        schema=TRADES.schema,
         channels={None: "V"},
         flat_file_prefixes={None: "us_indices/values_v1"},
-        key_maps={Transport.FLAT_FILES: {"ticker": "Symbol", "timestamp": "Timestamp"}},
-        time_units={(Transport.FLAT_FILES, "timestamp"): TimeUnit.NANOSECONDS},
+        keys={(FF, "us_indices/values_v1"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
     )
     assert query_class(values) is StreamHistoryQuery
 
@@ -617,10 +602,9 @@ def _renamed(spec: DatasetSpec, name: str) -> DatasetSpec:
         name=name,
         is_bars=spec.is_bars,
         asset_class=spec.asset_class,
-        schema=spec.schema,
         channels=spec.channels,
-        fetch_method=spec.fetch_method,
-        history_method=spec.history_method,
+        fetch_path=spec.fetch_path,
+        history_path=spec.history_path,
     )
 
 
