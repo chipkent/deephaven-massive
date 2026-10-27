@@ -147,16 +147,23 @@ jobs:
         run: uv python install 3.11
       - name: Build wheel and sdist
         run: uv build --python 3.11
-      - name: Check the wheel ships the generated wire schema and no refresh code
-        # The refresh and its vendored snapshot run from a source checkout only; the generated
-        # spec/*.json are package data the library loads at run time.
+      - name: Check the wheel ships the generated wire schema and no refresh code or vendor files
+        # The refresh runs from a source checkout only; the generated spec/*.json are package
+        # data the library loads at run time. The vendored snapshot under vendor/ is Massive's
+        # published content and goes in neither distribution.
         run: |
           unzip -Z1 dist/*.whl > "$RUNNER_TEMP/wheel-files.txt"
+          tar -tzf dist/*.tar.gz > "$RUNNER_TEMP/sdist-files.txt"
           grep -qx 'deephaven_massive/_massive/spec/rest.json' "$RUNNER_TEMP/wheel-files.txt" \
             || { echo "the wheel lacks spec/rest.json" >&2; exit 1; }
           if grep -q '^deephaven_massive/_massive/refresh/' "$RUNNER_TEMP/wheel-files.txt"; then
             echo "the wheel contains the refresh package:" >&2
             grep '^deephaven_massive/_massive/refresh/' "$RUNNER_TEMP/wheel-files.txt" >&2
+            exit 1
+          fi
+          if grep -q '^[^/]*/vendor/' "$RUNNER_TEMP/sdist-files.txt"; then
+            echo "the sdist contains vendored files:" >&2
+            grep '^[^/]*/vendor/' "$RUNNER_TEMP/sdist-files.txt" >&2
             exit 1
           fi
       - name: Set up JDK 17 (the import smoke test starts an embedded Deephaven server)
