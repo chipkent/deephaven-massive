@@ -32,10 +32,12 @@ dependencies = [
     # 16 is the first release that works with deephaven-core 42.0: 15 lacks pa.ListViewType,
     # which deephaven-core needs, and 14 fails to import against numpy 2.
     "pyarrow>=16",
-    "boto3>=1.28.62",  # the boto3 release paired with the botocore floor below
-    # 1.31.62 is the first release that accepts urllib3 2; Config(proxies=...) and
-    # retries={"total_max_attempts": ...} are older.
-    "botocore>=1.31.62",
+    "boto3>=1.28.63",  # the boto3 release paired with the botocore floor below
+    # 1.31.63 is the first release that works with urllib3 2 without a warning: 1.31.62 accepts
+    # urllib3 2 but still passes its pools the `strict` argument, which urllib3 2.0 deprecates
+    # with a DeprecationWarning on every new connection pool. Config(proxies=...),
+    # proxies_config, and retries={"total_max_attempts": ..., "mode": ...} are older.
+    "botocore>=1.31.63",
     # 2.0 is the first release with inline type information; ProxyManager is older.
     "urllib3>=2.0",
     # 2022.6.15.1 is the first release that finds its bundle with importlib.resources.files;
