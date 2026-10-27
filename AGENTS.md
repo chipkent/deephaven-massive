@@ -20,7 +20,7 @@ uv build                                   # sdist and wheel
 ```
 
 The refresh commands (`uv run python -m deephaven_massive._massive.refresh [--check | --fetch]`)
-arrive with the `PLAN.md` package rest-wire-schema, which adds them here.
+arrive with the `PLAN.md` planned PR rest-wire-schema, which adds them here.
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
@@ -30,12 +30,12 @@ uses the newest versions. Offline, a local run warns and keeps what is installed
 instead.
 
 The column reference command (`uv run python scripts/render_reference.py`, which regenerates
-all of `docs/datasets/`) arrives with the `PLAN.md` package column-reference-pages, which adds it
-here.
+all of `docs/datasets/`) arrives with the `PLAN.md` planned PR column-reference-pages, which adds
+it here.
 
 The library is moving off Massive's Python SDK (`massive`) to its own REST, WebSocket, and S3
 flat-file clients, with every schema generated from vendored, pinned vendor specs
-(`DESIGN.md` § 19). Until the `PLAN.md` package massive-sdk-removal lands, the old dependency is
+(`DESIGN.md` § 19). Until the `PLAN.md` planned PR massive-sdk-removal lands, the old dependency is
 still installed; massive-sdk-removal removes it and adds a ruff `banned-api` entry for it. Never
 add an import of `massive`. Once the generated `spec/*.json` files exist, never edit them by hand:
 they change only through the refresh, and hand input lives only in `_massive/refresh/lexicon.py`,
@@ -91,7 +91,7 @@ nothing is kept or shimmed for compatibility.
     `chore(deps):` PRs. `uv.lock` is not committed: CI starts with no lock and resolves the newest
     versions on every run, `scripts/check.sh` does the same locally with `uv sync --upgrade`,
     and a plain local `uv sync` keeps the existing lock.
-13. **One wire package** (from the `PLAN.md` package wire-package-scaffold, which creates it and
+13. **One wire package** (from the `PLAN.md` planned PR wire-package-scaffold, which creates it and
     its boundary tests). `src/deephaven_massive/_massive/` owns all Massive wire access (REST,
     WebSocket, and S3 flat files), the vendored spec snapshot, the generated schemas, the units,
     and the long-form names, in six subpackages: `net/`, `spec/`, `rest/`, `ws/`, `flatfiles/`,
@@ -125,7 +125,7 @@ anything with behavior worth knowing is a defect, not brevity.
   undefined. Ruff's `D` and `DOC` rules check form; reviewers check substance.
 - **No planning references.** Code, comments, docstrings, test names, error messages, CI step
   names, and config comments never reference the planning documents under `plans/`, their
-  section numbers, work-package names, or decision numbers. The planning documents are
+  section numbers, planned-PR names, or decision numbers. The planning documents are
   temporary; the implementation explains itself, so state the behavior or the reason directly.
   Only files under `plans/` may cross-reference each other.
 
@@ -192,6 +192,6 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | Threads and locks | `DESIGN.md` § 18 |
 | Wire clients, generated schemas, drift | `DESIGN.md` § 19 |
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
-| Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
+| Your planned PR | `plans/rework/PLAN.md`, then its GitHub issue |
 | Legacy code (deleted; reference only) | `git show 519fad8:<path>` for `src/deephaven_massive/{engine,domains,schemas}/` and `tests/legacy/` |
 | Namespace classes and dataset declarations | `src/deephaven_massive/_namespaces/`, `DESIGN.md` § 8 |

@@ -1,13 +1,15 @@
 # deephaven-massive rework — execution plan
 
-**Status:** approved plan; rework-design-and-plan, tooling-foundation, and core-skeleton merged,
-flat-file-history in review (#51), final-design (#52) in review. **Companion:**
-[`DESIGN.md`](DESIGN.md) is the specification; this file is the schedule. When they disagree,
-`DESIGN.md` wins and this file gets a `docs:` fix.
+**Status:** approved plan. Merged: rework-design-and-plan (#11), tooling-foundation (#42),
+core-skeleton (#46), final-design (#52), wire-client-dependencies (#53), legacy-deletion (#54),
+final-names (#56), wire-package-scaffold (#60), flat-file-history (#63, restructured from #51),
+and rest-client (#66). In review: websocket-client (#64) and rest-wire-schema (#67).
+**Companion:** [`DESIGN.md`](DESIGN.md) is the specification; this file is the schedule. When
+they disagree, `DESIGN.md` wins and this file gets a `docs:` fix.
 
 ## Purpose and lifetime of this file
 
-This file turns the approved rework into work packages that a fresh-context agent can execute
+This file turns the approved rework into planned PRs that a fresh-context agent can execute
 with nothing but `DESIGN.md`, this file, `AGENTS.md`, and the code. It is **temporary by
 design**: finish-rework moves the durable parts (standards, invariants, workflow) into
 `README.md` and `AGENTS.md`, and plan-retirement deletes `plans/rework/`. Nothing in this file
@@ -21,32 +23,32 @@ records are now requirements of the library's own clients (DESIGN § 19).
 
 ## How progress is tracked
 
-- One GitHub issue per work package, all children of one parent tracking issue. Each issue
-  carries the package's live checklist; the checklists below are the *initial* copy.
-- Each package links its issue; the parent tracking issue is #37. Live progress is tracked in
+- One GitHub issue per planned PR, all children of one parent tracking issue. Each issue
+  carries the planned PR's live checklist; the checklists below are the *initial* copy.
+- Each planned PR links its issue; the parent tracking issue is #37. Live progress is tracked in
   the issues' checklists, not by ticking boxes in this file.
-- A package is **done** when its PR is merged by the owner and the issue is closed with a link to
-  the merged PR. Agents never merge and never close issues on their own authority.
-- Each package has a short kebab-case name that says what it delivers (`rest-transport`,
-  `rest-client`). Commit bodies and PR descriptions refer to a package by that name and its
+- A planned PR is **done** when its PR is merged by the owner and the issue is closed with a link
+  to the merged PR. Agents never merge and never close issues on their own authority.
+- Each planned PR has a short kebab-case name that says what it delivers (`rest-transport`,
+  `rest-client`). Commit bodies and PR descriptions refer to a planned PR by that name and its
   issue (`Refs #<issue>`), never by PR title, so a retitled PR does not break traceability.
 
 ## Table of contents
 
 1. [Dependency graph](#dependency-graph)
-2. [Global rules for every package](#global-rules-for-every-package)
+2. [Global rules for every planned PR](#global-rules-for-every-planned-pr)
 3. [Parallelism guide](#parallelism-guide)
-4. [Package template](#package-template)
-5. Packages
+4. [Planned PR template](#planned-pr-template)
+5. Planned PRs
    - [rework-design-and-plan](#rework-design-and-plan) (merged)
    - [tooling-foundation](#tooling-foundation) (merged)
    - [core-skeleton](#core-skeleton) (merged)
-   - [The remaining packages](#pkgs): final-design, wire-client-dependencies, legacy-deletion,
+   - [The remaining planned PRs](#pkgs): final-design, wire-client-dependencies, legacy-deletion,
      final-names, wire-package-scaffold, flat-file-history, rest-client, websocket-client,
      rest-wire-schema, field-descriptions, websocket-and-flat-file-wire-schemas,
      runtime-drift-reporting, flat-file-s3-shared-rules, generated-catalog-and-schemas,
      api-drift-check, massive-sdk-removal, rest-transport, websocket-layer,
-     result-column-descriptions, column-reference-pages, the eight dataset packages,
+     result-column-descriptions, column-reference-pages, the eight dataset planned PRs,
      finish-rework, live-integration-suite, plan-retirement, release-workflow, release-0.1.0,
      release-tag, upstream-sdk-issues
 6. [End-to-end verification](#end-to-end-verification)
@@ -62,7 +64,7 @@ flowchart LR
     final_design & legacy_deletion --> final_names["final-names"]
     wire_client_dependencies["wire-client-dependencies"] --> wire_package_scaffold
     final_names --> wire_package_scaffold["wire-package-scaffold"]
-    wire_package_scaffold --> flat_file_history["flat-file-history (#51)"]
+    wire_package_scaffold --> flat_file_history["flat-file-history (#63)"]
     wire_package_scaffold --> rest_client["rest-client"]
     wire_package_scaffold --> websocket_client["websocket-client"]
     wire_package_scaffold & rest_client --> rest_wire_schema["rest-wire-schema"]
@@ -87,13 +89,13 @@ flowchart LR
     release_0_1_0 -.-> release_tag["release-tag<br/>(owner pushes v0.1.0)"]
 ```
 
-The release packages (dashed) start only on the owner's go-ahead; nothing else depends on
+The release planned PRs (dashed) start only on the owner's go-ahead; nothing else depends on
 them.
 
 **Critical path:** final-design → legacy-deletion → final-names → wire-package-scaffold →
 rest-client → rest-wire-schema → field-descriptions → websocket-and-flat-file-wire-schemas →
 generated-catalog-and-schemas → websocket-layer → result-column-descriptions →
-column-reference-pages → the asset-class dataset packages → finish-rework → plan-retirement.
+column-reference-pages → the asset-class dataset planned PRs → finish-rework → plan-retirement.
 The release (release-workflow, release-0.1.0, release-tag) follows only on the owner's
 go-ahead. **Chains alongside it:** wire-package-scaffold → flat-file-history →
 runtime-drift-reporting → generated-catalog-and-schemas; wire-package-scaffold →
@@ -102,23 +104,24 @@ api-drift-check. wire-client-dependencies may merge at any time.
 
 ---
 
-## Global rules for every package
+## Global rules for every planned PR
 
-These rules apply to every package. Package sections only add to them.
+These rules apply to every planned PR. Planned-PR sections only add to them.
 
-1. **Branching.** One PR per package on a branch named `<type>/<topic>`, cut from
+1. **Branching.** Each planned PR is one pull request on a branch named `<type>/<topic>`, cut from
    `origin/main` after `git fetch`, never from a local `main`. Never commit directly on `main`.
    Never force-push a branch another agent may have checked out.
 2. **Conventional commits.** Commit subjects and PR titles follow Conventional Commits v1.0.0
    (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `ci:`, `chore:`), with the PR title given in
-   each package below. Commit bodies end with the attribution lines the harness supplies.
+   each planned PR below. Commit bodies end with the attribution lines the harness supplies.
 3. **Check gate.** `./scripts/check.sh` (full tier) must be green before every push, and every
    CI job must be green on the PR, including the free-threaded `3.14t` job (`PYTHON_GIL=0`),
    which is a required check. 3.14t is the only free-threaded target: pyarrow, numpy, and pandas
    no longer publish cp313t wheels.
-4. **Fresh-context implementers.** Each package is executed by a subagent whose only inputs are
-   `DESIGN.md`, this file, `AGENTS.md`, and the code. If a package cannot be completed from those
-   inputs, the fix is to improve those files (a `docs:` PR), not to pass tribal knowledge along.
+4. **Fresh-context implementers.** Each planned PR is executed by a subagent whose only inputs are
+   `DESIGN.md`, this file, `AGENTS.md`, and the code. If a planned PR cannot be completed from
+   those inputs, the fix is to improve those files (a `docs:` PR), not to pass tribal knowledge
+   along.
 5. **No merging.** Agents never run `gh pr merge`, `git merge` into `main`, or `git push` to
    `main`. Only the owner merges, always via PR.
 6. **Owner approvals.** The following are outward-facing and require explicit owner approval
@@ -148,7 +151,7 @@ These rules apply to every package. Package sections only add to them.
 9. **Coverage.** 100% statement and branch coverage over `src/deephaven_massive`. `pragma: no
    cover` is allowed only with a written reason on the same line and owner approval in the PR.
    Never write dead defensive branches to satisfy the gate; delete the branch instead.
-10. **Deephaven invariants.** `AGENTS.md` lists them. A package that touches
+10. **Deephaven invariants.** `AGENTS.md` lists them. A planned PR that touches
     `src/deephaven_massive/_*.py` restates the invariants it relies on in its PR description.
 11. **No live testing as design input** ([DESIGN § 22](DESIGN.md#22-decisions)). Unit
     tests use the fakes in `tests/_fakes/` and fixtures shaped from the vendor's spec examples
@@ -157,9 +160,10 @@ These rules apply to every package. Package sections only add to them.
     Google-style docstring that meets `AGENTS.md`'s documentation standard. A change to a public
     signature, default, or table semantics updates `DESIGN.md` (owner decision required) and,
     after finish-rework, `README.md`.
-13. **One package, one concern.** If a package needs a change to a file another package owns,
-    land that change first in a small separate PR (`refactor:` or `chore:`), rebase, and continue.
-14. **Answer every review comment.** Reply to each review thread on a package's PR, from people
+13. **One planned PR, one concern.** If a planned PR needs a change to a file another planned PR
+    owns, land that change first in a small separate PR (`refactor:` or `chore:`), rebase, and
+    continue.
+14. **Answer every review comment.** Reply to each review thread on a planned PR, from people
     or bots: name the commit that addresses it and summarize the fix, or explain why no change
     is made. No thread is left unanswered, and none is resolved without a reply.
 15. **Every gate has a negative test that fails when the gate is deleted.**
@@ -168,7 +172,7 @@ These rules apply to every package. Package sections only add to them.
 
 ## Parallelism guide
 
-The module names are fixed by [DESIGN § 4.1](DESIGN.md#41-source-modules), so packages own
+The module names are fixed by [DESIGN § 4.1](DESIGN.md#41-source-modules), so planned PRs own
 disjoint files:
 
 - **The wire package** is split by owner. wire-package-scaffold owns `_massive/__init__.py`, `net/`
@@ -194,7 +198,7 @@ disjoint files:
 - **The fakes** follow the clients: rest-client `tests/_fakes/rest.py`, websocket-client `ws.py`,
   flat-file-history `s3.py`, core-skeleton `stream.py`; each adds one self-contained fixture block
   to `tests/conftest.py`.
-- **The dataset packages** edit only `_namespaces/<ns>.py`, its tests and fixtures, and delete
+- **The dataset planned PRs** edit only `_namespaces/<ns>.py`, its tests and fixtures, and delete
   only their own `tests/data/catalog/undeclared/<ns>.txt`. There are no lock files and no
   column maps to edit. A needed `refresh/` fix lands first in its own PR.
   reference-indicator-economy-datasets also fills `MassiveSession.snapshots()` in `_session.py`.
@@ -207,18 +211,18 @@ disjoint files:
 - **Fixture data is per test owner:** `tests/data/<test owner path>/`, loaded through the
   `load_fixture` fixture.
 
-The legacy implementation is deleted by legacy-deletion; when a package needs it for reference, it
-reads it with `git show 519fad8:src/deephaven_massive/<path>`.
+The legacy implementation is deleted by legacy-deletion; when a planned PR needs it for reference,
+it reads it with `git show 519fad8:src/deephaven_massive/<path>`.
 
 ---
 
-## Package template
+## Planned PR template
 
-Every package below has the same sections, in this order: header (PR title, branch, base, issue),
-goal, DESIGN sections, dependencies and parallelism, files, tasks, acceptance criteria,
-verification, pitfalls, out of scope, approval gates. "DESIGN §" references use the section
-numbers and titles of `DESIGN.md` and link to its headings; the "DESIGN sections implemented"
-line of each package is the authoritative list.
+Every planned PR below has the same sections, in this order: header (PR title, branch, base,
+issue), goal, DESIGN sections, dependencies and parallelism, files, tasks, acceptance criteria,
+verification, pitfalls, out of scope, approval gates. "DESIGN §" references use the section numbers
+and titles of `DESIGN.md` and link to its headings; the "DESIGN sections implemented" line of each
+planned PR is the authoritative list.
 
 ---
 
@@ -230,13 +234,13 @@ line of each package is the authoritative list.
 | **Branch** | `docs/rework-design-plan` |
 | **Issue** | Parent tracking issue #37 (rework-design-and-plan itself merged in #11) |
 
-**Goal.** Commit the approved specification and this execution plan so every later package has
+**Goal.** Commit the approved specification and this execution plan so every later planned PR has
 a stable source of truth, and open the tracking issues that hold the live checklists.
 
 **DESIGN sections implemented.** All of `DESIGN.md` is the deliverable (Appendix A v3 with the
 "Required v3 edits" applied, rewritten in O'Reilly style), including
 [§ 1 Purpose and scope](DESIGN.md#1-purpose-and-scope) and
-[§ 22 Decisions](DESIGN.md#22-decisions), which no code package implements; no code.
+[§ 22 Decisions](DESIGN.md#22-decisions), which no planned PR implements in code; no code.
 
 **Depends on.** Nothing. **Parallel with.** fork-setup.
 
@@ -252,17 +256,17 @@ a stable source of truth, and open the tracking issues that hold the live checkl
       classes; `/v3/snapshot/options/{u}/{o}` "covered by"; Python `>=3.11`; enums only with the
       runtime `TypeError`; base Business TICK host rule with WARNING; diagnostics scope; fork list
       minus #9/#10 plus the handshake `max_connections` item (item 6 of the fork's WebSocket
-      reconnect package); owner answers to §20).
+      reconnect PR); owner answers to §20).
 - [ ] Write this file.
-- [ ] Draft the parent tracking issue and one issue per package (every package of this file and
-      every fork package) using each package's goal, checklist, and acceptance criteria. **Stop for
-      owner approval before creating any issue.**
+- [ ] Draft the parent tracking issue and one issue per planned PR (every planned PR of this file
+      and every fork PR) using each planned PR's goal, checklist, and acceptance criteria. **Stop
+      for owner approval before creating any issue.**
 - [ ] After approval: create the issues, replace every `Issue: TBD` in this file, commit.
 - [ ] Open the PR (title above) with the owner's approval. PR body links the parent issue.
 
 **Acceptance criteria.**
 - [ ] `DESIGN.md` contains every required edit; a reviewer can tick each of the 13 edit items.
-- [ ] Every package in this file has all template sections filled.
+- [ ] Every planned PR in this file has all template sections filled.
 - [ ] Every `Issue: TBD` is replaced (or the PR description says issue creation was deferred by
       the owner).
 - [ ] The legacy gate (`./scripts/pre-commit.sh`) still passes; no code changed.
@@ -311,7 +315,7 @@ floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-t
 SDK fork, since replaced by [§ 19 Wire clients and the spec snapshot](DESIGN.md#19-wire-clients-and-the-spec-snapshot)). The exact configuration is [§ 20.1 Tooling configuration](DESIGN.md#201-tooling-configuration).
 
 **Depends on.** rework-design-and-plan (merged), fork-setup (the `deephaven-fixes` branch must
-exist to be tracked). **Parallel with.** the fork packages.
+exist to be tracked). **Parallel with.** the fork PRs.
 
 **Files.**
 - Create: `scripts/check.sh`, `.claude/settings.json`, `.claude/hooks/post-edit-ruff.sh`,
@@ -351,7 +355,7 @@ exist to be tracked). **Parallel with.** the fork packages.
     for `deephaven` ([DESIGN § 20.1](DESIGN.md#201-tooling-configuration): module-level imports; the JVM starts in `pytest_configure`).
   - Mypy: `strict`, `warn_unreachable`, `warn_unused_configs`, the eight `enable_error_code`
     entries from [DESIGN § 20.1](DESIGN.md#201-tooling-configuration). Overrides: `ignore_missing_imports` for `pyarrow.*` only;
-    the fork's `massive` ships `py.typed` (the fork's `py.typed` package).
+    the fork's `massive` ships `py.typed` (the fork's `py.typed` PR).
   - Pytest 9 `[tool.pytest]`: `minversion = "9.0"`, `strict = true`, `filterwarnings = ["error"]`,
     `addopts = ["-ra", "--import-mode=importlib"]`, `timeout = "60"`,
     `faulthandler_timeout = "120"` (both strings: pytest and pytest-timeout declare these
@@ -438,13 +442,13 @@ grep -rn LEGACY-EXCLUSION pyproject.toml tests/conftest.py tests/test_layout.py
 ```
 
 **Pitfalls (Appendix G).** Unused
-`massive` dependency (G#2); blanket `ignore_missing_imports` discarding real types for
-`deephaven`/`websockets` (G#3); `pytest-asyncio` with zero async tests (G#4); four gate
-definitions (G#6); tests importing helpers from `conftest.py` plus `pythonpath=["."]` (G#7);
-`exclude_lines` re-adding `pragma: no cover` (G#8); duplicated version (G#9); placeholder author
-and deprecated license form (G#10); dev deps as a PyPI extra (G#11); `websockets>=11` with the
-legacy `connect` (G#12); 220-line `.gitignore` (G#13); `conftest.py` importing the private
-`_ensure_deephaven_server` and hard-coding port 10099 (G, the `tests/conftest.py` priority).
+`massive` dependency; blanket `ignore_missing_imports` discarding real types for
+`deephaven`/`websockets`; `pytest-asyncio` with zero async tests; four gate
+definitions; tests importing helpers from `conftest.py` plus `pythonpath=["."]`;
+`exclude_lines` re-adding `pragma: no cover`; duplicated version; placeholder author
+and deprecated license form; dev deps as a PyPI extra; `websockets>=11` with the
+legacy `connect`; 220-line `.gitignore`; `conftest.py` importing the private
+`_ensure_deephaven_server` and hard-coding port 10099.
 Appendix D's draft config has `py310`, `pytest-asyncio`, a `TC003` ignore, an `ANN401` ignore,
 `PLR0917` ignored, and a `deephaven` module-level import ban; the settled decisions override all
 six.
@@ -473,12 +477,12 @@ core-skeleton did.
 **Goal.** Create the new package layout with the public surface fixed (exports, config, session
 shell, query classes, enums, types, errors), the cross-cutting engines that transports and domains
 build on (schema registry, time units, symbols, dates, liveness, diagnostics, dataset catalog),
-and stub domain modules so the transport and dataset packages can proceed in parallel without
+and stub domain modules so the transport and dataset planned PRs can proceed in parallel without
 touching shared files. No network code.
 
 **DESIGN sections implemented.** [§ 2 Principles and terms](DESIGN.md#2-principles-and-terms);
 [§ 3 Exports](DESIGN.md#3-exports); [§ 4 Package layout](DESIGN.md#4-package-layout) (every
-§ 4.1 module this package owns exists after it, the domain modules as stubs; the
+§ 4.1 module this planned PR owns exists after it, the domain modules as stubs; the
 transport modules `_rest.py`, `_hosts.py`, `_poll.py`, `_ws.py`, `_stream.py`, `_watchlist.py`,
 and `_flatfiles.py` are created by rest-transport, websocket-layer, and flat-file-history);
 [§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig);
@@ -495,7 +499,7 @@ bodies raise `NotImplementedError` until their transport lands);
 [§ 18 Concurrency model](DESIGN.md#18-concurrency-model) (registry lock, reaper thread, lock
 order).
 
-**Depends on.** tooling-foundation. **Parallel with.** the fork packages.
+**Depends on.** tooling-foundation. **Parallel with.** the fork PRs.
 
 **Files.** Module names are those of DESIGN § 4.1; every module below `deephaven_massive/`
 other than `__init__.py` is private, and the public surface is `__init__.py` alone. The six
@@ -603,28 +607,28 @@ uv run mypy src tests
 PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_liveness.py tests/test_session.py -q
 ```
 
-**Pitfalls (Appendix E).** Unbounded `_post_attach_sigs` (E C1) — no per-row Python sets in any
-engine path; streams never shut down (E C3) — every publisher is created with
-`on_shutdown_callback` inside a scope; zero logging and swallowed exceptions (E H2) — every
+**Pitfalls (Appendix E).** Unbounded `_post_attach_sigs` — no per-row Python sets in any
+engine path; streams never shut down — every publisher is created with
+`on_shutdown_callback` inside a scope; zero logging and swallowed exceptions — every
 module has `logger = logging.getLogger(__name__)` and no `contextlib.suppress(Exception)`; test
-hooks in the public constructor (E H6) — `MassiveSession(config)` only; `_is_deephaven_table`
-duck-typing matched `pyarrow.Table` (E H7) — use `isinstance(obj, deephaven.table.Table)`;
-defensive clamps `max(0, n-1)` (E H8) — raise on double release; triplicated config defaults
-(E M); `exec_ctx: ... | None` deferred failures (E M) — mandatory, fail fast; `to_utc_ns`
-magnitude sniffing (F M6) — units are declared per `(dataset, transport, field)`.
+hooks in the public constructor — `MassiveSession(config)` only; `_is_deephaven_table`
+duck-typing matched `pyarrow.Table` — use `isinstance(obj, deephaven.table.Table)`;
+defensive clamps `max(0, n-1)` — raise on double release; triplicated config defaults;
+`exec_ctx: ... | None` deferred failures — mandatory, fail fast; `to_utc_ns` magnitude sniffing —
+units are declared per `(dataset, transport, field)`.
 
 **Out of scope.** Any REST, WebSocket, or S3 I/O (rest-transport, websocket-layer, and
-flat-file-history); dataset definitions (the dataset packages); the `bars` overloads (the dataset
-packages, per domain); deleting legacy code (finish-rework).
+flat-file-history); dataset definitions (the dataset planned PRs); the `bars` overloads (the
+dataset planned PRs, per domain); deleting legacy code (finish-rework).
 
 **Approval gates.** Opening the PR. Any deviation from DESIGN § 3 or from the module names of
 DESIGN § 4.1 needs an owner decision first.
 
 ---
 <a id="pkgs"></a>
-## Remaining packages
+## Remaining planned PRs
 
-**Common gate.** Every package below also meets these, which its own acceptance criteria do
+**Common gate.** Every planned PR below also meets these, which its own acceptance criteria do
 not repeat:
 
 - `./scripts/check.sh` green;
@@ -643,7 +647,7 @@ not repeat:
 | [legacy-deletion](#legacy-deletion) | `chore: delete the legacy implementation` | final-design |
 | [final-names](#final-names) | `refactor: final module and test names` | final-design, legacy-deletion |
 | [wire-package-scaffold](#wire-package-scaffold) | `feat: wire package scaffold` | wire-client-dependencies, final-names |
-| [flat-file-history](#flat-file-history) | `feat: flat-file history` (#51) | wire-package-scaffold |
+| [flat-file-history](#flat-file-history) | `feat: flat-file history` (#63) | wire-package-scaffold |
 | [rest-client](#rest-client) | `feat: REST client` | wire-package-scaffold |
 | [websocket-client](#websocket-client) | `feat: WebSocket client` | wire-package-scaffold |
 | [rest-wire-schema](#rest-wire-schema) | `feat: generate the REST wire schema from the OpenAPI snapshot` | wire-package-scaffold, rest-client |
@@ -658,11 +662,11 @@ not repeat:
 | [websocket-layer](#websocket-layer) | `feat: WebSocket layer` | websocket-client, generated-catalog-and-schemas |
 | [result-column-descriptions](#result-column-descriptions) | `feat: result tables carry column descriptions` | rest-transport, websocket-layer |
 | [column-reference-pages](#column-reference-pages) | `feat: generated dataset column reference` | result-column-descriptions |
-| [stocks-datasets, options-datasets, futures-datasets, indices-datasets, forex-datasets, crypto-datasets](#dataset-packages) | `feat: <stocks / options / futures / indices / forex / crypto> datasets` | rest-transport, websocket-layer, column-reference-pages |
-| [reference-indicator-economy-datasets](#dataset-packages) | `feat: reference, indicators, economy, and unified snapshots datasets` | rest-transport, column-reference-pages |
-| [partner-datasets](#dataset-packages) | `feat: partner datasets` | rest-transport, column-reference-pages |
-| [finish-rework](#finish-rework) | `chore: finish rework` | every dataset package, api-drift-check, massive-sdk-removal |
-| [live-integration-suite](#live-integration-suite) | `test: live integration suite` | every dataset package |
+| [stocks-datasets, options-datasets, futures-datasets, indices-datasets, forex-datasets, crypto-datasets](#dataset-planned-prs) | `feat: <stocks / options / futures / indices / forex / crypto> datasets` | rest-transport, websocket-layer, column-reference-pages |
+| [reference-indicator-economy-datasets](#dataset-planned-prs) | `feat: reference, indicators, economy, and unified snapshots datasets` | rest-transport, column-reference-pages |
+| [partner-datasets](#dataset-planned-prs) | `feat: partner datasets` | rest-transport, column-reference-pages |
+| [finish-rework](#finish-rework) | `chore: finish rework` | every dataset planned PR, api-drift-check, massive-sdk-removal |
+| [live-integration-suite](#live-integration-suite) | `test: live integration suite` | every dataset planned PR |
 | [plan-retirement](#plan-retirement) | `docs: retire verified notes and the rework plan` | finish-rework, live-integration-suite |
 | [release-workflow](#release-workflow) | `ci: publish to PyPI from a version tag` (on the owner's go-ahead only) | finish-rework |
 | [release-0.1.0](#release-0.1.0) | `chore: release 0.1.0` (on the owner's go-ahead only) | plan-retirement, release-workflow |
@@ -682,7 +686,7 @@ not repeat:
 
 **Goal.** Rewrite `DESIGN.md`, this file, and `AGENTS.md` to the final design: one wire package
 holding REST, WebSocket, and S3 access; every schema generated from the vendor's specs; the final
-module and test layout; and every remaining package in the template.
+module and test layout; and every remaining planned PR in the template.
 
 **DESIGN sections implemented.** All of `DESIGN.md`, including the flat-file text settled in
 #51 ([process decision](#process-decisions) “The flat-file DESIGN and PLAN text of #51”).
@@ -870,7 +874,7 @@ change.
 | **Base** | `origin/main` after `git fetch` |
 | **Issue** | TBD (owner approval to create) |
 
-**Goal.** Create the wire package's skeleton and everything the later wire packages share, so
+**Goal.** Create the wire package's skeleton and everything the later wire planned PRs share, so
 rest-client, websocket-client, flat-file-history, and rest-wire-schema import nothing from each
 other.
 
@@ -882,7 +886,7 @@ and `request_id`, the lazy `__init__`); [§ 19](DESIGN.md#19-wire-clients-and-th
 path.
 
 **Files.**
-- Create: `src/deephaven_massive/_massive/__init__.py` (lazy; this package's block of
+- Create: `src/deephaven_massive/_massive/__init__.py` (lazy; this planned PR's block of
   `__all__`), `_massive/net/__init__.py`, `net/errors.py`, `net/http.py`, `net/codec.py`,
   `_massive/spec/__init__.py`, `spec/types.py` (no loaders), empty `rest/`, `ws/`, `flatfiles/`,
   and `refresh/` package markers; their mirrors under `tests/massive/`.
@@ -980,7 +984,7 @@ so the push fails if #51 moved; the implementer stops before the push for the ow
     `_massive`. `Request` gained a typed `adjusted` field (`build_query(adjusted=)`), and
     `DatasetSpec` gained `has_rest_history` and `has_grouped_daily`. `_dates.py` gained
     `futures_session`; `_catalog.py` checks the flat-file key maps at import (`Symbol`,
-    `Timestamp`, and `SessionEndDate` for futures). Namespace packages pass `adjusted` to
+    `Timestamp`, and `SessionEndDate` for futures). Dataset planned PRs pass `adjusted` to
     `build_query(adjusted=...)`, not in `params`.
 
 **Tasks.**
@@ -1034,16 +1038,16 @@ so the push fails if #51 moved; the implementer stops before the push for the ow
 uv run pytest tests/test_flat_files.py tests/test_history_source.py tests/massive/flatfiles tests/test_query.py -q
 ```
 
-**Pitfalls (Appendix F).** `to_pylist()` per chunk and accumulating every batch (F C2);
+**Pitfalls (Appendix F).** `to_pylist()` per chunk and accumulating every batch;
 `us_futures/` umbrella prefix and futures `day_aggs_v1` never existed (F, Appendix C);
-`load()` positional overloading and seven aliases (F H5); AUTO disabled whenever
-`adjusted=True` (F M4) — AUTO requires `adjusted=False` only for datasets that *have* the
+`load()` positional overloading and seven aliases; AUTO disabled whenever
+`adjusted=True` — AUTO requires `adjusted=False` only for datasets that *have* the
 parameter, and `indices.bars` has none; `ignore_missing = len(dates) > 1` dropping days silently
 (F LOW); fixture headers that are not Massive's real columns (F LOW).
 
 **Out of scope.** The header peek and drift (runtime-drift-reporting); the shared TLS, proxy, and
 retry rules (flat-file-s3-shared-rules); dataset prefixes beyond the fixtures (the dataset
-packages); REST history (rest-transport); live S3 tests (live-integration-suite).
+planned PRs); REST history (rest-transport); live S3 tests (live-integration-suite).
 
 **Approval gates.** The force-push to #51; merge by the owner.
 
@@ -1510,7 +1514,7 @@ uv run pytest tests/massive/flatfiles -q
 schema.
 
 **DESIGN sections implemented.** [§ 19.4](DESIGN.md#194-generated-schemas) (the run-time merge,
-C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
+the catalog gates); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
 [§ 8.12](DESIGN.md#812-excluded-endpoints) (used coverage);
 [§ 11](DESIGN.md#11-enums-and-types); [§ 12](DESIGN.md#12-timestamp-units-and-day-boundaries)
 (the routine for every transport).
@@ -1537,7 +1541,7 @@ C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
       `TimeUnitTable`, and `_enums.Transport`.
 - [ ] `_flat_files.py` builds plans from `source(Transport.FLAT_FILES, …)`; the timestamp routine
       serves every transport.
-- [ ] `tests/test_catalog.py`: C1–C7 and the undeclared files; `_enums` checked against
+- [ ] `tests/test_catalog.py`: the catalog gates and the undeclared files; `_enums` checked against
       `spec/rest.json`.
 - [ ] Each `tests/data/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
       declare; a shared source (the aggregate range path, `/prev`) is listed in every namespace
@@ -1547,13 +1551,13 @@ C1–C7); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
 - [ ] `git grep -nE "^\s*(from|import) massive" -- src tests` is empty.
 - [ ] `git grep -n "_enums import.*Transport"` is empty, and `Transport`'s string values are
       unchanged in the diagnostics tables.
-- [ ] A per-ticker REST path (`/v3/trades/{t}`) and a futures WebSocket channel pass C1 with
-      `from_request` and absent session keys.
+- [ ] A per-ticker REST path (`/v3/trades/{t}`) and a futures WebSocket channel pass the
+      declared-keys gate with `from_request` and absent session keys.
 - [ ] The renamed dataset schemas of the synthetic and test specs carry `Symbol`, `Timestamp`,
-      and `Underlying` where the dataset declares those keys (C1), including the DESIGN § 21
-      names `Symbol` and `Timestamp`.
-- [ ] Negative tests for C1–C7 on synthetic specs; C1's include a reference dataset that
-      declares no key and passes.
+      and `Underlying` where the dataset declares those keys (the declared-keys gate), including
+      the DESIGN § 21 names `Symbol` and `Timestamp`.
+- [ ] Negative tests for every catalog gate on synthetic specs; the declared-keys gate's cases
+      include a reference dataset that declares no key and passes.
 - [ ] A `stocks.trades`/`crypto.trades` fixture pair shows identical column sets with a single
       `Timestamp`.
 
@@ -1565,7 +1569,7 @@ uv run pytest tests/test_catalog.py tests/test_schema.py tests/test_timeunits.py
 
 **Pitfalls.** No schema is inferred from data; the merge runs from committed files only.
 
-**Out of scope.** Declaring datasets (the dataset packages).
+**Out of scope.** Declaring datasets (the dataset planned PRs).
 
 **Approval gates.** Opening the PR.
 
@@ -1728,12 +1732,12 @@ PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_rest.py tests/test_poll.py 
 ```
 
 **Pitfalls (Appendices E, F).** A second HTTP path beside `RestClient`; `limit` used as page
-size (F H1); envelope sniffing (F H4); ms epoch integers sent to a ns parameter (F M6);
-per-contract snapshot calls instead of `ticker.any_of` (F M7); network I/O in a poller
+size; envelope sniffing; ms epoch integers sent to a ns parameter;
+per-contract snapshot calls instead of `ticker.any_of`; network I/O in a poller
 `__init__`; "absence ⇒ delayed" applied to futures.
 
 **Out of scope.** The REST client (rest-client); WebSocket (websocket-layer); datasets beyond test
-fixtures (the dataset packages).
+fixtures (the dataset planned PRs).
 
 **Approval gates.** Opening the PR.
 
@@ -1780,7 +1784,7 @@ massive-sdk-removal.
       streams and logs at ERROR; drift goes to the `DriftRegistry`.
 - [ ] The flush renames, converts, applies the bound mask, and fans out with `where_in`.
 - [ ] The options cap with deferral; `_watchlist.py`; idle close after 30 s.
-- [ ] The core-skeleton follow-ups B1–B9: `open_stream`'s `channel` is `str`; `open_stream`
+- [ ] The core-skeleton follow-ups: `open_stream`'s `channel` is `str`; `open_stream`
       releases its scope and references if it raises; the shutdown callback logs the `RuntimeError`
       of a closed loop; `blink()` on a failed stream and the `DHError` wrap.
 
@@ -1798,11 +1802,11 @@ uv run pytest tests/test_ws.py tests/test_stream.py tests/test_watchlist.py -q
 PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_ws.py tests/test_stream.py tests/test_watchlist.py -q
 ```
 
-**Pitfalls (Appendices E, H).** Streams never shut down (E C3); decode or JVM work on the
-asyncio thread (E H1); swallowed exceptions (E H2); idle connections never closed (E H4);
+**Pitfalls (Appendices E, H).** Streams never shut down; decode or JVM work on the
+asyncio thread; swallowed exceptions; idle connections never closed;
 tearing down a whole URL on one entitlement error; prefix matching between topics.
 
-**Out of scope.** The WebSocket client (websocket-client); datasets (the dataset packages).
+**Out of scope.** The WebSocket client (websocket-client); datasets (the dataset planned PRs).
 
 **Approval gates.** Opening the PR.
 
@@ -1827,14 +1831,16 @@ dataset.
 `DatasetSpec.summary`); [§ 19.4](DESIGN.md#194-generated-schemas) (**Column descriptions**:
 `Column`, rules 1–3); [§ 6.1](DESIGN.md#61-how-a-live-table-is-kept-alive-and-released) (the
 described `blink()` copy, a stream failed during its open);
-[§ 23](DESIGN.md#23-open-verification-items) items 16 and 17;
+[§ 23](DESIGN.md#23-open-verification-items) (whether the described copy of a keyed
+`input_table` keeps its input-table attribute, and whether the web UI shows a
+`TableDescription`);
 [§ 22](DESIGN.md#22-decisions) “`columns()` on every query” and “Every result carries column
 descriptions”.
 
 **Depends on.** rest-transport, websocket-layer (and through them field-descriptions,
 websocket-and-flat-file-wire-schemas, and generated-catalog-and-schemas). **Parallel with.**
-api-drift-check, massive-sdk-removal. **Before.** column-reference-pages and the dataset packages,
-so that every declared dataset is described from its first PR.
+api-drift-check, massive-sdk-removal. **Before.** column-reference-pages and the dataset planned
+PRs, so that every declared dataset is described from its first PR.
 
 **Files.** Modify `_schema.py` (`Column` gains `description`, `supplied_by`, `wire_keys`; the
 three rules; `describe()`), `_catalog.py` (`DatasetSpec.summary`, required, one sentence),
@@ -1875,8 +1881,8 @@ tests (`test_schema`, `test_catalog`, `test_query`, `test_rest`, `test_poll`, `t
 - [ ] `columns()`: the four columns and their types; the same rows for two queries of one
       dataset with different arguments; no request reaches the fakes; it works after
       `close()`; `m.release()` rejects it; it raises `ValueError` on a UG thread.
-- [ ] DESIGN § 23 items 16 and 17: the fixture tests, and the web UI outcome of item 17
-      recorded in the PR.
+- [ ] The two DESIGN § 23 items on Deephaven (the keyed `input_table` attribute and the web
+      UI's `TableDescription`): the fixture tests, and the web UI outcome recorded in the PR.
 - [ ] 16 threads calling `columns()` and `blink()` on one session at once on 3.14t.
 
 **Verification.**
@@ -1920,13 +1926,13 @@ renderer, `sync`, the command, the parity test, the docstring rule);
 [§ 22](DESIGN.md#22-decisions) “A generated column reference that cannot hold an orphaned page”.
 
 **Depends on.** result-column-descriptions. **Parallel with.** api-drift-check,
-massive-sdk-removal. **Before.** Every dataset package, so each namespace package renders its own
-page and links its own docstrings.
+massive-sdk-removal. **Before.** Every dataset planned PR, so each namespace's planned PR renders
+its own page and links its own docstrings.
 
 **Files.** Create `src/deephaven_massive/_reference.py`, `tests/test_reference.py`, and
 `scripts/render_reference.py`. Modify `AGENTS.md` (the command in **Commands**, and that
 `docs/datasets/` is never edited by hand). No page exists yet: no dataset is declared, so the
-rendered set is empty and `docs/datasets/` is absent until the first dataset package.
+rendered set is empty and `docs/datasets/` is absent until the first dataset planned PR.
 
 **Tasks.**
 - [ ] `_reference.render(provenance)`: one page per namespace module with declared datasets,
@@ -1970,18 +1976,18 @@ uv run pytest tests/test_reference.py -q
 column lists into hand-written modules makes them go stale; docstrings link, they never list.
 A script that imports the library before the server starts fails on the first Deephaven import.
 
-**Out of scope.** The pages themselves (each dataset package renders its namespace); `README.md`
+**Out of scope.** The pages themselves (each dataset planned PR renders its namespace); `README.md`
 links (finish-rework).
 
 **Approval gates.** Opening the PR.
 
 ---
 
-<a id="dataset-packages"></a>
-## Dataset packages — `feat: <namespace> datasets`
+<a id="dataset-planned-prs"></a>
+## Dataset planned PRs — `feat: <namespace> datasets`
 
-All eight packages share this section; per-package specifics follow. The first six, from
-stocks-datasets to crypto-datasets, are the *asset-class dataset packages*. Each branch is cut
+All eight planned PRs share this section; per-PR specifics follow. The first six, from
+stocks-datasets to crypto-datasets, are the *asset-class dataset planned PRs*. Each branch is cut
 from `origin/main` after `git fetch`.
 
 | Name | Title | Branch | Issue | Depends on |
@@ -2002,7 +2008,7 @@ methods with the exact DESIGN signatures, and prove each dataset with spec-shape
 [§ 8](DESIGN.md#8-namespace-tree); [§ 7.1](DESIGN.md#71-bars-overloads) where it has `bars`;
 [§ 9](DESIGN.md#9-filters); [§ 10](DESIGN.md#10-symbols-and-all); [§ 11](DESIGN.md#11-enums-and-types).
 
-**Parallel with.** every other dataset package.
+**Parallel with.** every other dataset planned PR.
 
 **Shared files.** `_namespaces/<ns>.py` (namespace class and `DATASETS`), its tests and
 fixtures, its generated column reference page `docs/datasets/<ns>.md`, and the deletion of
@@ -2030,8 +2036,8 @@ needed `refresh/` fix lands first in its own PR.
 
 **Shared acceptance criteria.**
 - [ ] Every DESIGN § 8 row of the namespace is declared and tested.
-- [ ] C1–C7 pass for the namespace, and only its own undeclared file is deleted, so the dataset
-      packages land in any order.
+- [ ] The catalog gates pass for the namespace, and only its own undeclared file is deleted, so the
+      dataset planned PRs land in any order.
 - [ ] No `_massive` diff.
 
 **Shared verification.**
@@ -2041,10 +2047,10 @@ uv run pytest tests/namespaces/test_<ns>.py tests/test_catalog.py tests/test_ref
 uv run python scripts/render_reference.py && git status --porcelain docs/datasets    # empty
 ```
 
-**Shared pitfalls (Appendices B, C, F).** Nine wrong REST paths (F C1); invented wire keys
-(F C3); null anchors from wrong keys (F M3); related companies `Symbol` null (F M1); 23 aliases
-and ~3,500 copy-paste lines (F H3) — one name per dataset, no aliases. Read the legacy code, if
-needed, with `git show 519fad8:src/deephaven_massive/<path>`.
+**Shared pitfalls (Appendices B, C, F).** Nine wrong REST paths; invented wire keys; null anchors
+from wrong keys; related companies `Symbol` null; 23 aliases and ~3,500 copy-paste lines — one name
+per dataset, no aliases. Read the legacy code, if needed, with
+`git show 519fad8:src/deephaven_massive/<path>`.
 
 **Shared out of scope.** Shared modules; README (finish-rework); live tests
 (live-integration-suite).
@@ -2074,7 +2080,7 @@ needed, with `git show 519fad8:src/deephaven_massive/<path>`.
   ([§ 8.7](DESIGN.md#87-mreference)–[§ 8.9](DESIGN.md#89-meconomy),
   [§ 8.11](DESIGN.md#811-msnapshots)): the reference, indicators, and economy namespaces, and
   `MassiveSession.snapshots()` with its record `reference.snapshots` in `_namespaces/reference.py`;
-  the one dataset package that edits `_session.py`.
+  the one dataset planned PR that edits `_session.py`.
 - **partner-datasets** ([§ 8.10](DESIGN.md#810-mpartners)): the four vendor classes in
   `_namespaces/partners.py`.
 
@@ -2095,7 +2101,7 @@ move into `AGENTS.md`, and generated = used.
 **DESIGN sections implemented.** [§ 21 Examples](DESIGN.md#21-examples);
 [§ 8.12](DESIGN.md#812-excluded-endpoints) (generated = used).
 
-**Depends on.** Every dataset package, api-drift-check, massive-sdk-removal. **Parallel with.**
+**Depends on.** Every dataset planned PR, api-drift-check, massive-sdk-removal. **Parallel with.**
 live-integration-suite.
 
 **Files.** Create `tests/test_readme.py`. Modify `README.md`, `AGENTS.md`, and
@@ -2147,7 +2153,7 @@ owner can retire every UNVERIFIED note with evidence.
 **DESIGN sections implemented.** [§ 23](DESIGN.md#23-open-verification-items) (the live-test
 column).
 
-**Depends on.** Every dataset package. **Parallel with.** finish-rework.
+**Depends on.** Every dataset planned PR. **Parallel with.** finish-rework.
 
 **Files.** Create `tests/test_hosts_integration.py`, `tests/test_ws_integration.py`,
 `tests/test_timeunits_integration.py`, `tests/test_flat_files_integration.py`,
@@ -2170,7 +2176,7 @@ MASSIVE_API_KEY=… uv run pytest -m integration -q    # owner only
 
 **Pitfalls.** These tests are evidence, never design input; never probe an unsupported endpoint.
 
-**Out of scope.** Changing behaviour (a `fix:` package follows a refuted note).
+**Out of scope.** Changing behaviour (a `fix:` planned PR follows a refuted note).
 
 **Approval gates.** Opening the PR; the owner runs the suite.
 
@@ -2229,7 +2235,7 @@ git grep -n "UNVERIFIED\|plans/rework"
 
 **Starts only on the owner's go-ahead.** Publishing is not turned on. Until the owner says so,
 no release workflow, GitHub environment, or pending trusted publisher is created, and no other
-package depends on this one.
+planned PR depends on this one.
 
 **Goal.** Publish to PyPI reproducibly, with no long-lived token.
 
@@ -2272,7 +2278,7 @@ publishes to PyPI, where a version can never be re-uploaded.
 
 **Starts only on the owner's go-ahead.** Publishing is not turned on. Until the owner says so,
 no release workflow, GitHub environment, or pending trusted publisher is created, and no other
-package depends on this one.
+planned PR depends on this one.
 
 **Goal.** Prepare the first release.
 
@@ -2375,7 +2381,7 @@ DESIGN.
 4. **The fork is left alone.** The plan has no archive, pull-request-closing, or
    branch-cleanup step for `chipkent/massive-client-python`; what happens to it is the owner's
    own action.
-5. **The live integration suite runs alongside the finishing package** (live-integration-suite
+5. **The live integration suite runs alongside the finishing planned PR** (live-integration-suite
    alongside finish-rework), and plan-retirement retires the verified UNVERIFIED notes and deletes
    `plans/rework/`.
 6. **Upstream issues** (DESIGN § 22 “No SDK pull requests; upstream issues are optional”) are each
@@ -2388,7 +2394,7 @@ The owner decisions of the final design, each recorded in DESIGN or above:
 | Decision | Where it is recorded |
 |---|---|
 | Names from the lexicons, `NAMES`, and the declared key columns | § 19.4; § 22 “Names come from the generated tables” |
-| Coverage is derived: documented = generated ⊎ excluded ⊎ …; generated ⊆ used ∪ undeclared | § 8.12; § 19.4 C7 |
+| Coverage is derived: documented = generated ⊎ excluded ⊎ …; generated ⊆ used ∪ undeclared | § 8.12; § 19.4 (the coverage gate) |
 | One wire package, REST, WebSocket, and S3 | § 19; § 22 “One wire package” |
 | #51 is restructured before merge as a move with unchanged logic | flat-file-history; process decision “The flat-file implementation of #51 is restructured before merge” |
 | The legacy code is deleted now (legacy-deletion) | Process decision “The legacy implementation is deleted” |
@@ -2408,7 +2414,7 @@ The owner decisions of the final design, each recorded in DESIGN or above:
 | Hand input is never a column list | § 19.4 |
 | `dav` → `AccumulatedDecimalVolume`; stocks `dv` → `DecimalVolume`; futures `dv` → `DollarVolume` | § 19.4; § 22 “Names come from the generated tables” |
 | The snapshot is stored canonically | § 19.6 |
-| live-integration-suite runs alongside finish-rework; plan-retirement retires notes and deletes `plans/rework/` | Process decision “The live integration suite runs alongside the finishing package” |
+| live-integration-suite runs alongside finish-rework; plan-retirement retires notes and deletes `plans/rework/` | Process decision “The live integration suite runs alongside the finishing planned PR” |
 | Release 0.1.0 through trusted publishing, on the owner's go-ahead only | § 20.1; § 22 “Release through trusted publishing, on the owner's go-ahead” |
 | The fork is left to the owner | § 22 “No SDK pull requests; upstream issues are optional”; process decisions “The fork is left alone” and “Upstream issues” |
 | The raw vendor snapshot lives at the top-level `vendor/massive/`, in neither the wheel nor the sdist | § 19 (rest-wire-schema, #67) |
