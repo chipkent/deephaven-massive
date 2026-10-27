@@ -65,7 +65,12 @@ from deephaven_massive._datasets.catalog import filter_key
 from deephaven_massive._datasets.dates import CHICAGO, DAY_ZONES, NEW_YORK, FuturesSessions
 from deephaven_massive._datasets.history_source import partition_dates
 from deephaven_massive._datasets.schema import rename, required_fields, widen
-from deephaven_massive._datasets.symbols import canonical, ws_symbol
+from deephaven_massive._datasets.symbols import (
+    SymbolTable,
+    canonical,
+    symbol_class,
+    ws_symbol,
+)
 from deephaven_massive._datasets.timestamps import UnitMismatchError, instants
 from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._errors import MassiveError, from_wire, log_once
@@ -104,7 +109,7 @@ __all__ = [
     "RestEndpoints",
     "RestReader",
     "RestState",
-    "fetch_path",
+    "fetch_paths",
     "plan_calls",
 ]
 
@@ -363,10 +368,63 @@ def _symbol_parts(
     return parts
 
 
+def _caller_params(
+    spec: DatasetSpec, rest_path: RestPath, request: Request
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Return the path and query parameters the caller set: typed parameters and filters.
+
+    Typed parameters go wherever the path takes them: a path segment (`{date}`,
+    `{direction}`) or a query parameter. `order` on a path without an `order` parameter folds
+    into `sort` as its `.asc` or `.desc` suffix (`sort=date.desc`); on a path with one it is
+    sent as is. A filter goes out under the wire name whose `filters` key it is.
+
+    Args:
+        spec: The dataset, for messages.
+        rest_path: The path.
+        request: The normalized arguments.
+
+    Returns:
+        `(path parameters, query parameters)`.
+
+    Raises:
+        ValueError: If a typed parameter or a filter the caller set is not a parameter of the
+            path (for example a filter of a dataset's list path on its per-symbol path), or
+            `order` is set where the path has neither `order` nor `sort`.
+    """
+    params = {p.name: p for p in rest_path.params}
+    wire_names = {filter_key(name): name for name in params}
+    path: dict[str, object] = {}
+    query: dict[str, object] = {}
+    typed = dict(request.params)
+    folded = "order" in typed and "order" not in params
+    unknown = [name for name in typed if name not in params and not (folded and name == "order")]
+    for name, value in typed.items():
+        if name in params:
+            (path if params[name].in_path else query)[name] = value
+    if folded and "sort" in query:
+        query["sort"] = f"{typed['sort']}.{typed['order']}"
+    elif folded:
+        unknown.append("order")
+    for key, value in request.filters:
+        wire = wire_names.get(key)
+        if wire is None:
+            unknown.append(key)
+        else:
+            query[wire] = value
+    if unknown:
+        raise ValueError(f"{spec.name}: {rest_path.template} does not take {sorted(set(unknown))}")
+    return path, query
+
+
 def _base(
     spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Return the path and query parameters every request of a path shares.
+
+    Only parameters the path declares are sent: the caller's (`_caller_params`); `multiplier`
+    and `timespan` in path placeholders of those names; and `adjusted`, the futures
+    `resolution`, and the page size when the path takes them, left out otherwise (`adjusted`
+    on a crypto path that has none).
 
     Args:
         spec: The dataset.
@@ -376,31 +434,13 @@ def _base(
             `{to}` dates; they take precedence.
 
     Returns:
-        `(path parameters, query parameters)`. Typed parameters go wherever the path takes
-        them: a path segment (`{date}`, `{direction}`) or a query parameter; `order` on a path
-        without an `order` parameter folds into `sort` as its `.asc` or `.desc` suffix
-        (`sort=date.desc`); a filter goes out under the wire name whose `filters` key it is;
-        `multiplier`
-        and `timespan` fill path placeholders of those names; `adjusted`, the futures
-        `resolution`, and the page size go out when the path takes them. A parameter the
-        path does not take is left out, since a dataset's typed parameters and filters span
-        all of its paths.
+        `(path parameters, query parameters)`.
+
+    A parameter the caller set that the path does not take raises the `ValueError` of
+    `_caller_params`.
     """
     params = {p.name: p for p in rest_path.params}
-    wire_names = {filter_key(name): name for name in params}
-    path: dict[str, object] = {}
-    query: dict[str, object] = {}
-    typed = dict(request.params)
-    for name, value in typed.items():
-        if name in params:
-            (path if params[name].in_path else query)[name] = value
-    order = typed.get("order")
-    if order is not None and "order" not in params and "sort" in typed:
-        query["sort"] = f"{typed['sort']}.{order}"
-    for key, value in request.filters:
-        wire = wire_names.get(key)
-        if wire is not None:
-            query[wire] = value
+    path, query = _caller_params(spec, rest_path, request)
     if "multiplier" in params and params["multiplier"].in_path:
         path["multiplier"] = request.multiplier
     if request.timespan is not None and "timespan" in params and params["timespan"].in_path:
@@ -415,23 +455,36 @@ def _base(
     return path, query
 
 
-def fetch_path(spec: DatasetSpec, symbols: NormalizedSymbols | None) -> str:
-    """Return the REST path a `fetch()` or `poll()` cycle reads.
+def fetch_paths(
+    spec: DatasetSpec, symbols: NormalizedSymbols | None
+) -> list[tuple[str, NormalizedSymbols | None]]:
+    """Return the REST paths a `fetch()` or `poll()` cycle reads, each with its symbols.
 
     A dataset with a per-symbol detail path (`DatasetSpec.extra_paths`, such as one option
     contract's reference data) reads it once per symbol when the call names symbols, and its
-    list path (`fetch_path`) otherwise.
+    list path (`fetch_path`) otherwise. A dataset that serves some asset classes on paths of
+    their own (`DatasetSpec.fetch_paths_by_class`) sends each symbol to its class's path
+    (`symbol_class`), and every other symbol to `fetch_path`.
 
     Args:
         spec: The dataset, with a fetch path.
         symbols: The call's static symbols.
 
     Returns:
-        The path template.
+        `(path template, symbols)` pairs, in the order of each path's first symbol.
     """
-    if spec.extra_paths and isinstance(symbols, tuple):
-        return spec.extra_paths[0]
-    return cast("str", spec.fetch_path)
+    default = cast("str", spec.fetch_path)
+    if not isinstance(symbols, tuple):
+        return [(default, symbols)]
+    if spec.extra_paths:
+        return [(spec.extra_paths[0], symbols)]
+    if not spec.fetch_paths_by_class:
+        return [(default, symbols)]
+    groups: dict[str, list[str]] = {}
+    for symbol in symbols:
+        path = spec.fetch_paths_by_class.get(symbol_class(symbol), default)
+        groups.setdefault(path, []).append(symbol)
+    return [(path, tuple(group)) for path, group in groups.items()]
 
 
 def plan_calls(
@@ -1048,12 +1101,71 @@ class RestReader:
         Returns:
             The cycle's rows and request count.
         """
-        rest_path = self.rest_path(fetch_path(spec, symbols))
-        axis = _axis_query(spec, rest_path, dates=(request.start, request.end))
-        calls = plan_calls(spec, rest_path, request, symbols=symbols, axis=axis)
-        return self.read(
-            spec, rest_path, calls, limit=request.limit, record=record, executor=executor
-        )
+        return self.read_fetch(spec, request, symbols=symbols, record=record, executor=executor)
+
+    def plan_fetch(
+        self, spec: DatasetSpec, request: Request, symbols: NormalizedSymbols | None
+    ) -> list[tuple[RestPath, list[Call]]]:
+        """Plan the requests of a `fetch()` or `poll()` cycle, path by path.
+
+        Pure: no I/O.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments.
+            symbols: The static symbols.
+
+        Returns:
+            Each path the cycle reads (`fetch_paths`) with its calls.
+
+        A parameter a path does not take raises the `ValueError` of `_base`.
+        """
+        planned = []
+        for template, own in fetch_paths(spec, symbols):
+            rest_path = self.rest_path(template)
+            axis = _axis_query(spec, rest_path, dates=(request.start, request.end))
+            planned.append(
+                (rest_path, plan_calls(spec, rest_path, request, symbols=own, axis=axis))
+            )
+        return planned
+
+    def read_fetch(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        symbols: NormalizedSymbols | None,
+        record: Callable[[DriftReport], None] | None = None,
+        executor: ThreadPoolExecutor | None = None,
+    ) -> tuple[pa.Table, int]:
+        """Read a dataset's fetch paths for the symbols: `fetch()`, or one `poll()` cycle.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments.
+            symbols: The static symbols.
+            record: Receives each page's drift, or None.
+            executor: A pool for fan-out requests, or None for one of each read's own.
+
+        Returns:
+            The rows of every path, in path order, capped at `Request.limit`, and the request
+            count.
+
+        Errors are those of `read`, and a parameter a path does not take raises the
+        `ValueError` of `_base`.
+        """
+        tables = []
+        requests = 0
+        for rest_path, calls in self.plan_fetch(spec, request, symbols):
+            table, made = self.read(
+                spec, rest_path, calls, limit=request.limit, record=record, executor=executor
+            )
+            tables.append(table)
+            requests += made
+        rows = pa.concat_tables(tables)
+        if request.limit is not None:
+            rows = rows.slice(0, request.limit)
+        return rows, requests
 
 
 class RestEndpoints:
@@ -1186,11 +1298,9 @@ class RestEndpoints:
                 rate limit as `"rate limited: ..."`, a closed session as `"... is closed"`).
         """
         reader = self._reader()
-        rest_path = reader.rest_path(fetch_path(spec, request.symbols))
-        axis = _axis_query(spec, rest_path, dates=(request.start, request.end))
-        calls = plan_calls(spec, rest_path, request, symbols=request.symbols, axis=axis)
+        reader.plan_fetch(spec, request, request.symbols)  # a bad parameter fails before I/O
         try:
-            table, _ = reader.read(spec, rest_path, calls, limit=request.limit)
+            table, _ = reader.read_fetch(spec, request, symbols=request.symbols)
         except MassiveError as error:
             _report(error)
             raise
@@ -1271,6 +1381,8 @@ class RestEndpoints:
             The live table, tracked by the session.
         """
         reader = self._reader()
+        if not isinstance(request.symbols, SymbolTable):  # a bad parameter fails now, not later
+            reader.plan_fetch(spec, request, request.symbols)
         host = urlsplit(self._core.config.rest_base_url).hostname
         return open_poll(
             self._core,

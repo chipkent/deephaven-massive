@@ -253,6 +253,10 @@ class DatasetSpec:
         poll_keys: The key columns of a keyed (`REPLACE`, `UPSERT`) `poll()` table.
         per_symbol: True when the endpoint takes one symbol per request, so a symbol list fans
             out to one request per symbol.
+        fetch_paths_by_class: The REST path behind `fetch()` and `poll()` for the symbols of
+            one asset class, where it differs from `fetch_path`, such as
+            `{AssetClass.CRYPTO: "/v1/indicators/sma/{cryptoTicker}"}`; the symbols of every
+            other class read `fetch_path`.
         symbols_per_request: The most symbols one request carries in a list-valued symbol
             parameter (`ticker.any_of`), such as 250 for the unified snapshot; a longer list is
             split over several requests. None sends every symbol in one request.
@@ -277,6 +281,7 @@ class DatasetSpec:
     poll_mode: PollMode = PollMode.REPLACE
     poll_keys: tuple[str, ...] = ("Symbol",)
     per_symbol: bool = False
+    fetch_paths_by_class: Mapping[AssetClass, str] = field(default_factory=dict)
     symbols_per_request: int | None = None
     page_size: int | None = None
 
@@ -334,9 +339,19 @@ class DatasetSpec:
 
     @property
     def rest_paths(self) -> tuple[str, ...]:
-        """The REST paths the dataset reads: the role paths, then `extra_paths`."""
-        roles = (self.fetch_path, self.history_path, self.grouped_daily_path)
-        return (*(path for path in roles if path is not None), *self.extra_paths)
+        """The REST paths the dataset reads: the role paths, then `extra_paths`.
+
+        The role paths are `fetch_path`, the per-class fetch paths (`fetch_paths_by_class`),
+        `history_path`, and `grouped_daily_path`, without repeats.
+        """
+        roles = (
+            self.fetch_path,
+            *self.fetch_paths_by_class.values(),
+            self.history_path,
+            self.grouped_daily_path,
+        )
+        found = (*(path for path in roles if path is not None), *self.extra_paths)
+        return tuple(dict.fromkeys(found))
 
     @property
     def sources(self) -> tuple[tuple[Transport, str], ...]:
