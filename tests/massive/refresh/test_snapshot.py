@@ -160,6 +160,23 @@ def test_gate_snapshot_files_must_match_the_manifest_exactly(tmp_path: Path) -> 
     ]
 
 
+def test_file_browser_litter_is_ignored_but_any_other_stray_file_is_not(tmp_path: Path) -> None:
+    _write_snapshot(tmp_path / "s", llms=_INDEX, pages={"stocks/trades.md": "page"})
+    pages = tmp_path / "s" / "rest" / "stocks"
+    for litter in (tmp_path / "s" / ".DS_Store", pages / "._trades.md", pages / "Thumbs.db"):
+        litter.write_bytes(b"\x00")
+    (tmp_path / "s" / "desktop.ini").write_text("[.ShellClassInfo]", encoding="utf-8")
+    assert Snapshot.load(tmp_path / "s").pages == {"stocks/trades.md": "page"}
+    (pages / "notes.txt").write_text("a note", encoding="utf-8")
+    (tmp_path / "s" / ".hidden").write_text("a dot-file", encoding="utf-8")
+    with pytest.raises(RefreshError) as caught:
+        Snapshot.load(tmp_path / "s")
+    assert sorted((p.gate, p.key, p.message) for p in caught.value.problems) == [
+        ("snapshot", ".hidden", "not in the manifest"),
+        ("snapshot", "rest/stocks/notes.txt", "not in the manifest"),
+    ]
+
+
 def test_gate_docs_a_linked_page_missing_from_the_snapshot(tmp_path: Path) -> None:
     _write_snapshot(tmp_path / "s", llms=_INDEX, pages={})
     with pytest.raises(RefreshError) as caught:
