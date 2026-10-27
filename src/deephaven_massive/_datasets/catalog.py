@@ -248,6 +248,9 @@ class DatasetSpec:
         poll_keys: The key columns of a keyed (`REPLACE`, `UPSERT`) `poll()` table.
         per_symbol: True when the endpoint takes one symbol per request, so a symbol list fans
             out to one request per symbol.
+        symbols_per_request: The most symbols one request carries in a list-valued symbol
+            parameter (`ticker.any_of`), such as 250 for the unified snapshot; a longer list is
+            split over several requests. None sends every symbol in one request.
         page_size: The REST page size requested; `limit` is a separate total-row cap.
     """
 
@@ -268,6 +271,7 @@ class DatasetSpec:
     poll_mode: PollMode = PollMode.REPLACE
     poll_keys: tuple[str, ...] = ("Symbol",)
     per_symbol: bool = False
+    symbols_per_request: int | None = None
     page_size: int | None = None
 
     def __post_init__(self) -> None:

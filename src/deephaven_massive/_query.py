@@ -186,6 +186,18 @@ class QueryBase:
         suffix = f" {described}" if described else ""
         return f"<{type(self).__name__} {self._spec.name}{suffix}>"
 
+    def _static_request(self) -> Request:
+        """Return the request with a reactive symbol table read once, for a static verb.
+
+        Returns:
+            The request; for a reactive table, with its valid symbols (`_read_symbol_table`).
+        """
+        request = self._request
+        if isinstance(request.symbols, SymbolTable):
+            symbols = _read_symbol_table(self._core, self._spec, request.symbols)
+            return replace(request, symbols=symbols)
+        return request
+
 
 class Query(QueryBase):
     """A REST list or snapshot dataset: a static `fetch()` or a live `poll()`.
@@ -199,10 +211,12 @@ class Query(QueryBase):
     def fetch(self) -> Table:
         """Return every row the dataset's endpoint returns, fully paginated, as a static table.
 
-        The request runs synchronously on the calling thread. `limit`, when the dataset was
-        built with one, caps the total number of rows; the page size is internal. Columns are
-        the dataset's schema. HTTP 403 raises `EntitlementError` and any other failure
-        `MassiveError`.
+        The requests run on the calling thread, or for an endpoint that takes one symbol per
+        request on up to `max_concurrency` threads. `limit`, when the dataset was built with
+        one, caps the total number of rows; the page size is internal. Columns are the
+        dataset's schema. A reactive symbol table is read once, when the verb is called. HTTP
+        401 raises `AuthenticationError`, HTTP 403 `EntitlementError`, and any other failure
+        `MassiveError`; a symbol the endpoint answers with HTTP 404 is left out with a WARNING.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -211,7 +225,7 @@ class Query(QueryBase):
             A static table.
         """
         self._core.require_verb_thread()
-        return self._core.rest_transport().fetch(self._spec, self._request)
+        return self._core.rest_transport().fetch(self._spec, self._static_request())
 
     def poll(self, interval: float | timedelta, *, mode: PollMode | None = None) -> Table:
         """Return a live table that re-runs `fetch()` every `interval`.
@@ -522,9 +536,12 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
     def fetch(self) -> Table:
         """Return exactly one row per symbol, the latest, from the dataset's "last" endpoint.
 
-        One request per symbol, synchronously on the calling thread. The "last" endpoints are
-        absent from some plans; `snapshots(symbols).fetch()` is the alternative that works on
-        every plan. A failed request raises `MassiveError` (`EntitlementError` on HTTP 403).
+        The requests run on the calling thread, or on up to `max_concurrency` threads: one per
+        symbol for a per-symbol endpoint (`/v2/last/trade`), or one per batch of symbols for a
+        snapshot endpoint (the indices snapshot). A reactive symbol table is read once, when
+        the verb is called. The "last" endpoints are absent from some plans;
+        `snapshots(symbols).fetch()` is the alternative that works on every plan. A failed
+        request raises `MassiveError` (`EntitlementError` on HTTP 403).
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -535,7 +552,7 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
         """
         self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
-        return self._core.rest_transport().fetch(self._spec, self._request)
+        return self._core.rest_transport().fetch(self._spec, self._static_request())
 
 
 class HistoryLatestQuery(HistoryQuery):
@@ -563,4 +580,4 @@ class HistoryLatestQuery(HistoryQuery):
         """
         self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
-        return self._core.rest_transport().fetch(self._spec, self._request)
+        return self._core.rest_transport().fetch(self._spec, self._static_request())
