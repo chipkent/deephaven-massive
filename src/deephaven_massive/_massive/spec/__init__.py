@@ -11,6 +11,9 @@ against the same description and no schema is written by hand:
 - `rest.json`, next to this module, is generated from Massive's OpenAPI specification by
   `python -m deephaven_massive._massive.refresh` and committed; it is never edited by hand.
   It ships in the wheel as package data, while the refresh that writes it does not.
+- `spec.convert` checks one decoded JSON value against its `WireType` and converts it
+  exactly (an ISO instant to integer nanoseconds, for example), for every JSON decoder,
+  including a field's declared conversion from the vendor's wrong type.
 - `source(transport, key)` and `sources(transport)` read a transport's generated file into
   those types the first time either is called, and return the same values ever after.
 

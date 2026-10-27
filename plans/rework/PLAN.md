@@ -1230,6 +1230,12 @@ prefix half of G4, G5–G7).
       and `PROJECTIONS` into its entry in all three `spec/*.json` files, and load them onto
       `Source.memberships`; a test loads `spec/` with `refresh/` absent.
 - [ ] A library test checks `VENUES` against `FuturesVenue`.
+- [ ] Column order (owner decision B, DESIGN § 19.4 naming policy rule 6): the sources of each
+      kind take their field order from the kind's flat-file "Columns" table or WebSocket
+      message, recorded explicitly in all three `spec/*.json`; REST-only sources keep the
+      documented (alphabetical) REST order. A test checks one kind's order end to end (the
+      stocks aggregate order `ticker, volume, open, close, high, low, window_start,
+      transactions`), and a source whose order cannot be taken from its kind fails the refresh.
 - [ ] Check that the wire-derived names DESIGN § 21 uses (`BidPrice`, `AskPrice`) are generated
       names. `Symbol`, `Timestamp`, and `Underlying` come from the dataset key rename and are
       checked in PC3b.

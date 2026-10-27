@@ -12,12 +12,15 @@ import pytest
 from deephaven_massive import _massive
 from deephaven_massive._massive import spec
 from deephaven_massive._massive.net import errors
+from deephaven_massive._massive.rest import batch, client, response
 from deephaven_massive._massive.spec import types
 
 EXPECTED_INTERFACE = [
     "DriftReport",
     "Field",
+    "Page",
     "ParamKind",
+    "RestClient",
     "RestPath",
     "Source",
     "Transport",
@@ -28,6 +31,7 @@ EXPECTED_INTERFACE = [
     "WireUnit",
     "source",
     "sources",
+    "to_batch",
 ]
 
 
@@ -45,6 +49,9 @@ def test_every_name_resolves_to_its_defining_object() -> None:
         assert getattr(_massive, name) is getattr(types, name)
     assert _massive.WireType is types.WireType
     assert _massive.WireUnit is types.WireUnit
+    assert _massive.RestClient is client.RestClient
+    assert _massive.Page is response.Page
+    assert _massive.to_batch is batch.to_batch
 
 
 def test_every_lazy_name_is_in_all_and_none_is_bound() -> None:
@@ -86,9 +93,9 @@ def test_type_checking_imports_mirror_all() -> None:
 
 def test_an_unknown_name_raises_attribute_error() -> None:
     with pytest.raises(
-        AttributeError, match=r"module 'deephaven_massive\._massive' has no attribute 'RestClient'"
+        AttributeError, match=r"module 'deephaven_massive\._massive' has no attribute 'WsClient'"
     ):
-        _ = _massive.RestClient  # type: ignore[attr-defined]  # the missing attribute is the point
+        _ = _massive.WsClient  # type: ignore[attr-defined]  # the missing attribute is the point
 
 
 def test_dir_lists_exactly_the_interface() -> None:

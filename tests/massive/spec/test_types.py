@@ -163,8 +163,8 @@ def test_values_on_a_non_enum_param_are_rejected() -> None:
 
 
 def test_a_timestamp_param_keeps_its_unit() -> None:
-    since = Param(name="timestamp.gte", kind=ParamKind.TIMESTAMP, unit=WireUnit.NS)
-    assert since.unit is WireUnit.NS
+    since = Param(name="timestamp.gte", kind=ParamKind.TIMESTAMP, unit=WireUnit.MS)
+    assert since.unit is WireUnit.MS
 
 
 def test_a_timestamp_param_without_a_unit_is_rejected() -> None:
@@ -313,13 +313,13 @@ def test_a_rest_path_keeps_its_result_key_and_params() -> None:
     assert (path.result_key, path.params) == ("last", params)
 
 
-def test_a_rest_path_whose_body_is_its_rows_has_no_result_key() -> None:
+def test_the_envelope_keys_are_the_ones_that_describe_a_response() -> None:
+    assert frozenset({"status", "request_id", "next_url", "count"}) == ENVELOPE_KEYS
+
+
+def test_a_rest_path_without_an_envelope_has_no_result_key() -> None:
     path = RestPath(key="/v1/marketstatus/now", fields=(), result_key=None)
     assert path.result_key is None
-
-
-def test_the_envelope_keys() -> None:
-    assert {"status", "request_id", "next_url", "count"} == ENVELOPE_KEYS
 
 
 def test_query_parameters_need_no_placeholder() -> None:
@@ -365,7 +365,9 @@ def test_an_inconsistent_rest_path_is_rejected(
 
 
 def test_a_drift_report_defaults_to_no_drift() -> None:
-    assert DriftReport() == DriftReport(extra=frozenset(), missing=frozenset())
+    assert DriftReport() == DriftReport(
+        extra=frozenset(), missing=frozenset(), statuses=frozenset()
+    )
 
 
 # Every value type.

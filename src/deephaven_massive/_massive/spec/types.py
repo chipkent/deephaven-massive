@@ -68,14 +68,14 @@ __all__ = [
 
 
 ENVELOPE_KEYS: frozenset[str] = frozenset({"status", "request_id", "next_url", "count"})
-"""The keys of Massive's REST response envelope, which are never row data.
+"""The keys of Massive's REST envelope that describe a response, never a row.
 
-Most REST paths wrap their rows in an envelope (`{"status": ..., "request_id": ..., "results":
-[...]}`), and the rows sit under the path's result key. A few paths have no result key: their
-JSON object body is itself the one row, with these keys mixed in (`/v1/open-close/...`,
-`/v1/conversion/...`). The refresh leaves these keys out of such a path's fields, and the REST
-decoder drops them from the row before comparing it with the fields. A body that is a JSON list
-is never an envelope: its elements are the rows, and their keys are all data.
+A path whose body is a single JSON object that is both the envelope and the one row
+(`RestPath.result_key` is `None`: `/v1/open-close/{stocksTicker}/{date}`, `/v1/conversion/...`,
+`/v1/marketstatus/now`) carries some of these beside the row's own keys. The REST decoder
+removes them from such a row before it compares the row with the path's fields, and the refresh
+generates no field for them on such a path. A list body is never an envelope: its rows keep
+every key, `status` included (`/v1/marketstatus/upcoming`).
 """
 
 
@@ -113,7 +113,11 @@ class WireType(StrEnum):
     EPOCH = "epoch"
     """An integer count of `WireUnit`s since the Unix epoch; the field's `unit` says which."""
     ISO_INSTANT = "iso-instant"
-    """An instant as ISO-8601 date-time text; text without an offset is UTC."""
+    """An instant as ISO-8601 date-time text with seconds and an offset (`Z` or `±HH:MM`).
+
+    Decoded to exact integer nanoseconds since the Unix epoch (UTC), keeping up to nine
+    fractional digits. Text without an offset is an unconvertible value, never assumed UTC.
+    """
     INT_ARRAY = "int-array"
     """A list of integers, each within the signed 32-bit range (condition codes)."""
     JSON_TEXT = "json-text"
@@ -154,7 +158,7 @@ class ParamKind(StrEnum):
     DATE = "date"
     """Date or instant; an instant is sent as ISO-8601 date-time text, not date-only."""
     TIMESTAMP = "timestamp"
-    """Date or instant; an instant is sent as exact integer nanoseconds since the Unix epoch."""
+    """Date or instant; an instant is sent as an exact integer count of the parameter's `unit`."""
     LIST = "list"
     """A sequence of strings, sent joined with commas (the `.any_of` parameters)."""
 
@@ -172,11 +176,11 @@ class Field:
         required: Whether the vendor marks the field required, so its absence is reported as
             drift. False by default, as for almost every field Massive documents.
         declared_type: The type the vendor's specification declares, set only when it is wrong
-            and the refresh corrects it to `wire_type` through a declared conversion (for
-            example a count documented as a quoted decimal string that is decoded to `LONG`).
-            The decoder converts each value from this type to `wire_type` deliberately, and a
-            value that does not convert fails like any other bad value. `None`, the default,
-            means the vendor's type is right and no conversion applies.
+            or missing and the refresh corrects it to `wire_type` through a declared conversion
+            (for example a timestamp the specification leaves as plain text whose samples are
+            ISO-8601 date-times). The decoder converts each value from this type to `wire_type`
+            deliberately (`spec.convert`), and a value that does not convert fails like any
+            other bad value. `None`, the default, means the vendor's type is right.
 
     Example:
         ::
@@ -274,9 +278,9 @@ class Param:
         kind: The kind of value the parameter takes.
         in_path: True for a placeholder of the path template, False for a query parameter.
         values: The accepted values of an `ENUM` parameter, in spec order; empty otherwise.
-        unit: The unit a `TIMESTAMP` parameter counts in (`NS` for the trade and quote
-            filters, `MS` for the indicator filters): an instant is sent as the exact integer
-            number of these units since the Unix epoch. Set exactly when `kind` is `TIMESTAMP`.
+        unit: The unit an instant is sent in, set exactly when `kind` is `TIMESTAMP`: `NS` for
+            the trade and quote filters, `MS` for the indicator filters. An instant is sent as
+            an exact integer count of it.
     """
 
     name: str
@@ -398,11 +402,12 @@ class RestPath(Source):
     `transport` is always `Transport.REST` and cannot be passed.
 
     Attributes:
-        result_key: Where the rows sit in the response body: an envelope key (`"results"`,
-            the default, or `"last"`), or a dotted path of keys for rows nested deeper
-            (`"results.values"`). `None` means the body itself holds the rows: a JSON list is
-            the rows, and a JSON object is one row once the `ENVELOPE_KEYS` are dropped from
-            it.
+        result_key: The envelope key that holds the rows: `"results"` unless the path keeps
+            them elsewhere (for example `"last"`). A dotted key walks into nested objects
+            (`"results.values"` for the indicators). `None` when the body itself is the rows:
+            a JSON object is one row (`/v1/marketstatus/now`), from which the
+            `ENVELOPE_KEYS` are removed, and a JSON list is the rows
+            (`/v1/marketstatus/upcoming`).
         params: The path's parameters, path placeholders and query parameters alike, in
             spec order.
 
@@ -458,8 +463,13 @@ class DriftReport:
 
     Attributes:
         extra: Wire keys present in the payload that the source does not declare (dropped).
-        missing: Wire keys the source declares that the payload lacked (decoded as null).
+        missing: Wire keys of the vendor-`required` fields (`Field.required`) that some row
+            lacked or held as null (decoded as null). Absent optional fields are not drift.
+        statuses: REST envelope `status` values outside the documented ones (`OK`,
+            `DELAYED`, `success`, and the error statuses); the page's rows were still decoded.
+            Always empty for WebSocket and flat files.
     """
 
     extra: frozenset[str] = frozenset()
     missing: frozenset[str] = frozenset()
+    statuses: frozenset[str] = frozenset()

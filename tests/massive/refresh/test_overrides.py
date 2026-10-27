@@ -61,12 +61,13 @@ def test_a_type_fix_converts() -> None:
         (WireType.LONG, WireType.LONG),
         (WireType.LONG, WireType.EPOCH),
         (WireType.EPOCH, WireType.LONG),
+        (WireType.BOOL, WireType.STRING),
     ],
 )
-def test_a_type_fix_that_converts_nothing_is_rejected(
+def test_a_type_fix_the_decoder_cannot_convert_is_rejected(
     declared: WireType, wire_type: WireType
 ) -> None:
-    with pytest.raises(ValueError, match="is not a conversion"):
+    with pytest.raises(ValueError, match="is not a declared conversion"):
         overrides.TypeFix(declared=declared, wire_type=wire_type, reason="test")
 
 

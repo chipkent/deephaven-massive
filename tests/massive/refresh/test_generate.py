@@ -810,7 +810,7 @@ def test_gate_g4_hand_entries_naming_nothing() -> None:
         tag_conflicts={(_PATH, "gone"): "test"},
         type_fixes={
             (_PATH, "gone"): overrides.TypeFix(
-                declared=WireType.LONG, wire_type=WireType.DOUBLE, reason="test"
+                declared=WireType.LONG, wire_type=WireType.STRING, reason="test"
             )
         },
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},

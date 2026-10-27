@@ -1,0 +1,11 @@
+{
+  "next_url": "https://api.massive.com/v1/indicators/sma/AAPL?cursor=YWRqdXN0ZWQ9dHJ1ZQ",
+  "request_id": "a47d1beb8c11b6ae897ab76cdbbf35a3",
+  "results": {
+    "underlying": {
+      "url": "https://api.massive.com/v2/aggs/ticker/AAPL/range/1/day/1063281600000/1665180000000"
+    },
+    "values": [{"timestamp": 1517562000016, "value": 140.139}]
+  },
+  "status": "OK"
+}

@@ -38,6 +38,7 @@ from deephaven_massive._massive.refresh.lexicon import (
     RANGE_PATHS,
     STOCKS_SNAPSHOTS,
 )
+from deephaven_massive._massive.spec.convert import DECLARED_CONVERSIONS
 from deephaven_massive._massive.spec.types import WireType, WireUnit
 
 if TYPE_CHECKING:
@@ -111,15 +112,17 @@ class TypeFix:
     reason: str
 
     def __post_init__(self) -> None:
-        """Check that the entry converts something into a type a field can have.
+        """Check that the decoder has a declared conversion for the pair.
 
         Raises:
-            ValueError: If the two types are equal, or either is `EPOCH`, whose unit only a
-                `UNITS` entry can give.
+            ValueError: If `spec.convert.DECLARED_CONVERSIONS` has no conversion from
+                `declared` to `wire_type` (the same type twice, an `EPOCH`, whose unit only a
+                `UNITS` entry can give, or any pair no decoder converts).
         """
-        if self.declared is self.wire_type or WireType.EPOCH in {self.declared, self.wire_type}:
+        if (self.declared, self.wire_type) not in DECLARED_CONVERSIONS:
             raise ValueError(
-                f"a type fix from {self.declared} to {self.wire_type} is not a conversion"
+                f"a type fix from {self.declared} to {self.wire_type} is not a declared "
+                "conversion the decoder knows"
             )
 
 
