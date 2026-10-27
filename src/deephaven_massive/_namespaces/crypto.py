@@ -18,11 +18,10 @@ around the clock, so a date-only bound is a whole UTC day.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import DAY_ZONES, parse_date_like
+from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._enums import AssetClass, ChannelFamily, Direction, Timespan, _require_enum
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query
@@ -90,6 +89,7 @@ def _request(parameter: str) -> KeySpec:
 
 TRADES: Final = DatasetSpec(
     name="crypto.trades",
+    summary="Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.",
     asset_class=AssetClass.CRYPTO,
     kind="trades",
     fetch_path=_LAST_TRADE,
@@ -110,6 +110,7 @@ TRADES: Final = DatasetSpec(
 
 QUOTES: Final = DatasetSpec(
     name="crypto.quotes",
+    summary="Quotes of crypto pairs: each exchange's best bid and ask, as they change.",
     asset_class=AssetClass.CRYPTO,
     kind="quotes",
     channels={None: "XQ"},
@@ -119,6 +120,7 @@ QUOTES: Final = DatasetSpec(
 
 BARS: Final = DatasetSpec(
     name="crypto.bars",
+    summary="Open, high, low, close, and volume bars of crypto pairs, over any time window.",
     asset_class=AssetClass.CRYPTO,
     is_bars=True,
     kind="bars",
@@ -143,6 +145,7 @@ and the minute and day aggregate flat files."""
 
 FMV: Final = DatasetSpec(
     name="crypto.fmv",
+    summary="Massive's fair market value of crypto pairs, streamed as it updates.",
     asset_class=AssetClass.CRYPTO,
     kind="fmv",
     channels={None: "FMV"},
@@ -153,6 +156,7 @@ FMV: Final = DatasetSpec(
 
 SNAPSHOTS: Final = DatasetSpec(
     name="crypto.snapshots",
+    summary="The current state of crypto pairs: today's, the last minute's, and yesterday's bars.",
     asset_class=AssetClass.CRYPTO,
     fetch_path=_SNAPSHOTS,
     keys={(_R, _SNAPSHOTS): _keys(KeySpec("Ticker"))},
@@ -162,6 +166,7 @@ SNAPSHOTS: Final = DatasetSpec(
 
 MOVERS: Final = DatasetSpec(
     name="crypto.movers",
+    summary="The 20 crypto pairs that gained or lost the most since the previous day's close.",
     asset_class=AssetClass.CRYPTO,
     fetch_path=_MOVERS,
     keys={(_R, _MOVERS): _keys(KeySpec("Ticker"))},
@@ -170,6 +175,9 @@ MOVERS: Final = DatasetSpec(
 
 DAILY_OPEN_CLOSE: Final = DatasetSpec(
     name="crypto.daily_open_close",
+    summary=(
+        "The open and close prices of crypto pairs on one UTC day, with the trades behind them."
+    ),
     asset_class=AssetClass.CRYPTO,
     fetch_path=_OPEN_CLOSE,
     # The body names the pair as `BTC-USD`; the transport canonicalizes it to `X:BTCUSD`.
@@ -512,7 +520,7 @@ class _Crypto(Namespace):
         side = _require_enum(direction, Direction, "direction")
         return cast("Query", build_query(self._core, MOVERS, params={"direction": side}))
 
-    def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
+    def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open and close prices of crypto pairs on one UTC day, with the trades behind them.
 
         Each row is one pair on one day: its open and close prices, and the first and last
@@ -542,6 +550,8 @@ class _Crypto(Namespace):
                 `poll()` cycle).
             date: The day, as `"YYYY-MM-DD"` or a `date`. A timezone-aware `datetime` (or ISO
                 text with a time and an offset) names the UTC day it falls in.
+            adjusted: Whether the prices are adjusted for splits, sent as the endpoint's
+                `adjusted` parameter; True by default, as Massive's own default.
 
         Returns:
             The query. No request is made until a verb is called.
@@ -552,9 +562,6 @@ class _Crypto(Namespace):
                 q = m.crypto.daily_open_close(["BTC-USD", "ETH-USD"], "2026-01-02")
                 opens = q.fetch().view(["Symbol", "Open", "Close"])
         """
-        day = parse_date_like(date, "date")
-        if isinstance(day, datetime):
-            day = day.astimezone(DAY_ZONES[AssetClass.CRYPTO]).date()
         return cast(
             "Query",
             build_query(
@@ -562,6 +569,7 @@ class _Crypto(Namespace):
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
                 all_alternative="m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
-                params={"date": day},
+                adjusted=adjusted,
+                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

@@ -86,6 +86,12 @@ def test_each_dataset_has_the_query_class_of_its_transports(
     assert query_class(spec) is expected
 
 
+def test_each_factory_docstring_starts_with_its_summary() -> None:
+    for spec in crypto.DATASETS:
+        factory = getattr(crypto._Crypto, spec.name.partition(".")[2])
+        assert (factory.__doc__ or "").startswith(spec.summary + "\n"), spec.name
+
+
 def test_the_crypto_datasets_pass_every_catalog_gate() -> None:
     assert CRYPTO.problems() == ()
 
@@ -315,8 +321,16 @@ def test_daily_open_close(massive_session: dm.MassiveSession) -> None:
     request = request_of(q)
     assert request.symbols == ("X:BTCUSD", "X:ETHUSD")
     assert request.params == (("date", date(2026, 1, 2)),)
-    same = massive_session.crypto.daily_open_close("BTC-USD", date(2026, 1, 2))
+    assert request.adjusted is True
+    same = massive_session.crypto.daily_open_close("BTC-USD", date(2026, 1, 2), adjusted=False)
     assert request_of(same).params == (("date", date(2026, 1, 2)),)
+    assert request_of(same).adjusted is False
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        massive_session.crypto.daily_open_close(
+            "BTC-USD",
+            "2026-01-02",
+            adjusted=1,  # type: ignore[arg-type]  # not a bool
+        )
 
 
 @pytest.mark.parametrize(
