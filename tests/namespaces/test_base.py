@@ -1,30 +1,51 @@
-"""Tests for the shared dataset factory."""
+"""Tests for the shared dataset factory and the query class of every dataset.
 
+The annotation rule lives here too: for every dataset of the catalog, the return annotation of
+its factory method is the class `query_class` derives from the spec (for `bars`, each overload
+matches `bar_query_class` and the implementation returns `HistoryQuery`), and every public
+factory method maps to exactly one dataset. The rule is a function over a session class and a
+catalog, so it is checked against the real tree and against synthetic namespaces that break it.
+"""
+
+import typing
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast, overload
 
 import pytest
+from deephaven import new_table
+from deephaven.column import string_col
 
 import deephaven_massive as dm
+from deephaven_massive import _enums, _query, _types
 from deephaven_massive._datasets.catalog import DatasetSpec, ParamKind
 from deephaven_massive._datasets.schema import BARS, TRADES, Column, ColumnType, Schema
+from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, Transport
-from deephaven_massive._namespaces.base import Namespace, bar_query_class, build_query, list_params
+from deephaven_massive._namespaces.base import (
+    Namespace,
+    bar_query_class,
+    build_query,
+    list_params,
+    query_class,
+)
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
     Query,
     QueryBase,
+    StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
+from deephaven_massive._session import CATALOG
+from deephaven_massive._types import DaySpan, StreamSpan
 
 S, LD = ColumnType.STRING, ColumnType.LOCAL_DATE
 
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
-    query_class=HistoryQuery,
     is_bars=True,
     asset_class=AssetClass.STOCKS,
     schema=BARS.schema,
@@ -34,7 +55,6 @@ STOCK_BARS = DatasetSpec(
 )
 FUTURES_BARS = DatasetSpec(
     name="futures.bars",
-    query_class=HistoryQuery,
     is_bars=True,
     asset_class=AssetClass.FUTURES,
     schema=BARS.schema,
@@ -52,7 +72,6 @@ FUTURES_BARS = DatasetSpec(
 )
 INDEX_BARS = DatasetSpec(
     name="indices.bars",
-    query_class=HistoryQuery,
     is_bars=True,
     asset_class=AssetClass.INDICES,
     schema=BARS.schema,
@@ -62,14 +81,12 @@ INDEX_BARS = DatasetSpec(
 )
 TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
-    query_class=StreamQuery,
     asset_class=AssetClass.STOCKS,
     schema=TRADES.schema,
     channels={None: "T"},
 )
 DIVIDENDS = DatasetSpec(
     name="stocks.dividends",
-    query_class=Query,
     asset_class=AssetClass.STOCKS,
     schema=Schema("stocks.dividends", (Column("Symbol", S), Column("ExDividendDate", LD))),
     fetch_method="list_stocks_dividends",
@@ -77,7 +94,6 @@ DIVIDENDS = DatasetSpec(
 )
 INDICATOR = DatasetSpec(
     name="indicators.sma",
-    query_class=Query,
     schema=Schema("indicators.sma", (Column("Symbol", S), Column("Value", ColumnType.DOUBLE))),
     fetch_method="get_sma",
 )
@@ -188,9 +204,9 @@ def test_build_query_without_symbols_or_axis(massive_session: dm.MassiveSession)
 def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> None:
     fx = DatasetSpec(
         name="forex.quotes",
-        query_class=StreamQuery,
         asset_class=AssetClass.FOREX,
         schema=TRADES.schema,
+        channels={None: "C"},
     )
     assert build(massive_session, fx, symbols="EUR/USD")._request.symbols == ("C:EURUSD",)
     # A dataset without an asset class reads the class from each prefix; none is a stock.
@@ -338,3 +354,289 @@ def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> N
         ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\), not filters"
     ):
         build_query(massive_session._core, STOCK_BARS, symbols=["AAPL"], filters={"adjusted": True})
+
+
+def test_a_symbol_table_is_boxed_by_identity(
+    massive_session: dm.MassiveSession, dh_exec_ctx: object
+) -> None:
+    table = new_table([string_col("Symbol", ["AAPL"])])
+    q = build(massive_session, TRADES_SPEC, symbols=table)
+    boxed = q._request.symbols
+    assert isinstance(boxed, SymbolTable)
+    assert boxed.table is table
+    assert build(massive_session, TRADES_SPEC, symbols=table) == q
+
+
+def test_a_symbol_table_needs_a_symbol_column(
+    massive_session: dm.MassiveSession, dh_exec_ctx: object
+) -> None:
+    with pytest.raises(ValueError, match="a symbol table must have a Symbol column"):
+        build(massive_session, TRADES_SPEC, symbols=new_table([string_col("Ticker", ["AAPL"])]))
+
+
+# The query class of a dataset.
+
+_FETCH = {"fetch_method": "get_last_trade"}
+_HISTORY = {"history_method": "list_trades"}
+_CHANNELS = {"channels": {None: "T"}}
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({**_FETCH}, Query),
+        ({**_CHANNELS}, StreamQuery),
+        ({**_HISTORY}, HistoryQuery),
+        ({"grouped_daily_method": "get_grouped_daily_aggs"}, HistoryQuery),
+        ({**_CHANNELS, **_HISTORY}, StreamHistoryQuery),
+        ({**_CHANNELS, **_HISTORY, **_FETCH}, StreamHistoryLatestQuery),
+    ],
+)
+def test_the_query_class_follows_the_transports(
+    changes: dict[str, Any], expected: type[QueryBase]
+) -> None:
+    spec = DatasetSpec(
+        name="stocks.trades", asset_class=AssetClass.STOCKS, schema=TRADES.schema, **changes
+    )
+    assert query_class(spec) is expected
+
+
+def test_flat_files_are_a_history_source() -> None:
+    assert query_class(INDEX_BARS) is HistoryQuery
+    values = DatasetSpec(
+        name="indices.values",
+        asset_class=AssetClass.INDICES,
+        schema=TRADES.schema,
+        channels={None: "V"},
+        flat_file_prefixes={None: "us_indices/values_v1"},
+        key_maps={Transport.FLAT_FILES: {"ticker": "Symbol", "timestamp": "Timestamp"}},
+        time_units={(Transport.FLAT_FILES, "timestamp"): TimeUnit.NANOSECONDS},
+    )
+    assert query_class(values) is StreamHistoryQuery
+
+
+def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
+    # Every bars spec, whatever its transports; each call picks its own class.
+    assert {query_class(STOCK_BARS), query_class(FUTURES_BARS)} == {HistoryQuery}
+
+
+# The annotation rule: factories return the class their spec derives.
+
+# Datasets served by a method of the session itself rather than of a namespace.
+_SESSION_FACTORIES = {"reference.snapshots": "snapshots"}
+
+
+def _hints(function: Callable[..., object]) -> dict[str, Any]:
+    """Resolve a function's annotations, including names its module imports for typing only.
+
+    Args:
+        function: A factory, an overload of one, or a property getter.
+
+    Returns:
+        The annotations by parameter name, and `"return"`.
+    """
+    names = {**vars(_query), **vars(_types), **vars(_enums), "Literal": Literal}
+    return typing.get_type_hints(function, localns=names)
+
+
+def _factories(owner: type, path: str) -> Iterator[tuple[str, Callable[..., object]]]:
+    """Yield every public factory method reachable from `owner`, by its dotted dataset path.
+
+    A property whose return annotation is a `Namespace` subclass leads to a nested namespace
+    (`m.stocks`, `m.partners.benzinga`, `m.stocks.financials`); every other public function
+    defined on a namespace class is a factory.
+
+    Args:
+        owner: The session class or a namespace class.
+        path: The dotted path of `owner` from the session, empty for the session.
+
+    Yields:
+        `(dataset path, factory)` pairs, such as `("stocks.trades", _Stocks.trades)`.
+    """
+    for name, member in vars(owner).items():
+        if name.startswith("_"):
+            continue
+        dotted = f"{path}.{name}" if path else name
+        if isinstance(member, property) and member.fget is not None:
+            target = _hints(member.fget)["return"]
+            if isinstance(target, type) and issubclass(target, Namespace):
+                yield from _factories(target, dotted)
+        elif callable(member) and issubclass(owner, Namespace):
+            yield dotted, member
+
+
+def _bar_problems(name: str, spec: DatasetSpec, factory: Callable[..., object]) -> list[str]:
+    """Check each `bars` overload against `bar_query_class`, and the implementation.
+
+    An overload's return type must be a base of the class `bar_query_class` picks for every
+    timespan and multiplier its annotations allow, and that class itself for at least one.
+
+    Args:
+        name: The dataset name, for the messages.
+        spec: The bars dataset.
+        factory: Its factory method.
+
+    Returns:
+        One message per mismatch.
+    """
+    problems = []
+    if _hints(factory)["return"] is not HistoryQuery:
+        problems.append(f"{name}: the bars implementation must return HistoryQuery")
+    overloads = typing.get_overloads(factory)
+    if not overloads:
+        problems.append(f"{name}: a bars factory needs its overloads")
+    for variant in overloads:
+        hints = _hints(variant)
+        returned = hints["return"]
+        spans = typing.get_args(hints["timespan"]) or tuple(Timespan)
+        multipliers = typing.get_args(hints["multiplier"]) or (1, 2)
+        picked = set()
+        for span in spans:
+            for multiplier in multipliers:
+                try:
+                    picked.add(bar_query_class(spec, span, multiplier))
+                except ValueError:  # a timespan the asset class's endpoint does not accept
+                    continue
+        if returned not in picked or not all(issubclass(c, returned) for c in picked):
+            problems.append(
+                f"{name}: an overload returns {returned.__name__}, but its timespans give "
+                f"{sorted(c.__name__ for c in picked)}"
+            )
+    return problems
+
+
+def annotation_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list[str]:
+    """Return every break of the annotation rule.
+
+    Args:
+        session: The session class whose namespaces hold the factories.
+        specs: The catalog's specs by name.
+
+    Returns:
+        One message per factory without a spec, spec without a factory, or factory whose return
+        annotation is not the class its spec derives.
+    """
+    factories = dict(_factories(session, ""))
+    for dataset, method in _SESSION_FACTORIES.items():
+        if dataset in specs:
+            factories[dataset] = getattr(session, method)
+    problems = [f"{name}: a factory with no dataset" for name in sorted(factories - specs.keys())]
+    for name, spec in specs.items():
+        factory = factories.get(name)
+        if factory is None:
+            problems.append(f"{name}: a dataset with no factory")
+        elif spec.is_bars:
+            problems.extend(_bar_problems(name, spec, factory))
+        elif _hints(factory)["return"] is not query_class(spec):
+            problems.append(f"{name}: the factory must return {query_class(spec).__name__}")
+    return problems
+
+
+def test_every_factory_returns_the_class_of_its_dataset() -> None:
+    assert annotation_problems(dm.MassiveSession, CATALOG.by_name) == []
+
+
+class _Good(Namespace):
+    __slots__ = ()
+
+    @overload
+    def bars(
+        self, timespan: StreamSpan = Timespan.MINUTE, *, multiplier: Literal[1] = 1
+    ) -> StreamHistoryQuery: ...
+    @overload
+    def bars(self, timespan: DaySpan, *, multiplier: Literal[1] = 1) -> HistoryLatestQuery: ...
+    @overload
+    def bars(
+        self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
+    ) -> HistoryQuery: ...
+    def bars(self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1) -> HistoryQuery:
+        raise NotImplementedError
+
+    def dividends(self) -> Query:
+        raise NotImplementedError
+
+
+class _Bad(Namespace):
+    __slots__ = ()
+
+    @overload
+    def bars(self, timespan: DaySpan, *, multiplier: Literal[1] = 1) -> StreamHistoryQuery: ...
+    @overload
+    def bars(
+        self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
+    ) -> HistoryQuery: ...
+    def bars(self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1) -> QueryBase:
+        raise NotImplementedError
+
+    def trades(self) -> Query:  # the trades dataset streams, so this must be a StreamQuery
+        raise NotImplementedError
+
+    def news(self) -> Query:  # no dataset is named options.news
+        raise NotImplementedError
+
+    def minute_bars(self) -> HistoryQuery:  # a bars dataset served without its overloads
+        raise NotImplementedError
+
+
+class _GoodSession:
+    @property
+    def stocks(self) -> _Good:
+        raise NotImplementedError
+
+    @property
+    def label(self) -> str:  # a property that leads to no namespace
+        raise NotImplementedError
+
+    def snapshots(self) -> Query:
+        raise NotImplementedError
+
+
+class _BadSession:
+    @property
+    def options(self) -> _Bad:
+        raise NotImplementedError
+
+
+def _renamed(spec: DatasetSpec, name: str) -> DatasetSpec:
+    return DatasetSpec(
+        name=name,
+        is_bars=spec.is_bars,
+        asset_class=spec.asset_class,
+        schema=spec.schema,
+        channels=spec.channels,
+        fetch_method=spec.fetch_method,
+        history_method=spec.history_method,
+    )
+
+
+def _catalog(*specs: tuple[DatasetSpec, str]) -> dict[str, DatasetSpec]:
+    return {name: _renamed(spec, name) for spec, name in specs}
+
+
+def test_the_annotation_rule_passes_matching_factories() -> None:
+    specs = _catalog(
+        (STOCK_BARS, "stocks.bars"),
+        (DIVIDENDS, "stocks.dividends"),
+        (DIVIDENDS, "reference.snapshots"),  # served by the session's own `snapshots()`
+    )
+    assert annotation_problems(_GoodSession, specs) == []
+
+
+def test_the_annotation_rule_reports_every_mismatch() -> None:
+    specs = _catalog(
+        (STOCK_BARS, "options.bars"),
+        (TRADES_SPEC, "options.trades"),
+        (STOCK_BARS, "options.minute_bars"),
+        (DIVIDENDS, "options.splits"),
+    )
+    assert annotation_problems(_BadSession, specs) == [
+        "options.news: a factory with no dataset",
+        "options.bars: the bars implementation must return HistoryQuery",
+        (
+            "options.bars: an overload returns StreamHistoryQuery, but its timespans give "
+            "['HistoryLatestQuery']"
+        ),
+        "options.trades: the factory must return StreamQuery",
+        "options.minute_bars: a bars factory needs its overloads",
+        "options.splits: a dataset with no factory",
+    ]

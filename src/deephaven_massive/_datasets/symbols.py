@@ -22,10 +22,12 @@ crypto), a symbol without one is a stock, and that class's rules apply unchanged
 `ws_symbol` turns a canonical symbol back into the WebSocket form, and `underlying` parses the
 underlying ticker out of an OCC option symbol (the `Underlying` column of options rows).
 
-`normalize` applies these rules to a whole `Symbols` argument when a query is built: it
-materializes sequences to a sorted, de-duplicated tuple (the stream key), checks that a
-reactive `Table` has a `Symbol` column, and passes `dm.ALL` through. Every function here is pure
-and thread-safe.
+`normalize` applies these rules to a `Symbols` argument other than a table when a query is
+built: it materializes sequences to a sorted, de-duplicated tuple (the stream key) and passes
+`dm.ALL` through. A reactive `Table` is checked and boxed in a `SymbolTable` by the dataset
+factory (`build_query` in `_namespaces/base.py`), and its canonical view is built by
+`canonical_view` in `_tables/watchlist.py`: this module makes no Deephaven call and imports
+Deephaven for type checking only. Every function here is pure and thread-safe.
 """
 
 from __future__ import annotations
@@ -35,23 +37,20 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, TypeAlias
 
-from deephaven.table import Table
-
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import log_once
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
-    from deephaven_massive._types import Symbols
+    from deephaven.table import Table
 
 __all__ = [
     "CRYPTO_QUOTES",
     "NormalizedSymbols",
     "SymbolTable",
     "canonical",
-    "canonical_view",
     "normalize",
     "symbol_canonicalizer",
     "underlying",
@@ -323,34 +322,15 @@ def symbol_canonicalizer(
     return canonical_symbol
 
 
-def canonical_view(asset_class: AssetClass | None, table: Table) -> Table:
-    """Return a view of a reactive symbol table whose `Symbol` column is canonical.
+def normalize(
+    asset_class: AssetClass | None, symbols: str | Iterable[str] | _All
+) -> tuple[str, ...] | _All:
+    """Normalize a `Symbols` argument other than a table when a query is built.
 
-    Every consumer of a reactive symbol table reads it through this view, so the canonical
-    form is decided in one place: `last_by` filters the stream's rows (which carry canonical
-    symbols) with `where_in` against it, and the WebSocket layer subscribes the topics it
-    lists. Must be called inside the liveness scope that should own the view, on a thread
-    with the session's execution context. Deephaven resolves the formula's function from this
-    call's local variables.
-
-    Args:
-        asset_class: The class whose symbol rules apply, or None to select it by prefix.
-        table: The user's table with a `Symbol` column.
-
-    Returns:
-        A refreshing view with the same rows and a canonical (or null) `Symbol` column.
-    """
-    canonical_symbol = symbol_canonicalizer(asset_class)
-    return table.update_view([f"Symbol = {canonical_symbol.__name__}(Symbol)"])
-
-
-def normalize(asset_class: AssetClass | None, symbols: Symbols) -> NormalizedSymbols:
-    """Normalize a `Symbols` argument when a query is built.
-
-    Rules: `dm.ALL` passes through; a Deephaven `Table` must have a `Symbol` column and is boxed by
-    identity; a `str` is one symbol; any other iterable of strings, including a generator, is
-    materialized now. The resulting tuple is canonical, sorted, and de-duplicated, so equal symbol
-    sets give equal queries and one stream.
+    Rules: `dm.ALL` passes through; a `str` is one symbol; any other iterable of strings,
+    including a generator, is materialized now. The resulting tuple is canonical, sorted, and
+    de-duplicated, so equal symbol sets give equal queries and one stream. A Deephaven `Table`
+    never reaches this function: the dataset factory boxes it in a `SymbolTable` first.
 
     Whether `ALL` is acceptable for a dataset is decided by the caller, which knows the
     alternative to name.
@@ -361,21 +341,16 @@ def normalize(asset_class: AssetClass | None, symbols: Symbols) -> NormalizedSym
         symbols: The argument as the user passed it.
 
     Returns:
-        A sorted tuple of canonical symbols, `ALL`, or a `SymbolTable`.
+        A sorted tuple of canonical symbols, or `ALL`.
 
     Raises:
-        TypeError: If `symbols` is not a `str`, an iterable of `str`, a Deephaven `Table`, or
-            `dm.ALL`, or an element is not a `str`.
+        TypeError: If `symbols` is not a `str`, an iterable of `str`, or `dm.ALL`, or an
+            element is not a `str`.
         ValueError: If no symbols remain (`ValueError("no symbols")`, for example from an
-            exhausted generator), a `Table` has no `Symbol` column, or a symbol is invalid for
-            the class.
+            exhausted generator), or a symbol is invalid for the class.
     """
     if isinstance(symbols, _All):
         return symbols
-    if isinstance(symbols, Table):
-        if "Symbol" not in symbols.column_names:
-            raise ValueError("a symbol table must have a Symbol column")
-        return SymbolTable(symbols)
     if isinstance(symbols, str):
         items: tuple[object, ...] = (symbols,)
     else:

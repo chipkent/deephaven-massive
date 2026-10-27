@@ -4,8 +4,14 @@
 ...), the diagnostics tables, and the lifecycle verbs `release()` and `close()`, and nothing else.
 It checks where it is constructed (an execution context whose query scope is the script
 session's own, never an update-graph thread), builds the session's `SessionCore`
-(`_tables/core.py`), which owns everything stateful and which queries and namespaces share, and
-hands that core to one object per namespace.
+(`_tables/core.py`), which owns everything stateful and which queries and namespaces share,
+builds the session's `SessionClients` (`_ingest/clients.py`), which owns every wire client, and
+attaches them to the core once; then it hands the core to one object per namespace.
+
+This module is the composition root, the one place that sees every layer: it is the only API
+module that imports the ingest code, and it builds `CATALOG`, the process's dataset catalog,
+once, at import, from the `DATASETS` of every namespace module. Every core holds that catalog,
+so the dataset layer never has to find the namespace modules itself.
 
 The module also numbers sessions (`MassiveSession #1`, a per-process counter, used in the
 `repr`, in error messages, and in the same-key WARNING) and keeps the weak registry of open
@@ -18,13 +24,27 @@ import itertools
 import logging
 import threading
 import weakref
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Final, Self
 
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 
 from deephaven_massive._config import MassiveConfig, require_positive_int
+from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._namespaces import (
+    crypto,
+    economy,
+    forex,
+    futures,
+    indicators,
+    indices,
+    options,
+    partners,
+    reference,
+    stocks,
+)
 from deephaven_massive._namespaces.base import list_params
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
@@ -53,9 +73,26 @@ if TYPE_CHECKING:
     from deephaven_massive._query import Query
     from deephaven_massive._types import FilterValue, Symbols
 
-__all__ = ["MassiveSession"]
+__all__ = ["CATALOG", "MassiveSession"]
 
 logger = logging.getLogger(__name__)
+
+CATALOG: Final = Catalog(
+    (
+        *stocks.DATASETS,
+        *options.DATASETS,
+        *futures.DATASETS,
+        *indices.DATASETS,
+        *forex.DATASETS,
+        *crypto.DATASETS,
+        *reference.DATASETS,
+        *indicators.DATASETS,
+        *economy.DATASETS,
+        *partners.DATASETS,
+    )
+)
+"""Every dataset of every namespace module, built once, at import, and held by every session
+core. A test checks that every namespace module contributes."""
 
 _keys_lock = threading.Lock()
 _session_numbers = itertools.count(1)
@@ -193,7 +230,8 @@ class MassiveSession:
                 "create the session from the console or an application script, or use "
                 "make_user_exec_ctx() without freeze_vars."
             )
-        core = SessionCore(config, exec_ctx, _next_label())
+        core = SessionCore(config, exec_ctx, _next_label(), catalog=CATALOG)
+        core.attach(SessionClients(core))
         _register(core)
         self._core = core
         self._stocks = _Stocks(core)

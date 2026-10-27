@@ -3,7 +3,8 @@
 **Status:** approved plan. Merged: rework-design-and-plan (#11), tooling-foundation (#42),
 core-skeleton (#46), final-design (#52), wire-client-dependencies (#53), legacy-deletion (#54),
 final-names (#56), wire-package-scaffold (#60), flat-file-history (#63, restructured from #51),
-rest-client (#66), rest-wire-schema (#67), and websocket-client (#64). In review: layer-packages (#95).
+rest-client (#66), rest-wire-schema (#67), websocket-client (#64), and layer-packages (#95).
+In review: layer-rules.
 **Companion:** [`DESIGN.md`](DESIGN.md) is the specification; this file is the schedule. When
 they disagree, `DESIGN.md` wins and this file gets a `docs:` fix.
 

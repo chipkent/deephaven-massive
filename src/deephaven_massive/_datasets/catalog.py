@@ -1,13 +1,17 @@
-"""The dataset catalog: one frozen `DatasetSpec` per dataset, and the generated SDK parameters.
+"""The dataset catalog: one frozen `DatasetSpec` per dataset, the `Catalog`, and the SDK parameters.
 
 Every dataset (`m.stocks.trades`, `m.reference.news`, ...) is described once, declaratively, by
 a `DatasetSpec` in its namespace module under `_namespaces/`. Each of those modules exports
-`DATASETS: tuple[DatasetSpec, ...]`, and this module composes them from a *fixed* module list,
-`NAMESPACE_MODULES`, so that adding a dataset never touches a shared file: the time-unit table,
-the schema registry, and the coverage tests are all derived from the specs.
+`DATASETS: tuple[DatasetSpec, ...]`, and `_session.py` composes them, once, at import, into the
+process's `Catalog` (`CATALOG`), which every session core holds. Adding a dataset never touches
+a shared file: the time-unit rules, the schema registry, and the coverage tests are all derived
+from the specs. This module names no namespace module and imports nothing above the dataset
+layer, so the catalog is built by the code that owns the namespaces and handed down.
 
-The composition is lazy (`datasets()`, `time_units()`): the namespace modules import this module
-for `DatasetSpec`, so importing them here at module level would be a cycle.
+A spec says which transports serve the dataset, and its query class follows from them:
+`query_class` in `_namespaces/base.py` maps the channels, the history sources, and the fetch
+method to one of the query classes, and `DatasetSpec` rejects, when it is created, the
+combinations no query class serves.
 
 `SDK_PARAMS` is the table of every filter parameter each SDK `RESTClient` method accepts, keyed
 by method name. It is generated from the installed SDK by `scripts/refresh_massive_catalog.py`
@@ -18,56 +22,37 @@ SDK lacks) to give the keys the `filters` argument of that dataset accepts.
 
 from __future__ import annotations
 
-import functools
-import importlib
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.dates import require_aware
 from deephaven_massive._datasets.schema import ColumnType, Schema, model_schema
-from deephaven_massive._datasets.timestamps import TimeField, TimeUnit, TimeUnitTable, UnitRule
+from deephaven_massive._datasets.timestamps import TimeField, TimeUnit, UnitRule
 from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan, Transport
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from deephaven_massive._datasets.schema import ColumnOverride, KeyMap
-    from deephaven_massive._query import QueryBase
 
 __all__ = [
-    "NAMESPACE_MODULES",
     "SCHEMA_FROM_MODEL",
     "SDK_PARAMS",
+    "Catalog",
     "DatasetSpec",
     "ParamKind",
     "SymbolParam",
     "check_filters",
-    "datasets",
     "filter_params",
     "sdk_params",
-    "time_units",
     "unit_rules",
 ]
 
 logger = logging.getLogger(__name__)
-
-NAMESPACE_MODULES: Final = (
-    "stocks",
-    "options",
-    "futures",
-    "indices",
-    "forex",
-    "crypto",
-    "reference",
-    "indicators",
-    "economy",
-    "partners",
-)
-"""The namespace modules under `_namespaces/`, each exporting `DATASETS`. A test asserts this list
-equals the set of modules in the package."""
 
 
 class ParamKind(StrEnum):
@@ -113,11 +98,19 @@ class SymbolParam(StrEnum):
 class DatasetSpec:
     """The declarative description of one dataset, shared by every transport.
 
-    A spec says what a dataset *is* (its name, schema, and query class) and how each transport
-    reaches it (SDK methods, WebSocket channels, flat-file prefixes), plus the facts the
-    transports must not guess: the unit of every timestamp field, the SDK parameters behind
+    A spec says what a dataset *is* (its name and schema) and how each transport reaches it (SDK
+    methods, WebSocket channels, flat-file prefixes), plus the facts the transports must not
+    guess: the unit of every timestamp field, the SDK parameters behind
     `start` and `end`, the default `poll()` mode and its key columns, and the REST page size.
     Specs are immutable singletons compared by identity, and safe to share across threads.
+
+    The transports decide the dataset's query class (`query_class` in `_namespaces/base.py`).
+    With S meaning the spec has channels, H that it has a history source (a history method, a
+    grouped-daily method, or flat-file prefixes), and F that it has a fetch method: F alone
+    gives `Query`, S alone `StreamQuery`, H alone `HistoryQuery`, S and H `StreamHistoryQuery`,
+    and S, H, and F `StreamHistoryLatestQuery`. A `bars` dataset needs H; its class is picked per
+    call from the timespan and multiplier (`bar_query_class`). Every other combination is
+    rejected when the spec is created.
 
     Example:
         ::
@@ -126,12 +119,11 @@ class DatasetSpec:
             from deephaven_massive._datasets.schema import TRADES
             from deephaven_massive._datasets.timestamps import TimeUnit
             from deephaven_massive._enums import AssetClass, Transport
-            from deephaven_massive._query import StreamHistoryLatestQuery
 
             ms, ns = TimeUnit.MILLISECONDS, TimeUnit.NANOSECONDS
+            # Channels, history, and a fetch method: a StreamHistoryLatestQuery.
             STOCK_TRADES = DatasetSpec(
                 name="stocks.trades",
-                query_class=StreamHistoryLatestQuery,
                 asset_class=AssetClass.STOCKS,
                 schema=TRADES.schema,
                 key_maps={Transport.WS: TRADES.key_maps[Transport.WS]},
@@ -145,8 +137,6 @@ class DatasetSpec:
 
     Attributes:
         name: The dataset's dotted name, `"<namespace>.<dataset>"`, such as `"stocks.trades"`.
-        query_class: The query class the factory returns. For `bars` this is the most general
-            class; the overload selection in `_namespaces/base.py` narrows it by timespan.
         asset_class: The instruments' asset class, or None for datasets without instruments
             (economy, most partner datasets).
         is_bars: True for a `bars()` dataset: its `channels` and `flat_file_prefixes` are keyed
@@ -192,7 +182,6 @@ class DatasetSpec:
     """
 
     name: str
-    query_class: type[QueryBase]
     asset_class: AssetClass | None = None
     is_bars: bool = False
     schema: Schema = SCHEMA_FROM_MODEL
@@ -230,7 +219,8 @@ class DatasetSpec:
                 from a field with no `time_units` entry, a key column is not in `schema`, or a
                 dataset with flat files has no `FLAT_FILES` key map filling `Symbol` and
                 `Timestamp` (and, for futures, `SessionEndDate`, against which every futures
-                file is checked).
+                file is checked), or the transports match no query class (see the class
+                docstring and `_check_verbs`).
 
         Deriving the schema from `rest_model` raises the `TypeError` or `ValueError` of
         `schema.model_schema` (an unmapped SDK hint, an unknown override path).
@@ -284,6 +274,22 @@ class DatasetSpec:
             # Caught here, at import, rather than as a LookupError on a transport thread at
             # the first frame or page.
             raise ValueError(f"{self.name}: Instant fields {unitless} have no time_units")
+        self._check_verbs()
+
+    @property
+    def has_channels(self) -> bool:
+        """True when the dataset streams over the WebSocket (the stream verbs work)."""
+        return bool(self.channels)
+
+    @property
+    def has_history(self) -> bool:
+        """True when `history()` has a source: REST history, grouped-daily bars, or flat files."""
+        return self.has_rest_history or self.has_grouped_daily or bool(self.flat_file_prefixes)
+
+    @property
+    def has_fetch(self) -> bool:
+        """True when the dataset has a REST fetch method (`fetch()` works)."""
+        return self.fetch_method is not None
 
     @property
     def has_rest_history(self) -> bool:
@@ -294,6 +300,35 @@ class DatasetSpec:
     def has_grouped_daily(self) -> bool:
         """True when a grouped-daily REST endpoint serves `dm.ALL` 1-day bars, one request a day."""
         return self.grouped_daily_method is not None
+
+    def _check_verbs(self) -> None:
+        """Check that the dataset's transports match one query class.
+
+        Raises:
+            ValueError: If the dataset has no verb; if it has channels and a fetch method but
+                no history source (no query class streams and fetches without history); if,
+                outside `bars`, it has a history source and a fetch method but no channels
+                (that class is kept for daily bars); or if a `bars` dataset has no history
+                source. The message names the dataset.
+        """
+        stream, history, fetch = self.has_channels, self.has_history, self.has_fetch
+        if self.is_bars:
+            if not history:
+                raise ValueError(f"{self.name}: a bars dataset needs a history source")
+            return
+        if not (stream or history or fetch):
+            raise ValueError(
+                f"{self.name}: a dataset needs channels, a history source, or a fetch method"
+            )
+        if stream and fetch and not history:
+            raise ValueError(
+                f"{self.name}: a dataset with channels and a fetch method needs a history source"
+            )
+        if history and fetch and not stream:
+            raise ValueError(
+                f"{self.name}: only bars combine a history source and a fetch method "
+                "without channels"
+            )
 
     def _check_flat_files(self) -> None:
         """Check that a dataset with flat files can be read from them.
@@ -430,35 +465,11 @@ def _is_date(kind: ParamKind, value: object) -> bool:
     return not isinstance(value, datetime)
 
 
-@functools.cache
-def datasets() -> Mapping[str, DatasetSpec]:
-    """Return every dataset of every namespace module, keyed by dataset name.
-
-    Imports each module of `NAMESPACE_MODULES` on first call and caches the result for the life of
-    the process.
-
-    Returns:
-        The specs, keyed by `DatasetSpec.name`.
-
-    Raises:
-        ValueError: If two modules declare the same dataset name.
-    """
-    found: dict[str, DatasetSpec] = {}
-    for module_name in NAMESPACE_MODULES:
-        module = importlib.import_module(f"deephaven_massive._namespaces.{module_name}")
-        specs: tuple[DatasetSpec, ...] = module.DATASETS
-        for spec in specs:
-            if spec.name in found:
-                raise ValueError(f"dataset {spec.name} is declared twice")
-            found[spec.name] = spec
-    return found
-
-
 def unit_rules(specs: Mapping[str, DatasetSpec]) -> dict[TimeField, UnitRule]:
     """Collect the declared timestamp units of a set of datasets.
 
     Args:
-        specs: Datasets keyed by name, as `datasets()` returns them.
+        specs: Datasets keyed by name, as `Catalog.by_name` holds them.
 
     Returns:
         One rule per declared `(dataset, transport, field)`.
@@ -472,11 +483,50 @@ def unit_rules(specs: Mapping[str, DatasetSpec]) -> dict[TimeField, UnitRule]:
     }
 
 
-@functools.cache
-def time_units() -> TimeUnitTable:
-    """Return the process-wide `(dataset, transport, field)` unit table, built from the specs.
+class Catalog:
+    """Every declared dataset of the process, by name.
 
-    Returns:
-        The table of every declared timestamp unit.
+    `_session.py` builds the one catalog, `CATALOG`, at import from the `DATASETS` of every
+    namespace module, and hands it to each session core (`SessionCore.catalog`), where the
+    transports read it. The catalog is immutable once built, so it is safe to share across
+    threads and sessions.
+
+    Example:
+        ::
+
+            from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+            from deephaven_massive._datasets.schema import TRADES
+            from deephaven_massive._enums import AssetClass
+
+            trades = DatasetSpec(
+                name="stocks.trades",
+                asset_class=AssetClass.STOCKS,
+                schema=TRADES.schema,
+                channels={None: "T"},
+            )
+            catalog = Catalog((trades,))
+            catalog.by_name["stocks.trades"] is trades  # True
     """
-    return TimeUnitTable(unit_rules(datasets()))
+
+    __slots__ = ("_by_name",)
+
+    def __init__(self, specs: Iterable[DatasetSpec]) -> None:
+        """Collect the specs.
+
+        Args:
+            specs: Every dataset, in declaration order.
+
+        Raises:
+            ValueError: If two specs share a dataset name.
+        """
+        by_name: dict[str, DatasetSpec] = {}
+        for spec in specs:
+            if spec.name in by_name:
+                raise ValueError(f"dataset {spec.name} is declared twice")
+            by_name[spec.name] = spec
+        self._by_name: Final = MappingProxyType(by_name)
+
+    @property
+    def by_name(self) -> Mapping[str, DatasetSpec]:
+        """The specs, keyed by `DatasetSpec.name`, in declaration order; read-only."""
+        return self._by_name

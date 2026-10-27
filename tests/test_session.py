@@ -54,7 +54,6 @@ TIMEOUT = 30.0
 
 SPEC = DatasetSpec(
     name="test.trades",
-    query_class=StreamQuery,
     asset_class=AssetClass.STOCKS,
     schema=TRADES.schema,
     channels={None: "T"},
