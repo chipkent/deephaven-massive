@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Self
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 
-from deephaven_massive._config import MassiveConfig, log_json_codec_once, require_positive_int
+from deephaven_massive._config import MassiveConfig, require_positive_int
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._namespaces.base import list_params
 from deephaven_massive._namespaces.crypto import _Crypto
@@ -193,7 +193,6 @@ class MassiveSession:
                 "create the session from the console or an application script, or use "
                 "make_user_exec_ctx() without freeze_vars."
             )
-        log_json_codec_once()
         core = SessionCore(config, exec_ctx, _next_label())
         _register(core)
         self._core = core

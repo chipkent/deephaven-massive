@@ -23,8 +23,7 @@ from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _errors, _session
-from deephaven_massive._config import json_codec
+from deephaven_massive import _session
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import TRADES
 from deephaven_massive._enums import AssetClass
@@ -938,19 +937,6 @@ def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
     assert core.results.held() == 0
     assert core._streams == {}
     assert core._stream_ids == {}
-
-
-def test_a_session_start_logs_the_json_codec_once(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(_errors, "_logged", set())
-    with caplog.at_level(logging.INFO, logger="deephaven_massive._config"):
-        dm.MassiveSession(dm.MassiveConfig(api_key="codec-1")).close()
-        dm.MassiveSession(dm.MassiveConfig(api_key="codec-2")).close()
-    codec = json_codec()[0]
-    assert [r.getMessage() for r in caplog.records if "JSON codec" in r.getMessage()] == [
-        f"JSON codec: {codec}"
-    ]
 
 
 def test_a_session_that_reads_no_flat_file_never_imports_boto3() -> None:
