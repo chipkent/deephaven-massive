@@ -1,10 +1,11 @@
 """`SessionClients`, the one holder of a session's wire clients and connections.
 
 A session talks to Massive through the wire package's clients (`_massive.FlatFileClient` for
-the S3 flat files; the REST client and the WebSocket connections are not implemented yet). Each
-client is per session: it carries the session's credentials and connection pool and is closed
-with the session. `SessionClients` owns them all, so nothing on the Deephaven side
-(`_tables/`) ever holds a wire client, and the session core reaches the transports only through
+the S3 flat files, one `_massive.WsClient` per WebSocket connection, owned by the session's
+`WsConnections`; the REST client is not implemented yet). Each client is per session: it carries
+the session's credentials and connection pool and is closed with the session.
+`SessionClients` owns them all, so nothing on the Deephaven side (`_tables/`) ever holds a wire
+client, and the session core reaches the transports only through
 the `IngestPorts` protocol it defines (`rest()`, `streams()`, `flat_files()`).
 
 `MassiveSession.__init__` creates the core, then `SessionClients(core)`, then attaches the
@@ -22,8 +23,11 @@ from typing import TYPE_CHECKING
 from deephaven_massive import _massive
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
+from deephaven_massive._ingest.ws import WsConnections, WsTransport
 
 if TYPE_CHECKING:
+    from deephaven_massive._datasets.request import HostDecision
+    from deephaven_massive._enums import AssetClass, ChannelFamily
     from deephaven_massive._massive import FlatFileClient
     from deephaven_massive._tables.core import (
         FlatFileTransport,
@@ -51,7 +55,7 @@ class SessionClients:
     core's `registry_lock`, and the clients themselves are thread-safe.
     """
 
-    __slots__ = ("_core", "_flat_files", "_label")
+    __slots__ = ("_core", "_flat_files", "_label", "_streams")
 
     def __init__(self, core: SessionCore) -> None:
         """Bind the clients to their session; no client is created yet.
@@ -64,6 +68,8 @@ class SessionClients:
         self._label = core.label
         # Created by the first flat-file read (`flat_files`), under the core's `registry_lock`.
         self._flat_files: FlatFileClient | None = None
+        # Created by the first stream (`streams`), under the core's `registry_lock`.
+        self._streams: WsConnections | None = None
 
     def _live_core(self) -> SessionCore:
         """Return the session's core, which a caller of these methods normally keeps alive.
@@ -89,12 +95,43 @@ class SessionClients:
         raise NotImplementedError("the REST transport is not implemented yet")
 
     def streams(self) -> StreamTransport:
-        """Return the session's WebSocket transport.
+        """Return a WebSocket transport over the session's connections.
 
-        Raises:
-            NotImplementedError: Always, until the WebSocket transport is implemented.
+        Each call gets a new, lightweight `WsTransport` bound to the session's core and to the
+        session's one `WsConnections`. The first call creates the `WsConnections` under the
+        core's `registry_lock` (its constructor only stores settings: no connection is opened
+        until a stream needs one) and registers its `close` with `SessionCore.on_close` after
+        releasing the lock, so the connections close with the session, or at once if the
+        session closed meanwhile. The `WsConnections` holds the core weakly, since it lives as
+        long as the session, and decides each class's host through this object's `rest()`
+        transport (`RestTransport.resolve_host`), reached when the decision is made.
+
+        Returns:
+            The transport.
+
+        A garbage-collected core raises the `MassiveError` of `_live_core`.
         """
-        raise NotImplementedError("the WebSocket transport is not implemented yet")
+        core = self._live_core()
+        with core.registry_lock:
+            connections = self._streams
+            created = connections is None
+            if connections is None:
+                connections = self._streams = WsConnections(core, resolve_host=self._resolve_host)
+        if created:
+            core.on_close(connections.close)
+        return WsTransport(core, connections)
+
+    def _resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
+        """Decide the WebSocket host of a (class, family) through the session's REST transport.
+
+        Args:
+            asset_class: The class.
+            family: The family.
+
+        Returns:
+            The decision, cached for the session by the REST transport.
+        """
+        return self.rest().resolve_host(asset_class, family)
 
     def flat_files(self) -> FlatFileTransport:
         """Return a flat-file transport for one `history()` call.

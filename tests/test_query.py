@@ -226,8 +226,8 @@ def test_transport_hooks_raise_not_implemented(massive_session: dm.MassiveSessio
     q = trades(massive_session)
     with pytest.raises(NotImplementedError, match="REST transport"):
         q.fetch()
-    with pytest.raises(NotImplementedError, match="WebSocket transport"):
-        q.append_only()
+    with pytest.raises(NotImplementedError, match="REST transport"):
+        q.append_only()  # the stream's host is decided through the REST transport
     with pytest.raises(NotImplementedError, match="REST transport"):
         q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
     with pytest.raises(NotImplementedError, match="REST transport"):

@@ -53,6 +53,7 @@ import weakref
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Protocol
 
+from deephaven.dherror import DHError
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
 from deephaven_massive._errors import MassiveError
@@ -243,7 +244,7 @@ class StreamTransport(Protocol):
     """The WebSocket transport, from `SessionCore.stream_transport()` (`IngestPorts.streams`)."""
 
     def open_stream(
-        self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+        self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
     ) -> StreamHandle:
         """Create a new stream: its publisher and blink table in a new stream scope.
 
@@ -254,7 +255,9 @@ class StreamTransport(Protocol):
         exists, even before this method returns. The publisher is named
         `massive.{dataset}#{stream_id}`, and the blink table's `on_shutdown_callback` must first
         call `SessionCore.stream_shut_down(stream_id)` and only then release the stream's topics.
-        The returned handle carries `stream_id`.
+        The returned handle carries `stream_id`. If the open raises anything, even
+        `KeyboardInterrupt`, the transport has released the stream scope and the stream's
+        references (its connection lease and topics) before the exception propagates.
 
         Args:
             spec: The dataset.
@@ -605,7 +608,7 @@ class SessionCore:
         spec: DatasetSpec,
         request: Request,
         *,
-        channel: str | None,
+        channel: str,
         build: Callable[[Table], Table],
         wrap: bool = False,
     ) -> Table:
@@ -621,11 +624,13 @@ class SessionCore:
         stream hold are released before the exception propagates. Asynchronous exceptions such as
         `KeyboardInterrupt` are handled on a best-effort basis: every window between the library's
         own steps is covered, and the windows that remain are inside the cleanup code itself (an
-        interrupt while a hold or a scope is being released). A stream that failed while it was
-        opening (or between the claim and the build) still serves `blink()`, as a failed table;
-        `append_only()`, `ring()` and `last_by()` then raise Deephaven's `DHError` ("Can not listen
-        to failed table") while shaping, with the hold released. Either way `m.streams()` shows
-        `FAILED`.
+        interrupt while a hold or a scope is being released).
+
+        A stream that failed while it was opening, or between the claim and the build, serves no
+        result: every shape, `blink()` included, raises `MassiveError` naming the stream's
+        failure, with the hold released. A failure that lands while the shape is being derived
+        makes Deephaven raise `DHError` ("Can not listen to failed table"); that error is
+        wrapped in the same `MassiveError`. Either way `m.streams()` shows `FAILED`.
 
         Args:
             spec: The dataset.
@@ -636,29 +641,68 @@ class SessionCore:
 
         Returns:
             The live result, a distinct Python object per call.
+
+        Raises:
+            MassiveError: If the stream has failed (`"stocks.trades stream 7 failed: ..."`).
         """
         key: StreamKey = (spec.name, channel, request.symbol_key())
         handle = self._acquire(spec, request, key, channel=channel)
         blink = handle.blink
         scope: LivenessScope | None = None
         try:
+            self._require_unfailed(spec, handle.stream_id)
             with entered(self.exec_ctx):
                 result, scope = make_result(lambda: build(blink), wrap=wrap)
             self.results.track(
                 result, scope, functools.partial(self._release_hold, handle.stream_id)
             )
-        except BaseException:  # nothing was tracked: the scope and the hold are this call's
+        except BaseException as error:  # nothing was tracked: the scope and the hold are ours
+            # Read first: releasing the last hold of a shut-down stream deletes its record.
+            failure = self._failure(handle.stream_id) if isinstance(error, DHError) else None
             try:
                 if scope is not None:
                     with entered(self.exec_ctx):
                         scope.release()
             finally:
                 self._release_hold(handle.stream_id)
+            if failure is not None:
+                raise MassiveError(
+                    f"{spec.name} stream {handle.stream_id} failed: {failure}"
+                ) from error
             raise
         return result
 
+    def _require_unfailed(self, spec: DatasetSpec, stream_id: int) -> None:
+        """Refuse to build a result over a stream that has failed.
+
+        Args:
+            spec: The stream's dataset, named in the message.
+            stream_id: The stream.
+
+        Raises:
+            MassiveError: If the stream has failed; the message names its failure.
+        """
+        failure = self._failure(stream_id)
+        if failure is not None:
+            raise MassiveError(f"{spec.name} stream {stream_id} failed: {failure}")
+
+    def _failure(self, stream_id: int) -> str | None:
+        """Return a stream's failure text, if it has failed and is still in the registry.
+
+        Args:
+            stream_id: The stream.
+
+        Returns:
+            Its `Error` text when its state is `FAILED`; None otherwise.
+        """
+        with self.registry_lock:
+            state = self._streams.get(stream_id)
+            if state is None or state.row.state is not StreamState.FAILED:
+                return None
+            return state.row.error or "failed"
+
     def _acquire(
-        self, spec: DatasetSpec, request: Request, key: StreamKey, *, channel: str | None
+        self, spec: DatasetSpec, request: Request, key: StreamKey, *, channel: str
     ) -> StreamHandle:
         """Take a hold on the stream of `key`: reuse it, wait for its open, or open it.
 
@@ -776,7 +820,7 @@ class SessionCore:
             return stream_id
 
     def _open(
-        self, spec: DatasetSpec, request: Request, *, channel: str | None, stream_id: int
+        self, spec: DatasetSpec, request: Request, *, channel: str, stream_id: int
     ) -> StreamHandle:
         """Open the stream of a registered `OPENING` record through the WebSocket transport.
 
@@ -787,8 +831,8 @@ class SessionCore:
         after the transport returned the stream but before its handle is stored in the
         registry, nothing else knows the stream, so this method releases its scope itself. A
         failure or a shutdown the transport reported during the open has already been
-        recorded on the record, and the stream is returned as is: `blink()` returns the failed
-        table, and the other shapes raise `DHError` while the caller builds them.
+        recorded on the record, and the stream is returned as is: `stream_result` then raises
+        the `MassiveError` naming the failure instead of building a result.
 
         Args:
             spec: The dataset.

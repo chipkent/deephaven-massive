@@ -23,6 +23,12 @@ every unit confusion: milliseconds read as nanoseconds land in January 1970, and
 read as milliseconds overflow. `to_epoch_ns_array` is steps 2 and 3 alone, for converting a
 time column to filter on it.
 
+**The masked form** (`masked_instants`) runs the same three steps without raising: it returns
+the converted column with every failing value null, and a mask of the rows that failed. The
+WebSocket flush uses it, because a bad timestamp there fails only the streams that would have
+received its row, and the rest of the batch is still published; `mismatch_message` then gives
+each failing value the exact message the raising form would have.
+
 **The FMV magnitude rule.** The WebSocket `FMV` channel's `t` field is documented as
 nanoseconds but the documentation sample is in milliseconds, so `time_unit` gives it
 `TimeUnit.FMV_MAGNITUDE`: a value `>= 10**17` is nanoseconds, anything smaller is milliseconds.
@@ -60,6 +66,8 @@ __all__ = [
     "TimeUnit",
     "UnitMismatchError",
     "instants",
+    "masked_instants",
+    "mismatch_message",
     "time_unit",
     "to_epoch_ns",
     "to_epoch_ns_array",
@@ -234,6 +242,73 @@ def instants(label: str, unit: TimeUnit, values: pa.Array, *, time_column: bool)
         values = pc.cast(values, pa.int64())
         values = pc.if_else(pc.equal(values, 0), pa.scalar(None, pa.int64()), values)
     return to_epoch_ns_array(label, unit, values)
+
+
+def masked_instants(
+    unit: TimeUnit, values: pa.Array, *, time_column: bool
+) -> tuple[pa.Array, pa.Array]:
+    """Run the timestamp routine on one column without raising: failing values become null.
+
+    The same steps as `instants` (epoch 0 to null outside the time column, the scale to
+    nanoseconds, the 1990 to 2100 bound), vectorized in Arrow, but a value that overflows or
+    lies outside the bound is reported in the returned mask instead of raised, so the caller
+    can drop exactly those rows and fail exactly the readers of those rows. A null stays null
+    and is not a failure.
+
+    Args:
+        unit: The values' unit (`time_unit`).
+        values: An integer Arrow array of epoch values as Massive sent them.
+        time_column: True for the dataset's time column, whose `0` is kept and so fails the
+            bound; False for every other `Instant` column, whose `0` becomes null.
+
+    Returns:
+        `(nanos, failed)`: an `int64` array of nanoseconds since the Unix epoch, null where
+        the value was null or failed; and a boolean array, true exactly where a value failed.
+    """
+    sent = pc.cast(values, pa.int64())
+    if not time_column:
+        sent = pc.if_else(pc.equal(sent, 0), pa.scalar(None, pa.int64()), sent)
+    if unit is TimeUnit.FMV_MAGNITUDE:
+        is_ns = pc.call_function("greater_equal", [sent, FMV_NS_THRESHOLD])
+        any_ns = pc.call_function("any", [is_ns]).as_py()
+        if any_ns is not None:  # None: every value was null, so nothing was classified
+            _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
+        millis = _NS_PER[TimeUnit.MILLISECONDS]
+        factor = pc.if_else(is_ns, 1, millis)
+        limit = pc.if_else(is_ns, _INT64_MAX, _INT64_MAX // millis)
+    else:
+        factor = pa.scalar(_NS_PER[unit], pa.int64())
+        limit = pa.scalar(_INT64_MAX // _NS_PER[unit], pa.int64())
+    fits = pc.and_(pc.less_equal(sent, limit), pc.greater_equal(sent, pc.negate(limit)))
+    nanos = pc.multiply(pc.if_else(fits, sent, pa.scalar(None, pa.int64())), factor)
+    inside = pc.and_(pc.greater_equal(nanos, MIN_INSTANT_NS), pc.less(nanos, MAX_INSTANT_NS))
+    failed = pc.and_(pc.is_valid(sent), pc.invert(pc.fill_null(inside, fill_value=False)))
+    return pc.if_else(failed, pa.scalar(None, pa.int64()), nanos), failed
+
+
+def mismatch_message(label: str, unit: TimeUnit, value: int) -> str:
+    """Return the message the timestamp routine raises for one failing epoch value.
+
+    For a value `masked_instants` reported as failed, so a failure reads the same whether the
+    routine raised or masked it.
+
+    Args:
+        label: The field, as `<dataset>.<column>`.
+        unit: The value's unit.
+        value: The epoch integer as Massive sent it.
+
+    Returns:
+        The `UnitMismatchError` text, such as `timestamp unit mismatch for stocks.trades.Timestamp:
+        5 ms is outside 1990 to 2100`.
+
+    Raises:
+        ValueError: If the value converts within the bound, which is the caller's mistake.
+    """
+    try:
+        to_epoch_ns(label, unit, value)
+    except UnitMismatchError as error:
+        return str(error)
+    raise ValueError(f"{value} {unit.value} is a valid timestamp for {label}")
 
 
 def _scale(label: str, unit: TimeUnit, values: pa.Array) -> pa.Array:

@@ -255,9 +255,13 @@ class StreamQuery(QueryBase):
     __slots__ = ()
 
     @property
-    def _channel(self) -> str | None:
-        """The WebSocket channel: per timespan for bars, otherwise the dataset's channel."""
-        return self._spec.channels.get(self._request.timespan)
+    def _channel(self) -> str:
+        """The WebSocket channel: per timespan for bars, otherwise the dataset's channel.
+
+        A stream query exists only for a timespan with a channel (`bar_query_class`), so the
+        lookup always finds one.
+        """
+        return self._spec.channels[self._request.timespan]
 
     def _stream(self, build: Callable[[Table], Table], *, wrap: bool = False) -> Table:
         """Shape a live result from this query's stream, creating the stream if needed.

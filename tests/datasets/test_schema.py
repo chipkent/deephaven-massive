@@ -14,6 +14,7 @@ from deephaven_massive._datasets.schema import (
     ColumnType,
     Schema,
     SourceColumn,
+    conform,
     dataset_schema,
     join,
     key_column,
@@ -75,6 +76,16 @@ def test_every_wire_type_has_a_column_type() -> None:
     assert COLUMN_TYPES[WireType.INT_ARRAY] is ColumnType.INT_ARRAY
     # A dataset column is never a 32-bit int: exchange and tape ids are long.
     assert ColumnType.INT not in COLUMN_TYPES.values()
+
+
+def test_conform_gives_each_column_its_merged_arrow_type() -> None:
+    longs = pa.array([100, None], pa.int64())
+    assert conform(longs, ColumnType.DOUBLE).type == pa.float64()
+    widened = conform(longs, ColumnType.INT_ARRAY)
+    assert widened.type == pa.list_(pa.int32())
+    assert widened.to_pylist() == [[100], None]
+    lists = pa.array([[1], None], pa.list_(pa.int32()))
+    assert conform(lists, ColumnType.INT_ARRAY).to_pylist() == [[1], None]
 
 
 def test_schema_rejects_duplicate_columns() -> None:
