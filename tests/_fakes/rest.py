@@ -11,7 +11,9 @@ path scripted once answers every request the same way. An unscripted path answer
 
 The server also behaves as an HTTP proxy. A `CONNECT host:port` request is recorded (method
 `CONNECT`, `proxied=True`) and then tunnelled byte for byte to that address, so a test can put
-it in `HTTPS_PROXY` in front of a TLS fake and see exactly what reaches the proxy. A request
+it in `HTTPS_PROXY` in front of a TLS fake and see exactly what reaches the proxy; after
+`refuse_tunnels(status)` it answers every `CONNECT` with that status instead, as a proxy that
+rejects the client's credentials (407) does. A request
 line with an absolute URL (`GET http://host/path`, forwarding) is answered like any other and
 recorded with `proxied=True`.
 
@@ -30,6 +32,7 @@ import ssl
 import threading
 from collections import deque
 from dataclasses import dataclass, field
+from http import HTTPStatus
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -127,6 +130,7 @@ class FakeRestServer:
         self._script: dict[str, deque[Reply]] = {}
         self._received: list[Received] = []
         self._on_request: Callable[[Received], None] | None = None
+        self._tunnel_status: int | None = None
         self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._scheme = "http"
@@ -183,6 +187,16 @@ class FakeRestServer:
         """
         with self._lock:
             self._on_request = hook
+
+    def refuse_tunnels(self, status: int) -> None:
+        """Answer every later `CONNECT` with `status` and open no tunnel.
+
+        Args:
+            status: The status, such as 407 for a proxy that rejects the client's credentials;
+                a 407 carries a `Proxy-Authenticate: Basic` challenge, as a real proxy's does.
+        """
+        with self._lock:
+            self._tunnel_status = status
 
     @property
     def requests(self) -> list[Received]:
@@ -267,6 +281,16 @@ class FakeRestServer:
                         method="CONNECT",
                     )
                 )
+                with fake._lock:
+                    refusal = fake._tunnel_status
+                if refusal is not None:
+                    self.send_response(refusal)
+                    if refusal == HTTPStatus.PROXY_AUTHENTICATION_REQUIRED:
+                        self.send_header("Proxy-Authenticate", 'Basic realm="proxy"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    self.close_connection = True
+                    return
                 host, _, port = self.path.rpartition(":")
                 with socket.create_connection((host, int(port)), timeout=10) as upstream:
                     self.send_response(200, "Connection established")

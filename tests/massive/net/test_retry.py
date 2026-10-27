@@ -105,6 +105,32 @@ def test_a_cycle_of_exceptions_ends_the_search() -> None:
     second = ValueError(first)
     first.__context__ = second
     assert not retry.is_tls_failure(first)
+    assert not retry.is_proxy_auth_failure(first)
+
+
+def test_a_proxy_credential_refusal_is_recognised_however_it_is_wrapped() -> None:
+    # http.client's report of a CONNECT answered with 407, wrapped as urllib3 and botocore do.
+    refused = OSError("Tunnel connection failed: 407 Proxy Authentication Required")
+    assert retry.is_proxy_auth_failure(refused)
+    as_argument = ConnectionError("Unable to connect to proxy", refused)
+    assert retry.is_proxy_auth_failure(as_argument)
+    as_context = RuntimeError("Failed to connect to proxy URL")
+    as_context.__context__ = as_argument
+    assert retry.is_proxy_auth_failure(as_context)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("Tunnel connection failed: 403 Forbidden"),
+        OSError("Tunnel connection failed: 4070 Unknown"),
+        ValueError("Tunnel connection failed: 407 Proxy Authentication Required"),
+        ConnectionRefusedError(61, "Connection refused"),
+    ],
+    ids=["another-status", "a-longer-status", "not-an-os-error", "refused"],
+)
+def test_other_failures_are_not_proxy_credential_refusals(error: BaseException) -> None:
+    assert not retry.is_proxy_auth_failure(error)
 
 
 def test_the_system_clock_reads_and_waits_on_real_time() -> None:

@@ -38,6 +38,7 @@ from deephaven_massive._massive.net.retry import (
     MAX_RETRY_AFTER,
     SYSTEM_CLOCK,
     TRANSIENT_STATUSES,
+    is_proxy_auth_failure,
     is_tls_failure,
     rate_limit_wait,
     retry_after_seconds,
@@ -271,10 +272,11 @@ class RestClient:
         0.5 to 2.4 s each for a 5xx or connection failure, and up to 60 s each for a 429.
 
         Errors: `WireError` when the request fails after its retries, a 429 asks for more
-        than 60 s, TLS verification fails, the body is not a valid page, or the client is
-        closed; `WireAuthError` for 401; `WireEntitlementError` for 403 or a
-        `NOT_AUTHORIZED` envelope. Parameters that do not fit the path raise `ValueError`,
-        and a value of a type its kind does not accept raises `TypeError` (see `rest.query`).
+        than 60 s, TLS verification fails, the proxy refuses its credentials (status 407,
+        never retried), the body is not a valid page, or the client is closed;
+        `WireAuthError` for 401; `WireEntitlementError` for 403 or a `NOT_AUTHORIZED`
+        envelope. Parameters that do not fit the path raise `ValueError`, and a value of a
+        type its kind does not accept raises `TypeError` (see `rest.query`).
 
         Args:
             rest_path: The path, from the spec.
@@ -424,8 +426,9 @@ class RestClient:
 
         Raises:
             WireError: When the failure is not retryable: the client is closed, TLS
-                verification failed, a 429 asked for more than 60 s, or the status is
-                neither 200, 429, nor a transient 5xx (`http_error` chooses the subclass).
+                verification failed, the proxy refused its credentials (HTTP 407), a 429
+                asked for more than 60 s, or the status is neither 200, 429, nor a transient
+                5xx (`http_error` chooses the subclass).
         """
         self._wait_not_before()
         if self._closed.is_set():
@@ -444,6 +447,16 @@ class RestClient:
                     f"GET {request.target}: TLS certificate verification failed for "
                     f"{self._host} ({error}); if a proxy or private CA signs it, set "
                     "SSL_CERT_FILE to a bundle that trusts it",
+                    host=self._host,
+                    path=request.target,
+                ) from error
+            if is_proxy_auth_failure(error):
+                # The same credentials would be refused again, and a corporate proxy may lock
+                # the account after a few refusals.
+                raise WireError(
+                    f"GET {request.target}: the proxy refused its credentials (HTTP 407 for a "
+                    f"tunnel to {self._host}); check the user and password in HTTPS_PROXY",
+                    status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
                     host=self._host,
                     path=request.target,
                 ) from error

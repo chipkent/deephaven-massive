@@ -238,18 +238,25 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
 
 
 @pytest.fixture(autouse=True)
-def _virtual_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+def retry_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
     """Give every session's flat-file client a fake clock, so its retry waits never sleep.
 
-    The patch goes into the module's namespace with `setitem`, so teardown removes the entry
-    again. `setattr` would restore the lazily resolved class as a bound attribute, which the
-    wire package's interface test forbids.
+    The session reads `_massive.FlatFileClient` when it creates its client, so the patch reaches
+    it; the tests that retry assert this clock's waits, so they fail rather than sleep for real
+    if the session ever binds the class earlier. The patch goes into the module's namespace with
+    `setitem`, so teardown removes the entry again. `setattr` would restore the lazily resolved
+    class as a bound attribute, which the wire package's interface test forbids.
+
+    Returns:
+        The clock every flat-file client of the test waits on.
     """
+    clock = FakeClock()
     monkeypatch.setitem(
         vars(_massive),
         "FlatFileClient",
-        functools.partial(_massive.FlatFileClient, clock=FakeClock()),
+        functools.partial(_massive.FlatFileClient, clock=clock),
     )
+    return clock
 
 
 @pytest.fixture
@@ -1087,16 +1094,19 @@ def test_rejected_credentials_are_an_authentication_error(
     assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
 
 
-def test_a_server_error_is_a_massive_error(session: dm.MassiveSession, fake_s3: FakeS3) -> None:
+def test_a_server_error_is_a_massive_error(
+    session: dm.MassiveSession, fake_s3: FakeS3, retry_clock: FakeClock
+) -> None:
     fake_s3.refuse("us_stocks_sip/", status=500, code="InternalError", message="Try again")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(dm.MassiveError, match=r"HTTP 500 \(InternalError: Try again\)") as info:
         q.history("2025-03-03", "2025-03-03")
     assert (info.value.status, info.value.request_id) == (500, fake_s3.request_id)
+    assert len(retry_clock.waits) == 3  # retried on the fake clock, never on real time
 
 
 def test_an_unreachable_endpoint_is_a_massive_error(
-    session: dm.MassiveSession, fake_s3: FakeS3
+    session: dm.MassiveSession, fake_s3: FakeS3, retry_clock: FakeClock
 ) -> None:
     fake_s3.fail(TRADES_0303, "unreachable")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
@@ -1104,6 +1114,7 @@ def test_an_unreachable_endpoint_is_a_massive_error(
         dm.MassiveError, match=re.escape("cannot read s3://flatfiles/us_stocks_sip")
     ):
         q.history("2025-03-03", "2025-03-03")
+    assert len(retry_clock.waits) == 3  # retried on the fake clock, never on real time
 
 
 @pytest.mark.parametrize(
