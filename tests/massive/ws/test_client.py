@@ -51,7 +51,8 @@ SOURCES = (
         fields=(
             Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
             Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE),
-            Field(wire_key="s", column="Size", wire_type=WireType.LONG),
+            # Marked required by the vendor, so an object without it is reported as drift.
+            Field(wire_key="s", column="Size", wire_type=WireType.LONG, required=True),
             Field(wire_key="t", column="SipTimestamp", wire_type=WireType.EPOCH, unit=WireUnit.MS),
         ),
     ),

@@ -12,8 +12,11 @@ tested without a socket; `ws.client` owns the socket and calls in here:
 - **Received frames.** `FrameDecoder` decodes each frame once, with the `net.codec` JSON codec,
   into `Status` events and per-channel `Data`: rows keyed by long-form column, `Reject`s for the
   rows that fail validation, and the `DriftReport` of the channel's objects in the frame. Each
-  value goes through `spec.convert.convert`, the converter the REST client uses too, so a value
-  means the same on both transports.
+  value goes through `spec.convert.convert_field`, the converter the REST client uses too (a
+  field with a named `conversion` through that conversion), so a value means the same on both
+  transports. Drift is reported as REST reports it: `extra` holds the keys a channel does not
+  declare, which are dropped, and `missing` only the fields the vendor marks required
+  (`Field.required`) that some object lacked or held as null.
 - **Failures.** `classify_failure` decides whether an exception from opening the socket is
   fatal or retryable, from websockets' own rule and two overrides, and how long a retryable
   one must wait at least. The overrides use the shared `net.retry` helpers: `is_tls_failure`
@@ -42,11 +45,13 @@ from websockets.exceptions import InvalidStatus
 from deephaven_massive._massive.net import codec
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.net.retry import is_tls_failure, retry_after_seconds
-from deephaven_massive._massive.spec.convert import UnconvertibleError, convert
-from deephaven_massive._massive.spec.types import DriftReport, Source, Transport, WireType
+from deephaven_massive._massive.spec.convert import UnconvertibleError, convert_field
+from deephaven_massive._massive.spec.types import DriftReport, Source, Transport
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+
+    from deephaven_massive._massive.spec.types import Field
 
 __all__ = [
     "MAX_TOPICS_PER_FRAME",
@@ -157,8 +162,8 @@ class Data:
         rows: The valid rows in arrival order, each mapping every column of the channel's
             source to its value (`None` when the wire omitted it or sent null).
         rejects: The rows that failed validation, in arrival order.
-        drift: The wire keys of these objects that the source does not declare, and the
-            declared keys some object lacked.
+        drift: The wire keys of these objects that the source does not declare (`extra`),
+            and the vendor-required fields some object lacked or held as null (`missing`).
     """
 
     channel: str
@@ -291,15 +296,13 @@ class _Step:
     """How one field of a channel is read from each object: computed once, used per row.
 
     Attributes:
-        wire_key: The key on the wire.
-        column: The long-form column it fills.
-        wire_type: The field's type, which `spec.convert.convert` checks each value against.
-        required: Whether a missing value (or null) rejects the row.
+        field: The generated field, which `spec.convert.convert_field` checks each value
+            against.
+        required: Whether a missing value (or null) rejects the row: the library's choice
+            through `FrameDecoder.set_required`, not the vendor's `Field.required`.
     """
 
-    wire_key: str
-    column: str
-    wire_type: WireType
+    field: Field
     required: bool = False
 
 
@@ -309,16 +312,18 @@ class _Channel:
 
     Attributes:
         source: The channel's generated source.
-        declared: The source's wire keys.
-        shape: The keys of an object that carries exactly the declared fields and `ev`; an
-            object of that shape has no drift, which one set comparison decides.
+        shape: The keys of an object that carries exactly the source's fields and `ev`; an
+            object of that shape has no extra key, which one set comparison decides, and any
+            other key of an object is an extra key.
+        vendor_required: The wire keys of the fields the vendor marks required, whose absence
+            or null is reported as drift.
         steps: One `_Step` per field, in the source's order.
         symbol: The wire key holding the symbol, or `None` when none is declared.
     """
 
     source: Source
-    declared: frozenset[str]
     shape: frozenset[str]
+    vendor_required: frozenset[str]
     steps: tuple[_Step, ...]
     symbol: str | None = None
 
@@ -336,20 +341,11 @@ class _Channel:
         Returns:
             The plan.
         """
-        declared = frozenset(f.wire_key for f in source.fields)
-        steps = tuple(
-            _Step(
-                wire_key=f.wire_key,
-                column=f.column,
-                wire_type=f.wire_type,
-                required=f.wire_key in required,
-            )
-            for f in source.fields
-        )
+        steps = tuple(_Step(field=f, required=f.wire_key in required) for f in source.fields)
         return cls(
             source=source,
-            declared=declared,
-            shape=declared | {"ev"},
+            shape=frozenset(f.wire_key for f in source.fields) | {"ev"},
+            vendor_required=frozenset(f.wire_key for f in source.fields if f.required),
             steps=steps,
             symbol=symbol,
         )
@@ -552,25 +548,27 @@ class FrameDecoder:
         spec = self._channels[channel]
         keys = item.keys()
         if keys != spec.shape:  # the common case, an exact shape, costs one comparison
-            present = keys - {"ev"}
-            into.extra |= present - spec.declared
-            into.missing |= spec.declared - present
+            into.extra |= keys - spec.shape
+        into.missing.update(k for k in spec.vendor_required if item.get(k) is None)
         row: dict[str, object] = {}
         for step in spec.steps:
-            value = item.get(step.wire_key)
+            f = step.field
+            value = item.get(f.wire_key)
             if value is None:
                 if step.required:
-                    problem = f"missing required key {step.wire_key!r} ({step.column})"
+                    problem = f"missing required key {f.wire_key!r} ({f.column})"
                     into.rejects.append(self._reject(channel, item, problem))
                     return
-                row[step.column] = None
+                row[f.column] = None
                 continue
             try:
-                row[step.column] = convert(step.wire_type, value)
+                row[f.column] = convert_field(f, value)
             except UnconvertibleError:
+                expected = str(f.wire_type)
+                if f.conversion is not None:
+                    expected += f" (by the conversion {f.conversion})"
                 problem = (
-                    f"field {step.wire_key!r} ({step.column}) expects {step.wire_type}, "
-                    f"got {_quote(value)}"
+                    f"field {f.wire_key!r} ({f.column}) expects {expected}, got {_quote(value)}"
                 )
                 into.rejects.append(self._reject(channel, item, problem))
                 return

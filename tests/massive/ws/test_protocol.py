@@ -14,6 +14,7 @@ from websockets.http11 import Response
 
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec.types import (
+    Conversion,
     DriftReport,
     Field,
     Source,
@@ -45,7 +46,14 @@ TRADES = Source(
         Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
         Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE),
         Field(wire_key="s", column="Size", wire_type=WireType.LONG),
-        Field(wire_key="t", column="SipTimestamp", wire_type=WireType.EPOCH, unit=WireUnit.MS),
+        # The vendor marks `t` required, so its absence is drift; the others are optional.
+        Field(
+            wire_key="t",
+            column="SipTimestamp",
+            wire_type=WireType.EPOCH,
+            unit=WireUnit.MS,
+            required=True,
+        ),
         Field(wire_key="c", column="Conditions", wire_type=WireType.INT_ARRAY),
     ),
 )
@@ -58,6 +66,26 @@ EVERYTHING = Source(
         Field(wire_key="d", column="Day", wire_type=WireType.DATE),
         Field(wire_key="i", column="When", wire_type=WireType.ISO_INSTANT),
         Field(wire_key="j", column="Extra", wire_type=WireType.JSON_TEXT),
+    ),
+)
+# Fields that take a named conversion, as the generated schema records one for a field whose
+# documented values its declared type does not describe.
+CONVERTED = Source(
+    key="forex/C",
+    transport=Transport.WS,
+    fields=(
+        Field(
+            wire_key="x",
+            column="Exchange",
+            wire_type=WireType.LONG,
+            conversion=Conversion.QUOTED_INTEGER,
+        ),
+        Field(
+            wire_key="i",
+            column="TradeId",
+            wire_type=WireType.STRING,
+            conversion=Conversion.TEXT_OR_INTEGER_ID,
+        ),
     ),
 )
 FOREX = Source(
@@ -214,19 +242,25 @@ def test_rows_use_long_form_columns_and_absent_fields_are_none(decoder: FrameDec
 def test_a_null_value_is_none(decoder: FrameDecoder) -> None:
     data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", "p": None})
     assert data.rows[0]["Price"] is None
-    assert data.drift.missing == {"s", "t", "c"}
 
 
-def test_drift_collects_extra_and_missing_keys_over_the_channel(decoder: FrameDecoder) -> None:
+def test_drift_reports_extra_keys_and_only_vendor_required_fields_as_missing(
+    decoder: FrameDecoder,
+) -> None:
     [data] = decoder.decode(
         _frame(
             {"ev": "T", "sym": "A", "p": 1, "s": 1, "t": 1, "c": [], "new": 1},
-            {"ev": "T", "sym": "B", "p": 1, "s": 1, "t": 1, "z": 2},
+            {"ev": "T", "sym": "B", "s": 1, "z": 2},
+            {"ev": "T", "sym": "C", "t": None},
         )
     )
     assert isinstance(data, Data)
-    assert data.drift == DriftReport(extra=frozenset({"new", "z"}), missing=frozenset({"c"}))
-    assert len(data.rows) == 2
+    # The optional `p` and `c` are absent without drift; the vendor-required `t`, absent once
+    # and null once, is missing. The extra keys are dropped from the rows.
+    assert data.drift == DriftReport(extra=frozenset({"new", "z"}), missing=frozenset({"t"}))
+    columns = {"Ticker", "Price", "Size", "SipTimestamp", "Conditions"}
+    assert [set(r) for r in data.rows] == [columns] * 3
+    assert [r["SipTimestamp"] for r in data.rows] == [1, None, None]
 
 
 def test_symbols_pass_through_as_the_wire_spells_them() -> None:
@@ -261,8 +295,9 @@ def test_a_single_object_frame_is_decoded(decoder: FrameDecoder) -> None:
 
 
 # --- conversions --------------------------------------------------------------------------------
-# `spec.convert` owns the rules of every type and is tested there; these tests show that the
-# decoder applies it to every field and turns its refusal into a reject.
+# `spec.convert` owns the rules of every type and every named conversion and is tested there;
+# these tests show that the decoder applies it to every field, a field's named conversion
+# included, and turns its refusal into a reject.
 
 
 def test_every_field_goes_through_the_shared_converter(decoder: FrameDecoder) -> None:
@@ -306,10 +341,35 @@ def test_an_unconvertible_value_rejects_its_row(
     assert f"expects {expects}, got {value!r}" in reject.error.message
 
 
-def test_an_instant_without_an_offset_rejects_its_row(decoder: FrameDecoder) -> None:
-    data = _decode_one(decoder, {"ev": "E", "i": "2026-01-02T14:30:00"})
+def test_a_named_conversion_applies_to_its_field() -> None:
+    decoder = FrameDecoder([CONVERTED], host=HOST, path="/forex")
+    [data] = decoder.decode(_frame({"ev": "C", "x": "48", "i": 7}, {"ev": "C", "i": "ab"}))
+    assert isinstance(data, Data)
+    assert data.rows == [{"Exchange": 48, "TradeId": "7"}, {"Exchange": None, "TradeId": "ab"}]
+    assert data.rejects == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        # Only the named conversion reads the field: a plain `long` is refused too.
+        ("x", "Exchange", "4.8", "long (by the conversion quoted-integer)"),
+        ("x", "Exchange", 48, "long (by the conversion quoted-integer)"),
+        ("i", "TradeId", 1.5, "string (by the conversion text-or-integer-id)"),
+    ],
+)
+def test_a_value_its_named_conversion_cannot_read_rejects_its_row(
+    case: tuple[str, str, object, str],
+) -> None:
+    key, column, value, expects = case
+    decoder = FrameDecoder([CONVERTED], host=HOST, path="/forex")
+    data = _decode_one(decoder, {"ev": "C", key: value})
+    assert data.rows == []
     [reject] = data.rejects
-    assert "expects iso-instant, got '2026-01-02T14:30:00'" in reject.error.message
+    assert reject.error.message == (
+        f"rejected a C row from socket.massive.com/forex: "
+        f"field {key!r} ({column}) expects {expects}, got {value!r}"
+    )
 
 
 def test_a_reject_quotes_at_most_50_characters_of_the_value(decoder: FrameDecoder) -> None:
