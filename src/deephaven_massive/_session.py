@@ -19,9 +19,12 @@ owns:
   the order the registry changed;
 - the result registry and the reaper thread (`_liveness.py`);
 - the diagnostics tables and their writer thread (`_diagnostics.py`);
-- one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`). No
-  transport is implemented yet, so each raises `NotImplementedError`, and so do the verbs that need
-  it.
+- one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`).
+  The flat-file transport is implemented: the core creates the session's
+  `_massive.FlatFileClient` (the S3 client, closed with the session) on the first flat-file read,
+  so a session that reads no flat file never imports boto3, and hands each `history()` call a
+  `FlatFileHistory`. The REST and WebSocket hooks are not implemented yet, so they raise
+  `NotImplementedError`, and so do the verbs that need them.
 
 Lock order: the update-graph (UG) lock, then `registry_lock`. A stream is registered under
 `registry_lock` before it opens (with a session-minted id), then opened with no lock held; a
@@ -44,6 +47,7 @@ from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
+from deephaven_massive import _massive
 from deephaven_massive._config import MassiveConfig, log_json_codec_once, require_positive_int
 from deephaven_massive._diagnostics import (
     Diagnostics,
@@ -54,6 +58,7 @@ from deephaven_massive._diagnostics import (
 )
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._flat_files import FlatFileHistory
 from deephaven_massive._liveness import Reaper, ResultRegistry, entered, make_result
 from deephaven_massive._namespaces.base import list_params
 from deephaven_massive._namespaces.crypto import _Crypto
@@ -78,6 +83,7 @@ if TYPE_CHECKING:
     from deephaven_massive._catalog import DatasetSpec
     from deephaven_massive._enums import Order
     from deephaven_massive._liveness import StreamHandle
+    from deephaven_massive._massive import FlatFileClient
     from deephaven_massive._query import (
         FlatFileTransport,
         Query,
@@ -333,6 +339,8 @@ class SessionCore:
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamState] = {}
+        # Created by the first flat-file read (`flat_file_transport`), under `registry_lock`.
+        self._flat_files: FlatFileClient | None = None
         # Shared with the finalizer, which runs the closers of a session collected unclosed.
         self._closers: list[Callable[[], None]] = []
         self._closed = False
@@ -398,12 +406,45 @@ class SessionCore:
         raise NotImplementedError("the WebSocket transport is not implemented yet")
 
     def flat_file_transport(self) -> FlatFileTransport:
-        """Return the session's flat-file transport.
+        """Return a flat-file transport for one `history()` call.
+
+        Each call gets a new, lightweight `FlatFileHistory` bound to this core and to the
+        session's `FlatFileClient`. The first call creates that client: it reads
+        `_massive.FlatFileClient` outside every lock (the first read imports boto3), creates the
+        client under `registry_lock` (the constructor only stores settings), and registers its
+        close with `on_close` after releasing the lock, so the client closes with the session,
+        or at once if the session closed meanwhile. No call makes a network request: the boto3
+        client is created by the first read.
+
+        Returns:
+            The transport.
 
         Raises:
-            NotImplementedError: Always, until the flat-file transport is implemented.
+            ValueError: If the configuration has no S3 credentials. `history()` never gets
+                here then: its source choice has already required them.
         """
-        raise NotImplementedError("the flat-file transport is not implemented yet")
+        config = self.config
+        access_key_id, secret_access_key = config.s3_access_key_id, config.s3_secret_access_key
+        if access_key_id is None or secret_access_key is None:
+            raise ValueError(
+                "flat files need MassiveConfig s3_access_key_id and s3_secret_access_key"
+            )
+        factory = _massive.FlatFileClient
+        with self.registry_lock:
+            client = self._flat_files
+            created = client is None
+            if client is None:
+                # The client holds no reference to the core, so its closer may outlive it.
+                client = self._flat_files = factory(
+                    access_key_id=access_key_id,
+                    secret_access_key=secret_access_key,
+                    endpoint_url=config.s3_endpoint_url,
+                    bucket=config.s3_bucket,
+                    max_pool=config.max_concurrency,
+                )
+        if created:
+            self.on_close(client.close)
+        return FlatFileHistory(self, client)
 
     # --- Streams --------------------------------------------------------------------------
 

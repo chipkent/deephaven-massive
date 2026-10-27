@@ -22,6 +22,8 @@ take the session's registry lock.
 The verbs delegate the transport work to three interfaces, one per transport, which the session
 provides through its factory hooks: `RestTransport` (`fetch`, `poll`, REST `history`),
 `StreamTransport` (opening a WebSocket stream), and `FlatFileTransport` (flat-file `history`).
+`history()` chooses its source itself (`_history_source.choose_source`) and then calls one
+transport, so the transports only do I/O.
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
@@ -53,8 +55,10 @@ from deephaven_massive._enums import (
     Timespan,
     _require_enum,
 )
-from deephaven_massive._symbols import SymbolTable, canonical_view
-from deephaven_massive._types import ALL, _All, override
+from deephaven_massive._history_source import choose_source, partition_dates, rest_history_problem
+from deephaven_massive._liveness import entered
+from deephaven_massive._symbols import SymbolTable, canonical_view, symbol_canonicalizer
+from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -110,6 +114,10 @@ class Request:
         timespan: The bar timespan (bars and indicators only).
         multiplier: The bar multiplier.
         venue: The futures venue, which selects flat-file prefixes only.
+        adjusted: Whether bars are adjusted for splits, for datasets with an `adjusted`
+            parameter; None for datasets without one. Flat files hold only unadjusted bars.
+            The REST transport sends it, when not None, as the `adjusted` query parameter;
+            `params` never holds `adjusted`.
         start: The lower bound of the dataset's time axis (`…T` datasets), or of `history()`.
         end: The upper bound of the dataset's time axis, or of `history()`.
         params: The dataset's other typed parameters, by SDK parameter name, sorted by name.
@@ -123,6 +131,7 @@ class Request:
     timespan: Timespan | None = None
     multiplier: int = 1
     venue: FuturesVenue | None = None
+    adjusted: bool | None = None
     start: date | datetime | None = None
     end: date | datetime | None = None
     params: tuple[tuple[str, ParamValue], ...] = ()
@@ -283,7 +292,11 @@ class StreamTransport(Protocol):
 
 
 class FlatFileTransport(Protocol):
-    """The flat-file transport, provided by `SessionCore.flat_file_transport()`."""
+    """The flat-file transport, provided by `SessionCore.flat_file_transport()`.
+
+    It only reads files: `HistoryQuery.history()` has already chosen flat files as the source
+    (`_history_source.choose_source`).
+    """
 
     def history(
         self,
@@ -291,16 +304,17 @@ class FlatFileTransport(Protocol):
         request: Request,
         window: TimeRange | FuturesSessions,
         *,
-        source: HistorySource,
+        dates: Sequence[date],
     ) -> Table:
-        """Return history from flat files (or, under `AUTO`, from the chosen source), static.
+        """Return the rows of `window` from the dataset's flat files, static.
 
         Args:
-            spec: The dataset.
-            request: The normalized arguments, with the raw `start` and `end` bounds.
+            spec: The dataset, with a flat-file prefix for the request.
+            request: The normalized arguments, with the raw `start` and `end` bounds and static
+                symbols (never a reactive table).
             window: The bounds under the class's day rules: a half-open `TimeRange`, or the
                 `FuturesSessions` of date-bounded futures.
-            source: `FLAT_FILES` or `AUTO`.
+            dates: The partition dates to read (`_history_source.partition_dates`).
         """
         ...
 
@@ -350,6 +364,37 @@ def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
             f"{spec.name}.fetch() needs explicit symbols; "
             f"use m.{namespace}.snapshots(dm.ALL).fetch() for every symbol"
         )
+
+
+def _read_symbol_table(
+    core: SessionCore, spec: DatasetSpec, symbols: SymbolTable
+) -> tuple[str, ...]:
+    """Read a reactive symbol table once, for a static `history()` result.
+
+    The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
+    it reads, so the symbols are one consistent snapshot. Runs on the caller thread, inside the
+    session's execution context, with no library lock held. Each row is canonicalized as the
+    stream verbs do (`_symbols.symbol_canonicalizer`): a row that is not a valid symbol of the
+    class is ignored and logged once at WARNING.
+
+    Args:
+        core: The session core, for its execution context.
+        spec: The dataset, whose asset class canonicalizes the symbols.
+        symbols: The boxed reactive table.
+
+    Returns:
+        The table's valid symbols, canonical, sorted, and de-duplicated.
+
+    Raises:
+        ValueError: If the table holds no valid symbol, as an empty symbol list does.
+    """
+    canonical_symbol = symbol_canonicalizer(spec.asset_class)
+    with entered(core.exec_ctx):
+        raw = {canonical_symbol(row[0]) for row in symbols.table.iter_tuple(cols="Symbol")}
+    found = tuple(sorted(symbol for symbol in raw if symbol is not None))
+    if not found:
+        raise ValueError(f"{spec.name} history: the symbol table holds no valid symbols")
+    return found
 
 
 @dataclass(frozen=True, repr=False, slots=True)
@@ -614,11 +659,30 @@ class HistoryQuery(QueryBase):
         crypto; sessions for futures), so whole days are inclusive. There is no `limit`: the
         library pages internally.
 
+        Flat files (S3) can serve a request when S3 credentials are configured, the dataset
+        has files for it (bars: only 1-minute and 1-day bars, and 1-session bars for futures,
+        unadjusted where the dataset has `adjusted`), and every day's file is published (from
+        `flat_file_publish_cutoff`, New York time, after the day ends). REST can serve it when
+        the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
+        daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
+        or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
+        `dm.ALL`); otherwise it uses REST. A reactive symbol table is read once, when the verb
+        is called, and every source receives the same sorted canonical symbols; rows that are
+        not valid symbols of the class are ignored with a WARNING. Flat-file reads skip a
+        missing weekend file silently and a missing weekday file (a holiday) with a WARNING.
+
         A `source` that is not a `HistorySource`, or a bound of the wrong type, raises
-        `TypeError`. A naive or unparseable bound, an empty range, or `source=REST` where REST
-        cannot serve the request (no REST history, or `dm.ALL` without a grouped-daily
-        endpoint) raises `ValueError`, synchronously. A failed request raises `MassiveError`
-        (`EntitlementError` on HTTP 403).
+        `TypeError`. A naive or unparseable bound, an empty range, a reactive symbol table
+        without a valid symbol, a source that cannot serve
+        the request (`REST` without REST history or with `dm.ALL` and no grouped-daily
+        endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO` when neither
+        can, with every violated condition listed) raises `ValueError`, synchronously. A failed
+        request raises `MassiveError` (`EntitlementError` on HTTP 403, which for futures flat
+        files names the venue and the `venue=` parameter; `AuthenticationError` when S3 rejects
+        the flat-file credentials). A missing flat file for the last requested day raises
+        `MassiveError` only within a day after its publication time ("... is not yet published
+        (flat files land ~11:00 ET next day), or was a market holiday"); after that the date is
+        skipped with a WARNING, as a holiday.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -636,34 +700,39 @@ class HistoryQuery(QueryBase):
         chosen = _require_enum(source, HistorySource, "source")
         first, last = parse_date_like(start, "start"), parse_date_like(end, "end")
         window = bounds(self._spec, first, last)
-        request = replace(self._request, start=first, end=last)
+        symbols = self._request.symbols
+        if isinstance(symbols, SymbolTable):
+            symbols = _read_symbol_table(self._core, self._spec, symbols)
+        request = replace(self._request, start=first, end=last, symbols=symbols)
         if chosen is HistorySource.REST:
             self._check_rest_history()
             return self._core.rest_transport().history(self._spec, request, window)
-        return self._core.flat_file_transport().history(self._spec, request, window, source=chosen)
+        dates = partition_dates(self._spec, window)
+        choice = choose_source(
+            self._spec, request, dates, requested=chosen, config=self._core.config
+        )
+        if chosen is HistorySource.AUTO:
+            logger.info(
+                "%s history: AUTO chose %s (%s)",
+                self._spec.name,
+                choice.source.name,
+                choice.reason,
+            )
+        if choice.source is HistorySource.REST:
+            return self._core.rest_transport().history(self._spec, request, window)
+        return self._core.flat_file_transport().history(self._spec, request, window, dates=dates)
 
     def _check_rest_history(self) -> None:
         """Reject `history(source=REST)` where REST cannot serve the request.
 
         Raises:
             ValueError: If the dataset has no REST history endpoint, or the symbols are
-                `dm.ALL` and the request is not daily bars with a grouped-daily endpoint.
+                `dm.ALL` and the request is not daily bars with a grouped-daily endpoint
+                (`rest_history_problem`); the message names `HistorySource.FLAT_FILES`.
         """
-        spec, request = self._spec, self._request
-        if spec.history_method is None:
-            raise ValueError(
-                f"{spec.name} has no REST history; use source=dm.HistorySource.FLAT_FILES"
-            )
-        grouped = (
-            spec.grouped_daily_method is not None
-            and request.timespan is Timespan.DAY
-            and request.multiplier == 1
-        )
-        if isinstance(request.symbols, _All) and not grouped:
-            raise ValueError(
-                f"{spec.name} history over REST needs explicit symbols; "
-                "dm.ALL is served by source=dm.HistorySource.FLAT_FILES"
-            )
+        problem = rest_history_problem(self._spec, self._request)
+        if problem is not None:
+            raise ValueError(f"{problem}; use source=dm.HistorySource.FLAT_FILES")
 
 
 class StreamHistoryQuery(StreamQuery, HistoryQuery):

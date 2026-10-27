@@ -10,15 +10,22 @@ from types import ModuleType
 import pytest
 
 from deephaven_massive import _massive
+from deephaven_massive._massive.flatfiles import client as flatfiles_client
+from deephaven_massive._massive.flatfiles import layout, reader
 from deephaven_massive._massive.net import errors
 from deephaven_massive._massive.rest import batch, client, response
 
 EXPECTED_INTERFACE = [
+    "FlatFile",
+    "FlatFileClient",
     "Page",
+    "ReadColumn",
+    "ReadPlan",
     "RestClient",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "object_key",
     "to_batch",
 ]
 
@@ -31,6 +38,11 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.WireError is errors.WireError
     assert _massive.WireAuthError is errors.WireAuthError
     assert _massive.WireEntitlementError is errors.WireEntitlementError
+    assert _massive.FlatFileClient is flatfiles_client.FlatFileClient
+    assert _massive.FlatFile is reader.FlatFile
+    assert _massive.ReadPlan is reader.ReadPlan
+    assert _massive.ReadColumn is reader.ReadColumn
+    assert _massive.object_key is layout.object_key
     assert _massive.RestClient is client.RestClient
     assert _massive.Page is response.Page
     assert _massive.to_batch is batch.to_batch
@@ -140,3 +152,43 @@ def test_importing_the_interface_never_imports_deephaven() -> None:
 def test_the_probe_detects_a_module_that_imports_deephaven() -> None:
     # The negative case: `_types` imports `deephaven.table`, and the probe must see it.
     assert "deephaven" in _deephaven_imports_attempted_by("deephaven_massive._types", [])
+
+
+def _boto_modules_loaded_by(names: list[str]) -> list[str]:
+    """Resolve names of the interface in a fresh interpreter and report boto3 and botocore.
+
+    Args:
+        names: Attribute names to read from `deephaven_massive._massive`.
+
+    Returns:
+        Which of `boto3` and `botocore` are in `sys.modules` afterwards, sorted.
+    """
+    # The script is a literal and the names travel as data on stdin; `-P` keeps the working
+    # directory off `sys.path`.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            (
+                "import importlib, json, sys\n"
+                "wire = importlib.import_module('deephaven_massive._massive')\n"
+                "for name in json.load(sys.stdin):\n"
+                "    getattr(wire, name)\n"
+                "print(json.dumps(sorted({'boto3', 'botocore'} & set(sys.modules))))"
+            ),
+        ],
+        input=json.dumps(names),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded: list[str] = json.loads(result.stdout)
+    return loaded
+
+
+def test_only_the_flat_file_client_imports_boto3() -> None:
+    # A session that reads no flat file uses at most these names, so it never loads boto3.
+    others = [name for name in _massive.__all__ if name != "FlatFileClient"]
+    assert _boto_modules_loaded_by(others) == []
+    assert _boto_modules_loaded_by(["FlatFileClient"]) == ["boto3", "botocore"]

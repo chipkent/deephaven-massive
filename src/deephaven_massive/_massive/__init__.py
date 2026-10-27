@@ -16,6 +16,9 @@ imports only the standard library, `urllib3`, `websockets`, `certifi`, `orjson`,
 Interface:
     - `WireError`, `WireAuthError`, `WireEntitlementError`: the errors every client raises;
       `deephaven_massive._errors.from_wire` turns each into its public counterpart.
+    - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
+      client, one file being decoded into Arrow batches, what to read from it, and where a
+      dataset's file for a day lives.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
 
@@ -37,27 +40,40 @@ from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
 __all__ = [
+    "FlatFile",
+    "FlatFileClient",
     "Page",
+    "ReadColumn",
+    "ReadPlan",
     "RestClient",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "object_key",
     "to_batch",
 ]
 
 # Each name of the interface, and the module that defines it.
 _EXPORTS: dict[str, str] = {
+    "FlatFile": "deephaven_massive._massive.flatfiles.reader",
+    "FlatFileClient": "deephaven_massive._massive.flatfiles.client",
     "Page": "deephaven_massive._massive.rest.response",
+    "ReadColumn": "deephaven_massive._massive.flatfiles.reader",
+    "ReadPlan": "deephaven_massive._massive.flatfiles.reader",
     "RestClient": "deephaven_massive._massive.rest.client",
     "WireAuthError": "deephaven_massive._massive.net.errors",
     "WireEntitlementError": "deephaven_massive._massive.net.errors",
     "WireError": "deephaven_massive._massive.net.errors",
+    "object_key": "deephaven_massive._massive.flatfiles.layout",
     "to_batch": "deephaven_massive._massive.rest.batch",
 }
 
 # Type checkers read the imports, so they see each name's real type and flag a name outside
 # the interface; at run time `__getattr__` resolves the names instead.
 if TYPE_CHECKING:
+    from deephaven_massive._massive.flatfiles.client import FlatFileClient
+    from deephaven_massive._massive.flatfiles.layout import object_key
+    from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
     from deephaven_massive._massive.net.errors import (
         WireAuthError,
         WireEntitlementError,
