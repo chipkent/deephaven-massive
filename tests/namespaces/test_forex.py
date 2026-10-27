@@ -343,7 +343,7 @@ def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.Massive
         )
 
 
-def test_every_docstring_starts_with_a_summary_and_links_its_section() -> None:
+def test_every_docstring_links_its_section_and_states_limit_and_all() -> None:
     methods = {
         "quotes": forex._Forex.quotes,
         "bars": forex._Forex.bars,

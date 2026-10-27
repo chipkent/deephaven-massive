@@ -67,6 +67,7 @@ _QUOTE_FILES: Final = "global_forex/quotes_v1"
 
 QUOTES: Final = DatasetSpec(
     name="forex.quotes",
+    summary="Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick.",
     asset_class=AssetClass.FOREX,
     kind="quotes",
     fetch_path=_LAST_QUOTE,
@@ -103,6 +104,7 @@ _STREAM_BAR_KEYS: Final = SourceKeys(symbol=KeySpec("Pair"), time=KeySpec("Windo
 
 BARS: Final = DatasetSpec(
     name="forex.bars",
+    summary="Aggregate bars of currency pairs: open, high, low, close, and volume per window.",
     asset_class=AssetClass.FOREX,
     is_bars=True,
     kind="bars",
@@ -128,6 +130,7 @@ BARS: Final = DatasetSpec(
 
 FMV: Final = DatasetSpec(
     name="forex.fmv",
+    summary="Massive's fair market value of each currency pair, streamed as it updates.",
     asset_class=AssetClass.FOREX,
     kind="fmv",
     channels={None: "FMV"},
@@ -140,6 +143,9 @@ _SNAPSHOTS: Final = "/v2/snapshot/locale/global/markets/forex/tickers"
 
 SNAPSHOTS: Final = DatasetSpec(
     name="forex.snapshots",
+    summary=(
+        "The current state of currency pairs: today's bar, the last minute, and the last quote."
+    ),
     asset_class=AssetClass.FOREX,
     fetch_path=_SNAPSHOTS,
     keys={(_REST, _SNAPSHOTS): SourceKeys(symbol=KeySpec("Ticker"))},
@@ -151,6 +157,7 @@ _MOVERS: Final = "/v2/snapshot/locale/global/markets/forex/{direction}"
 
 MOVERS: Final = DatasetSpec(
     name="forex.movers",
+    summary="The twenty currency pairs with the largest percentage gain or loss today.",
     asset_class=AssetClass.FOREX,
     fetch_path=_MOVERS,
     keys={(_REST, _MOVERS): SourceKeys(symbol=KeySpec("Ticker"))},
@@ -161,6 +168,7 @@ _CONVERSION: Final = "/v1/conversion/{from}/{to}"
 
 CONVERSION: Final = DatasetSpec(
     name="forex.conversion",
+    summary="An amount converted between two currencies at the latest quote.",
     asset_class=AssetClass.FOREX,
     fetch_path=_CONVERSION,
     # The vendor's own `symbol` field is generated as `Symbol`, so the key uses it as is.
@@ -443,7 +451,7 @@ class _Forex(Namespace):
     def conversion(
         self, from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2
     ) -> Query:
-        """Convert an amount between two currencies at the latest quote.
+        """An amount converted between two currencies at the latest quote.
 
         One request to `/v1/conversion/{from}/{to}` returns one row: the converted amount,
         the amount converted, and the last bid and ask it used. It is REST only: `fetch()`,
