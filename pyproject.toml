@@ -42,8 +42,11 @@ dependencies = [
     # earlier releases call the deprecated importlib.resources.path. It has inline type
     # information (py.typed), which 2022.5.18 introduced.
     "certifi>=2022.6.15.1",
-    # 15.0 is the first release whose asyncio connect() reads proxies from the environment.
-    "websockets>=15.0",
+    # 17.1 is the first release that defines process_exception, the public rule for which
+    # connection failures to retry, in websockets.client (17.0 and earlier define it only in
+    # websockets.asyncio.client, which does not export it). Proxy support from the environment
+    # (15.0) and cp314t wheels are older.
+    "websockets>=17.1",
 ]
 
 [project.optional-dependencies]
