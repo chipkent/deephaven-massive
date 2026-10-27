@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from deephaven_massive._massive.spec.types import (
     Membership,
     Param,
     ParamKind,
+    Provenance,
     RestPath,
     Source,
     Transport,
@@ -28,19 +30,22 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
+_Loaded = dict[Transport, "Mapping[str, Source]"]
+
+
 @pytest.fixture
-def unloaded(monkeypatch: pytest.MonkeyPatch) -> dict[Transport, object]:
-    """Give the test an empty cache, so the next call loads from the file again.
+def unloaded(monkeypatch: pytest.MonkeyPatch) -> _Loaded:
+    """Give the test an empty cache, so the next call loads from the files again.
 
     Returns:
-        The empty cache the module now uses.
+        The empty mapping of loaded sources the module now uses.
     """
-    cache: dict[Transport, object] = {}
-    monkeypatch.setattr(spec, "_loaded", cache)
-    return cache
+    cache = spec._Cache(sources={})
+    monkeypatch.setattr(spec, "_cache", cache)
+    return cache.sources
 
 
-def test_rest_sources_load_from_the_generated_file(unloaded: dict[Transport, object]) -> None:
+def test_rest_sources_load_from_the_generated_file(unloaded: _Loaded) -> None:
     rest = spec.sources(Transport.REST)
     text = resources.files(spec).joinpath("rest.json").read_text(encoding="utf-8")
     assert list(rest) == [entry["key"] for entry in json.loads(text)["sources"]]
@@ -58,6 +63,8 @@ def test_the_loaded_values_are_the_generated_ones() -> None:
         wire_type=WireType.EPOCH,
         unit=WireUnit.NS,
         required=True,
+        description="The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when "
+        "the SIP received this trade from the exchange which produced it.",
     )
     assert trades.params[0] == Param(name="stockTicker", kind=ParamKind.STRING, in_path=True)
     gte = next(p for p in trades.params if p.name == "timestamp.gte")
@@ -78,43 +85,50 @@ def test_an_unknown_source_names_the_transport_and_key() -> None:
 
 
 @pytest.mark.parametrize("transport", [Transport.WS, Transport.FLAT_FILES])
-def test_a_transport_without_a_generated_file(
-    unloaded: dict[Transport, object], transport: Transport
-) -> None:
+def test_a_transport_without_a_generated_file(unloaded: _Loaded, transport: Transport) -> None:
     with pytest.raises(LookupError, match=f"no generated schema exists for transport {transport}"):
         spec.sources(transport)
     assert unloaded == {}
+    assert spec._cache.descriptions is None
 
 
 def test_sixteen_threads_share_one_first_load(
-    unloaded: dict[Transport, object], monkeypatch: pytest.MonkeyPatch
+    unloaded: _Loaded, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    parses: list[str] = []
-    real = spec.parse
+    # Half the threads ask for the sources first and half for the provenance first, all at
+    # once: each file is still read exactly once, and every thread gets the same objects.
+    reads: list[str] = []
+    real = spec._read
 
-    def counting(transport: Transport, text: str) -> object:
-        parses.append(transport)
-        return real(transport, text)
+    def counting(name: str) -> str:
+        reads.append(name)  # called only under the module's lock
+        return real(name)
 
-    monkeypatch.setattr(spec, "parse", counting)
+    monkeypatch.setattr(spec, "_read", counting)
     barrier = threading.Barrier(16)
-    results: list[object] = []
+    results: list[tuple[object, object]] = []
     lock = threading.Lock()
 
-    def load() -> None:
+    def load(sources_first: bool) -> None:
         barrier.wait()
-        loaded = spec.sources(Transport.REST)
+        if sources_first:
+            rest = spec.sources(Transport.REST)
+            loaded = (rest, spec.provenance())
+        else:
+            found = spec.provenance()
+            loaded = (spec.sources(Transport.REST), found)
         with lock:
             results.append(loaded)
 
-    threads = [threading.Thread(target=load) for _ in range(16)]
+    threads = [threading.Thread(target=load, args=(i % 2 == 0,)) for i in range(16)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
-    assert parses == [Transport.REST]
+    assert sorted(reads) == ["descriptions.json", "rest.json"]
     assert len(results) == 16
-    assert all(result is results[0] for result in results)
+    assert all(result[0] is results[0][0] for result in results)
+    assert all(result[1] is results[0][1] for result in results)
 
 
 def _file(*entries: Mapping[str, object]) -> str:
@@ -257,3 +271,265 @@ def test_parse_rejects_a_conversion_the_decoder_lacks_or_that_does_not_fit(
     field = {**_FIELD, "type": "string", "conversion": conversion}
     with pytest.raises(ValueError, match=message):
         spec.parse(Transport.WS, _file({"key": "s", "fields": [field], "memberships": []}))
+
+
+# --- Descriptions and provenance -----------------------------------------------------------
+
+
+def _committed_descriptions() -> dict[str, object]:
+    text = resources.files(spec).joinpath("descriptions.json").read_text(encoding="utf-8")
+    document: dict[str, object] = json.loads(text)
+    return document
+
+
+def test_every_description_is_joined_into_its_field() -> None:
+    texts = _committed_descriptions()["descriptions"]
+    assert isinstance(texts, dict)
+    described = texts["REST"]
+    for key, path in spec.sources(Transport.REST).items():
+        for item in path.fields:
+            assert item.description == described.get(key, {}).get(item.wire_key, ""), (key, item)
+    trades = spec.source(Transport.REST, "/v3/trades/{stockTicker}")
+    assert trades.field("Conditions").description == (
+        "A list of condition codes. See Stocks Condition Codes "
+        "(https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each "
+        "code means."
+    )
+
+
+def test_a_field_the_vendor_does_not_describe_loads_as_empty() -> None:
+    futures = spec.source(Transport.REST, "/futures/v1/snapshot")
+    assert futures.field("DetailsTicker").description == ""
+    assert futures.field("DetailsSettlementDate").description == (
+        "The day that this contract is settled."
+    )
+
+
+def test_provenance_gives_the_fetch_date_and_every_source_url() -> None:
+    found = spec.provenance()
+    assert isinstance(found, Provenance)
+    assert found is spec.provenance()
+    assert found.fetched.isoformat() == _committed_descriptions()["fetched"]
+    assert {key for _, key in found.urls} == set(spec.sources(Transport.REST))
+    assert found.urls[Transport.REST, "/v3/trades/{stockTicker}"] == (
+        "https://massive.com/docs/rest/stocks/trades-quotes/trades.md",
+    )
+    # A path several asset classes share cites every page that documents it.
+    assert found.urls[Transport.REST, "/v3/reference/tickers"] == tuple(
+        f"https://massive.com/docs/rest/{asset}/tickers/all-tickers.md"
+        for asset in ("crypto", "forex", "indices", "stocks")
+    )
+
+
+_PRICE = {**_FIELD, "wire_key": "p", "column": "P", "conversion": None}
+_DESCRIBED_ENTRY = {"key": "stocks/T", "fields": [_PRICE], "memberships": []}
+
+
+def test_parse_joins_descriptions_and_leaves_the_rest_empty() -> None:
+    entry = {**_DESCRIBED_ENTRY, "fields": [_PRICE, _FIELD]}
+    (value,) = spec.parse(Transport.WS, _file(entry), {"stocks/T": {"p": "The price."}}).values()
+    assert [(f.wire_key, f.description) for f in value.fields] == [("p", "The price."), ("x", "")]
+    (bare,) = spec.parse(Transport.WS, _file(entry)).values()
+    assert [f.description for f in bare.fields] == ["", ""]
+
+
+@pytest.mark.parametrize(
+    ("descriptions", "message"),
+    [
+        (
+            {"stocks/Q": {"p": "The price."}},
+            "descriptions name the WS source 'stocks/Q', which is absent",
+        ),
+        (
+            {"stocks/T": {"p": "The price.", "z": "Gone."}},
+            r"descriptions of WS 'stocks/T' name no field: \['z'\]",
+        ),
+    ],
+    ids=["unknown source", "unknown wire key"],
+)
+def test_parse_rejects_a_description_of_something_the_schema_lacks(
+    descriptions: Mapping[str, Mapping[str, str]], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        spec.parse(Transport.WS, _file(_DESCRIBED_ENTRY), descriptions)
+
+
+_URL = "https://massive.com/docs/rest/x.md"
+
+
+def _descriptions(**change: object) -> str:
+    document = {
+        "generated_by": "python -m deephaven_massive._massive.refresh",
+        "fetched": "2026-10-27",
+        "urls": {"REST": {"/v1/x": [_URL]}},
+        "descriptions": {"REST": {"/v1/x": {"price": "The price."}}},
+    }
+    return json.dumps({**document, **change})
+
+
+def test_parse_descriptions_reads_the_generated_format() -> None:
+    found = spec.parse_descriptions(_descriptions())
+    assert found.fetched == dt.date(2026, 10, 27)
+    assert found.urls == {Transport.REST: {"/v1/x": (_URL,)}}
+    assert found.texts == {Transport.REST: {"/v1/x": {"price": "The price."}}}
+    assert isinstance(found.urls, MappingProxyType)
+    assert isinstance(found.urls[Transport.REST], MappingProxyType)
+    assert isinstance(found.texts[Transport.REST], MappingProxyType)
+    assert isinstance(found.texts[Transport.REST]["/v1/x"], MappingProxyType)
+
+
+@pytest.mark.parametrize(
+    ("text", "error", "message"),
+    [
+        ("[]", TypeError, "the descriptions file is \\[\\], not an object"),
+        (_descriptions(fetched="27 Oct 2026"), ValueError, "Invalid isoformat"),
+        (_descriptions(fetched=None), TypeError, "'fetched' is None, not a string"),
+        (_descriptions(urls={"SMS": {}}), ValueError, "'SMS' is not a valid Transport"),
+        (_descriptions(urls=[]), TypeError, "urls is \\[\\], not an object"),
+        (_descriptions(urls={"REST": []}), TypeError, "URLs of REST is \\[\\], not an object"),
+        (
+            _descriptions(urls={"REST": {"/v1/x": _URL}}),
+            TypeError,
+            "URLs of '/v1/x' is .* not an array of strings",
+        ),
+        (
+            _descriptions(urls={"REST": {"/v1/x": [1]}}),
+            TypeError,
+            "not an array of strings",
+        ),
+        (
+            _descriptions(descriptions={"REST": {"/v1/x": {"price": None}}}),
+            TypeError,
+            "descriptions of '/v1/x' is .* not an object of strings",
+        ),
+        (
+            _descriptions(descriptions={"REST": ["/v1/x"]}),
+            TypeError,
+            "descriptions of REST is .* not an object",
+        ),
+        (json.dumps({"fetched": "2026-10-27"}), ValueError, "missing member 'urls'"),
+        (
+            json.dumps({"fetched": "2026-10-27", "urls": {}}),
+            ValueError,
+            "missing member 'descriptions'",
+        ),
+    ],
+    ids=[
+        "not an object",
+        "a date that is not ISO",
+        "no date",
+        "unknown transport",
+        "urls not an object",
+        "a transport's urls not an object",
+        "a source's urls not a list",
+        "a url not text",
+        "a description not text",
+        "a transport's descriptions not an object",
+        "no urls",
+        "no descriptions",
+    ],
+)
+def test_parse_descriptions_coerces_nothing(
+    text: str, error: type[Exception], message: str
+) -> None:
+    with pytest.raises(error, match=message):
+        spec.parse_descriptions(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("[]", "the schema file is \\[\\], not an object"),
+        ("{}", "missing member 'sources'"),
+        (_file({"key": "s", "memberships": []}), "missing member 'fields'"),
+        (_file({"fields": [], "memberships": []}), "missing member 'key'"),
+    ],
+    ids=["not an object", "no sources", "a source without fields", "a source without a key"],
+)
+def test_parse_names_a_missing_member(text: str, message: str) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        spec.parse(Transport.WS, text)
+
+
+# The loader against generated files of the test's own, so each mismatch shows alone.
+
+_SCHEMA = json.dumps(
+    {
+        "sources": [
+            {
+                "key": "/v1/x",
+                "result_key": "results",
+                "params": [],
+                "fields": [{**_FIELD, "wire_key": "price", "column": "Price"}],
+                "memberships": [],
+            }
+        ]
+    }
+)
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, files: Mapping[str, str]) -> None:
+    """Make the loader read `files`, by file name, instead of the committed generated files.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        files: The text of each generated file, such as `{"rest.json": ...}`; a file not
+            named is read from the package as usual.
+    """
+    real = spec._read
+    monkeypatch.setattr(spec, "_read", lambda name: files[name] if name in files else real(name))
+
+
+def test_the_loader_joins_and_checks_files_of_its_own(
+    unloaded: _Loaded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _serve(monkeypatch, {"rest.json": _SCHEMA, "descriptions.json": _descriptions()})
+    assert spec.source(Transport.REST, "/v1/x").field("Price").description == "The price."
+    assert spec.provenance() == Provenance(
+        fetched=dt.date(2026, 10, 27), urls={(Transport.REST, "/v1/x"): (_URL,)}
+    )
+
+
+@pytest.mark.parametrize(
+    ("descriptions", "message"),
+    [
+        pytest.param(
+            _descriptions(urls={"WS": {}}),
+            r"names transports without a schema: \['WS'\]",
+            id="a transport without a schema",
+        ),
+        pytest.param(
+            _descriptions(descriptions={"REST": {"/v1/y": {"price": "P."}}}),
+            "descriptions name the REST source '/v1/y', which is absent",
+            id="a description of an unknown source",
+        ),
+        pytest.param(
+            _descriptions(urls={"REST": {}}),
+            r"has REST sources without a URL: \['/v1/x'\]",
+            id="a source without a URL",
+        ),
+        pytest.param(
+            _descriptions(urls={"REST": {"/v1/x": [_URL], "/v1/y": [_URL]}}),
+            r"has REST URLs of sources the schema lacks: \['/v1/y'\]",
+            id="a URL of an unknown source",
+        ),
+    ],
+)
+@pytest.mark.parametrize("first", ["sources", "provenance"])
+def test_a_mismatched_file_raises_at_load_whichever_call_comes_first(
+    unloaded: _Loaded,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    descriptions: str,
+    message: str,
+    first: str,
+) -> None:
+    # `sources` and `provenance` reject the same files, and the transport stays unloaded so
+    # that the next call raises again rather than returning what failed.
+    _serve(monkeypatch, {"rest.json": _SCHEMA, "descriptions.json": descriptions})
+    call = spec.provenance if first == "provenance" else lambda: spec.sources(Transport.REST)
+    for _ in range(2):
+        with pytest.raises(ValueError, match=message):
+            call()
+    assert unloaded == {}
+    assert spec._cache.provenance is None

@@ -1,11 +1,16 @@
-"""Render the generated REST schema, `spec/rest.json`, as its canonical text.
+"""Render the generated files, `spec/rest.json` and `spec/descriptions.json`, as canonical text.
 
 The generators produce `RestPath` values; this module turns them into the text of the
-committed file the runtime loads (`spec.sources()`), and nothing else; `generate` writes it.
-The text is deterministic, so a refresh that changes nothing leaves the file byte for byte as
-it was, and the parity test can compare the committed file with a fresh rendering. It is JSON
-with one line per field and per parameter, so a refresh diff shows each changed field or
-parameter as one changed line.
+committed files the runtime loads (`spec.sources()`, `spec.provenance()`), and nothing else;
+`generate` writes them. The text is deterministic, so a refresh that changes nothing leaves
+each file byte for byte as it was, and the parity test can compare the committed files with a
+fresh rendering. Both are JSON with one line per field (and, in `rest.json`, per parameter),
+so a refresh diff shows each changed field as one changed line.
+
+The vendor's descriptions go in `descriptions.json` alone, never in `rest.json`: they change
+far more often than the schema, and a refresh that only rewords them must leave `rest.json`
+unchanged, so a reviewer sees at once that no schema moved. The descriptions arrive already
+plain text (`plain_text`, applied by the generators).
 
 It imports the standard library and `spec.types` only.
 """
@@ -17,15 +22,28 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
+    import datetime as dt
     from collections.abc import Mapping, Sequence
 
     from deephaven_massive._massive.refresh.openapi import Json
-    from deephaven_massive._massive.spec.types import Field, Param, RestPath
+    from deephaven_massive._massive.spec.types import Field, Param, RestPath, Source, Transport
 
-__all__ = ["REST_FILE", "render_rest"]
+__all__ = [
+    "DESCRIPTIONS_FILE",
+    "REST_FILE",
+    "SPEC_DIRECTORY",
+    "render_descriptions",
+    "render_rest",
+]
 
-REST_FILE: Final = Path(__file__).parent.parent / "spec" / "rest.json"
+SPEC_DIRECTORY: Final = Path(__file__).parent.parent / "spec"
+"""The directory of the generated files, the `spec` package."""
+
+REST_FILE: Final = SPEC_DIRECTORY / "rest.json"
 """The generated REST schema the refresh writes."""
+
+DESCRIPTIONS_FILE: Final = SPEC_DIRECTORY / "descriptions.json"
+"""The generated file of the vendor's field descriptions, fetch date, and source URLs."""
 
 # The command that writes the file, recorded in it.
 _GENERATED_BY: Final = "python -m deephaven_massive._massive.refresh"
@@ -93,15 +111,59 @@ def _rows(lines: Sequence[str], indent: str) -> list[str]:
     return [f"{indent}{line}{',' if i < len(lines) - 1 else ''}" for i, line in enumerate(lines)]
 
 
-def render_rest(paths: Sequence[RestPath], *, openapi_sha256: str) -> str:
+def render_descriptions(
+    sources: Mapping[Transport, Sequence[Source]],
+    *,
+    fetched: dt.date,
+    urls: Mapping[Transport, Mapping[str, Sequence[str]]],
+) -> str:
+    """Return the canonical text of `descriptions.json`.
+
+    Transports, sources, and fields keep the order they are given in. A field whose
+    `description` is empty has no entry, and a source with no described field has none
+    either; every source given in `urls` keeps its URLs, sorted.
+
+    Args:
+        sources: The generated sources of each transport, each field's `description` already
+            plain text (`plain_text`).
+        fetched: The day the snapshot they came from was downloaded.
+        urls: Per transport, the vendor URLs that document each source key: for REST, every
+            documentation page that names the path (a path shared by several asset classes,
+            such as `/v3/reference/tickers`, has one page per asset class).
+
+    Returns:
+        The file's text: `{"generated_by", "fetched", "urls": {<transport>: {<source key>:
+        [<url>, ...]}}, "descriptions": {<transport>: {<source key>: {<wire key>: <text>}}}}`,
+        one line per URL and per description, ending in a newline.
+    """
+    texts: dict[str, dict[str, dict[str, str]]] = {}
+    for transport, described in sources.items():
+        texts[transport.value] = {}
+        for source in described:
+            fields = {f.wire_key: f.description for f in source.fields if f.description}
+            if fields:
+                texts[transport.value][source.key] = fields
+    document = {
+        "generated_by": _GENERATED_BY,
+        "fetched": fetched.isoformat(),
+        "urls": {
+            transport.value: {key: sorted(found) for key, found in by_key.items()}
+            for transport, by_key in urls.items()
+        },
+        "descriptions": texts,
+    }
+    return json.dumps(document, indent=1, ensure_ascii=False) + "\n"
+
+
+def render_rest(paths: Sequence[RestPath]) -> str:
     """Return the canonical text of `rest.json`.
 
     Paths keep their order; within a field or parameter, keys are sorted. The file records the
-    command that wrote it and the stored hash of the specification it came from.
+    command that wrote it, and nothing about the snapshot it came from (`descriptions.json`
+    records the fetch date), so a vendor change that moves no schema leaves it unchanged.
 
     Args:
         paths: The generated paths.
-        openapi_sha256: The stored hash of the specification they came from.
 
     Returns:
         The file's text, ending in a newline.
@@ -109,7 +171,6 @@ def render_rest(paths: Sequence[RestPath], *, openapi_sha256: str) -> str:
     out = [
         "{",
         f' "generated_by": {json.dumps(_GENERATED_BY)},',
-        f' "openapi_sha256": {json.dumps(openapi_sha256)},',
         ' "sources": [',
     ]
     for index, path in enumerate(paths):

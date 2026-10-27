@@ -194,10 +194,10 @@ def test_the_type_fixes_follow_their_samples(
     for (path, wire_key), fix in overrides.TYPE_FIXES.items():
         typed = next(f for f in paths[path].fields if f.wire_key == wire_key)
         assert (typed.wire_type, typed.conversion) == (fix.conversion.wire_type, fix.conversion)
-        page = pages[coverage_page(real[1], path)]
+        shown_on = [pages[name] for name in coverage_pages(real[1], path)]
         key = wire_key.rsplit(".", 1)[-1]
         cited = re.findall(r'"[^"]+"|\b\d{6,}\b', fix.reason)
-        shown = [sample for sample in cited if f'"{key}": {sample}' in page]
+        shown = [s for s in cited if any(f'"{key}": {s}' in page for page in shown_on)]
         assert shown, (path, wire_key)
         # The sample must decode through the conversion the decoder applies.
         assert convert_field(typed, json.loads(shown[0])) is not None
@@ -295,9 +295,24 @@ def test_gate_stale_entry_a_shared_type_fix_is_needed_while_any_member_needs_it(
     ]
 
 
-def coverage_page(coverage: Coverage, path: str) -> str:
-    """Return the documentation page that names a path."""
+def coverage_pages(coverage: Coverage, path: str) -> tuple[str, ...]:
+    """Return the documentation pages that name a path."""
     return coverage.pages[path]
+
+
+@_requires_snapshot
+def test_a_path_shared_by_asset_classes_keeps_every_page(
+    real: tuple[tuple[RestPath, ...], Coverage],
+) -> None:
+    assert coverage_pages(real[1], "/v3/reference/tickers") == (
+        "crypto/tickers/all-tickers.md",
+        "forex/tickers/all-tickers.md",
+        "indices/tickers/all-tickers.md",
+        "stocks/tickers/all-tickers.md",
+    )
+    assert coverage_pages(real[1], "/v3/trades/{stockTicker}") == (
+        "stocks/trades-quotes/trades.md",
+    )
 
 
 # --- Synthetic specifications ---------------------------------------------------------------
@@ -364,7 +379,14 @@ def _snapshot(
         endpoint = f"**Endpoint:** `GET {path}`\n"
         if path not in undocumented and endpoint not in covered:
             named[f"auto/page-{index}.md"] = endpoint
-    return Snapshot(openapi=openapi, llms="", pages=named, openapi_sha256="0" * 64)
+    return Snapshot(
+        openapi=openapi,
+        llms="",
+        pages=named,
+        fetched=date(2026, 1, 2),
+        page_urls={name: f"https://massive.com/docs/rest/{name}" for name in named},
+        index_url="https://massive.com/docs/llms.txt",
+    )
 
 
 def _hand(
@@ -519,6 +541,52 @@ def test_nested_objects_flatten_in_order_with_refs_and_all_of() -> None:
         ("ticker", "Ticker", True),
         ("day.close", "DayClose", False),
         ("close", "Close", False),
+    ]
+
+
+def test_each_field_records_its_resolved_description_as_plain_text() -> None:
+    # The description is read after `$ref` and `allOf` are resolved, and normalized.
+    schemas = {
+        "Bar": {
+            "type": "object",
+            "properties": {"close": {"type": "number", "description": "The close\n price."}},
+        },
+        "Base": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "See [tickers](/docs/tickers)."}
+            },
+        },
+    }
+    row = {
+        "allOf": [
+            {"$ref": "#/components/schemas/Base"},
+            {"type": "object", "properties": {"day": {"$ref": "#/components/schemas/Bar"}}},
+        ]
+    }
+    paths, _ = generate_rest(
+        _snapshot({_PATH: _item(row)}, schemas=schemas), _hand(identity={"day": ""})
+    )
+    assert [(f.wire_key, f.description) for f in paths[0].fields] == [
+        # A root-relative link resolves against the documentation index's origin.
+        ("ticker", "See tickers (https://massive.com/docs/tickers)."),
+        ("day.close", "The close price."),
+    ]
+
+
+def test_a_field_without_a_description_generates_and_stops_nothing() -> None:
+    # No gate looks at descriptions: a missing, empty, or non-text one is simply "".
+    path = _one(
+        _row(
+            price={"type": "number"},
+            size={"type": "number", "description": "  "},
+            remark={"type": "number", "description": 5},
+        )
+    )
+    assert [(f.wire_key, f.description) for f in path.fields] == [
+        ("price", ""),
+        ("size", ""),
+        ("remark", ""),
     ]
 
 
@@ -1096,7 +1164,7 @@ def test_paths_are_classified() -> None:
     assert coverage.draft == {"/b/{id}"}
     assert coverage.deprecated == {"/e/{id}", "/f/{id}"}
     assert coverage.specified == {"/a/{id}", "/b/{id}", "/c/{id}", "/d/{id}", "/e/{id}", "/f/{id}"}
-    assert coverage.pages["/c/{id}"] == "c.md"
+    assert coverage.pages["/c/{id}"] == ("c.md",)
 
 
 def test_exclusions_of_other_transports_are_left_to_their_generators() -> None:

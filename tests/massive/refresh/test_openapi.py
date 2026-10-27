@@ -79,6 +79,49 @@ def test_schema_unwraps_a_one_branch_choice_only() -> None:
     assert _SPEC.schema(two, "w") == two
 
 
+_DESCRIBED: dict[str, JsonObject] = {
+    "Price": {"type": "number", "description": "A price."},
+    "Priced": {"allOf": [{"$ref": "#/components/schemas/Price"}], "description": "The bid."},
+}
+
+
+@pytest.mark.parametrize(
+    ("node", "description"),
+    [
+        pytest.param(
+            {"$ref": "#/components/schemas/Price", "description": "The ask."},
+            "The ask.",
+            id="beside a reference",
+        ),
+        pytest.param(
+            {"allOf": [{"$ref": "#/components/schemas/Price"}], "description": "The close."},
+            "The close.",
+            id="beside an allOf",
+        ),
+        pytest.param(
+            {"anyOf": [{"$ref": "#/components/schemas/Price"}], "description": "The open."},
+            "The open.",
+            id="beside a one-branch choice",
+        ),
+        pytest.param(
+            {"$ref": "#/components/schemas/Priced"},
+            "The bid.",
+            id="beside the allOf a reference names",
+        ),
+        pytest.param(
+            {"$ref": "#/components/schemas/Priced", "description": "The last."},
+            "The last.",
+            id="the nearest of several",
+        ),
+        pytest.param({"$ref": "#/components/schemas/Price"}, "A price.", id="none beside"),
+    ],
+)
+def test_schema_the_nearest_description_wins(node: Json, description: str) -> None:
+    spec = OpenApi({"components": {"schemas": _DESCRIBED}})
+    assert spec.schema(node, "w")["description"] == description
+    assert _DESCRIBED["Price"]["description"] == "A price."  # nothing is changed in place
+
+
 def test_schema_stops_on_a_cyclic_all_of() -> None:
     with pytest.raises(RefreshError, match="nesting too deep"):
         _SPEC.schema({"$ref": "#/components/schemas/Deep"}, "w")

@@ -38,7 +38,13 @@ def test_the_snapshot_lives_outside_the_package() -> None:
 )
 def test_the_real_snapshot_matches_its_manifest() -> None:
     manifest = json.loads((snapshot.DIRECTORY / "manifest.json").read_text("utf-8"))
-    assert Snapshot.load().openapi_sha256 == manifest["files"]["openapi.json"]["stored_sha256"]
+    loaded = Snapshot.load()
+    assert loaded.fetched.isoformat() == manifest["fetched"]
+    assert loaded.index_url == manifest["files"]["llms.txt"]["url"]
+    assert loaded.origin == "https://massive.com"
+    assert loaded.page_urls.keys() == loaded.pages.keys()
+    for name, url in loaded.page_urls.items():
+        assert manifest["files"][f"rest/{name}"]["url"] == url
 
 
 def test_a_missing_snapshot_says_to_run_from_a_source_checkout(tmp_path: Path) -> None:
@@ -134,7 +140,39 @@ def test_a_stored_snapshot_loads(tmp_path: Path) -> None:
     assert loaded.pages == {"stocks/trades.md": "page"}
     assert loaded.openapi == {"paths": {}}
     assert loaded.llms == _INDEX
-    assert loaded.openapi_sha256 == _sha((tmp_path / "s" / "openapi.json").read_bytes())
+    assert loaded.fetched == dt.date(2026, 1, 1)
+    assert loaded.index_url == "https://example.com/llms.txt"
+    assert loaded.origin == "https://example.com"
+    assert loaded.page_urls == {"stocks/trades.md": "https://example.com/rest/stocks/trades.md"}
+
+
+def _edit_manifest(directory: Path, change: dict[str, object]) -> None:
+    """Merge `change` into a stored snapshot's manifest."""
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    (directory / "manifest.json").write_text(json.dumps({**manifest, **change}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("fetched", ["27 October 2026", None])
+def test_gate_snapshot_a_manifest_without_a_fetch_date(tmp_path: Path, fetched: object) -> None:
+    _write_snapshot(tmp_path / "s", llms=_INDEX, pages={"stocks/trades.md": "page"})
+    _edit_manifest(tmp_path / "s", {"fetched": fetched})
+    with pytest.raises(RefreshError) as caught:
+        Snapshot.load(tmp_path / "s")
+    assert [(p.gate, p.key, p.message) for p in caught.value.problems] == [
+        ("snapshot", "manifest.json", f"the fetch date {fetched!r} is not an ISO date")
+    ]
+
+
+def test_gate_snapshot_a_manifest_entry_without_a_url(tmp_path: Path) -> None:
+    _write_snapshot(tmp_path / "s", llms=_INDEX, pages={"stocks/trades.md": "page"})
+    manifest = json.loads((tmp_path / "s" / "manifest.json").read_text(encoding="utf-8"))
+    del manifest["files"]["llms.txt"]["url"]
+    _edit_manifest(tmp_path / "s", {"files": manifest["files"]})
+    with pytest.raises(RefreshError) as caught:
+        Snapshot.load(tmp_path / "s")
+    assert [(p.gate, p.key, p.message) for p in caught.value.problems] == [
+        ("snapshot", "llms.txt", "the manifest records no URL")
+    ]
 
 
 def test_gate_snapshot_an_edited_vendor_file(tmp_path: Path) -> None:

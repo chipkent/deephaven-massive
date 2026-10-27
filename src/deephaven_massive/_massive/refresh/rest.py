@@ -44,6 +44,11 @@ replaced by its `NAMES` entry when Massive names the key nowhere (a name derived
 field's description, which the entry quotes). `naming.column_name` joins the long names in
 PascalCase: `prevDay.vw` becomes `PrevDayVwap`.
 
+**Descriptions.** Each field records the `description` of its schema after `$ref` and `allOf`
+are resolved, as plain text (`plain_text`), for `spec/descriptions.json`. A field
+without one gets `""`, and nothing stops: no name, type, or gate depends on a description,
+except that a `NAMES` entry quotes the one its name was derived from.
+
 **Parameters** keep the specification's order and wire names. Their `ParamKind` follows the
 same kind of mechanical rules: a name ending in `.any_of`, or an array, is `LIST` (sent
 comma-joined, even when its values come from an `enum`); any other `enum` is `ENUM`;
@@ -69,6 +74,7 @@ from deephaven_massive._massive.refresh import docs, gates, naming
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required, text
+from deephaven_massive._massive.refresh.plain_text import plain_text
 from deephaven_massive._massive.spec.convert import UnconvertibleError, convert, convert_field
 from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
@@ -158,7 +164,9 @@ class Coverage:
         excluded: The paths named by an exclusion.
         deprecated: The paths the specification marks deprecated.
         draft: The paths the specification marks draft (and not deprecated).
-        pages: Each path a REST documentation page names, mapped to that page's name.
+        pages: Each path a REST documentation page names, mapped to the names of every
+            page that names it, sorted (a path shared by several asset classes, such as
+            `/v3/reference/tickers`, has one page per asset class).
     """
 
     specified: frozenset[str]
@@ -166,7 +174,7 @@ class Coverage:
     excluded: frozenset[str]
     deprecated: frozenset[str]
     draft: frozenset[str]
-    pages: Mapping[str, str]
+    pages: Mapping[str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -187,16 +195,19 @@ class _Raw:
 class _PathGenerator:
     """Generate one path's `RestPath`, collecting its problems instead of stopping."""
 
-    def __init__(self, spec: OpenApi, hand: HandInput, path: str) -> None:
+    def __init__(self, spec: OpenApi, hand: HandInput, path: str, *, origin: str) -> None:
         """Prepare to generate `path`.
 
         Args:
             spec: The specification.
             hand: The hand input.
             path: The path template.
+            origin: The documentation origin a root-relative link in a description is
+                resolved against (`plain_text`).
         """
         self.spec = spec
         self.hand = hand
+        self.origin = origin
         self.path = path
         self.problems: list[Problem] = []
         self.wire_keys: set[str] = set()
@@ -599,6 +610,7 @@ class _PathGenerator:
             unit=unit,
             required=raw.required,
             conversion=fix,
+            description=plain_text(description, origin=self.origin),
         )
 
     def unit(
@@ -927,8 +939,8 @@ def _status(item: JsonObject) -> str:
     return "draft" if item.get("x-polygon-draft") is True else ""
 
 
-def _documented_pages(snapshot: Snapshot, problems: list[Problem]) -> dict[str, str]:
-    """Map each path a REST documentation page names to the page.
+def _documented_pages(snapshot: Snapshot, problems: list[Problem]) -> dict[str, tuple[str, ...]]:
+    """Map each path a REST documentation page names to every page that names it.
 
     Args:
         snapshot: The snapshot.
@@ -936,9 +948,9 @@ def _documented_pages(snapshot: Snapshot, problems: list[Problem]) -> dict[str, 
             being an overview, is reported.
 
     Returns:
-        Path template to page name.
+        Path template to page names, sorted.
     """
-    pages: dict[str, str] = {}
+    pages: dict[str, tuple[str, ...]] = {}
     for name, page in sorted(snapshot.pages.items()):
         try:
             path = docs.endpoint(page)
@@ -946,7 +958,7 @@ def _documented_pages(snapshot: Snapshot, problems: list[Problem]) -> dict[str, 
             problems.append(Problem(gate=Gate.DOCS, source="", key=name, message=str(error)))
             continue
         if path is not None:
-            pages.setdefault(path, name)
+            pages[path] = (*pages.get(path, ()), name)
         elif PurePosixPath(name).stem not in _OVERVIEW_PAGES:
             problems.append(
                 Problem(
@@ -1009,9 +1021,9 @@ def generate_rest(
             gate=Gate.DOCS,
             source=path,
             key="",
-            message=f"{page} documents a path the specification lacks",
+            message=f"{', '.join(names)} documents a path the specification lacks",
         )
-        for path, page in pages.items()
+        for path, names in pages.items()
         if path not in statuses
     ]
     problems += gates.check_exclusions(hand, statuses, pages)
@@ -1021,7 +1033,7 @@ def generate_rest(
     for path, status in statuses.items():
         if status or path in excluded:
             continue
-        generator = _PathGenerator(spec, hand, path)
+        generator = _PathGenerator(spec, hand, path, origin=snapshot.origin)
         try:
             value = generator.generate()
         except RefreshError as error:
