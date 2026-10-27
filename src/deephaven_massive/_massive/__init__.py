@@ -16,6 +16,14 @@ imports only the standard library, `urllib3`, `websockets`, `certifi`, `orjson`,
 Interface:
     - `WireError`, `WireAuthError`, `WireEntitlementError`: the errors every client raises;
       `deephaven_massive._errors.from_wire` turns each into its public counterpart.
+    - `source`, `sources`: the generated description of each REST path (and, later, each
+      WebSocket channel and flat-file prefix), loaded once from the committed `spec/*.json`.
+    - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
+      `DriftReport`: the value types of that description. A `RestPath`'s parameters are
+      `Param`s, reached through `RestPath.params`.
+    - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
+      client, one file being decoded into Arrow batches, what to read from it, and where a
+      dataset's file for a day lives.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
     - `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`: the client of one WebSocket
@@ -28,7 +36,10 @@ Deephaven.
 Example:
     ::
 
-        from deephaven_massive._massive import WireError
+        from deephaven_massive._massive import Transport, WireError, source
+
+        trades = source(Transport.REST, "/v3/trades/{stockTicker}")
+        assert trades.field("Price").wire_key == "price"
 
         try:
             raise WireError("HTTP 503 from GET /v3/trades/AAPL", status=503)
@@ -40,22 +51,41 @@ from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
 __all__ = [
+    "DriftReport",
+    "Field",
+    "FlatFile",
+    "FlatFileClient",
     "Page",
+    "ParamKind",
+    "ReadColumn",
+    "ReadPlan",
     "Reject",
     "RestClient",
+    "RestPath",
+    "Source",
     "Status",
     "StatusKind",
+    "Transport",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WireType",
+    "WireUnit",
     "WsClient",
     "WsState",
+    "object_key",
+    "source",
+    "sources",
     "to_batch",
 ]
 
 # Each name of the interface, and the module that defines it.
 _EXPORTS: dict[str, str] = {
+    "FlatFile": "deephaven_massive._massive.flatfiles.reader",
+    "FlatFileClient": "deephaven_massive._massive.flatfiles.client",
     "Page": "deephaven_massive._massive.rest.response",
+    "ReadColumn": "deephaven_massive._massive.flatfiles.reader",
+    "ReadPlan": "deephaven_massive._massive.flatfiles.reader",
     "RestClient": "deephaven_massive._massive.rest.client",
     "WireAuthError": "deephaven_massive._massive.net.errors",
     "WireEntitlementError": "deephaven_massive._massive.net.errors",
@@ -65,12 +95,26 @@ _EXPORTS: dict[str, str] = {
     "StatusKind": "deephaven_massive._massive.ws",
     "WsClient": "deephaven_massive._massive.ws",
     "WsState": "deephaven_massive._massive.ws",
+    "source": "deephaven_massive._massive.spec",
+    "sources": "deephaven_massive._massive.spec",
+    "DriftReport": "deephaven_massive._massive.spec.types",
+    "Field": "deephaven_massive._massive.spec.types",
+    "ParamKind": "deephaven_massive._massive.spec.types",
+    "RestPath": "deephaven_massive._massive.spec.types",
+    "Source": "deephaven_massive._massive.spec.types",
+    "Transport": "deephaven_massive._massive.spec.types",
+    "WireType": "deephaven_massive._massive.spec.types",
+    "WireUnit": "deephaven_massive._massive.spec.types",
+    "object_key": "deephaven_massive._massive.flatfiles.layout",
     "to_batch": "deephaven_massive._massive.rest.batch",
 }
 
 # Type checkers read the imports, so they see each name's real type and flag a name outside
 # the interface; at run time `__getattr__` resolves the names instead.
 if TYPE_CHECKING:
+    from deephaven_massive._massive.flatfiles.client import FlatFileClient
+    from deephaven_massive._massive.flatfiles.layout import object_key
+    from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
     from deephaven_massive._massive.net.errors import (
         WireAuthError,
         WireEntitlementError,
@@ -79,6 +123,17 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.rest.batch import to_batch
     from deephaven_massive._massive.rest.client import RestClient
     from deephaven_massive._massive.rest.response import Page
+    from deephaven_massive._massive.spec import source, sources
+    from deephaven_massive._massive.spec.types import (
+        DriftReport,
+        Field,
+        ParamKind,
+        RestPath,
+        Source,
+        Transport,
+        WireType,
+        WireUnit,
+    )
     from deephaven_massive._massive.ws import Reject, Status, StatusKind, WsClient, WsState
 else:
 

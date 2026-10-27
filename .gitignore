@@ -234,3 +234,7 @@ hs_err_pid*.log
 # uv.lock is not committed: users never install from it, and every sync resolves the newest
 # versions, including the latest deephaven-fixes commit of the SDK fork.
 uv.lock
+
+# An interrupted `refresh --fetch` leaves its staging or backup directory beside the snapshot.
+vendor/massive-incoming/
+vendor/massive-previous/

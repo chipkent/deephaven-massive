@@ -3,7 +3,7 @@ from types import ModuleType
 from deephaven_massive._massive import refresh
 
 
-def test_the_package_defines_no_names_yet() -> None:
+def test_the_package_defines_no_names() -> None:
     # Submodules imported elsewhere in the process are bound on the package; they do not count.
     defined = [
         name

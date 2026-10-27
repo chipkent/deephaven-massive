@@ -84,11 +84,15 @@ massive = { git = "https://github.com/chipkent/massive-client-python", branch = 
 
 [tool.hatch.build.targets.sdist]
 # The sdist carries the package and its tests; hatchling adds README.md, LICENSE, and
-# pyproject.toml itself.
+# pyproject.toml itself. It leaves out vendor/: the snapshot there is Massive's published
+# content, kept only as input to the refresh, and the tests that read it skip without it.
 only-include = ["src", "tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deephaven_massive"]
+# The refresh runs from a source checkout only, reading the snapshot under vendor/; the wheel
+# ships the generated spec/*.json as package data.
+exclude = ["src/deephaven_massive/_massive/refresh"]
 
 # ---------------------------------------------------------------------------------------------
 # Ruff
