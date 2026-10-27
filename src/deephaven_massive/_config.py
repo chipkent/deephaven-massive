@@ -1,4 +1,4 @@
-"""`MassiveConfig`, the session's immutable configuration, and the JSON codec choice.
+"""`MassiveConfig`, the session's immutable configuration.
 
 `MassiveConfig` is the only way to configure the library: `MassiveSession(MassiveConfig(...))`.
 Every default lives in exactly one place, the field defaults of the dataclass below; nothing else in
@@ -8,26 +8,23 @@ fails before any session exists.
 
 What is deliberately *not* configurable: the options contract cap (1,000 per connection), the
 evidence endpoints of the host decision, the plan tier (Massive offers no entitlement endpoint,
-so the library learns the tier from REST evidence instead), and the JSON codec. The codec is
-`orjson` when the optional extra `deephaven-massive[orjson]` is installed and the standard
-library otherwise; `json_codec()` reports the choice and the session logs it once at INFO.
+so the library learns the tier from REST evidence instead), and the JSON codec. The wire
+package owns the codec: it uses `orjson` when the optional extra `deephaven-massive[orjson]` is
+installed and the standard library otherwise, and logs the choice once at INFO.
 """
 
 from __future__ import annotations
 
-import importlib
-import json
-import logging
 import math
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import time
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._enums import AssetClass, _require_enum
-from deephaven_massive._errors import AuthenticationError, log_once
+from deephaven_massive._errors import AuthenticationError
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -36,15 +33,10 @@ if TYPE_CHECKING:
 __all__ = [
     "MIN_RECONNECT_BACKOFF",
     "HostMap",
-    "JsonCodec",
     "MassiveConfig",
-    "json_codec",
-    "log_json_codec_once",
     "require_positive_int",
     "require_positive_number",
 ]
-
-logger = logging.getLogger(__name__)
 
 MIN_RECONNECT_BACKOFF: Final = 15.0
 """The shortest `reconnect_backoff` accepted, in seconds.
@@ -377,53 +369,3 @@ class HostMap(Mapping[AssetClass, str]):
             For example `{<AssetClass.STOCKS: 'stocks'>: 'delayed.massive.com'}`.
         """
         return repr(dict(self._hosts))
-
-
-class JsonCodec(Protocol):
-    """A JSON decoder: `orjson.loads` or `json.loads`."""
-
-    def __call__(self, data: str | bytes, /) -> object:
-        """Decode one JSON document.
-
-        Args:
-            data: The document's text or UTF-8 bytes.
-
-        Returns:
-            The decoded value.
-        """
-
-
-def _select_json_codec() -> tuple[str, JsonCodec]:
-    """Pick the JSON decoder: `orjson` when it can be imported, otherwise the standard library.
-
-    `orjson` is an optional extra because it publishes no free-threaded wheels.
-
-    Returns:
-        `("orjson", orjson.loads)` or `("json", json.loads)`.
-    """
-    try:
-        orjson = importlib.import_module("orjson")
-    except ImportError:
-        return "json", json.loads
-    loads: JsonCodec = orjson.loads
-    return "orjson", loads
-
-
-_CODEC: Final = _select_json_codec()
-
-
-def json_codec() -> tuple[str, JsonCodec]:
-    """Return the process's JSON decoder and its name.
-
-    The WebSocket layer decodes every frame exactly once with this codec. The SDK client keeps
-    the standard library for the frames it sends, because `orjson.dumps` returns bytes.
-
-    Returns:
-        `(name, loads)`, where `name` is `"orjson"` or `"json"`.
-    """
-    return _CODEC
-
-
-def log_json_codec_once() -> None:
-    """Log the JSON codec choice at INFO, the first time any session starts in the process."""
-    log_once(logger, "json-codec", "JSON codec: %s", _CODEC[0])

@@ -1,24 +1,15 @@
-"""Tests for `MassiveConfig` and the JSON codec choice."""
+"""Tests for `MassiveConfig`."""
 
 import dataclasses
 import inspect
-import json
-import logging
-import sys
 from datetime import time
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive import _errors, _query, _session
-from deephaven_massive._config import (
-    MassiveConfig,
-    _select_json_codec,
-    json_codec,
-    log_json_codec_once,
-)
+from deephaven_massive import _query, _session
+from deephaven_massive._config import MassiveConfig
 from deephaven_massive._dates import NEW_YORK
 from deephaven_massive._enums import AssetClass
 
@@ -202,29 +193,6 @@ def test_ws_hosts_types(base: MassiveConfig) -> None:
 def test_publish_cutoff_is_a_wall_clock_time(base: MassiveConfig) -> None:
     with pytest.raises(ValueError, match="drop tzinfo"):
         _replace(base, flat_file_publish_cutoff=time(11, 30, tzinfo=NEW_YORK))
-
-
-def test_json_codec_without_orjson(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "orjson", None)  # makes `import orjson` raise ImportError
-    assert _select_json_codec() == ("json", json.loads)
-
-
-def test_json_codec_with_orjson(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "orjson", SimpleNamespace(loads=json.loads))
-    name, loads = _select_json_codec()
-    assert name == "orjson"
-    assert loads(b'{"a": 1}') == {"a": 1}
-    assert json_codec()[0] in {"json", "orjson"}
-
-
-def test_json_codec_is_logged_once(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(_errors, "_logged", set())
-    with caplog.at_level(logging.INFO, logger="deephaven_massive._config"):
-        log_json_codec_once()
-        log_json_codec_once()
-    assert [r.getMessage() for r in caplog.records] == [f"JSON codec: {json_codec()[0]}"]
 
 
 def test_api_key_must_be_a_string() -> None:

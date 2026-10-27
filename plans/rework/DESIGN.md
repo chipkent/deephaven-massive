@@ -363,8 +363,9 @@ Not configurable:
 
 - The options contract cap (1,000 per connection; [section 15](#15-options-contract-cap)).
 - The JSON codec. `orjson` is used when it is installed (optional extra
-  `deephaven-massive[orjson]`); otherwise the standard library. The choice is logged once at
-  INFO.
+  `deephaven-massive[orjson]`); otherwise the standard library. The wire package's
+  `net.codec` owns the choice and logs it once at INFO, when it is first imported
+  ([section 19](#19-wire-clients-and-the-spec-snapshot)).
 - The evidence endpoints of [section 13.2](#132-host-decision).
 - The shared retry policy (REST and S3), the REST client's timeouts and pool size, and the
   WebSocket client's handshake timeout and stable-uptime rule
