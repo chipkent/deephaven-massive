@@ -1279,7 +1279,7 @@ for flat files); [§ 17](DESIGN.md#17-diagnostics).
 
 **Files.** Modify `_diagnostics.py` (`DriftRegistry`, `SchemaDrift`), `_massive/flatfiles/reader.py`
 (the header peek and the missing key header), `_flat_files.py` (routing), `_timeunits.py` (the
-routine; epoch 0 → null moves here from `reader.py`), `tests/_fakes/s3.py`, and their tests.
+routine; epoch 0 → null moves here from `_flat_files.py`), `tests/_fakes/s3.py`, and their tests.
 
 **Tasks.**
 - [ ] The header peek and by-name reading of DESIGN § 16.
