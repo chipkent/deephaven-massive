@@ -37,7 +37,7 @@ its reason in one of the hand-input tables, never by editing the generated file:
 `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_CONFLICTS`,
 `TYPE_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, or `KINDS` entry (`overrides.py`); or an
 `EXCLUSIONS` or `SAMPLE_ERRORS` entry (`exclusions.py`). `--check` (a live drift report)
-arrives with the `PLAN.md` package PC3c.
+arrives with the `PLAN.md` planned PR api-drift-check.
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
@@ -46,12 +46,16 @@ environment, and the Claude Code hook blocks them.
 uses the newest versions. Offline, a local run warns and keeps what is installed; CI fails
 instead.
 
+The column reference command (`uv run python scripts/render_reference.py`, which regenerates
+all of `docs/datasets/`) arrives with the `PLAN.md` planned PR column-reference-pages, which adds
+it here.
+
 The library is moving off Massive's Python SDK (`massive`) to its own REST, WebSocket, and S3
 flat-file clients, with every schema generated from vendored, pinned vendor specs
-(`DESIGN.md` § 19). Until the `PLAN.md` package PC4 lands, the old dependency is still
-installed; PC4 removes it and adds a ruff `banned-api` entry for it. Never add an import of
-`massive`. Once the generated `spec/*.json` files exist, never edit them by hand: they change
-only through the refresh, and hand input lives only in `_massive/refresh/lexicon.py`,
+(`DESIGN.md` § 19). Until the `PLAN.md` planned PR massive-sdk-removal lands, the old dependency is
+still installed; massive-sdk-removal removes it and adds a ruff `banned-api` entry for it. Never
+add an import of `massive`. Once the generated `spec/*.json` files exist, never edit them by hand:
+they change only through the refresh, and hand input lives only in `_massive/refresh/lexicon.py`,
 `overrides.py`, and `exclusions.py`, every entry with a reason. The library has no users, so
 nothing is kept or shimmed for compatibility.
 
@@ -104,8 +108,8 @@ nothing is kept or shimmed for compatibility.
     `chore(deps):` PRs. `uv.lock` is not committed: CI starts with no lock and resolves the newest
     versions on every run, `scripts/check.sh` does the same locally with `uv sync --upgrade`,
     and a plain local `uv sync` keeps the existing lock.
-13. **One wire package** (from the `PLAN.md` package PC1a, which creates it and its boundary
-    tests). `src/deephaven_massive/_massive/` owns all Massive wire access
+13. **One wire package** (from the `PLAN.md` planned PR wire-package-scaffold, which creates it and
+    its boundary tests). `src/deephaven_massive/_massive/` owns all Massive wire access
     (REST, WebSocket, and S3 flat files), the generated schemas, the units, and the long-form
     names, in six subpackages: `net/`, `spec/`, `rest/`, `ws/`, `flatfiles/`, `refresh/`. The
     vendored spec snapshot the refresh reads lives outside the package, in `vendor/massive/`
@@ -119,6 +123,11 @@ nothing is kept or shimmed for compatibility.
     (by `import`, relative import, or `importlib`), never `urllib3`, `websockets`, `certifi`,
     `boto3`, or `botocore`, and never a snapshot file. `tests/_fakes/` keeps its exception for
     the network libraries. The AST tests in `tests/test_layout.py` enforce all of it.
+14. **Every PR closes its issue on merge.** A PR that delivers a tracked planned PR puts
+    `Closes #<issue>` on its own line in the PR description, so the owner's merge closes the
+    issue. Check it with `gh pr view <n> --json closingIssuesReferences` before asking for review.
+    A PR that delivers only part of an issue says `Refs #<issue>` instead, and its description
+    names what remains. Never close an issue by hand to make up for a missing link.
 
 ## Documentation standard
 
@@ -140,7 +149,7 @@ anything with behavior worth knowing is a defect, not brevity.
   undefined. Ruff's `D` and `DOC` rules check form; reviewers check substance.
 - **No planning references.** Code, comments, docstrings, test names, error messages, CI step
   names, and config comments never reference the planning documents under `plans/`, their
-  section numbers, work-package names, or decision numbers. The planning documents are
+  section numbers, planned-PR names, or decision numbers. The planning documents are
   temporary; the implementation explains itself, so state the behavior or the reason directly.
   Only files under `plans/` may cross-reference each other.
 
@@ -207,6 +216,6 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | Threads and locks | `DESIGN.md` § 18 |
 | Wire clients, generated schemas, drift | `DESIGN.md` § 19 |
 | Tooling and quality gates | `DESIGN.md` § 20, `pyproject.toml` |
-| Your work package | `plans/rework/PLAN.md`, then its GitHub issue |
+| Your planned PR | `plans/rework/PLAN.md`, then its GitHub issue |
 | Legacy code (deleted; reference only) | `git show 519fad8:<path>` for `src/deephaven_massive/{engine,domains,schemas}/` and `tests/legacy/` |
 | Namespace classes and dataset declarations | `src/deephaven_massive/_namespaces/`, `DESIGN.md` § 8 |
