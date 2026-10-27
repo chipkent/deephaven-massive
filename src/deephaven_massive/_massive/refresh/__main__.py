@@ -1,4 +1,4 @@
-"""The refresh command: `python -m deephaven_massive._massive.refresh [--fetch]`.
+"""The refresh command: `python -m deephaven_massive._massive.refresh [--check | --fetch]`.
 
 Run it from a source checkout with `uv run`; neither the package nor the vendored snapshot it
 reads (`vendor/massive/`) is in a distribution.
@@ -12,6 +12,15 @@ reads (`vendor/massive/`) is in a distribution.
   WebSocket specifications, the documentation index, and the REST, WebSocket, and flat-file
   pages the index links) and stops; run it again without the option to regenerate from the
   new snapshot. A failed download leaves the old snapshot in place and exits with status 1.
+- With `--check`, it downloads the same live sources into a scratch directory, compares them
+  with the vendored snapshot and the committed schemas (`drift`), prints the drift report as
+  Markdown to standard output, and changes nothing. It exits with status 0 when there is no
+  drift, 1 when there is, and 2 when the check could not be made (a download failed, a
+  vendored snapshot file is missing, unreadable, not JSON, or does not match the manifest, or
+  the flat-file bucket could not be listed), with the reason on standard error. With
+  `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` set, it also lists the
+  flat-file bucket's top-level prefixes.
+  The weekly drift workflow runs this same command.
 
 Review the snapshot diff and the `spec/*.json` diff together in one pull request.
 """
@@ -22,7 +31,8 @@ import argparse
 import sys
 from typing import TYPE_CHECKING
 
-from deephaven_massive._massive.refresh import fetch, generate, render, snapshot
+from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.refresh import drift, fetch, generate, render, snapshot
 from deephaven_massive._massive.refresh.gates import RefreshError
 
 if TYPE_CHECKING:
@@ -31,6 +41,9 @@ if TYPE_CHECKING:
 __all__ = ["main"]
 
 _PROG = "python -m deephaven_massive._massive.refresh"
+# The exit status of a check that found drift, and of one that could not be made.
+_DRIFT = 1
+_CHECK_FAILED = 2
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -40,21 +53,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         argv: The command-line arguments after the program name; `sys.argv[1:]` when omitted.
 
     Returns:
-        The exit status: 0 on success, 1 when the refresh or the fetch stopped (the reason is
-        printed to standard error). An unknown option makes `argparse` exit with status 2.
+        The exit status. The plain run and `--fetch`: 0 on success, 1 when the refresh or the
+        fetch stopped (the reason is printed to standard error). `--check`: 0 without drift,
+        1 with drift, 2 when the check could not be made. A usage error makes `argparse` exit
+        with status 2.
     """
     parser = argparse.ArgumentParser(
         prog=_PROG,
         description="Regenerate the wire schemas from the vendored snapshot of Massive's "
         "published specifications (vendor/massive/ in the source checkout).",
     )
-    parser.add_argument(
+    choice = parser.add_mutually_exclusive_group()
+    choice.add_argument(
+        "--check",
+        action="store_true",
+        help="compare the live vendor sources with the vendored snapshot and print the drift "
+        "report; changes nothing; exits 1 on drift, 2 when the check fails",
+    )
+    choice.add_argument(
         "--fetch",
         action="store_true",
         help="replace the vendored snapshot with the live vendor sources (reads public "
         "Massive URLs)",
     )
     options = parser.parse_args(argv)
+    if options.check:
+        return _check()
     try:
         if options.fetch:
             names = fetch.fetch(snapshot.DIRECTORY)
@@ -70,6 +94,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"{error}\n")
         return 1
     return 0
+
+
+def _check() -> int:
+    """Run the drift check and print its report.
+
+    Returns:
+        0 without drift, 1 with drift, 2 when the check could not be made (the reason is
+        printed to standard error and no report to standard output).
+    """
+    try:
+        report = drift.check()
+    # OSError and ValueError (JSONDecodeError among them) are a vendored snapshot file that is
+    # missing, unreadable, or not JSON, and RecursionError a vendor schema nested past what the
+    # interpreter allows: the check could not be made, which is not drift.
+    except (
+        RefreshError,
+        fetch.FetchError,
+        WireError,
+        OSError,
+        ValueError,
+        RecursionError,
+    ) as error:
+        sys.stderr.write(f"the drift check could not be made: {error}\n")
+        return _CHECK_FAILED
+    sys.stdout.write(report.text())
+    return _DRIFT if report.items else 0
 
 
 if __name__ == "__main__":

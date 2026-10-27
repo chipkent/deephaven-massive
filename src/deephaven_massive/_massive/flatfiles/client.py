@@ -1,10 +1,12 @@
 """The client of Massive's flat-file bucket: one boto3 S3 client, its errors, and its close.
 
 `FlatFileClient` opens the objects of Massive's S3 flat-file bucket (`flatfiles` at
-`https://files.massive.com`) for `FlatFile` to decode. It takes plain arguments, never the
+`https://files.massive.com`) for `FlatFile` to decode, and lists the bucket's top-level
+prefixes for the refresh's drift check (`prefixes`). It takes plain arguments, never the
 library's configuration, and maps every S3 failure to the wire errors of `net.errors`:
 
-- a 404 is no error: `open` returns None, and the library applies its missing-file policy;
+- a 404 for an object is no error: `open` returns None, and the library applies its
+  missing-file policy (a 404 for the bucket itself, from `prefixes`, is a `WireError`);
 - a 403 whose S3 error code says the credentials themselves are wrong (`InvalidAccessKeyId`,
   `SignatureDoesNotMatch`) is `WireAuthError`;
 - any other 403 is `WireEntitlementError`;
@@ -44,12 +46,13 @@ the rest of `flatfiles` and `net`; the package's interface resolves it only when
 
 from __future__ import annotations
 
+import functools
 import logging
 import random
 import threading
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, TypeVar
 from urllib.parse import urlsplit
 
 import boto3
@@ -80,8 +83,11 @@ from deephaven_massive._massive.net.retry import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
     from botocore.response import StreamingBody
     from types_boto3_s3.client import S3Client
+    from types_boto3_s3.type_defs import ListObjectsV2OutputTypeDef
 
     from deephaven_massive._massive.net.retry import Clock
 
@@ -89,6 +95,9 @@ if TYPE_CHECKING:
 __all__ = ["FlatFileClient"]
 
 _log = logging.getLogger(__name__)
+
+# What one request gives its caller: an object's body, or a page of a listing.
+_Answer = TypeVar("_Answer")
 
 # The source of retry jitter. `SystemRandom` draws from the OS and keeps no state, so threads
 # share it safely; jitter needs no cryptographic strength, only independence.
@@ -176,7 +185,7 @@ class FlatFileClient:
     """The connection to Massive's flat-file bucket: one S3 client, created on first use.
 
     The library's session creates one on its first flat-file read and closes it when the
-    session closes. The boto3 client is created by the first `open`, under the client's own
+    session closes. The boto3 client is created by the first request, under the client's own
     leaf lock (no network call and no wait happen while it is held: the credentials are given,
     the proxy is decided before the lock is taken, and the `legacy` defaults mode keeps boto3
     from asking the instance-metadata service for a region), and shared by every reader
@@ -232,7 +241,7 @@ class FlatFileClient:
         """Remember the settings; no client is created and nothing touches the network.
 
         The certificate authorities and the proxy are read from the environment later, once,
-        when the first `open` creates the boto3 client.
+        when the first request creates the boto3 client.
 
         Args:
             access_key_id: The S3 access key id.
@@ -286,9 +295,106 @@ class FlatFileClient:
             The object, open for reading, or None if the bucket answered 404.
         """
         location = f"s3://{self._bucket}/{key} at {self._endpoint_url}"
+
+        def get(client: S3Client) -> StreamingBody | None:
+            try:
+                return client.get_object(Bucket=self._bucket, Key=key)["Body"]
+            except ClientError as error:
+                if _status(error) == HTTPStatus.NOT_FOUND:
+                    return None
+                raise
+
+        body = self._request(get, key=key, location=location, verb="read")
+        if body is None:
+            return None
+        return FlatFile(_Body(body), key, location=location, host=self._host)
+
+    def prefixes(self) -> list[str]:
+        """List the bucket's top-level prefixes: the first segment of every object key.
+
+        The refresh's drift check calls it to find what the bucket holds that nothing names.
+        It sends `ListObjectsV2` with the delimiter `/` and follows every continuation token,
+        so a bucket with more prefixes than one page holds (1000) is listed whole. Each page is
+        one request, retried on the schedule `open` uses when it fails before its answer
+        arrives, and refused once the client is closed; each blocks the calling thread for its
+        round trip and any retry waits, and `close()` ends a retry wait at once. The first
+        request of either method creates the boto3 client.
+
+        Errors: as for `open`, except that HTTP 404 (S3's `NoSuchBucket`) is a `WireError`
+        too. A message names the bucket instead of an object, such as `"HTTP 403 for
+        s3://flatfiles/ at https://files.massive.com (AccessDenied: Access Denied)"`, and its
+        `path` is `""`. A page that says the listing goes on but gives no continuation token,
+        or repeats the one it was asked with, is a `WireError` too: following it would stop
+        early or never end.
+
+        Returns:
+            The prefixes without their trailing `/` (`"us_stocks_sip"`), in the order S3 lists
+            them (UTF-8 binary order).
+
+        Raises:
+            WireError: For a truncated page without a new continuation token; the request
+                errors, described above, propagate from each page's request.
+        """
+        location = f"s3://{self._bucket}/ at {self._endpoint_url}"
+        found: list[str] = []
+        token: str | None = None
+        while True:
+            page = self._request(
+                functools.partial(self._list_page, token=token),
+                key="",
+                location=location,
+                verb="list",
+            )
+            found += [entry["Prefix"].removesuffix("/") for entry in page.get("CommonPrefixes", [])]
+            # Read as plain data: a server other than S3 may leave either field out.
+            fields: Mapping[str, object] = page
+            if not fields.get("IsTruncated"):
+                return found
+            following = fields.get("NextContinuationToken")
+            if not isinstance(following, str) or not following or following == token:
+                fault = "the same" if isinstance(following, str) and following else "no"
+                raise WireError(
+                    f"cannot list {location}: a truncated page gave {fault} continuation token",
+                    host=self._host,
+                )
+            token = following
+
+    def _list_page(self, client: S3Client, *, token: str | None) -> ListObjectsV2OutputTypeDef:
+        """Request one page of the bucket's top-level prefixes.
+
+        Args:
+            client: The boto3 client.
+            token: The continuation token the previous page ended with; None for the first.
+
+        Returns:
+            The page as botocore parses it.
+        """
+        if token is None:
+            return client.list_objects_v2(Bucket=self._bucket, Delimiter="/")
+        return client.list_objects_v2(Bucket=self._bucket, Delimiter="/", ContinuationToken=token)
+
+    def _request(
+        self, call: Callable[[S3Client], _Answer], *, key: str, location: str, verb: str
+    ) -> _Answer:
+        """Send one request, retrying a failure before its answer on the shared schedule.
+
+        Args:
+            call: Sends the request on the boto3 client and returns what the caller needs of
+                the answer. A `ClientError` it lets through is mapped to a wire error here.
+            key: The object key the request concerns, or `""` for the bucket, for the errors'
+                `path`.
+            location: The object's or bucket's location, for messages.
+            verb: What the request does (`"read"`, `"list"`), for messages.
+
+        A failure no retry can fix raises its `WireError` at once, as `open` describes, and so
+        does a retryable one, the last attempt's, once the retries are spent.
+
+        Returns:
+            What `call` returned.
+        """
         retry = 0
         while True:
-            outcome = self._attempt(key, location)
+            outcome = self._attempt(call, key=key, location=location, verb=verb)
             if not isinstance(outcome, _Retryable):
                 return outcome
             if retry == MAX_RETRIES:
@@ -300,26 +406,28 @@ class FlatFileClient:
             self._clock.wait(self._closed, wait)
             retry += 1
 
-    def _attempt(self, key: str, location: str) -> FlatFile | _Retryable | None:
-        """Send one attempt of a `GetObject` request.
+    def _attempt(
+        self, call: Callable[[S3Client], _Answer], *, key: str, location: str, verb: str
+    ) -> _Answer | _Retryable:
+        """Send one attempt of a request.
 
         Args:
-            key: The object key.
-            location: The object's location, for messages.
+            call: Sends the request on the boto3 client.
+            key: The object key, or `""` for the bucket.
+            location: The object's or bucket's location, for messages.
+            verb: What the request does, for messages.
 
         Returns:
-            The object, open for reading; None for HTTP 404; or the failure to retry.
+            What `call` returned, or the failure to retry.
 
         Raises:
             WireError: When the failure is not retryable; see `open`.
         """
         client, proxy = self._client_for(key)
         try:
-            body = client.get_object(Bucket=self._bucket, Key=key)["Body"]
+            return call(client)
         except ClientError as error:
-            refusal = self._refusal(error, key=key, location=location)
-            if refusal is None:
-                return None
+            refusal = self._refusal(error, key=key, location=location, verb=verb)
             details = error.response.get("Error", {})
             if refusal.status in TRANSIENT_STATUSES or details.get("Code") in _TRANSIENT_CODES:
                 return _Retryable(refusal, error)
@@ -327,7 +435,7 @@ class FlatFileClient:
         except BotoCoreError as error:
             if is_tls_failure(error):
                 raise WireError(
-                    f"cannot read {location}: TLS certificate verification failed for "
+                    f"cannot {verb} {location}: TLS certificate verification failed for "
                     f"{self._host} ({error}); if a proxy or private CA signs it, set "
                     "SSL_CERT_FILE to a bundle that trusts it",
                     host=self._host,
@@ -337,8 +445,8 @@ class FlatFileClient:
                 # The same credentials would be refused again, and a corporate proxy may lock
                 # the account after a few refusals.
                 raise WireError(
-                    f"cannot read {location}: the proxy {proxy} refused its credentials (HTTP "
-                    "407); check the user and password in HTTPS_PROXY",
+                    f"cannot {verb} {location}: the proxy {proxy} refused its credentials "
+                    "(HTTP 407); check the user and password in HTTPS_PROXY",
                     status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
                     host=self._host,
                     path=key,
@@ -347,12 +455,12 @@ class FlatFileClient:
                 # Any other TLS failure (a protocol mismatch, a handshake the server ends) is
                 # a configuration problem a retry cannot fix either.
                 raise WireError(
-                    f"cannot read {location}: TLS failed for {self._host} ({error})",
+                    f"cannot {verb} {location}: TLS failed for {self._host} ({error})",
                     host=self._host,
                     path=key,
                 ) from error
             failure = WireError(
-                f"cannot read {location}: {_describe(error, proxy)}", host=self._host, path=key
+                f"cannot {verb} {location}: {_describe(error, proxy)}", host=self._host, path=key
             )
             if isinstance(error, _CONNECTION_ERRORS):
                 return _Retryable(failure, error)
@@ -360,7 +468,7 @@ class FlatFileClient:
         except _RESPONSE_CUT_SHORT as error:
             return _Retryable(
                 WireError(
-                    f"cannot read {location}: the error response was cut short ({error})",
+                    f"cannot {verb} {location}: the error response was cut short ({error})",
                     host=self._host,
                     path=key,
                 ),
@@ -371,7 +479,6 @@ class FlatFileClient:
                 # The client was closed while this request was in flight, and the request may
                 # have opened a new connection pool: close it again now that it has returned.
                 client.close()
-        return FlatFile(_Body(body), key, location=location, host=self._host)
 
     def close(self) -> None:
         """Close the boto3 client, if one was created, and refuse every further request.
@@ -488,25 +595,23 @@ class FlatFileClient:
             ),
         )
 
-    def _refusal(self, error: ClientError, *, key: str, location: str) -> WireError | None:
-        """Map an S3 error response to the wire error it means, or None for a missing object.
+    def _refusal(self, error: ClientError, *, key: str, location: str, verb: str) -> WireError:
+        """Map an S3 error response to the wire error it means.
 
         Args:
             error: The SDK error, carrying the HTTP status, S3's code and message, and the
                 response headers.
-            key: The key that was requested.
-            location: The object's location, for messages.
+            key: The key that was requested, or `""` for the bucket.
+            location: The object's or bucket's location, for messages.
+            verb: What the request did (`"read"`, `"list"`), for messages.
 
         Returns:
-            None for HTTP 404. Otherwise the error to raise: `WireAuthError` for a 403 that
-            rejects the credentials themselves, `WireEntitlementError` for any other 403, and
-            `WireError` for any other status, each with the status, host, key, and
-            `x-amz-request-id`.
+            The error to raise: `WireAuthError` for a 403 that rejects the credentials
+            themselves, `WireEntitlementError` for any other 403, and `WireError` for any other
+            status, each with the status, host, key, and `x-amz-request-id`.
         """
         metadata = error.response.get("ResponseMetadata", {})
-        status = metadata.get("HTTPStatusCode")
-        if status == HTTPStatus.NOT_FOUND:
-            return None
+        status = _status(error)
         details = error.response.get("Error", {})
         code = details.get("Code", "")
         server = f"{code}: {details.get('Message', '')}"
@@ -517,11 +622,24 @@ class FlatFileClient:
             "request_id": metadata.get("HTTPHeaders", {}).get("x-amz-request-id"),
         }
         if status != HTTPStatus.FORBIDDEN:
-            return WireError(f"cannot read {location}: HTTP {status} ({server})", **context)
+            return WireError(f"cannot {verb} {location}: HTTP {status} ({server})", **context)
         refused = f"HTTP 403 for {location} ({server})"
         if code in _CREDENTIAL_ERRORS:
             return WireAuthError(refused, **context)
         return WireEntitlementError(refused, **context)
+
+
+def _status(error: ClientError) -> int | None:
+    """Return the HTTP status of an S3 error response.
+
+    Args:
+        error: The SDK error.
+
+    Returns:
+        The status botocore recorded, or None when it recorded none.
+    """
+    status: int | None = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return status
 
 
 def _describe(error: BotoCoreError, proxy: str | None) -> str:

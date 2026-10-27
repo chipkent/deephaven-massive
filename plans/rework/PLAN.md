@@ -1849,7 +1849,8 @@ common prefixes and continuation tokens).
       `rest.json`.
 - [ ] `FlatFileClient.prefixes()`: a paginated `list_objects_v2(Delimiter="/")` through the
       shared retry schedule and the closed-flag check.
-- [ ] The workflow: `issues: write` only; one standing issue; creates the `spec-drift` label.
+- [ ] The workflow: `contents: read` (the private repository's checkout) and `issues: write`
+      only; one standing issue; creates the `spec-drift` label.
 
 **Acceptance criteria.**
 - [ ] Synthetic before-and-after snapshots for every drift kind.

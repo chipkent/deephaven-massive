@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.refresh.openapi import Json, JsonObject
     from deephaven_massive._massive.refresh.snapshot import Snapshot
 
-__all__ = ["Coverage", "generate_rest"]
+__all__ = ["Coverage", "generate_rest", "path_status"]
 
 # The vendor extensions a path item and its GET operation may carry, each with what the
 # generator does about it. Any other `x-polygon-*` key is a change at Massive the refresh stops
@@ -476,8 +476,12 @@ def _enum_text(value: Json) -> str:
     return value if isinstance(value, str) else json.dumps(value)
 
 
-def _status(item: JsonObject) -> str:
+def path_status(item: JsonObject) -> str:
     """Classify one path item of the specification.
+
+    The generator decides with it which paths it generates, and the drift check which paths
+    the vendor has newly deprecated. The vendor marks WebSocket channels the same way, so the
+    drift check classifies them with it too.
 
     Args:
         item: The resolved path item.
@@ -571,7 +575,7 @@ def generate_rest(
     problems: list[Problem] = []
     pages = _documented_pages(snapshot, problems)
     paths = spec.deref(snapshot.openapi.get("paths"), "paths")
-    statuses = {path: _status(spec.deref(item, path)) for path, item in paths.items()}
+    statuses = {path: path_status(spec.deref(item, path)) for path, item in paths.items()}
     problems += _check_extensions(spec, paths)
     problems += [
         Problem(
