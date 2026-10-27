@@ -239,9 +239,16 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
 
 @pytest.fixture(autouse=True)
 def _virtual_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give every session's flat-file client a fake clock, so its retry waits never sleep."""
-    monkeypatch.setattr(
-        _massive, "FlatFileClient", functools.partial(_massive.FlatFileClient, clock=FakeClock())
+    """Give every session's flat-file client a fake clock, so its retry waits never sleep.
+
+    The patch goes into the module's namespace with `setitem`, so teardown removes the entry
+    again. `setattr` would restore the lazily resolved class as a bound attribute, which the
+    wire package's interface test forbids.
+    """
+    monkeypatch.setitem(
+        vars(_massive),
+        "FlatFileClient",
+        functools.partial(_massive.FlatFileClient, clock=FakeClock()),
     )
 
 
