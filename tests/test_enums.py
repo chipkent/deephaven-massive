@@ -257,6 +257,8 @@ ENUM_PARAMETERS = {
     "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
     "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
+    "_Forex.bars.timespan": "namespaces/test_forex.py::test_bars_reject_bad_arguments",
+    "_Forex.movers.direction": "namespaces/test_forex.py::test_movers",
 }
 
 
