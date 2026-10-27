@@ -23,6 +23,7 @@ It imports the standard library, `docs`, and `gates` only.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import shutil
@@ -34,7 +35,6 @@ from deephaven_massive._massive.refresh import docs
 from deephaven_massive._massive.refresh.gates import Gate, Problem, RefreshError
 
 if TYPE_CHECKING:
-    import datetime as dt
     from collections.abc import Iterator, Mapping, Sequence
 
     from deephaven_massive._massive.refresh.openapi import Json, JsonObject
@@ -192,22 +192,25 @@ class Snapshot:
             from deephaven_massive._massive.refresh.snapshot import Snapshot
 
             snapshot = Snapshot.load()
-            print(len(snapshot.pages), snapshot.openapi_sha256)
+            print(len(snapshot.pages), snapshot.fetched)
 
     Attributes:
         openapi: The OpenAPI specification.
         llms: The text of the documentation index.
         pages: Each REST page the index links, by its name below the snapshot's `rest/`
             directory (`"stocks/trades-quotes/trades.md"`), as text.
-        openapi_sha256: The SHA-256 of the stored specification, verified against the
-            manifest and written into `rest.json`, so every generated file names the snapshot
-            it came from.
+        fetched: The day the snapshot was downloaded, from the manifest. It is written into
+            `descriptions.json`, so the generated files name the snapshot they came from.
+        urls: Each stored file, by its name relative to the snapshot directory
+            (`"rest/stocks/trades-quotes/trades.md"`), mapped to the URL it was downloaded
+            from, from the manifest.
     """
 
     openapi: JsonObject
     llms: str
     pages: Mapping[str, str]
-    openapi_sha256: str
+    fetched: dt.date
+    urls: Mapping[str, str]
 
     @classmethod
     def load(cls, directory: Path | None = None) -> Snapshot:
@@ -221,13 +224,14 @@ class Snapshot:
                 runs.
 
         Returns:
-            The parsed snapshot, with `openapi_sha256` computed from the file itself.
+            The parsed snapshot.
 
         Raises:
             RefreshError: If the directory does not exist (the refresh runs from a source
-                checkout only), the manifest or the specification is not a JSON object, a
-                file's hash differs from the manifest's, a file is on disk but not in the
-                manifest or the reverse, or a REST page the index links is missing.
+                checkout only), the manifest or the specification is not a JSON object, the
+                manifest's fetch date is not an ISO date, a file's hash differs from the
+                manifest's or the manifest records no URL for it, a file is on disk but not in
+                the manifest or the reverse, or a REST page the index links is missing.
         """
         directory = directory or DIRECTORY
         if not directory.is_dir():
@@ -250,6 +254,18 @@ class Snapshot:
                 [Problem(gate=Gate.SNAPSHOT, source="", key="", message="not a JSON object")]
             )
         problems = list(_verify(directory, files))
+        try:
+            fetched = dt.date.fromisoformat(manifest.get("fetched"))
+        except (TypeError, ValueError):
+            fetched = None
+            problems.append(
+                Problem(
+                    gate=Gate.SNAPSHOT,
+                    source="",
+                    key=MANIFEST,
+                    message=f"the fetch date {manifest.get('fetched')!r} is not an ISO date",
+                )
+            )
         llms = (directory / LLMS).read_text(encoding="utf-8")
         pages: dict[str, str] = {}
         for url in docs.rest_page_urls(llms):
@@ -267,10 +283,20 @@ class Snapshot:
                         message=f"the index links {url} but the snapshot lacks the page",
                     )
                 )
-        if problems:
+        if problems or fetched is None:
             raise RefreshError(problems)
-        digest = _sha256((directory / OPENAPI).read_bytes())
-        return cls(openapi=openapi, llms=llms, pages=pages, openapi_sha256=digest)
+        urls = {
+            name: link
+            for name, entry in files.items()
+            if isinstance(entry, dict) and isinstance(link := entry.get("url"), str)
+        }
+        return cls(
+            openapi=openapi,
+            llms=llms,
+            pages=pages,
+            fetched=fetched,
+            urls=urls,
+        )
 
 
 def _os_litter(name: str) -> bool:
@@ -298,8 +324,9 @@ def _verify(directory: Path, files: Mapping[str, Json]) -> Iterator[Problem]:
         files: The manifest's `files` object: name to `{"stored_sha256", ...}`.
 
     Yields:
-        A `snapshot` problem for each file whose hash differs from the manifest's, each file
-        on disk the manifest does not list, and each listed file that is missing.
+        A `snapshot` problem for each file whose hash differs from the manifest's or whose URL
+        the manifest does not record, each file on disk the manifest does not list, and each
+        listed file that is missing.
     """
     on_disk = {
         path.relative_to(directory).as_posix()
@@ -308,8 +335,9 @@ def _verify(directory: Path, files: Mapping[str, Json]) -> Iterator[Problem]:
     }
     for name in sorted(on_disk - set(files)):
         yield Problem(gate=Gate.SNAPSHOT, source="", key=name, message="not in the manifest")
-    for name, entry in sorted(files.items()):
-        recorded = entry.get("stored_sha256") if isinstance(entry, dict) else None
+    for name, listed in sorted(files.items()):
+        entry = listed if isinstance(listed, dict) else {}
+        recorded = entry.get("stored_sha256")
         if name not in on_disk:
             yield Problem(gate=Gate.SNAPSHOT, source="", key=name, message="listed but missing")
         elif _sha256((directory / name).read_bytes()) != recorded:
@@ -319,4 +347,8 @@ def _verify(directory: Path, files: Mapping[str, Json]) -> Iterator[Problem]:
                 key=name,
                 message="its SHA-256 differs from the manifest's: a vendor file was edited; "
                 "refetch instead",
+            )
+        elif not isinstance(entry.get("url"), str):
+            yield Problem(
+                gate=Gate.SNAPSHOT, source="", key=name, message="the manifest records no URL"
             )

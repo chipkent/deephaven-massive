@@ -22,15 +22,15 @@ if TYPE_CHECKING:
 def test_the_plain_run_reports_an_up_to_date_schema(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The run regenerates a copy, never the committed file, so this test cannot hide a parity
-    # failure by rewriting it.
-    committed = render.REST_FILE.read_bytes()
-    copy = tmp_path / "rest.json"
-    copy.write_bytes(committed)
-    monkeypatch.setattr(render, "REST_FILE", copy)
+    # The run regenerates copies, never the committed files, so this test cannot hide a
+    # parity failure by rewriting them.
+    committed = {path.name: path.read_bytes() for path in render.SPEC_DIRECTORY.glob("*.json")}
+    for name, data in committed.items():
+        (tmp_path / name).write_bytes(data)
+    monkeypatch.setattr(render, "SPEC_DIRECTORY", tmp_path)
     assert command.main([]) == 0
-    assert capsys.readouterr().out == f"{copy} is up to date\n"
-    assert copy.read_bytes() == committed
+    assert capsys.readouterr().out == f"{tmp_path} is up to date\n"
+    assert {path.name: path.read_bytes() for path in tmp_path.glob("*.json")} == committed
 
 
 def test_the_plain_run_reports_an_update(
@@ -38,9 +38,10 @@ def test_the_plain_run_reports_an_update(
 ) -> None:
     # `generate.refresh` writing a changed file is tested with the generator; here only the
     # command's report of it is.
-    monkeypatch.setattr(generate, "refresh", lambda: True)
+    written = [render.REST_FILE, render.DESCRIPTIONS_FILE]
+    monkeypatch.setattr(generate, "refresh", lambda: written)
     assert command.main([]) == 0
-    assert capsys.readouterr().out == f"{render.REST_FILE} updated\n"
+    assert capsys.readouterr().out.splitlines() == [f"{path} updated" for path in written]
 
 
 def test_a_stopped_refresh_prints_the_problems_and_fails(
@@ -48,7 +49,7 @@ def test_a_stopped_refresh_prints_the_problems_and_fails(
 ) -> None:
     problem = Problem(gate=Gate.SHORT_KEY, source="/v1/x", key="p", message="short key")
 
-    def stopped() -> bool:
+    def stopped() -> list[Path]:
         raise RefreshError([problem])
 
     monkeypatch.setattr(generate, "refresh", stopped)

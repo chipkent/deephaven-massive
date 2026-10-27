@@ -2109,7 +2109,7 @@ refresh/             build time only; excluded from the wheel; may import any of
   ws.py, flatfiles.py  the WebSocket and flat-file generators (with the type lattice)
   gates.py           Gate (the named gates of section 19.4), Problem, RefreshError, and the
                      checks that span paths: stale entries, exclusions, concept collisions
-  render.py          spec/*.json in canonical text
+  render.py          spec/*.json in canonical text; plain_text, the description normalization
   hand_input.py      HandInput: the hand tables bundled for the generators
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
   overrides.py       NAMES, KINDS, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
@@ -2645,9 +2645,9 @@ checks.
 that users can read what each column means ([section 7.4](#74-column-descriptions)).
 
 - **Where they come from.** REST: the OpenAPI `description` of each response property, after
-  `$ref` and `allOf` are resolved; at the 2026-10-26 snapshot, 1,392 of the 1,394 leaf
-  response fields carry one (the two without are futures `/futures/v1/snapshot`
-  `details.product_code` and `details.ticker`). WebSocket: the `description` of each message
+  `$ref` and `allOf` are resolved; at the 2026-10-27 snapshot, 1,597 of the 1,599 leaf
+  response fields of the generated paths carry one (the two without are futures
+  `/futures/v1/snapshot` `details.product_code` and `details.ticker`). WebSocket: the `description` of each message
   property in `websocket.json`. Flat files: the description cell of the page's "Columns"
   table, where the page has one. The coverage of the last two is measured when their
   generators land. The REST documentation pages are rendered from the same OpenAPI text and add
@@ -2655,34 +2655,44 @@ that users can read what each column means ([section 7.4](#74-column-description
 - **Normalization**, by fixed rules and no hand input, so every outlet can show plain text:
   a Markdown link `[text](url)` becomes `text (url)`; an HTML link `<a href="url" …>text</a>`
   becomes `text (url)`; every run of whitespace, newlines included, becomes one space, and the
-  ends are trimmed. Nothing else changes. At the 2026-10-26 snapshot 134 REST descriptions
-  contain a link.
+  ends are trimmed. Nothing else changes: no entity is unescaped, no other markup is removed,
+  and nothing is shortened. At the 2026-10-27 snapshot 66 of the generated REST fields'
+  descriptions contain a link (170 description strings of the whole specification do). The
+  refresh's `render.plain_text` is the one implementation, used by every generator.
 - **No gate.** A field without a description gets `""`, and nothing stops the refresh.
   Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
   changed description is an ordinary line in the refresh diff.
 - **A separate generated file**, `spec/descriptions.json`, so that a refresh that only changes
   descriptions leaves `rest.json`, `ws.json`, and `flatfiles.json` byte for byte unchanged,
-  and a reviewer sees at once that no schema moved. It is generated, committed, and stored like
-  the other three, shipped as package data, and covered by the same parity test:
+  and a reviewer sees at once that no schema moved. For the same reason the schema files record
+  nothing about the snapshot they came from (no fetch date, no hash of a vendor file): the
+  snapshot is named by `fetched` here. It is generated, committed, and stored like the other
+  three, shipped as package data, and covered by the same parity test:
 
   ```
   {
    "generated_by": "python -m deephaven_massive._massive.refresh",
    "fetched": "<the snapshot's fetch date, from the manifest>",
-   "urls": {"<transport>": {"<source key>": "<the vendor URL the source was generated from>"}},
+   "urls": {"<transport>": {"<source key>": "<the vendor URL that documents the source>"}},
    "descriptions": {"<transport>": {"<source key>": {"<wire key>": "<plain text>"}}}
   }
   ```
 
-  A field without a description has no entry.
+  A field without a description has no entry, and a source with no described field has no
+  entry under `descriptions`. Every generated source has a URL: for REST, the URL of the
+  documentation page that names its path (every generated path has one, by the `docs` gate),
+  as the snapshot's manifest records it. The entries are one per line, in generated order, so a
+  reworded description is one changed line of the diff.
 - **Joined at load.** `Field` gains `description: str = ""`, and the `spec` loader fills it
   from `descriptions.json` when it loads the schema files, under the same once-only lock. An
   entry that names a source or wire key the schema files lack raises at load: the files are
   generated together, so only a hand edit can cause it. A description belongs to a
   `(source, wire key)`, so a projected field keeps the description of its wire key.
   `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], str])` exposes
-  the fetch date and the URL of each source, for the footer of the column reference. No other
-  name is added to the interface.
+  the fetch date and the URL of each source, for the footer of the column reference; it loads
+  every transport the file names a URL for, and a URL of a source the schema files lack raises
+  the same way. Each file is read once under the lock, whichever of `sources` and `provenance`
+  comes first. No other name is added to the interface.
 
 **Dataset schemas** are merged at run time, after the rename, never inferred from data:
 

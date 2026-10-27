@@ -1,6 +1,5 @@
 {
  "generated_by": "python -m deephaven_massive._massive.refresh",
- "openapi_sha256": "aa890c3342ea587fe915aded87acf88c254a6989927c9fcb1ce28cf2765d5b11",
  "sources": [
   {
    "key": "/benzinga/v1/analyst-insights",

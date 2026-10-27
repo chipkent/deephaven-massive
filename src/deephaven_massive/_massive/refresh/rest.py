@@ -44,6 +44,11 @@ replaced by its `NAMES` entry when Massive names the key nowhere (a name derived
 field's description, which the entry quotes). `naming.column_name` joins the long names in
 PascalCase: `prevDay.vw` becomes `PrevDayVwap`.
 
+**Descriptions.** Each field records the `description` of its schema after `$ref` and `allOf`
+are resolved, as plain text (`render.plain_text`), for `spec/descriptions.json`. A field
+without one gets `""`, and nothing stops: no name, type, or gate depends on a description,
+except that a `NAMES` entry quotes the one its name was derived from.
+
 **Parameters** keep the specification's order and wire names. Their `ParamKind` follows the
 same kind of mechanical rules: a name ending in `.any_of`, or an array, is `LIST` (sent
 comma-joined, even when its values come from an `enum`); any other `enum` is `ENUM`;
@@ -65,7 +70,7 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._massive.refresh import docs, gates, naming
+from deephaven_massive._massive.refresh import docs, gates, naming, render
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required, text
@@ -599,6 +604,7 @@ class _PathGenerator:
             unit=unit,
             required=raw.required,
             conversion=fix,
+            description=render.plain_text(description),
         )
 
     def unit(

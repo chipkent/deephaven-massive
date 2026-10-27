@@ -364,7 +364,7 @@ def _snapshot(
         endpoint = f"**Endpoint:** `GET {path}`\n"
         if path not in undocumented and endpoint not in covered:
             named[f"auto/page-{index}.md"] = endpoint
-    return Snapshot(openapi=openapi, llms="", pages=named, openapi_sha256="0" * 64)
+    return Snapshot(openapi=openapi, llms="", pages=named, fetched=date(2026, 1, 2), urls={})
 
 
 def _hand(
@@ -519,6 +519,51 @@ def test_nested_objects_flatten_in_order_with_refs_and_all_of() -> None:
         ("ticker", "Ticker", True),
         ("day.close", "DayClose", False),
         ("close", "Close", False),
+    ]
+
+
+def test_each_field_records_its_resolved_description_as_plain_text() -> None:
+    # The description is read after `$ref` and `allOf` are resolved, and normalized.
+    schemas = {
+        "Bar": {
+            "type": "object",
+            "properties": {"close": {"type": "number", "description": "The close\n price."}},
+        },
+        "Base": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "See [tickers](https://x.example)."}
+            },
+        },
+    }
+    row = {
+        "allOf": [
+            {"$ref": "#/components/schemas/Base"},
+            {"type": "object", "properties": {"day": {"$ref": "#/components/schemas/Bar"}}},
+        ]
+    }
+    paths, _ = generate_rest(
+        _snapshot({_PATH: _item(row)}, schemas=schemas), _hand(identity={"day": ""})
+    )
+    assert [(f.wire_key, f.description) for f in paths[0].fields] == [
+        ("ticker", "See tickers (https://x.example)."),
+        ("day.close", "The close price."),
+    ]
+
+
+def test_a_field_without_a_description_generates_and_stops_nothing() -> None:
+    # No gate looks at descriptions: a missing, empty, or non-text one is simply "".
+    path = _one(
+        _row(
+            price={"type": "number"},
+            size={"type": "number", "description": "  "},
+            remark={"type": "number", "description": 5},
+        )
+    )
+    assert [(f.wire_key, f.description) for f in path.fields] == [
+        ("price", ""),
+        ("size", ""),
+        ("remark", ""),
     ]
 
 

@@ -3,16 +3,16 @@
 Run it from a source checkout with `uv run`; neither the package nor the vendored snapshot it
 reads (`vendor/massive/`) is in a distribution.
 
-- With no option, it regenerates `spec/rest.json` from the vendored snapshot, checking every
-  refresh gate first. It reads no network. When a gate stops it, it prints every problem
-  (the gate, the path, the key, and the vendor's description) and exits with status 1,
-  having written nothing.
+- With no option, it regenerates `spec/rest.json` and `spec/descriptions.json` from the
+  vendored snapshot, checking every refresh gate first, and prints each file it changed. It
+  reads no network. When a gate stops it, it prints every problem (the gate, the path, the
+  key, and the vendor's description) and exits with status 1, having written nothing.
 - With `--fetch`, it replaces the snapshot with the live vendor sources (the OpenAPI
   specification, the documentation index, and the REST pages the index links) and stops; run
   it again without the option to regenerate from the new snapshot. A failed download leaves
   the old snapshot in place and exits with status 1.
 
-Review the snapshot diff and the `spec/rest.json` diff together in one pull request.
+Review the snapshot diff and the `spec/*.json` diff together in one pull request.
 """
 
 from __future__ import annotations
@@ -60,8 +60,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(f"stored {len(names)} files in {snapshot.DIRECTORY}\n")
             sys.stdout.write(f"now run `{_PROG}` to regenerate the schemas\n")
         else:
-            changed = generate.refresh()
-            sys.stdout.write(f"{render.REST_FILE} {'updated' if changed else 'is up to date'}\n")
+            written = generate.refresh()
+            for path in written:
+                sys.stdout.write(f"{path} updated\n")
+            if not written:
+                sys.stdout.write(f"{render.SPEC_DIRECTORY} is up to date\n")
     except (RefreshError, fetch.FetchError) as error:
         sys.stderr.write(f"{error}\n")
         return 1

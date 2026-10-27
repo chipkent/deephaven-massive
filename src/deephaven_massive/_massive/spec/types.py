@@ -15,6 +15,9 @@ its fields, under other column names, for that membership only.
 Decoders compare each payload with its source and return a `DriftReport` of the keys that
 were extra or missing.
 
+`Provenance` records where the generated values came from: the day the vendor sources were
+fetched and the vendor URL of each source.
+
 The refresh generates every value of these types into `spec/*.json`, and the library reads
 them from there; tests build them by hand. Every type is a frozen dataclass or a `StrEnum`,
 so every value is immutable and safe to share between threads. Constructors check the
@@ -38,6 +41,7 @@ from typing import TYPE_CHECKING, TypeVar
 _F = TypeVar("_F")
 
 if TYPE_CHECKING:
+    import datetime as dt
     from collections.abc import Iterable, Mapping
 
     from typing_extensions import override
@@ -60,6 +64,7 @@ __all__ = [
     "Membership",
     "Param",
     "ParamKind",
+    "Provenance",
     "RestPath",
     "Source",
     "Transport",
@@ -266,6 +271,10 @@ class Field:
             sent both as text and as an integer). Its `wire_type` is the field's. `None`, the
             default, means each value is converted by `wire_type` alone; a value that does not
             convert fails like any other bad value either way.
+        description: What the vendor says the field means, as plain text: its documented
+            description with every link written `text (url)` and every run of whitespace
+            collapsed to one space. `""`, the default, when the vendor gives none. It is
+            documentation only: no name, type, or check is derived from it.
 
     Example:
         ::
@@ -283,6 +292,7 @@ class Field:
     unit: WireUnit | None = None
     required: bool = False
     conversion: Conversion | None = None
+    description: str = ""
 
     def __post_init__(self) -> None:
         """Check that the unit is set exactly for an epoch, and that a conversion fits.
@@ -537,6 +547,45 @@ class RestPath(Source):
     def template(self) -> str:
         """The path template, with `{name}` placeholders; the same text as `key`."""
         return self.key
+
+
+@dataclass(frozen=True, kw_only=True)
+class Provenance:
+    """Where the generated sources came from: the vendor snapshot's date and each source's URL.
+
+    `spec.provenance()` returns the one value read from the generated files; tests build their
+    own. A generated document cites it, so that a reader can check a column against the
+    vendor's own documentation and see how old that documentation was.
+
+    Attributes:
+        fetched: The day the vendor sources the schemas were generated from were downloaded.
+        urls: Each generated source, by its transport and key, mapped to the vendor's URL
+            that documents it (for REST, the documentation page that names the path). The
+            mapping is copied into a read-only view, so later changes to the caller's mapping
+            have no effect; like a membership's projection, that view cannot be pickled or
+            deep-copied.
+
+    Example:
+        ::
+
+            import datetime as dt
+
+            from deephaven_massive._massive.spec.types import Provenance, Transport
+
+            trades = (Transport.REST, "/v3/trades/{stockTicker}")
+            provenance = Provenance(
+                fetched=dt.date(2026, 10, 27),
+                urls={trades: "https://massive.com/docs/rest/stocks/trades-quotes/trades.md"},
+            )
+            assert provenance.urls[trades].endswith("/trades.md")
+    """
+
+    fetched: dt.date
+    urls: Mapping[tuple[Transport, str], str] = dataclasses.field(hash=False)
+
+    def __post_init__(self) -> None:
+        """Freeze a copy of the URLs."""
+        object.__setattr__(self, "urls", MappingProxyType(dict(self.urls)))
 
 
 @dataclass(frozen=True, kw_only=True)

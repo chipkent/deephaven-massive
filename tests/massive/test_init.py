@@ -24,6 +24,7 @@ EXPECTED_INTERFACE = [
     "FlatFileClient",
     "Page",
     "ParamKind",
+    "Provenance",
     "ReadColumn",
     "ReadPlan",
     "Reject",
@@ -41,6 +42,7 @@ EXPECTED_INTERFACE = [
     "WsClient",
     "WsState",
     "object_key",
+    "provenance",
     "source",
     "sources",
     "to_batch",
@@ -62,8 +64,10 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.Reject is ws.Reject
     assert _massive.source is spec.source
     assert _massive.sources is spec.sources
-    for name in ("DriftReport", "Field", "ParamKind", "RestPath", "Source", "Transport"):
+    assert _massive.provenance is spec.provenance
+    for name in ("DriftReport", "Field", "ParamKind", "Provenance", "RestPath", "Source"):
         assert getattr(_massive, name) is getattr(types, name)
+    assert _massive.Transport is types.Transport
     assert _massive.WireType is types.WireType
     assert _massive.WireUnit is types.WireUnit
     assert _massive.FlatFileClient is flatfiles_client.FlatFileClient
