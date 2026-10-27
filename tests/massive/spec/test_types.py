@@ -8,6 +8,7 @@ import pytest
 from deephaven_massive import _enums
 from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
+    Conversion,
     DriftReport,
     Field,
     Membership,
@@ -95,6 +96,26 @@ def test_a_unit_on_anything_but_an_epoch_is_rejected(wire_type: WireType) -> Non
         Field(wire_key="x", column="X", wire_type=wire_type, unit=WireUnit.NS)
 
 
+def test_a_field_records_its_conversion() -> None:
+    size = Field(
+        wire_key="x", column="Size", wire_type=WireType.LONG, conversion=Conversion.QUOTED_INTEGER
+    )
+    assert size.conversion is Conversion.QUOTED_INTEGER
+    assert _price().conversion is None
+
+
+def test_a_conversion_must_give_the_field_s_type() -> None:
+    with pytest.raises(
+        ValueError, match="'x': the conversion quoted-integer gives long, not string"
+    ):
+        Field(
+            wire_key="x",
+            column="X",
+            wire_type=WireType.STRING,
+            conversion=Conversion.QUOTED_INTEGER,
+        )
+
+
 # Membership.
 
 
@@ -159,9 +180,12 @@ def test_a_timestamp_param_without_a_unit_is_rejected() -> None:
         Param(name="timestamp", kind=ParamKind.TIMESTAMP)
 
 
-def test_a_unit_on_a_non_timestamp_param_is_rejected() -> None:
-    with pytest.raises(ValueError, match="'date': a timestamp needs a unit"):
-        Param(name="date", kind=ParamKind.DATE, unit=WireUnit.NS)
+@pytest.mark.parametrize(
+    "kind", [k for k in ParamKind if k not in {ParamKind.TIMESTAMP, ParamKind.ENUM}]
+)
+def test_a_unit_on_anything_but_a_timestamp_param_is_rejected(kind: ParamKind) -> None:
+    with pytest.raises(ValueError, match="'p': a timestamp needs a unit"):
+        Param(name="p", kind=kind, unit=WireUnit.MS)
 
 
 # Source.

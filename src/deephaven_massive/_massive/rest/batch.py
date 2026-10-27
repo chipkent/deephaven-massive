@@ -6,7 +6,8 @@ with no row object or model class between them. Each column is one `Field` of th
 through the field's dotted wire key (`"day.c"` is the `c` of the row's `day` object).
 
 Each value is checked and converted by `spec.convert`, the converter every JSON decoder
-shares, and stored as:
+shares (a field with a `conversion` through that named conversion, from the vendor's documented
+form to its `wire_type`), and stored as:
 
 | `WireType` | Arrow type |
 |---|---|
@@ -43,7 +44,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 
 from deephaven_massive._massive.net.errors import WireError
-from deephaven_massive._massive.spec.convert import UnconvertibleError, convert
+from deephaven_massive._massive.spec.convert import UnconvertibleError, convert_field
 from deephaven_massive._massive.spec.types import DriftReport, WireType
 
 if TYPE_CHECKING:
@@ -216,11 +217,12 @@ def to_batch(
                 column.append(None)
                 continue
             try:
-                column.append(convert(f.wire_type, value))
+                column.append(convert_field(f, value))
             except UnconvertibleError:
-                message = _unconvertible(
-                    rest_path, f.wire_key, expected=str(f.wire_type), value=value
-                )
+                expected = str(f.wire_type)
+                if f.conversion is not None:
+                    expected += f" (by the conversion {f.conversion})"
+                message = _unconvertible(rest_path, f.wire_key, expected=expected, value=value)
                 raise WireError(message, path=rest_path.template) from None
     types = [_ARROW[f.wire_type] for f in fields]
     schema = pa.schema([pa.field(f.column, t) for f, t in zip(fields, types, strict=True)])

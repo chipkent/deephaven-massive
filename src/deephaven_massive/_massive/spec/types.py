@@ -54,6 +54,7 @@ else:
 
 __all__ = [
     "ENVELOPE_KEYS",
+    "Conversion",
     "DriftReport",
     "Field",
     "Membership",
@@ -74,7 +75,8 @@ A path whose body is a single JSON object that is both the envelope and the one 
 (`RestPath.result_key` is `None`: `/v1/open-close/{stocksTicker}/{date}`, `/v1/conversion/...`,
 `/v1/marketstatus/now`) carries some of these beside the row's own keys. The REST decoder
 removes them from such a row before it compares the row with the path's fields, and the refresh
-never generates a field for them. A list body is never an envelope: its rows keep every key.
+generates no field for them on such a path. A list body is never an envelope: its rows keep
+every key, `status` included (`/v1/marketstatus/upcoming`).
 """
 
 
@@ -92,7 +94,7 @@ class Transport(StrEnum):
 
 
 class WireType(StrEnum):
-    """The type of a field's values on the wire, after any declared conversion.
+    """The type of a field's values on the wire, after any named conversion.
 
     The refresh assigns each field one of these. Two sources that share a column within a
     dataset kind may differ only by a widening (`LONG` with `DOUBLE` gives `DOUBLE`, `LONG`
@@ -162,6 +164,90 @@ class ParamKind(StrEnum):
     """A sequence of strings, sent joined with commas (the `.any_of` parameters)."""
 
 
+class Conversion(StrEnum):
+    """A named, deliberate conversion of a field whose values the vendor's type does not describe.
+
+    The vendor's specification gives each field a type. Where the documented samples show the
+    wire differs, the refresh records one of these on the field (`Field.conversion`) instead of
+    loosening the plain converter of any type. Each conversion has one meaning, fixed here: the
+    types the specification may declare for such a field (`declarations`), the type the field
+    gets (`wire_type`), whether it accepts a form the declared type refuses (`widens`) or only
+    retypes values the declared type already accepts, and the forms it accepts (the converters
+    live in `spec.convert`). No conversion is a no-op: each one widens or retypes.
+    """
+
+    ISO_TEXT_INSTANT = "iso-text-instant"
+    """Text the specification leaves untyped that is an ISO-8601 instant (`string` to
+    `iso-instant`); it retypes text."""
+    ISO_DATE_TEXT = "iso-date-text"
+    """Text declared a date-time that is a date, `YYYY-MM-DD` (`iso-instant` to `date`)."""
+    QUOTED_INTEGER = "quoted-integer"
+    """An integer sent as decimal digits in text, such as `"48"` (`string` to `long`); it
+    retypes text."""
+    INTEGER_ID_AS_TEXT = "integer-id-as-text"
+    """An identifier declared an integer and sent as one, kept as text; text is refused
+    (`long` to `string`); it retypes integers."""
+    TEXT_OR_INTEGER_ID = "text-or-integer-id"
+    """An identifier sent both as text and as an integer, declared either way; either form is
+    kept as text (`long` or `string` to `string`)."""
+    NUMBER_LABEL = "number-label"
+    """A label declared a number but sent as text, such as the version `"1.0"`; text is kept,
+    and a finite number becomes its decimal text (`double` to `string`)."""
+    ONE_CODE = "one-code"
+    """One integer where a list of condition codes is meant (`long` to `int-array`); it
+    retypes integers."""
+    MIDNIGHT_UTC_DATE = "midnight-utc-date"
+    """A date also sent as an ISO-8601 instant at exactly midnight with offset `Z` or `+00:00`
+    (`date` to `date`)."""
+    DATE_AS_EPOCH = "date-as-epoch"
+    """A date sent as an integer epoch count in the field's unit (`date` to `epoch`)."""
+
+    @property
+    def declarations(self) -> frozenset[WireType]:
+        """The types the vendor's specification may give a field that takes this conversion."""
+        return _CONVERSION_TYPES[self][0]
+
+    @property
+    def wire_type(self) -> WireType:
+        """The type a field that takes this conversion has."""
+        return _CONVERSION_TYPES[self][1]
+
+    @property
+    def widens(self) -> bool:
+        """Whether it accepts a form the declared type refuses, rather than only retyping.
+
+        A widening conversion is needed only while a documented sample is in that form; a
+        retyping one is needed for as long as the specification declares the type.
+        """
+        return _CONVERSION_TYPES[self][2]
+
+
+# Each conversion's declarations, resulting wire type, and whether it widens.
+_CONVERSION_TYPES: Mapping[Conversion, tuple[frozenset[WireType], WireType, bool]] = (
+    MappingProxyType(
+        {
+            Conversion.ISO_TEXT_INSTANT: (
+                frozenset({WireType.STRING}),
+                WireType.ISO_INSTANT,
+                False,
+            ),
+            Conversion.ISO_DATE_TEXT: (frozenset({WireType.ISO_INSTANT}), WireType.DATE, True),
+            Conversion.QUOTED_INTEGER: (frozenset({WireType.STRING}), WireType.LONG, False),
+            Conversion.INTEGER_ID_AS_TEXT: (frozenset({WireType.LONG}), WireType.STRING, False),
+            Conversion.TEXT_OR_INTEGER_ID: (
+                frozenset({WireType.LONG, WireType.STRING}),
+                WireType.STRING,
+                True,
+            ),
+            Conversion.NUMBER_LABEL: (frozenset({WireType.DOUBLE}), WireType.STRING, True),
+            Conversion.ONE_CODE: (frozenset({WireType.LONG}), WireType.INT_ARRAY, False),
+            Conversion.MIDNIGHT_UTC_DATE: (frozenset({WireType.DATE}), WireType.DATE, True),
+            Conversion.DATE_AS_EPOCH: (frozenset({WireType.DATE}), WireType.EPOCH, True),
+        }
+    )
+)
+
+
 @dataclass(frozen=True, kw_only=True)
 class Field:
     """One field of a source: a key on the wire and the column the library names it.
@@ -174,6 +260,12 @@ class Field:
         unit: The timestamp unit; set exactly when `wire_type` is `WireType.EPOCH`.
         required: Whether the vendor marks the field required, so its absence is reported as
             drift. False by default, as for almost every field Massive documents.
+        conversion: The named conversion the decoder applies to each value, set only where the
+            vendor's documented samples show values its declared type does not describe (a
+            timestamp left as plain text whose samples are ISO-8601 date-times, an identifier
+            sent both as text and as an integer). Its `wire_type` is the field's. `None`, the
+            default, means each value is converted by `wire_type` alone; a value that does not
+            convert fails like any other bad value either way.
 
     Example:
         ::
@@ -190,17 +282,24 @@ class Field:
     wire_type: WireType
     unit: WireUnit | None = None
     required: bool = False
+    conversion: Conversion | None = None
 
     def __post_init__(self) -> None:
-        """Check that the unit is set exactly for an epoch.
+        """Check that the unit is set exactly for an epoch, and that a conversion fits.
 
         Raises:
-            ValueError: If `wire_type` is `EPOCH` and `unit` is `None`, or the reverse.
+            ValueError: If `wire_type` is `EPOCH` and `unit` is `None`, or the reverse; or if
+                `conversion` produces another type than `wire_type`.
         """
         if (self.wire_type is WireType.EPOCH) != (self.unit is not None):
             raise ValueError(
                 f"field {self.wire_key!r}: an epoch needs a unit and any other type has none "
                 f"(type {self.wire_type}, unit {self.unit})"
+            )
+        if self.conversion is not None and self.conversion.wire_type is not self.wire_type:
+            raise ValueError(
+                f"field {self.wire_key!r}: the conversion {self.conversion} gives "
+                f"{self.conversion.wire_type}, not {self.wire_type}"
             )
 
 
