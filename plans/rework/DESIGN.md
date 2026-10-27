@@ -1179,13 +1179,13 @@ All return `Query`. The symbol prefix selects the asset class. The axis is `time
 
 ```python
 sma(symbols, window: int, *, timespan: Timespan = Timespan.DAY, multiplier: int = 1,
-    series_type: SeriesType = SeriesType.CLOSE, adjusted: bool = True,
+    series_type: SeriesType = SeriesType.CLOSE, adjusted: bool | None = None,
     expand_underlying: bool = False, …T)
 ema(...)   # same signature as sma
 rsi(...)   # same signature as sma
 macd(symbols, *, short_window: int, long_window: int, signal_window: int,
      timespan: Timespan = Timespan.DAY, multiplier: int = 1,
-     series_type: SeriesType = SeriesType.CLOSE, adjusted: bool = True,
+     series_type: SeriesType = SeriesType.CLOSE, adjusted: bool | None = None,
      expand_underlying: bool = False, …T)
 ```
 
@@ -1193,7 +1193,10 @@ REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol. `Timespan.SESSION` is 
 here. The indicator paths have an `order` parameter but no `sort`, so their `…F` block keeps
 `order` and has no `sort` ([section 9](#9-filters)). Crypto symbols are served by the
 `{cryptoTicker}` templates, chosen per symbol through `DatasetSpec.fetch_paths_by_class`
-([section 13.4](#134-rest)).
+([section 13.4](#134-rest)). Those templates have no `adjusted` parameter, so `adjusted`
+defaults to None, which sends nothing and leaves Massive's default in force. An explicit
+`True` or `False` is sent where the chosen path declares `adjusted`, and raises `ValueError`
+for a symbol whose path does not (a crypto symbol), rather than being dropped silently.
 
 ### 8.9 `m.economy`
 
@@ -3735,7 +3738,10 @@ document already reflects them.
     projected `fetch()` ([section 13.4](#134-rest)). The § 8 rows gain `product_code` on every
     futures dataset that takes it, `adjusted` on the options and crypto `daily_open_close`,
     `filters` on `consensus_ratings`, `type=options` on `options.snapshots`, and the generated
-    axis of `share_float` ([section 8](#8-namespace-tree)).
+    axis of `share_float` ([section 8](#8-namespace-tree)). The indicators take
+    `adjusted: bool | None = None`: None sends nothing, an explicit value is sent where the
+    chosen path declares `adjusted`, and raises `ValueError` on the crypto templates, which do
+    not.
 
 ## 23. Open verification items
 
