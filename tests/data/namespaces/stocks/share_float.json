@@ -1,0 +1,12 @@
+{
+  "request_id": "5e3a1c0f9b2d4e6f8a7b6c5d4e3f2a1b",
+  "results": [
+    {
+      "effective_date": "2025-11-01",
+      "free_float": 15000000000,
+      "free_float_percent": 98.5,
+      "ticker": "AAPL"
+    }
+  ],
+  "status": "OK"
+}

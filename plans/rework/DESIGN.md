@@ -1040,7 +1040,7 @@ Notation:
   `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column. A
   `time` key is always an instant, so `Timestamp` is an `Instant`. Every axis below that is
   a calendar date (all but the instants `published_utc`, `published`, and the indicators'
-  `timestamp`: the dividends, splits, IPOs, short interest and volume, float, financials,
+  `timestamp`: the dividends, splits, IPOs, short interest and volume, financial statements,
   filings, futures schedules, economy, and TMX axes) keeps its `LocalDate` column under its
   own name, such as `Date` or `ExDividendDate`, and declares no `time` key. Datasets whose
   rows each list several tickers (a JSON `tickers` field) describe a filing, a company, or
@@ -1067,8 +1067,9 @@ Notation:
 | `ipos(symbols=None, …T)`, axis `listing_date` | Query | | `/vX/reference/ipos` | |
 | `short_interest(symbols=None, …T)`, axis `settlement_date` | Query | | `/stocks/v1/short-interest` | |
 | `short_volume(symbols=None, …T)`, axis `date` | Query | | `/stocks/v1/short-volume` | |
-| `share_float(symbols=None, …T)`, axis `date` | Query | | `/stocks/vX/float` | |
-| `financials.balance_sheets`, `financials.income_statements`, `financials.cash_flow_statements`, `financials.ratios` — each `(symbols=None, *, timeframe: Timeframe \| None = None, …T)`, axis `period_end` | Query | | `/stocks/financials/v1/{balance-sheets,income-statements,cash-flow-statements,ratios}` | |
+| `share_float(symbols=None, *, …F)`, no axis (the path documents no date parameter; `EffectiveDate` is a column only) | Query | | `/stocks/vX/float` | |
+| `financials.balance_sheets`, `financials.income_statements`, `financials.cash_flow_statements` — each `(symbols=None, *, timeframe: Timeframe \| None = None, …T)`, axis `period_end` | Query | | `/stocks/financials/v1/{balance-sheets,income-statements,cash-flow-statements}` | |
+| `financials.ratios(symbols=None, *, …F)`, no axis (the path documents no `period_end`, `timeframe`, or `date` parameter; its rows carry one `ticker`, so it has `Symbol`) | Query | | `/stocks/financials/v1/ratios` | |
 | `filings.index(symbols=None, *, form_type: str \| None = None, …T)`, axis `filing_date` | Query | | `/stocks/filings/vX/index` | |
 | `filings.sections_10k`, `filings.text_8k`, `filings.disclosures_8k`, `filings.risk_factors` — each `(symbols=None, …T)`, axis `filing_date` | Query | | `/stocks/filings/10-K/vX/sections`, `/stocks/filings/8-K/vX/text`, `/stocks/filings/8-K/vX/disclosures`, `/stocks/filings/vX/risk-factors` | |
 | `filings.institutional_holdings(*, filer_cik: str \| None = None, …T)`, axis `filing_date` (Form 13-F) | Query | | `/stocks/filings/vX/13-F` | |
@@ -1408,7 +1409,7 @@ has the same value set as that parameter.
 | `Direction` | GAINERS, LOSERS | `gainers`, `losers` | `movers()` |
 | `ContractType` | CALL, PUT, OTHER | `call`, `put`, `other` | `options.chain`, `options.contracts` |
 | `SeriesType` | OPEN, HIGH, LOW, CLOSE | `open`, `high`, `low`, `close` | `indicators.*` |
-| `Timeframe` | ANNUAL, QUARTERLY | `annual`, `quarterly` | `stocks.financials.*` |
+| `Timeframe` | ANNUAL, QUARTERLY, TRAILING_TWELVE_MONTHS | `annual`, `quarterly`, `trailing_twelve_months` (the income and cash flow statements document all three, the balance sheets the first two) | `stocks.financials` statements |
 | `Order` | ASC, DESC | `asc`, `desc` | the `…F` block |
 | `Market` | STOCKS, OTC, INDICES, FX, CRYPTO | `stocks`, `otc`, `indices`, `fx`, `crypto` | `reference.tickers` |
 | `Locale` | US, GLOBAL | `us`, `global` | `reference.ticker_types`, `reference.exchanges` |
@@ -3444,7 +3445,7 @@ wl_quotes = m.stocks.quotes(wl).last_by()        # subscriptions follow edits; r
 wl_trades = m.stocks.trades(wl).ring(10_000)
 movers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
 mover_quotes = m.stocks.quotes(movers).last_by()                          # follows the top 20
-mover_ratios = m.stocks.financials.ratios(movers).poll(600)               # 20 requests per cycle
+mover_ratios = m.stocks.financials.ratios(movers).poll(600)               # one ticker.any_of request per cycle
 m.release(wl_trades)        # deterministic: T topics unsubscribed when no other table holds the stream
 del wl_quotes               # released at the end of this console command, unless a UI panel shows it
 ```
@@ -3668,3 +3669,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 19 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/namespaces/test_crypto_integration.py`: one `XT` frame; record the form of `i` |
 | 20 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); the overflow check and the [1990, 2100] bound fail loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
 | 21 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
+| 22 | Whether rows of `stocks.filings.index`, `filings.sections_10k`, `filings.text_8k`, and `filings.risk_factors` can lack a `ticker` (a filer with no listed security) | The `ticker` is the dataset's `symbol` key, so it is required: a row without one fails the request loudly; if rows can lack it, those datasets get a symbol key that is not required | `tests/namespaces/test_stocks.py`: the documented examples decode with the key required | `tests/namespaces/test_stocks_integration.py`: one unfiltered page of each; record whether any row lacks `ticker` |
