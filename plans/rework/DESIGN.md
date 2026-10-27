@@ -1097,7 +1097,7 @@ needs a timezone: pass an aware datetime or a date`. The same rule and message a
 **ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
 becomes an `Instant`. It must carry an offset (`Z` or `±HH:MM`): text without one is an
 unconvertible value ([section 19.5](#195-runtime-drift)), never read as UTC, and a field that
-really is offset-less UTC needs a declared `TYPE_FIXES` conversion. The generator's
+really is offset-less UTC needs a named `TYPE_FIXES` conversion. The generator's
 representation rules ([section 19.4](#194-generated-schemas)) decide which fields are ISO
 `Instant`s and which are dates; any other text timestamp needs a `TYPE_FIXES` entry.
 
@@ -2111,7 +2111,7 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   float or a microsecond `datetime`), `int-array` → `list<int32>`. Values are checked and
   converted by `spec.convert`, which the WebSocket decoder shares. ISO date-time text **without** an offset is an
   unconvertible value, never assumed to be UTC: a field that really is offset-less UTC gets a
-  declared `TYPE_FIXES` conversion. `DriftReport.missing` holds only the vendor-`required`
+  named `TYPE_FIXES` conversion. `DriftReport.missing` holds only the vendor-`required`
   fields that some row lacked or held as null; an extra nested object is reported by its own
   key, not by each leaf.
 - **Logging.** Each request logs at DEBUG: method, path, query (with no secret), status,
@@ -2460,9 +2460,10 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
 
 **Named conversions.** A `TYPE_FIXES` entry names one field of one source and one
 `spec.types.Conversion`, and the generated `Field` records it as `conversion` (`rest.json`
-writes its name). Each conversion has one meaning wherever it is used: the type the
-specification must declare (a changed declaration makes the entry stale), the type the field
-gets, and exactly the forms it accepts, so no entry silently inherits a meaning nobody chose
+writes its name). Each conversion has one meaning wherever it is used: the types the
+specification may declare (`declarations`; a changed declaration makes the entry stale), the
+type the field gets, whether it widens (accepts a form the declared type refuses) or only
+retypes values the declared type accepts (`widens`), and exactly the forms it accepts, so no entry silently inherits a meaning nobody chose
 for it. The plain converter of each `WireType` is never loosened, and no conversion is a
 no-op. The decoder applies it deliberately: forex `x` arrives as a quoted decimal string
 (`"48"`) and `quoted-integer` parses it to `long`; a value it cannot read (`"4.8"`, `"x"`) is
@@ -2476,9 +2477,8 @@ entry declares is coercion, which never happens. The conversions:
 | `iso-date-text` | `iso-instant` → `date` | `YYYY-MM-DD` | futures products `last_updated` (sample `"2025-02-22"`) |
 | `quoted-integer` | `string` → `long` | decimal digits in text | forex `x` |
 | `integer-id-as-text` | `long` → `string` | an integer only; text fails | WebSocket crypto `XT` `i` |
-| `integer-or-text-id` | `long` → `string` | an integer or text | TMX `tmx_company_id` (sample `"2208"`) |
-| `text-or-integer-id` | `string` → `string` | text or an integer | crypto full-market and movers snapshots `lastTrade.i` (samples `413131` and `"517478762"`) |
-| `number-label` | `double` → `string` | text, or a number written with a fraction | risk-factor `taxonomy` (sample `"1.0"`) |
+| `text-or-integer-id` | `long` or `string` → `string` | text or an integer | crypto full-market and movers snapshots `lastTrade.i`, declared text (samples `413131` and `"517478762"`); TMX `tmx_company_id`, declared an integer (sample `"2208"`) |
+| `number-label` | `double` → `string` | text, or a finite number as float text (`1` gives `"1.0"`) | risk-factor `taxonomy` (sample `"1.0"`) |
 | `one-code` | `long` → `int-array` | one integer | flat-file `conditions` |
 | `midnight-utc-date` | `date` → `date` | `YYYY-MM-DD`, or midnight with offset `Z` or `+00:00`, giving the written date; any other clock or offset fails | indices open-close `from`, crypto open-close `day` (samples `"…T00:00:00.000Z"`); the column stays a date so the open-close sources agree |
 | `date-as-epoch` | `date` → `epoch` | an integer count; its unit comes from `UNITS` | futures snapshot `details.settlement_date` (sample `1753851600000000000`, an instant in ns; `/futures/v1/contracts` sends the field as a date) |
@@ -2488,10 +2488,12 @@ the specification's response example (106 of the 109 generated REST paths carry 
 field's own `example`. A type the vendor's samples contradict stops the refresh instead of
 failing at run time. It also retires fixes: a `TYPE_FIXES` entry is stale once no example
 value of the fields it names (all entries sharing one decision, such as the two crypto
-snapshots) is a value the declared type refuses, except a conversion from untyped text
-(`iso-text-instant`, `quoted-integer`), which the declared-type check retires once the
-specification types the field. A `SAMPLE_ERRORS` entry is stale once the specification no
-longer shows its sample, or the field accepts it.
+snapshots, one decision from one `TypeFix` object) is a value the declared type refuses. A
+conversion that only retypes values its declared type accepts (`iso-text-instant`,
+`quoted-integer`, `integer-id-as-text`, `one-code`) is exempt: the declared-type check retires
+it once the specification changes the type. A `SAMPLE_ERRORS` entry is stale once the specification no
+longer shows its sample, the field accepts it, or the field is gone; samples compare as JSON
+text, so `1`, `1.0`, and `true` are three samples.
 
 **Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
 columns as `KeySpec(column, from_request)`, one optional declaration per role (`symbol`,
@@ -2559,7 +2561,7 @@ routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
 | **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
 | **Missing required key** (a key the dataset declares for this source, not `from_request`; a dataset that declares no key has none) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
-| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a declared `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the declared conversion cannot parse fails here. |
+| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_timeunits` | in `_timeunits`, in the flush thread as a vectorized mask | in `_timeunits` | Loud failure naming the dataset, the column, the unit, and the value. |
 | **Undocumented value of an interpreted field** (`timeframe`) | `_hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
 

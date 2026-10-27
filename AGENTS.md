@@ -36,7 +36,8 @@ refresh it prints each problem (gate, path, key, vendor description); fix it wit
 its reason in one of the hand-input tables, never by editing the generated file: a lexicon,
 `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_CONFLICTS`,
 `TYPE_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, or `KINDS` entry (`overrides.py`); or an
-`EXCLUSIONS` or `SAMPLE_ERRORS` entry (`exclusions.py`). `--check` (a live drift report) arrives with the `PLAN.md` package PC3c.
+`EXCLUSIONS` or `SAMPLE_ERRORS` entry (`exclusions.py`). `--check` (a live drift report)
+arrives with the `PLAN.md` package PC3c.
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
