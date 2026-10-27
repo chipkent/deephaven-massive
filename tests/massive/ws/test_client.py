@@ -392,6 +392,19 @@ def test_an_http_429_waits_the_longer_of_retry_after_and_the_backoff(
     assert at == h.clock.time() + wait
 
 
+def test_a_capped_retry_after_is_warned_about(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_ws_server.reject_next(429, {"Retry-After": "500"})
+    h = make_client(backoff=(2.0, 10.0))
+    h.recorder.wait_open(1)
+    [record] = [r for r in caplog.records if "Retry-After" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert record.getMessage().endswith("wait 500.0 s (Retry-After); waiting at most 10.0 s")
+
+
 def test_a_refused_connection_is_retried(
     make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
 ) -> None:

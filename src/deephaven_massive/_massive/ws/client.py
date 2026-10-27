@@ -475,7 +475,14 @@ class WsClient:
             ended = await self._attempt()
             if isinstance(ended, WireError):
                 return ended
-            least = min(ended.least_wait, self._max_wait)  # a Retry-After, capped
+            if ended.least_wait > self._max_wait:
+                logger.warning(
+                    "%s asked to wait %.1f s (Retry-After); waiting at most %.1f s",
+                    self._url,
+                    ended.least_wait,
+                    self._max_wait,
+                )
+            least = min(ended.least_wait, self._max_wait)
             wait = max(self._backoff.next_wait(ended.uptime), least)
             logger.warning("reconnecting to %s in %.1f s", self._url, wait)
             state = WsState.WAITING_SLOT if ended.waiting_slot else WsState.RECONNECTING
