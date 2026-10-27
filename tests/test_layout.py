@@ -1121,7 +1121,7 @@ def test_the_refresh_rule_covers_names_in_strings() -> None:
 
 # Everywhere else: only the interface.
 
-_LIBRARY_FILE = "src/deephaven_massive/_rest.py"
+_LIBRARY_FILE = "src/deephaven_massive/_query.py"  # any library module outside the wire
 
 
 @pytest.mark.parametrize("path", [_LIBRARY_FILE, "src/deephaven_massive/_namespaces/stocks.py"])
@@ -1562,11 +1562,12 @@ def _client_reads(
     Returns:
         `(line, name)` for each client name of `_massive.__all__` the file uses.
     """
-    found = [
+    members = [
         (line, name.removeprefix(f"{_WIRE}.").split(".")[0])
         for line, name in references
-        if _inside(name, _WIRE) and name.removeprefix(f"{_WIRE}.").split(".")[0] in WIRE_CLIENTS
+        if _inside(name, _WIRE) and name != _WIRE
     ]
+    found = [(line, member) for line, member in members if member in WIRE_CLIENTS]
     found.extend(
         (line, attribute)
         for line, attribute in _wire_reads(tree, _wire_aliases(tree, package))
