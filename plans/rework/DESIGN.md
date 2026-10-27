@@ -968,8 +968,8 @@ The mapping is mechanical and one to one: a key ending in `_gt`, `_gte`, `_lt`, 
 `_any_of` is sent as `<field>.<suffix>` exactly when the spec lists that dotted parameter for the
 path; every other key is sent unchanged. `Sequence[str]` values of an `.any_of` parameter are
 joined with commas; dates are ISO-8601; an aware `datetime` becomes the parameter's documented
-form (exact integer nanoseconds for a nanosecond timestamp parameter, ISO-8601 otherwise), and a
-naive one raises `ValueError` (§ 11).
+form (an exact integer count of the parameter's `unit` for a timestamp parameter, ISO-8601
+otherwise), and a naive one raises `ValueError` (§ 11).
 
 Validation is synchronous at query construction, against the generated parameters of the
 dataset's paths (`RestPath.params` of `spec/rest.json`,
@@ -1075,10 +1075,9 @@ needs a timezone: pass an aware datetime or a date`. The same rule and message a
 `datetime` passed as a `filters` value or a typed parameter.
 
 **ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
-becomes an `Instant`, decoded to exact integer nanoseconds since the epoch (a fraction of up to
-9 digits is kept exactly). Text without an offset is an unconvertible value: its zone would be
-a guess. A field whose vendor text is known to omit a UTC offset gets a field-scoped
-`TYPE_FIXES` entry that declares UTC. The generator's
+becomes an `Instant`. It must carry an offset (`Z` or `±HH:MM`): text without one is an
+unconvertible value ([section 19.5](#195-runtime-drift)), never read as UTC, and a field that
+really is offset-less UTC needs a declared `TYPE_FIXES` conversion. The generator's
 representation rules ([section 19.4](#194-generated-schemas)) decide which fields are ISO
 `Instant`s and which are dates; any other text timestamp needs a `TYPE_FIXES` entry.
 
@@ -1852,14 +1851,18 @@ net/                 shared by every client; imports nothing else in _massive
   errors.py          WireError, WireAuthError, WireEntitlementError
   http.py            CA bundle (SSL_CERT_FILE/SSL_CERT_DIR, else certifi); proxy from HTTPS_PROXY/NO_PROXY
   retry.py           the retry schedule (0.5/1/2 s, +20 % jitter; Retry-After; 15/30/60 s for 429),
-                     retryable classification; TLS never retried
+                     retryable classification; TLS never retried; Clock (injectable, tests
+                     never sleep); an unusable Retry-After is logged at WARNING, never 0
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
 spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport): load once under a lock
   types.py           Transport, Source(key, transport, fields, memberships),
                      Membership(kind, group, position, projection), RestPath(Source + template,
                      result key, params), Field(wire key, column, WireType, unit, required),
-                     Param, ParamKind, WireType, WireUnit, DriftReport(extra, missing)
+                     Param(+ unit), ParamKind, WireType, WireUnit, ENVELOPE_KEYS,
+                     DriftReport(extra, missing, statuses)
+  convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
+                     every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError
   rest.json  ws.json  flatfiles.json        generated, committed
 rest/                imports net, spec
   __init__.py        RestClient, Page, to_batch
@@ -1954,7 +1957,8 @@ argument (the parameters are copied before they are encoded).
 client.get(rest_path, path_params, query_params) -> Page             # one request
 client.pages(rest_path, path_params, query_params, *, limit=None) -> Iterator[Page]
                                                                     # follows next_url
-Page(status: str, request_id: str | None, rows: list[dict], body: dict | list)
+Page(status: str, request_id: str | None, rows: list[dict], body: dict | list,
+     drift: DriftReport)          # drift.statuses only; repr omits rows and body
 to_batch(rows, rest_path, *, required) -> (pyarrow.RecordBatch, DriftReport)
 ```
 
@@ -1966,32 +1970,59 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   `max_concurrency` so fan-out never discards connections, and `Accept-Encoding: gzip`
   (urllib3 decodes it). `User-Agent: deephaven-massive/<version>` (`net.USER_AGENT`).
 - **Authentication.** `Authorization: Bearer <key>` on every request. The key never appears in
-  a URL: an `apiKey` parameter in a `next_url` is removed before the request.
+  a URL: an `apiKey` parameter in a `next_url` is removed before the request. A key that is
+  empty or holds anything but visible ASCII (a trailing newline from a key file) raises
+  `ValueError` at construction, without quoting the key. The base URL must be `https`, except
+  for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), so the key never travels in clear
+  text; it names only a scheme, host, and port (no user information, path, or query).
 - **Proxies and certificates** come from `net.http`: `urllib.request.getproxies()` for
   `HTTPS_PROXY` and `urllib.request.proxy_bypass` for `NO_PROXY` select a `ProxyManager` for
-  the REST host or a plain `PoolManager`, read once at construction. The CA bundle is the
+  the REST host or a plain `PoolManager`, read once at construction. A user and password in
+  the proxy URL are sent as `Proxy-Authorization` (`net.http.proxy_credentials`; urllib3 does
+  not send them itself), and the pool holds the URL without them, so they never reach a log or
+  an error. HTTPS goes through the proxy in a `CONNECT` tunnel, so the proxy sees
+  `Proxy-Authorization` and never the bearer key. A proxy reached over `https` is verified
+  with the same `net.http.ssl_context()` as Massive. The CA bundle is the
   system default when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an
   `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise.
-- **Query encoding.** Path parameters are percent-encoded into the template. Query values, by
-  the parameter's `ParamKind`: an enum by its value, `bool` as `true`/`false`, a `date` as
-  ISO-8601, an aware `datetime` as exact integer nanoseconds computed from `timedelta` days,
-  seconds, and microseconds (never through a float) for a nanosecond timestamp parameter and as
-  ISO-8601 otherwise, and a sequence joined with commas (the `.any_of` form). A naive
-  `datetime` raises `ValueError`. `None` values are omitted. Names arrive already in wire form
-  (`strike_price.gte`); the dot mapping of [section 9](#9-filters) happens before the client.
+- **Query encoding.** Path parameters are encoded like query values, then percent-encoded
+  whole into the template. Values, by the parameter's `ParamKind`: an enum by its value (one of
+  `Param.values`), `bool` as `true`/`false` (never for an integer or number), a `date` as
+  ISO-8601, an aware `datetime` for a `TIMESTAMP` parameter as an exact integer count of the
+  parameter's `unit` (`Param.unit`, set exactly for `TIMESTAMP`: nanoseconds for most,
+  milliseconds for the indicators' `timestamp` filters) computed from `timedelta` days,
+  seconds, and microseconds (never through a float), and as ISO-8601 for a `DATE` parameter;
+  a non-empty sequence of `str` joined with commas (the `.any_of` form). A naive `datetime`, an
+  instant that is not a whole number of the parameter's unit (rounding would move a range
+  bound), an empty sequence, and a non-finite number raise `ValueError`; a value of a type the
+  kind does not accept raises `TypeError`. `None` values are omitted. A name that is not a
+  query parameter of the path, or path parameters other than exactly its placeholders, raise
+  `ValueError` before any request. Names arrive already in wire form (`strike_price.gte`); the
+  dot mapping of [section 9](#9-filters) happens before the client.
 - **Paging.** `pages` follows each page's `next_url`, which carries the cursor and the query.
-  A `next_url` whose scheme and host differ from `rest_base_url` raises `WireError` and is never
-  requested. `limit` is the total-row cap: paging stops once that many rows have been yielded,
-  and the last page is truncated. Only one page of rows is held at a time.
+  A `next_url` whose scheme, host, or port differ from `rest_base_url` raises `WireError` and
+  is never requested, and the error quotes it without `apiKey` or user information; any other
+  `next_url` is requested on the base URL's origin, its query kept byte for byte without
+  `apiKey`. `limit` (at least 1) is the total-row cap: paging stops
+  once that many rows have been yielded, and the last page is truncated. Only one page of rows
+  is held at a time. A body without an envelope (`result_key` `None`, a list) ends paging.
 - **Retries** follow `net/retry.py`. At most 3 retries (4 attempts); every request is a `GET`,
   so a retry is always safe. HTTP 500, 502, 503, 504 and connection errors wait 0.5, 1, then
   2 s, each with up to 20% upward jitter. HTTP 429 waits the `Retry-After` value in either form
   (delta-seconds or HTTP-date), otherwise 15, 30, then 60 s; a `Retry-After` above 60 s raises
-  `WireError(status=429)` at once, naming the requested wait. After a 429 the client sets its
-  not-before instant, so concurrent workers back off together instead of multiplying 429s. A
+  `WireError(status=429)` at once, naming the requested wait, and still sets the not-before
+  instant 60 s ahead, so the other workers stop too. After a 429 the client sets its
+  not-before instant, so concurrent workers back off together instead of multiplying 429s;
+  a 429 on the last attempt still sets it (its `Retry-After`, else 60 s) before it raises. A
   TLS certificate failure (`ssl.SSLCertVerificationError`) is never retried: it raises
   `WireError` at once, naming `SSL_CERT_FILE`. A connection reset in the middle of paging
-  retries **that page** (its `next_url`), never the first page.
+  retries **that page** (its `next_url`), never the first page. Redirects are never followed
+  (a 3xx is a `WireError`), so the bearer key never leaves the REST host. Every wait goes
+  through an injectable clock (`net.retry.Clock`, whose `wait(event, seconds)` ends early
+  when the event is set), so tests never sleep. `close()` sets the client's closed event: a
+  thread waiting for the not-before instant or a retry stops at once, and every later request
+  raises `WireError`. A `next_url` that repeats the target just fetched raises `WireError`
+  rather than paging forever.
 - **Error mapping.** After the retries, the client raises: 401 as `WireAuthError`; 403, and a
   200 envelope with `status` `NOT_AUTHORIZED`, as `WireEntitlementError`; every other non-200
   status (429 included), a 200 envelope with `status` `ERROR`, and a connection failure as
@@ -2003,15 +2034,42 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   bytes, on any call and on any page. So does a document nested deeper than 512 on the
   standard-library path: the codec counts the depth before decoding, so a hostile body can
   never exhaust the C stack of the calling thread (a JVM thread has 1 MB); orjson enforces its
-  own limit of 1024. The page's rows come from the `RestPath`'s result key
-  (`results`, or the `RESULT_KEYS` entry). A single object is wrapped as one row; a bare JSON
-  list (`/v1/marketstatus/upcoming`) is the rows, with `status=""` and `request_id=None`. A
-  missing result key is an empty page only when `status` is `OK` or `DELAYED`. The envelope's
-  `status` and `request_id` are kept on the `Page`, so callers can read `DELAYED`.
+  own limit of 1024. The page's rows come from the `RestPath`'s `result_key: str | None`:
+  - **A key** (`results`, or the `RESULT_KEYS` entry such as `last`), possibly dotted
+    (`results.values` for the indicators, `results.events` for ticker events): the body is an
+    envelope object, and the decoder walks the dots. An object there is one row and a list is
+    the rows. A missing (or null) step is an empty page only when `status` is `OK` or
+    `DELAYED`, and a `WireError` otherwise. Rows under a key keep every key, `status` included
+    (TMX corporate events carry their own).
+  - **`None`**: the body is the rows (the generator writes `null` where the OpenAPI response has
+    no envelope). A JSON list is the rows, every key kept (`/v1/marketstatus/upcoming` holiday
+    rows have a real `status`), with `status=""` and `request_id=None`. A JSON object is one
+    row and also the envelope (`/v1/marketstatus/now`, `/v1/open-close/*`, `/v1/conversion`):
+    its `status` and `request_id` describe the page, and the `ENVELOPE_KEYS`
+    (`status`, `request_id`, `next_url`, `count`, one constant in `spec/types.py` that the
+    refresh shares) are removed from the row before drift detection.
+
+  **Envelope status**, for every path: `NOT_AUTHORIZED` raises `WireEntitlementError` and
+  `ERROR` raises `WireError`. `OK`, `DELAYED`, and `success` (the "last" endpoints) are the
+  documented good statuses, named once (`rest.response.GOOD_STATUSES`). Any other status still
+  yields its rows and is reported in `Page.drift.statuses`, which the library logs at WARNING
+  once per (path, status). A `status` or `request_id` that is not text is a `WireError`. The
+  envelope's `status` and `request_id` are kept on the `Page`, so callers can read `DELAYED`.
 - **Batches.** `to_batch` turns a page's rows into one Arrow batch of the path's generated
   fields, in long-form column names, and returns its `DriftReport`; it validates every value
   per [section 19.5](#195-runtime-drift). It is the only code that walks a wire path; no row
-  object or model class sits between the JSON and Arrow.
+  object or model class sits between the JSON and Arrow. `required` holds long-form columns
+  (`KeySpec.column`); a name that is not a column of the path raises `ValueError`. Arrow
+  types: `long` and `epoch` → `int64` (an epoch stays a raw count for `_timeunits`), `double` →
+  `float64`, `bool` → `bool`, `string` and `json-text` (compact JSON) → `string`, `date` →
+  `date32` (strict `YYYY-MM-DD`), `iso-instant` → `timestamp[ns, UTC]` built from exact
+  integer nanoseconds (up to nine fractional digits, integer arithmetic only, never through a
+  float or a microsecond `datetime`), `int-array` → `list<int32>`. Values are checked and
+  converted by `spec.convert`, which the WebSocket decoder shares. ISO date-time text **without** an offset is an
+  unconvertible value, never assumed to be UTC: a field that really is offset-less UTC gets a
+  declared `TYPE_FIXES` conversion. `DriftReport.missing` holds only the vendor-`required`
+  fields that some row lacked or held as null; an extra nested object is reported by its own
+  key, not by each leaf.
 - **Logging.** Each request logs at DEBUG: method, path, query (with no secret), status,
   `request_id`, row count, and elapsed time. Retries log at INFO with the wait, and exhausted
   retries at ERROR. The `Authorization` header is never logged.
@@ -2151,7 +2209,9 @@ verification, never a column list.
 
 - **REST.** Every `openapi.json` path that is not deprecated, draft, or ignored and not in
   `EXCLUSIONS`. The generator resolves `$ref`, merges `allOf`, flattens nested objects into
-  dotted wire paths below the result key (`results` unless `RESULT_KEYS` names another), keeps
+  dotted wire paths below the result key (`results` unless `RESULT_KEYS` names another, which may
+  itself be dotted, such as `results.values`; `null` where the response schema has no
+  envelope and the body is the rows, whose `ENVELOPE_KEYS` never become fields), keeps
   fields in spec order, and records the parameters (wire name, `ParamKind`, enum values, path or
   query).
 - **WebSocket.** Every `websocket.json` channel not in `EXCLUSIONS`, keyed `(cluster,
@@ -2196,7 +2256,11 @@ joins: `long ⊔ double = double`; `long ⊔ int-array = int-array` (a scalar be
 one-element list); `epoch ⊔ epoch = epoch`, each source keeping its own unit. Any other pair is a
 **type conflict** (gate G5). `_schema` maps `long` to `long`, `double` to `double`, `bool` to
 `boolean`, `string` and `json-text` to `String`, `date` to `LocalDate`, `epoch` and
-`iso-instant` to `Instant`, and `int-array` to `int[]`. An `int-array` element outside the
+`iso-instant` to `Instant`, and `int-array` to `int[]`. An `iso-instant` is ISO-8601
+date-time text with seconds and an offset (`Z` or `±HH:MM`), decoded to exact integer
+nanoseconds since the epoch; text without an offset, or an instant outside the signed
+64-bit nanosecond range (1677 to 2262), is an unconvertible value, never assumed UTC or
+clamped. An `int-array` element outside the
 `int32` range is an unconvertible value.
 
 **Hand input.** All of it lives in `refresh/`, every entry carries a reason, and an entry that
@@ -2332,7 +2396,9 @@ installed wheel; the CI build job checks that the wheel holds no `refresh/`.
 
 Data on the wire can differ from the committed schema until the next refresh. **Detection** is in
 `_massive`: each decoder compares a payload with its generated source and returns a
-`DriftReport(extra, missing)`. A decoder never raises for drift; REST and flat files raise
+`DriftReport(extra, missing, statuses)` (`missing`: only vendor-`required` fields that some
+row lacked or held as null; `statuses`: REST envelope statuses outside the
+documented ones). A decoder never raises for drift; REST and flat files raise
 `WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
 session's `_diagnostics.DriftRegistry` (a leaf lock, WARNINGs logged after release) and the
 routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
@@ -2340,6 +2406,7 @@ routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
 |---|---|---|---|---|
 | **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field). Shown in `SchemaDrift`. |
+| **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
 | **Missing required key** (a key the dataset declares for this source, not `from_request`; a dataset that declares no key has none) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a declared `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the declared conversion cannot parse fails here. |

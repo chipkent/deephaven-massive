@@ -11,7 +11,9 @@ REST (urllib3), WebSocket (websockets), and flat files (boto3):
 - **Proxy.** `HTTPS_PROXY` (or `https_proxy`) names the proxy for HTTPS traffic, and
   `NO_PROXY` lists the hosts that bypass it, read through `urllib.request` exactly as the
   standard library reads them. On macOS and Windows, with neither variable set, the system's
-  proxy settings apply, again as `urllib.request` reads them.
+  proxy settings apply, again as `urllib.request` reads them. A user and password in the
+  proxy URL are sent as `Proxy-Authorization` (`proxy_credentials` splits them out for
+  urllib3, which would not send them itself) and never appear in a log or an error.
 
 The functions read the environment on every call and keep no state, so they are safe from
 any thread. This module imports only the standard library and `certifi`.
@@ -19,13 +21,15 @@ any thread. This module imports only the standard library and `certifi`.
 
 from __future__ import annotations
 
+import base64
 import os
 import ssl
 import urllib.request
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import certifi
 
-__all__ = ["ca_file", "https_proxy", "ssl_context"]
+__all__ = ["ca_file", "https_proxy", "proxy_credentials", "ssl_context"]
 
 
 def ssl_context() -> ssl.SSLContext:
@@ -81,3 +85,30 @@ def https_proxy(host: str) -> str | None:
     if not proxy or urllib.request.proxy_bypass(host):
         return None
     return proxy
+
+
+def proxy_credentials(proxy_url: str) -> tuple[str, dict[str, str]]:
+    """Split a proxy URL into the URL without credentials and the header that carries them.
+
+    A corporate proxy often takes a user and password in the URL
+    (`http://alice:secret@proxy.corp:3128`). urllib3's `ProxyManager` parses them but never
+    sends them, so the REST client passes the returned header as its `proxy_headers`, and the
+    URL without credentials as the proxy, which keeps the password out of every object a log
+    or an error might show. botocore and `websockets` read credentials from the URL
+    themselves, so the other clients need not call this.
+
+    Args:
+        proxy_url: The proxy URL, from `https_proxy`. A percent-encoded user or password
+            (`p%40ss` for `p@ss`) is decoded.
+
+    Returns:
+        The proxy URL with no user information, and `{"Proxy-Authorization": "Basic <...>"}`
+        (UTF-8 `user:password` in base64) when the URL names a user, or `{}` when it does not.
+    """
+    parts = urlsplit(proxy_url)
+    if parts.username is None:
+        return proxy_url, {}
+    bare = urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
+    pair = f"{unquote(parts.username)}:{unquote(parts.password or '')}"
+    token = base64.b64encode(pair.encode()).decode("ascii")
+    return bare, {"Proxy-Authorization": f"Basic {token}"}

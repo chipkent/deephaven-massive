@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive import MassiveSession
+    from tests._fakes.rest import FakeRestServer
     from tests._fakes.stream import FakeStreamTransport
     from tests._fakes.ws import FakeMassiveServer
 
@@ -177,6 +178,20 @@ def fake_ws_server() -> Iterator[FakeMassiveServer]:
     server: FakeMassiveServer = ws.FakeMassiveServer()
     yield server
     server.stop()
+
+
+@pytest.fixture
+def fake_rest() -> Iterator[FakeRestServer]:
+    """Yield a started `FakeRestServer` (`tests/_fakes/rest.py`) on 127.0.0.1, closed at teardown.
+
+    Yields:
+        The server; script it with `reply` and read `requests` afterwards.
+    """
+    rest = importlib.import_module("tests._fakes.rest")
+    server: FakeRestServer = rest.FakeRestServer()
+    server.start()
+    yield server
+    server.close()
 
 
 # --- Session fixtures --------------------------------------------------------------------------

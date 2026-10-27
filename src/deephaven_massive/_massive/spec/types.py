@@ -53,6 +53,7 @@ else:
 
 
 __all__ = [
+    "ENVELOPE_KEYS",
     "DriftReport",
     "Field",
     "Membership",
@@ -64,6 +65,17 @@ __all__ = [
     "WireType",
     "WireUnit",
 ]
+
+
+ENVELOPE_KEYS: frozenset[str] = frozenset({"status", "request_id", "next_url", "count"})
+"""The keys of Massive's REST envelope that describe a response, never a row.
+
+A path whose body is a single JSON object that is both the envelope and the one row
+(`RestPath.result_key` is `None`: `/v1/open-close/{stocksTicker}/{date}`, `/v1/conversion/...`,
+`/v1/marketstatus/now`) carries some of these beside the row's own keys. The REST decoder
+removes them from such a row before it compares the row with the path's fields, and the refresh
+never generates a field for them. A list body is never an envelope: its rows keep every key.
+"""
 
 
 class Transport(StrEnum):
@@ -100,8 +112,11 @@ class WireType(StrEnum):
     EPOCH = "epoch"
     """An integer count of `WireUnit`s since the Unix epoch; the field's `unit` says which."""
     ISO_INSTANT = "iso-instant"
-    """An instant as ISO-8601 date-time text with an offset (`Z` or `+HH:MM`), decoded to
-    exact integer nanoseconds since the Unix epoch; text without an offset is unconvertible."""
+    """An instant as ISO-8601 date-time text with seconds and an offset (`Z` or `±HH:MM`).
+
+    Decoded to exact integer nanoseconds since the Unix epoch (UTC), keeping up to nine
+    fractional digits. Text without an offset is an unconvertible value, never assumed UTC.
+    """
     INT_ARRAY = "int-array"
     """A list of integers, each within the signed 32-bit range (condition codes)."""
     JSON_TEXT = "json-text"
@@ -142,7 +157,7 @@ class ParamKind(StrEnum):
     DATE = "date"
     """Date or instant; an instant is sent as ISO-8601 date-time text, not date-only."""
     TIMESTAMP = "timestamp"
-    """Date or instant; an instant is sent as exact integer nanoseconds since the Unix epoch."""
+    """Date or instant; an instant is sent as an exact integer count of the parameter's `unit`."""
     LIST = "list"
     """A sequence of strings, sent joined with commas (the `.any_of` parameters)."""
 
@@ -249,22 +264,31 @@ class Param:
         kind: The kind of value the parameter takes.
         in_path: True for a placeholder of the path template, False for a query parameter.
         values: The accepted values of an `ENUM` parameter, in spec order; empty otherwise.
+        unit: The unit an instant is sent in, set exactly when `kind` is `TIMESTAMP`: `NS` for
+            the trade and quote filters, `MS` for the indicator filters. An instant is sent as
+            an exact integer count of it.
     """
 
     name: str
     kind: ParamKind
     in_path: bool = False
     values: tuple[str, ...] = ()
+    unit: WireUnit | None = None
 
     def __post_init__(self) -> None:
-        """Check that values are given exactly for an enum.
+        """Check that values are given exactly for an enum, and a unit exactly for a timestamp.
 
         Raises:
-            ValueError: If `kind` is `ENUM` and `values` is empty, or the reverse.
+            ValueError: If `kind` is `ENUM` and `values` is empty, or the reverse; or if `kind`
+                is `TIMESTAMP` and `unit` is `None`, or the reverse.
         """
         if (self.kind is ParamKind.ENUM) != bool(self.values):
             raise ValueError(
                 f"parameter {self.name!r}: an enum needs values and any other kind has none"
+            )
+        if (self.kind is ParamKind.TIMESTAMP) != (self.unit is not None):
+            raise ValueError(
+                f"parameter {self.name!r}: a timestamp needs a unit and any other kind has none"
             )
 
 
@@ -364,8 +388,12 @@ class RestPath(Source):
     `transport` is always `Transport.REST` and cannot be passed.
 
     Attributes:
-        result_key: The envelope key that holds the rows; `"results"` unless the path keeps
-            them elsewhere (for example `"last"`).
+        result_key: The envelope key that holds the rows: `"results"` unless the path keeps
+            them elsewhere (for example `"last"`). A dotted key walks into nested objects
+            (`"results.values"` for the indicators). `None` when the body itself is the rows:
+            a JSON object is one row (`/v1/marketstatus/now`), from which the
+            `ENVELOPE_KEYS` are removed, and a JSON list is the rows
+            (`/v1/marketstatus/upcoming`).
         params: The path's parameters, path placeholders and query parameters alike, in
             spec order.
 
@@ -383,7 +411,7 @@ class RestPath(Source):
     """
 
     transport: Transport = dataclasses.field(default=Transport.REST, init=False)
-    result_key: str = "results"
+    result_key: str | None = "results"
     params: tuple[Param, ...] = ()
 
     @override
@@ -421,8 +449,13 @@ class DriftReport:
 
     Attributes:
         extra: Wire keys present in the payload that the source does not declare (dropped).
-        missing: Wire keys the source declares that the payload lacked (decoded as null).
+        missing: Wire keys of the vendor-`required` fields (`Field.required`) that some row
+            lacked or held as null (decoded as null). Absent optional fields are not drift.
+        statuses: REST envelope `status` values outside the documented ones (`OK`,
+            `DELAYED`, `success`, and the error statuses); the page's rows were still decoded.
+            Always empty for WebSocket and flat files.
     """
 
     extra: frozenset[str] = frozenset()
     missing: frozenset[str] = frozenset()
+    statuses: frozenset[str] = frozenset()
