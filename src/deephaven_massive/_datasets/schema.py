@@ -12,7 +12,8 @@ the dataset's table shape:
   (used by the diagnostics tables, whose rows are built in Python).
 - `rename`, the run-time key rename of one source for one dataset: the source's fields,
   through the projection of the dataset's membership of its kind, with the dataset's declared
-  key columns renamed to `Symbol`, `Timestamp`, and `Underlying`, and a key the source does
+  key columns renamed to `Symbol`, `Timestamp`, and `Underlying` (a fan-out key that is no
+  instrument, such as a filer CIK, keeps its column), and a key the source does
   not carry (one filled from the request) added as a constant `String` column. Nothing else
   changes. `required_fields` resolves the keys a source must carry back to the generated
   fields behind them, for the wire clients' required-key checks.
@@ -48,7 +49,7 @@ from deephaven_massive._massive import WireType
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
     from deephaven_massive._massive import Field, Source, Transport
 
 __all__ = [
@@ -60,6 +61,7 @@ __all__ = [
     "SourceColumn",
     "dataset_schema",
     "join",
+    "key_column",
     "pascal_case",
     "rename",
     "required_fields",
@@ -126,7 +128,24 @@ KEY_COLUMNS: Final[Mapping[str, str]] = {
     "fanout": "Underlying",
 }
 """The column each renamed key role takes. The `session` role keeps its generated column (the
-futures `SessionEndDate`)."""
+futures `SessionEndDate`), and so does a `fanout` key that is no instrument (`FilerCik`)."""
+
+
+def key_column(role: str, key: KeySpec) -> str:
+    """Return the dataset column one declared key takes.
+
+    Args:
+        role: The key's role: `symbol`, `time`, `fanout`, or `session`.
+        key: The key's declaration.
+
+    Returns:
+        `Symbol`, `Timestamp`, or `Underlying` for a key the rename moves (`KEY_COLUMNS`; a
+        `fanout` key only when it is an instrument); otherwise the key's own column, such as
+        `SessionEndDate` or `FilerCik`.
+    """
+    if role in KEY_COLUMNS and key.instrument:
+        return KEY_COLUMNS[role]
+    return key.column
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,9 +382,10 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
 
     The source's fields, kept and named by the projection of the dataset's membership of its
     kind (`Source.memberships`), in the source's field order; then the dataset's key columns
-    for this source (`DatasetSpec.keys`): the `symbol`, `time`, and `fanout` keys are renamed
-    to `Symbol`, `Timestamp`, and `Underlying`, the `session` key keeps its column, and a key
-    filled from the request comes first, as a constant `String` column. Nothing else changes.
+    for this source (`DatasetSpec.keys`): the `symbol`, `time`, and instrument `fanout` keys
+    are renamed to `Symbol`, `Timestamp`, and `Underlying` (`key_column`), the `session` key
+    and a `fanout` key that is no instrument keep their columns, and a key filled from the
+    request comes first, as a constant `String` column. Nothing else changes.
 
     Args:
         spec: The dataset.
@@ -386,16 +406,16 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
     renames: dict[str, str] = {}
     columns: list[SourceColumn] = []
     for role, key in spec.keys_for(source.transport, source.key).declared():
-        target = KEY_COLUMNS.get(role)
+        target = key_column(role, key)
         if key.from_request:
-            # DatasetSpec allows only the symbol and fan-out keys to come from the request.
-            columns.append(SourceColumn(KEY_COLUMNS[role], WireType.STRING, parameter=key.column))
+            # DatasetSpec allows only an instrument symbol or fan-out key from the request.
+            columns.append(SourceColumn(target, WireType.STRING, parameter=key.column))
         elif key.column not in named.values():
             raise ValueError(
                 f"declared keys: {where}: the {role} key {key.column!r} is not a column of the "
                 "source"
             )
-        elif target is not None:
+        else:
             renames[key.column] = target
     for field in fields:
         column = renames.get(named[field.wire_key], named[field.wire_key])
@@ -429,7 +449,7 @@ def required_fields(spec: DatasetSpec, source: Source) -> tuple[Field, ...]:
     """
     columns = {c.column: c.field for c in rename(spec, source) if c.field is not None}
     return tuple(
-        columns[KEY_COLUMNS.get(role, key.column)]
+        columns[key_column(role, key)]
         for role, key in spec.keys_for(source.transport, source.key).declared()
         if not key.from_request
     )
@@ -504,7 +524,7 @@ def dataset_schema(
                         f"{transport.value} {key}"
                     )
                 types[contribution.column] = joined
-    declared = spec.declared_roles
-    leading = [KEY_COLUMNS[role] for role in KEY_COLUMNS if role in declared]
+    declared = {key_column(r, k) for keys in spec.keys.values() for r, k in keys.declared()}
+    leading = [name for name in KEY_COLUMNS.values() if name in declared]
     order = [*leading, *(name for name in types if name not in leading)]
     return Schema(spec.name, tuple(Column(name, COLUMN_TYPES[types[name]]) for name in order))

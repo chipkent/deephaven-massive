@@ -1031,7 +1031,10 @@ Notation:
   placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
   Every path is a generated REST source (`_massive.source(Transport.REST, template)`,
   [section 19.4](#194-generated-schemas)). Each dataset names its paths by role (`fetch_path`,
-  `history_path`, `grouped_daily_path`, `extra_paths`).
+  `history_path`, `grouped_daily_path`, `extra_paths`), and declares the key columns of each
+  source it reads as `KeySpec`s ([section 19.4](#194-generated-schemas), "Keys are declared
+  per source"): the `symbol`, `time`, and instrument `fanout` keys become `Symbol`,
+  `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column.
 
 ### 8.1 `m.stocks`
 
@@ -1345,7 +1348,8 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   instrument, it is `Underlying` on every options row (from `underlying_ticker` or
   `underlying_asset.ticker`) and on `related_companies` rows. A non-instrument fan-out key
   keeps the generated column the dataset declares as its `fanout` key (`filer_cik` becomes
-  `FilerCik`). Where a source does not carry the instrument in its rows (it takes the symbol
+  `FilerCik`), declared with `KeySpec(..., instrument=False)`
+  ([section 19.4](#194-generated-schemas)). Where a source does not carry the instrument in its rows (it takes the symbol
   as a path parameter, as `/v3/trades/{t}` and `/v2/aggs/ticker/{t}/…` do, or holds it outside
   the result key, as `/v1/last/crypto` and `/v1/last_quote` do), `Symbol` is filled from the
   request ([section 19.4](#194-generated-schemas)). A dataset whose rows describe no instrument
@@ -2924,9 +2928,10 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
   for each member m, each source s of m (its role paths, channels, prefixes):
       fields = s.fields through the projection of s's membership of (m.kind, m's group), if any
       cols(m, s) = rename(m, s, fields)      # m's keys for s: symbol -> Symbol, time ->
-                                             # Timestamp, fanout -> Underlying; a key filled
-                                             # from the request adds a constant column;
-                                             # nothing else changes
+                                             # Timestamp, an instrument fanout -> Underlying
+                                             # (any other fanout and session keep their
+                                             # columns); a key filled from the request adds
+                                             # a constant column; nothing else changes
   schema = ordered union by column name of every cols(m, s):
            Symbol, then Timestamp, first where the dataset declares them; then first
            appearance in member, then source, then field order
@@ -2976,15 +2981,19 @@ longer shows its sample, the field accepts it, or the field is gone; samples com
 text, so `1`, `1.0`, and `true` are three samples.
 
 **Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
-columns as `KeySpec(column, from_request)`, one optional declaration per role (`symbol`,
-`time`, `fanout`, `session`):
+columns as `KeySpec(column, from_request=False, instrument=True)`, grouped per source in a
+`SourceKeys`, one optional declaration per role (`symbol`, `time`, `fanout`, `session`):
 
 - every source of a dataset in a kind declares `symbol` and `time`;
 - every source of any other instrument dataset declares `symbol`;
 - any other dataset declares only the keys its rows carry, possibly none: `reference.exchanges`,
   `conditions`, `market_status`, `market_holidays`, and `ticker_types`, `futures.exchanges`,
   and `benzinga.firms` declare none, and `economy.*` declares `time` and no `symbol`;
-- `fanout` and (futures) `session` are declared only on the sources that carry them.
+- `fanout` and (futures) `session` are declared only on the sources that carry them;
+- `instrument` says whether a `fanout` key names an instrument: True, the default, renames it
+  to `Underlying` (the options underlying, the related company asked about); False keeps its
+  generated column (`filer_cik` stays `FilerCik`). Only a `fanout` key may set it False, and
+  such a key is a column of the rows, never `from_request`.
 
 A key is `from_request` when the source does not carry it in its rows: the symbol of a source
 that takes it as a path parameter or holds it outside the result key

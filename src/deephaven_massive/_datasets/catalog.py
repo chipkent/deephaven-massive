@@ -77,6 +77,7 @@ class KeySpec:
 
             KeySpec("SipTimestamp")  # the source's own SipTimestamp column
             KeySpec("stocksTicker", from_request=True)  # the symbol is a path parameter
+            KeySpec("FilerCik", instrument=False)  # a fan-out key that is no instrument
 
     Attributes:
         column: The source's generated column that holds the key, after the projection of the
@@ -86,10 +87,16 @@ class KeySpec:
             path parameter (`/v3/trades/{stockTicker}`) or held outside the result key
             (`/v1/last/crypto/{from}/{to}`). The library then fills the key as a constant
             column, and it is not a required key of the source.
+        instrument: For a `fanout` key, whether it names an instrument. True, the default,
+            renames it to `Underlying` (the options underlying, the related company asked
+            about); False keeps its generated column (a filer CIK stays `FilerCik`). Only a
+            `fanout` key may set it False, and such a key comes from the source's rows, never
+            from the request (`DatasetSpec` rejects both, when it is created).
     """
 
     column: str
     from_request: bool = False
+    instrument: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,8 +111,10 @@ class SourceKeys:
     Attributes:
         symbol: The instrument the row describes; renamed to `Symbol`.
         time: The row's primary time; renamed to `Timestamp`.
-        fanout: The instrument a request fans out over when it differs from the row's (the
-            options underlying, the related company asked about); renamed to `Underlying`.
+        fanout: The key a request fans out over when it differs from the row's instrument:
+            an instrument (the options underlying, the related company asked about), renamed
+            to `Underlying`, or, with `KeySpec.instrument` False, another identifier (a filer
+            CIK), which keeps its column.
         session: The futures trading session the row belongs to; keeps its column
             (`SessionEndDate`). Only `symbol` and `fanout` may come from the request.
     """
@@ -350,8 +359,10 @@ class DatasetSpec:
         """Check that keys are declared only for the dataset's sources, and fit their roles.
 
         Raises:
-            ValueError: If `keys` names a source the dataset does not read, or a `time` or
-                `session` key is filled from the request; the message names the dataset.
+            ValueError: If `keys` names a source the dataset does not read; a `time` or
+                `session` key is filled from the request; or a key other than `fanout` is
+                marked as no instrument, or a fan-out key that is no instrument is filled from
+                the request (it would have no column to keep). The message names the dataset.
         """
         unused = sorted(f"{t.value} {k}" for t, k in set(self.keys) - set(self.sources))
         if unused:
@@ -359,11 +370,16 @@ class DatasetSpec:
                 f"{self.name}: keys are declared for sources it does not read {unused}"
             )
         for (transport, key), declared in self.keys.items():
+            where = f"{self.name}: {transport.value} {key}"
             for role, spec in declared.declared():
                 if spec.from_request and role not in _FROM_REQUEST_ROLES:
+                    raise ValueError(f"{where}: the {role} key cannot come from the request")
+                if not spec.instrument and role != "fanout":
+                    raise ValueError(f"{where}: only a fanout key can be no instrument")
+                if not spec.instrument and spec.from_request:
                     raise ValueError(
-                        f"{self.name}: {transport.value} {key}: the {role} key cannot come "
-                        "from the request"
+                        f"{where}: a fanout key that is no instrument keeps a column of the "
+                        "rows, so it cannot come from the request"
                     )
 
     def _check_flat_files(self) -> None:

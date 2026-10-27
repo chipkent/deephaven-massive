@@ -16,6 +16,7 @@ from deephaven_massive._datasets.schema import (
     SourceColumn,
     dataset_schema,
     join,
+    key_column,
     pascal_case,
     rename,
     required_fields,
@@ -388,6 +389,27 @@ def test_rename_refuses_a_repeated_column() -> None:
         r"/\{date\}: columns \['Symbol'\] repeat after the rename$",
     ):
         rename(dup, source(*open_close))
+
+
+def test_the_column_of_each_key() -> None:
+    assert key_column("symbol", KeySpec("Ticker")) == "Symbol"
+    assert key_column("time", KeySpec("SipTimestamp")) == "Timestamp"
+    assert key_column("fanout", KeySpec("UnderlyingTicker")) == "Underlying"
+    assert key_column("fanout", KeySpec("FilerCik", instrument=False)) == "FilerCik"
+    assert key_column("session", KeySpec("SessionEndDate")) == "SessionEndDate"
+
+
+def test_a_fanout_key_that_is_no_instrument_keeps_its_column_and_is_required() -> None:
+    holdings = (R, "/stocks/filings/vX/13-F")
+    filings = DatasetSpec(
+        name="stocks.institutional_holdings",
+        fetch_path=holdings[1],
+        keys={holdings: SourceKeys(fanout=KeySpec("FilerCik", instrument=False))},
+    )
+    names = [c.column for c in rename(filings, source(*holdings))]
+    assert "FilerCik" in names
+    assert "Underlying" not in names
+    assert [f.wire_key for f in required_fields(filings, source(*holdings))] == ["filer_cik"]
 
 
 def test_a_fanout_key_from_the_request_precedes_the_fields() -> None:

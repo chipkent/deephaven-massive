@@ -222,6 +222,19 @@ def test_only_the_symbol_and_fanout_keys_come_from_the_request(role: str) -> Non
         change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): bad})
 
 
+@pytest.mark.parametrize("role", ["symbol", "time", "session"])
+def test_only_a_fanout_key_can_be_no_instrument(role: str) -> None:
+    bad = SourceKeys(**{role: KeySpec("Id", instrument=False)})
+    with pytest.raises(ValueError, match=r"only a fanout key can be no instrument"):
+        change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): bad})
+
+
+def test_a_fanout_key_that_is_no_instrument_comes_from_the_rows() -> None:
+    bad = SourceKeys(fanout=KeySpec("filer_cik", from_request=True, instrument=False))
+    with pytest.raises(ValueError, match=r"no instrument keeps a column of the rows"):
+        change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): bad})
+
+
 def test_flat_files_declare_symbol_and_time_from_their_own_columns() -> None:
     prefix = (F, "us_stocks_sip/trades_v1")
     with pytest.raises(ValueError, match=r"must declare the \['time'\] keys"):
@@ -379,6 +392,26 @@ def test_keys_rename_to_symbol_timestamp_and_underlying() -> None:
     futures = catalog.dataset_schema(FUTURES_TRADES).column_names
     assert futures[:2] == ("Symbol", "Timestamp")
     assert "SessionEndDate" in futures  # the session key keeps its column
+
+
+def test_a_fanout_key_that_is_no_instrument_keeps_its_column() -> None:
+    holdings = DatasetSpec(
+        name="stocks.institutional_holdings",
+        fetch_path="/stocks/filings/vX/13-F",
+        poll_keys=("AccessionNumber",),
+        keys={(R, "/stocks/filings/vX/13-F"): keys(fanout=KeySpec("FilerCik", instrument=False))},
+    )
+    assert problems(holdings) == ()
+    columns = Catalog((holdings,)).dataset_schema(holdings).column_names
+    # No key is renamed, so none leads: the filer CIK stays where the source puts it.
+    assert "FilerCik" in columns
+    assert "Underlying" not in columns
+    assert columns[0] == "AccessionNumber"
+    # The same key as an instrument would be the Underlying.
+    as_instrument = change(holdings, keys={(R, "/stocks/filings/vX/13-F"): keys(fanout="FilerCik")})
+    renamed = Catalog((as_instrument,)).dataset_schema(as_instrument).column_names
+    assert renamed[0] == "Underlying"
+    assert "FilerCik" not in renamed
 
 
 def test_a_reference_dataset_declares_no_key() -> None:
