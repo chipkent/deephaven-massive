@@ -74,8 +74,8 @@ from deephaven_massive._datasets.symbols import (
 from deephaven_massive._datasets.timestamps import UnitMismatchError, instants
 from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._errors import MassiveError, from_wire, log_once
-from deephaven_massive._ingest import hosts
-from deephaven_massive._ingest.poll import CLOCK, Pollers, RowDataError, open_poll
+from deephaven_massive._ingest import hosts, poll
+from deephaven_massive._ingest.poll import Pollers, RowDataError
 from deephaven_massive._massive import (
     DriftReport,
     ParamKind,
@@ -310,13 +310,19 @@ def _pair(spec: DatasetSpec, symbol: str) -> tuple[str, str]:
 
 
 def _symbol_parts(
-    spec: DatasetSpec, rest_path: RestPath, symbols: NormalizedSymbols | None
+    spec: DatasetSpec,
+    rest_path: RestPath,
+    symbols: NormalizedSymbols | None,
+    *,
+    slot: str | None,
 ) -> list[tuple[str | None, dict[str, object], dict[str, object]]]:
     """Return how a request's symbols spread over requests of one path.
 
     A path that takes the symbol itself (a key the dataset fills from the request, such as
-    `{stocksTicker}`, or a currency pair's `{from}/{to}`), a `per_symbol` dataset, and a symbol
-    parameter that takes one value (`ticker`) get one request per symbol. A list parameter
+    `{stocksTicker}`, or a currency pair's `{from}/{to}`), a path whose one placeholder nothing
+    else fills (`slot`: a per-symbol detail path whose rows also carry the ticker), a
+    `per_symbol` dataset, and a symbol parameter that takes one value (`ticker`) get one
+    request per symbol. A list parameter
     (`ticker.any_of`, `tickers`) gets up to `DatasetSpec.symbols_per_request` symbols a
     request (all of them when the dataset sets no limit). `dm.ALL`, no
     symbols, and a path that takes neither get one request without symbols.
@@ -325,6 +331,7 @@ def _symbol_parts(
         spec: The dataset.
         rest_path: The path.
         symbols: The static symbols: a sorted tuple, `ALL`, or None.
+        slot: The path's one placeholder that no parameter, key, or window fills, or None.
 
     Returns:
         `(symbol, path parameters, query parameters)` per request: `symbol` is set for a
@@ -340,9 +347,10 @@ def _symbol_parts(
     from_request = [key for _, key in keys.declared() if key.from_request]
     param = spec.symbol_param if spec.symbol_param in params else None
     listed = param is not None and params[param].kind is ParamKind.LIST
-    per_symbol = bool(from_request) or spec.per_symbol or (param is not None and not listed)
+    takes_one = bool(from_request) or slot is not None or spec.per_symbol
+    per_symbol = takes_one or (param is not None and not listed)
     if symbols is None or isinstance(symbols, _All):
-        if from_request or spec.per_symbol:
+        if takes_one:
             raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
         return [(None, {}, {})]
     explicit = cast("tuple[str, ...]", symbols)
@@ -362,6 +370,8 @@ def _symbol_parts(
                 path[key.column] = symbol
             else:
                 query[key.column] = symbol
+        if slot is not None:
+            path[slot] = symbol
         if param is not None:
             query[param] = (symbol,) if listed else symbol
         parts.append((symbol, path, query))
@@ -422,9 +432,9 @@ def _base(
     """Return the path and query parameters every request of a path shares.
 
     Only parameters the path declares are sent: the caller's (`_caller_params`); `multiplier`
-    and `timespan` in path placeholders of those names; and `adjusted`, the futures
-    `resolution`, and the page size when the path takes them, left out otherwise (`adjusted`
-    on a crypto path that has none).
+    in a path placeholder of that name; `timespan` wherever the path takes it (the aggregates'
+    segment, the indicators' query parameter); `Request.adjusted` when it is set; and the
+    futures `resolution` and the page size when the path takes them.
 
     Args:
         spec: The dataset.
@@ -436,16 +446,22 @@ def _base(
     Returns:
         `(path parameters, query parameters)`.
 
-    A parameter the caller set that the path does not take raises the `ValueError` of
+    Raises:
+        ValueError: If `Request.adjusted` is set and the path has no `adjusted` parameter
+            (the crypto indicators); an explicit value is never dropped.
+
+    Any other parameter the caller set that the path does not take raises the `ValueError` of
     `_caller_params`.
     """
     params = {p.name: p for p in rest_path.params}
     path, query = _caller_params(spec, rest_path, request)
     if "multiplier" in params and params["multiplier"].in_path:
         path["multiplier"] = request.multiplier
-    if request.timespan is not None and "timespan" in params and params["timespan"].in_path:
-        path["timespan"] = request.timespan
-    if request.adjusted is not None and "adjusted" in params:
+    if request.timespan is not None and "timespan" in params:
+        (path if params["timespan"].in_path else query)["timespan"] = request.timespan
+    if request.adjusted is not None:
+        if "adjusted" not in params:
+            raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
         query["adjusted"] = request.adjusted
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
@@ -518,9 +534,15 @@ def plan_calls(
     """
     path, query = _base(spec, rest_path, request, fixed=fixed or {})
     query.update(axis or {})
+    keys = spec.keys_for(Transport.REST, rest_path.template).declared()
+    filled = set(path) | {key.column for _, key in keys if key.from_request}
+    if "from" in filled:
+        filled.add("to")  # a currency pair fills both
+    empty = [p.name for p in rest_path.params if p.in_path and p.name not in filled]
+    slot = empty[0] if len(empty) == 1 else None
     return [
         Call({**path, **own_path}, {**query, **own_query}, symbol)
-        for symbol, own_path, own_query in _symbol_parts(spec, rest_path, symbols)
+        for symbol, own_path, own_query in _symbol_parts(spec, rest_path, symbols, slot=slot)
     ]
 
 
@@ -587,10 +609,6 @@ class _Converter:
             ),
             asset_class=spec.asset_class,
         )
-
-    def empty(self) -> pa.Table:
-        """Return an empty table in the dataset's schema."""
-        return self.arrow_schema.empty_table()
 
     def convert(
         self, rows: Sequence[Mapping[str, object]], symbol: str | None
@@ -665,18 +683,16 @@ class _Converter:
                 arrays.append(widen(values, target))
         return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
 
-    def _canonical(self, value: str | None) -> str | None:
+    def _canonical(self, value: str) -> str:
         """Return a symbol read from the rows in its canonical form (`AUD/USD` as `C:AUDUSD`).
 
         Args:
-            value: The row's symbol, or None.
+            value: The row's symbol; the rows always carry it (a required key).
 
         Returns:
             The canonical symbol; a value that is no valid symbol of the class is kept as sent,
             and logged once per process at WARNING.
         """
-        if value is None:
-            return None
         try:
             return canonical(self.asset_class, value)
         except (TypeError, ValueError):
@@ -832,8 +848,6 @@ class RestState:
 
     def warn_rate_limit(self) -> None:
         """Log, once per session, why Massive rate-limited the session and what multiplies it."""
-        if self._rate_limit_warned.is_set():
-            return
         with self._lock:
             first = not self._rate_limit_warned.is_set()
             self._rate_limit_warned.set()
@@ -1338,12 +1352,10 @@ class RestEndpoints:
             calls = [Call({**path, "date": day}, query) for day in dates]
         else:
             rest_path = reader.rest_path(cast("str", spec.history_path))
-            names = {p.name for p in rest_path.params if p.in_path}
-            pair = {"from", "to"} <= names and all(
-                key.column != "from"
-                for _, key in spec.keys_for(Transport.REST, rest_path.template).declared()
-            )
-            fixed = _range_segments(rest_path, window, dates) if pair else {}
+            # The aggregates take their range as `{from}/{to}` timestamp segments.
+            kinds = {p.name: p.kind for p in rest_path.params if p.in_path}
+            ranged = kinds.get("from") is ParamKind.TIMESTAMP
+            fixed = _range_segments(window) if ranged else {}
             bounds: tuple[date | None, date | None]
             if isinstance(window, FuturesSessions):
                 bounds = (window.first, window.last)
@@ -1384,7 +1396,7 @@ class RestEndpoints:
         if not isinstance(request.symbols, SymbolTable):  # a bad parameter fails now, not later
             reader.plan_fetch(spec, request, request.symbols)
         host = urlsplit(self._core.config.rest_base_url).hostname
-        return open_poll(
+        return poll.open_poll(
             self._core,
             spec=spec,
             request=request,
@@ -1394,7 +1406,7 @@ class RestEndpoints:
             pollers=self._state.pollers,
             host=host,
             path=spec.fetch_path,
-            clock=CLOCK,
+            clock=poll.CLOCK,
         )
 
 
@@ -1410,27 +1422,19 @@ def _report(error: MassiveError) -> None:
     logger.error("%s", error)
 
 
-def _range_segments(
-    rest_path: RestPath, window: TimeRange | FuturesSessions, dates: Sequence[date]
-) -> dict[str, object]:
+def _range_segments(window: TimeRange | FuturesSessions) -> dict[str, object]:
     """Return an aggregates path's `{from}` and `{to}` segments for a `history()` window.
 
-    Both ends are inclusive. A timestamp parameter (the aggregates' millisecond epochs) gets
-    the window's first instant and its last whole millisecond before the end; any other kind
-    gets the window's first and last calendar dates. Rows outside the window are dropped
-    afterwards (`_keep`).
+    The segments are millisecond epochs, both inclusive: the window's first instant and its
+    last whole millisecond before the end. Rows outside the window are dropped afterwards
+    (`_keep`).
 
     Args:
-        rest_path: The aggregates path.
         window: The window; date-bounded futures use their widened bar window.
-        dates: The window's partition dates.
 
     Returns:
-        `{"from": ..., "to": ...}`.
+        `{"from": ..., "to": ...}`, as instants the client counts in milliseconds.
     """
-    kinds = {p.name: p.kind for p in rest_path.params}
-    if kinds["from"] is not ParamKind.TIMESTAMP:
-        return {"from": dates[0], "to": dates[-1]}
     span = window.window if isinstance(window, FuturesSessions) else window
     first = span.start.replace(microsecond=span.start.microsecond // 1000 * 1000)
     last = span.end - timedelta(microseconds=1)

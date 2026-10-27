@@ -19,6 +19,7 @@ from deephaven_massive._datasets.symbols import (
     canonical,
     normalize,
     symbol_canonicalizer,
+    symbol_class,
     underlying,
     ws_symbol,
 )
@@ -247,3 +248,17 @@ def test_symbol_canonicalizer(
         assert to_canonical("EURUSDX") is None
     assert len(caplog.records) == 1
     assert "'not a pair', which is not a valid forex symbol" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("symbol", "asset_class"),
+    [
+        ("AAPL", AssetClass.STOCKS),
+        ("O:SPY250117C00600000", AssetClass.OPTIONS),
+        ("I:SPX", AssetClass.INDICES),
+        ("C:EURUSD", AssetClass.FOREX),
+        ("X:BTCUSD", AssetClass.CRYPTO),
+    ],
+)
+def test_symbol_class(symbol: str, asset_class: AssetClass) -> None:
+    assert symbol_class(symbol) is asset_class

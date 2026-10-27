@@ -38,6 +38,7 @@ unclosed session from being collected (whose collection then stops the poller).
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -379,16 +380,6 @@ class Poller:
         found = {canonical(row[0]) for row in snapshot.iter_tuple(cols="Symbol")}
         return tuple(sorted(symbol for symbol in found if symbol is not None))
 
-    def _record(self, drift: DriftReport) -> None:
-        """Add one page's drift to the table's `SchemaDrift`.
-
-        Args:
-            drift: The page's drift.
-        """
-        core = self._core()
-        if core is not None:
-            core.record_stream_drift(self._stream_id, Transport.REST.value, drift)
-
     def _cycle(self, pool: ThreadPoolExecutor) -> bool:
         """Run one cycle: read, publish, and update the table's row.
 
@@ -405,7 +396,10 @@ class Poller:
         reactive = isinstance(self._request.symbols, SymbolTable)
         try:
             symbols = self._symbols()
-            table, requests = self._read(symbols=symbols, record=self._record, executor=pool)
+            record = functools.partial(
+                core.record_stream_drift, self._stream_id, Transport.REST.value
+            )
+            table, requests = self._read(symbols=symbols, record=record, executor=pool)
         except (AuthenticationError, EntitlementError, RowDataError) as error:
             if not self._stop.is_set():
                 self._fail(core, error)

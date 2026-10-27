@@ -1012,15 +1012,13 @@ class SessionCore:
         Its last row is written with no held result and `State=RELEASED`, unless it failed or
         the session closed, which keep their state; the drift registry forgets it. Runs on the
         reaper thread when the result is released, or on the caller thread when `poll()` fails
-        after registering the row. An unknown id is ignored. No Deephaven call, no wait.
+        after registering the row; each table is released once. No Deephaven call, no wait.
 
         Args:
             stream_id: The table's `StreamId`.
         """
         with self.registry_lock:
-            row = self._polls.pop(stream_id, None)
-            if row is None:
-                return
+            row = self._polls.pop(stream_id)
             self.drift.forget(stream_id)
             released = row.state is StreamState.RUNNING
             last = replace(
