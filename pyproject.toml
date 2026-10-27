@@ -27,7 +27,6 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "massive>=2.9.0",
     "deephaven-core>=42.0",
     # 16 is the first release that works with deephaven-core 42.0: 15 lacks pa.ListViewType,
     # which deephaven-core needs, and 14 fails to import against numpy 2.
@@ -76,14 +75,6 @@ dev = [
     "deephaven-server>=42.0",
 ]
 
-[tool.uv.sources]
-# The fork's `deephaven-fixes` integration branch. uv.lock is not committed: CI resolves the
-# branch head on every run and scripts/check.sh refreshes it locally (uv sync --upgrade); a
-# plain `uv sync` keeps the local lock. With a source set, uv takes this git source and ignores
-# the `massive>=2.9.0` specifier, which matters only in published metadata. The fork builds as
-# version 0.0.0, so no code or test may check the massive version.
-massive = { git = "https://github.com/chipkent/massive-client-python", branch = "deephaven-fixes" }
-
 [tool.hatch.build.targets.sdist]
 # The sdist carries the package and its tests; hatchling adds README.md, LICENSE, and
 # pyproject.toml itself. It leaves out vendor/: the snapshot there is Massive's published
@@ -103,7 +94,8 @@ exclude = ["src/deephaven_massive/_massive/refresh"]
 [tool.ruff]
 line-length = 100
 # First-party import roots, the same as mypy's and pytest's: `deephaven_massive` from `src/`,
-# `tests.…` from the repository root. `tests/` is not a root, so `massive` stays third-party.
+# `tests.…` from the repository root. `tests/` is not a root, so `tests/massive/` is never a
+# top-level `massive`.
 src = ["src", "."]
 # tests/ has no __init__.py; its modules are imported from the repository root as `tests.…`.
 namespace-packages = ["tests"]
@@ -148,6 +140,9 @@ ignore = [
 # is on sys.path, so its importable name is `tests.conftest`; `conftest` covers a stray rootdir.
 "conftest".msg = "Request fixtures by name; never import conftest"
 "tests.conftest".msg = "Request fixtures by name; never import conftest"
+# The library has its own REST, WebSocket, and flat-file clients; Massive's Python SDK is not a
+# dependency.
+"massive".msg = "The library has its own clients; see deephaven_massive._massive"
 
 [tool.ruff.lint.mccabe]
 max-complexity = 12

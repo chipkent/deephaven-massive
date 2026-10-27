@@ -68,6 +68,7 @@ TIMEOUT = 30.0
 
 SPEC = DatasetSpec(
     name="test.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     channels={None: "T"},
 )

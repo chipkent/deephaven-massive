@@ -60,11 +60,10 @@ The column reference command (`uv run python scripts/render_reference.py`, which
 all of `docs/datasets/`) arrives with the `PLAN.md` planned PR column-reference-pages, which adds
 it here.
 
-The library is moving off Massive's Python SDK (`massive`) to its own REST, WebSocket, and S3
-flat-file clients, with every schema generated from vendored, pinned vendor specs
-(`DESIGN.md` § 19). Until the `PLAN.md` planned PR massive-sdk-removal lands, the old dependency is
-still installed; massive-sdk-removal removes it and adds a ruff `banned-api` entry for it. Never
-add an import of `massive`. Once the generated `spec/*.json` files exist, never edit them by hand:
+The library does not use Massive's Python SDK (`massive`): it has its own REST, WebSocket, and
+S3 flat-file clients, with every schema generated from vendored, pinned vendor specs
+(`DESIGN.md` § 19). The SDK is not a dependency, and a ruff `banned-api` entry rejects any
+import of `massive`. Once the generated `spec/*.json` files exist, never edit them by hand:
 they change only through the refresh, and hand input lives only in `_massive/refresh/lexicon.py`,
 `overrides.py`, and `exclusions.py`, every entry with a reason. The library has no users, so
 nothing is kept or shimmed for compatibility.
