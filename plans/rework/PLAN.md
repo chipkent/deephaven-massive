@@ -166,9 +166,12 @@ disjoint files:
   `_stream.py`, `_watchlist.py`; P5 owns `_flat_files.py` and `_history_source.py`; PDR owns
   `_diagnostics.py`'s drift registry; PC3b owns `_catalog.py`, `_schema.py`, and
   `_timeunits.py`. `_session.py` has one factory hook per transport, so P3, P4, and P5 edit
-  disjoint hunks. result-column-descriptions then adds `describe()` and the description rule
-  to `_schema.py` and `columns()` to `_query.py`; column-reference-pages owns `_reference.py`,
-  `scripts/render_reference.py`, and `tests/test_reference.py`.
+  disjoint hunks. result-column-descriptions starts after all three have merged, adds
+  `describe()` and the description rule to `_schema.py` and `columns()` to `_query.py`, and
+  adds the `describe()` call at each verb's return in their modules (`_rest.py`, `_poll.py`,
+  `_stream.py`, `_flat_files.py`): ownership passes in sequence, as `flatfiles/` passes from
+  P5 to PDR and PS3, so no separate PR is needed. column-reference-pages owns
+  `_reference.py`, `scripts/render_reference.py`, and `tests/test_reference.py`.
 - **The fakes** follow the clients: PC1 `tests/_fakes/rest.py`, PC2 `ws.py`, P5 `s3.py`, P2
   `stream.py`; each adds one self-contained fixture block to `tests/conftest.py`.
 - **Namespace packages** (P6) edit only `_namespaces/<ns>.py`, its tests and fixtures, and delete
@@ -1195,7 +1198,8 @@ timestamp-like integers (68 of them untagged) and about 50 short keys.
 **Verification.**
 ```bash
 ./scripts/check.sh
-uv run python -m deephaven_massive._massive.refresh && git diff --exit-code src/deephaven_massive/_massive/spec
+uv run python -m deephaven_massive._massive.refresh
+test -z "$(git status --porcelain --untracked-files=all -- src/deephaven_massive/_massive/spec)"
 uv run pytest tests/massive/refresh tests/massive/spec -q
 ```
 
@@ -1221,8 +1225,8 @@ Never derive a name from a description.
 
 **Goal.** The refresh records the vendor's description of every REST field, normalized to plain
 text, in a separate generated file, `spec/descriptions.json`, and the `spec` loader joins it
-into `Field.description`. This is the source of every column description users later see; it
-needs no declared dataset.
+into `Field.description`. This is the source of every vendor-written column description users
+later see; it needs no declared dataset.
 
 **DESIGN sections implemented.** [§ 19.4](DESIGN.md#194-generated-schemas) (**Field
 descriptions**: sources, normalization, no gate, the file format, the join at load);
@@ -1271,7 +1275,8 @@ and flat-file entries with the same rules.
 **Verification.**
 ```bash
 ./scripts/check.sh
-uv run python -m deephaven_massive._massive.refresh && git diff --exit-code src/deephaven_massive/_massive/spec
+uv run python -m deephaven_massive._massive.refresh
+test -z "$(git status --porcelain --untracked-files=all -- src/deephaven_massive/_massive/spec)"
 uv run pytest tests/massive/refresh tests/massive/spec tests/massive/test_init.py -q
 ```
 
@@ -1873,16 +1878,18 @@ so each namespace package renders its own page and links its own docstrings.
 rendered set is empty and `docs/datasets/` is absent until the first P6 package.
 
 **Tasks.**
-- [ ] `_reference.render()`: one page per namespace module with declared datasets, sections
-      in declaration order, the explicit `<a id="<dataset>"></a>` anchor (dots as hyphens),
-      the heading, `DatasetSpec.summary`, the column table, and the footer from
-      `_massive.provenance()`; `|` escaped, no trailing whitespace, one final newline.
+- [ ] `_reference.render(provenance)`: one page per namespace module with declared datasets,
+      sections in declaration order, the explicit `<a id="<dataset>"></a>` anchor (dots as
+      hyphens), the heading, `DatasetSpec.summary`, the column table, and the footer from the
+      `Provenance` argument; `|` escaped, no trailing whitespace, one final newline.
 - [ ] `_reference.sync(directory, pages)`: delete every file and subdirectory not in `pages`,
       write each page whose bytes differ, return what it wrote and deleted, touch nothing
-      outside `directory`.
+      outside `directory`. A missing `directory` counts as empty and is created only to
+      write a page, so `sync()` with no pages on a missing directory succeeds and writes
+      nothing.
 - [ ] `scripts/render_reference.py`: start the embedded server, then import the library, call
-      `render()` and `sync()` on `docs/datasets/`, and print the result. All logic stays in
-      `_reference.py`, which coverage measures.
+      `render(_massive.provenance())` and `sync()` on `docs/datasets/`, and print the
+      result. All logic stays in `_reference.py`, which coverage measures.
 - [ ] `tests/test_reference.py`: the parity test, the docstring tests (the docstring starts
       with the summary and names `docs/datasets/<namespace>.md#<dataset>`), and render and
       sync tests on a synthetic catalog and `tmp_path`.

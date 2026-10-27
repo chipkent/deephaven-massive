@@ -106,12 +106,14 @@ deprecation path, and no rule that rests on the chance of breaking someone.
     and none is inferred from data. A live table must know its full column set and types before
     its first row, the first message may omit optional fields (stocks `T` omits `pt` on OTC
     trades), and two sessions must agree on a dataset's shape.
-12. **Every column says what it means, in the vendor's own words.** The refresh records
-    Massive's description of every field beside the generated schemas, and one rule picks each
-    dataset column's description from them. The same text reaches users three ways: the
-    column-header tooltip of every result in the Deephaven web UI, `columns()` in the console,
-    and the generated pages under `docs/datasets/` ([section 7.4](#74-column-descriptions)).
-    Nobody writes a column list by hand.
+12. **Every column says what it means, in the vendor's own words where the vendor has them.**
+    The refresh records Massive's description of every field beside the generated schemas,
+    and one rule picks each dataset column's description from them; fixed library text
+    covers only the cases [section 19.4](#194-generated-schemas) defines (the key columns
+    `Symbol`, `Timestamp`, and `Underlying`, and a column that only other members of its kind
+    supply). The same text reaches users three ways: the column-header tooltip of every result
+    in the Deephaven web UI, `columns()` in the console, and the generated pages under
+    `docs/datasets/` ([section 7.4](#74-column-descriptions)). Nobody writes a column list by hand.
 
 ### 2.2 Terms
 
@@ -248,9 +250,9 @@ _poll.py             poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> pu
 _flat_files.py       flat-file transport: read plans, reader pool, cancellation, conversion,
                      merge to tables, missing-file policy, drift routing (section 16)
 _history_source.py   partition dates, publication grace, REST capability, the AUTO choice; pure, no I/O
-_reference.py        the column reference: render() -> {file name: Markdown} from the catalog
-                     and the dataset schemas (pure); sync(directory, pages) owns docs/datasets/
-                     (section 7.4)
+_reference.py        the column reference: render(provenance) -> {file name: Markdown} from
+                     the catalog, the dataset schemas, and the provenance (pure);
+                     sync(directory, pages) owns docs/datasets/ (section 7.4)
 _massive/            the wire package (section 19)
 py.typed
 ```
@@ -840,24 +842,27 @@ and `WebSocket`), and one **Wire field** column per transport the dataset uses (
 `Flat-file field`, `WebSocket field`). A wire-field cell lists the distinct wire keys of that
 transport's sources that feed the column, in source order and before any projection, or
 `request` for a key filled from the request. A footer names the snapshot's fetch date and the
-vendor URLs of the sources the page's datasets use, read from `_massive.provenance()`
+vendor URLs of the sources the page's datasets use, from the `Provenance` passed to the renderer
 ([section 19.4](#194-generated-schemas)). Units and nullability get no columns: every
 timestamp is an `Instant`, and **Supplied by** with the description already says when a
 column is null. Readers can see what each table holds before they install.
 
-- **The renderer** is `_reference.render() -> dict[str, str]`, a pure function from the catalog
-  and the dataset schemas to `{file name: page text}`. It escapes `|` in cells, emits no
-  trailing whitespace, and ends every page with one newline, so the pages pass the commit
-  hooks unchanged. `_reference.sync(directory, pages)` owns the directory: it deletes every
-  file and subdirectory of `directory` that `pages` does not name, writes each page whose bytes
-  differ, and returns the names it wrote and deleted. Neither touches anything outside the
-  directory.
+- **The renderer** is `_reference.render(provenance: Provenance) -> dict[str, str]`, a pure
+  function from the catalog, the dataset schemas, and the `provenance` it is given to
+  `{file name: page text}`; it reads no other state, so tests pass a synthetic `Provenance`.
+  It escapes `|` in cells, emits no trailing whitespace, and ends every page with one newline,
+  so the pages pass the commit hooks unchanged. `_reference.sync(directory, pages)` owns the
+  directory: it deletes every file and subdirectory of `directory` that `pages` does not name,
+  writes each page whose bytes differ, and returns the names it wrote and deleted. A missing
+  `directory` counts as empty: `sync()` creates it only to write a page, so an empty `pages` on a
+  missing directory succeeds and writes nothing. Neither touches anything outside the directory.
 - **The command** `uv run python scripts/render_reference.py` regenerates the whole column
   reference and nothing else. The script starts the embedded Deephaven server (the dataset
   schemas need Deephaven's types, and the library never imports `deephaven_server`), calls
-  `render()` and then `sync()` on `docs/datasets/`, and prints what it wrote and deleted. A
-  renamed or removed namespace or dataset therefore never leaves an orphaned page: the one
-  command that writes the directory also empties it of everything it did not render.
+  `render(_massive.provenance())` and then `sync()` on `docs/datasets/`, and prints what it
+  wrote and deleted. A renamed or removed namespace or dataset therefore never leaves an
+  orphaned page: the one command that writes the directory also empties it of everything it
+  did not render.
 - **The parity test**, `tests/test_reference.py`, renders the pages in the test JVM and fails
   on a stale page (bytes differ), a missing page, and any extra file or directory under
   `docs/datasets/`, naming the command that fixes it. A catalog change or a refresh that moves
