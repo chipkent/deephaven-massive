@@ -45,7 +45,11 @@ from websockets.exceptions import InvalidStatus
 from deephaven_massive._massive.net import codec
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.net.retry import is_tls_failure, retry_after_seconds
-from deephaven_massive._massive.spec.convert import UnconvertibleError, convert_field
+from deephaven_massive._massive.spec.convert import (
+    UnconvertibleError,
+    convert_field,
+    missing_key_message,
+)
 from deephaven_massive._massive.spec.types import DriftReport, Source, Transport
 
 if TYPE_CHECKING:
@@ -75,8 +79,7 @@ Massive does not document a frame-size limit; 1,000 topics of options contracts 
 of about 25 KB, which is conservative.
 """
 
-_QUOTE_LIMIT = 50
-# How much of an undecodable frame a log message quotes.
+# How much of an undecodable frame or element a log message or handshake error quotes.
 _LOG_LIMIT = 200
 
 
@@ -225,7 +228,7 @@ def handshake_status(data: str | bytes) -> tuple[str, str]:
             status, message = item.get("status"), item.get("message", "")
             if isinstance(status, str):
                 return status, message if isinstance(message, str) else ""
-    raise ValueError(f"expected a status object, got {_quote(data, _LOG_LIMIT)}")
+    raise ValueError(f"expected a status object, got {_quote(data)}")
 
 
 def classify_failure(error: Exception, *, host: str, path: str, now: float) -> WireError | float:
@@ -273,17 +276,19 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     )
 
 
-def _quote(value: object, limit: int = _QUOTE_LIMIT) -> str:
-    """Return the start of a value's text for a message.
+def _quote(value: object) -> str:
+    """Return the start of a raw frame, or of an element of one, for a log line or an error.
+
+    A row's bad value is quoted by `spec.convert` instead, as every decoder quotes it; this is
+    for input that may not be JSON at all, such as undecodable bytes.
 
     Args:
-        value: Any decoded or raw value.
-        limit: How many characters to keep.
+        value: A raw frame (`str` or `bytes`) or a decoded element.
 
     Returns:
-        `repr(value)`, cut to `limit` characters.
+        `repr(value)`, cut to 200 characters.
     """
-    return repr(value)[:limit]
+    return repr(value)[:_LOG_LIMIT]
 
 
 # A word of a refusal message that may name a topic: a run of characters with no space,
@@ -398,8 +403,9 @@ class FrameDecoder:
             path: The URL path of the connection, such as `"/stocks"`, named in reject errors.
 
         Raises:
-            ValueError: If a source is not a WebSocket source, its key names no channel, or
-                two sources name one channel.
+            ValueError: If a source is not a WebSocket source, its key names no channel, a
+                field's wire key is dotted (a WebSocket object is flat, so such a field could
+                never be read), or two sources name one channel.
         """
         self._host = host
         self._path = path
@@ -409,6 +415,12 @@ class FrameDecoder:
             channel = source.key.partition("/")[2]
             if source.transport is not Transport.WS or not channel:
                 raise ValueError(f"{source.key!r} is not a WebSocket source '<cluster>/<channel>'")
+            dotted = sorted(f.wire_key for f in source.fields if "." in f.wire_key)
+            if dotted:
+                raise ValueError(
+                    f"source {source.key!r} has dotted wire keys {dotted}; "
+                    "a WebSocket object is flat"
+                )
             if channel in self._channels:
                 raise ValueError(f"two sources for channel {channel!r}")
             self._channels[channel] = _Channel.plan(source)
@@ -464,7 +476,7 @@ class FrameDecoder:
                 "dropped a frame from %s%s that is not JSON: %s",
                 self._host,
                 self._path,
-                _quote(data, _LOG_LIMIT),
+                _quote(data),
             )
             return []
         order: list[Status | str] = []
@@ -475,7 +487,7 @@ class FrameDecoder:
                     "dropped an element of a frame from %s%s with no text 'ev': %s",
                     self._host,
                     self._path,
-                    _quote(item, _LOG_LIMIT),
+                    _quote(item),
                 )
             elif ev == "status":
                 order.append(self._status(item))
@@ -547,30 +559,27 @@ class FrameDecoder:
         """
         spec = self._channels[channel]
         keys = item.keys()
-        if keys != spec.shape:  # the common case, an exact shape, costs one comparison
+        # An object of exactly the declared shape, the common case, has no extra key, which one
+        # set comparison decides; the vendor-required scan runs only on a channel that has such
+        # fields, and covers every object, a rejected one included.
+        if keys != spec.shape:
             into.extra |= keys - spec.shape
-        into.missing.update(k for k in spec.vendor_required if item.get(k) is None)
+        if spec.vendor_required:
+            into.missing.update(k for k in spec.vendor_required if item.get(k) is None)
         row: dict[str, object] = {}
         for step in spec.steps:
             f = step.field
             value = item.get(f.wire_key)
             if value is None:
                 if step.required:
-                    problem = f"missing required key {f.wire_key!r} ({f.column})"
-                    into.rejects.append(self._reject(channel, item, problem))
+                    into.rejects.append(self._reject(channel, item, missing_key_message(f)))
                     return
                 row[f.column] = None
                 continue
             try:
                 row[f.column] = convert_field(f, value)
-            except UnconvertibleError:
-                expected = str(f.wire_type)
-                if f.conversion is not None:
-                    expected += f" (by the conversion {f.conversion})"
-                problem = (
-                    f"field {f.wire_key!r} ({f.column}) expects {expected}, got {_quote(value)}"
-                )
-                into.rejects.append(self._reject(channel, item, problem))
+            except UnconvertibleError as error:
+                into.rejects.append(self._reject(channel, item, str(error)))
                 return
         into.rows.append(row)
 
@@ -580,7 +589,8 @@ class FrameDecoder:
         Args:
             channel: The row's channel.
             item: The row's object, from which the raw symbol is read.
-            problem: What is wrong with the row.
+            problem: What is wrong with the row: the clause `spec.convert` shares with every
+                decoder, for a missing key or an unconvertible value.
 
         Returns:
             The reject, whose error names the connection, the channel, the symbol, and

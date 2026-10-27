@@ -263,6 +263,28 @@ def test_drift_reports_extra_keys_and_only_vendor_required_fields_as_missing(
     assert [r["SipTimestamp"] for r in data.rows] == [1, None, None]
 
 
+def test_a_vendor_required_field_held_as_null_is_missing(decoder: FrameDecoder) -> None:
+    # Present in every object, but only ever as null.
+    [data] = decoder.decode(_frame({"ev": "T", "sym": "A", "t": None}, {"ev": "T", "t": None}))
+    assert isinstance(data, Data)
+    assert data.drift == DriftReport(missing=frozenset({"t"}))
+
+
+def test_a_rejected_row_still_counts_in_the_drift(decoder: FrameDecoder) -> None:
+    decoder.set_required("T", frozenset({"Ticker"}))
+    [data] = decoder.decode(
+        _frame(
+            {"ev": "T", "sym": "A", "p": 1, "s": 1, "t": 1, "c": []},
+            {"ev": "T", "p": "bad", "new": 1},
+            {"ev": "T", "sym": "B", "p": "bad", "s": 1, "c": [], "z": 2},
+        )
+    )
+    assert isinstance(data, Data)
+    assert len(data.rows) == 1
+    assert len(data.rejects) == 2
+    assert data.drift == DriftReport(extra=frozenset({"new", "z"}), missing=frozenset({"t"}))
+
+
 def test_symbols_pass_through_as_the_wire_spells_them() -> None:
     decoder = FrameDecoder([FOREX], host=HOST, path="/forex")
     decoder.set_required("CA", frozenset({"Pair"}), symbol="Pair")
@@ -320,25 +342,29 @@ def test_every_field_goes_through_the_shared_converter(decoder: FrameDecoder) ->
 @pytest.mark.parametrize(
     "case",
     [
-        ("p", "1.5", "double"),
-        ("s", True, "long"),
-        ("t", "1536036818784", "epoch"),
-        ("c", [1, 2**31], "int-array"),
-        ("sym", 5, "string"),
+        ("p", "Price", "1.5", "double", '"1.5"'),
+        ("s", "Size", True, "long", "true"),
+        ("t", "SipTimestamp", "1536036818784", "epoch", '"1536036818784"'),
+        ("c", "Conditions", [1, 2**31], "int-array", "[1, 2147483648]"),
+        ("sym", "Ticker", 5, "string", "5"),
     ],
 )
 def test_an_unconvertible_value_rejects_its_row(
-    decoder: FrameDecoder, case: tuple[str, object, str]
+    decoder: FrameDecoder, case: tuple[str, str, object, str, str]
 ) -> None:
-    key, value, expects = case
+    key, column, value, expects, quoted = case
     data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", key: value})
     assert data.rows == []
     [reject] = data.rejects
     assert reject.channel == "T"
     assert reject.symbol is None  # no symbol column was declared
     assert (reject.error.host, reject.error.path, reject.error.status) == (HOST, PATH, None)
-    assert f"field {key!r}" in reject.error.message
-    assert f"expects {expects}, got {value!r}" in reject.error.message
+    # The clause after the prefix is the one `spec.convert` shares with the REST decoder,
+    # quoting the value's JSON text.
+    assert reject.error.message == (
+        f"rejected a T row from socket.massive.com/stocks: "
+        f"{column} (wire key {key!r}) expects {expects}, got {quoted}"
+    )
 
 
 def test_a_named_conversion_applies_to_its_field() -> None:
@@ -353,29 +379,29 @@ def test_a_named_conversion_applies_to_its_field() -> None:
     "case",
     [
         # Only the named conversion reads the field: a plain `long` is refused too.
-        ("x", "Exchange", "4.8", "long (by the conversion quoted-integer)"),
-        ("x", "Exchange", 48, "long (by the conversion quoted-integer)"),
-        ("i", "TradeId", 1.5, "string (by the conversion text-or-integer-id)"),
+        ("x", "Exchange", "4.8", "long (by the conversion quoted-integer)", '"4.8"'),
+        ("x", "Exchange", 48, "long (by the conversion quoted-integer)", "48"),
+        ("i", "TradeId", 1.5, "string (by the conversion text-or-integer-id)", "1.5"),
     ],
 )
 def test_a_value_its_named_conversion_cannot_read_rejects_its_row(
-    case: tuple[str, str, object, str],
+    case: tuple[str, str, object, str, str],
 ) -> None:
-    key, column, value, expects = case
+    key, column, value, expects, quoted = case
     decoder = FrameDecoder([CONVERTED], host=HOST, path="/forex")
     data = _decode_one(decoder, {"ev": "C", key: value})
     assert data.rows == []
     [reject] = data.rejects
     assert reject.error.message == (
         f"rejected a C row from socket.massive.com/forex: "
-        f"field {key!r} ({column}) expects {expects}, got {value!r}"
+        f"{column} (wire key {key!r}) expects {expects}, got {quoted}"
     )
 
 
 def test_a_reject_quotes_at_most_50_characters_of_the_value(decoder: FrameDecoder) -> None:
     data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": "x" * 200})
     message = data.rejects[0].error.message
-    assert message.endswith("got " + repr("x" * 200)[:50])
+    assert message.endswith("got " + json.dumps("x" * 200)[:50])
 
 
 # --- required keys and symbols ------------------------------------------------------------------
@@ -399,10 +425,11 @@ def test_a_missing_required_key_rejects_while_a_missing_optional_field_is_null(
     assert [(r.channel, r.symbol) for r in data.rejects] == [("T", "MSFT"), ("T", None)]
     assert data.rejects[0].error.message == (
         "rejected a T row for MSFT from socket.massive.com/stocks: "
-        "missing required key 't' (SipTimestamp)"
+        "no SipTimestamp (wire key 't'), which the dataset needs"
     )
     assert data.rejects[1].error.message == (
-        "rejected a T row from socket.massive.com/stocks: missing required key 'sym' (Ticker)"
+        "rejected a T row from socket.massive.com/stocks: "
+        "no Ticker (wire key 'sym'), which the dataset needs"
     )
 
 
@@ -470,6 +497,16 @@ def test_an_unknown_channel_is_dropped_and_warned_once(
         ([TRADES, TRADES], "two sources for channel 'T'"),
         ([Source(key="stocks", transport=Transport.WS, fields=())], "not a WebSocket source"),
         ([Source(key="stocks/T", transport=Transport.REST, fields=())], "not a WebSocket source"),
+        (
+            [
+                Source(
+                    key="stocks/T",
+                    transport=Transport.WS,
+                    fields=(Field(wire_key="day.c", column="DayC", wire_type=WireType.DOUBLE),),
+                )
+            ],
+            r"source 'stocks/T' has dotted wire keys \['day\.c'\]; a WebSocket object is flat",
+        ),
     ],
 )
 def test_the_sources_are_checked(sources: list[Source], message: str) -> None:

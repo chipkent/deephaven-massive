@@ -611,7 +611,7 @@ def test_a_bad_row_rejects_only_itself_with_the_raw_symbol(
     [reject] = rejects
     assert reject.channel == "T"
     assert reject.symbol == "BRK.A"
-    assert "'p' (Price)" in reject.error.message
+    assert "Price (wire key 'p')" in reject.error.message
     assert drift == DriftReport(extra=frozenset({"x"}), missing=frozenset({"s"}))
 
 
@@ -643,7 +643,7 @@ def test_required_keys_survive_a_reconnect(
     h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
     [(generation, _, rows, [reject], _)] = h.recorder.of("data")
     assert (generation, rows, reject.symbol) == (2, [], "AAPL")
-    assert "missing required key 't' (SipTimestamp)" in reject.error.message
+    assert "no SipTimestamp (wire key 't'), which the dataset needs" in reject.error.message
 
 
 def test_a_status_after_authentication_is_delivered_in_order_with_data(

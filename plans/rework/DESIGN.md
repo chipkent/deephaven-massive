@@ -1892,7 +1892,9 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
                      ENVELOPE_KEYS, DriftReport(extra, missing, statuses)
   convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
                      every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError;
-                     convert_field applies a field's named conversion
+                     convert_field applies a field's named conversion and raises with the
+                     shared bad-value message; missing_key_message and excerpt, so both
+                     decoders word a row failure alike and add only their own context
   rest.json  ws.json  flatfiles.json        generated, committed
 rest/                imports net, spec
   __init__.py        RestClient, Page, to_batch
