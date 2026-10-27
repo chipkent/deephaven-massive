@@ -1519,10 +1519,11 @@ same rules.
 **Tasks.**
 - [ ] Record each REST response field's OpenAPI `description` after `$ref` and `allOf`
       resolution, keyed by `(source, wire key)`.
-- [ ] Normalize by exactly the three rules of DESIGN § 19.4: Markdown links and `<a href>`
-      links become `text (url)`, whitespace collapses to one space and the ends are trimmed.
+- [ ] Normalize by exactly the four rules of DESIGN § 19.4: `<a href>` links and Markdown
+      links become `text (url)`, a root-relative URL resolves against the documentation
+      origin, whitespace collapses to one space and the ends are trimmed.
 - [ ] Write `spec/descriptions.json` with `generated_by`, `fetched` (the manifest's fetch
-      date), `urls` (each source's vendor URL, from the manifest), and `descriptions`, stored
+      date), `urls` (each source's vendor URLs, from the manifest), and `descriptions`, stored
       canonically like the other generated files; a field without text has no entry.
 - [ ] Join the file into `Field.description` at load; an entry naming a source or wire key
       the schema files lack raises; `provenance()` returns the fetch date and the URLs.
@@ -1550,7 +1551,7 @@ uv run pytest tests/massive/refresh tests/massive/spec tests/massive/test_init.p
 ```
 
 **Pitfalls.** A `description` key inside `rest.json` would make a description edit look like a
-schema change in review; keep the files apart. Normalization changes nothing but the three
+schema change in review; keep the files apart. Normalization changes nothing but the four
 rules (no HTML unescaping, no truncation). Descriptions never feed column names or gates; the
 quoted descriptions of `NAMES` entries are a separate, existing mechanism.
 

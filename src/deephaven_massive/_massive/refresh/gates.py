@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 from deephaven_massive._massive.spec.types import Transport
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from deephaven_massive._massive.refresh.hand_input import HandInput
     from deephaven_massive._massive.refresh.overrides import TypeFix
@@ -320,7 +320,7 @@ def unneeded_type_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterato
 def check_exclusions(
     hand: HandInput,
     statuses: Mapping[str, str],
-    pages: Mapping[str, str],
+    pages: Mapping[str, Sequence[str]],
 ) -> Iterator[Problem]:
     """Check each REST exclusion against the specification and the documentation.
 
@@ -328,7 +328,7 @@ def check_exclusions(
         hand: The hand input.
         statuses: Each specification path's status: `"deprecated"`, `"draft"`, or `""` for a
             path the vendor publishes as current.
-        pages: Each documented path's page name.
+        pages: Each documented path's page names.
 
     Yields:
         A `stale-entry` problem for an exclusion naming a path the specification lacks or
@@ -358,7 +358,8 @@ def check_exclusions(
                 gate=Gate.DOCS,
                 source=entry.item,
                 key="",
-                message=f"excluded as undocumented, but {pages[entry.item]} documents it",
+                message=f"excluded as undocumented, but {', '.join(pages[entry.item])} "
+                "documents it",
             )
         elif not entry.undocumented and entry.item not in pages:
             yield Problem(

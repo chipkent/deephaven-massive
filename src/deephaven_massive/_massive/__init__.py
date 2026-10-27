@@ -17,7 +17,10 @@ Interface:
     - `WireError`, `WireAuthError`, `WireEntitlementError`: the errors every client raises;
       `deephaven_massive._errors.from_wire` turns each into its public counterpart.
     - `source`, `sources`: the generated description of each REST path (and, later, each
-      WebSocket channel and flat-file prefix), loaded once from the committed `spec/*.json`.
+      WebSocket channel and flat-file prefix), loaded once from the committed `spec/*.json`,
+      each field carrying the vendor's description of it (`Field.description`).
+    - `provenance`, `Provenance`: the day the vendor sources were fetched and the vendor URL
+      of each source, for documents that cite them.
     - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
       `DriftReport`: the value types of that description. A `RestPath`'s parameters are
       `Param`s, reached through `RestPath.params`.
@@ -57,6 +60,7 @@ __all__ = [
     "FlatFileClient",
     "Page",
     "ParamKind",
+    "Provenance",
     "ReadColumn",
     "ReadPlan",
     "Reject",
@@ -74,6 +78,7 @@ __all__ = [
     "WsClient",
     "WsState",
     "object_key",
+    "provenance",
     "source",
     "sources",
     "to_batch",
@@ -95,11 +100,13 @@ _EXPORTS: dict[str, str] = {
     "StatusKind": "deephaven_massive._massive.ws",
     "WsClient": "deephaven_massive._massive.ws",
     "WsState": "deephaven_massive._massive.ws",
+    "provenance": "deephaven_massive._massive.spec",
     "source": "deephaven_massive._massive.spec",
     "sources": "deephaven_massive._massive.spec",
     "DriftReport": "deephaven_massive._massive.spec.types",
     "Field": "deephaven_massive._massive.spec.types",
     "ParamKind": "deephaven_massive._massive.spec.types",
+    "Provenance": "deephaven_massive._massive.spec.types",
     "RestPath": "deephaven_massive._massive.spec.types",
     "Source": "deephaven_massive._massive.spec.types",
     "Transport": "deephaven_massive._massive.spec.types",
@@ -123,11 +130,12 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.rest.batch import to_batch
     from deephaven_massive._massive.rest.client import RestClient
     from deephaven_massive._massive.rest.response import Page
-    from deephaven_massive._massive.spec import source, sources
+    from deephaven_massive._massive.spec import provenance, source, sources
     from deephaven_massive._massive.spec.types import (
         DriftReport,
         Field,
         ParamKind,
+        Provenance,
         RestPath,
         Source,
         Transport,
