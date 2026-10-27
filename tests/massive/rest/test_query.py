@@ -78,6 +78,11 @@ def test_integers_and_numbers() -> None:
     assert _encode("strike_price.gte", 1e-7) == "1e-07"
 
 
+def test_an_integer_of_any_size_is_sent_exactly() -> None:
+    assert _encode("limit", 10**400) == "1" + "0" * 400
+    assert _encode("strike_price.gte", -(10**400)) == "-1" + "0" * 400
+
+
 @pytest.mark.parametrize(("name", "value"), [("limit", True), ("limit", 1.0), ("limit", "5")])
 def test_an_integer_refuses_bool_float_and_text(name: str, value: object) -> None:
     with pytest.raises(TypeError, match=f"'{name}' takes integer values"):

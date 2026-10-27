@@ -182,6 +182,39 @@ def test_https_proxy_routes_requests_through_the_proxy(
     assert (received.proxied, received.host_url) == (True, "http://api.massive.test")
 
 
+def test_proxy_credentials_are_sent_as_proxy_authorization(
+    fake_rest: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
+) -> None:
+    host = fake_rest.url.removeprefix("http://")
+    no_proxy_env.setenv("HTTPS_PROXY", f"http://alice:s%40cret@{host}")
+    fake_rest.reply("/v3/trades/AAPL", _ok())
+    rest = RestClient(
+        _KEY, base_url="http://api.massive.test", max_concurrency=1, clock=FakeClock()
+    )
+    rest.get(_TRADES, _AAPL, {})
+    (received,) = fake_rest.requests
+    assert received.proxied
+    # base64 of "alice:s@cret"
+    assert received.headers["proxy-authorization"] == "Basic YWxpY2U6c0BjcmV0"
+    assert received.headers["authorization"] == f"Bearer {_KEY}"
+    assert "s%40cret" not in str(rest._pool.proxy)
+
+
+def test_proxy_credentials_never_reach_an_error_or_a_log(
+    no_proxy_env: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    no_proxy_env.setenv("HTTPS_PROXY", "http://alice:topsecret@127.0.0.1:9")
+    rest = RestClient(
+        _KEY, base_url="http://api.massive.test", max_concurrency=1, clock=FakeClock()
+    )
+    with pytest.raises(WireError, match="failed: ") as caught:
+        rest.get(_TRADES, _AAPL, {})
+    assert "topsecret" not in caught.value.message
+    assert caplog.records
+    assert not any("topsecret" in r.getMessage() for r in caplog.records)
+
+
 def test_no_proxy_bypasses_the_proxy(
     fake_rest: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
 ) -> None:

@@ -154,7 +154,7 @@ def _number(param: Param, value: object) -> str:
     accepted = (int,) if param.kind is ParamKind.INTEGER else (int, float)
     if isinstance(value, bool) or not isinstance(value, accepted):
         raise TypeError(f"parameter {param.name!r} takes {param.kind} values, not {value!r}")
-    if not math.isfinite(value):
+    if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"parameter {param.name!r} takes a finite number, not {value!r}")
     return repr(value)
 

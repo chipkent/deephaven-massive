@@ -30,7 +30,7 @@ import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireError
-from deephaven_massive._massive.net.http import https_proxy, ssl_context
+from deephaven_massive._massive.net.http import https_proxy, proxy_credentials, ssl_context
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     MAX_RETRY_AFTER,
@@ -130,7 +130,8 @@ class RestClient:
 
         The proxy (`HTTPS_PROXY`, `NO_PROXY`) and the certificate authorities
         (`SSL_CERT_FILE`, `SSL_CERT_DIR`, else `certifi`) are read from the environment once,
-        here, through `net.http`.
+        here, through `net.http`. Credentials in the proxy URL go to the proxy as a
+        `Proxy-Authorization` header; the pool holds the proxy URL without them.
 
         Args:
             api_key: The Massive API key, sent as a bearer token.
@@ -163,22 +164,24 @@ class RestClient:
         }
         proxy = https_proxy(self._host)
         timeout = urllib3.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT)
-        self._pool = (
-            urllib3.ProxyManager(
-                proxy,
+        self._pool: urllib3.PoolManager
+        if proxy:
+            proxy_url, proxy_headers = proxy_credentials(proxy)
+            self._pool = urllib3.ProxyManager(
+                proxy_url,
+                proxy_headers=proxy_headers,
                 maxsize=max_concurrency,
                 retries=_NO_RETRIES,
                 timeout=timeout,
                 ssl_context=ssl_context(),
             )
-            if proxy
-            else urllib3.PoolManager(
+        else:
+            self._pool = urllib3.PoolManager(
                 maxsize=max_concurrency,
                 retries=_NO_RETRIES,
                 timeout=timeout,
                 ssl_context=ssl_context(),
             )
-        )
         self._lock = threading.Lock()
         self._not_before = float("-inf")
         self._closed = threading.Event()

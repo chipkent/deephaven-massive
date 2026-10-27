@@ -1960,7 +1960,10 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   a URL: an `apiKey` parameter in a `next_url` is removed before the request.
 - **Proxies and certificates** come from `net.http`: `urllib.request.getproxies()` for
   `HTTPS_PROXY` and `urllib.request.proxy_bypass` for `NO_PROXY` select a `ProxyManager` for
-  the REST host or a plain `PoolManager`, read once at construction. The CA bundle is the
+  the REST host or a plain `PoolManager`, read once at construction. A user and password in
+  the proxy URL are sent as `Proxy-Authorization` (`net.http.proxy_credentials`; urllib3 does
+  not send them itself), and the pool holds the URL without them, so they never reach a log or
+  an error. The CA bundle is the
   system default when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an
   `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise.
 - **Query encoding.** Path parameters are encoded like query values, then percent-encoded
