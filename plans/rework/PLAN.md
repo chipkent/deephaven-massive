@@ -1282,6 +1282,202 @@ Never derive a name from a description.
 
 ---
 
+<a id="layer-packages"></a>
+## layer-packages — `refactor: move library modules into layer packages`
+
+| | |
+|---|---|
+| **Branch** | `refactor/layer-packages` |
+| **Base** | `origin/main` after `git fetch` |
+| **Issue** | #92 |
+
+**Goal.** Group the library's flat pile of root modules by layer, with no behaviour change:
+the vocabulary (`_config`, `_enums`, `_errors`, `_types`) and the API (`__init__`, `_session`,
+`_query`, `_namespaces/`) stay at the root, and everything else moves into `_datasets/`,
+`_tables/`, and `_ingest/`. `_session.py` loses `SessionCore` to `_tables/core.py`, and
+`_query.py` loses `Request` and its records to `_datasets/request.py` and the transport ports
+to `_tables/core.py`. The move comes first so that every later planned PR edits the final
+paths.
+
+**DESIGN sections implemented.** [§ 4.1](DESIGN.md#41-source-modules) (the tree);
+[§ 4.2](DESIGN.md#42-test-layout) (the mirrored tests and fixtures);
+[§ 19](DESIGN.md#19-wire-clients-and-the-spec-snapshot) (the library paths it names).
+
+**Depends on.** flat-file-history, rest-client, websocket-client, rest-wire-schema (all
+merged). **Parallel with.** field-descriptions, flat-file-s3-shared-rules. **Before.**
+layer-rules.
+
+**Files.**
+- Move (`git mv`): `_catalog.py` → `_datasets/catalog.py`, `_schema.py` →
+  `_datasets/schema.py`, `_timeunits.py` → `_datasets/timestamps.py`, `_dates.py` →
+  `_datasets/dates.py`, `_symbols.py` → `_datasets/symbols.py`, `_history_source.py` →
+  `_datasets/history_source.py`, `_liveness.py` → `_tables/liveness.py`, `_diagnostics.py` →
+  `_tables/diagnostics.py`, `_flat_files.py` → `_ingest/flatfiles.py`; their tests to
+  `tests/datasets/`, `tests/tables/`, and `tests/ingest/`; the fixtures
+  `tests/data/flat_files/` → `tests/data/ingest/flatfiles/` and `tests/data/symbols/` →
+  `tests/data/datasets/symbols/`.
+- Create: `_datasets/__init__.py`, `_tables/__init__.py`, `_ingest/__init__.py` (a docstring
+  only), `_datasets/request.py`, `_tables/core.py`, and their mirrors
+  (`tests/{datasets,tables,ingest}/test_init.py`, `tests/datasets/test_request.py`,
+  `tests/tables/test_core.py`).
+- Modify: every importer of a moved name, `tests/test_layout.py` (the plain-mirror test of the
+  catalog's tests), `tests/conftest.py`, the docstrings of `_massive` that name a library module,
+  `AGENTS.md` (rule 7), `DESIGN.md` § 4.1, § 4.2, and § 19, and this file's file lists.
+
+**Tasks.**
+- [ ] Commit 1: the pure `git mv` of the modules, tests, and fixtures; imports, monkeypatch
+      targets, logger names, and docstring paths follow; the three docstring-only package
+      `__init__.py` files and their `test_init.py`.
+- [ ] Commit 2: `SessionCore`, its stream records, its finalizer, the stream-id allocator, and
+      the update-graph checks move from `_session.py` to `_tables/core.py`, with the transport
+      ports (`RestTransport`, `StreamTransport`, `FlatFileTransport`) from `_query.py`;
+      `Request`, `StreamKey`, `ParamValue`, and `HostDecision` move to
+      `_datasets/request.py`. The `SessionCore` tests move to `tests/tables/test_core.py`.
+- [ ] `tests/datasets/test_catalog.py` is a plain mirror: AGENTS rule 7, DESIGN § 4.2, global
+      rule 7, and `test_test_catalog_is_a_plain_mirror` say so.
+
+**Acceptance criteria.**
+- [ ] No behaviour change: no test changes beyond imports, patch targets, logger names, fixture
+      paths, moving tests to their new mirror, and the tests of the new package files.
+- [ ] `git log --follow` shows each moved module's history (the moves are renames).
+- [ ] The wheel built by `uv build` holds every module of the new tree.
+- [ ] `git grep` finds no old module path outside the merged planned-PR sections of this file.
+
+**Verification.**
+```bash
+./scripts/check.sh
+uv build && uv run python -m zipfile -l dist/*.whl | grep deephaven_massive/_
+```
+
+**Pitfalls.** A `monkeypatch.setattr` on the old module object silently patches nothing the code
+reads; patch the module that now owns the name. A fixture owner path is the test's path, so a
+moved test moves its fixtures.
+
+**Out of scope.** Enforcing the layers, `SessionClients`, `_tables/columns.py`, and
+`_tables/watchlist.py` (layer-rules); deleting the old JSON codec of `_config` (its own small PR).
+
+**Approval gates.** Opening the PR.
+
+---
+
+<a id="layer-rules"></a>
+## layer-rules — `refactor: enforce the library layers`
+
+| | |
+|---|---|
+| **Branch** | `refactor/layer-rules` |
+| **Base** | `origin/main` after `git fetch` |
+| **Issue** | #93 |
+
+**Goal.** Make the layers a rule. The library has six layers, in order: wire (`_massive/`),
+vocabulary (the root `_config`, `_enums`, `_errors`, `_types`), datasets (`_datasets/`),
+tables (`_tables/`), ingest (`_ingest/`), and API (the root `__init__`, `_session`, `_query`,
+`_reference`, and `_namespaces/`). A module imports only its own layer or lower ones, type-only
+imports included, and `tests/test_layout.py` enforces it. The four upward edges of today's code
+go: the catalog's `query_class` and its namespace-module import, the core's import of the
+flat-file transport, and the Deephaven calls inside `_datasets`.
+
+**DESIGN sections implemented.** [§ 4.3](DESIGN.md#4-package-layout) "Layers" (created here: the
+layer table, the rules, and what justifies each boundary); [§ 4.1](DESIGN.md#41-source-modules)
+(`_ingest/clients.py`, `_tables/columns.py`, `_tables/watchlist.py`);
+[§ 7](DESIGN.md#7-query-classes-and-verbs) (the query class derived from the spec);
+[§ 8](DESIGN.md#8-namespace-tree) (the catalog built from the namespace modules);
+[§ 19.4](DESIGN.md#194-generated-schemas) (the `Catalog` and its `dataset_schema` cache).
+
+**Depends on.** layer-packages. **Parallel with.** field-descriptions,
+websocket-and-flat-file-wire-schemas, flat-file-s3-shared-rules, api-drift-check. **Before.**
+runtime-drift-reporting, and through it generated-catalog-and-schemas, rest-transport, and
+websocket-layer.
+
+**Files.**
+- Create: `_ingest/clients.py` (`SessionClients`), `_tables/columns.py` (the Deephaven type of
+  each `ColumnType`, `col_defs(schema)`), `_tables/watchlist.py` (`canonical_view`), and their
+  mirrors.
+- Modify: `_session.py` (builds `CATALOG`, the core, and `SessionClients`, then calls
+  `core.attach(clients)` once), `_tables/core.py` (`attach`, the `IngestPorts` protocol, and
+  `catalog`; no ingest import), `_datasets/catalog.py` (`query_class` leaves `DatasetSpec`;
+  `NAMESPACE_MODULES` and the computed import go; a `Catalog` holds the specs by name and
+  `members(kind)`), `_datasets/schema.py` (`dh_type` and `col_defs` move out),
+  `_datasets/symbols.py` (`canonical_view` and the `Table` branch of `normalize` move out),
+  `_namespaces/base.py` (`query_class(spec)`, `bar_query_class`, the `Table` branch of
+  `build_query`), `_query.py`, `tests/test_layout.py`, `DESIGN.md`, `AGENTS.md`.
+
+**Tasks.**
+- [ ] `SessionClients(core)` owns every per-session wire client and connection (the
+      `FlatFileClient` now; the `RestClient` and the host-decision cache in rest-transport; the
+      per-URL WebSocket connections in websocket-layer). It implements `rest()`, `streams()`,
+      and `flat_files()` (the `IngestPorts` protocol in `_tables/core.py`) and registers its
+      closers with `core.on_close`. The body of today's `SessionCore.flat_file_transport` moves
+      to `SessionClients.flat_files`.
+- [ ] `_session.py` builds `CATALOG = Catalog((*stocks.DATASETS, …))` once, at import, from
+      static imports of every namespace module, and hands it to the core; ingest reads
+      `core.catalog`. A test asserts every namespace module is in `CATALOG`.
+- [ ] The query class is derived from the spec, not declared. With S = the spec has channels,
+      H = it has a history path, a grouped-daily path, or a flat-file prefix, and F = it has a
+      fetch path: F alone → `Query`; S alone → `StreamQuery`; H alone → `HistoryQuery`; S and
+      H → `StreamHistoryQuery`; S, H, and F → `StreamHistoryLatestQuery`. No verb, S and F
+      without H, and H and F without S (outside `bars`) raise `ValueError` in
+      `DatasetSpec.__post_init__`, naming the dataset. A `bars` spec must have H, and
+      `bar_query_class(spec, timespan, multiplier)` picks its class per call.
+- [ ] The annotation test in `tests/namespaces/test_base.py`: for every catalog spec, the
+      factory's return annotation is `query_class(spec)`; each `bars` overload returns
+      `bar_query_class` on one timespan of its `Literal` set and the implementation returns
+      `HistoryQuery`; every public factory method maps to exactly one spec.
+- [ ] `_datasets` makes no Deephaven calls: `SymbolTable` keeps `table: Table` through a
+      type-only import; the `isinstance(symbols, Table)` branch of `normalize` and its
+      `Symbol`-column check move to `_namespaces/base.build_query`; `ColumnType.dh_type` and
+      `Schema.col_defs` become `dh_type(column_type)` and `col_defs(schema)` in
+      `_tables/columns.py`; `canonical_view` moves to `_tables/watchlist.py`.
+- [ ] The layer rules in `tests/test_layout.py`, each with a negative test:
+      - every module under `src/` is in a known layer; any other root module fails with "not in
+        a known layer";
+      - every import, relative import, literal `import_module`/`__import__`, and module-name
+        string, type-only or not, targets a layer no higher than its own;
+      - outside the two lazy `__init__.py` files, a computed `import_module` or `__import__`
+        argument is a violation (the negative test uses today's f-string);
+      - Deephaven: none in the wire; only `deephaven.table` in the vocabulary (the `Table` in
+        `_types.Symbols`); `_datasets` imports `deephaven` only under `TYPE_CHECKING` (the
+        negative test is a runtime `from deephaven.table import Table`); nobody imports
+        `deephaven_server`;
+      - the vocabulary and `_datasets` import none of `queue`, `asyncio`, `concurrent`,
+        `socket`, `ssl`, `http`, `urllib`, or `subprocess`, and read neither
+        `threading.Thread` nor `threading.Timer`;
+      - `_massive.__all__` splits into vocabulary names (the three errors and the spec names)
+        and client names (`RestClient`, `Page`, `to_batch`, `WsClient`, `WsState`, `Status`,
+        `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`,
+        `object_key`); under `src/`, only `_ingest` reads a client name, and a test asserts
+        the two sets partition `__all__`;
+      - in the API, only `_session.py` imports `_ingest`, and only `_ingest.clients`;
+      - the `__init__.py` of `_namespaces`, `_datasets`, `_tables`, and `_ingest` holds a
+        docstring and nothing else.
+      Tests are exempt from the layer order and keep the existing interface rule.
+- [ ] DESIGN § 4.3 "Layers" and the edits to § 7, § 8, and § 19.4; an `AGENTS.md` paragraph
+      with the layer rule, and its "Package and test layout" row pointed at § 4.3.
+
+**Acceptance criteria.**
+- [ ] Every rule above fails on its synthetic violation and passes on the real tree.
+- [ ] No behaviour change visible to users: the public API, the tables, and the messages are
+      unchanged. Every `DATASETS` is empty, so no dataset data moves.
+- [ ] `SessionClients` is the only holder of a wire client: `git grep -n "FlatFileClient"
+      -- src/deephaven_massive` outside `_massive/` and `_ingest/` is empty.
+
+**Verification.**
+```bash
+./scripts/check.sh
+uv run pytest tests/test_layout.py tests/namespaces/test_base.py tests/ingest/test_clients.py -q
+```
+
+**Pitfalls.** A type-only import counts: moving an upward import under `TYPE_CHECKING` does not
+satisfy the order. `_reference.py` reads the catalog the API builds, so it is in the API layer,
+not in `_datasets`.
+
+**Out of scope.** The REST and WebSocket bodies of `SessionClients` (rest-transport,
+websocket-layer); `KeySpec` and the generated schemas (generated-catalog-and-schemas).
+
+**Approval gates.** Opening the PR.
+
+---
+
 <a id="field-descriptions"></a>
 ## field-descriptions — `feat: generated schemas carry vendor field descriptions`
 

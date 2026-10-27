@@ -31,21 +31,21 @@ from typing import TYPE_CHECKING, ClassVar
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import check_filters
 from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import normalize
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
     QueryBase,
-    Request,
     StreamHistoryQuery,
 )
 from deephaven_massive._types import _All, override
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._query import ParamValue
-    from deephaven_massive._session import SessionCore
+    from deephaven_massive._datasets.request import ParamValue
+    from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
 __all__ = ["Namespace", "bar_query_class", "build_query", "list_params"]

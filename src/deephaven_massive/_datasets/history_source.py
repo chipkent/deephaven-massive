@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.dates import TimeRange
-    from deephaven_massive._query import Request
+    from deephaven_massive._datasets.request import Request
 
 __all__ = [
     "NOT_PUBLISHED",

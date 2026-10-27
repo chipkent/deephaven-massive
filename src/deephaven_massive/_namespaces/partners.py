@@ -25,7 +25,7 @@ from deephaven_massive._namespaces.base import Namespace
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._session import SessionCore
+    from deephaven_massive._tables.core import SessionCore
 
 __all__ = ["DATASETS", "_Benzinga", "_EtfGlobal", "_Fable", "_Partners", "_Tmx"]
 

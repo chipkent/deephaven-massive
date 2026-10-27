@@ -29,6 +29,7 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.dates import CHICAGO, FuturesSessions, TimeRange, bounds
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import (
     BARS,
     INDEX_VALUES,
@@ -42,7 +43,7 @@ from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan, Transport
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._namespaces.base import build_query
-from deephaven_massive._query import HistoryQuery, Request
+from deephaven_massive._query import HistoryQuery
 from deephaven_massive._types import override
 
 TIMEOUT = 30.0
@@ -1476,7 +1477,7 @@ def test_a_session_collected_unclosed_closes_its_bucket(
     client = flat_file_client(m)
     reaper = m._core._reaper.thread
     assert fake_s3.closes == 0
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)

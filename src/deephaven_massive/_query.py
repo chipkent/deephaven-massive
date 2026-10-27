@@ -1,4 +1,4 @@
-"""The six query classes and their verbs, and the transport interfaces the verbs call.
+"""The six query classes and their verbs.
 
 A dataset method such as `m.stocks.trades(["AAPL"])` returns a *query*: an immutable,
 hashable description of what to fetch. Nothing touches the network until a *verb* is called,
@@ -19,9 +19,10 @@ contract. Verbs validate their parameters synchronously on the calling thread: a
 Deephaven update-graph thread (for example inside a table listener), because verbs create tables and
 take the session's registry lock.
 
-The verbs delegate the transport work to three interfaces, one per transport, which the session
-provides through its factory hooks: `RestTransport` (`fetch`, `poll`, REST `history`),
-`StreamTransport` (opening a WebSocket stream), and `FlatFileTransport` (flat-file `history`).
+The verbs delegate the transport work to three interfaces, one per transport, defined in
+`_tables/core.py` and provided by the session core's factory hooks: `RestTransport` (`fetch`,
+`poll`, REST `history`), `StreamTransport` (opening a WebSocket stream), and
+`FlatFileTransport` (flat-file `history`).
 `history()` chooses its source itself (`history_source.choose_source`) and then calls one
 transport, so the transports only do I/O.
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
@@ -34,10 +35,9 @@ construct them.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, fields, replace
-from datetime import date, datetime, timedelta
-from enum import Enum
-from typing import TYPE_CHECKING, Final, Protocol, TypeAlias
+from dataclasses import dataclass, replace
+from datetime import timedelta
+from typing import TYPE_CHECKING, Final
 
 from deephaven.stream import blink_to_append_only
 from deephaven.table import Table
@@ -52,13 +52,8 @@ from deephaven_massive._datasets.history_source import (
 )
 from deephaven_massive._datasets.symbols import SymbolTable, canonical_view, symbol_canonicalizer
 from deephaven_massive._enums import (
-    AssetClass,
-    ChannelFamily,
-    FuturesVenue,
     HistorySource,
     PollMode,
-    Recency,
-    Timespan,
     _require_enum,
 )
 from deephaven_massive._tables.liveness import entered
@@ -66,261 +61,26 @@ from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from enum import StrEnum
 
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
-    from deephaven_massive._datasets.symbols import NormalizedSymbols
-    from deephaven_massive._session import SessionCore
-    from deephaven_massive._tables.liveness import StreamHandle
+    from deephaven_massive._datasets.request import Request
+    from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._types import DateLike
 
 __all__ = [
-    "FlatFileTransport",
     "HistoryLatestQuery",
     "HistoryQuery",
-    "HostDecision",
-    "ParamValue",
     "Query",
     "QueryBase",
-    "Request",
-    "RestTransport",
     "StreamHistoryLatestQuery",
     "StreamHistoryQuery",
-    "StreamKey",
     "StreamQuery",
-    "StreamTransport",
 ]
 
 logger = logging.getLogger(__name__)
 
 MAX_RING_CAPACITY: Final = 2**31 - 1
 """The largest `ring()` capacity Deephaven accepts (a Java `int`)."""
-
-ParamValue: TypeAlias = "str | int | float | bool | date | datetime | StrEnum | tuple[str, ...]"
-"""A normalized parameter or filter value, as a `Request` stores it (sequences become tuples)."""
-
-StreamKey: TypeAlias = "tuple[str, str | None, NormalizedSymbols]"
-"""The identity of a stream: `(dataset name, channel, symbols)`. The symbols are the sorted
-tuple of canonical symbols, `ALL`, or a `SymbolTable` box, which compares by the identity of the
-reactive table's wrapper and holds it strongly while the key exists."""
-
-
-@dataclass(frozen=True, slots=True)
-class Request:
-    """The normalized arguments of a dataset call, shared by every verb of its query.
-
-    Built by `_namespaces/base.py` when the query is created; immutable and hashable, so equal
-    calls give equal queries and share streams.
-
-    Attributes:
-        symbols: The normalized symbols, or None for datasets without instruments.
-        timespan: The bar timespan (bars and indicators only).
-        multiplier: The bar multiplier.
-        venue: The futures venue, which selects flat-file prefixes only.
-        adjusted: Whether bars are adjusted for splits, for datasets with an `adjusted`
-            parameter; None for datasets without one. Flat files hold only unadjusted bars.
-            The REST transport sends it, when not None, as the `adjusted` query parameter;
-            `params` never holds `adjusted`.
-        start: The lower bound of the dataset's time axis (`…T` datasets), or of `history()`.
-        end: The upper bound of the dataset's time axis, or of `history()`.
-        params: The dataset's other typed parameters, by SDK parameter name, sorted by name.
-        filters: The `filters` mapping, by SDK parameter name, sorted by name.
-        limit: The cap on the total number of rows across pages, or None for every row. It is
-            not an SDK parameter: the page size is internal (`DatasetSpec.page_size`), and
-            the REST transport stops paging once `limit` rows have arrived.
-    """
-
-    symbols: NormalizedSymbols | None = None
-    timespan: Timespan | None = None
-    multiplier: int = 1
-    venue: FuturesVenue | None = None
-    adjusted: bool | None = None
-    start: date | datetime | None = None
-    end: date | datetime | None = None
-    params: tuple[tuple[str, ParamValue], ...] = ()
-    filters: tuple[tuple[str, ParamValue], ...] = ()
-    limit: int | None = None
-
-    def symbol_key(self) -> NormalizedSymbols:
-        """Return the symbol part of a stream key.
-
-        Returns:
-            The sorted symbol tuple, `ALL`, or the reactive table's `SymbolTable` box.
-
-        Raises:
-            ValueError: If the request has no symbols (a stream always has some).
-        """
-        if self.symbols is None:
-            raise ValueError("a stream needs symbols")
-        return self.symbols
-
-    def describe(self) -> str:
-        """Render the fields that differ from their defaults, for a query's `repr`.
-
-        Returns:
-            Space-separated `name=value` pairs, such as `symbols=('AAPL', 'MSFT')`; `ALL`
-            renders as `ALL`, a reactive table as `<reactive table>`, enums by member name,
-            dates in ISO form, and parameters and filters as dictionaries.
-        """
-        parts = []
-        for f in fields(self):
-            value = getattr(self, f.name)
-            if value != f.default:
-                parts.append(f"{f.name}={_render(value)}")
-        return " ".join(parts)
-
-
-def _render(value: object) -> str:
-    """Render one request value for a `repr`.
-
-    Args:
-        value: A field value of a `Request`.
-
-    Returns:
-        Its display form.
-    """
-    if value is ALL:
-        return "ALL"
-    if isinstance(value, SymbolTable):
-        return "<reactive table>"
-    if isinstance(value, Enum):
-        return f"{type(value).__name__}.{value.name}"
-    if isinstance(value, date):
-        return value.isoformat()
-    if isinstance(value, tuple) and value and isinstance(value[0], tuple):
-        return "{" + ", ".join(f"{k!r}: {_render(v)}" for k, v in value) + "}"
-    return repr(value)
-
-
-@dataclass(frozen=True, slots=True)
-class HostDecision:
-    """Which WebSocket host serves a (asset class, channel family), and why.
-
-    Returned by `RestTransport.resolve_host`; immutable, so it can be cached and shared between
-    threads.
-
-    Attributes:
-        host: The hostname, such as `"delayed.massive.com"`.
-        recency: Whether the host serves real-time or delayed data, or `UNKNOWN` when the
-            evidence did not say (only then may a server verdict re-route the connection).
-        evidence: Why: a human-readable account of the decision, shown in `m.connections()`.
-    """
-
-    host: str
-    recency: Recency
-    evidence: str
-
-
-class RestTransport(Protocol):
-    """The REST transport, provided by `SessionCore.rest_transport()`.
-
-    Every method runs synchronously on the calling thread and raises `EntitlementError` on
-    HTTP 403 and `MassiveError` on other failures; `poll()` instead fails its live table.
-    """
-
-    def resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
-        """Decide the WebSocket host of a (class, family), once per session.
-
-        Called by the WebSocket transport on the caller thread at the first stream verb for the
-        pair. The first call may make one REST request; the decision is then cached for the
-        life of the session, so later calls return it without a request. Each new decision
-        writes the pair's `Transport=REST` row of `m.connections()` (host, recency, evidence).
-
-        Args:
-            asset_class: The asset class of the stream.
-            family: The channel family, `TICK` or `FMV`.
-        """
-        ...
-
-    def fetch(self, spec: DatasetSpec, request: Request) -> Table:
-        """Return every row the dataset's `fetch` endpoint returns for the request, static.
-
-        Args:
-            spec: The dataset.
-            request: The normalized arguments.
-        """
-        ...
-
-    def poll(
-        self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
-    ) -> Table:
-        """Return a live table that re-runs `fetch` every `interval`, tracked by the session.
-
-        Args:
-            spec: The dataset.
-            request: The normalized arguments.
-            interval: The time between cycles.
-            mode: How cycles combine.
-        """
-        ...
-
-    def history(
-        self, spec: DatasetSpec, request: Request, window: TimeRange | FuturesSessions
-    ) -> Table:
-        """Return the dataset's REST history over `window`, paged internally, static.
-
-        Args:
-            spec: The dataset.
-            request: The normalized arguments, with the raw `start` and `end` bounds.
-            window: The bounds under the class's day rules: a half-open `TimeRange`, or the
-                `FuturesSessions` of date-bounded futures.
-        """
-        ...
-
-
-class StreamTransport(Protocol):
-    """The WebSocket transport, provided by `SessionCore.stream_transport()`."""
-
-    def open_stream(
-        self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
-    ) -> StreamHandle:
-        """Create a new stream: its publisher and blink table in a new stream scope.
-
-        Runs on the caller thread; may resolve the host with one REST call. Must not hold the
-        session's registry lock while calling Deephaven. The session has already registered the
-        stream under `stream_id`, so `SessionCore.fail_stream(stream_id, ...)` and
-        `SessionCore.stream_shut_down(stream_id)` may be called from the moment the publisher
-        exists, even before this method returns. The publisher is named
-        `massive.{dataset}#{stream_id}`, and the blink table's `on_shutdown_callback` must first
-        call `SessionCore.stream_shut_down(stream_id)` and only then release the stream's topics.
-        The returned handle carries `stream_id`.
-
-        Args:
-            spec: The dataset.
-            request: The normalized arguments.
-            channel: The WebSocket channel.
-            stream_id: The id the session minted for the stream.
-        """
-        ...
-
-
-class FlatFileTransport(Protocol):
-    """The flat-file transport, provided by `SessionCore.flat_file_transport()`.
-
-    It only reads files: `HistoryQuery.history()` has already chosen flat files as the source
-    (`history_source.choose_source`).
-    """
-
-    def history(
-        self,
-        spec: DatasetSpec,
-        request: Request,
-        window: TimeRange | FuturesSessions,
-        *,
-        dates: Sequence[date],
-    ) -> Table:
-        """Return the rows of `window` from the dataset's flat files, static.
-
-        Args:
-            spec: The dataset, with a flat-file prefix for the request.
-            request: The normalized arguments, with the raw `start` and `end` bounds and static
-                symbols (never a reactive table).
-            window: The bounds under the class's day rules: a half-open `TimeRange`, or the
-                `FuturesSessions` of date-bounded futures.
-            dates: The partition dates to read (`history_source.partition_dates`).
-        """
-        ...
 
 
 def _interval(value: object) -> timedelta:

@@ -20,8 +20,8 @@ from deephaven_massive._tables.liveness import StreamHandle, new_scope
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._query import Request
-    from deephaven_massive._session import SessionCore
+    from deephaven_massive._datasets.request import Request
+    from deephaven_massive._tables.core import SessionCore
 
 
 class FakeStreamTransport:

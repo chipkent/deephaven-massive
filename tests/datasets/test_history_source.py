@@ -19,6 +19,7 @@ from deephaven_massive._datasets.history_source import (
     rest_history_problem,
     within_publication_grace,
 )
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import (
     BARS,
     INDEX_VALUES,
@@ -29,7 +30,7 @@ from deephaven_massive._datasets.schema import (
 )
 from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan, Transport
-from deephaven_massive._query import HistoryQuery, Request
+from deephaven_massive._query import HistoryQuery
 
 NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES

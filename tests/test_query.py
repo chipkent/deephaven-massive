@@ -21,6 +21,7 @@ from deephaven_massive import _errors
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import (
     BARS,
     INDEX_VALUES,
@@ -29,7 +30,6 @@ from deephaven_massive._datasets.schema import (
     ColumnType,
     Schema,
 )
-from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan, Transport
 from deephaven_massive._namespaces.base import build_query
@@ -38,7 +38,6 @@ from deephaven_massive._query import (
     HistoryQuery,
     Query,
     QueryBase,
-    Request,
     StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
@@ -218,15 +217,6 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
         "<HistoryQuery forex.bars symbols=('C:EURUSD',) timespan=Timespan.MINUTE multiplier=5 "
         "adjusted=False start=2025-01-02 params={'sort': 'timestamp'} filters={'limit': 3}>"
     )
-
-
-def test_symbol_keys(dh_exec_ctx: object) -> None:
-    assert Request(symbols=("A",)).symbol_key() == ("A",)
-    assert Request(symbols=dm.ALL).symbol_key() is dm.ALL
-    table = new_table([string_col("Symbol", ["A"])])
-    assert Request(symbols=SymbolTable(table)).symbol_key() == SymbolTable(table)
-    with pytest.raises(ValueError, match="needs symbols"):
-        Request().symbol_key()
 
 
 def test_class_hierarchy() -> None:
