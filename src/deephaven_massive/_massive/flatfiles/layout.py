@@ -7,8 +7,8 @@ a futures prefix holds the placeholder `{venue}` (`us_futures_{venue}/trades_v1`
 fills with the venue's lowercase name (`us_futures_cme/trades_v1`).
 
 This module knows only the layout. Which prefix a dataset has, which venues a request reads,
-and which dates a range needs are the library's decisions (`_flat_files.py` and
-`_history_source.py`). It imports only the standard library.
+and which dates a range needs are the library's decisions (`_ingest/flatfiles.py` and
+`_datasets/history_source.py`). It imports only the standard library.
 """
 
 from __future__ import annotations

@@ -40,7 +40,7 @@ from deephaven_massive._enums import AssetClass
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from deephaven_massive._catalog import DatasetSpec
+    from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._types import DateLike
 
 __all__ = [

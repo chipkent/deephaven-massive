@@ -8,16 +8,16 @@ import pyarrow as pa
 import pytest
 
 from deephaven_massive import _errors
-from deephaven_massive._catalog import datasets, time_units, unit_rules
-from deephaven_massive._enums import Transport
-from deephaven_massive._errors import MassiveError
-from deephaven_massive._timeunits import (
+from deephaven_massive._datasets.catalog import datasets, time_units, unit_rules
+from deephaven_massive._datasets.timestamps import (
     FMV_NS_THRESHOLD,
     TimeField,
     TimeUnit,
     TimeUnitTable,
     UnitRule,
 )
+from deephaven_massive._enums import Transport
+from deephaven_massive._errors import MassiveError
 
 # Field names that hold an epoch timestamp and so need a declared unit. The single-letter bar
 # bounds `s` and `e` are ambiguous across models, so datasets register those explicitly.
@@ -68,7 +68,7 @@ def test_fmv_rule_at_the_boundary(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_errors, "_logged", set())
-    with caplog.at_level(logging.INFO, logger="deephaven_massive._timeunits"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._datasets.timestamps"):
         assert TABLE.to_epoch_ns(FMV, FMV_NS_THRESHOLD) == FMV_NS_THRESHOLD
         # Just below the threshold is milliseconds; such a value overflows (see the test below).
         # The documentation sample, 13 digits: milliseconds.
@@ -82,7 +82,7 @@ def test_fmv_rule_logs_only_a_decided_unit(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_errors, "_logged", set())
-    with caplog.at_level(logging.INFO, logger="deephaven_massive._timeunits"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._datasets.timestamps"):
         nulls = pa.array([None, None], type=pa.int64())
         assert TABLE.to_epoch_ns_array(FMV, nulls).to_pylist() == [None, None]
         assert not [r for r in caplog.records if "FMV timestamps detected" in r.getMessage()]

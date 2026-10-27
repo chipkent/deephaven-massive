@@ -257,8 +257,8 @@ def _fixtures() -> list[PurePosixPath]:
     ("module", "expected"),
     [
         ("_config.py", "test_config.py"),
-        ("_catalog.py", "test_catalog.py"),
-        ("_hosts.py", "test_hosts.py"),
+        ("_datasets/catalog.py", "datasets/test_catalog.py"),
+        ("_ingest/hosts.py", "ingest/test_hosts.py"),
         ("_namespaces/stocks.py", "namespaces/test_stocks.py"),
         ("_massive/rest/client.py", "massive/rest/test_client.py"),
         ("_massive/rest/_paging.py", "massive/rest/test_paging.py"),
@@ -291,7 +291,7 @@ def test_mirror_of_maps_a_dunder_module_to_its_bare_name(module: str, expected: 
     ("test_file", "expected"),
     [
         ("test_config.py", "test_config.py"),
-        ("test_hosts_integration.py", "test_hosts.py"),
+        ("ingest/test_hosts_integration.py", "ingest/test_hosts.py"),
         ("namespaces/test_stocks_integration.py", "namespaces/test_stocks.py"),
     ],
 )
@@ -300,8 +300,8 @@ def test_unit_test_of_maps_live_tests_to_their_mirror(test_file: str, expected: 
 
 
 def test_a_live_test_without_a_module_is_an_orphan() -> None:
-    found = orphans(_paths("_hosts.py"), _paths("test_ws_integration.py"))
-    assert found == ["tests/test_ws_integration.py"]
+    found = orphans(_paths("_ingest/hosts.py"), _paths("ingest/test_ws_integration.py"))
+    assert found == ["tests/ingest/test_ws_integration.py"]
 
 
 # The privacy rule.
@@ -363,13 +363,14 @@ def test_every_test_file_mirrors_a_source_module() -> None:
 
 
 def test_a_test_file_without_a_module_is_an_orphan() -> None:
-    found = orphans(_paths("_config.py"), _paths("test_config.py", "test_hosts.py"))
-    assert found == ["tests/test_hosts.py"]
+    found = orphans(_paths("_config.py"), _paths("test_config.py", "ingest/test_hosts.py"))
+    assert found == ["tests/ingest/test_hosts.py"]
 
 
 def test_test_catalog_is_a_plain_mirror() -> None:
-    assert orphans(_paths("_catalog.py"), _paths("test_catalog.py")) == []
-    assert orphans(_paths("_config.py"), _paths("test_catalog.py")) == ["tests/test_catalog.py"]
+    catalog_test = _paths("datasets/test_catalog.py")
+    assert orphans(_paths("_datasets/catalog.py"), catalog_test) == []
+    assert orphans(_paths("_config.py"), catalog_test) == ["tests/datasets/test_catalog.py"]
 
 
 def test_the_approved_exceptions_need_no_module() -> None:
@@ -421,7 +422,7 @@ def test_no_fixture_directory_starts_with_an_underscore() -> None:
 
 def test_an_underscored_fixture_directory_is_reported() -> None:
     fixtures = _paths(
-        "symbols/crypto_tickers.csv",
+        "datasets/symbols/crypto_tickers.csv",
         "_flatfiles/a.csv.gz",
         "_flatfiles/b.csv.gz",
         "massive/_rest/page.json",
@@ -1271,7 +1272,7 @@ def test_the_fakes_may_import_the_network_libraries() -> None:
         "flat-files/manifest.json",
     ],
 )
-@pytest.mark.parametrize("path", [_LIBRARY_FILE, "tests/test_catalog.py"])
+@pytest.mark.parametrize("path", [_LIBRARY_FILE, "tests/datasets/test_catalog.py"])
 def test_outside_code_must_not_name_a_snapshot_file(text: str, path: str) -> None:
     assert _check(path, f"x = {text!r}\n") == [f"{path}:1: names a snapshot file: {text!r}"]
 

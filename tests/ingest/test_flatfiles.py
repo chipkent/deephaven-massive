@@ -26,14 +26,25 @@ from deephaven.table import Table
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _flat_files, _history_source, _massive
-from deephaven_massive._catalog import DatasetSpec
-from deephaven_massive._dates import CHICAGO, FuturesSessions, TimeRange, bounds
+from deephaven_massive import _massive
+from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.dates import CHICAGO, FuturesSessions, TimeRange, bounds
+from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.schema import (
+    BARS,
+    INDEX_VALUES,
+    QUOTES,
+    TRADES,
+    Column,
+    ColumnType,
+    Schema,
+)
+from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan, Transport
+from deephaven_massive._ingest import flatfiles
 from deephaven_massive._namespaces.base import build_query
-from deephaven_massive._query import HistoryQuery, Request
-from deephaven_massive._schema import BARS, INDEX_VALUES, QUOTES, TRADES, Column, ColumnType, Schema
-from deephaven_massive._timeunits import TimeUnit
+from deephaven_massive._query import HistoryQuery
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
@@ -220,7 +231,7 @@ def pick(table: Table, *columns: str) -> list[tuple[Any, ...]]:
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
     def set_now(moment: datetime) -> None:
-        monkeypatch.setattr(_history_source, "_now", lambda: moment)
+        monkeypatch.setattr(history_source, "_now", lambda: moment)
 
     set_now(NOW)
     return set_now
@@ -228,9 +239,16 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
 
 @pytest.fixture(autouse=True)
 def _virtual_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give every session's flat-file client a fake clock, so its retry waits never sleep."""
-    monkeypatch.setattr(
-        _massive, "FlatFileClient", functools.partial(_massive.FlatFileClient, clock=FakeClock())
+    """Give every session's flat-file client a fake clock, so its retry waits never sleep.
+
+    The patch goes into the module's namespace with `setitem`, so teardown removes the entry
+    again. `setattr` would restore the lazily resolved class as a bound attribute, which the
+    wire package's interface test forbids.
+    """
+    monkeypatch.setitem(
+        vars(_massive),
+        "FlatFileClient",
+        functools.partial(_massive.FlatFileClient, clock=FakeClock()),
     )
 
 
@@ -249,7 +267,7 @@ def put(
     make_csv_gz: Callable[[str], bytes],
 ) -> Callable[[str, str], None]:
     def store(key: str, fixture: str) -> None:
-        fake_s3.put(key, make_csv_gz(load_fixture("flat_files", fixture).decode()))
+        fake_s3.put(key, make_csv_gz(load_fixture("ingest/flatfiles", fixture).decode()))
 
     return store
 
@@ -260,7 +278,7 @@ def many_blocks(
 ) -> Callable[[str], int]:
     # Stores a trades file of many small blocks under a key and returns its block count.
     block = 4096
-    monkeypatch.setattr(_flat_files, "BLOCK_SIZE", block)
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
 
     def store(key: str) -> int:
         text = TRADE_HEADER + "".join(trade(n, 1741012200000000000 + n) for n in range(4000))
@@ -328,7 +346,7 @@ def pool(monkeypatch: pytest.MonkeyPatch) -> type[ShutdownSignal]:
         sizes: ClassVar[list[int]] = []
         shut: ClassVar[threading.Event] = threading.Event()
 
-    monkeypatch.setattr(_flat_files, "ThreadPoolExecutor", Recorded)
+    monkeypatch.setattr(flatfiles, "ThreadPoolExecutor", Recorded)
     return Recorded
 
 
@@ -503,7 +521,7 @@ def test_no_matching_rows_gives_an_empty_table_with_every_column(
         converted.append(data.num_rows)
         return convert(data)
 
-    monkeypatch.setattr(_flat_files, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "to_table", counted)
     q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert t.size == 0
@@ -610,8 +628,8 @@ def test_each_file_becomes_one_table(
         converted.append(data.num_rows)
         return convert(data)
 
-    monkeypatch.setattr(_flat_files, "to_table", counted)
-    monkeypatch.setattr(_flat_files, "BLOCK_SIZE", 256)  # several blocks per file
+    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)  # several blocks per file
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-05")
     assert t.size == 6
     # The empty schema table, then one table per file, although each file has many blocks.
@@ -632,8 +650,8 @@ def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
         converted.append(data.num_rows)
         return convert(data)
 
-    monkeypatch.setattr(_flat_files, "to_table", counted)
-    monkeypatch.setattr(_flat_files, "_TABLE_BLOCKS", 2)
+    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 2)
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     assert pick(t, "Id")[:3] == [("0",), ("1",), ("2",)]  # still in file order
     assert t.size == 4000
@@ -1128,7 +1146,7 @@ def test_a_dropped_connection_is_a_massive_error(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     data = make_csv_gz(
-        load_fixture("flat_files", "us_stocks_sip_trades_v1_2025-03-03.csv").decode()
+        load_fixture("ingest/flatfiles", "us_stocks_sip_trades_v1_2025-03-03.csv").decode()
     )
     fake_s3.put_dropped(TRADES_0303, data[: len(data) // 2])
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
@@ -1186,7 +1204,7 @@ def test_reader_threads_enter_the_session_context(
         seen.append((threading.current_thread().name, context))
         return convert(data)
 
-    monkeypatch.setattr(_flat_files, "to_table", recorded)
+    monkeypatch.setattr(flatfiles, "to_table", recorded)
     query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     reader = f"{session._core.label} flat files"
     assert all(context for _, context in seen)
@@ -1258,13 +1276,13 @@ def test_a_cancelled_or_closed_read_makes_no_request(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     transport = session._core.flat_file_transport()
-    assert isinstance(transport, _flat_files.FlatFileHistory)
+    assert isinstance(transport, flatfiles.FlatFileHistory)
     window = bounds(STOCK_TRADES, "2025-03-03", "2025-03-03")
-    transform = _flat_files._Transform.build(STOCK_TRADES, dm.ALL, window)
-    key = _flat_files._Key(TRADES_0303, date(2025, 3, 3), None)
+    transform = flatfiles._Transform.build(STOCK_TRADES, dm.ALL, window)
+    key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = threading.Event()
     cancel.set()
-    with pytest.raises(_flat_files._CancelledError):
+    with pytest.raises(flatfiles._CancelledError):
         transport._read_key(transform, key, cancel=cancel)
     flat_file_client(session).close()
     with pytest.raises(dm.MassiveError, match="is closed"):
@@ -1310,7 +1328,7 @@ def test_an_interrupt_stops_every_read(
     def interrupted(futures: object, return_when: str) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(_flat_files, "wait", interrupted)  # Ctrl-C while the caller waits
+    monkeypatch.setattr(flatfiles, "wait", interrupted)  # Ctrl-C while the caller waits
     applied.hook = lambda _key: pool.shut.wait(TIMEOUT)
     m = dm.MassiveSession(config(max_concurrency=1))
     try:
@@ -1476,7 +1494,7 @@ def test_a_session_collected_unclosed_closes_its_bucket(
     client = flat_file_client(m)
     reaper = m._core._reaper.thread
     assert fake_s3.closes == 0
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)
@@ -1531,7 +1549,7 @@ class MemorySampler:
             return convert(data)
 
         monkeypatch.setattr(_massive.FlatFile, "batches", sampled_batches)
-        monkeypatch.setattr(_flat_files, "to_table", sampled_convert)
+        monkeypatch.setattr(flatfiles, "to_table", sampled_convert)
 
     def sample_arrow(self) -> None:
         self.arrow[self.taken[0]] = pa.total_allocated_bytes()
@@ -1569,7 +1587,7 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     block = 16 * 1024
-    monkeypatch.setattr(_flat_files, "BLOCK_SIZE", block)
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
     text = synthetic_trades(600_000)
     fake_s3.put(TRADES_0303, make_csv_gz(text))
     sampler = MemorySampler(2 * (len(text) // block) + 1000)
@@ -1607,14 +1625,14 @@ def test_memory_per_reader_does_not_grow_with_the_file(
 
 
 def test_the_production_block_size() -> None:
-    assert _flat_files.BLOCK_SIZE == 2**20
-    assert _flat_files._TABLE_BLOCKS == 16
+    assert flatfiles.BLOCK_SIZE == 2**20
+    assert flatfiles._TABLE_BLOCKS == 16
 
 
 def test_outcome_of_a_cancelled_read_is_skipped() -> None:
     cancelled: Future[list[Table] | None] = Future()
     assert cancelled.cancel()
-    assert _flat_files._outcome(cancelled) is None
+    assert flatfiles._outcome(cancelled) is None
 
 
 # --- The session's client and the library's own errors -------------------------------------
@@ -1636,8 +1654,8 @@ def test_a_session_without_a_flat_file_read_creates_no_client(
 def test_every_read_of_a_session_shares_one_client(session: dm.MassiveSession) -> None:
     first = session._core.flat_file_transport()
     second = session._core.flat_file_transport()
-    assert isinstance(first, _flat_files.FlatFileHistory)
-    assert isinstance(second, _flat_files.FlatFileHistory)
+    assert isinstance(first, flatfiles.FlatFileHistory)
+    assert isinstance(second, flatfiles.FlatFileHistory)
     assert first._client is second._client is flat_file_client(session)
 
 
@@ -1667,10 +1685,10 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
 ) -> None:
     # Converting a file's rows can fail in Arrow (out of memory, say): it is a failed read of
     # that file, named like any other.
-    def exhausted(transform: _flat_files._Transform, batch: pa.RecordBatch) -> pa.RecordBatch:
+    def exhausted(transform: flatfiles._Transform, batch: pa.RecordBatch) -> pa.RecordBatch:
         raise pa.ArrowMemoryError("malloc of size 1048576 failed")
 
-    monkeypatch.setattr(_flat_files._Transform, "apply", exhausted)
+    monkeypatch.setattr(flatfiles._Transform, "apply", exhausted)
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(

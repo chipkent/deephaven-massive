@@ -16,9 +16,7 @@ from massive.rest.models.contracts import OptionsContract, Underlying
 from massive.rest.models.snapshot import OptionContractSnapshot
 from massive.websocket.models import EquityAgg, EquityQuote, EquityTrade, IndexValue
 
-from deephaven_massive._enums import Transport
-from deephaven_massive._errors import MassiveError
-from deephaven_massive._schema import (
+from deephaven_massive._datasets.schema import (
     BARS,
     INDEX_VALUES,
     QUOTES,
@@ -32,6 +30,8 @@ from deephaven_massive._schema import (
     model_schema,
     pascal_case,
 )
+from deephaven_massive._enums import Transport
+from deephaven_massive._errors import MassiveError
 
 ALL_TYPES = Schema("all", tuple(Column(t.name.title().replace("_", ""), t) for t in ColumnType))
 

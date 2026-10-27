@@ -17,7 +17,10 @@ from deephaven.table import Table
 from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
-from deephaven_massive._diagnostics import (
+from deephaven_massive._datasets.schema import Schema
+from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Transport
+from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
     STREAMS,
     ConnectionRow,
@@ -29,10 +32,7 @@ from deephaven_massive._diagnostics import (
     as_row,
     describe_symbols,
 )
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Transport
-from deephaven_massive._liveness import new_scope
-from deephaven_massive._schema import Schema
-from deephaven_massive._symbols import SymbolTable
+from deephaven_massive._tables.liveness import new_scope
 
 Rows = Callable[[Table], list[dict[str, Any]]]
 TIMEOUT = 30.0
@@ -179,7 +179,7 @@ def test_failed_writes_are_logged_and_the_writer_continues(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    with caplog.at_level(logging.ERROR, logger="deephaven_massive._diagnostics"):
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
         diagnostics.write(_stream(stream_id=8, dataset=cast("str", 5)))
         diagnostics.write(STREAM)
         assert diagnostics.barrier().wait(TIMEOUT)
@@ -202,7 +202,7 @@ def test_a_failing_table_does_not_cost_the_other_its_rows(
     connection = ConnectionRow(
         transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
     )
-    with caplog.at_level(logging.ERROR, logger="deephaven_massive._diagnostics"):
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
         diagnostics.write(STREAM)
         diagnostics.write(connection)
         assert diagnostics.barrier().wait(TIMEOUT)
@@ -242,7 +242,7 @@ def test_a_batch_of_rows_that_do_not_fit_adds_nothing(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    with caplog.at_level(logging.ERROR, logger="deephaven_massive._diagnostics"):
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
         diagnostics.write(_stream(stream_id=8, dataset=cast("str", 5)))
         assert diagnostics.barrier().wait(TIMEOUT)
     assert "failed to write a streams row" in caplog.text
@@ -287,8 +287,8 @@ def test_a_failed_table_creation_releases_the_scope(
         created.append(real_table(col_defs, key_cols=key_cols))
         return created[0]
 
-    monkeypatch.setattr("deephaven_massive._diagnostics.new_scope", tracking_scope)
-    monkeypatch.setattr("deephaven_massive._diagnostics.input_table", second_fails)
+    monkeypatch.setattr("deephaven_massive._tables.diagnostics.new_scope", tracking_scope)
+    monkeypatch.setattr("deephaven_massive._tables.diagnostics.input_table", second_fails)
     with pytest.raises(RuntimeError, match="no second table"):
         Diagnostics(dh_exec_ctx, "test diagnostics")
     assert scopes[0].j_scope is None  # released, with the first table in it

@@ -19,9 +19,12 @@ from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 
 import deephaven_massive as dm
-from deephaven_massive._catalog import DatasetSpec
+from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.schema import TRADES
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._liveness import (
+from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._query import StreamQuery
+from deephaven_massive._tables.liveness import (
     QueueWorker,
     Reaper,
     ResultRecord,
@@ -30,9 +33,6 @@ from deephaven_massive._liveness import (
     make_result,
     new_scope,
 )
-from deephaven_massive._namespaces.base import build_query
-from deephaven_massive._query import StreamQuery
-from deephaven_massive._schema import TRADES
 from deephaven_massive._types import override
 
 
@@ -107,7 +107,7 @@ def test_make_result_releases_the_scope_on_failure(
         scopes.append(scope)
         return scope
 
-    monkeypatch.setattr("deephaven_massive._liveness.new_scope", tracking)
+    monkeypatch.setattr("deephaven_massive._tables.liveness.new_scope", tracking)
 
     def fail() -> Table:
         raise RuntimeError("boom")
@@ -134,7 +134,7 @@ def test_reaper_runs_jobs_in_order_and_survives_failures(
     def fail() -> None:
         raise RuntimeError("job failed")
 
-    with caplog.at_level(logging.ERROR, logger="deephaven_massive._liveness"):
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.liveness"):
         reaper.submit(lambda: seen.append(1))
         reaper.submit(fail)
         reaper.submit(lambda: seen.append(2))
@@ -494,7 +494,7 @@ def test_queue_worker_logs_a_fatal_exit_before_dying(
     def fatal(_batch: list[int]) -> None:
         raise _Fatal
 
-    with caplog.at_level(logging.CRITICAL, logger="deephaven_massive._liveness"):
+    with caplog.at_level(logging.CRITICAL, logger="deephaven_massive._tables.liveness"):
         worker: QueueWorker[int] = QueueWorker(dh_exec_ctx, "fatal-worker", handle=fatal)
         worker.put(1)
         worker.thread.join(TIMEOUT)
@@ -513,7 +513,7 @@ def test_queue_worker_runs_on_exit_and_logs_batch_failures(
     def fail(batch: list[int]) -> None:
         raise RuntimeError(f"bad batch {batch}")
 
-    with caplog.at_level(logging.ERROR, logger="deephaven_massive._liveness"):
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.liveness"):
         worker: QueueWorker[int] = QueueWorker(
             dh_exec_ctx, "test-worker", handle=fail, on_exit=exited.set
         )
@@ -608,7 +608,7 @@ def test_an_interrupt_right_after_the_finalizer_is_created_never_releases_twice(
             raise KeyboardInterrupt
         return made
 
-    monkeypatch.setattr(weakref, "finalize", creating)  # as _liveness sees it
+    monkeypatch.setattr(weakref, "finalize", creating)  # as liveness sees it
     with pytest.raises(KeyboardInterrupt):
         query(massive_session).append_only()
     monkeypatch.setattr(weakref, "finalize", real)

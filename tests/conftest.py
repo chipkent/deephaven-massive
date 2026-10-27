@@ -141,8 +141,8 @@ def load_fixture() -> Callable[[str, str], bytes]:
     """Return a function that reads a payload fixture from `tests/data/<owner>/<name>`.
 
     `owner` is the mirrored test's path under `tests/` without the `test_` prefix and `.py`
-    (`"symbols"` for `tests/test_symbols.py`), or a test package's path (`"massive/rest"`), so
-    each owner's fixtures stay together.
+    (`"datasets/symbols"` for `tests/datasets/test_symbols.py`), or a test package's path
+    (`"massive/rest"`), so each owner's fixtures stay together.
 
     Returns:
         A function mapping `(owner, name)` to the fixture file's bytes.
@@ -215,12 +215,12 @@ def massive_session() -> Iterator[MassiveSession]:
 def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Number each test's streams from 1, so tests can name them by id.
 
-    Stream ids are process-unique in the library (a module-level counter in `_session.py`);
-    each test gets a fresh counter.
+    Stream ids are process-unique in the library (a module-level counter in
+    `_tables/core.py`); each test gets a fresh counter.
     """
-    session = importlib.import_module("deephaven_massive._session")
+    core = importlib.import_module("deephaven_massive._tables.core")
     itertools = importlib.import_module("itertools")
-    monkeypatch.setattr(session, "_stream_numbers", itertools.count(1))
+    monkeypatch.setattr(core, "_stream_numbers", itertools.count(1))
 
 
 @pytest.fixture
