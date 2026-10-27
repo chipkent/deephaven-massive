@@ -47,6 +47,7 @@ from deephaven_massive._massive.ws.backoff import Backoff
 from deephaven_massive._massive.ws.protocol import (
     FrameDecoder,
     Status,
+    StatusKind,
     auth_frame,
     classify_failure,
     handshake_status,
@@ -74,10 +75,23 @@ connection. After a `max_connections` reply it also bounds the wait for the serv
 """
 
 
+# The logger every connection hands to websockets. websockets logs each frame it sends at
+# DEBUG, and the authentication frame, which holds the API key, is short enough to be logged
+# whole. A connection decides once, when it is created, whether to log frames, by asking its
+# logger `isEnabledFor(DEBUG)`; this logger's own level answers no whatever the root's level,
+# and its filter drops any DEBUG record even if someone lowers that level. websockets' INFO
+# and higher records still propagate, under this name.
+_WIRE_LOGGER = logger.getChild("wire")
+_WIRE_LOGGER.setLevel(logging.INFO)
+_WIRE_LOGGER.addFilter(lambda record: record.levelno > logging.DEBUG)
+
+
 class WsState(StrEnum):
     """The connection states a client reports through its `on_state` callback.
 
-    Being connected is reported by `on_open`, not by a state.
+    Being connected is reported by `on_open`, not by a state. `FAILED` and `CLOSED` are
+    terminal, and a client reports exactly one of them, once: a `close()` that races a fatal
+    failure does not add `CLOSED` after `FAILED`.
     """
 
     CONNECTING = "CONNECTING"
@@ -85,10 +99,14 @@ class WsState(StrEnum):
     RECONNECTING = "RECONNECTING"
     """The connection closed or an attempt failed; the detail is the next attempt's time."""
     WAITING_SLOT = "WAITING_SLOT"
-    """The server answered the key with `max_connections`: the account has no free connection.
-    The detail is the next attempt's time."""
+    """The account has no free connection: the server answered the key with
+    `max_connections`, or sent a `max_connections` status before closing an authenticated
+    socket. The client waits its backoff and tries again; the detail is the next attempt's
+    time."""
     FAILED = "FAILED"
-    """A fatal failure ended the client; the detail is the `WireError`."""
+    """A fatal failure ended the client; the detail is the `WireError`. An internal failure (a
+    callback that raised, an unexpected exception) also ends here, with the original exception
+    as the `WireError`'s `__cause__`."""
     CLOSED = "CLOSED"
     """`close()` ended the client."""
 
@@ -100,7 +118,8 @@ class _Ended:
     Attributes:
         uptime: Seconds the generation stayed authenticated; `None` when the attempt never
             authenticated.
-        waiting_slot: Whether the server answered the key with `max_connections`.
+        waiting_slot: Whether the server reported `max_connections`, as the reply to the key
+            or as a status before it closed an authenticated socket.
         least_wait: The least wait before the next attempt that the failure demands (an HTTP
             429's `Retry-After`); the backoff may be longer.
     """
@@ -138,8 +157,13 @@ class WsClient:
     see the module documentation for which methods other threads may call.
 
     The callbacks run on the loop thread, in the order the events happen, and must neither
-    block nor raise: an exception from a callback stops the client (the socket is closed and the
-    exception logged at ERROR) without a state report.
+    block nor raise. An exception from a callback, or any other unexpected exception, ends the
+    client: the socket is closed, the exception is logged at ERROR, and `FAILED` is reported
+    with a `WireError` whose `__cause__` is the exception, so a broken client is never silently
+    stale. An exception from that last `on_state` call is logged too.
+
+    The creator must call `start()` exactly once, even when it calls `close()` first: the
+    loop is created with the client, and only the thread closes it.
 
     - `on_open(generation)`: Massive accepted the key on a new socket. Generations count from
       1. Subscriptions made before it are gone: the library sends its whole set again.
@@ -357,12 +381,18 @@ class WsClient:
             self._current.outbox.put_nowait(None)
 
     def _off_loop_thread(self) -> bool:
-        """Return whether the caller is any thread but the client's loop thread.
+        """Return whether the caller is anything but code running on the client's loop.
+
+        It asks for the running loop rather than comparing thread ids, which the operating
+        system reuses once the client's thread has ended.
 
         Returns:
             True when a loop-thread method must refuse the call.
         """
-        return threading.get_ident() != self._thread.ident
+        try:
+            return asyncio.get_running_loop() is not self._loop
+        except RuntimeError:  # no loop runs on the calling thread
+            return True
 
     def _enqueue(self, generation: int, frames: list[str]) -> None:
         """Queue frames for the current generation, or drop them for an ended one.
@@ -391,34 +421,49 @@ class WsClient:
 
     def _run(self) -> None:
         """Run the client's loop until the client ends; the thread's target."""
-        try:
-            with asyncio.Runner(loop_factory=lambda: self._loop) as runner:
-                runner.run(self._main())
-        except Exception:
-            logger.exception("the WebSocket client for %s stopped on an error", self._url)
+        with asyncio.Runner(loop_factory=lambda: self._loop) as runner:
+            runner.run(self._main())
 
     async def _main(self) -> None:
-        """Connect until a fatal failure or `close()`, and report `CLOSED` after `close()`."""
+        """Connect until a fatal failure or `close()`, then report the one terminal state."""
         self._task = asyncio.current_task()
+        failure: WireError | None
         try:
-            if not self._closing.is_set():
-                await self._connect_until_fatal()
+            failure = None if self._closing.is_set() else await self._connect_until_fatal()
         except asyncio.CancelledError:
-            # Only `close()` cancels the task; ending normally lets the loop shut down.
-            pass
-        finally:
-            if self._closing.is_set():
-                logger.info("closed the WebSocket client for %s", self._url)
+            failure = None  # only `close()` cancels the task
+        except Exception as error:
+            logger.exception("the WebSocket client for %s stopped on an internal error", self._url)
+            failure = WireError(
+                f"the WebSocket client for {self._host}{self._path} stopped on an internal "
+                f"error: {error!r}",
+                host=self._host,
+                path=self._path,
+            )
+            failure.__cause__ = error
+        else:
+            if failure is not None:
+                logger.error("the WebSocket client for %s failed: %s", self._url, failure)
+        if failure is None:
+            logger.info("closed the WebSocket client for %s", self._url)
+        try:
+            if failure is None:
                 self._on_state(WsState.CLOSED, None)
+            else:
+                self._on_state(WsState.FAILED, failure)
+        except Exception:
+            logger.exception("on_state raised while the client for %s ended", self._url)
 
-    async def _connect_until_fatal(self) -> None:
-        """Attempt, run, and back off, forever, until a fatal failure."""
+    async def _connect_until_fatal(self) -> WireError:
+        """Attempt, run, and back off, forever, until a fatal failure.
+
+        Returns:
+            The fatal error.
+        """
         while True:
             ended = await self._attempt()
             if isinstance(ended, WireError):
-                logger.error("the WebSocket client for %s failed: %s", self._url, ended)
-                self._on_state(WsState.FAILED, ended)
-                return
+                return ended
             wait = max(self._backoff.next_wait(ended.uptime), ended.least_wait)
             logger.warning("reconnecting to %s in %.1f s", self._url, wait)
             state = WsState.WAITING_SLOT if ended.waiting_slot else WsState.RECONNECTING
@@ -434,24 +479,18 @@ class WsClient:
         self._on_state(WsState.CONNECTING, None)
         logger.info("connecting to %s", self._url)
         deadline = asyncio.get_running_loop().time() + HANDSHAKE_TIMEOUT
-        connector = connect(
-            self._url,
-            ssl=self._ssl,
-            max_size=None,
-            open_timeout=None,
-            user_agent_header=USER_AGENT,
-        )
         try:
             async with asyncio.timeout_at(deadline):
-                websocket = await connector
+                websocket = await connect(
+                    self._url,
+                    ssl=self._ssl,
+                    max_size=None,
+                    open_timeout=None,
+                    user_agent_header=USER_AGENT,
+                    logger=_WIRE_LOGGER,
+                )
         except (OSError, WebSocketException) as error:  # a timeout is an OSError
-            verdict = classify_failure(
-                error,
-                retryable=connector.process_exception(error) is None,
-                host=self._host,
-                path=self._path,
-                now=self._clock(),
-            )
+            verdict = classify_failure(error, host=self._host, path=self._path, now=self._clock())
             if isinstance(verdict, WireError):
                 return verdict
             logger.info("could not connect to %s: %r", self._url, error)
@@ -476,8 +515,13 @@ class WsClient:
         try:
             async with asyncio.timeout_at(deadline):
                 reply = await self._handshake(websocket)
-        except (TimeoutError, ConnectionClosed, ValueError) as error:
+        except (TimeoutError, ConnectionClosed) as error:
             logger.warning("the handshake with %s failed: %r", self._url, error)
+            return _Ended()
+        except ValueError:
+            # The server spoke a protocol this client does not know: vendor drift, not a
+            # network hiccup, so it is logged at ERROR, though the attempt is still retried.
+            logger.exception("the handshake with %s broke protocol", self._url)
             return _Ended()
         if isinstance(reply, WireError):
             return reply
@@ -529,7 +573,8 @@ class WsClient:
             websocket: The authenticated socket.
 
         Returns:
-            The generation's end, with its uptime.
+            The generation's end, with its uptime, and whether the server reported
+            `max_connections` before closing.
         """
         self._generations += 1
         generation = _Generation(number=self._generations, outbox=asyncio.Queue())
@@ -537,11 +582,13 @@ class WsClient:
         opened_at = self._clock()
         logger.info("authenticated with %s (generation %d)", self._url, generation.number)
         sender = asyncio.create_task(self._send(websocket, generation.outbox))
+        no_slot = False
         try:
             self._on_open(generation.number)
             async for frame in websocket:
                 for event in self._decoder.decode(frame):
                     if isinstance(event, Status):
+                        no_slot = no_slot or event.kind is StatusKind.MAX_CONNECTIONS
                         self._on_status(generation.number, event)
                     else:
                         self._on_data(
@@ -553,7 +600,7 @@ class WsClient:
             self._current = None
             sender.cancel()
         logger.info("the connection to %s closed (code %s)", self._url, websocket.close_code)
-        return _Ended(uptime=self._clock() - opened_at)
+        return _Ended(uptime=self._clock() - opened_at, waiting_slot=no_slot)
 
     @staticmethod
     async def _send(websocket: ClientConnection, outbox: asyncio.Queue[str | None]) -> None:

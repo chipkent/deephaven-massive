@@ -9,7 +9,6 @@ from email.utils import format_datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from websockets.asyncio.client import connect
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidMessage, InvalidStatus, InvalidURI
 from websockets.http11 import Response
@@ -271,9 +270,11 @@ def test_a_single_object_frame_is_decoded(decoder: FrameDecoder) -> None:
     [
         ("b", False, False),
         ("d", "2026-01-02", date(2026, 1, 2)),
-        ("i", "2026-01-02T14:30:00Z", datetime(2026, 1, 2, 14, 30, tzinfo=UTC)),
-        ("i", "2026-01-02T14:30:00", datetime(2026, 1, 2, 14, 30, tzinfo=UTC)),
-        ("i", "2026-01-02T09:30:00-05:00", datetime(2026, 1, 2, 14, 30, tzinfo=UTC)),
+        ("i", "2026-01-02T14:30:00Z", 1_767_364_200_000_000_000),
+        ("i", "2026-01-02T09:30:00-05:00", 1_767_364_200_000_000_000),
+        ("i", "2026-01-02T14:30:00.123456789Z", 1_767_364_200_123_456_789),
+        ("i", "2026-01-02T14:30:00.5+00:00", 1_767_364_200_500_000_000),
+        ("i", "1969-12-31T23:59:59.25Z", -750_000_000),
         ("j", {"a": [1, "é"]}, '{"a":[1,"é"]}'),
         ("j", "text", '"text"'),
     ],
@@ -346,9 +347,12 @@ def test_an_unconvertible_value_rejects_its_row(
         ("d", "2026-13-01", "a date as YYYY-MM-DD"),
         ("d", "2026W011x", "a date as YYYY-MM-DD"),
         ("d", 20260102, "a date as YYYY-MM-DD"),
-        ("i", "2026-01-02", "an ISO-8601 date-time"),
-        ("i", "2026-01-02T25:00:00", "an ISO-8601 date-time"),
-        ("i", 1, "an ISO-8601 date-time"),
+        ("i", "2026-01-02", "an ISO-8601 date-time with an offset"),
+        ("i", "2026-01-02T14:30:00", "an ISO-8601 date-time with an offset"),
+        ("i", "2026-01-02T14:30:00.1234567891Z", "an ISO-8601 date-time with an offset"),
+        ("i", "2026-01-02T25:00:00Z", "an ISO-8601 date-time with an offset"),
+        ("i", "2026-01-02T14:30:00+0000", "an ISO-8601 date-time with an offset"),
+        ("i", 1, "an ISO-8601 date-time with an offset"),
     ],
 )
 def test_text_types_refuse_what_they_cannot_parse(
@@ -504,9 +508,7 @@ IN_90_SECONDS = format_datetime(datetime.fromtimestamp(NOW + 90, UTC), usegmt=Tr
 
 
 def _classify(error: Exception) -> WireError | float:
-    # As the client does: with the rule of the `connect()` that raised the error.
-    retryable = connect(f"wss://{HOST}{PATH}").process_exception(error) is None
-    return classify_failure(error, retryable=retryable, host=HOST, path=PATH, now=NOW)
+    return classify_failure(error, host=HOST, path=PATH, now=NOW)
 
 
 @pytest.mark.parametrize(
@@ -571,3 +573,15 @@ def test_a_certificate_failure_is_fatal_and_names_ssl_cert_file() -> None:
         f"TLS certificate verification failed for {HOST}: unable to get local issuer "
         "certificate; set SSL_CERT_FILE to a bundle that trusts the server's certificate"
     )
+
+
+def test_an_unreadable_retry_after_is_warned_about(caplog: pytest.LogCaptureFixture) -> None:
+    assert _classify(_status_error(429, {"Retry-After": "soon"})) == 0.0
+    [record] = caplog.records
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == "ignoring an unreadable Retry-After header: 'soon'"
+
+
+def test_an_object_of_exactly_the_declared_shape_has_no_drift(decoder: FrameDecoder) -> None:
+    data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": 1, "s": 1, "t": 1, "c": []})
+    assert data.drift == DriftReport()

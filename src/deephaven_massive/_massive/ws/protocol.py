@@ -36,6 +36,7 @@ from enum import StrEnum
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Literal
 
+from websockets.client import process_exception
 from websockets.exceptions import InvalidStatus
 
 from deephaven_massive._massive.net import codec
@@ -68,6 +69,11 @@ of about 25 KB, which is conservative.
 """
 
 _INT64 = (-(2**63), 2**63 - 1)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+# An ISO-8601 instant: whole seconds, an optional fraction of up to 9 digits, a required offset.
+_ISO_INSTANT = re.compile(
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})"
+)
 _INT32 = (-(2**31), 2**31 - 1)
 # How much of an offending value an error message quotes.
 _QUOTE_LIMIT = 50
@@ -223,22 +229,17 @@ def handshake_status(data: str | bytes) -> tuple[str, str]:
     raise ValueError(f"expected a status object, got {_quote(data, _LOG_LIMIT)}")
 
 
-def classify_failure(
-    error: Exception, *, retryable: bool, host: str, path: str, now: float
-) -> WireError | float:
+def classify_failure(error: Exception, *, host: str, path: str, now: float) -> WireError | float:
     """Decide whether a failure to open the socket is fatal, and how long a retry must wait.
 
-    Two cases override websockets' own rule: an HTTP 429 is always retried, after its
-    `Retry-After`, and a TLS certificate failure is always fatal, although it is an `OSError`.
+    websockets' public rule, `websockets.client.process_exception`, decides: it retries an
+    `OSError`, a timeout, an EOF during the upgrade, and HTTP 500, 502, 503, and 504, and
+    treats everything else (HTTP 400 or 404, an invalid URI, ...) as fatal. Two cases override
+    it: an HTTP 429 is always retried, after its `Retry-After`, and a TLS certificate failure
+    is always fatal, although it is an `OSError`.
 
     Args:
         error: What opening the socket (TCP, TLS, proxy, HTTP upgrade) raised.
-        retryable: websockets' public rule for `error`: whether the `process_exception` of the
-            `connect()` that raised it returns `None`. By default it retries `OSError`,
-            timeouts, an EOF during the upgrade, and HTTP 500, 502, 503, and 504, and treats
-            everything else (HTTP 400 or 404, an invalid URI, ...) as fatal. The client reads
-            the rule from its `connect()` object because the function's module moved between
-            websockets releases.
         host: The host connected to, for the error message.
         path: The URL path, such as `"/stocks"`, for the error message.
         now: The current time in seconds since the Unix epoch, to read an HTTP-date
@@ -261,7 +262,7 @@ def classify_failure(
     status = error.response.status_code if isinstance(error, InvalidStatus) else None
     if isinstance(error, InvalidStatus) and status == HTTPStatus.TOO_MANY_REQUESTS:
         return _retry_after(error.response.headers.get("Retry-After"), now)
-    if retryable:
+    if process_exception(error) is None:
         return 0.0
     reason = f"HTTP {status}" if status is not None else f"{type(error).__name__}: {error}"
     return WireError(
@@ -280,7 +281,8 @@ def _retry_after(value: str | None, now: float) -> float:
         now: The current time in seconds since the Unix epoch.
 
     Returns:
-        The wait in seconds, never negative; 0.0 when the header is absent or unreadable.
+        The wait in seconds, never negative; 0.0 when the header is absent, and 0.0 with a
+        WARNING quoting it when it is unreadable.
     """
     if value is None:
         return 0.0
@@ -290,6 +292,7 @@ def _retry_after(value: str | None, now: float) -> float:
     try:
         when = email.utils.parsedate_to_datetime(value)
     except ValueError:
+        logger.warning("ignoring an unreadable Retry-After header: %r", value[:_LOG_LIMIT])
         return 0.0
     if when.tzinfo is None:  # an HTTP-date is always GMT; "-0000" parses as naive
         when = when.replace(tzinfo=UTC)
@@ -423,29 +426,35 @@ def _date(value: object) -> date:
         raise _UnconvertibleError(expected) from None
 
 
-def _instant(value: object) -> datetime:
-    """Convert an `ISO_INSTANT` value.
+def _instant(value: object) -> int:
+    """Convert an `ISO_INSTANT` value to exact integer nanoseconds since the Unix epoch.
+
+    The text must be `YYYY-MM-DDTHH:MM:SS`, an optional fraction of 1 to 9 digits, and an
+    offset (`Z` or `+HH:MM`/`-HH:MM`). The fraction is read digit by digit, never through a
+    float or a `datetime` (which keeps only microseconds), so nanoseconds survive exactly.
 
     Args:
         value: The decoded JSON value, not `None`.
 
     Returns:
-        The instant as an aware `datetime` in UTC; text without an offset is UTC.
+        The instant as nanoseconds since 1970-01-01T00:00:00Z.
 
     Raises:
-        _UnconvertibleError: If the value is not ISO-8601 date-time text (a bare date is
-            refused).
+        _UnconvertibleError: If the value is not such text: no offset (its zone would be a
+            guess), more than 9 fractional digits, or an impossible date or time.
     """
-    expected = "an ISO-8601 date-time"
-    if not isinstance(value, str) or "T" not in value:
+    expected = "an ISO-8601 date-time with an offset"
+    match = _ISO_INSTANT.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
         raise _UnconvertibleError(expected)
+    seconds, fraction, offset = match.groups()
     try:
-        parsed = datetime.fromisoformat(value)
+        whole = datetime.fromisoformat(seconds + ("+00:00" if offset == "Z" else offset))
     except ValueError:
         raise _UnconvertibleError(expected) from None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+    elapsed = whole - _EPOCH
+    total_seconds = elapsed.days * 86_400 + elapsed.seconds
+    return total_seconds * 1_000_000_000 + int((fraction or "").ljust(9, "0"))
 
 
 def _int_array(value: object) -> list[int]:
@@ -498,20 +507,72 @@ _WORD = re.compile(r"""[^\s,;'"()\[\]]+""")
 
 
 @dataclass(frozen=True, kw_only=True)
+class _Step:
+    """How one field of a channel is read from each object: computed once, used per row.
+
+    Attributes:
+        wire_key: The key on the wire.
+        column: The long-form column it fills.
+        convert: The converter of the field's `WireType`.
+        required: Whether a missing value (or null) rejects the row.
+    """
+
+    wire_key: str
+    column: str
+    convert: Callable[[object], object]
+    required: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
 class _Channel:
     """What the decoder knows about one channel: its source and the library's key choice.
 
     Attributes:
         source: The channel's generated source.
         declared: The source's wire keys.
-        required: The wire keys whose absence rejects a row.
+        shape: The keys of an object that carries exactly the declared fields and `ev`; an
+            object of that shape has no drift, which one set comparison decides.
+        steps: One `_Step` per field, in the source's order.
         symbol: The wire key holding the symbol, or `None` when none is declared.
     """
 
     source: Source
     declared: frozenset[str]
-    required: frozenset[str] = frozenset()
+    shape: frozenset[str]
+    steps: tuple[_Step, ...]
     symbol: str | None = None
+
+    @classmethod
+    def plan(
+        cls, source: Source, required: frozenset[str] = frozenset(), symbol: str | None = None
+    ) -> _Channel:
+        """Compute a channel's reading plan.
+
+        Args:
+            source: The channel's generated source.
+            required: The wire keys whose absence rejects a row.
+            symbol: The wire key holding the symbol, or `None`.
+
+        Returns:
+            The plan.
+        """
+        declared = frozenset(f.wire_key for f in source.fields)
+        steps = tuple(
+            _Step(
+                wire_key=f.wire_key,
+                column=f.column,
+                convert=_CONVERTERS[f.wire_type],
+                required=f.wire_key in required,
+            )
+            for f in source.fields
+        )
+        return cls(
+            source=source,
+            declared=declared,
+            shape=declared | {"ev"},
+            steps=steps,
+            symbol=symbol,
+        )
 
 
 @dataclass(kw_only=True)
@@ -574,8 +635,7 @@ class FrameDecoder:
                 raise ValueError(f"{source.key!r} is not a WebSocket source '<cluster>/<channel>'")
             if channel in self._channels:
                 raise ValueError(f"two sources for channel {channel!r}")
-            declared = frozenset(f.wire_key for f in source.fields)
-            self._channels[channel] = _Channel(source=source, declared=declared)
+            self._channels[channel] = _Channel.plan(source)
 
     def set_required(
         self, channel: str, keys: frozenset[str], *, symbol: str | None = None
@@ -600,11 +660,10 @@ class FrameDecoder:
         unknown = sorted((keys | {symbol} if symbol is not None else keys) - by_column.keys())
         if unknown:
             raise ValueError(f"source {current.source.key!r} has no columns {unknown}")
-        self._channels[channel] = _Channel(
-            source=current.source,
-            declared=current.declared,
-            required=frozenset(by_column[k] for k in keys),
-            symbol=None if symbol is None else by_column[symbol],
+        self._channels[channel] = _Channel.plan(
+            current.source,
+            frozenset(by_column[k] for k in keys),
+            None if symbol is None else by_column[symbol],
         )
 
     def decode(self, data: str | bytes) -> list[Status | Data]:
@@ -711,43 +770,45 @@ class FrameDecoder:
             into: The channel's accumulator for this frame.
         """
         spec = self._channels[channel]
-        keys = item.keys() - {"ev"}
-        into.extra |= keys - spec.declared
-        into.missing |= spec.declared - keys
-        symbol = item.get(spec.symbol) if spec.symbol is not None else None
+        keys = item.keys()
+        if keys != spec.shape:  # the common case, an exact shape, costs one comparison
+            present = keys - {"ev"}
+            into.extra |= present - spec.declared
+            into.missing |= spec.declared - present
         row: dict[str, object] = {}
-        for wire_field in spec.source.fields:
-            value = item.get(wire_field.wire_key)
+        for step in spec.steps:
+            value = item.get(step.wire_key)
             if value is None:
-                if wire_field.wire_key in spec.required:
-                    problem = f"missing required key {wire_field.wire_key!r} ({wire_field.column})"
-                    into.rejects.append(self._reject(channel, symbol, problem))
+                if step.required:
+                    problem = f"missing required key {step.wire_key!r} ({step.column})"
+                    into.rejects.append(self._reject(channel, item, problem))
                     return
-                row[wire_field.column] = None
+                row[step.column] = None
                 continue
             try:
-                row[wire_field.column] = _CONVERTERS[wire_field.wire_type](value)
+                row[step.column] = step.convert(value)
             except _UnconvertibleError as error:
                 problem = (
-                    f"field {wire_field.wire_key!r} ({wire_field.column}) expects {error}, "
-                    f"got {_quote(value)}"
+                    f"field {step.wire_key!r} ({step.column}) expects {error}, got {_quote(value)}"
                 )
-                into.rejects.append(self._reject(channel, symbol, problem))
+                into.rejects.append(self._reject(channel, item, problem))
                 return
         into.rows.append(row)
 
-    def _reject(self, channel: str, symbol: object, problem: str) -> Reject:
+    def _reject(self, channel: str, item: dict[str, object], problem: str) -> Reject:
         """Build the reject of one row.
 
         Args:
             channel: The row's channel.
-            symbol: The row's raw symbol value, or `None`.
+            item: The row's object, from which the raw symbol is read.
             problem: What is wrong with the row.
 
         Returns:
             The reject, whose error names the connection, the channel, the symbol, and
             `problem`.
         """
+        key = self._channels[channel].symbol
+        symbol = item.get(key) if key is not None else None
         text = symbol if isinstance(symbol, str) else None
         about = f" for {text}" if text is not None else ""
         error = WireError(

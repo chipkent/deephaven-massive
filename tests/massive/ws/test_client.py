@@ -233,17 +233,34 @@ def test_it_authenticates_and_opens_generation_one(
     assert h.recorder.threads == {h.client._thread.ident}
 
 
-def test_the_key_is_never_logged(
-    make_client: Callable[..., Harness],
-    fake_ws_server: FakeMassiveServer,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.DEBUG, logger="deephaven_massive._massive.ws")
-    fake_ws_server.auth_replies.append("auth_failed")
+def _log_a_session(make_client: Callable[..., Harness], caplog: pytest.LogCaptureFixture) -> str:
+    # Open a generation, subscribe, and close, capturing every logger at DEBUG.
+    caplog.set_level(logging.DEBUG)  # the root, so websockets' own loggers are captured too
     h = make_client()
-    h.recorder.wait_for(lambda e: ("state", WsState.FAILED) in [x[:2] for x in e])
-    assert caplog.records
-    assert KEY not in caplog.text
+    h.recorder.wait_open(1)
+    h.on_loop(lambda: h.client.subscribe(1, ["T.AAPL"]))
+    h.recorder.wait_for(lambda e: any(x[0] == "status" for x in e))
+    h.client.close()
+    assert h.client.join(10.0)
+    return "\n".join(f"{r.name} {r.getMessage()}" for r in caplog.records)
+
+
+def test_the_key_is_never_logged_by_anyone(
+    make_client: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    text = _log_a_session(make_client, caplog)
+    assert "connecting to" in text  # the capture did see the client's records
+    assert KEY not in text
+
+
+def test_websockets_would_log_the_key_without_the_quiet_logger(
+    make_client: Callable[..., Harness],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Proves the test above can fail: websockets' own logger logs the authentication frame.
+    monkeypatch.setattr(client_module, "_WIRE_LOGGER", logging.getLogger("websockets.client"))
+    assert KEY in _log_a_session(make_client, caplog)
 
 
 def test_auth_failed_is_fatal_and_never_retried(
@@ -289,22 +306,30 @@ def test_max_connections_without_a_close_ends_at_the_handshake_timeout(
     assert h.recorder.states() == [WsState.CONNECTING, WsState.WAITING_SLOT]
 
 
+def test_a_silent_server_is_cut_off_by_the_handshake_timeout(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Only this attempt runs under the short timeout: the held wait stops any second one.
+    monkeypatch.setattr(client_module, "HANDSHAKE_TIMEOUT", 0.2)
+    fake_ws_server.greet_next(None)
+    h = make_client(free_waits=0)
+    h.sleeper.wait_for_count(1)
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.RECONNECTING]
+    assert len(fake_ws_server.connections) == 1
+
+
 @pytest.fixture(
     params=[
-        ("greeting", None),  # silent: the handshake times out
         ("greeting", _status("auth_success", "early")),  # no `connected` greeting first
         ("greeting", "not json"),
         ("reply", "auth_timeout"),  # an unknown reply to the key
     ],
-    ids=["silent", "no-greeting", "not-json", "unknown-reply"],
+    ids=["no-greeting", "not-json", "unknown-reply"],
 )
-def broken_handshake(
-    request: pytest.FixtureRequest,
-    fake_ws_server: FakeMassiveServer,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Script the fake's next handshake to fail one way, with a short handshake timeout."""
-    monkeypatch.setattr(client_module, "HANDSHAKE_TIMEOUT", 0.2)
+def drifted_handshake(request: pytest.FixtureRequest, fake_ws_server: FakeMassiveServer) -> None:
+    """Script the fake's next handshake to break Massive's protocol one way."""
     step, value = request.param
     if step == "greeting":
         fake_ws_server.greet_next(value)
@@ -312,15 +337,18 @@ def broken_handshake(
         fake_ws_server.auth_replies.append(value)
 
 
-def test_a_failed_handshake_is_retried(
-    broken_handshake: None,
+@pytest.mark.usefixtures("drifted_handshake")
+def test_a_handshake_that_breaks_protocol_is_logged_and_retried(
     make_client: Callable[..., Harness],
     fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     h = make_client()
     h.recorder.wait_open(1)
     assert h.recorder.states() == [WsState.CONNECTING, WsState.RECONNECTING, WsState.CONNECTING]
     assert len(fake_ws_server.connections) == 2
+    [record] = [r for r in caplog.records if "broke protocol" in r.getMessage()]
+    assert record.levelno == logging.ERROR
 
 
 # --- failures while opening the socket ------------------------------------------------------
@@ -487,12 +515,34 @@ def test_subscribe_sends_at_once_and_the_ack_is_decoded(
     h = make_client(start=False, recorder=recorder)
     recorder.open_hook = lambda g: h.client.subscribe(g, ["T.AAPL", "Q.AAPL"])
     h.client.start()
-    recorder.wait_for(lambda e: any(x[0] == "status" for x in e))
-    [(generation, status)] = recorder.of("status")
-    assert generation == 1
-    assert status == Status(
-        kind=StatusKind.ACK, topics=("T.AAPL", "Q.AAPL"), message="subscribed to: T.AAPL,Q.AAPL"
-    )
+    recorder.wait_for(lambda e: recorder.count("status")(e) == 2)
+    assert recorder.of("status") == [
+        (1, Status(kind=StatusKind.ACK, topics=("T.AAPL",), message="subscribed to: T.AAPL")),
+        (1, Status(kind=StatusKind.ACK, topics=("Q.AAPL",), message="subscribed to: Q.AAPL")),
+    ]
+
+
+def test_a_combined_ack_lists_every_topic(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    fake_ws_server.combined_acks = True
+    h = make_client()
+    h.recorder.wait_open(1)
+    h.on_loop(lambda: h.client.subscribe(1, ["T.AAPL", "Q.AAPL"]))
+    h.recorder.wait_for(lambda e: h.recorder.count("status")(e) == 1)
+    assert h.recorder.of("status")[0][1].topics == ("T.AAPL", "Q.AAPL")
+
+
+def test_a_max_connections_status_then_a_close_waits_for_a_slot(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client(free_waits=0)
+    h.recorder.wait_open(1)
+    fake_ws_server.send(_status("max_connections", "Maximum number of connections exceeded."))
+    fake_ws_server.close(1008)
+    h.sleeper.wait_for_count(1)
+    assert h.recorder.of("status")[0][1].kind is StatusKind.MAX_CONNECTIONS
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.WAITING_SLOT]
 
 
 def test_subscribe_splits_large_sets_into_frames_of_1000(
@@ -549,6 +599,22 @@ def test_a_bad_row_rejects_only_itself_with_the_raw_symbol(
     assert reject.symbol == "BRK.A"
     assert "'p' (Price)" in reject.error.message
     assert drift == DriftReport(extra=frozenset({"x"}), missing=frozenset({"s"}))
+
+
+def test_a_frame_over_one_mebibyte_is_decoded(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    # websockets closes the socket (1009) on a frame above its 1 MiB default; the client
+    # lifts that limit, since a burst of options trades easily exceeds it.
+    h = make_client()
+    h.recorder.wait_open(1)
+    rows = [{"ev": "T", "sym": f"S{i:07d}", "p": 1.5, "s": 100, "t": 1} for i in range(40_000)]
+    frame = json.dumps(rows)
+    assert len(frame) > 2 * 2**20
+    fake_ws_server.send(frame)
+    h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
+    assert len(h.recorder.of("data")[0][2]) == 40_000
+    assert h.recorder.states() == [WsState.CONNECTING]
 
 
 def test_required_keys_survive_a_reconnect(
@@ -699,8 +765,47 @@ def test_a_raising_callback_stops_the_client_and_is_logged(
     h.client.start()
     assert h.client.join(10.0)
     fake_ws_server.wait_for(lambda s: s.connections[0].close_code is not None)
-    assert "stopped on an error" in caplog.text
-    assert recorder.states() == [WsState.CONNECTING]
+    assert "stopped on an internal error" in caplog.text
+    assert recorder.states() == [WsState.CONNECTING, WsState.FAILED]
+    error = recorder.of("state")[-1][1]
+    assert type(error) is WireError
+    assert isinstance(error.__cause__, ZeroDivisionError)
+    assert error.message == (
+        "the WebSocket client for 127.0.0.1/stocks stopped on an internal error: "
+        "ZeroDivisionError()"
+    )
+
+
+def test_an_unexpected_error_while_connecting_fails_the_client(
+    make_client: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # websockets raises ImportError for a SOCKS proxy without python-socks, for example.
+    def connect(*args: object, **kwargs: object) -> None:
+        raise ImportError("python-socks is required")
+
+    monkeypatch.setattr(client_module, "connect", connect)
+    h = make_client()
+    assert h.client.join(10.0)
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.FAILED]
+    assert isinstance(h.recorder.of("state")[-1][1].__cause__, ImportError)
+
+
+def test_an_on_state_that_raises_at_the_end_is_logged(
+    make_client: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    recorder = Recorder()
+    h = make_client(start=False, recorder=recorder)
+
+    def on_state(state: WsState, detail: float | WireError | None) -> None:
+        recorder.on_state(state, detail)
+        raise RuntimeError(state)
+
+    h.client._on_state = on_state
+    h.client.start()
+    assert h.client.join(10.0)
+    # CONNECTING raised, which failed the client; FAILED raised too, and was only logged.
+    assert recorder.states() == [WsState.CONNECTING, WsState.FAILED]
+    assert "on_state raised while the client for" in caplog.text
 
 
 # --- free-threaded stress -----------------------------------------------------------------------
@@ -722,6 +827,24 @@ def test_close_from_16_threads_at_once(make_client: Callable[..., Harness]) -> N
         thread.join(10.0)
     assert h.client.join(10.0)
     assert h.recorder.states().count(WsState.CLOSED) == 1
+
+
+def test_a_second_close_never_interrupts_the_closing_handshake(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client()
+    h.recorder.wait_open(1)
+    fake_ws_server.hold_reads(held=True)  # the client's close frame goes unanswered for now
+    h.client.close()
+    for _ in range(3):  # each round trip drains the loop: the task is now awaiting the close
+        h.on_loop(lambda: None)
+    h.client.close()
+    for _ in range(3):  # a second cancel, were one sent, has now landed
+        h.on_loop(lambda: None)
+    fake_ws_server.hold_reads(held=False)
+    assert h.client.join(10.0)
+    fake_ws_server.wait_for(lambda s: s.connections[0].close_code is not None)
+    assert fake_ws_server.connections[0].close_code == 1000
 
 
 def test_16_clients_at_once(

@@ -3,8 +3,12 @@
 It speaks Massive's protocol on `ws://127.0.0.1:<port>/<path>` from its own thread and asyncio
 loop, with `websockets.asyncio.server`: each connection gets the `connected` greeting, reads
 the authentication frame, and gets a reply; after `auth_success` every frame it receives is
-recorded and, when `auto_ack` is set, each subscribe frame is acknowledged with
-"subscribed to: <topics>", as Massive does.
+recorded and, when `auto_ack` is set, each subscribe frame is acknowledged as Massive's
+knowledge base shows it: one "subscribed to: <topic>" status object per topic, all in one
+array (or, with `combined_acks`, one object naming the comma-separated topics).
+
+The server logs through its own logger at WARNING, so its DEBUG frame log (which would show
+the client's authentication frame) never reaches a test that captures every logger.
 
 Tests script the next connections before they happen (`reject_next`, `greet_next`,
 `auth_replies`) and act on the live one (`send`, `close`) from the test thread. Everything the
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -31,6 +36,10 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from websockets.http11 import Request
+
+# The fake's own logger: quiet below WARNING whatever level a test sets on the root.
+_LOGGER = logging.getLogger("tests.fake_massive_ws")
+_LOGGER.setLevel(logging.WARNING)
 
 _MESSAGES = {
     "connected": "Connected Successfully",
@@ -55,6 +64,22 @@ def status_frame(status: str, message: str | None = None) -> str:
     """
     text = _MESSAGES.get(status, "") if message is None else message
     return json.dumps([{"ev": "status", "status": status, "message": text}])
+
+
+def _ack_frame(params: str, *, combined: bool) -> str:
+    """Return the acknowledgement of one subscribe frame.
+
+    Args:
+        params: The frame's comma-separated topics.
+        combined: One status object for all topics, instead of one per topic.
+
+    Returns:
+        The status frame.
+    """
+    topics = [params] if combined else params.split(",")
+    return json.dumps(
+        [{"ev": "status", "status": "success", "message": f"subscribed to: {t}"} for t in topics]
+    )
 
 
 @dataclass
@@ -89,6 +114,7 @@ class FakeMassiveServer:
         self.connections: list[Connection] = []
         self.auth_replies: list[str] = []
         self.auto_ack = True
+        self.combined_acks = False
         self.close_after_refusal = True
         self._rejects: list[tuple[int, dict[str, str]]] = []
         self._greetings: list[str | None] = []
@@ -100,7 +126,13 @@ class FakeMassiveServer:
         self._thread.start()
 
         async def bind() -> Server:
-            return await serve(self._handle, "127.0.0.1", 0, process_request=self._process_request)
+            return await serve(
+                self._handle,
+                "127.0.0.1",
+                0,
+                process_request=self._process_request,
+                logger=_LOGGER,
+            )
 
         self._server = asyncio.run_coroutine_threadsafe(bind(), self._loop).result(10.0)
         self.port: int = self._server.sockets[0].getsockname()[1]
@@ -154,6 +186,24 @@ class FakeMassiveServer:
             code: The close code; 1000 is a clean close, 1011 a server error.
         """
         self._call(lambda ws: ws.close(code))
+
+    def hold_reads(self, *, held: bool) -> None:
+        """Stop or resume reading from the latest connection.
+
+        While reads are held, nothing the client sends is seen, so a closing handshake it
+        starts stays unanswered until reads resume.
+
+        Args:
+            held: True to stop reading, False to resume.
+        """
+
+        async def toggle(ws: ServerConnection) -> None:
+            if held:
+                ws.transport.pause_reading()
+            else:
+                ws.transport.resume_reading()
+
+        self._call(toggle)
 
     def _call(self, action: Callable[[ServerConnection], Awaitable[object]]) -> None:
         """Run a coroutine against the latest live connection on the server's loop.
@@ -260,10 +310,11 @@ class FakeMassiveServer:
                 with self._lock:
                     record.frames.append(str(frame))
                     ack = self.auto_ack
+                    combined = self.combined_acks
                     self._lock.notify_all()
                 request = json.loads(frame)
                 if ack and request.get("action") == "subscribe":
-                    await ws.send(status_frame("success", f"subscribed to: {request['params']}"))
+                    await ws.send(_ack_frame(request["params"], combined=combined))
         except ConnectionClosed:
             pass  # the client went away mid-protocol, as a client under test may
         finally:

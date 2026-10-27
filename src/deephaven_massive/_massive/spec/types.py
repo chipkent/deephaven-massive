@@ -100,7 +100,8 @@ class WireType(StrEnum):
     EPOCH = "epoch"
     """An integer count of `WireUnit`s since the Unix epoch; the field's `unit` says which."""
     ISO_INSTANT = "iso-instant"
-    """An instant as ISO-8601 date-time text; text without an offset is UTC."""
+    """An instant as ISO-8601 date-time text with an offset (`Z` or `+HH:MM`), decoded to
+    exact integer nanoseconds since the Unix epoch; text without an offset is unconvertible."""
     INT_ARRAY = "int-array"
     """A list of integers, each within the signed 32-bit range (condition codes)."""
     JSON_TEXT = "json-text"
