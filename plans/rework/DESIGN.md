@@ -2660,7 +2660,10 @@ verification, never a column list.
 - **REST.** Every `openapi.json` path that is not deprecated (`x-polygon-deprecation`) or
   draft (`x-polygon-draft`) and not in `EXCLUSIONS`; `x-polygon-ignore` neither excludes nor
   generates a path ([section 8.12](#812-excluded-endpoints)). The generator resolves `$ref`,
-  merges `allOf`, treats a `oneOf` or `anyOf` with exactly one branch as that branch, flattens
+  merges `allOf` (into an object when any part is an object or no part has a type, else into
+  the one scalar type its typed parts share, two different scalar types being a `shape`
+  problem; three crypto response bodies put the status field's string schema beside the
+  object part, and stay objects), treats a `oneOf` or `anyOf` with exactly one branch as that branch, flattens
   nested objects into dotted wire paths below the result key (`results` unless `RESULT_KEYS`
   names another key, a dotted path of keys such as `results.values`, or `None` for a body that
   is itself the rows), keeps fields in the order the vendor documents them (see the naming
