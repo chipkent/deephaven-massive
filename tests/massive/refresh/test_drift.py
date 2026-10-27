@@ -332,6 +332,28 @@ def test_fields_added_removed_retyped_and_retagged() -> None:
     ]
 
 
+def test_requiredness_changes_including_an_enclosing_objects() -> None:
+    def widgets(*, required: list[str], day_required: list[str]) -> Snapshot:
+        day = {"type": "object", "required": ["c"], "properties": {"c": {"type": "number"}}}
+        fields = {"price": {"type": "number"}, "day": day}
+        found = item(fields)
+        rows = found["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        rows["properties"]["results"]["items"]["required"] = required
+        day["required"] = day_required
+        return make(rest={"/v1/widgets": found})
+
+    before = widgets(required=["price", "day"], day_required=["c"])
+    path = "CHANGES - REST `/v1/widgets`:"
+    # `day.c` stays required in `day`, but `day` itself no longer is.
+    assert compare(widgets(required=["price"], day_required=["c"]), before) == [
+        f"{path} field `results[].day.c` no longer required"
+    ]
+    assert compare(before, widgets(required=["day"], day_required=[])) == [
+        f"{path} field `results[].day.c` now required",
+        f"{path} field `results[].price` now required",
+    ]
+
+
 def test_a_tag_added_is_reported_against_none() -> None:
     before = make(rest={"/v1/widgets": item({"t": {"type": "integer"}})})
     tagged = {"type": "integer", "x-polygon-go-type": {"name": "INanoseconds"}}

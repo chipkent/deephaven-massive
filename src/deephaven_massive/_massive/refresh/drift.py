@@ -14,13 +14,13 @@ sections, each with the action a person takes:
   generated source, or exclusion names.
 - **Field, type, and column changes** (`Section.CHANGES`): REST paths and WebSocket channels
   new in the specifications, removed while not generated, unreadable, or whose status changed
-  otherwise than to deprecated (draft to current, say);
-  response and message fields added, removed, or retyped, or whose unit tag
-  (`x-polygon-go-type`) changed; REST parameters added, removed, or changed; documentation
-  pages added to or removed from `llms.txt`; a REST page that documents another endpoint, or a
-  WebSocket page another feed; a flat-file page's "Columns" table, its "Example Data" header,
-  or an overview's dataset rows; and every problem a refresh gate would stop on if the live
-  sources were fetched and regenerated (`gate_stops`).
+  otherwise than to deprecated (draft to current, say); response and message fields added,
+  removed, or retyped, or whose unit tag (`x-polygon-go-type`) or requiredness changed; REST
+  parameters added, removed, or changed; documentation pages added to or removed from
+  `llms.txt`; a REST page that documents another endpoint, or a WebSocket page another feed;
+  a flat-file page's "Columns" table, its "Example Data" header, or an overview's dataset
+  rows; and every problem a refresh gate would stop on if the live sources were fetched and
+  regenerated (`gate_stops`).
 - **Deprecations** (`Section.DEPRECATIONS`): a path or channel the vendor newly deprecates; a
   deprecated or removed one the committed `rest.json` or `ws.json` still holds; and a
   committed flat-file prefix no live overview names any more.
@@ -28,8 +28,8 @@ sections, each with the action a person takes:
 The comparison is semantic: descriptions, examples, key order, and formatting are ignored,
 so a reworded page or a reordered document reports nothing. Fields are compared on the vendor
 document's own terms (dotted keys below the response body, such as `results[].p`, with their
-schema type, format, and unit tag), independently of the refresh's naming rules, so a change is
-reported even where a refresh gate would stop on it.
+schema type, format, unit tag, and requiredness), independently of the refresh's naming rules,
+so a change is reported even where a refresh gate would stop on it.
 
 **Untrusted text.** Every vendor value in a report (a path, key, type, header, or gate
 message) is quoted as Markdown code with its backticks replaced and its whitespace collapsed,
@@ -54,7 +54,7 @@ from deephaven_massive._massive.refresh import docs, fetch, generate, rest, ws
 from deephaven_massive._massive.refresh.flatfiles import venue_template
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
-from deephaven_massive._massive.refresh.openapi import OpenApi, properties
+from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required
 from deephaven_massive._massive.refresh.snapshot import Snapshot
 from deephaven_massive._massive.spec import sources
 from deephaven_massive._massive.spec.types import Transport
@@ -257,10 +257,18 @@ class Committed:
 
 
 class _Leaf(NamedTuple):
-    """One field of a response or message: its type as text and its unit tag, if any."""
+    """One field of a response or message, as the drift check compares it.
+
+    Attributes:
+        type: Its schema type as text (`_type_text`).
+        tag: Its unit tag, or `None`.
+        required: Whether it is required, as the generators decide it: listed as required by
+            its object and by every enclosing object up to the row.
+    """
 
     type: str
     tag: str | None
+    required: bool
 
 
 @dataclass(frozen=True)
@@ -270,7 +278,8 @@ class _Operation:
     Attributes:
         status: `"deprecated"`, `"draft"`, or `"current"`.
         parameters: Each parameter's name mapped to its location, type, and constraints.
-        fields: Each dotted field key below the body mapped to its type and unit tag.
+        fields: Each dotted field key below the body mapped to its type, unit tag, and
+            requiredness.
     """
 
     status: str
@@ -355,12 +364,20 @@ def _tag(schema: JsonObject) -> str | None:
 
 
 def _leaves(
-    spec: OpenApi, node: Json, *, prefix: str, where: str, depth: int = 0
+    spec: OpenApi,
+    node: Json,
+    *,
+    prefix: str,
+    where: str,
+    depth: int = 0,
+    is_required: bool = True,
 ) -> Iterator[tuple[str, _Leaf]]:
     """Flatten a body or message schema into its dotted field keys.
 
     Object properties are joined with `.`; an array of objects adds `[]` to its key and goes
-    on into the objects (`results[].day.c`). Anything else is a leaf.
+    on into the objects (`results[].day.c`). Anything else is a leaf. A property is required
+    when its object lists it in `required` and the object itself is required; the body and
+    each object of an array (a row) count as required, as the generators count them.
 
     Args:
         spec: The specification.
@@ -368,6 +385,7 @@ def _leaves(
         prefix: The key of `node`; `""` for the body itself.
         where: The path, for messages.
         depth: How many objects and arrays enclose `node`.
+        is_required: Whether `node` itself is required.
 
     A `RefreshError` from resolving a schema (a reference that cannot be followed)
     propagates.
@@ -378,16 +396,23 @@ def _leaves(
     schema = spec.schema(node, where)
     found = properties(schema)
     if depth < _MAX_NESTING and found is not None:
+        needed = required(schema)
         for name, child in found.items():
-            key = f"{prefix}.{name}" if prefix else name
-            yield from _leaves(spec, child, prefix=key, where=where, depth=depth + 1)
+            yield from _leaves(
+                spec,
+                child,
+                prefix=f"{prefix}.{name}" if prefix else name,
+                where=where,
+                depth=depth + 1,
+                is_required=is_required and name in needed,
+            )
         return
     if depth < _MAX_NESTING and schema.get("type") == "array":
         items = spec.schema(schema.get("items", {}), where)
         if properties(items) is not None:
             yield from _leaves(spec, items, prefix=f"{prefix}[]", where=where, depth=depth + 1)
             return
-    yield prefix or "(body)", _Leaf(_type_text(spec, schema, where), _tag(schema))
+    yield prefix or "(body)", _Leaf(_type_text(spec, schema, where), _tag(schema), is_required)
 
 
 def _parameter(spec: OpenApi, node: Json, where: str) -> tuple[str, str]:
@@ -506,7 +531,8 @@ def _field_changes(old: Mapping[str, _Leaf], new: Mapping[str, _Leaf]) -> Iterat
         new: The live fields.
 
     Yields:
-        One detail per field added or removed, and per field whose type or unit tag changed.
+        One detail per field added or removed, and per field whose type, requiredness, or
+        unit tag changed.
     """
     yield from _changed(
         _labelled("field", {key: leaf.type for key, leaf in old.items() if key not in new}),
@@ -516,6 +542,9 @@ def _field_changes(old: Mapping[str, _Leaf], new: Mapping[str, _Leaf]) -> Iterat
         before, after = old[key], new[key]
         if before.type != after.type:
             yield f"field {_code(key)} retyped from {_code(before.type)} to {_code(after.type)}"
+        if before.required != after.required:
+            now = "now required" if after.required else "no longer required"
+            yield f"field {_code(key)} {now}"
         if before.tag != after.tag:
             yield (
                 f"field {_code(key)} unit tag changed from {_code(before.tag or 'none')} to "
