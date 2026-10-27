@@ -1651,7 +1651,7 @@ def layer_violations(path: PurePosixPath, source: str) -> list[str]:
     docstring_only = len(tree.body) == 1 and ast.get_docstring(tree) is not None
     if path in _DOCSTRING_ONLY_INITS and not docstring_only:
         found.append(f"{where}:1: a layer package's __init__.py holds a docstring and nothing else")
-    return sorted(set(found), key=lambda message: int(message.split(":")[1]))
+    return sorted(found, key=lambda message: int(message.split(":")[1]))
 
 
 def test_the_tree_keeps_the_layers() -> None:
@@ -1993,8 +1993,9 @@ def test_only_the_session_imports_ingest(module: str, source: str, message: str)
     ],
 )
 def test_a_layer_package_init_holds_only_a_docstring(package: str, source: str) -> None:
+    message = "a layer package's __init__.py holds a docstring and nothing else"
     found = _layer_check(f"{package}/__init__.py", source)
-    assert found[-1].endswith("a layer package's __init__.py holds a docstring and nothing else")
+    assert f"src/deephaven_massive/{package}/__init__.py:1: {message}" in found
 
 
 @pytest.mark.parametrize("package", ["_namespaces", "_datasets", "_tables", "_ingest"])
