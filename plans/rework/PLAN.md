@@ -1945,7 +1945,8 @@ threads).
 - Modify: `_ingest/clients.py` (`SessionClients.rest()`: the session's `RestClient`, the
   host-decision cache, and their closer), `_query.py` (REST verb bodies and the
   `StreamHistoryLatestQuery.fetch` docstring), `_namespaces/base.py`, `_datasets/catalog.py`
-  (`DatasetSpec.symbols_per_request`; the typed-parameter reservation in filter validation).
+  (`DatasetSpec.symbols_per_request`, `DatasetSpec.fetch_paths_by_class`; the typed-parameter
+  reservation in filter validation), `_datasets/symbols.py` (`symbol_class`).
 
 **Tasks.**
 - [ ] One `RestClient` per session, held by `SessionClients` and closed through a closer that
@@ -1967,8 +1968,9 @@ threads).
 - [ ] `fetch()` on the latest queries; REST `history()` on `history_path` and
       `grouped_daily_path`.
 - [ ] `sort` and `order` per DESIGN § 9: sent as they are where the path has an `order`
-      parameter, folded into `sort=<field>.<asc|desc>` where it has none; `order` without
-      `sort` raises `ValueError` at query construction.
+      parameter (`order` alone is valid there), folded into `sort=<field>.<asc|desc>` where it
+      has none, and only there does `order` without `sort` raise `ValueError` at query
+      construction.
 - [ ] The typed-parameter reservation in the shared filter check (DESIGN § 9): a `filters` key
       naming a typed keyword parameter, or any of its `.gt`/`.gte`/`.lt`/`.lte`/`.any_of`/
       `.all_of` forms, raises `ValueError` naming the parameter. Dataset PRs that landed
@@ -1977,10 +1979,13 @@ threads).
       `Request.params`; the bars `{from}`/`{to}` filled from `history()`'s bounds in the form
       the path's parameter kind gives (no `time_axis` on bars); futures trades and quotes on
       the `timestamp` range widened to whole Chicago sessions (DESIGN § 12);
-      `DatasetSpec.symbols_per_request` and the `ticker.any_of` batching; the per-symbol
-      detail path chosen from the role paths; `canonical(spec.asset_class, value)` on symbols
-      read from rows; error rows kept by `snapshots()` and dropped, with one WARNING per
-      ticker, by a projected `fetch()`.
+      `DatasetSpec.symbols_per_request: int | None = None` and the `ticker.any_of` batching;
+      `DatasetSpec.fetch_paths_by_class: Mapping[AssetClass, str]` with
+      `symbol_class(symbol) -> AssetClass` in `_datasets/symbols.py`; only the parameters the
+      chosen path declares are sent, and a typed parameter it lacks raises `ValueError`; the
+      per-symbol detail path chosen from the role paths; `canonical(spec.asset_class, value)`
+      on symbols read from rows; error rows kept by `snapshots()` and dropped, with one
+      WARNING per ticker, by a projected `fetch()`.
 - [ ] Correct the `StreamHistoryLatestQuery.fetch` docstring in `_query.py`: "one request per
       symbol" is wrong for a batched projected snapshot (`indices.values`). The "no namespace
       declares…" class docstrings and their examples stay for finish-rework.

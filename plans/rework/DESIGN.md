@@ -235,16 +235,17 @@ _namespaces/
 _datasets/               dataset semantics: no network I/O, no threads, no Deephaven calls;
                          only column_reference.sync writes files
   __init__.py            docstring only
-  catalog.py             DatasetSpec (summary, role paths, kind, per-source key columns, channels,
-                         prefixes, poll defaults, page size, symbols per request), Catalog
-                         (the specs by name,
+  catalog.py             DatasetSpec (summary, role paths and fetch paths by symbol class,
+                         kind, per-source key columns, channels, prefixes, poll defaults,
+                         page size, symbols per request), Catalog (the specs by name,
                          members(kind)), filter validation
   schema.py              ColumnType, Column, Schema, WireType -> ColumnType, rename(),
                          dataset_schema() with column descriptions (section 19.4)
   request.py             Request, StreamKey, ParamValue, HostDecision
   timestamps.py          the one timestamp routine (section 12), the FMV magnitude rule
   dates.py               DateLike parsing, day zones, sessions, publish_time, [start, end)
-  symbols.py             normalization, the Symbol/Underlying rule (section 10)
+  symbols.py             normalization, symbol_class(), the Symbol/Underlying rule
+                         (section 10)
   history_source.py      partition dates, publication grace, REST capability, the AUTO choice
   column_reference.py    the column reference: render(catalog, provenance) -> {file name:
                          Markdown} (pure); sync(directory, pages) owns docs/datasets/
@@ -1020,10 +1021,11 @@ Notation:
 - `DateLike = str | date | datetime` ([section 11](#11-enums-and-types)).
 - `…F` is the trailing keyword-only block
   `sort: str | None = None, order: Order | None = None, limit: int | None = None, filters: Mapping[str, FilterValue] | None = None`.
-  A dataset none of whose paths has a `sort` parameter (futures `exchanges` and
-  `market_status`, for example) leaves `sort` and `order` out of its block, so a signature
-  never offers an ordering the endpoint cannot apply. How `sort` and `order` reach the wire is
-  in [section 9](#9-filters).
+  The block offers only the ordering the dataset's paths accept, so a signature never offers
+  one the endpoint cannot apply: a dataset whose paths have neither a `sort` nor an `order`
+  parameter (futures `exchanges` and `market_status`, for example) leaves both out, and a
+  dataset whose paths have `order` but no `sort` (the indicators) keeps `order` alone. How
+  `sort` and `order` reach the wire is in [section 9](#9-filters).
 - `…T` is `start: DateLike | None = None, end: DateLike | None = None` followed by `…F`. It
   exists only on datasets whose row has a named time axis (shown as "axis"). `start` and `end`
   address that axis with the day rules of [section 12](#12-timestamp-units-and-day-boundaries).
@@ -1188,7 +1190,10 @@ macd(symbols, *, short_window: int, long_window: int, signal_window: int,
 ```
 
 REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol. `Timespan.SESSION` is rejected
-here.
+here. The indicator paths have an `order` parameter but no `sort`, so their `…F` block keeps
+`order` and has no `sort` ([section 9](#9-filters)). Crypto symbols are served by the
+`{cryptoTicker}` templates, chosen per symbol through `DatasetSpec.fetch_paths_by_class`
+([section 13.4](#134-rest)).
 
 ### 8.9 `m.economy`
 
@@ -1350,12 +1355,14 @@ refreshing the snapshot adds it; no code changes.
 
 **`sort` and `order`.** Most list endpoints have no `order` parameter: the direction is an
 `.asc` or `.desc` suffix inside `sort`. On such a path the REST transport folds the two, so
-`sort="date", order=Order.DESC` sends `sort=date.desc`, and `sort` alone is sent unchanged. A
-path that has its own `order` parameter (`/v3/snapshot/indices`, `/v3/trades`, the reference
-lists) receives `sort` and `order` as they are. Which form applies is read from the path's
-generated parameters, never from a hand list. `order` without `sort` raises `ValueError` at
-query construction. A dataset whose paths have no `sort` parameter offers neither `sort` nor
-`order` ([section 8](#8-namespace-tree)).
+`sort="date", order=Order.DESC` sends `sort=date.desc`, and `sort` alone is sent unchanged; on
+such a path `order` without `sort` raises `ValueError` at query construction, since there is
+nothing to fold it into. A path that has its own `order` parameter (`/v3/snapshot/indices`,
+`/v3/trades`, the reference lists, the indicators) receives `sort` and `order` as they are,
+and `order` alone is valid there. Which form applies is read from the path's generated
+parameters, never from a hand list. A dataset whose paths have neither parameter offers
+neither; one whose paths have `order` but no `sort` (the indicators) offers `order` alone
+([section 8](#8-namespace-tree)).
 
 `start` and `end` map to the wire parameter pair recorded per dataset in the catalog
 (`DatasetSpec.time_axis`). The pair follows the axis: an instant axis is half-open, `.gte` and
@@ -1900,11 +1907,22 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - **Bars ranges.** A bars spec declares no `time_axis`. `history()` fills the range path's
   `{from}` and `{to}` segments from its bounds, as epoch milliseconds or as `YYYY-MM-DD`
   according to the kind the generated path gives the parameter.
-- **Symbol batching.** `DatasetSpec.symbols_per_request: int | None` caps the symbols of one
-  request. When it is set (250 on the unified snapshot and the indices snapshot), the transport
-  splits the symbol list into `ticker.any_of` batches of at most that size, issues them in
-  order, and concatenates the rows; None sends every symbol in one request. A projected
+- **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
+  of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
+  (250 on the unified snapshot and the indices snapshot), the transport splits the symbol
+  list into batches of at most that size, issues them in order, and concatenates the rows;
+  None sends every symbol in one request. A projected
   `fetch()` (`indices.values`) batches the same way, so it is not one request per symbol.
+- **A path per symbol class.** `DatasetSpec.fetch_paths_by_class: Mapping[AssetClass, str]`
+  (empty by default) names the fetch path that serves symbols of one class, for a dataset that
+  spans classes whose vendor templates differ (the indicators:
+  `{AssetClass.CRYPTO: "/v1/indicators/sma/{cryptoTicker}"}`). Each symbol's class is
+  `symbol_class(symbol)` in `_datasets/symbols.py`; a class without an entry uses
+  `fetch_path`. Each such path is a source of the dataset and declares its `keys` like any
+  other.
+- **Only declared parameters are sent.** A request carries only the parameters its chosen
+  path declares in its generated parameters. A typed parameter the chosen path lacks raises
+  `ValueError` naming the parameter and the path, rather than being dropped silently.
 - **Per-symbol detail paths.** A dataset with both a list path and a per-symbol detail path in
   `extra_paths` (`options.contracts`: `/v3/reference/options/contracts` and
   `/v3/reference/options/contracts/{o}`) calls the detail path once per symbol when symbols
@@ -3702,14 +3720,17 @@ document already reflects them.
     ([section 19.4](#194-generated-schemas), "Cross-table naming").
 50. **Dataset gaps settled while declaring the namespaces** (2026-10-28). `order` is sent as
     is where a path has its own `order` parameter and folded into `sort` as a `.asc`/`.desc`
-    suffix where it has none; a dataset without `sort` offers neither, and `order` without
-    `sort` is a `ValueError` ([section 9](#9-filters)). The whole family of every typed
+    suffix where it has none, and only there is `order` without `sort` a `ValueError`; a
+    dataset whose paths have neither parameter offers neither, and the indicators, whose
+    paths have `order` but no `sort`, keep `order` alone ([section 9](#9-filters)). The whole family of every typed
     parameter is reserved from `filters` in one shared check. Instant axes are half-open
     (`.gte`/`.lt`), date axes whole days (`.gte`/`.lte`). Futures trades and quotes take the
     `timestamp` range widened to whole Chicago sessions, as bars do
     ([section 12](#12-timestamp-units-and-day-boundaries)). The REST transport fills path
     parameters from `Request.params`, fills the bars `{from}`/`{to}` from `history()`'s bounds,
-    batches symbols by `DatasetSpec.symbols_per_request`, picks a per-symbol detail path from
+    batches symbols by `DatasetSpec.symbols_per_request`, picks a path per symbol class by
+    `DatasetSpec.fetch_paths_by_class`, sends only the parameters the chosen path declares,
+    picks a per-symbol detail path from
     the role paths, canonicalizes symbols read from rows, and drops error rows only from a
     projected `fetch()` ([section 13.4](#134-rest)). The § 8 rows gain `product_code` on every
     futures dataset that takes it, `adjusted` on the options and crypto `daily_open_close`,
