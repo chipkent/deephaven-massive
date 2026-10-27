@@ -102,7 +102,7 @@ def test_defaults_live_in_exactly_one_place() -> None:
         assert f.default is not missing or f.default_factory is not missing, f.name
     assert list(inspect.signature(dm.MassiveSession).parameters) == ["config"]
     others = inspect.getsource(_session) + inspect.getsource(_query)
-    # The bucket name is matched as a string literal: module names such as _flatfiles contain it.
+    # The bucket name is matched as a string literal: _massive.flatfiles contains it.
     literals = ("120.0", "time(11, 30)", "files.massive.com", "api.massive.com", '"flatfiles"')
     for literal in literals:
         assert literal not in others

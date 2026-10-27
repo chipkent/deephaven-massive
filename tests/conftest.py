@@ -260,8 +260,6 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch) -> FakeS3:
         The fake, for storing objects and inspecting requests.
     """
     s3 = importlib.import_module("tests._fakes.s3")
-    flatfiles = importlib.import_module("deephaven_massive._flat_files")
     fake: FakeS3 = s3.FakeS3()
-    create = flatfiles._s3_client
-    monkeypatch.setattr(flatfiles, "_s3_client", lambda config: fake.attach(create(config)))
+    fake.install(monkeypatch)
     return fake

@@ -10,9 +10,19 @@ from types import ModuleType
 import pytest
 
 from deephaven_massive import _massive
+from deephaven_massive._massive.flatfiles import client, layout, reader
 from deephaven_massive._massive.net import errors
 
-EXPECTED_INTERFACE = ["WireAuthError", "WireEntitlementError", "WireError"]
+EXPECTED_INTERFACE = [
+    "FlatFile",
+    "FlatFileClient",
+    "ReadColumn",
+    "ReadPlan",
+    "WireAuthError",
+    "WireEntitlementError",
+    "WireError",
+    "object_key",
+]
 
 
 def test_all_is_exactly_the_interface() -> None:
@@ -23,6 +33,11 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.WireError is errors.WireError
     assert _massive.WireAuthError is errors.WireAuthError
     assert _massive.WireEntitlementError is errors.WireEntitlementError
+    assert _massive.FlatFileClient is client.FlatFileClient
+    assert _massive.FlatFile is reader.FlatFile
+    assert _massive.ReadPlan is reader.ReadPlan
+    assert _massive.ReadColumn is reader.ReadColumn
+    assert _massive.object_key is layout.object_key
 
 
 def test_every_lazy_name_is_in_all_and_none_is_bound() -> None:

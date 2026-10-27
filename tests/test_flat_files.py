@@ -17,8 +17,6 @@ from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
-from botocore.exceptions import EndpointConnectionError
-from botocore.response import StreamingBody
 from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
@@ -27,13 +25,10 @@ from deephaven.table import Table
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _flat_files, _history_source
+from deephaven_massive import _flat_files, _history_source, _massive
 from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._dates import CHICAGO, FuturesSessions, TimeRange, bounds
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan, Transport
-from deephaven_massive._flat_files import (
-    FlatFileBucket,
-)
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Request
 from deephaven_massive._schema import BARS, INDEX_VALUES, QUOTES, TRADES, Column, ColumnType, Schema
@@ -53,12 +48,15 @@ class FakeS3(Protocol):
     # What the tests use of the `fake_s3` fixture (tests/conftest.py, tests/_fakes/s3.py).
     requests: list[tuple[str, str]]
     clients: list[dict[str, object]]
+    closes: int
+    closed_bodies: list[str]
+    request_id: str
     before_answer: Callable[[str], object] | None
 
     def put(self, key: str, data: bytes) -> None: ...
     def put_dropped(self, key: str, data: bytes) -> None: ...
     def refuse(self, prefix: str, *, status: int, code: str, message: str) -> None: ...
-    def fail(self, key: str, error: Exception) -> None: ...
+    def fail(self, key: str, failure: str) -> None: ...
     def keys(self) -> list[str]: ...
 
 
@@ -272,22 +270,17 @@ class Applied:
 @pytest.fixture
 def applied(monkeypatch: pytest.MonkeyPatch) -> Applied:
     record = Applied()
-    apply = _flat_files._Transform.apply
+    batches = _massive.FlatFile.batches
 
-    def counted(
-        transform: _flat_files._Transform, block: pa.RecordBatch, key: _flat_files._Key
-    ) -> pa.RecordBatch:
-        record.counts[key.key] = record.counts.get(key.key, 0) + 1
-        if record.hook is not None:
-            record.hook(key.key)
-        return apply(transform, block, key)
+    def counted(file: _massive.FlatFile, plan: _massive.ReadPlan) -> Iterator[pa.RecordBatch]:
+        for batch in batches(file, plan):
+            record.counts[file.key] = record.counts.get(file.key, 0) + 1
+            if record.hook is not None:
+                record.hook(file.key)
+            yield batch
 
-    monkeypatch.setattr(_flat_files._Transform, "apply", counted)
+    monkeypatch.setattr(_massive.FlatFile, "batches", counted)
     return record
-
-
-def has_client(bucket: FlatFileBucket) -> bool:
-    return bucket._client is not None
 
 
 def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> HistoryQuery:
@@ -1022,8 +1015,9 @@ def test_a_refused_file_is_an_entitlement_error(
     with pytest.raises(
         dm.EntitlementError,
         match=r"the plan does not include these flat files: .*\(AccessDenied: Access Denied\)",
-    ):
+    ) as info:
         q.history("2025-03-03", "2025-03-03")
+    assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
 
 
 @pytest.mark.parametrize("code", ["InvalidAccessKeyId", "SignatureDoesNotMatch"])
@@ -1055,19 +1049,21 @@ def test_rejected_credentials_are_an_authentication_error(
     ) as info:
         q.history("2025-03-04", "2025-03-04")
     assert not isinstance(info.value, dm.EntitlementError)
+    assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
 
 
 def test_a_server_error_is_a_massive_error(session: dm.MassiveSession, fake_s3: FakeS3) -> None:
     fake_s3.refuse("us_stocks_sip/", status=500, code="InternalError", message="Try again")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with pytest.raises(dm.MassiveError, match=r"HTTP 500 \(InternalError: Try again\)"):
+    with pytest.raises(dm.MassiveError, match=r"HTTP 500 \(InternalError: Try again\)") as info:
         q.history("2025-03-03", "2025-03-03")
+    assert (info.value.status, info.value.request_id) == (500, fake_s3.request_id)
 
 
 def test_an_unreachable_endpoint_is_a_massive_error(
     session: dm.MassiveSession, fake_s3: FakeS3
 ) -> None:
-    fake_s3.fail(TRADES_0303, EndpointConnectionError(endpoint_url="https://files.massive.com"))
+    fake_s3.fail(TRADES_0303, "unreachable")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
         dm.MassiveError, match=re.escape("cannot read s3://flatfiles/us_stocks_sip")
@@ -1126,26 +1122,14 @@ def test_a_dropped_connection_is_a_massive_error(
 
 
 def test_every_response_body_is_closed(
-    *,
-    session: dm.MassiveSession,
-    fake_s3: FakeS3,
-    put: Callable[[str, str], None],
-    monkeypatch: pytest.MonkeyPatch,
+    *, session: dm.MassiveSession, fake_s3: FakeS3, put: Callable[[str, str], None]
 ) -> None:
-    closed: list[bool] = []
-    close = StreamingBody.close
-
-    def recorded(body: StreamingBody) -> None:
-        closed.append(True)
-        close(body)
-
-    monkeypatch.setattr(StreamingBody, "close", recorded)
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     fake_s3.put(TRADES_0304, b"not gzip")
     with pytest.raises(dm.MassiveError):
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04")
-    assert closed == [True, True]
+    assert fake_s3.closed_bodies == [TRADES_0303, TRADES_0304]
 
 
 # --- Threads, cancellation, and close --------------------------------------------------------
@@ -1261,14 +1245,13 @@ def test_a_cancelled_or_closed_read_makes_no_request(
     window = bounds(STOCK_TRADES, "2025-03-03", "2025-03-03")
     transform = _flat_files._Transform.build(STOCK_TRADES, dm.ALL, window)
     key = _flat_files._Key(TRADES_0303, date(2025, 3, 3), None)
-    client = session._core._flat_files.client()
     cancel = threading.Event()
     cancel.set()
     with pytest.raises(_flat_files._CancelledError):
-        transport._read_key(client, transform, key, cancel=cancel)
+        transport._read_key(transform, key, cancel=cancel)
     session._core._flat_files.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
-        transport._read_key(client, transform, key, cancel=threading.Event())
+        transport._read_key(transform, key, cancel=threading.Event())
     assert fake_s3.requests == []
 
 
@@ -1381,31 +1364,16 @@ def test_a_close_during_a_request_reports_the_close(
     if stored:
         put(TRADES_KEY.format(day), "us_stocks_sip_trades_v1_2025-03-03.csv")
     m = dm.MassiveSession(config())
-    bucket = m._core._flat_files
-    closes: list[bool] = []
-
-    def close_mid_request(key: str) -> None:
-        client = bucket._client
-        assert client is not None
-        close = client.close
-
-        def recorded() -> None:
-            closes.append(True)
-            close()
-
-        monkeypatch.setattr(client, "close", recorded)
-        bucket.close()
-
-    fake_s3.before_answer = close_mid_request
+    fake_s3.before_answer = lambda _key: m._core._flat_files.close()
     when = f"2025-03-{day:02d}"
     try:
         with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
             query(m, STOCK_TRADES, symbols=dm.ALL).history(when, when)
     finally:
         m.close()
-    # Closed by the bucket, then once more after the pool drained, which drops any connection
-    # pool the in-flight request opened.
-    assert closes == [True, True]
+    # Closed by the close, then once more as the in-flight request returned, which drops any
+    # connection pool that request opened.
+    assert fake_s3.closes == 2
     assert fake_s3.keys() == [TRADES_KEY.format(day)]
 
 
@@ -1462,21 +1430,19 @@ def test_a_client_that_cannot_be_created_is_a_massive_error(
 
 
 def test_closing_the_session_closes_the_boto_client(
-    *, session: dm.MassiveSession, put: Callable[[str, str], None], monkeypatch: pytest.MonkeyPatch
+    *, session: dm.MassiveSession, fake_s3: FakeS3, put: Callable[[str, str], None]
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    bucket = session._core._flat_files
-    closed: list[bool] = []
-    monkeypatch.setattr(bucket._client, "close", lambda: closed.append(True))
+    client = session._core._flat_files
     session.close()
-    assert closed == [True]
-    assert not has_client(bucket)
-    assert bucket.closed
-    bucket.close()  # idempotent
-    assert closed == [True]
-    with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
-        bucket.client()  # a read that raced close() cannot reopen it
+    assert fake_s3.closes == 1
+    assert client.closed
+    client.close()  # idempotent
+    assert fake_s3.closes == 1
+    with pytest.raises(_massive.WireError, match="is closed"):
+        client.open(TRADES_0303)  # a read that raced close() cannot reopen it
+    assert fake_s3.keys() == [TRADES_0303]
 
 
 def test_a_session_collected_unclosed_closes_its_bucket(
@@ -1490,16 +1456,16 @@ def test_a_session_collected_unclosed_closes_its_bucket(
     m = dm.MassiveSession(config(api_key="collected-with-flat-files"))
     name = repr(m).removeprefix("<").removesuffix(" open>")
     table = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    bucket = m._core._flat_files
+    client = m._core._flat_files
     reaper = m._core._reaper.thread
-    assert has_client(bucket)
+    assert fake_s3.closes == 0
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)
     assert not reaper.is_alive()
-    assert not has_client(bucket)
-    assert bucket.closed
+    assert fake_s3.closes == 1
+    assert client.closed
     assert table.size == 4  # static results outlive their session
     assert caplog.messages == [
         f"{name} was garbage-collected without close(); closing its connections and pollers"
@@ -1531,22 +1497,23 @@ class MemorySampler:
         self.taken = [0, 0]
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        apply = _flat_files._Transform.apply
+        batches = _massive.FlatFile.batches
         convert = dh_arrow.to_table
 
-        def sampled_apply(
-            transform: _flat_files._Transform, data: pa.RecordBatch, key: _flat_files._Key
-        ) -> pa.RecordBatch:
-            self.sample_arrow()
-            self.python[self.taken[1]] = tracemalloc.get_traced_memory()[1]
-            self.taken[1] += 1
-            return apply(transform, data, key)
+        def sampled_batches(
+            file: _massive.FlatFile, plan: _massive.ReadPlan
+        ) -> Iterator[pa.RecordBatch]:
+            for batch in batches(file, plan):
+                self.sample_arrow()
+                self.python[self.taken[1]] = tracemalloc.get_traced_memory()[1]
+                self.taken[1] += 1
+                yield batch
 
         def sampled_convert(data: pa.Table) -> Table:
             self.sample_arrow()
             return convert(data)
 
-        monkeypatch.setattr(_flat_files._Transform, "apply", sampled_apply)
+        monkeypatch.setattr(_massive.FlatFile, "batches", sampled_batches)
         monkeypatch.setattr(_flat_files, "to_table", sampled_convert)
 
     def sample_arrow(self) -> None:
