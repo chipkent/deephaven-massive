@@ -43,6 +43,7 @@ TICKER_AND_SIP = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
 
 TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     channels={None: "T"},
     fetch_path="/v2/last/trade/{stocksTicker}",
@@ -57,6 +58,7 @@ TRADES_SPEC = DatasetSpec(
 )
 BARS_SPEC = DatasetSpec(
     name="forex.bars",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.FOREX,
     is_bars=True,
     channels={Timespan.SECOND: "CAS", Timespan.MINUTE: "CA"},
@@ -66,6 +68,7 @@ BARS_SPEC = DatasetSpec(
 )
 VALUES_SPEC = DatasetSpec(
     name="indices.values",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
     channels={None: "V"},
     flat_file_prefixes={None: "us_indices/values_v1"},
@@ -73,15 +76,20 @@ VALUES_SPEC = DatasetSpec(
 )
 NEWS_SPEC = DatasetSpec(
     name="economy.inflation",
+    summary="A dataset for the tests.",
     fetch_path="/fed/v1/inflation",
     poll_mode=PollMode.APPEND,
     poll_keys=("Date",),
 )
 HISTORY_SPEC = DatasetSpec(
-    name="economy.yields", poll_keys=("Date",), history_path="/fed/v1/treasury-yields"
+    name="economy.yields",
+    summary="A dataset for the tests.",
+    poll_keys=("Date",),
+    history_path="/fed/v1/treasury-yields",
 )
 FUTURES_SPEC = DatasetSpec(
     name="futures.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
     channels={None: "T"},
     history_path="/futures/v1/trades/{ticker}",
@@ -624,6 +632,7 @@ def test_the_guard_runs_before_argument_checks(massive_session: dm.MassiveSessio
 
 FOREX_SPEC = DatasetSpec(
     name="forex.quotes",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.FOREX,
     channels={None: "C"},
     keys={(W, "forex/C"): SourceKeys(KeySpec("Ticker"), KeySpec("ParticipantTimestamp"))},
