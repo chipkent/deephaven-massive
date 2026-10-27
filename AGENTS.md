@@ -19,8 +19,25 @@ uv run pytest tests/test_layout.py -q      # one file, no coverage, debugger-fri
 uv build                                   # sdist and wheel
 ```
 
-The refresh commands (`uv run python -m deephaven_massive._massive.refresh [--check | --fetch]`)
-arrive with the `PLAN.md` planned PR rest-wire-schema, which adds them here.
+The wire schemas (`src/deephaven_massive/_massive/spec/*.json`) are generated from the vendored
+snapshot of Massive's published specifications (`vendor/massive/`, outside the package). The
+files under `vendor/massive/` are Massive's published content, vendored as generation input:
+they are not covered by the repository's license and are not distributed in the packages.
+
+```bash
+uv run python -m deephaven_massive._massive.refresh           # regenerate spec/*.json; no network
+uv run python -m deephaven_massive._massive.refresh --fetch   # replace the snapshot with the live sources
+uv run pytest tests/massive/refresh -q                        # the parity test and every refresh gate
+```
+
+To take a vendor change, run `--fetch`, then the plain refresh, and review the snapshot diff,
+the `spec/*.json` diff, and any hand-input lines in one pull request. When a gate stops the
+refresh it prints each problem (gate, path, key, vendor description); fix it with an entry and
+its reason in one of the hand-input tables, never by editing the generated file: a lexicon,
+`SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_CONFLICTS`,
+`TYPE_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, or `KINDS` entry (`overrides.py`); or an
+`EXCLUSIONS` or `SAMPLE_ERRORS` entry (`exclusions.py`). `--check` (a live drift report)
+arrives with the `PLAN.md` planned PR api-drift-check.
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
@@ -92,18 +109,20 @@ nothing is kept or shimmed for compatibility.
     versions on every run, `scripts/check.sh` does the same locally with `uv sync --upgrade`,
     and a plain local `uv sync` keeps the existing lock.
 13. **One wire package** (from the `PLAN.md` planned PR wire-package-scaffold, which creates it and
-    its boundary tests). `src/deephaven_massive/_massive/` owns all Massive wire access (REST,
-    WebSocket, and S3 flat files), the vendored spec snapshot, the generated schemas, the units,
-    and the long-form names, in six subpackages: `net/`, `spec/`, `rest/`, `ws/`, `flatfiles/`,
-    `refresh/`. `_massive` imports nothing from `deephaven`, `deephaven_server`, `jpy`, or the rest
-    of the library. Layers: `net` and `spec` import nothing else in `_massive`; `rest`, `ws`, and
-    `flatfiles` import only `net` and `spec`; only `refresh` and its tests import `refresh`. The
-    wire package's own tests, under `tests/massive/`, may import any `_massive` module. Everything
-    else, the rest of `tests/` included, imports only `deephaven_massive._massive` and uses only
-    the names in its `__all__`: never a submodule (by `import`, relative import, or `importlib`),
-    never `urllib3`, `websockets`, `certifi`, `boto3`, or `botocore`, and never a snapshot file.
-    `tests/_fakes/` keeps its exception for the network libraries. The AST tests in
-    `tests/test_layout.py` enforce all of it.
+    its boundary tests). `src/deephaven_massive/_massive/` owns all Massive wire access
+    (REST, WebSocket, and S3 flat files), the generated schemas, the units, and the long-form
+    names, in six subpackages: `net/`, `spec/`, `rest/`, `ws/`, `flatfiles/`, `refresh/`. The
+    vendored spec snapshot the refresh reads lives outside the package, in `vendor/massive/`
+    (Massive's published content, not covered by the repository's license, and in neither the
+    wheel nor the sdist). `_massive` imports nothing from `deephaven`, `deephaven_server`,
+    `jpy`, or the rest of the library. Layers: `net` and `spec` import nothing else in
+    `_massive`; `rest`, `ws`, and `flatfiles` import only `net` and `spec`; only `refresh` and
+    its tests import `refresh`. The wire package's own tests, under `tests/massive/`, may
+    import any `_massive` module. Everything else, the rest of `tests/` included, imports only
+    `deephaven_massive._massive` and uses only the names in its `__all__`: never a submodule
+    (by `import`, relative import, or `importlib`), never `urllib3`, `websockets`, `certifi`,
+    `boto3`, or `botocore`, and never a snapshot file. `tests/_fakes/` keeps its exception for
+    the network libraries. The AST tests in `tests/test_layout.py` enforce all of it.
 
 ## Documentation standard
 
