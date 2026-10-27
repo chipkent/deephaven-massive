@@ -257,6 +257,8 @@ ENUM_PARAMETERS = {
     "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
     "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
+    "_Crypto.bars.timespan": "namespaces/test_crypto.py::test_bar_arguments_are_checked",
+    "_Crypto.movers.direction": "namespaces/test_crypto.py::test_movers",
 }
 
 

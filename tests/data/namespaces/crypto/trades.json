@@ -1,0 +1,28 @@
+{
+  "request_id": "a47d1beb8c11b6ae897ab76cdbbf35a3",
+  "results": [
+    {
+      "conditions": [
+        1
+      ],
+      "exchange": 1,
+      "id": "191450340",
+      "participant_timestamp": 1625097600103000000,
+      "price": 35060,
+      "received_timestamp": 1625097600125000000,
+      "size": 1.0434526
+    },
+    {
+      "conditions": [
+        2
+      ],
+      "exchange": 1,
+      "id": "191450341",
+      "participant_timestamp": 1625097600368000000,
+      "price": 35059.99,
+      "received_timestamp": 1625097600390000000,
+      "size": 0.0058883
+    }
+  ],
+  "status": "OK"
+}
