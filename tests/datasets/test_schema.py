@@ -18,6 +18,7 @@ from deephaven_massive._datasets.schema import (
     join,
     pascal_case,
     rename,
+    required_fields,
 )
 from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass
@@ -302,6 +303,50 @@ def test_a_projection_belongs_to_the_dataset_group() -> None:
         kind="quotes",
     )
     assert [c.column for c in rename(forex, shared)] == ["Symbol", "Offer"]
+
+
+def test_required_keys_resolve_to_the_fields_behind_them() -> None:
+    snapshot = (R, "/v3/snapshot/indices")
+    values = spec(
+        "indices.values",
+        {snapshot: SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
+        asset_class=AssetClass.INDICES,
+        kind="values",
+    )
+    # The kind's Timestamp is the snapshot's own LastUpdated, which the wire client decodes.
+    fields = required_fields(values, source(*snapshot))
+    assert [(f.wire_key, f.column) for f in fields] == [
+        ("ticker", "Ticker"),
+        ("last_updated", "LastUpdated"),
+    ]
+    # A key filled from the request is no column of the rows, so it is never required.
+    files = (F, "us_futures_{venue}/trades_v1")
+    trades = (R, "/futures/v1/trades/{ticker}")
+    futures = DatasetSpec(
+        name="futures.trades",
+        asset_class=AssetClass.FUTURES,
+        history_path=trades[1],
+        flat_file_prefixes={None: files[1]},
+        keys={
+            trades: SourceKeys(
+                KeySpec("ticker", from_request=True),
+                KeySpec("Timestamp"),
+                session=KeySpec("SessionEndDate"),
+            ),
+            files: SourceKeys(
+                KeySpec("Ticker"), KeySpec("Timestamp"), session=KeySpec("SessionEndDate")
+            ),
+        },
+    )
+    assert [f.wire_key for f in required_fields(futures, source(*trades))] == [
+        "timestamp",
+        "session_end_date",
+    ]
+    assert [f.wire_key for f in required_fields(futures, source(*files))] == [
+        "ticker",
+        "timestamp",
+        "session_end_date",
+    ]
 
 
 def test_the_fmv_channel_takes_the_magnitude_rule() -> None:

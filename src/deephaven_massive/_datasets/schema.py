@@ -14,7 +14,8 @@ the dataset's table shape:
   through the projection of the dataset's membership of its kind, with the dataset's declared
   key columns renamed to `Symbol`, `Timestamp`, and `Underlying`, and a key the source does
   not carry (one filled from the request) added as a constant `String` column. Nothing else
-  changes.
+  changes. `required_fields` resolves the keys a source must carry back to the generated
+  fields behind them, for the wire clients' required-key checks.
 - `dataset_schema`, the merge: the ordered union by column name of the renamed columns of
   every source of every member of the dataset's kind (`Catalog.members`), `Symbol`,
   `Timestamp`, and `Underlying` first where the dataset declares them, each column's wire type
@@ -61,6 +62,7 @@ __all__ = [
     "join",
     "pascal_case",
     "rename",
+    "required_fields",
 ]
 
 logger = logging.getLogger(__name__)
@@ -404,6 +406,33 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
     if repeated:
         raise ValueError(f"unique columns: {where}: columns {repeated} repeat after the rename")
     return tuple(columns)
+
+
+def required_fields(spec: DatasetSpec, source: Source) -> tuple[Field, ...]:
+    """Return the generated fields behind a source's required keys for one dataset.
+
+    The required keys are the keys the dataset declares for the source and does not fill from
+    the request; a row without one is a loud failure, never a null key. A key named through a
+    membership projection (the index snapshot's `Timestamp`) resolves to the field behind it
+    (`last_updated`, whose own column is `LastUpdated`), so a transport hands each wire client
+    the names it decodes by: `Field.column` for `to_batch(..., required=)` and
+    `WsClient.set_required`, `Field.wire_key` for a flat file's `ReadPlan.required`.
+
+    Args:
+        spec: The dataset.
+        source: One of the dataset's generated sources.
+
+    Returns:
+        The fields, in the order `symbol`, `time`, `fanout`, `session`.
+
+    A declared key the source lacks raises the `ValueError` of `rename`.
+    """
+    columns = {c.column: c.field for c in rename(spec, source) if c.field is not None}
+    return tuple(
+        columns[KEY_COLUMNS.get(role, key.column)]
+        for role, key in spec.keys_for(source.transport, source.key).declared()
+        if not key.from_request
+    )
 
 
 _JOINS: Final[Mapping[frozenset[WireType], WireType]] = {

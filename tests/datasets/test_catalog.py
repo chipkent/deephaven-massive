@@ -158,15 +158,13 @@ def problems(*specs: DatasetSpec) -> tuple[str, ...]:
 # --- Keys ------------------------------------------------------------------------------------
 
 
-def test_source_keys_list_their_roles_in_order_and_their_required_columns() -> None:
+def test_source_keys_list_their_roles_in_order() -> None:
     declared = keys(request("stockTicker"), "SipTimestamp", session="SessionEndDate")
     assert declared.declared() == (
         ("symbol", KeySpec("stockTicker", from_request=True)),
         ("time", KeySpec("SipTimestamp")),
         ("session", KeySpec("SessionEndDate")),
     )
-    # A key filled from the request is no column of the rows, so it is never required.
-    assert declared.required == frozenset({"SipTimestamp", "SessionEndDate"})
     assert SourceKeys().declared() == ()
     assert STOCK_TRADES.keys_for(R, "/nowhere") == SourceKeys()
 

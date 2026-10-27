@@ -130,15 +130,6 @@ class SourceKeys:
         )
         return tuple((role, key) for role, key in roles if key is not None)
 
-    @property
-    def required(self) -> frozenset[str]:
-        """The source's required key columns: every declared key not filled from the request.
-
-        A transport hands these to the wire client (`to_batch(..., required=)`,
-        `ReadPlan.required`, `WsClient.set_required`), so a row without one fails loudly.
-        """
-        return frozenset(key.column for _, key in self.declared() if not key.from_request)
-
 
 _NO_KEYS: Final = SourceKeys()
 

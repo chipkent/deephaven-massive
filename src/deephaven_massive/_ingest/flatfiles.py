@@ -88,7 +88,7 @@ from deephaven.arrow import to_table
 
 from deephaven_massive._datasets.dates import TimeRange
 from deephaven_massive._datasets.history_source import within_publication_grace
-from deephaven_massive._datasets.schema import KEY_COLUMNS, rename
+from deephaven_massive._datasets.schema import rename, required_fields
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
@@ -307,10 +307,7 @@ class _Transform:
             to_ns=to_ns,
             session=None,
             block_size=BLOCK_SIZE,
-            # Each key column under its renamed name (the session key keeps its own).
-            required=frozenset(
-                header[KEY_COLUMNS.get(role, key.column)] for role, key in keys.declared()
-            ),
+            required=frozenset(f.wire_key for f in required_fields(spec, source)),
         )
         return cls(
             dataset=spec.name,
