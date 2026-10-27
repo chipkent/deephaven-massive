@@ -53,6 +53,7 @@ else:
 
 
 __all__ = [
+    "ENVELOPE_KEYS",
     "DriftReport",
     "Field",
     "Membership",
@@ -64,6 +65,18 @@ __all__ = [
     "WireType",
     "WireUnit",
 ]
+
+
+ENVELOPE_KEYS: frozenset[str] = frozenset({"status", "request_id", "next_url", "count"})
+"""The keys of Massive's REST response envelope, which are never row data.
+
+Most REST paths wrap their rows in an envelope (`{"status": ..., "request_id": ..., "results":
+[...]}`), and the rows sit under the path's result key. A few paths have no result key: their
+JSON object body is itself the one row, with these keys mixed in (`/v1/open-close/...`,
+`/v1/conversion/...`). The refresh leaves these keys out of such a path's fields, and the REST
+decoder drops them from the row before comparing it with the fields. A body that is a JSON list
+is never an envelope: its elements are the rows, and their keys are all data.
+"""
 
 
 class Transport(StrEnum):
@@ -158,6 +171,12 @@ class Field:
         unit: The timestamp unit; set exactly when `wire_type` is `WireType.EPOCH`.
         required: Whether the vendor marks the field required, so its absence is reported as
             drift. False by default, as for almost every field Massive documents.
+        declared_type: The type the vendor's specification declares, set only when it is wrong
+            and the refresh corrects it to `wire_type` through a declared conversion (for
+            example a count documented as a quoted decimal string that is decoded to `LONG`).
+            The decoder converts each value from this type to `wire_type` deliberately, and a
+            value that does not convert fails like any other bad value. `None`, the default,
+            means the vendor's type is right and no conversion applies.
 
     Example:
         ::
@@ -174,17 +193,24 @@ class Field:
     wire_type: WireType
     unit: WireUnit | None = None
     required: bool = False
+    declared_type: WireType | None = None
 
     def __post_init__(self) -> None:
-        """Check that the unit is set exactly for an epoch.
+        """Check that the unit is set exactly for an epoch, and that a conversion converts.
 
         Raises:
-            ValueError: If `wire_type` is `EPOCH` and `unit` is `None`, or the reverse.
+            ValueError: If `wire_type` is `EPOCH` and `unit` is `None`, or the reverse; or if
+                `declared_type` equals `wire_type`, which would be a conversion to itself.
         """
         if (self.wire_type is WireType.EPOCH) != (self.unit is not None):
             raise ValueError(
                 f"field {self.wire_key!r}: an epoch needs a unit and any other type has none "
                 f"(type {self.wire_type}, unit {self.unit})"
+            )
+        if self.declared_type is self.wire_type:
+            raise ValueError(
+                f"field {self.wire_key!r}: a declared conversion from {self.declared_type} "
+                "to itself converts nothing"
             )
 
 
@@ -248,22 +274,31 @@ class Param:
         kind: The kind of value the parameter takes.
         in_path: True for a placeholder of the path template, False for a query parameter.
         values: The accepted values of an `ENUM` parameter, in spec order; empty otherwise.
+        unit: The unit a `TIMESTAMP` parameter counts in (`NS` for the trade and quote
+            filters, `MS` for the indicator filters): an instant is sent as the exact integer
+            number of these units since the Unix epoch. Set exactly when `kind` is `TIMESTAMP`.
     """
 
     name: str
     kind: ParamKind
     in_path: bool = False
     values: tuple[str, ...] = ()
+    unit: WireUnit | None = None
 
     def __post_init__(self) -> None:
-        """Check that values are given exactly for an enum.
+        """Check that values are given exactly for an enum, and a unit exactly for a timestamp.
 
         Raises:
-            ValueError: If `kind` is `ENUM` and `values` is empty, or the reverse.
+            ValueError: If `kind` is `ENUM` and `values` is empty, or the reverse; or if `kind`
+                is `TIMESTAMP` and `unit` is `None`, or the reverse.
         """
         if (self.kind is ParamKind.ENUM) != bool(self.values):
             raise ValueError(
                 f"parameter {self.name!r}: an enum needs values and any other kind has none"
+            )
+        if (self.kind is ParamKind.TIMESTAMP) != (self.unit is not None):
+            raise ValueError(
+                f"parameter {self.name!r}: a timestamp needs a unit and any other kind has none"
             )
 
 
@@ -363,8 +398,11 @@ class RestPath(Source):
     `transport` is always `Transport.REST` and cannot be passed.
 
     Attributes:
-        result_key: The envelope key that holds the rows; `"results"` unless the path keeps
-            them elsewhere (for example `"last"`).
+        result_key: Where the rows sit in the response body: an envelope key (`"results"`,
+            the default, or `"last"`), or a dotted path of keys for rows nested deeper
+            (`"results.values"`). `None` means the body itself holds the rows: a JSON list is
+            the rows, and a JSON object is one row once the `ENVELOPE_KEYS` are dropped from
+            it.
         params: The path's parameters, path placeholders and query parameters alike, in
             spec order.
 
@@ -382,7 +420,7 @@ class RestPath(Source):
     """
 
     transport: Transport = dataclasses.field(default=Transport.REST, init=False)
-    result_key: str = "results"
+    result_key: str | None = "results"
     params: tuple[Param, ...] = ()
 
     @override

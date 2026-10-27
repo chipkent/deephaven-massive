@@ -7,6 +7,7 @@ import pytest
 
 from deephaven_massive import _enums
 from deephaven_massive._massive.spec.types import (
+    ENVELOPE_KEYS,
     DriftReport,
     Field,
     Membership,
@@ -94,6 +95,19 @@ def test_a_unit_on_anything_but_an_epoch_is_rejected(wire_type: WireType) -> Non
         Field(wire_key="x", column="X", wire_type=wire_type, unit=WireUnit.NS)
 
 
+def test_a_field_records_a_declared_conversion() -> None:
+    size = Field(
+        wire_key="x", column="Size", wire_type=WireType.LONG, declared_type=WireType.STRING
+    )
+    assert (size.wire_type, size.declared_type) == (WireType.LONG, WireType.STRING)
+    assert _price().declared_type is None
+
+
+def test_a_declared_conversion_to_the_same_type_is_rejected() -> None:
+    with pytest.raises(ValueError, match="'x': a declared conversion from long to itself"):
+        Field(wire_key="x", column="X", wire_type=WireType.LONG, declared_type=WireType.LONG)
+
+
 # Membership.
 
 
@@ -146,6 +160,24 @@ def test_an_enum_param_without_values_is_rejected() -> None:
 def test_values_on_a_non_enum_param_are_rejected() -> None:
     with pytest.raises(ValueError, match="'limit': an enum needs values"):
         Param(name="limit", kind=ParamKind.INTEGER, values=("1",))
+
+
+def test_a_timestamp_param_keeps_its_unit() -> None:
+    since = Param(name="timestamp.gte", kind=ParamKind.TIMESTAMP, unit=WireUnit.NS)
+    assert since.unit is WireUnit.NS
+
+
+def test_a_timestamp_param_without_a_unit_is_rejected() -> None:
+    with pytest.raises(ValueError, match="'timestamp': a timestamp needs a unit"):
+        Param(name="timestamp", kind=ParamKind.TIMESTAMP)
+
+
+@pytest.mark.parametrize(
+    "kind", [k for k in ParamKind if k not in {ParamKind.TIMESTAMP, ParamKind.ENUM}]
+)
+def test_a_unit_on_anything_but_a_timestamp_param_is_rejected(kind: ParamKind) -> None:
+    with pytest.raises(ValueError, match="'p': a timestamp needs a unit"):
+        Param(name="p", kind=kind, unit=WireUnit.MS)
 
 
 # Source.
@@ -279,6 +311,15 @@ def test_a_rest_path_keeps_its_result_key_and_params() -> None:
     )
     path = RestPath(key="/v1/last/crypto/{from}/{to}", fields=(), result_key="last", params=params)
     assert (path.result_key, path.params) == ("last", params)
+
+
+def test_a_rest_path_whose_body_is_its_rows_has_no_result_key() -> None:
+    path = RestPath(key="/v1/marketstatus/now", fields=(), result_key=None)
+    assert path.result_key is None
+
+
+def test_the_envelope_keys() -> None:
+    assert {"status", "request_id", "next_url", "count"} == ENVELOPE_KEYS
 
 
 def test_query_parameters_need_no_placeholder() -> None:

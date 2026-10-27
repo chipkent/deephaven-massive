@@ -19,8 +19,20 @@ uv run pytest tests/test_layout.py -q      # one file, no coverage, debugger-fri
 uv build                                   # sdist and wheel
 ```
 
-The refresh commands (`uv run python -m deephaven_massive._massive.refresh [--check | --fetch]`)
-arrive with the `PLAN.md` package PC3a, which adds them here.
+The wire schemas (`src/deephaven_massive/_massive/spec/*.json`) are generated from the vendored
+snapshot of Massive's published specifications (`_massive/refresh/snapshot/`):
+
+```bash
+uv run python -m deephaven_massive._massive.refresh           # regenerate spec/*.json; no network
+uv run python -m deephaven_massive._massive.refresh --fetch   # replace the snapshot with the live sources
+uv run pytest tests/massive/refresh -q                        # the parity test and every refresh gate
+```
+
+To take a vendor change, run `--fetch`, then the plain refresh, and review the snapshot diff,
+the `spec/*.json` diff, and any hand-input lines in one pull request. When a gate stops the
+refresh it prints each problem (gate, path, key, vendor description); fix it with a lexicon,
+`NAMES`, `UNITS`, `PARAM_UNITS`, or `EXCLUSIONS` entry and its reason, never by editing the
+generated file. `--check` (a live drift report) arrives with the `PLAN.md` package PC3c.
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.

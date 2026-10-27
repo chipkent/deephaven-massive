@@ -10,9 +10,25 @@ from types import ModuleType
 import pytest
 
 from deephaven_massive import _massive
+from deephaven_massive._massive import spec
 from deephaven_massive._massive.net import errors
+from deephaven_massive._massive.spec import types
 
-EXPECTED_INTERFACE = ["WireAuthError", "WireEntitlementError", "WireError"]
+EXPECTED_INTERFACE = [
+    "DriftReport",
+    "Field",
+    "ParamKind",
+    "RestPath",
+    "Source",
+    "Transport",
+    "WireAuthError",
+    "WireEntitlementError",
+    "WireError",
+    "WireType",
+    "WireUnit",
+    "source",
+    "sources",
+]
 
 
 def test_all_is_exactly_the_interface() -> None:
@@ -23,6 +39,12 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.WireError is errors.WireError
     assert _massive.WireAuthError is errors.WireAuthError
     assert _massive.WireEntitlementError is errors.WireEntitlementError
+    assert _massive.source is spec.source
+    assert _massive.sources is spec.sources
+    for name in ("DriftReport", "Field", "ParamKind", "RestPath", "Source", "Transport"):
+        assert getattr(_massive, name) is getattr(types, name)
+    assert _massive.WireType is types.WireType
+    assert _massive.WireUnit is types.WireUnit
 
 
 def test_every_lazy_name_is_in_all_and_none_is_bound() -> None:

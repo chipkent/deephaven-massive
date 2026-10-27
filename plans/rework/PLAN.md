@@ -1170,8 +1170,8 @@ timestamp-like integers (68 of them untagged) and about 50 short keys.
 - [ ] The parity test passes byte for byte.
 - [ ] For documented REST paths: documented − (DESIGN § 8 ∪ § 8.12) = ∅ at the pinned
       snapshot; any residue goes to the owner before merge.
-- [ ] For documented REST paths: documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪
-      ignored). Channels and prefixes arrive in PC3a2.
+- [ ] For documented REST paths: documented = generated ⊎ excluded ⊎ (deprecated ∪ draft).
+      Channels and prefixes arrive in PC3a2.
 - [ ] Negative tests for G1–G4; a fixture exercises each `TYPE_FIXES` entry.
 - [ ] A test checks every "not documented in `llms.txt`" exclusion against the snapshot's
       `llms.txt`.
@@ -1237,7 +1237,7 @@ prefix half of G4, G5–G7).
 **Acceptance criteria.**
 - [ ] Parity for all three files.
 - [ ] For every documented path, channel, and prefix: documented − (DESIGN § 8 ∪ § 8.12) = ∅,
-      and documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored).
+      and documented = generated ⊎ excluded ⊎ (deprecated ∪ draft).
 - [ ] Negative tests for G5 (a type disagreement, including stocks `dv` against futures `dv`)
       and G6 (`s` → `Shares`).
 - [ ] All 37 channels and every documented prefix are accounted for.

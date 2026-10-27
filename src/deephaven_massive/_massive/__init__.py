@@ -16,6 +16,11 @@ imports only the standard library, `urllib3`, `websockets`, `certifi`, `orjson`,
 Interface:
     - `WireError`, `WireAuthError`, `WireEntitlementError`: the errors every client raises;
       `deephaven_massive._errors.from_wire` turns each into its public counterpart.
+    - `source`, `sources`: the generated description of each REST path (and, later, each
+      WebSocket channel and flat-file prefix), loaded once from the committed `spec/*.json`.
+    - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
+      `DriftReport`: the value types of that description. A `RestPath`'s parameters are
+      `Param`s, reached through `RestPath.params`.
 
 Names resolve lazily on first access (PEP 562), so importing this package imports none of
 its clients' dependencies, and never Deephaven.
@@ -23,7 +28,10 @@ its clients' dependencies, and never Deephaven.
 Example:
     ::
 
-        from deephaven_massive._massive import WireError
+        from deephaven_massive._massive import Transport, WireError, source
+
+        trades = source(Transport.REST, "/v3/trades/{stockTicker}")
+        assert trades.field("Price").wire_key == "price"
 
         try:
             raise WireError("HTTP 503 from GET /v3/trades/AAPL", status=503)
@@ -35,9 +43,19 @@ from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
 __all__ = [
+    "DriftReport",
+    "Field",
+    "ParamKind",
+    "RestPath",
+    "Source",
+    "Transport",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WireType",
+    "WireUnit",
+    "source",
+    "sources",
 ]
 
 # Each name of the interface, and the module that defines it.
@@ -45,6 +63,16 @@ _EXPORTS: dict[str, str] = {
     "WireAuthError": "deephaven_massive._massive.net.errors",
     "WireEntitlementError": "deephaven_massive._massive.net.errors",
     "WireError": "deephaven_massive._massive.net.errors",
+    "source": "deephaven_massive._massive.spec",
+    "sources": "deephaven_massive._massive.spec",
+    "DriftReport": "deephaven_massive._massive.spec.types",
+    "Field": "deephaven_massive._massive.spec.types",
+    "ParamKind": "deephaven_massive._massive.spec.types",
+    "RestPath": "deephaven_massive._massive.spec.types",
+    "Source": "deephaven_massive._massive.spec.types",
+    "Transport": "deephaven_massive._massive.spec.types",
+    "WireType": "deephaven_massive._massive.spec.types",
+    "WireUnit": "deephaven_massive._massive.spec.types",
 }
 
 # Type checkers read the imports, so they see each name's real type and flag a name outside
@@ -54,6 +82,17 @@ if TYPE_CHECKING:
         WireAuthError,
         WireEntitlementError,
         WireError,
+    )
+    from deephaven_massive._massive.spec import source, sources
+    from deephaven_massive._massive.spec.types import (
+        DriftReport,
+        Field,
+        ParamKind,
+        RestPath,
+        Source,
+        Transport,
+        WireType,
+        WireUnit,
     )
 else:
 

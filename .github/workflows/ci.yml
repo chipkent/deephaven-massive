@@ -107,6 +107,18 @@ jobs:
         run: uv python install 3.11
       - name: Build wheel and sdist
         run: uv build --python 3.11
+      - name: Check the wheel ships the generated wire schema and no refresh code
+        # The refresh and its vendored snapshot run from a source checkout only; the generated
+        # spec/*.json are package data the library loads at run time.
+        run: |
+          unzip -Z1 dist/*.whl > "$RUNNER_TEMP/wheel-files.txt"
+          grep -qx 'deephaven_massive/_massive/spec/rest.json' "$RUNNER_TEMP/wheel-files.txt" \
+            || { echo "the wheel lacks spec/rest.json" >&2; exit 1; }
+          if grep -q '^deephaven_massive/_massive/refresh/' "$RUNNER_TEMP/wheel-files.txt"; then
+            echo "the wheel contains the refresh package:" >&2
+            grep '^deephaven_massive/_massive/refresh/' "$RUNNER_TEMP/wheel-files.txt" >&2
+            exit 1
+          fi
       - name: Set up JDK 17 (the import smoke test starts an embedded Deephaven server)
         uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:

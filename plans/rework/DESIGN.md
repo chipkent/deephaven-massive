@@ -7,7 +7,8 @@ work package in `PLAN.md`. It changes only by owner decision.
 
 The design was checked against Massive's OpenAPI spec (`https://api.massive.com/openapi`,
 147 paths), its WebSocket spec (`https://api.massive.com/specs/websocket.json`, 37 channels),
-`llms.txt`, and the flat-file dataset and overview pages, all as of 2026-10-26;
+`llms.txt` and the REST pages it links, and the flat-file dataset and overview pages, all as
+of 2026-10-26;
 `deephaven-core` 42.7 (Python package; Java behaviour from the `deephaven-core` `main` branch);
 and the massive.com documentation as of 2026-10-23. Facts that could not be verified from those
 sources are marked **UNVERIFIED**, carry the conservative handling that applies, and are
@@ -896,9 +897,15 @@ Excluded items fall into two lists.
 - **Executable exclusions** are entries `(kind, item, reason)` of `EXCLUSIONS` in
   `_massive/refresh/exclusions.py`, the single list for REST paths, WebSocket channels, and
   flat-file prefixes. Each names an item present in a vendor source at the pinned snapshot
-  (the OpenAPI spec, `websocket.json`, `llms.txt`, or the flat-file pages). An entry that names
-  an item the snapshot lacks fails the refresh as stale (G4,
-  [section 19.4](#194-generated-schemas)).
+  (the OpenAPI spec, `websocket.json`, `llms.txt` and the REST pages it links, or the
+  flat-file pages). An entry that names an item the snapshot lacks fails the refresh as stale
+  (G4, [section 19.4](#194-generated-schemas)). A path the OpenAPI spec itself marks
+  deprecated (`x-polygon-deprecation`) or draft (`x-polygon-draft`) is accounted for by the
+  spec and is never an entry; the rows below that name such paths record why nothing uses
+  them. An entry whose reason is that no documentation page names the item is marked
+  `undocumented`, and the refresh checks that claim against the snapshot both ways: a page
+  whose `**Endpoint:**` line names the item fails it, as does a documented entry no page
+  names.
 - **Documentation-only exclusions** name endpoints that never existed or are absent from every
   vendor source. They are recorded here so nobody re-adds them, and never appear in
   `EXCLUSIONS`. A row of the first table that the snapshot shows absent from every vendor
@@ -907,14 +914,14 @@ Excluded items fall into two lists.
 | Endpoint | Reason |
 |---|---|
 | `/v3/reference/dividends`, `/v3/reference/splits` | Deprecated; replaced by `/stocks/v1/*`. |
-| `/benzinga/v1/news` | Sunset; replaced by `/benzinga/v2/news`. |
-| `/vX/reference/financials` | Sunset; replaced by `/stocks/financials/v1/*`. |
 | `/v1/summaries` | Not in the documentation index. |
-| Crypto `/book` REST endpoint; WebSocket `XL2` | Deprecated and sunset. |
+| Crypto `/book` REST endpoint; WebSocket `XL2` | Deprecated and sunset (the REST path is marked deprecated in the OpenAPI spec). |
 | WebSocket `LV`; Launchpad hosts and paths | Product retired. |
 | WebSocket `/futures/{venue}` | Not documented: the futures WebSocket pages list `/futures` only. |
-| `/v1/historic/*`, `/v2/ticks/*` | Deprecated 2022; replaced by `/v3/trades` and `/v3/quotes`. |
-| Form 5, per-asset `/v1/exchanges`, `/options/v3/*`, `/v1/reference/ipos`, `/stocks/dev/*`, `vX_0` paths, and every path marked `x-polygon-draft` or `x-polygon-ignore` | Present only in the OpenAPI spec; not announced or documented in `llms.txt`. |
+| `/v1/historic/*`, `/v2/ticks/*` | Deprecated 2022 (marked deprecated in the OpenAPI spec); replaced by `/v3/trades` and `/v3/quotes`. |
+| Form 5, per-asset `/v1/exchanges` (`/stocks`, `/options`, `/forex`, `/crypto`), `/options/v3/*`, `/v1/reference/ipos`, `/stocks/dev/*`, `vX_0` paths | Present only in the OpenAPI spec; no page `llms.txt` links names them (`undocumented`). |
+| `/v1/reference/sec/filings*` | Marked `x-polygon-draft` in the OpenAPI spec and undocumented. |
+| `/v1/indicators/{sma,ema,rsi,macd}/{optionsTicker,indicesTicker,fxTicker}` | The same URL, fields, and parameters as the `{stockTicker}` template, which serves every asset class by the ticker's prefix; a refresh test checks they still repeat it. The `{cryptoTicker}` templates document no `adjusted` parameter, so they are generated in their own right. |
 | Single-ticker v2 snapshots `/v2/snapshot/.../tickers/{t}` | Covered by `snapshots(symbols)` with the `tickers` filter. |
 | `/v3/snapshot/options/{u}/{o}` | Covered by `m.options.snapshots`; identical fields. |
 
@@ -923,11 +930,18 @@ Documentation only:
 | Endpoint | Reason |
 |---|---|
 | `/benzinga/v1/transcripts` | Never existed. |
+| `/benzinga/v1/news` | Sunset; replaced by `/benzinga/v2/news`. Absent from the OpenAPI spec and the documentation at the pinned snapshot. |
+| `/vX/reference/financials` | Sunset; replaced by `/stocks/financials/v1/*`. Absent from the OpenAPI spec and the documentation at the pinned snapshot. |
+
+`x-polygon-ignore` excludes nothing. It is the vendor's hint to its own SDK generator not to
+emit a second client method for one URL (the per-asset-class templates of `/v3/trades`,
+`/v3/quotes`, `/v2/last/trade`, and the indicators); each such template has its own
+documentation page, with its own documented fields, so it is generated like any other path.
 
 **Coverage.** Everything documented is generated or excluded, and everything generated is
 used or listed as still to be declared:
 
-- **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored)**, tested against the
+- **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft)**, tested against the
   pinned snapshot in `tests/massive/refresh/test_generate.py`;
 - **generated ⊆ used ∪ undeclared**, tested in `tests/test_catalog.py`. Every generated item
   is used by a declared dataset or listed in some undeclared file. The file
@@ -1105,9 +1119,9 @@ beside the table, and the indicator `timestamp` fields are its first entries.
 |---|---|
 | WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); `LULD`/`NOI`; options `T`/`Q`; futures `T`/`Q`; indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` (`t`; `XT`/`XQ` received time `r`) | ms (verified on each documentation page) |
 | WebSocket `FMV` `t` | Documented as ns; the documentation sample is `1678220098130` (13 digits, ms). Rule, FMV only: `t >= 10**17` means ns, otherwise ms. Every ns value after 1973-03-03 is at least 10^17, and an ms value reaches 10^17 only in the year 3,170,000, so the rule cannot misclassify. Logged once; tested. |
-| REST `/v3/trades`, `/v3/quotes`, `/v2/last/trade`, `/v2/last/nbbo`; snapshot `last_updated`, `fmv_last_updated`; futures `/trades` and `/quotes` (`timestamp`, `bid_timestamp`, `ask_timestamp`); futures aggregates `window_start` (documented as "nanosecond Unix timestamp") | ns |
-| REST aggregates `t`; `/prev` `t`; indicators `timestamp`; futures snapshot `last_minute.last_updated` | ms |
-| REST forex `/v1/last_quote` `timestamp`; crypto `/v1/last` `timestamp` | **UNVERIFIED** (`unverified-ms`). The spec tags both `last.timestamp` fields `IMilliseconds`, which agrees; registered as ms with a fixture test. |
+| REST `/v3/trades`, `/v3/quotes`, `/v2/last/trade`, `/v2/last/nbbo`; snapshot `last_updated`, `fmv_last_updated`; futures `/trades` and `/quotes` (`timestamp`, `bid_timestamp`, `ask_timestamp`); futures aggregates `window_start` (documented as "nanosecond Unix timestamp"); futures snapshot `last_quote` and `last_trade` times; stocks v2 snapshot `updated`, `lastTrade.t`, `lastQuote.t` | ns |
+| REST aggregates `t`; `/prev` `t`; indicators `timestamp`; futures snapshot `last_minute.last_updated`; every v2 snapshot `min.t`; forex and crypto v2 snapshot `updated`, forex `lastQuote.t`, crypto `lastTrade.t` (13-digit documentation samples) | ms |
+| REST forex `/v1/last_quote` `timestamp`; crypto `/v1/last` `timestamp`; forex `/v1/conversion` `last.timestamp` (the same `last` object as `/v1/last_quote`) | **UNVERIFIED** (`unverified-ms`). The spec tags the `last.timestamp` fields `IMilliseconds`, which agrees; registered as ms with a fixture test. |
 | Flat files: all tick files; `*_aggs_v1.window_start`; `us_indices/values_v1.timestamp` (the documentation says ms, the sample is 19 digits) | ns |
 
 **The timestamp routine.** One routine in `_timeunits.py` converts every epoch-integer
@@ -1844,8 +1858,9 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport): load once under a lock
   types.py           Transport, Source(key, transport, fields, memberships),
                      Membership(kind, group, position, projection), RestPath(Source + template,
-                     result key, params), Field(wire key, column, WireType, unit, required),
-                     Param, ParamKind, WireType, WireUnit, DriftReport(extra, missing)
+                     result key, params), Field(wire key, column, WireType, unit, required,
+                     declared type), Param(name, kind, in path, values, unit), ParamKind,
+                     WireType, WireUnit, DriftReport(extra, missing), ENVELOPE_KEYS
   rest.json  ws.json  flatfiles.json        generated, committed
 rest/                imports net, spec
   __init__.py        RestClient, Page, to_batch
@@ -1871,13 +1886,15 @@ refresh/             build time only; excluded from the wheel; may import any of
   __main__.py        [--check | --fetch]; the plain run regenerates spec/*.json
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
   overrides.py       NAMES, KINDS, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
-                     TRANSPORT_ONLY, RESULT_KEYS, VENUES
+                     TRANSPORT_ONLY, RESULT_KEYS, PARAM_UNITS, VENUES
   exclusions.py      EXCLUSIONS (kind, item, reason), the executable rows of section 8.12
-  docs.py            flat-file "Columns" tables, overview prefix tables, llms.txt
+  docs.py            flat-file "Columns" tables, overview prefix tables, llms.txt and the
+                     endpoint line of each REST page it links
   generate.py        snapshot -> spec/*.json: flatten, representation rules, type lattice, names, gates
   fetch.py           download and store canonically, manifest.json
   drift.py           live-against-snapshot comparison, unaccounted items, deprecations
-  snapshot/          openapi.json, websocket.json, llms.txt, flat-file pages, manifest.json
+  snapshot/          openapi.json, websocket.json, llms.txt, rest/ (the REST pages llms.txt
+                     links), flat-file pages, manifest.json
 ```
 
 The package is spelled `flatfiles` because PEP 8 forbids the underscore in a package name; the
@@ -1960,9 +1977,9 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise.
 - **Query encoding.** Path parameters are percent-encoded into the template. Query values, by
   the parameter's `ParamKind`: an enum by its value, `bool` as `true`/`false`, a `date` as
-  ISO-8601, an aware `datetime` as exact integer nanoseconds computed from `timedelta` days,
-  seconds, and microseconds (never through a float) for a nanosecond timestamp parameter and as
-  ISO-8601 otherwise, and a sequence joined with commas (the `.any_of` form). A naive
+  ISO-8601, an aware `datetime` as an exact integer count of the parameter's `Param.unit`
+  computed from `timedelta` days, seconds, and microseconds (never through a float) for a
+  `TIMESTAMP` parameter and as ISO-8601 otherwise, and a sequence joined with commas (the `.any_of` form). A naive
   `datetime` raises `ValueError`. `None` values are omitted. Names arrive already in wire form
   (`strike_price.gte`); the dot mapping of [section 9](#9-filters) happens before the client.
 - **Paging.** `pages` follows each page's `next_url`, which carries the cursor and the query.
@@ -1990,8 +2007,13 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   standard-library path: the codec counts the depth before decoding, so a hostile body can
   never exhaust the C stack of the calling thread (a JVM thread has 1 MB); orjson enforces its
   own limit of 1024. The page's rows come from the `RestPath`'s result key
-  (`results`, or the `RESULT_KEYS` entry). A single object is wrapped as one row; a bare JSON
-  list (`/v1/marketstatus/upcoming`) is the rows, with `status=""` and `request_id=None`. A
+  (`results`, or the `RESULT_KEYS` entry, which may be a dotted path such as
+  `results.values`, where a missing step means no rows under the same `OK`/`DELAYED` rule).
+  A single object is wrapped as one row. A path whose result key is `None` has no envelope
+  around its rows: a bare JSON list (`/v1/marketstatus/upcoming`) is the rows, with
+  `status=""` and `request_id=None`, and a JSON object (`/v1/open-close/...`) is one row once
+  the `ENVELOPE_KEYS` (`status`, `request_id`, `next_url`, `count`) are dropped from it before
+  drift detection; the generator leaves the same keys out of such a path's fields. A
   missing result key is an empty page only when `status` is `OK` or `DELAYED`. The envelope's
   `status` and `request_id` are kept on the `Page`, so callers can read `DELAYED`.
 - **Batches.** `to_batch` turns a page's rows into one Arrow batch of the path's generated
@@ -2124,11 +2146,27 @@ verification, never a column list.
 
 **Sources and flattening.**
 
-- **REST.** Every `openapi.json` path that is not deprecated, draft, or ignored and not in
-  `EXCLUSIONS`. The generator resolves `$ref`, merges `allOf`, flattens nested objects into
-  dotted wire paths below the result key (`results` unless `RESULT_KEYS` names another), keeps
-  fields in spec order, and records the parameters (wire name, `ParamKind`, enum values, path or
-  query).
+- **REST.** Every `openapi.json` path that is not deprecated (`x-polygon-deprecation`) or
+  draft (`x-polygon-draft`) and not in `EXCLUSIONS`; `x-polygon-ignore` neither excludes nor
+  generates a path ([section 8.12](#812-excluded-endpoints)). The generator resolves `$ref`,
+  merges `allOf`, treats a `oneOf` or `anyOf` with exactly one branch as that branch, flattens
+  nested objects into dotted wire paths below the result key (`results` unless `RESULT_KEYS`
+  names another key, a dotted path of keys such as `results.values`, or `None` for a body that
+  is itself the rows), keeps fields in spec order, and records the parameters (wire name,
+  `ParamKind`, enum values, path or query, and the unit of a `TIMESTAMP`). A JSON-object body
+  without a result key is one row, and its `ENVELOPE_KEYS` are left out of the fields; one of
+  those keys whose type is not the envelope's (`status`, `request_id`, `next_url` strings,
+  `count` an integer) stops the refresh, since dropping it could lose data. A response with no
+  rows where its result key says stops the refresh until a `RESULT_KEYS` entry says where they
+  are.
+- **REST parameters.** A name ending in `.any_of`, or an array, is `LIST` (sent comma-joined,
+  even when its values come from an `enum`); any other `enum` is `ENUM`; booleans, integers, and numbers are `BOOLEAN`, `INTEGER`, and `NUMBER`; a
+  timestamp-like string parameter (base name `timestamp`, `*_timestamp`, `updated`,
+  `*_updated`, `window_start`, `window_end`, or `*_time`, the names of gate G3) takes its
+  `PARAM_UNITS` entry: a unit makes it `TIMESTAMP` in that unit (`Param.unit`), and "not an
+  epoch" makes it `DATE`; a string with `format: date` or `date-time`, a choice of formats, or
+  a base name `date`, `*_date`, `*_utc`, or `as_of` is `DATE`; any other string is `STRING`.
+  The `.gt`, `.gte`, `.lt`, and `.lte` variants share their base name's entry.
 - **WebSocket.** Every `websocket.json` channel not in `EXCLUSIONS`, keyed `(cluster,
   channel)` and spelled `"<cluster>/<channel>"` as its `Source.key` (`"stocks/T"`,
   `"futures/AM"`), since stocks, options, and futures share channel names. Fields are its
@@ -2180,21 +2218,23 @@ names a source or field the snapshot lacks fails the refresh as stale (G4).
 | Kind | Where | What | Example |
 |---|---|---|---|
 | Lexicon | `lexicon.py` | `SHAPES` maps each object shape (aggregate row; snapshot `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`; each WebSocket channel; each futures object) to its lexicon. A lexicon translates a short key to Massive's own long form; identity entries cover short real words (`id`, `cik`, `url`, `low`, `fmv`, `mic`). | trade lexicon `p` → `price`, `t` → `sip_timestamp`; segment `min` → `minute` |
-| `NAMES` | `overrides.py` | `{(source, wire key): (long name, reason)}` for a column the lexicon cannot name | stocks `A`/`AM` `dv` → `decimal_volume`, `dav` → `accumulated_decimal_volume`; futures `A`/`AM` `dv` → `dollar_volume`; `av`, `op`, aggregate `a`, aggregate `z` |
+| `NAMES` | `overrides.py` | `{(source, wire key): (long name, reason)}` for a column the lexicon cannot name: a short key Massive spells out nowhere, or a vendor name the library reserves (`symbol`) | stocks `A`/`AM` `dv` → `decimal_volume`, `dav` → `accumulated_decimal_volume`; futures `A`/`AM` `dv` → `dollar_volume`; `av`, `op`, aggregate `a`, aggregate `z`; open-close `symbol` → `ticker` (or `pair` for a currency pair) |
 | `KINDS` | `overrides.py` | `{kind: {group: [sources]}}`: the sources of one dataset kind, grouped per asset class, in source order. Every dataset with a stream or flat-file source has a kind, WebSocket-only `luld`, `imbalances`, and `fmv` included. | `trades: {stocks: [/v3/trades/{stockTicker}, /v2/last/trade/{stocksTicker}, (stocks, T), us_stocks_sip/trades_v1], crypto: […]}` |
 | `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values, `last_updated` → `timestamp` |
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp"; with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
-| `TYPE_FIXES` | `overrides.py` | vendor type **errors** only: a declared, field-scoped conversion that the decoder applies deliberately (see **Declared conversions** below); each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | flat-file `conditions` `integer` → `int-array`; forex `x` (documented as a quoted decimal string) → `long`; crypto `XT` `i` (`integer`) → `string`; snapshot `lastQuote` sizes → `double` |
+| `TYPE_FIXES` | `overrides.py` | vendor type **errors** only: a declared, field-scoped conversion that the decoder applies deliberately (see **Declared conversions** below); each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23. No REST field needs one at the pinned snapshot. | flat-file `conditions` `integer` → `int-array`; forex `x` (documented as a quoted decimal string) → `long`; crypto `XT` `i` (`integer`) → `string` |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, column): reason}`: columns legitimately on one transport | `AccumulatedVolume` (WebSocket only) |
-| `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results` | `/v1/last/crypto` → `last` |
+| `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
+| `PARAM_UNITS` | `overrides.py` | `{(path, base parameter): (unit, reason)}`: the unit of every timestamp-like string parameter, or "not an epoch" (sent as date or date-time text) | `/v3/trades` `timestamp` → ns; indicators `timestamp` → ms; benzinga `last_updated` → not an epoch |
 | `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, the executable rows of section 8.12 | `/v1/summaries` |
 
 **The naming rule.** A field's column is derived by splitting its wire path into segments and
 dropping the result key, translating each short key through the lexicon of its shape, applying
 `NAMES`, and PascalCase-joining the segments (`prevDay.vw` becomes `PrevDayVwap`). Names are
-never derived from descriptions. The generator never emits `Symbol` or `Underlying`, and emits
-`Timestamp` only where the vendor's long name is `timestamp`. The WebSocket-only
+never derived from descriptions. The generator never emits `Symbol` or `Underlying` (gate G2
+stops on either, so a vendor `symbol` needs a `NAMES` entry), and emits `Timestamp` only where
+the vendor's long name is `timestamp`. The WebSocket-only
 names are `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
 aggregate `z` → `AverageTradeSize`, `dav` → `AccumulatedDecimalVolume`, stocks `dv` →
 `DecimalVolume`, and futures `dv` → `DollarVolume`; the snapshot object `min` gives
@@ -2205,16 +2245,21 @@ reviewer, on:
 
 - **G1:** a short key (three characters or fewer, no underscore) with no lexicon, identity, or
   `NAMES` entry;
-- **G2:** two keys of one source producing one column;
+- **G2:** two keys of one source producing one column, or a key producing the reserved
+  `Symbol` or `Underlying`;
 - **G3:** a timestamp-like integer field with no `UNITS` entry. ISO date-time text fields
   (`last_updated` on benzinga and futures products, `timestamp` on futures schedules) are
   excluded; the representation rules decide them. G3 runs on the long name, after the
   lexicon and `NAMES`: an integer field is timestamp-like when it has a unit tag, a doc type of
   `timestamp - integer`, or a long name matching `timestamp`, `*_timestamp`, `updated`,
   `*_updated`, `window_start`, `window_end`, or `*_time` (the bar lexicon gives `s` and `e`
-  as `window_start` and `end_timestamp`, while a trade's `s` is `size`);
-- **G4:** a stale hand entry: a `NAMES`, `UNITS`, `TYPE_FIXES`, `PROJECTIONS`, `KINDS`,
-  `RESULT_KEYS`, or `EXCLUSIONS` entry naming a source or field the snapshot lacks;
+  as `window_start` and `end_timestamp`, while a trade's `s` is `size`). A timestamp-like
+  string REST parameter (by its base name) with no `PARAM_UNITS` entry fails the same gate;
+- **G4:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict, `TYPE_FIXES`,
+  `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry naming a source,
+  field, or parameter the snapshot lacks, or claiming what the snapshot contradicts (a type fix
+  whose declared type the spec no longer gives, a tag conflict the tag no longer contradicts,
+  an exclusion of a path the spec already marks deprecated or draft);
 - **G5 (type agreement):** within one kind, one column name joins to one `WireType`, unless a
   `TYPE_FIXES` entry resolves it; the message prints both keys' descriptions, because a
   conflict is first treated as a possible naming error (stocks and futures `dv` are exactly
@@ -2247,7 +2292,7 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
 ```
 
 **Declared conversions.** A `TYPE_FIXES` entry names one field of one source, the wire form,
-and the generated type, and it is recorded on the generated `Field`. The decoder applies that
+and the generated type, and it is recorded on the generated `Field` as `declared_type`. The decoder applies that
 conversion deliberately: forex `x` arrives as a quoted decimal string (`"48"`) and is parsed to
 `long`. A value that does not parse (`"4.8"`, `"x"`) is an unconvertible value and fails loudly
 like any other ([section 19.5](#195-runtime-drift)). Every entry has a fixture test of both the
@@ -2345,13 +2390,19 @@ uv run python -m deephaven_massive._massive.refresh --check    # live: report dr
 
 The command runs from a source checkout; `refresh/` is not in the wheel. The parity test in
 `tests/massive/refresh/test_generate.py` regenerates `spec/*.json` from the snapshot and
-requires it byte for byte, and checks documented = generated ⊎ excluded ⊎ (deprecated ∪ draft
-∪ ignored).
+requires it byte for byte, and checks documented = generated ⊎ excluded ⊎ (deprecated ∪
+draft).
 
 **The snapshot is stored canonically.** `fetch.py` writes JSON with `sort_keys`, `indent=1`,
 and a final newline, and text with trailing whitespace stripped and a final newline, so refresh
 diffs read line by line and no hook exception is needed. `manifest.json` records the fetch date
-and the SHA-256 of the fetched bytes and of the stored file.
+and, per file, its URL and the SHA-256 of the fetched bytes and of the stored file. Besides the
+specs, `--fetch` stores every REST page `llms.txt` links, under `snapshot/rest/`, because
+`llms.txt` names pages, not paths: each page's `**Endpoint:**` line is what ties the
+documentation to an OpenAPI path. The documentation host rate-limits a burst of page requests
+with HTTP 429, which the fetch waits out (`Retry-After`, else 2 to 32 s, five times); any other
+failure stops it and leaves the old snapshot in place. The snapshot (about 3 MB, 165 files)
+ships in the sdist and never in the wheel.
 
 **`--check`** downloads the live `openapi.json`, `websocket.json`, `llms.txt`, and flat-file
 pages and overviews, compares them semantically with the snapshot (`refresh/drift.py`), prints a
@@ -2400,7 +2451,7 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   [section 4.2](#42-test-layout), and the `_massive` boundary and layers of
   [section 19](#19-wire-clients-and-the-spec-snapshot).
 - **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
-  byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft ∪ ignored), and refresh gates
+  byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and refresh gates
   G1–G7), and `tests/test_catalog.py` passes (catalog gates C1–C7, generated ⊆ used ∪
   undeclared) ([section 19.4](#194-generated-schemas)). They read only vendored files, never
   the network.
@@ -2785,7 +2836,7 @@ before 1.0.
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
-| 1 | Unit of REST forex `/v1/last_quote` `timestamp` and crypto `/v1/last` `timestamp` | Registered as ms (`unverified-ms`); the spec tags both `last.timestamp` fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/test_timeunits.py`: ms and ns fixtures; the out-of-range path raises | `tests/test_timeunits_integration.py`: one request each; the converted `Instant` is within 1 day of now |
+| 1 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags both `last.timestamp` fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/test_timeunits.py`: ms and ns fixtures; the out-of-range path raises | `tests/test_timeunits_integration.py`: one request each; the converted `Instant` is within 1 day of now |
 | 2 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/test_timeunits.py`: both magnitudes convert correctly | `tests/namespaces/test_stocks_integration.py` (Business key): one FMV frame converts to a current `Instant` |
 | 3 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/test_flat_files_integration.py` (S3 credentials): one key per venue |
 | 4 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/test_hosts.py`: both replies | `tests/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |

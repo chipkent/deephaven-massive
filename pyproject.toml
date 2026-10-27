@@ -80,6 +80,9 @@ only-include = ["src", "tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deephaven_massive"]
+# The refresh (and its vendored snapshot of Massive's specifications) runs from a source
+# checkout only; the wheel ships the generated spec/*.json as package data.
+exclude = ["src/deephaven_massive/_massive/refresh"]
 
 # ---------------------------------------------------------------------------------------------
 # Ruff
