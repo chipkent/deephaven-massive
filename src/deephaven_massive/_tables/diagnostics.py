@@ -17,6 +17,14 @@ keeping the latest row per key. Each row replaces the whole row for its key; the
 in, first out, and the session queues each snapshot while holding its
 `registry_lock`, so rows land in the order the registry changed. Once the writer is stopped,
 rows are no longer queued.
+
+The module also holds the session's `DriftRegistry`, the policy half of runtime schema drift.
+The wire package detects drift (each decoder returns a `DriftReport` of the fields a payload had
+beyond its documented schema, and the documented fields it lacked); every transport hands those
+reports to the registry, which logs one WARNING per (dataset, transport, field) and keeps the
+`SchemaDrift` text of each stream and connection, a column of both tables. Drift never fails a
+read: a missing key, a value that does not convert, or a timestamp out of bounds fails loudly
+where it is found, and never reaches the registry.
 """
 
 from __future__ import annotations
@@ -39,20 +47,25 @@ from deephaven_massive._tables.liveness import QueueWorker, new_scope
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
+    from collections.abc import Hashable
+
     from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Transport
+    from deephaven_massive._massive import DriftReport
 
 __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
+    "SCHEMA_DRIFT_SHOWN",
     "STREAMS",
     "STREAM_KEYS",
     "ConnectionRow",
     "ConnectionState",
     "Diagnostics",
+    "DriftRegistry",
     "StreamRow",
     "StreamState",
     "StreamUpdate",
@@ -64,6 +77,9 @@ logger = logging.getLogger(__name__)
 
 _SYMBOLS_SHOWN: Final = 20
 """How many symbols the `Symbols` column lists before it truncates."""
+
+SCHEMA_DRIFT_SHOWN: Final = 200
+"""The longest `SchemaDrift` text, in characters; a longer one is cut and ends in `…`."""
 
 
 class ConnectionState(StrEnum):
@@ -117,6 +133,7 @@ CONNECTIONS: Final = Schema(
             ("NextReconnectAt", _T),
             ("UpdatedAt", _T),
             ("LastError", _S),
+            ("SchemaDrift", _S),
         )
     ),
 )
@@ -144,6 +161,7 @@ STREAMS: Final = Schema(
             ("State", _S),
             ("Error", _S),
             ("CreatedAt", _T),
+            ("SchemaDrift", _S),
         )
     ),
 )
@@ -175,6 +193,9 @@ class ConnectionRow:
         next_reconnect_at: When the next reconnect attempt is due.
         updated_at: When the row was written.
         last_error: The last error text.
+        schema_drift: The drift seen on the connection, as `DriftRegistry.record` writes it
+            (`channel:field+` for an extra field, `channel:field-` for a missing one); null
+            while there is none.
     """
 
     transport: Transport
@@ -194,6 +215,7 @@ class ConnectionRow:
     next_reconnect_at: int | None = None
     updated_at: int | None = None
     last_error: str | None = None
+    schema_drift: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -216,6 +238,9 @@ class StreamRow:
         state: The stream state.
         error: The failure or warning text.
         created_at: When the stream was created.
+        schema_drift: The stream's drift, as `DriftRegistry.record` writes it
+            (`transport:field+` for an extra field, `transport:field-` for a missing one);
+            null while there is none. Separate from `error`, so drift never hides a failure.
     """
 
     stream_id: int
@@ -232,6 +257,7 @@ class StreamRow:
     state: StreamState = StreamState.RUNNING
     error: str | None = None
     created_at: int
+    schema_drift: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -252,6 +278,9 @@ class StreamUpdate:
         path: The cluster path.
         error: Warning text for the `Error` column.
         clear_error: True to set `Error` back to null; takes precedence over `error`.
+
+    `SchemaDrift` is not set here: `SessionCore.record_stream_drift` records a stream's drift
+    and writes its row in one step, so concurrent reports cannot leave an older text behind.
     """
 
     rows_published: int | None = None
@@ -314,6 +343,153 @@ def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
     shown = ", ".join(symbols[:_SYMBOLS_SHOWN])
     hidden = len(symbols) - _SYMBOLS_SHOWN
     return len(symbols), f"{shown} (+{hidden} more)" if hidden > 0 else shown
+
+
+class DriftRegistry:
+    """The session's record of runtime schema drift: the WARNINGs and the `SchemaDrift` text.
+
+    Massive's data can differ from the documented schema until the library's schemas are
+    regenerated. The wire decoders report each payload's differences as a `DriftReport`: the
+    fields it had that the schema does not declare (dropped) and the declared fields it lacked
+    (null). Every transport routes those reports here:
+
+    - `report` logs one WARNING per (dataset, transport, field) for the life of the session.
+      A static verb (`fetch()`, `history()`) reports drift only this way.
+    - `report_statuses` logs one WARNING per (REST path, status) for a REST envelope status
+      outside the documented ones; the page's rows are kept.
+    - `record` adds a report to the drift of one stream or connection, its owner, and returns
+      the owner's new `SchemaDrift` text when it changed, for the caller to write into the
+      owner's diagnostics row. `forget` drops an owner once it has left its registry.
+
+    Drift is never a failure: a missing key, a value that does not convert, and a timestamp out
+    of bounds fail where they are found and never reach the registry.
+
+    `SessionCore` creates one per session, and any library thread calls it. Thread-safe: one
+    leaf lock guards its sets, held for set operations and for building a text, never for
+    logging, a Deephaven call, or a wait. `record` and `forget` may therefore be called with
+    the session's `registry_lock` held. `report` and `report_statuses` must not be: they log,
+    and a log handler may do I/O.
+
+    Every text `record` returns is built under the lock from the owner's entries at that
+    moment, but two calls for one owner can still return in either order, so the row write
+    must be ordered with the call. A stream's row is: `SessionCore.record_stream_drift` calls
+    `record` and writes the row in one `registry_lock` section, and calls `forget` when the
+    stream leaves the registry. A connection's row is written only by its loop thread, which
+    is also where its frames, and so its drift, are decoded.
+
+    Example:
+        ::
+
+            from deephaven_massive._enums import Transport
+            from deephaven_massive._massive import DriftReport
+            from deephaven_massive._tables.diagnostics import DriftRegistry
+
+            drift = DriftReport(extra=frozenset({"halted"}), missing=frozenset({"trf_id"}))
+            registry = DriftRegistry()
+            registry.report("stocks.trades", Transport.REST, drift)  # two WARNINGs
+            registry.report("stocks.trades", Transport.REST, drift)  # nothing new: no log
+            registry.record(7, Transport.REST.value, drift)  # "REST:halted+, REST:trf_id-"
+            registry.record(7, Transport.REST.value, drift)  # unchanged: None
+    """
+
+    __slots__ = ("_lock", "_owners", "_statuses", "_warned")
+
+    def __init__(self) -> None:
+        """Start with no drift seen."""
+        self._lock = threading.Lock()
+        self._warned: set[tuple[str, Transport, str]] = set()
+        self._statuses: set[tuple[str, str]] = set()
+        self._owners: dict[Hashable, frozenset[str]] = {}
+
+    def report(self, dataset: str, transport: Transport, drift: DriftReport) -> None:
+        """Log a WARNING for each field of `drift` not yet reported for the dataset and transport.
+
+        Ignores `drift.statuses`; see `report_statuses`.
+
+        Args:
+            dataset: The dataset name, such as `"stocks.trades"`.
+            transport: The transport the payload arrived on.
+            drift: The payload's drift, as a wire decoder returned it.
+        """
+        changes = [(field, True) for field in drift.extra]
+        changes += [(field, False) for field in drift.missing]
+        with self._lock:
+            new = [
+                (f, extra) for f, extra in changes if (dataset, transport, f) not in self._warned
+            ]
+            self._warned.update((dataset, transport, f) for f, _ in new)
+        for field, extra in sorted(new):
+            if extra:
+                logger.warning(
+                    "%s: %s field %r is not in the schema; it is dropped (schema drift)",
+                    dataset,
+                    transport.value,
+                    field,
+                )
+            else:
+                logger.warning(
+                    "%s: %s field %r is missing; it reads as null (schema drift)",
+                    dataset,
+                    transport.value,
+                    field,
+                )
+
+    def report_statuses(self, path: str, statuses: frozenset[str]) -> None:
+        """Log a WARNING for each undocumented REST envelope status not yet seen for the path.
+
+        Args:
+            path: The REST path template, such as `"/v3/trades/{stockTicker}"`.
+            statuses: The page's statuses outside the documented ones (`DriftReport.statuses`).
+        """
+        with self._lock:
+            new = sorted(status for status in statuses if (path, status) not in self._statuses)
+            self._statuses.update((path, status) for status in new)
+        for status in new:
+            logger.warning(
+                "%s: undocumented response status %r; the rows are kept (schema drift)",
+                path,
+                status,
+            )
+
+    def record(self, owner: Hashable, prefix: str, drift: DriftReport) -> str | None:
+        """Add a report to one owner's drift and return its new `SchemaDrift` text, if changed.
+
+        Each extra field becomes the entry `<prefix>:<field>+` and each missing one
+        `<prefix>:<field>-`. An owner's entries only accumulate: drift seen once stays shown.
+
+        Args:
+            owner: The stream's id, or the connection's key (a tuple), whose row shows the
+                drift.
+            prefix: The transport's value (`"WS"`, `"REST"`) for a stream, or the channel
+                (`"T"`, `"AM"`) for a connection.
+            drift: The payload's drift; its `statuses` are not shown.
+
+        Returns:
+            The owner's entries, sorted, joined by `", "`, and cut to `SCHEMA_DRIFT_SHOWN`
+            characters (ending in `…` when cut); None when the report added no entry.
+        """
+        entries = {f"{prefix}:{field}+" for field in drift.extra}
+        entries |= {f"{prefix}:{field}-" for field in drift.missing}
+        with self._lock:
+            seen = self._owners.get(owner, frozenset())
+            if entries <= seen:
+                return None
+            seen |= entries
+            self._owners[owner] = seen
+            # Built under the lock, so the text is the owner's entries at this moment.
+            text = ", ".join(sorted(seen))
+        if len(text) > SCHEMA_DRIFT_SHOWN:
+            text = text[: SCHEMA_DRIFT_SHOWN - 1] + "…"
+        return text
+
+    def forget(self, owner: Hashable) -> None:
+        """Drop an owner's drift once it has left its registry; its last row keeps the text.
+
+        Args:
+            owner: The owner `record` was given; unknown owners are ignored.
+        """
+        with self._lock:
+            self._owners.pop(owner, None)
 
 
 _Item: TypeAlias = "ConnectionRow | StreamRow | threading.Event"

@@ -153,6 +153,7 @@ def stocks_plan(block_size: int = 1 << 20) -> ReadPlan:
         to_ns=lambda values: values,
         session=None,
         block_size=block_size,
+        required=frozenset({"ticker"}),
     )
 
 
@@ -602,7 +603,7 @@ def test_a_drop_after_the_first_block_fails_loudly_and_repeats_no_row(
     seen: list[int] = []
 
     def read(file: FlatFile) -> None:
-        for batch in file.batches(stocks_plan(block_size=16 << 10)):
+        for batch, _ in file.batches(stocks_plan(block_size=16 << 10)):
             seen.extend(batch["SequenceNumber"].to_pylist())
             delivered.set()
 
@@ -807,7 +808,7 @@ _SLOW_DOWN = (
 def _symbols(file: FlatFile | None) -> list[str]:
     assert file is not None
     with file:
-        return [s for batch in file.batches(stocks_plan()) for s in batch["Symbol"].to_pylist()]
+        return [s for batch, _ in file.batches(stocks_plan()) for s in batch["Symbol"].to_pylist()]
 
 
 def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(
