@@ -134,12 +134,14 @@ def _read(name: str) -> str:
 def _load_descriptions() -> Descriptions:
     """Return the descriptions file, reading it the first time. The caller holds `_lock`.
 
+    A `ValueError` or `TypeError` from `parse_descriptions` (a malformed file) propagates, and
+    nothing is cached.
+
     Returns:
         The parsed file.
 
     Raises:
-        ValueError: If the file is malformed (see `parse_descriptions`) or names a transport
-            that has no generated schema file.
+        ValueError: If the file names a transport that has no generated schema file.
     """
     loaded = _cache.descriptions
     if loaded is None:
@@ -154,7 +156,7 @@ def _load_descriptions() -> Descriptions:
 def _load(transport: Transport) -> Mapping[str, Source]:
     """Return a transport's sources, loading them the first time. The caller holds `_lock`.
 
-    A `ValueError` from `parse` or `_load_descriptions` propagates.
+    A `ValueError` or `TypeError` from `parse` or `_load_descriptions` propagates.
 
     Args:
         transport: The transport.
@@ -188,8 +190,9 @@ def sources(transport: Transport) -> Mapping[str, Source]:
 
     A `LookupError`, if the transport has no generated file in this version of the library,
     propagates. So does a `ValueError` (a value that breaks a type's invariants, or a
-    description of a source or wire key the schema lacks, either of which means a generated
-    file was edited by hand), and the transport stays unloaded.
+    description of a source or wire key the schema lacks) or a `TypeError` (a member of the
+    wrong type), either of which means a generated file was edited by hand, and the transport
+    stays unloaded.
 
     Args:
         transport: The transport, such as `Transport.REST`.
@@ -236,8 +239,8 @@ def provenance() -> Provenance:
     A generated document cites it so a reader can check a column against the vendor's own
     documentation. The first call reads the descriptions file and loads every transport it
     names a URL for (as `sources` would), so that each URL is checked against a generated
-    source; every later call returns the same value. A `ValueError` from that loading
-    propagates.
+    source; every later call returns the same value. A `ValueError` or `TypeError` from that
+    loading propagates, and nothing is cached.
 
     Returns:
         The snapshot's fetch date and, by `(transport, source key)`, the vendor URL of every
