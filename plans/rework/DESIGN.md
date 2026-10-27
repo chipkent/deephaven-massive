@@ -228,7 +228,7 @@ _session.py              MassiveSession: builds the catalog, the core, and the s
                          (section 6)
 _query.py                the six query classes and their verbs, through the core's ports (section 7)
 _namespaces/
-  __init__.py            empty
+  __init__.py            docstring only
   base.py                the shared dataset factory
   stocks.py options.py futures.py indices.py forex.py crypto.py
   reference.py indicators.py economy.py partners.py      namespace class + DATASETS
@@ -1099,7 +1099,7 @@ All return `Query`.
 snapshot. `ALL` is not accepted here (the endpoint requires tickers). Its catalog record is
 named `reference.snapshots` and is declared in `_namespaces/reference.py` with
 `asset_class=None` (each ticker's prefix selects its class,
-§ 10), so `catalog.datasets()` finds it; `m.streams()` and messages show that name.
+§ 10), so `datasets()` in `_datasets/catalog.py` finds it; `m.streams()` and messages show that name.
 
 ### 8.12 Excluded endpoints
 
@@ -1243,7 +1243,7 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
 - A `Table` must have a `Symbol` column. Streams listen to it and subscribe or unsubscribe as
   rows are added or removed. Polls re-read it each cycle. Its rows may use any accepted input
   form: every consumer reads the table through one canonicalized view
-  (`symbols.canonical_view`), so `last_by()`'s `where_in` filter and the subscribed topics
+  (`canonical_view` in `_tables/watchlist.py`), so `last_by()`'s `where_in` filter and the subscribed topics
   agree on `C:EURUSD` whether the row says `EUR/USD` or `C:EURUSD`. A row that is not a valid
   symbol for the class matches nothing and is logged once at WARNING.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
@@ -1755,7 +1755,7 @@ logged once.
   [section 7](#7-query-classes-and-verbs).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
   row buffer once. The rows arrive keyed by long-form column; the flush renames them
-  (`schema.rename`), converts them (`_datasets/timestamps.py`), and builds one Arrow batch in the dataset
+  (`rename` in `_datasets/schema.py`), converts them (`_datasets/timestamps.py`), and builds one Arrow batch in the dataset
   schema. The timestamp bound is applied as a vectorized mask: rows that fail it fail only the
   streams that would have received them ([section 19.5](#195-runtime-drift)) and are dropped
   from the batch. Rejected rows never enter a buffer. The batch is converted once with
@@ -1845,7 +1845,7 @@ flat-file only.
 
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
 nothing is split between the sources. A dataset without instruments counts as `ALL`.
-`HistoryQuery.history()` makes the choice (`history_source.choose_source`) and then calls one
+`HistoryQuery.history()` makes the choice (`choose_source` in `_datasets/history_source.py`) and then calls one
 transport; the transports only do I/O. The REST predicate depends only on the dataset's REST
 capabilities (`DatasetSpec.has_rest_history`, `has_grouped_daily`), and the `adjusted` check on
 the typed `Request.adjusted`.
@@ -1884,7 +1884,7 @@ operations in this order: the futures session check on the whole block, the `Sym
 plan's converter to nanoseconds (not applied to date-bounded futures, whose files hold exactly
 the requested sessions), and, on the surviving rows only, the rename to long-form names and
 parsing of the list columns (`Conditions`, `Indicators`). `_ingest/flatfiles.py` then applies
-`schema.rename` and the `_datasets/timestamps.py` routine. No block is converted to Python objects. A
+`rename` in `_datasets/schema.py` and the `_datasets/timestamps.py` routine. No block is converted to Python objects. A
 file's surviving rows become one static Deephaven table per 16 blocks of data and at the end of
 the file (usually one table per file, since each table carries a fixed JVM-heap cost), and the
 tables are merged.
@@ -2029,7 +2029,7 @@ without the GIL.
   is behind the lock or has a single owner.
 - `ExecutionContext` is captured at session construction. Every library thread enters it before
   any Deephaven call, each time through a fresh Python wrapper of the captured Java context
-  (`liveness.entered`). The `deephaven` wrapper stores its restore handle on the wrapper object,
+  (`entered` in `_tables/liveness.py`). The `deephaven` wrapper stores its restore handle on the wrapper object,
   so two threads entering one shared wrapper at once make the first to exit install the other
   thread's previous (empty) context on itself.
 - `LivenessScopeStack` is thread-local, so result scopes are opened and closed on the caller
@@ -2858,7 +2858,7 @@ Data on the wire can differ from the committed schema until the next refresh. **
 row lacked or held as null; `statuses`: REST envelope statuses outside the
 documented ones). A decoder never raises for drift; REST and flat files raise
 `WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
-session's `diagnostics.DriftRegistry` (a leaf lock, WARNINGs logged after release) and the
+session's `DriftRegistry` in `_tables/diagnostics.py` (a leaf lock, WARNINGs logged after release) and the
 routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
 
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
@@ -3267,7 +3267,7 @@ document already reflects them.
     and the API key stays out of objects users routinely leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
     its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares the key
-    columns its sources carry, and `schema.rename` maps them to `Symbol`, `Timestamp`, and
+    columns its sources carry, and `rename` in `_datasets/schema.py` maps them to `Symbol`, `Timestamp`, and
     `Underlying`. Names are never derived from descriptions, and the refresh gates and the catalog
     gates fail on a wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The
     final names: `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,

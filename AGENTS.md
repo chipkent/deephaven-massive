@@ -86,10 +86,10 @@ nothing is kept or shimmed for compatibility.
    a helper package outside the rule (a test module inside one is still checked); there is
    one, `tests/_fakes/`. No directory under `tests/data/` starts with `_`. The only other files
    allowed are `tests/conftest.py`, `tests/test_layout.py`, and `tests/test_readme.py`.
-   `tests/test_layout.py` enforces this; a new exception needs owner approval and a change to `DESIGN.md` § 4.2. The
-   import roots are the repository root for pytest (`pythonpath = ["."]`) and `src/` for mypy
-   (`mypy_path = ["src"]`): test code imports helpers as `tests._fakes…`, so `tests/massive/`
-   can never shadow the top-level `massive` package.
+   `tests/test_layout.py` enforces this; a new exception needs owner approval and a change to
+   `DESIGN.md` § 4.2. The import roots are the repository root for pytest
+   (`pythonpath = ["."]`) and `src/` for mypy (`mypy_path = ["src"]`): test code imports helpers
+   as `tests._fakes…`, so `tests/massive/` can never shadow the top-level `massive` package.
 8. **Linter ignores need a reason and, if new, owner approval.** Every entry in the ruff ignore
    lists and every inline `# noqa` or `# type: ignore[code]` carries a reason comment. Adding a
    rule to any ignore list, or a new `noqa` category, requires owner approval recorded in the

@@ -258,7 +258,7 @@ def _fixtures() -> list[PurePosixPath]:
     [
         ("_config.py", "test_config.py"),
         ("_datasets/catalog.py", "datasets/test_catalog.py"),
-        ("_hosts.py", "test_hosts.py"),
+        ("_ingest/hosts.py", "ingest/test_hosts.py"),
         ("_namespaces/stocks.py", "namespaces/test_stocks.py"),
         ("_massive/rest/client.py", "massive/rest/test_client.py"),
         ("_massive/rest/_paging.py", "massive/rest/test_paging.py"),
@@ -291,7 +291,7 @@ def test_mirror_of_maps_a_dunder_module_to_its_bare_name(module: str, expected: 
     ("test_file", "expected"),
     [
         ("test_config.py", "test_config.py"),
-        ("test_hosts_integration.py", "test_hosts.py"),
+        ("ingest/test_hosts_integration.py", "ingest/test_hosts.py"),
         ("namespaces/test_stocks_integration.py", "namespaces/test_stocks.py"),
     ],
 )
@@ -300,8 +300,8 @@ def test_unit_test_of_maps_live_tests_to_their_mirror(test_file: str, expected: 
 
 
 def test_a_live_test_without_a_module_is_an_orphan() -> None:
-    found = orphans(_paths("_hosts.py"), _paths("test_ws_integration.py"))
-    assert found == ["tests/test_ws_integration.py"]
+    found = orphans(_paths("_ingest/hosts.py"), _paths("ingest/test_ws_integration.py"))
+    assert found == ["tests/ingest/test_ws_integration.py"]
 
 
 # The privacy rule.
@@ -363,8 +363,8 @@ def test_every_test_file_mirrors_a_source_module() -> None:
 
 
 def test_a_test_file_without_a_module_is_an_orphan() -> None:
-    found = orphans(_paths("_config.py"), _paths("test_config.py", "test_hosts.py"))
-    assert found == ["tests/test_hosts.py"]
+    found = orphans(_paths("_config.py"), _paths("test_config.py", "ingest/test_hosts.py"))
+    assert found == ["tests/ingest/test_hosts.py"]
 
 
 def test_test_catalog_is_a_plain_mirror() -> None:

@@ -324,7 +324,7 @@ class MassiveSession:
 
         Returns:
             The `connections` table, keyed by `Transport`, `AssetClass`, and `Family`;
-            its columns are `diagnostics.CONNECTIONS`.
+            its columns are `CONNECTIONS` in `_tables/diagnostics.py`.
         """
         self._core.require_open()
         return self._core.diagnostics.connections
@@ -338,7 +338,7 @@ class MassiveSession:
 
         Returns:
             The `streams` table, keyed by `StreamId`; its columns are
-            `diagnostics.STREAMS`.
+            `STREAMS` in `_tables/diagnostics.py`.
         """
         self._core.require_open()
         return self._core.diagnostics.streams

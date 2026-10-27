@@ -96,18 +96,17 @@ flowchart LR
 The release planned PRs (dashed) start only on the owner's go-ahead; nothing else depends on
 them.
 
-**Critical path:** final-design → legacy-deletion → final-names → wire-package-scaffold →
-rest-client → rest-wire-schema → field-descriptions → websocket-and-flat-file-wire-schemas →
-generated-catalog-and-schemas → websocket-layer → the asset-class dataset planned PRs →
-finish-rework → plan-retirement. The release (release-workflow, release-0.1.0, release-tag)
-follows only on the owner's go-ahead. **Chains alongside it:** layer-packages → layer-rules →
-runtime-drift-reporting → generated-catalog-and-schemas, so rest-transport and websocket-layer
-also come after layer-rules; rest-transport and websocket-layer → result-column-descriptions →
-column-reference-pages → finish-rework, beside the dataset planned PRs;
-wire-package-scaffold → websocket-client → websocket-layer; flat-file-history →
-flat-file-s3-shared-rules → api-drift-check. field-descriptions, flat-file-s3-shared-rules,
-and api-drift-check touch only `_massive` and do not wait for the layer planned PRs.
-wire-client-dependencies may merge at any time.
+**Critical path** (the longest chain of open planned PRs, nine): layer-packages →
+layer-rules → runtime-drift-reporting → generated-catalog-and-schemas → rest-transport and
+websocket-layer → result-column-descriptions → column-reference-pages → finish-rework →
+plan-retirement. The release (release-workflow, release-0.1.0, release-tag) follows only on the
+owner's go-ahead. **Chains alongside it, each with one planned PR of slack:**
+field-descriptions → websocket-and-flat-file-wire-schemas → generated-catalog-and-schemas (two
+PRs beside the path's three before it), and rest-transport and websocket-layer → the dataset
+planned PRs → finish-rework (one PR beside the path's two). Also alongside: flat-file-history →
+flat-file-s3-shared-rules → api-drift-check → finish-rework. field-descriptions,
+flat-file-s3-shared-rules, and api-drift-check touch only `_massive` and do not wait for the
+layer planned PRs. wire-client-dependencies may merge at any time.
 
 ---
 
@@ -159,8 +158,9 @@ These rules apply to every planned PR. Planned-PR sections only add to them.
 9. **Coverage.** 100% statement and branch coverage over `src/deephaven_massive`. `pragma: no
    cover` is allowed only with a written reason on the same line and owner approval in the PR.
    Never write dead defensive branches to satisfy the gate; delete the branch instead.
-10. **Deephaven invariants.** `AGENTS.md` lists them. A planned PR that touches
-    `src/deephaven_massive/_*.py` restates the invariants it relies on in its PR description.
+10. **Deephaven invariants.** `AGENTS.md` lists them. A planned PR that touches library code
+    under `src/deephaven_massive/` outside `_massive/` restates the invariants it relies on in
+    its PR description.
 11. **No live testing as design input** ([DESIGN § 22](DESIGN.md#22-decisions)). Unit
     tests use the fakes in `tests/_fakes/` and fixtures shaped from the vendor's spec examples
     and documentation samples. Live tests belong to live-integration-suite alone.
@@ -1400,7 +1400,9 @@ websocket-layer.
   `members(kind)`), `_datasets/schema.py` (`dh_type` and `col_defs` move out),
   `_datasets/symbols.py` (`canonical_view` and the `Table` branch of `normalize` move out),
   `_namespaces/base.py` (`query_class(spec)`, `bar_query_class`, the `Table` branch of
-  `build_query`), `_query.py`, `tests/test_layout.py`, `DESIGN.md`, `AGENTS.md`.
+  `build_query`), `_namespaces/__init__.py` (gains its docstring: the file is empty today, and
+  the docstring-only rule for package `__init__.py` files covers it), `_query.py`,
+  `tests/test_layout.py`, `DESIGN.md`, `AGENTS.md`.
 
 **Tasks.**
 - [ ] `SessionClients(core)` owns every per-session wire client and connection (the
@@ -1772,7 +1774,7 @@ duplicate the wire package's `ParamKind` and `Transport`; both go.
       optional per role, as DESIGN § 19.4 states), and the role paths (`fetch_path`,
       `history_path`, `grouped_daily_path`, `extra_paths`); `has_rest_history` and
       `has_grouped_daily` read the role paths.
-- [ ] `schema.rename` and `dataset_schema` (DESIGN § 19.4), reading memberships and their
+- [ ] `rename` in `_datasets/schema.py` and `dataset_schema` (DESIGN § 19.4), reading memberships and their
       projections from `Source.memberships`, never from `refresh/`; a `from_request` key becomes a
       constant column; the cache is computed outside its lock and published under it.
 - [ ] Delete the hand tick schemas, core-skeleton's key maps, `ColumnOverride`, the SDK flattening,
@@ -1942,7 +1944,7 @@ threads).
 - [ ] Requests from the `DatasetSpec`: the role path's `RestPath`, its path segments, the symbol
       parameter, the `start`/`end` wire pair, the validated `filters`, `Request.adjusted` sent as
       `adjusted` when not None, the page size; `limit` is the total-row cap.
-- [ ] Batches from `to_batch`, renamed (`schema.rename`) and converted (the timestamp routine);
+- [ ] Batches from `to_batch`, renamed (`rename` in `_datasets/schema.py`) and converted (the timestamp routine);
       drift to the `DriftRegistry`; never more than one page of rows held.
 - [ ] Errors per DESIGN § 13.4: `from_wire`; the rate-limit WARNING once per session; fan-out
       404 drops one symbol; `poll()` data failures → `publish_failure`.

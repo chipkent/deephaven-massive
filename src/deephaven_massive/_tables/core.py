@@ -27,8 +27,11 @@ one `SessionCore`, which queries and namespaces share. The core owns:
   not implemented yet, so they raise `NotImplementedError`, and so do the verbs that need
   them.
 
-The module also holds the update-graph checks every entry point runs (`on_update_graph`,
-`has_execution_context`, `has_script_query_scope`) and the process-wide stream-id allocator.
+The module also holds the process-wide stream-id allocator and three context checks.
+`on_update_graph` runs at every entry point: `MassiveSession()`, every verb (through
+`SessionCore.require_verb_thread`), and `close()`. `has_execution_context` and
+`has_script_query_scope` run only when a `MassiveSession` is constructed, which is the one place
+an execution context is captured.
 
 Lock order: the update-graph (UG) lock, then `registry_lock`. A stream is registered under
 `registry_lock` before it opens (with a session-minted id), then opened with no lock held; a
@@ -263,7 +266,7 @@ class FlatFileTransport(Protocol):
     """The flat-file transport, provided by `SessionCore.flat_file_transport()`.
 
     It only reads files: `HistoryQuery.history()` has already chosen flat files as the source
-    (`history_source.choose_source`).
+    (`choose_source` in `_datasets/history_source.py`).
     """
 
     def history(
@@ -282,7 +285,7 @@ class FlatFileTransport(Protocol):
                 symbols (never a reactive table).
             window: The bounds under the class's day rules: a half-open `TimeRange`, or the
                 `FuturesSessions` of date-bounded futures.
-            dates: The partition dates to read (`history_source.partition_dates`).
+            dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
         """
         ...
 

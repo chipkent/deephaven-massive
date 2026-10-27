@@ -10,7 +10,7 @@ Partner datasets stay nested by vendor, one class each:
 - `m.partners.fable` (`_Fable`): European consumer-spending merchant aggregates and hierarchy.
 
 This module owns the partners' `DatasetSpec`s, exported as `DATASETS` and composed into the
-catalog by `catalog.datasets()`.
+catalog by `datasets()` in `_datasets/catalog.py`.
 
 Status: no datasets are declared yet. `DATASETS` is empty and the vendor classes have no dataset
 methods.

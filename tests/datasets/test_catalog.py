@@ -198,7 +198,7 @@ def test_specs_are_identity_hashed() -> None:
     assert len({a, b}) == 2
 
 
-def test_sdk_params_block_is_generated_and_empty_until_p3() -> None:
+def test_sdk_params_block_is_generated_and_still_empty() -> None:
     source = Path(catalog.__file__).read_text()
     begin = source.index("# --- BEGIN GENERATED SDK_PARAMS")
     end = source.index("# --- END GENERATED SDK_PARAMS")

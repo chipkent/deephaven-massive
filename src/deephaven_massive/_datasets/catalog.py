@@ -122,19 +122,19 @@ class DatasetSpec:
     Example:
         ::
 
-            from deephaven_massive._datasets import schema
             from deephaven_massive._datasets.catalog import DatasetSpec
+            from deephaven_massive._datasets.schema import TRADES
             from deephaven_massive._datasets.timestamps import TimeUnit
             from deephaven_massive._enums import AssetClass, Transport
             from deephaven_massive._query import StreamHistoryLatestQuery
 
             ms, ns = TimeUnit.MILLISECONDS, TimeUnit.NANOSECONDS
-            TRADES = DatasetSpec(
+            STOCK_TRADES = DatasetSpec(
                 name="stocks.trades",
                 query_class=StreamHistoryLatestQuery,
                 asset_class=AssetClass.STOCKS,
-                schema=schema.TRADES.schema,
-                key_maps={Transport.WS: schema.TRADES.key_maps[Transport.WS]},
+                schema=TRADES.schema,
+                key_maps={Transport.WS: TRADES.key_maps[Transport.WS]},
                 fetch_method="get_last_trade",
                 history_method="list_trades",
                 channels={None: "T"},

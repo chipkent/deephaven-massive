@@ -23,8 +23,8 @@ The verbs delegate the transport work to three interfaces, one per transport, de
 `_tables/core.py` and provided by the session core's factory hooks: `RestTransport` (`fetch`,
 `poll`, REST `history`), `StreamTransport` (opening a WebSocket stream), and
 `FlatFileTransport` (flat-file `history`).
-`history()` chooses its source itself (`history_source.choose_source`) and then calls one
-transport, so the transports only do I/O.
+`history()` chooses its source itself (`choose_source` in `_datasets/history_source.py`) and
+then calls one transport, so the transports only do I/O.
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
@@ -138,8 +138,8 @@ def _read_symbol_table(
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
     it reads, so the symbols are one consistent snapshot. Runs on the caller thread, inside the
     session's execution context, with no library lock held. Each row is canonicalized as the
-    stream verbs do (`symbols.symbol_canonicalizer`): a row that is not a valid symbol of the
-    class is ignored and logged once at WARNING.
+    stream verbs do (`symbol_canonicalizer` in `_datasets/symbols.py`): a row that is not a
+    valid symbol of the class is ignored and logged once at WARNING.
 
     Args:
         core: The session core, for its execution context.
@@ -330,7 +330,7 @@ class StreamQuery(QueryBase):
         row is the latest from a symbol that was watched when it arrived; a group keeps that
         row after the symbol is removed, until a watched symbol ticks in the group. The table
         may hold any accepted spelling (`EUR/USD` for `C:EURUSD`): it is matched through
-        `symbols.canonical_view`. `last_by()` never seeds
+        `canonical_view` in `_datasets/symbols.py`. `last_by()` never seeds
         from REST: use `snapshots(symbols).poll(n)` for current state on every plan. A `by`
         that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
         unknown column raises `ValueError`.

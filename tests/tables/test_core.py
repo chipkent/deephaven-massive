@@ -1,21 +1,30 @@
-"""Tests for `SessionCore`: opening streams, the record lifetime, and interrupt windows."""
+"""Tests for `SessionCore`, the engine behind every session.
+
+They cover opening streams, the record lifetime, closers, collection, the update-graph guards,
+failures reported to the core, and the interrupt windows of a verb's bookkeeping.
+"""
 
 from __future__ import annotations
 
 import contextlib
 import gc
+import importlib
 import inspect
 import itertools
 import logging
 import sys
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import new_table
+from deephaven import new_table, time_table
 from deephaven.column import string_col
+from deephaven.dherror import DHError
+from deephaven.table_listener import listen
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
@@ -32,6 +41,8 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
 )
 from deephaven_massive._tables.liveness import (
+    Reaper,
+    ResultRegistry,
     StreamHandle,
     entered,
     make_result,
@@ -40,6 +51,7 @@ from deephaven_massive._tables.liveness import (
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
+    import functools
     from collections.abc import Callable, Iterator
     from types import FrameType
 
@@ -48,6 +60,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.request import Request, StreamKey
+    from deephaven_massive._tables.liveness import ResultRecord
     from tests._fakes.stream import FakeStreamTransport
 
 TIMEOUT = 30.0
@@ -65,6 +78,10 @@ def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> Str
     q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
     assert isinstance(q, StreamQuery)
     return q
+
+
+def label(session: dm.MassiveSession) -> str:
+    return session._core.label
 
 
 # --- Opening a stream: registered first, one open per key ------------------------------------
@@ -747,3 +764,478 @@ def test_an_interrupt_after_make_result_releases_the_result_scope(
     gc.collect()
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # nothing keeps the stream alive
     assert core._streams == {}
+
+
+# --- Lifecycle: closers, collection, guards, and failures reported to the core ---------------
+
+
+def test_a_verb_racing_close_does_not_reuse_the_closed_stream(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = massive_session._core
+    q = stream_query(massive_session)
+    first = q.blink()
+    guard = core.require_verb_thread
+
+    def guard_then_close() -> None:
+        # The verb passes the guard, then another thread closes the session.
+        guard()
+        core.close()
+
+    monkeypatch.setattr(core, "require_verb_thread", guard_then_close)
+    with pytest.raises(dm.MassiveError, match=f"^{label(massive_session)} is closed$"):
+        q.append_only()
+    assert len(fake_streams.opened) == 1
+    assert core.results.held() == 1  # no hold was taken on the closed stream
+    massive_session.release(first)
+
+
+def test_a_session_collected_unclosed_runs_its_closers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ran: list[str] = []
+
+    def broken() -> None:
+        raise RuntimeError("cannot close")
+
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-unclosed"))
+    name = label(m)
+    m._core.on_close(broken)
+    m._core.on_close(lambda: ran.append("closed"))
+    reaper = m._core._reaper.thread
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+        del m
+        gc.collect()
+        reaper.join(TIMEOUT)
+    assert not reaper.is_alive()
+    assert ran == ["closed"]
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            f"{name} was garbage-collected without close(); closing its connections and pollers",
+        ),
+        (logging.ERROR, f"{name}: a transport failed to close"),
+    ]
+
+
+def test_a_closed_session_does_not_run_its_closers_again_when_collected(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ran: list[str] = []
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-closed"))
+    m._core.on_close(lambda: ran.append("closed"))
+    reaper = m._core._reaper.thread
+    m.close()
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+        del m
+        gc.collect()
+        reaper.join(TIMEOUT)
+    assert not reaper.is_alive()
+    assert ran == ["closed"]
+    assert caplog.records == []
+
+
+def test_closers_run_and_failures_are_logged(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    ran: list[str] = []
+
+    def failing() -> None:
+        raise RuntimeError("cannot close")
+
+    massive_session._core.on_close(failing)
+    massive_session._core.on_close(lambda: ran.append("second"))
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.core"):
+        massive_session.close()
+    assert ran == ["second"]
+    assert "a transport failed to close" in caplog.text
+
+
+def test_a_reaper_that_cannot_start_stops_the_diagnostics_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[Diagnostics] = []
+    real = Diagnostics
+
+    def spying(exec_ctx: ExecutionContext, name: str) -> Diagnostics:
+        diagnostics = real(exec_ctx, name)
+        created.append(diagnostics)
+        return diagnostics
+
+    def no_thread(exec_ctx: ExecutionContext, name: str) -> Reaper:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(_core, "Diagnostics", spying)
+    monkeypatch.setattr(_core, "Reaper", no_thread)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    (diagnostics,) = created
+    diagnostics.thread.join(TIMEOUT)
+    assert not diagnostics.thread.is_alive()  # stopped, with its tables released
+
+
+def test_background_threads_stop_when_the_session_is_collected() -> None:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    reaper = m._core._reaper.thread
+    writer = m._core.diagnostics.thread
+    del m
+    gc.collect()
+    reaper.join(TIMEOUT)
+    writer.join(TIMEOUT)
+    assert not reaper.is_alive()
+    assert not writer.is_alive()
+
+
+def test_a_session_with_released_results_is_collected() -> None:
+    # Regression: a background loop that kept its last job or row referenced while waiting
+    # for the next one kept the SessionCore alive, so its finalizer never stopped the threads.
+    # A second, independent fake is needed here because the `fake_streams` fixture is bound to
+    # the fixture session, and monkeypatch would hold this session's core until teardown.
+    fakes = importlib.import_module("tests._fakes.stream")
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="collected-session"))
+    core = m._core
+    fake = fakes.FakeStreamTransport(core)
+    vars(core)["stream_transport"] = lambda: fake
+    # A weak reference, not a finalizer that sets an Event: garbage collection can run the
+    # finalizer while this thread holds the Event's internal lock, which would deadlock.
+    alive = weakref.ref(core)
+    reaper, writer = core._reaper.thread, core.diagnostics.thread
+    result = stream_query(m).blink()
+    del result, core, m
+    gc.collect()
+    assert fake.shutdown[1].wait(TIMEOUT)
+    # The reaper finishes its job just after the shutdown callback; collect until it lets go.
+    pause = threading.Event()  # never set; only paces the bounded wait below
+    for _ in range(200):
+        gc.collect()
+        if alive() is None:
+            break
+        pause.wait(0.05)
+    assert alive() is None
+    reaper.join(TIMEOUT)
+    writer.join(TIMEOUT)
+    assert not reaper.is_alive()
+    assert not writer.is_alive()
+
+
+def test_a_closer_registered_after_close_runs_at_once(
+    massive_session: dm.MassiveSession,
+) -> None:
+    ran: list[str] = []
+    massive_session.close()
+    massive_session._core.on_close(lambda: ran.append("late"))
+    assert ran == ["late"]
+    massive_session.close()  # idempotent: the late closer does not run again
+    assert ran == ["late"]
+
+
+def test_a_result_keeps_its_session_alive() -> None:
+    # A result that outlives every reference to its session and query must still be released
+    # when it is collected: the release path (registry, reaper, core) lives as long as it does.
+    # An independent fake is needed for the same reason as in the test above.
+    fakes = importlib.import_module("tests._fakes.stream")
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="outliving-result"))
+    core = m._core
+    fake = fakes.FakeStreamTransport(core)
+    vars(core)["stream_transport"] = lambda: fake
+    alive = weakref.ref(core)
+    reaper = core._reaper.thread
+    result = stream_query(m).append_only()
+    del core, m
+    gc.collect()
+    assert alive() is not None
+    assert reaper.is_alive()
+    assert not fake.shutdown[1].is_set()
+    del result
+    gc.collect()
+    assert fake.shutdown[1].wait(TIMEOUT)
+    pause = threading.Event()  # never set; only paces the bounded wait below
+    for _ in range(200):
+        gc.collect()
+        if alive() is None:
+            break
+        pause.wait(0.05)
+    assert alive() is None
+    reaper.join(TIMEOUT)
+    assert not reaper.is_alive()
+
+
+def test_a_failed_stream_is_not_reused(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    q = stream_query(massive_session)
+    first = q.blink()
+    massive_session._core.fail_stream(1, "not authorized")
+    massive_session._core.fail_stream(1, "not authorized")  # its key is already unregistered
+    second = q.blink()
+    assert len(fake_streams.opened) == 2
+    rows = stream_rows()
+    assert [(r["StreamId"], r["State"], r["Error"]) for r in rows] == [
+        (1, "FAILED", "not authorized"),
+        (2, "RUNNING", None),
+    ]
+    massive_session.release(first)  # the failed stream's key already serves stream 2
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    third = q.append_only()
+    assert len(fake_streams.opened) == 2  # still served by stream 2
+    massive_session.release(second)
+    massive_session.release(third)
+    assert fake_streams.shutdown[2].wait(TIMEOUT)
+
+
+def test_the_update_graph_check_precedes_the_closed_check(
+    massive_session: dm.MassiveSession,
+) -> None:
+    q = stream_query(massive_session)
+    massive_session.close()
+    errors: list[BaseException] = []
+    seen = threading.Event()
+
+    def on_update(_update: object, _replay: bool) -> None:
+        if seen.is_set():
+            return
+        for call in (q.blink, massive_session.close, massive_session._core.close):
+            try:
+                call()
+            except ValueError as e:
+                errors.append(e)
+        seen.set()
+
+    scope = new_scope()
+    with scope.open():
+        handle = listen(time_table("PT0.01S"), on_update)
+    assert seen.wait(TIMEOUT)
+    handle.stop()
+    scope.release()
+    assert len(errors) == 3
+
+
+def test_calls_under_the_update_graph_lock_are_rejected(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # The same guard as on an update-graph thread, exercised on this thread (coverage tools
+    # on Python 3.11 do not see lines run on Deephaven's own threads).
+    update_graph = massive_session._core.exec_ctx.update_graph
+    with shared_lock(update_graph):
+        for call in (
+            lambda: dm.MassiveSession(dm.MassiveConfig(api_key="k")),
+            massive_session.close,
+            massive_session._core.close,
+        ):
+            with pytest.raises(ValueError, match="update-graph lock"):
+                call()
+    assert not massive_session._core.closed
+
+
+def test_a_failure_after_the_last_release_is_shown(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # The library released its last result, but a derived table keeps the blink table, and so
+    # the publisher, alive; the transport can still report a failure for that stream.
+    q = stream_query(massive_session)
+    result = q.append_only()
+    user_scope = new_scope()
+    with user_scope.open():
+        derived = result.tail(1)
+    massive_session.release(result)
+    assert [r["State"] for r in stream_rows()] == ["RELEASED"]
+    massive_session._core.fail_stream(1, "not authorized")
+    assert [(r["State"], r["Error"], r["HeldResults"]) for r in stream_rows()] == [
+        ("FAILED", "not authorized", 0)
+    ]
+    assert derived.is_refreshing
+    again = q.blink()  # the released stream's key was already free: a fresh stream opens
+    assert len(fake_streams.opened) == 2
+    assert list(fake_streams.shutdown) == [1, 2]  # the new verb opened stream 2
+    massive_session.release(again)
+    user_scope.release()
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    # The stream has shut down and left the registry: a failure now is only logged.
+    massive_session._core.fail_stream(1, "later")
+    rows = sorted(stream_rows(), key=lambda r: r["StreamId"])
+    assert [(r["StreamId"], r["State"], r["Error"]) for r in rows] == [
+        (1, "FAILED", "not authorized"),
+        (2, "RELEASED", None),
+    ]
+
+
+def test_an_interrupt_while_tracking_releases_the_scope_and_the_hold(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = massive_session._core
+
+    def interrupted(*_args: object) -> ResultRecord:
+        raise KeyboardInterrupt  # delivered on the caller thread right after make_result
+
+    monkeypatch.setattr(ResultRegistry, "track", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session).append_only()
+    # The result scope and the stream hold were both released, so the stream shut down.
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    assert core._streams == {}
+    assert core.results.held() == 0
+
+
+def test_a_result_that_outlives_its_session_is_still_released() -> None:
+    # A result whose release callback does not hold the core (a future poll() table's
+    # poller, for example) can outlive the session. The reaper must outlive it too, or the
+    # result's scope would never be released once it is collected.
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="outliving-poll"))
+    core = m._core
+    released = threading.Event()
+    with entered(core.exec_ctx):
+        result, scope = make_result(lambda: time_table("PT1S"))
+    core.results.track(result, scope, released.set)  # the callback holds nothing of the core
+    alive = weakref.ref(core)
+    reaper = core._reaper.thread
+    del core, m
+    pause = threading.Event()  # never set; only paces the bounded waits below
+    for _ in range(200):
+        gc.collect()
+        if alive() is None:
+            break
+        pause.wait(0.05)
+    assert alive() is None  # the session is gone
+    pause.wait(0.2)
+    assert reaper.is_alive()  # but its reaper waits for the result
+    assert result.is_refreshing
+    del result
+    gc.collect()
+    assert released.wait(TIMEOUT)
+    reaper.join(TIMEOUT)
+    assert not reaper.is_alive()  # and ends with the last result
+
+
+def test_an_unclosed_core_is_collected_by_the_cyclic_collector() -> None:
+    # Each result record's owner callback refers back to the core (record -> partial -> core
+    # -> results -> record), so an unclosed core is collected by the cyclic collector, not by
+    # reference counting. The fake is imported directly, not taken from the `fake_streams`
+    # fixture: that fixture is bound to the fixture session, whose core the fixture and
+    # monkeypatch hold until teardown, and this test must own the only reference to the core it
+    # watches being collected.
+    fakes = importlib.import_module("tests._fakes.stream")
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="cyclic-core"))
+    core = m._core
+    fake = fakes.FakeStreamTransport(core)
+    vars(core)["stream_transport"] = lambda: fake
+    result = stream_query(m).append_only()
+    with core.registry_lock:
+        record = next(iter(core.results._results.values()))
+    callback = cast("functools.partial[None]", record.on_released)
+    assert getattr(callback.func, "__self__", None) is core
+    alive = weakref.ref(core)
+    del record, callback, core, m, result
+    pause = threading.Event()  # never set; only paces the bounded wait below
+    for _ in range(200):
+        gc.collect()
+        if alive() is None:
+            break
+        pause.wait(0.05)
+    assert alive() is None
+
+
+def test_update_streams_reaches_every_stream_still_registered(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    drain: Callable[[], None],
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    core = massive_session._core
+    result = stream_query(massive_session).append_only()
+    # Shut down while still held: the record stays, so the flush can still report on it.
+    fake_streams.publishers[1].publish_failure(RuntimeError("gone"))
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    core.update_streams(
+        {
+            1: StreamUpdate(rows_published=5, host="socket.other", error="slow consumer"),
+            99: StreamUpdate(rows_published=1),  # left the registry: ignored
+        }
+    )
+    columns = ("StreamId", "State", "RowsPublished", "Host", "Error")
+    assert [tuple(r[c] for c in columns) for r in stream_rows()] == [
+        (1, "RUNNING", 5, "socket.other", "slow consumer")  # an update never fails a stream
+    ]
+    massive_session.release(result)
+    drain()
+    assert core._streams == {}
+    core.update_streams({1: StreamUpdate(rows_published=6)})  # deleted: nothing changes
+    assert [r["RowsPublished"] for r in stream_rows()] == [5]
+
+
+def test_a_shutdown_of_an_unknown_stream_is_ignored(massive_session: dm.MassiveSession) -> None:
+    # Called on this thread so that coverage sees it on every Python version; a blink table's
+    # shutdown callback runs on a Deephaven thread.
+    massive_session._core.stream_shut_down(99)
+    assert massive_session._core._streams == {}
+
+
+def test_a_closer_registered_after_close_never_runs_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ran: list[str] = []
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="late-closer"))
+    reaper = m._core._reaper.thread
+    m.close()
+    m._core.on_close(lambda: ran.append("late"))
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+        del m
+        gc.collect()
+        reaper.join(TIMEOUT)
+    assert ran == ["late"]  # once, at registration; the collection finalizer runs nothing
+    assert caplog.records == []
+
+
+def test_a_failure_after_the_stream_left_the_registry_is_logged(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    core = massive_session._core
+    result = stream_query(massive_session).blink()
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.core"):
+        core.fail_stream(1, "shown")  # in the registry: shown in m.streams(), not logged
+        core.fail_stream(42, "late")  # never registered: only logged
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.DEBUG, f"{core.label}: stream 42 failed after it left the registry: late")
+    ]
+    massive_session.release(result)
+
+
+def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    drain: Callable[[], None],
+) -> None:
+    # blink() returns the failed table; the other shapes raise Deephaven's DHError while
+    # deriving from it, and the hold is released either way.
+    core = massive_session._core
+
+    class FailingDuringOpen:
+        def open_stream(
+            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+        ) -> StreamHandle:
+            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+            fake_streams.publishers[stream_id].publish_failure(RuntimeError("entitlement"))
+            assert fake_streams.shutdown[stream_id].wait(TIMEOUT)
+            core.fail_stream(stream_id, "entitlement")
+            return handle
+
+    monkeypatch.setattr(core, "stream_transport", FailingDuringOpen)
+    with pytest.raises(DHError, match="failed table"):
+        stream_query(massive_session).append_only()
+    drain()
+    assert core.results.held() == 0
+    assert core._streams == {}
+    assert core._stream_ids == {}

@@ -4,10 +4,11 @@ Massive publishes one gzip CSV file per dataset and day in the `flatfiles` bucke
 `https://files.massive.com`, under keys `<prefix>/<YYYY>/<MM>/<YYYY-MM-DD>.csv.gz` (for
 example `us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz`). This module is the flat-file
 transport. `HistoryQuery.history()` decides that flat files serve a request
-(`history_source.choose_source`) and hands it the partition dates to read. The S3 access
-itself (the bucket client, the key layout, the S3 errors, and the CSV decoding) is the wire
-package's: `_massive.FlatFileClient` opens each file and `_massive.FlatFile` decodes it, and this
-module builds the `_massive.ReadPlan` that says what to keep.
+(`choose_source` in `_datasets/history_source.py`) and hands it the partition dates to read.
+The S3 access itself (the bucket client, the key layout, the S3 errors, and the CSV
+decoding) is the wire package's: `_massive.FlatFileClient` opens each file and
+`_massive.FlatFile` decodes it, and this module builds the `_massive.ReadPlan` that says what
+to keep.
 
 - `FlatFileHistory` reads the files of one `history()` call in parallel, at most
   `MassiveConfig.max_concurrency` at a time, each in blocks of `BLOCK_SIZE` bytes. Each block
@@ -28,9 +29,9 @@ text such as `NA` or `NULL` is data (both are valid tickers).
 A missing file is judged by its date: on a weekend (for every class but crypto, which trades
 every day) it is skipped silently; on a weekday it is skipped with a WARNING, since it is most
 likely a market holiday. A missing file for the last requested date may instead be late: within
-a day after its publication time (`history_source.within_publication_grace`) it raises
-`MassiveError` naming both causes, and after that it is skipped with a WARNING like any other
-weekday.
+a day after its publication time (`within_publication_grace` in
+`_datasets/history_source.py`) it raises `MassiveError` naming both causes, and after that it is
+skipped with a WARNING like any other weekday.
 
 Massive writes `0` where a timestamp has no value (`trf_timestamp` of a trade without a TRF), so
 in every `Instant` column except `Timestamp` a `0` becomes null before unit conversion.
@@ -366,19 +367,19 @@ class FlatFileHistory:
         """Return the rows of `window` from the dataset's flat files, as one static table.
 
         Flat files have already been chosen for the request
-        (`history_source.choose_source`), so the dataset has a file for its timespan. Files
-        are read by a pool of `min(max_concurrency, files)` threads, which end before this
-        method returns. If any read fails, or this thread is interrupted, every other read
-        stops at its next block, reads that have not started are cancelled, and the failure of
-        the earliest file is raised. Closing the session stops the reads the same way. Logs
-        `source=S3 files=<n> skipped=<dates>` at INFO.
+        (`choose_source` in `_datasets/history_source.py`), so the dataset has a file for its
+        timespan. Files are read by a pool of `min(max_concurrency, files)` threads, which end
+        before this method returns. If any read fails, or this thread is interrupted, every
+        other read stops at its next block, reads that have not started are cancelled, and the
+        failure of the earliest file is raised. Closing the session stops the reads the same
+        way. Logs `source=S3 files=<n> skipped=<dates>` at INFO.
 
         Args:
             spec: The dataset.
             request: The normalized arguments, with the raw `start` and `end` bounds, and
                 static symbols (the query reads a reactive symbol table before this call).
-            window: The bounds under the class's day rules (`dates.bounds`).
-            dates: The partition dates to read (`history_source.partition_dates`).
+            window: The bounds under the class's day rules (`bounds` in `_datasets/dates.py`).
+            dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
 
         Returns:
             A static table in the dataset's schema: the files' rows in date order (and, for
@@ -565,9 +566,9 @@ class FlatFileHistory:
 
         A weekend file is skipped silently (except for crypto, which trades every day); a
         weekday file is skipped with a WARNING (most likely a market holiday). The file for the
-        last requested date may instead be late, so within
-        `history_source.PUBLICATION_GRACE` after its publication time it raises; after that it
-        is skipped with a WARNING too.
+        last requested date may instead be late, so within `PUBLICATION_GRACE` (in
+        `_datasets/history_source.py`) after its publication time it raises; after that it is
+        skipped with a WARNING too.
 
         Args:
             spec: The dataset.
