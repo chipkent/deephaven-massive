@@ -2524,7 +2524,8 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   dependencies are declared directly, with floors: `deephaven-core`, `pyarrow`, `boto3`,
   `botocore` (a floor whose `Config` takes `proxies` and `retries={"total_max_attempts": …}`),
   `urllib3`,
-  `websockets` (a floor with proxy support in `websockets.asyncio.client.connect`), and
+  `websockets` (a floor whose `websockets.client` defines `process_exception`, 17.1, which
+  also reads proxies from the environment in `websockets.asyncio.client.connect`), and
   `certifi`. There is no `massive` dependency and no `[tool.uv.sources]` table: every
   dependency comes from PyPI. `.gitignore` lists only the files this project produces.
 - **Banned import.** `[tool.ruff.lint.flake8-tidy-imports.banned-api]` bans `massive` with the
