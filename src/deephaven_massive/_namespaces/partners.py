@@ -66,6 +66,7 @@ def _list_spec(
     name: str,
     path: str,
     *,
+    summary: str,
     symbol: str | None = None,
     symbol_param: str | None = None,
     poll_keys: tuple[str, ...],
@@ -81,6 +82,7 @@ def _list_spec(
     Args:
         name: The dataset's dotted name, such as `"partners.benzinga.ratings"`.
         path: The REST path template behind `fetch()` and `poll()`.
+        summary: The dataset's one-sentence summary, the first line of its factory's docstring.
         symbol: The path's column that holds the row's instrument, renamed to `Symbol`; None
             for a dataset whose rows describe no single instrument.
         symbol_param: The query parameter that carries the requested symbols, or None.
@@ -101,6 +103,7 @@ def _list_spec(
     )
     return DatasetSpec(
         name=name,
+        summary=summary,
         asset_class=asset_class,
         fetch_path=path,
         keys={} if keys == SourceKeys() else {(_REST, path): keys},
@@ -113,12 +116,15 @@ def _list_spec(
     )
 
 
-def _benzinga(name: str, path: str, *, page_size: int, tickers: bool = True) -> DatasetSpec:
+def _benzinga(
+    name: str, path: str, *, summary: str, page_size: int, tickers: bool = True
+) -> DatasetSpec:
     """Declare a Benzinga v1 list dataset whose rows each carry a unique `benzinga_id`.
 
     Args:
         name: The dataset's name below `partners.benzinga`, such as `"ratings"`.
         path: The REST path template.
+        summary: The dataset's one-sentence summary.
         page_size: The endpoint's documented maximum `limit`.
         tickers: True when the endpoint filters by `ticker` and each row names one stock.
 
@@ -128,6 +134,7 @@ def _benzinga(name: str, path: str, *, page_size: int, tickers: bool = True) -> 
     return _list_spec(
         f"partners.benzinga.{name}",
         path,
+        summary=summary,
         asset_class=AssetClass.STOCKS if tickers else None,
         symbol="Ticker" if tickers else None,
         symbol_param="ticker.any_of" if tickers else None,
@@ -136,12 +143,15 @@ def _benzinga(name: str, path: str, *, page_size: int, tickers: bool = True) -> 
     )
 
 
-def _etf_global(name: str, path: str, *, poll_keys: tuple[str, ...] = _ETF_KEYS) -> DatasetSpec:
+def _etf_global(
+    name: str, path: str, *, summary: str, poll_keys: tuple[str, ...] = _ETF_KEYS
+) -> DatasetSpec:
     """Declare an ETF Global dataset: one fund per row, filtered by `composite_ticker`.
 
     Args:
         name: The dataset's name below `partners.etf_global`, such as `"profiles"`.
         path: The REST path template.
+        summary: The dataset's one-sentence summary.
         poll_keys: The key columns of a keyed `poll()` table.
 
     Returns:
@@ -150,6 +160,7 @@ def _etf_global(name: str, path: str, *, poll_keys: tuple[str, ...] = _ETF_KEYS)
     return _list_spec(
         f"partners.etf_global.{name}",
         path,
+        summary=summary,
         asset_class=AssetClass.STOCKS,
         symbol="CompositeTicker",
         symbol_param="composite_ticker.any_of",
@@ -159,15 +170,28 @@ def _etf_global(name: str, path: str, *, poll_keys: tuple[str, ...] = _ETF_KEYS)
 
 
 BENZINGA_ANALYSTS: Final = _benzinga(
-    "analysts", "/benzinga/v1/analysts", page_size=50_000, tickers=False
+    "analysts",
+    "/benzinga/v1/analysts",
+    summary="Benzinga's profiles of sell-side analysts, with each analyst's firm and track record.",
+    page_size=50_000,
+    tickers=False,
 )
 BENZINGA_ANALYST_INSIGHTS: Final = _benzinga(
-    "analyst_insights", "/benzinga/v1/analyst-insights", page_size=50_000
+    "analyst_insights",
+    "/benzinga/v1/analyst-insights",
+    summary="Benzinga analyst insights on US stocks: a rating, a price target, and the reason.",
+    page_size=50_000,
 )
-BENZINGA_RATINGS: Final = _benzinga("ratings", "/benzinga/v1/ratings", page_size=50_000)
+BENZINGA_RATINGS: Final = _benzinga(
+    "ratings",
+    "/benzinga/v1/ratings",
+    summary="Analyst rating and price-target actions on US stocks, as reported by Benzinga.",
+    page_size=50_000,
+)
 BENZINGA_CONSENSUS_RATINGS: Final = _list_spec(
     "partners.benzinga.consensus_ratings",
     "/benzinga/v1/consensus-ratings/{ticker}",
+    summary="The consensus of analyst ratings and price targets for each US stock, from Benzinga.",
     asset_class=AssetClass.STOCKS,
     symbol="Ticker",
     poll_keys=("Symbol",),
@@ -175,14 +199,34 @@ BENZINGA_CONSENSUS_RATINGS: Final = _list_spec(
     per_symbol=True,
 )
 BENZINGA_BULLS_BEARS_SAY: Final = _benzinga(
-    "bulls_bears_say", "/benzinga/v1/bulls-bears-say", page_size=5_000
+    "bulls_bears_say",
+    "/benzinga/v1/bulls-bears-say",
+    summary="Benzinga's bull case and bear case summaries for US stocks.",
+    page_size=5_000,
 )
-BENZINGA_GUIDANCE: Final = _benzinga("guidance", "/benzinga/v1/guidance", page_size=50_000)
-BENZINGA_EARNINGS: Final = _benzinga("earnings", "/benzinga/v1/earnings", page_size=50_000)
-BENZINGA_FIRMS: Final = _benzinga("firms", "/benzinga/v1/firms", page_size=50_000, tickers=False)
+BENZINGA_GUIDANCE: Final = _benzinga(
+    "guidance",
+    "/benzinga/v1/guidance",
+    summary="Earnings and revenue guidance issued by US companies, as reported by Benzinga.",
+    page_size=50_000,
+)
+BENZINGA_EARNINGS: Final = _benzinga(
+    "earnings",
+    "/benzinga/v1/earnings",
+    summary="Earnings announcements of US companies from Benzinga, with estimates and surprises.",
+    page_size=50_000,
+)
+BENZINGA_FIRMS: Final = _benzinga(
+    "firms",
+    "/benzinga/v1/firms",
+    summary="The research firms behind Benzinga's analyst ratings.",
+    page_size=50_000,
+    tickers=False,
+)
 BENZINGA_NEWS: Final = _list_spec(
     "partners.benzinga.news",
     "/benzinga/v2/news",
+    summary="Benzinga news articles, with headline, teaser, body, and the tickers each one names.",
     time="Published",
     time_axis=("published.gte", "published.lt"),
     symbol_param="tickers.any_of",
@@ -191,20 +235,38 @@ BENZINGA_NEWS: Final = _list_spec(
     page_size=50_000,
 )
 
-ETF_GLOBAL_ANALYTICS: Final = _etf_global("analytics", "/etf-global/v1/analytics")
+ETF_GLOBAL_ANALYTICS: Final = _etf_global(
+    "analytics",
+    "/etf-global/v1/analytics",
+    summary="ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.",
+)
 ETF_GLOBAL_CONSTITUENTS: Final = _etf_global(
     "constituents",
     "/etf-global/v1/constituents",
+    summary="The holdings of US-listed ETFs from ETF Global, one row per fund, date, and holding.",
     # The rank orders a fund's holdings of one effective date without ties.
     poll_keys=(*_ETF_KEYS, "ConstituentRank"),
 )
-ETF_GLOBAL_FUND_FLOWS: Final = _etf_global("fund_flows", "/etf-global/v1/fund-flows")
-ETF_GLOBAL_PROFILES: Final = _etf_global("profiles", "/etf-global/v1/profiles")
-ETF_GLOBAL_TAXONOMIES: Final = _etf_global("taxonomies", "/etf-global/v1/taxonomies")
+ETF_GLOBAL_FUND_FLOWS: Final = _etf_global(
+    "fund_flows",
+    "/etf-global/v1/fund-flows",
+    summary="Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.",
+)
+ETF_GLOBAL_PROFILES: Final = _etf_global(
+    "profiles",
+    "/etf-global/v1/profiles",
+    summary="ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.",
+)
+ETF_GLOBAL_TAXONOMIES: Final = _etf_global(
+    "taxonomies",
+    "/etf-global/v1/taxonomies",
+    summary="ETF Global's classification of US-listed ETFs by strategy, structure, and exposure.",
+)
 
 TMX_CORPORATE_EVENTS: Final = _list_spec(
     "partners.tmx.corporate_events",
     "/tmx/v1/corporate-events",
+    summary="Corporate events from TMX: earnings dates, dividends, conferences, and more.",
     asset_class=AssetClass.STOCKS,
     symbol="Ticker",
     symbol_param="ticker.any_of",
@@ -216,8 +278,12 @@ TMX_CORPORATE_EVENTS: Final = _list_spec(
 FABLE_MERCHANT_AGGREGATES: Final = _list_spec(
     "partners.fable.merchant_aggregates",
     "/consumer-spending/eu/v1/merchant-aggregates",
+    summary="Daily European consumer spending per merchant, from Fable Data's transaction panel.",
     time_axis=("transaction_date.gte", "transaction_date.lte"),
-    # One aggregate per merchant, day, and panel slice; a revision has a later publish date.
+    # The vendor documents no row key, so the key is every field that is not a measure or an
+    # attribute of the merchant: the day, the data version (a restated day comes back with a
+    # later publish date), the merchant or processor, and the panel slice (consumer country,
+    # channel, panel, merchant category, and account currency).
     poll_keys=(
         "TransactionDate",
         "PublishedDate",
@@ -226,12 +292,15 @@ FABLE_MERCHANT_AGGREGATES: Final = _list_spec(
         "UserCountry",
         "Channel",
         "ConsumerType",
+        "MccGroup",
+        "TransactionCurrency",
     ),
     page_size=5_000,
 )
 FABLE_MERCHANT_HIERARCHY: Final = _list_spec(
     "partners.fable.merchant_hierarchy",
     "/consumer-spending/eu/v1/merchant-hierarchy",
+    summary="Fable Data's map from merchants to parent companies, tickers, and industries.",
     # One mapping per merchant and the date it became applicable.
     poll_keys=("LookupName", "ActiveFrom"),
     page_size=50_000,
@@ -355,10 +424,12 @@ class _Benzinga(Namespace):
         in the web UI's column tooltips, and in `columns()`.
 
         Args:
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"smart_score.desc"`); None keeps the
+            sort: The column to sort by, by its wire name (`"smart_score"`); None keeps the
                 endpoint's default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="smart_score", order=dm.Order.DESC` sends `sort=smart_score.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -389,7 +460,7 @@ class _Benzinga(Namespace):
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
     ) -> Query:
-        """Analyst insights on US stocks from Benzinga: a rating, a price target, and the reason.
+        """Benzinga analyst insights on US stocks: a rating, a price target, and the reason.
 
         One row per insight: the stock, the firm, the rating and rating action, the price
         target, and the analyst's rationale as text, dated by `Date`. Narrow the dates through
@@ -407,10 +478,12 @@ class _Benzinga(Namespace):
                 Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
                 None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
                 pass None instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"date.desc"`); None keeps the endpoint's
-                default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"date"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="date", order=dm.Order.DESC` sends `sort=date.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -467,10 +540,12 @@ class _Benzinga(Namespace):
                 Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
                 None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
                 pass None instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"date.desc"`); None keeps the endpoint's
-                default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"date"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="date", order=dm.Order.DESC` sends `sort=date.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -497,13 +572,17 @@ class _Benzinga(Namespace):
             filters=filters,
         )
 
-    def consensus_ratings(self, symbols: Symbols) -> Query:
+    def consensus_ratings(
+        self, symbols: Symbols, *, filters: Mapping[str, FilterValue] | None = None
+    ) -> Query:
         """The consensus of analyst ratings and price targets for each US stock, from Benzinga.
 
         One row per requested stock: the counts of strong-buy, buy, hold, sell, and
         strong-sell ratings, the consensus rating and its numeric value, the consensus, high,
-        and low price targets, and the number of contributing analysts, aggregated over every
-        rating Benzinga holds for the stock.
+        and low price targets, and the number of contributing analysts. By default the
+        consensus aggregates every rating Benzinga holds for the stock; the `date` filters
+        restrict it to the ratings published in a range (`{"date_gte": "2024-10-01",
+        "date_lt": "2025-01-01"}` aggregates the fourth quarter of 2024).
 
         Served by REST only, from `GET /benzinga/v1/consensus-ratings/{ticker}`, which takes
         one ticker as a path segment, so a list of symbols sends one request per symbol, at
@@ -518,23 +597,33 @@ class _Benzinga(Namespace):
             symbols: The stocks: one ticker (`"AAPL"`), a sequence of tickers, or a Deephaven
                 table with a `Symbol` column, which `poll()` re-reads every cycle. Required:
                 the endpoint has no form without a ticker, so `dm.ALL` raises `ValueError`.
+            filters: Further query parameters of the endpoint, keyed by wire name with dots
+                written as underscores: the `date` range of the ratings to aggregate
+                (`date`, `date_gte`, `date_lt`, ...); None, the default, aggregates every
+                rating.
 
         Returns:
-            A `Query`. Building it checks `symbols` and sends nothing: `TypeError` for a value
-            that is not a ticker, a sequence of tickers, or a table, and `ValueError` for
-            `dm.ALL`, no symbols (an empty list or an exhausted generator), a symbol that is
-            not a valid stock ticker, or a table without a `Symbol` column.
+            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
+            a value that is not a ticker, a sequence of tickers, or a table, or for a
+            `filters` that is not a mapping, and `ValueError` for `dm.ALL`, no symbols (an
+            empty list or an exhausted generator), a symbol that is not a valid stock ticker,
+            a table without a `Symbol` column, an unknown filter, or a filter value that is
+            not a date.
 
         Example:
             ::
 
                 consensus = m.partners.benzinga.consensus_ratings(["AAPL", "MSFT"]).fetch()
+                q4 = m.partners.benzinga.consensus_ratings(
+                    "AAPL", filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
+                ).fetch()
         """
         return _list_query(
             self._core,
             BENZINGA_CONSENSUS_RATINGS,
             symbols=symbols,
             all_alternative="a list of symbols; the endpoint takes one ticker per request",
+            filters=filters,
         )
 
     def bulls_bears_say(
@@ -563,10 +652,12 @@ class _Benzinga(Namespace):
                 Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
                 None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
                 pass None instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"last_updated.desc"`); None keeps the
+            sort: The column to sort by, by its wire name (`"last_updated"`); None keeps the
                 endpoint's default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="last_updated", order=dm.Order.DESC` sends `sort=last_updated.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -622,10 +713,12 @@ class _Benzinga(Namespace):
                 Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
                 None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
                 pass None instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"date.desc"`); None keeps the endpoint's
-                default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"date"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="date", order=dm.Order.DESC` sends `sort=date.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -682,10 +775,12 @@ class _Benzinga(Namespace):
                 Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
                 None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
                 pass None instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"date.asc"`); None keeps the endpoint's
-                default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"date"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="date", order=dm.Order.ASC` sends `sort=date.asc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -737,10 +832,12 @@ class _Benzinga(Namespace):
         in the web UI's column tooltips, and in `columns()`.
 
         Args:
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"name.asc"`); None keeps the endpoint's
-                default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"name"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="name", order=dm.Order.ASC` sends `sort=name.asc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -799,10 +896,12 @@ class _Benzinga(Namespace):
             end: The end of the publication range: a date includes that whole day, and an
                 aware `datetime` is the first instant excluded. None, the default, sets no
                 upper bound.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"published.asc"`); None keeps the endpoint's
-                default, newest first.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"published"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="published", order=dm.Order.ASC` sends `sort=published.asc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -892,10 +991,12 @@ class _EtfGlobal(Namespace):
                 a Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
                 None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
                 pass None instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"quant_total_score.desc"`); None keeps the
+            sort: The column to sort by, by its wire name (`"reward_score"`); None keeps the
                 endpoint's default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="reward_score", order=dm.Order.DESC` sends `sort=reward_score.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -951,10 +1052,12 @@ class _EtfGlobal(Namespace):
                 re-reads every cycle. None, the default, applies no fund filter. `dm.ALL`
                 raises `ValueError`; pass None instead. To find the funds that hold a
                 security, filter on `constituent_ticker` instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"weight.desc"`); None keeps the endpoint's
-                default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"weight"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="weight", order=dm.Order.DESC` sends `sort=weight.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -1009,10 +1112,12 @@ class _EtfGlobal(Namespace):
                 a Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
                 None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
                 pass None instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"effective_date.desc"`); None keeps the
+            sort: The column to sort by, by its wire name (`"effective_date"`); None keeps the
                 endpoint's default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="effective_date", order=dm.Order.DESC` sends `sort=effective_date.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -1051,7 +1156,7 @@ class _EtfGlobal(Namespace):
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
     ) -> Query:
-        """ETF Global's profiles of US-listed ETFs: issuer, fees, assets, trading, and exposures.
+        """ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 
         One row per fund and date: the issuer and service providers, inception date, fees and
         expenses, assets under management, holdings count, trading and options activity, and
@@ -1070,10 +1175,12 @@ class _EtfGlobal(Namespace):
                 a Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
                 None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
                 pass None instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"effective_date.desc"`); None keeps the
+            sort: The column to sort by, by its wire name (`"effective_date"`); None keeps the
                 endpoint's default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="effective_date", order=dm.Order.DESC` sends `sort=effective_date.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -1127,10 +1234,12 @@ class _EtfGlobal(Namespace):
                 a Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
                 None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
                 pass None instead.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"effective_date.desc"`); None keeps the
+            sort: The column to sort by, by its wire name (`"effective_date"`); None keeps the
                 endpoint's default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="effective_date", order=dm.Order.DESC` sends `sort=effective_date.desc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -1195,7 +1304,7 @@ class _Tmx(Namespace):
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
     ) -> Query:
-        """Scheduled corporate events from TMX: earnings dates, dividends, conferences, and more.
+        """Corporate events from TMX: earnings dates, dividends, conferences, and more.
 
         One row per event: the company's ticker, name, and ISIN, its trading venue, the
         event's type, name, status (confirmed, unconfirmed, canceled, ...), scheduled `Date`,
@@ -1218,10 +1327,12 @@ class _Tmx(Namespace):
                 (`"2025-07-01"`) or a `date`. None, the default, sets no lower bound.
             end: The last event date to return, inclusive, in the same forms. None, the
                 default, sets no upper bound.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"date.asc"`); None keeps the endpoint's
-                default, latest first.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"date"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="date", order=dm.Order.ASC` sends `sort=date.asc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -1318,10 +1429,12 @@ class _Fable(Namespace):
                 (`"2025-06-01"`) or a `date`. None, the default, sets no lower bound.
             end: The last transaction date to return, inclusive, in the same forms. None, the
                 default, sets no upper bound.
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"transaction_date.asc"`); None keeps the
-                endpoint's default, latest first.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"transaction_date"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="transaction_date", order=dm.Order.ASC` sends `sort=transaction_date.asc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
@@ -1378,10 +1491,12 @@ class _Fable(Namespace):
         in the web UI's column tooltips, and in `columns()`.
 
         Args:
-            sort: The endpoint's `sort` parameter: a comma-separated list of columns, each
-                followed by `.asc` or `.desc` (`"lookup_name.asc"`); None keeps the endpoint's
-                default order.
-            order: The sort direction as a `dm.Order`, or None for the endpoint's default.
+            sort: The column to sort by, by its wire name (`"lookup_name"`); None keeps the
+                endpoint's default order.
+            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
+                (`sort="lookup_name", order=dm.Order.ASC` sends `sort=lookup_name.asc`);
+                None leaves the direction to the endpoint. `order` without `sort` raises
+                `ValueError`.
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots

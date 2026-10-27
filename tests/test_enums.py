@@ -257,6 +257,22 @@ ENUM_PARAMETERS = {
     "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
     "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
+    "_Benzinga.analysts.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Benzinga.analyst_insights.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Benzinga.ratings.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Benzinga.bulls_bears_say.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Benzinga.guidance.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Benzinga.earnings.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Benzinga.firms.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Benzinga.news.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_EtfGlobal.analytics.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_EtfGlobal.constituents.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_EtfGlobal.fund_flows.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_EtfGlobal.profiles.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_EtfGlobal.taxonomies.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Tmx.corporate_events.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Fable.merchant_aggregates.order": "namespaces/test_partners.py::test_order_is_an_enum",
+    "_Fable.merchant_hierarchy.order": "namespaces/test_partners.py::test_order_is_an_enum",
 }
 
 

@@ -9,7 +9,7 @@ import inspect
 import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import new_table
@@ -25,6 +25,9 @@ from deephaven_massive._namespaces import partners
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+
+if TYPE_CHECKING:
+    from deephaven_massive._types import FilterValue
 
 FIXTURES = "namespaces/partners"
 
@@ -219,14 +222,12 @@ def test_each_fixture_has_every_generated_field(
 
 @pytest.mark.parametrize("name", LIST_WITH_SYMBOLS)
 def test_list_factories_build_the_request(massive_session: dm.MassiveSession, name: str) -> None:
-    q = factory(massive_session, name)(
-        ["msft", "AAPL"], sort="date.desc", order=Order.DESC, limit=10
-    )
+    q = factory(massive_session, name)(["msft", "AAPL"], sort="date", order=Order.DESC, limit=10)
     assert type(q) is Query
     assert q._spec is spec_of(name)
     request = q._request
     assert request.symbols == ("AAPL", "MSFT")
-    assert request.params == (("order", Order.DESC), ("sort", "date.desc"))
+    assert request.params == (("order", Order.DESC), ("sort", "date"))
     assert request.limit == 10
     assert request.filters == ()
     assert request.start is None
@@ -299,11 +300,17 @@ def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession
     assert spec.poll_keys == ("Symbol",)
     with pytest.raises(ValueError, match="takes one ticker per request"):
         massive_session.partners.benzinga.consensus_ratings(dm.ALL)
-    # One row per stock, aggregated over every rating: no list parameters, no filters.
+    # One row per stock: no sort, order, or limit; filters choose the ratings aggregated.
     assert list(inspect.signature(partners._Benzinga.consensus_ratings).parameters) == [
         "self",
         "symbols",
+        "filters",
     ]
+    window: dict[str, FilterValue] = {"date_gte": "2024-10-01", "date_lt": date(2025, 1, 1)}
+    q = massive_session.partners.benzinga.consensus_ratings("AAPL", filters=window)
+    assert dict(q._request.filters) == window
+    with pytest.raises(ValueError, match="has no filter 'ticker'"):
+        massive_session.partners.benzinga.consensus_ratings("AAPL", filters={"ticker": "MSFT"})
 
 
 def test_news_selects_articles_by_ticker_and_time(massive_session: dm.MassiveSession) -> None:
@@ -413,10 +420,16 @@ def test_bad_filters_are_refused(
         factory(massive_session, name)(filters=filters)
 
 
+@pytest.mark.parametrize(
+    "name", [n for n in DATASETS if n != "partners.benzinga.consensus_ratings"]
+)
+def test_order_is_an_enum(massive_session: dm.MassiveSession, name: str) -> None:
+    with pytest.raises(TypeError, match=r"order must be dm\.Order"):
+        factory(massive_session, name)(sort="date", order=cast("Order", "desc"))
+
+
 def test_bad_types_are_refused(massive_session: dm.MassiveSession) -> None:
     ratings = massive_session.partners.benzinga.ratings
-    with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        ratings(order=cast("Order", "asc"))
     with pytest.raises(TypeError, match="sort must be a str"):
         ratings(sort=cast("str", 1))
     with pytest.raises(ValueError, match="limit must be positive"):
@@ -436,6 +449,7 @@ def test_each_factory_links_its_column_reference(name: str) -> None:
     anchor = name.removeprefix("partners.").replace(".", "-")
     assert f"docs/datasets/partners.md#{anchor}" in doc
     summary = doc.split("\n\n", 1)[0]
+    assert summary == spec_of(name).summary
     assert "\n" not in summary
     assert summary.endswith(".")
     assert "REST only" in doc
