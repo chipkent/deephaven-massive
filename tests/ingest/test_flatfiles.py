@@ -89,6 +89,7 @@ def from_request(parameter: str) -> KeySpec:
 
 STOCK_TRADES = DatasetSpec(
     name="stocks.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/trades/{stockTicker}",
     flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
@@ -99,6 +100,7 @@ STOCK_TRADES = DatasetSpec(
 )
 STOCK_QUOTES = DatasetSpec(
     name="stocks.quotes",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/quotes/{stockTicker}",
     flat_file_prefixes={None: "us_stocks_sip/quotes_v1"},
@@ -109,6 +111,7 @@ STOCK_QUOTES = DatasetSpec(
 )
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     is_bars=True,
     history_path="/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}",
@@ -124,12 +127,14 @@ STOCK_BARS = DatasetSpec(
 )
 INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
     flat_file_prefixes={None: "us_indices/values_v1"},
     keys={(FF, "us_indices/values_v1"): keys("Ticker", "Timestamp")},
 )
 FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
     history_path="/futures/v1/trades/{ticker}",
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
@@ -140,6 +145,7 @@ FUTURES_TRADES = DatasetSpec(
 )
 CRYPTO_TRADES = DatasetSpec(
     name="crypto.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.CRYPTO,
     history_path="/v3/trades/{cryptoTicker}",
     flat_file_prefixes={None: "global_crypto/trades_v1"},
@@ -151,7 +157,10 @@ CRYPTO_TRADES = DatasetSpec(
     },
 )
 YIELDS = DatasetSpec(
-    name="economy.yields", poll_keys=("Date",), history_path="/fed/v1/treasury-yields"
+    name="economy.yields",
+    summary="A dataset for the tests.",
+    poll_keys=("Date",),
+    history_path="/fed/v1/treasury-yields",
 )
 
 
@@ -425,6 +434,7 @@ def test_trades_are_renamed_typed_and_converted(
 SYNTHETIC_FILES = "us_stocks_sip/trades_v1"
 SYNTHETIC = DatasetSpec(
     name="stocks.synthetic",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/trades/{stockTicker}",
     flat_file_prefixes={None: SYNTHETIC_FILES},

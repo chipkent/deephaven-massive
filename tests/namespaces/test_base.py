@@ -1,12 +1,16 @@
 """Tests for the shared dataset factory and the query class of every dataset.
 
-The annotation rule lives here too: for every dataset of the catalog, the return annotation of
-its factory method is the class `query_class` derives from the spec (for `bars`, each overload
-matches `bar_query_class` and the implementation returns `HistoryQuery`), and every public
-factory method maps to exactly one dataset. The rule is a function over a session class and a
-catalog, so it is checked against the real tree and against synthetic namespaces that break it.
+Two rules over the factory methods live here too. The annotation rule: for every dataset of
+the catalog, the return annotation of its factory method is the class `query_class` derives
+from the spec (for `bars`, each overload matches `bar_query_class` and the implementation
+returns `HistoryQuery`), and every public factory method maps to exactly one dataset. The
+summary rule: every factory's docstring starts with its `DatasetSpec.summary`. Each rule is a
+function over a session class and a catalog, so it is checked against the real tree and
+against synthetic namespaces that break it.
 """
 
+import collections.abc
+import datetime as dt
 import typing
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
@@ -47,6 +51,7 @@ INDEX_FILES = "us_indices/minute_aggs_v1"
 
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
+    summary="A dataset for the tests.",
     is_bars=True,
     asset_class=AssetClass.STOCKS,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
@@ -55,6 +60,7 @@ STOCK_BARS = DatasetSpec(
 )
 FUTURES_BARS = DatasetSpec(
     name="futures.bars",
+    summary="A dataset for the tests.",
     is_bars=True,
     asset_class=AssetClass.FUTURES,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
@@ -68,6 +74,7 @@ FUTURES_BARS = DatasetSpec(
 )
 INDEX_BARS = DatasetSpec(
     name="indices.bars",
+    summary="A dataset for the tests.",
     is_bars=True,
     asset_class=AssetClass.INDICES,
     flat_file_prefixes={Timespan.MINUTE: INDEX_FILES},
@@ -75,18 +82,24 @@ INDEX_BARS = DatasetSpec(
 )
 TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     channels={None: "T"},
 )
 DIVIDENDS = DatasetSpec(
     name="stocks.dividends",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     fetch_path="/stocks/v1/dividends",
     keys={(Transport.REST, "/stocks/v1/dividends"): SourceKeys(KeySpec("Ticker"))},
     time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
     symbol_param="ticker.any_of",
 )
-INDICATOR = DatasetSpec(name="indicators.sma", fetch_path="/v1/indicators/sma/{stockTicker}")
+INDICATOR = DatasetSpec(
+    name="indicators.sma",
+    summary="A dataset for the tests.",
+    fetch_path="/v1/indicators/sma/{stockTicker}",
+)
 
 
 def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
@@ -197,6 +210,7 @@ def test_build_query_without_symbols_or_axis(massive_session: dm.MassiveSession)
 def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> None:
     fx = DatasetSpec(
         name="forex.quotes",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.FOREX,
         channels={None: "C"},
     )
@@ -387,7 +401,12 @@ _CHANNELS = {"channels": {None: "T"}}
 def test_the_query_class_follows_the_transports(
     changes: dict[str, Any], expected: type[QueryBase]
 ) -> None:
-    spec = DatasetSpec(name="stocks.trades", asset_class=AssetClass.STOCKS, **changes)
+    spec = DatasetSpec(
+        name="stocks.trades",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        **changes,
+    )
     assert query_class(spec) is expected
 
 
@@ -395,6 +414,7 @@ def test_flat_files_are_a_history_source() -> None:
     assert query_class(INDEX_BARS) is HistoryQuery
     values = DatasetSpec(
         name="indices.values",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.INDICES,
         channels={None: "V"},
         flat_file_prefixes={None: "us_indices/values_v1"},
@@ -426,7 +446,16 @@ def _hints(function: Callable[..., object]) -> dict[str, Any]:
     Returns:
         The annotations by parameter name, and `"return"`.
     """
-    names = {**vars(_query), **vars(_types), **vars(_enums), "Literal": Literal}
+    # A namespace module imports its typing-only names (`Mapping`, `Sequence`, `date`) under
+    # `TYPE_CHECKING`, so they are not in its globals; supply them here.
+    names = {
+        **vars(collections.abc),
+        **vars(dt),
+        **vars(_query),
+        **vars(_types),
+        **vars(_enums),
+        "Literal": Literal,
+    }
     return typing.get_type_hints(function, localns=names)
 
 
@@ -496,6 +525,52 @@ def _bar_problems(name: str, spec: DatasetSpec, factory: Callable[..., object]) 
     return problems
 
 
+def _factory_map(session: type, pending: frozenset[str]) -> dict[str, Callable[..., object]]:
+    """Return every factory method reachable from a session class, by dataset name.
+
+    Args:
+        session: The session class whose namespaces hold the factories.
+        pending: The session methods whose dataset is not declared yet, left out.
+
+    Returns:
+        The namespace factories (`_factories`) and the session's own dataset methods.
+    """
+    factories = dict(_factories(session, ""))
+    for dataset, method in _SESSION_FACTORIES.items():
+        if hasattr(session, method) and method not in pending:
+            factories[dataset] = getattr(session, method)
+    return factories
+
+
+def summary_problems(
+    session: type, specs: Mapping[str, DatasetSpec], *, pending: frozenset[str] = _PENDING
+) -> list[str]:
+    """Return every factory whose docstring does not start with its dataset's summary.
+
+    The summary is the sentence a result's table description and the column reference show, so
+    the dataset method's docstring, which a console user reads, opens with the same words. A
+    factory without a spec, or a spec without a factory, is the annotation rule's concern and
+    is skipped here.
+
+    Args:
+        session: The session class whose namespaces hold the factories.
+        specs: The catalog's specs by name.
+        pending: The session methods whose dataset is not declared yet, left out of the rule.
+
+    Returns:
+        One message per factory whose docstring is missing or starts otherwise.
+    """
+    factories = _factory_map(session, pending)
+    problems = []
+    for name, spec in specs.items():
+        factory = factories.get(name)
+        if factory is None:
+            continue
+        if not (factory.__doc__ or "").lstrip().startswith(spec.summary):
+            problems.append(f"{name}: the docstring must start with {spec.summary!r}")
+    return problems
+
+
 def annotation_problems(
     session: type, specs: Mapping[str, DatasetSpec], *, pending: frozenset[str] = _PENDING
 ) -> list[str]:
@@ -510,10 +585,7 @@ def annotation_problems(
         One message per factory without a spec, spec without a factory, or factory whose return
         annotation is not the class its spec derives.
     """
-    factories = dict(_factories(session, ""))
-    for dataset, method in _SESSION_FACTORIES.items():
-        if hasattr(session, method) and method not in pending:
-            factories[dataset] = getattr(session, method)
+    factories = _factory_map(session, pending)
     problems = [f"{name}: a factory with no dataset" for name in sorted(factories - specs.keys())]
     for name, spec in specs.items():
         factory = factories.get(name)
@@ -603,6 +675,7 @@ class _BadSession:
 def _renamed(spec: DatasetSpec, name: str) -> DatasetSpec:
     return DatasetSpec(
         name=name,
+        summary="A dataset for the tests.",
         is_bars=spec.is_bars,
         asset_class=spec.asset_class,
         channels=spec.channels,
@@ -642,4 +715,55 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
         "options.trades: the factory must return StreamQuery",
         "options.minute_bars: a bars factory needs its overloads",
         "options.splits: a dataset with no factory",
+    ]
+
+
+# The summary rule: each dataset method's docstring starts with its dataset's summary.
+
+
+def test_every_factory_docstring_starts_with_its_summary() -> None:
+    assert summary_problems(dm.MassiveSession, CATALOG.by_name) == []
+
+
+class _Summarized(Namespace):
+    __slots__ = ()
+
+    def dividends(self) -> Query:
+        """Cash dividends of US-listed stocks. The rest of the summary line.
+
+        The rest of the docstring.
+        """
+        raise NotImplementedError
+
+    def splits(self) -> Query:
+        """Something else entirely."""
+        raise NotImplementedError
+
+    def news(self) -> Query:
+        raise NotImplementedError
+
+
+class _SummarizedSession:
+    @property
+    def stocks(self) -> _Summarized:
+        raise NotImplementedError
+
+
+def _summarized(name: str, summary: str) -> DatasetSpec:
+    return DatasetSpec(name=name, summary=summary, fetch_path="/v3/reference/dividends")
+
+
+def test_the_summary_rule_reports_every_mismatch() -> None:
+    specs = {
+        spec.name: spec
+        for spec in (
+            _summarized("stocks.dividends", "Cash dividends of US-listed stocks."),
+            _summarized("stocks.splits", "Stock splits of US-listed stocks."),
+            _summarized("stocks.news", "News articles."),
+            _summarized("stocks.ipos", "Initial public offerings."),  # no factory: skipped
+        )
+    }
+    assert summary_problems(_SummarizedSession, specs, pending=frozenset()) == [
+        "stocks.splits: the docstring must start with 'Stock splits of US-listed stocks.'",
+        "stocks.news: the docstring must start with 'News articles.'",
     ]
