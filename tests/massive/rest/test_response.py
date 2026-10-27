@@ -243,7 +243,7 @@ def test_a_status_or_request_id_that_is_not_text_is_an_error(body: dict[str, obj
         b'\xff\xfe{"status": "OK"}',
         b"",
         b'{"a": NaN}',
-        b"[" * 600 + b"]" * 600,
+        b"[" * 1100 + b"]" * 1100,  # deeper than either decoder allows (512, orjson 1024)
     ],
 )
 def test_a_body_that_is_not_json_is_an_error_quoting_its_start(data: bytes) -> None:
