@@ -1729,14 +1729,15 @@ def _deephaven_rule(layer: str, name: str, *, type_only: bool) -> str | None:
     Returns:
         The rule's text, or None when the reference is allowed.
     """
-    top = name.split(".", maxsplit=1)[0]
+    # The vocabulary binds Deephaven's `Table` at run time, so importing it from there imports
+    # `deephaven.table.Table`.
+    module = "deephaven.table.Table" if name == _TYPES_TABLE else name
+    top = module.split(".", maxsplit=1)[0]
     if top == "deephaven_server":
         return f"nothing imports deephaven_server: {name}"
-    if name == _TYPES_TABLE:  # the vocabulary binds Deephaven's `Table` at run time
-        top = "deephaven"
     if top != "deephaven":
         return None
-    if layer == "vocabulary" and not _inside(name, "deephaven.table"):
+    if layer == "vocabulary" and not _inside(module, "deephaven.table"):
         return f"the vocabulary imports only deephaven.table: {name}"
     if layer == "datasets" and not type_only:
         return f"the datasets layer imports deephaven only for type checking: {name}"
@@ -1987,6 +1988,7 @@ def test_a_literal_import_is_not_computed(source: str) -> None:
         ),
         ("_datasets/symbols.py", "from deephaven_massive._types import Symbols, _All\n"),
         ("_tables/watchlist.py", "from deephaven_massive._types import Table\n"),
+        ("_config.py", "from deephaven_massive._types import Table\n"),
     ],
 )
 def test_deephaven_where_the_layer_allows_it(module: str, source: str) -> None:
