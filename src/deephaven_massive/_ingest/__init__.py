@@ -7,7 +7,7 @@
 
 Layer: ingest, above the wire (`_massive`), the vocabulary (the root `_config`, `_enums`,
 `_errors`, `_types`), the datasets (`_datasets`), and the tables (`_tables`), all of which it
-may import; only the API above it (`_session.py`, and only `clients`) imports it. It is the
-only layer that reads the wire package's client names. The package defines no names of its
-own: import the module that owns a name.
+may import; only the API above it (`_session.py`, and only `clients`) imports it. Outside
+the wire package itself, it is the only code that uses the wire clients. The package defines no
+names of its own: import the module that owns a name.
 """

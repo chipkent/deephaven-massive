@@ -251,7 +251,7 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
 _tables/                 the Deephaven side: tables, liveness, library threads
   __init__.py            docstring only
   core.py                SessionCore, registry_lock, registries, closers, stream ids, the
-                         transport ports (section 6)
+                         transport ports, IngestPorts, attach (sections 4.3, 6)
   liveness.py            result and stream scopes, records, reaper queue (section 6.1)
   diagnostics.py         connections() and streams() with SchemaDrift; DriftRegistry (section 17)
   columns.py             ColumnType -> Deephaven type, column definitions; describe() (section 7.4)
@@ -2084,9 +2084,9 @@ without the GIL.
   - `FlatFileClient`'s lock, one per session, which guards the creation and the close of the
     boto3 S3 client (creation reads local AWS configuration but makes no request, since the
     credentials are given); its closed flag is a `threading.Event`, read without the lock by
-    the reader threads. The session creates the `FlatFileClient` itself on its first flat-file
-    read, under `registry_lock` (the constructor only stores settings), and registers its close
-    after releasing the lock;
+    the reader threads. The session's `SessionClients` creates the `FlatFileClient` on the
+    session's first flat-file read, under `registry_lock` (the constructor only stores
+    settings), and registers its close after releasing the lock;
   - the `_massive.spec` loaders, which load each generated file once;
   - `RestClient`'s not-before instant (section 19.1);
   - the session's `DriftRegistry`, whose WARNINGs are logged after the lock is released;

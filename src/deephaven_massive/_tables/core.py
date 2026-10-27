@@ -301,15 +301,30 @@ class IngestPorts(Protocol):
     """
 
     def rest(self) -> RestTransport:
-        """Return the session's REST transport."""
+        """Return the session's REST transport, the same one for the life of the session.
+
+        Raises:
+            NotImplementedError: Until the REST transport is implemented.
+        """
         ...
 
     def streams(self) -> StreamTransport:
-        """Return the session's WebSocket transport."""
+        """Return the session's WebSocket transport, the same one for the life of the session.
+
+        Raises:
+            NotImplementedError: Until the WebSocket transport is implemented.
+        """
         ...
 
     def flat_files(self) -> FlatFileTransport:
-        """Return a flat-file transport for one `history()` call."""
+        """Return a new flat-file transport for one `history()` call.
+
+        The first call creates the session's S3 client and registers its close with the core
+        (`SessionCore.on_close`); later calls share it.
+
+        Raises:
+            ValueError: If the configuration has no S3 credentials.
+        """
         ...
 
 
@@ -486,16 +501,21 @@ class SessionCore:
     def attach(self, ports: IngestPorts) -> None:
         """Attach the session's ingest side, which serves the transport hooks.
 
-        `MassiveSession.__init__` calls it once, right after it creates the core and the
-        session's `SessionClients`, before the session is returned, so no verb runs without
-        it.
+        `MassiveSession.__init__` calls it exactly once, on the caller thread, right after it
+        creates the core and the session's `SessionClients` and before the session is
+        returned, so every verb finds the ports attached. Nothing else attaches ports.
 
         Args:
             ports: The session's ingest side.
+
+        Raises:
+            RuntimeError: If ports are already attached.
         """
+        if self._ports is not None:
+            raise RuntimeError(f"{self.label} already has its transports attached")
         self._ports = ports
 
-    def _ingest(self) -> IngestPorts:
+    def _attached_ports(self) -> IngestPorts:
         """Return the attached ingest ports.
 
         Returns:
@@ -510,30 +530,42 @@ class SessionCore:
         return self._ports
 
     def rest_transport(self) -> RestTransport:
-        """Return the session's REST transport.
+        """Return the session's REST transport (`IngestPorts.rest`).
+
+        No request is made. Without attached ports this raises the `RuntimeError` of
+        `_attached_ports`; until the REST transport is implemented the ports raise
+        `NotImplementedError`.
 
         Returns:
-            The attached ports' REST transport (`IngestPorts.rest`), whose errors propagate.
+            The transport.
         """
-        return self._ingest().rest()
+        return self._attached_ports().rest()
 
     def stream_transport(self) -> StreamTransport:
-        """Return the session's WebSocket transport.
+        """Return the session's WebSocket transport (`IngestPorts.streams`).
+
+        No connection is opened. Without attached ports this raises the `RuntimeError` of
+        `_attached_ports`; until the WebSocket transport is implemented the ports raise
+        `NotImplementedError`.
 
         Returns:
-            The attached ports' WebSocket transport (`IngestPorts.streams`), whose errors
-            propagate.
+            The transport.
         """
-        return self._ingest().streams()
+        return self._attached_ports().streams()
 
     def flat_file_transport(self) -> FlatFileTransport:
-        """Return a flat-file transport for one `history()` call.
+        """Return a flat-file transport for one `history()` call (`IngestPorts.flat_files`).
+
+        The first call creates the session's S3 client, which closes with the session; no
+        request is made. Without attached ports this raises the `RuntimeError` of
+        `_attached_ports`; without S3 credentials in the configuration the ports raise
+        `ValueError` (`history()` never gets here then: its source choice has already required
+        them).
 
         Returns:
-            A transport from the attached ports (`IngestPorts.flat_files`), whose errors
-            propagate.
+            The transport.
         """
-        return self._ingest().flat_files()
+        return self._attached_ports().flat_files()
 
     # --- Streams --------------------------------------------------------------------------
 

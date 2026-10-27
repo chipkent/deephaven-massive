@@ -1280,5 +1280,9 @@ def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContex
         assert core.stream_transport() is _STREAMS
         assert core.flat_file_transport() is _FLAT_FILES
         assert ports.asked == ["rest", "streams", "flat_files"]
+        with pytest.raises(RuntimeError, match=r"^core already has its transports attached$"):
+            core.attach(_Ports())
+        assert core.rest_transport() is _REST
+        assert ports.asked == ["rest", "streams", "flat_files", "rest"]
     finally:
         core.close()
