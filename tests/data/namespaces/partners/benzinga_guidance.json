@@ -1,0 +1,34 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "benzinga_id": "682b28a9c068240001a9fded",
+      "company_name": "Bath & Body Works",
+      "currency": "USD",
+      "date": "2025-05-19",
+      "eps_method": "adj",
+      "estimated_eps_guidance": 3.52,
+      "estimated_revenue_guidance": 7470000000,
+      "fiscal_period": "FY",
+      "fiscal_year": 2025,
+      "importance": 3,
+      "last_updated": "2025-05-19T12:54:04Z",
+      "max_eps_guidance": 3.6,
+      "max_revenue_guidance": 7526000000,
+      "min_eps_guidance": 3.25,
+      "min_revenue_guidance": 7380000000,
+      "notes": "Revenue for 2025 FY is expected to up by 1 to 3% YoY from $7.307B",
+      "positioning": "primary",
+      "previous_max_eps_guidance": 3.6,
+      "previous_max_revenue_guidance": 7526000000,
+      "previous_min_eps_guidance": 3.25,
+      "previous_min_revenue_guidance": 7380000000,
+      "release_type": "preliminary",
+      "revenue_method": "gaap",
+      "ticker": "BBWI",
+      "time": "08:30:00"
+    }
+  ],
+  "status": "OK"
+}

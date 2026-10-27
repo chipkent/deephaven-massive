@@ -1,0 +1,26 @@
+{
+  "count": 1,
+  "request_id": "a1b2c3d4e5f6",
+  "results": [
+    {
+      "active_from": "0001-01-01",
+      "active_to": "9999-12-31",
+      "category": "General Merchandise",
+      "grandparent_name": "Amazon Inc",
+      "grandparent_ticker": "AMZN US",
+      "great_grandparent_name": "Amazon Inc",
+      "great_grandparent_ticker": "AMZN US",
+      "industry": "E-Commerce Discretionary",
+      "industry_group": "Retail - Discretionary",
+      "listing_status": "public",
+      "lookup_name": "amazon",
+      "normalized_name": "Amazon Inc",
+      "parent_name": "Amazon Inc",
+      "parent_ticker": "AMZN US",
+      "sector": "Consumer Discretionary",
+      "sub_industry": "E-Commerce Discretionary",
+      "ticker": "AMZN US"
+    }
+  ],
+  "status": "OK"
+}

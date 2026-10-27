@@ -1,0 +1,33 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "actual_eps": -0.19,
+      "actual_revenue": 17566000,
+      "benzinga_id": "651bcd8d7e4d6000011f2232",
+      "company_name": "Guardforce AI Co",
+      "currency": "USD",
+      "date": "2029-09-24",
+      "date_status": "confirmed",
+      "eps_method": "GAAP",
+      "eps_surprise": 0.06,
+      "eps_surprise_percent": 0.24,
+      "estimated_eps": -0.25,
+      "estimated_revenue": 17000000,
+      "fiscal_period": "H1",
+      "fiscal_year": 2024,
+      "importance": 1,
+      "last_updated": "2025-01-07T10:19:50Z",
+      "notes": "Half-year results.",
+      "previous_eps": -0.75,
+      "previous_revenue": 18413292,
+      "revenue_method": "GAAP",
+      "revenue_surprise": 566000,
+      "revenue_surprise_percent": 0.0333,
+      "ticker": "GFAI",
+      "time": "07:00:00"
+    }
+  ],
+  "status": "OK"
+}

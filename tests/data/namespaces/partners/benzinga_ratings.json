@@ -1,0 +1,33 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "adjusted_price_target": 15,
+      "analyst": "Alexander Potter",
+      "benzinga_analyst_id": "58933b2043eaaa0001698f4a",
+      "benzinga_calendar_url": "https://www.benzinga.com/quote/RIVN/analyst-ratings",
+      "benzinga_firm_id": "5e147c6b7da4190001b287b4",
+      "benzinga_id": "682f29b0e5343b000100a619",
+      "benzinga_news_url": "https://www.benzinga.com/stock-articles/RIVN/analyst-ratings",
+      "company_name": "Rivian Automotive",
+      "currency": "USD",
+      "date": "2025-05-22",
+      "firm": "Piper Sandler",
+      "importance": 0,
+      "last_updated": "2025-05-22T13:42:30Z",
+      "notes": "Price target raised after the earnings beat.",
+      "previous_adjusted_price_target": 13,
+      "previous_price_target": 13,
+      "previous_rating": "neutral",
+      "price_percent_change": 15.38,
+      "price_target": 15,
+      "price_target_action": "raises",
+      "rating": "neutral",
+      "rating_action": "maintains",
+      "ticker": "RIVN",
+      "time": "09:42:08"
+    }
+  ],
+  "status": "OK"
+}

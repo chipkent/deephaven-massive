@@ -1,0 +1,31 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "composite_ticker": "SPY",
+      "effective_date": "2025-01-29",
+      "fund_flow": -30235124.7,
+      "nav": 601.877341,
+      "processed_date": "2025-01-29",
+      "shares_outstanding": 1047232116
+    },
+    {
+      "composite_ticker": "SPY",
+      "effective_date": "2025-01-30",
+      "fund_flow": -2798729635.65,
+      "nav": 605.0574,
+      "processed_date": "2025-01-30",
+      "shares_outstanding": 1042582116
+    },
+    {
+      "composite_ticker": "SPY",
+      "effective_date": "2025-01-31",
+      "fund_flow": -3358068570,
+      "nav": 602.044248,
+      "processed_date": "2025-01-31",
+      "shares_outstanding": 1037032116
+    }
+  ],
+  "status": "OK"
+}

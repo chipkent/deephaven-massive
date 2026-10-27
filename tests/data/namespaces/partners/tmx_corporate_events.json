@@ -1,0 +1,20 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "company_name": "Rollins Inc.",
+      "date": "2025-07-23",
+      "isin": "US7757111049",
+      "name": "Q2 2025 Earnings Announcement-After Mkt",
+      "status": "unconfirmed",
+      "ticker": "ROL",
+      "tmx_company_id": "2208",
+      "tmx_record_id": "4XMW4E9G",
+      "trading_venue": "XNYS",
+      "type": "earnings_announcement_date",
+      "url": "https://www.rollins.com/investors"
+    }
+  ],
+  "status": "OK"
+}

@@ -1,0 +1,13 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "benzinga_id": "5e147c6b7da4190001b287b4",
+      "currency": "USD",
+      "last_updated": "2020-01-07T12:41:25Z",
+      "name": "Piper Sandler"
+    }
+  ],
+  "status": "OK"
+}
