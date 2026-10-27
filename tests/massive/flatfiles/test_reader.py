@@ -522,3 +522,24 @@ def test_a_row_of_the_wrong_width_keeps_arrows_message(
         f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: CSV parse error: "
     )
     assert "Expected 13 columns, got 2" in info.value.message
+
+
+def test_quoted_row_text_never_names_a_column(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Arrow quotes a malformed row in its parse error; text in that row that looks like
+    # Arrow's own column position must not be taken for one.
+    with pytest.raises(WireError) as info:
+        table(opened(KEY, TRADE_HEADER + "In CSV column #999: x,1\n"), plan())
+    assert info.value.message.startswith(
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: CSV parse error: "
+    )
+    assert "In CSV column #999: x,1" in info.value.message
+
+
+def test_a_header_that_is_not_valid_csv_is_a_wire_error(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    with pytest.raises(WireError, match=r"^cannot read .*: new-line character seen") as info:
+        table(opened(KEY, "ticker,a\rb,sip_timestamp\nAAPL,1,2\n"), plan())
+    assert isinstance(info.value.__cause__, csv.Error)

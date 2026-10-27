@@ -56,8 +56,9 @@ if TYPE_CHECKING:
 
 __all__ = ["FlatFile", "ReadColumn", "ReadPlan"]
 
-_CSV_COLUMN: Final = re.compile(r"CSV column #(\d+)")
-"""How Arrow names the column of a value it cannot convert: by its position in the file."""
+_CSV_COLUMN: Final = re.compile(r"In CSV column #(\d+): ")
+"""How Arrow's message about a value it cannot convert starts: the column's position in the
+file. Matched only at the start, so a quoted value can never supply the position."""
 
 
 def _describe(error: Exception, names: list[str], read_types: dict[str, pa.DataType]) -> str:
@@ -72,7 +73,7 @@ def _describe(error: Exception, names: list[str], read_types: dict[str, pa.DataT
         The failure's own text, preceded, for a conversion failure, by the header and the type
         it was read as (`"size is not double: In CSV column #8: ..."`).
     """
-    found = _CSV_COLUMN.search(str(error))
+    found = _CSV_COLUMN.match(str(error))
     if found is None:
         return str(error)
     header = names[int(found[1])]
@@ -254,11 +255,11 @@ class FlatFile:
         Raises:
             WireError: If the body is not gzip, is truncated or corrupt, or the connection
                 drops; if the file is empty (no header line); if the header line is longer
-                than `plan.block_size` or not UTF-8; if the header names a column twice or
-                lacks a key header of `plan.required` (before the first block, naming the
-                headers); if a value, or an element of a list, does not parse as its type
-                (naming the header and the type, and quoting Arrow's message); or if a
-                futures block holds a session date other than the plan's session, or none.
+                than `plan.block_size`, not UTF-8, or not valid CSV; if the header names a
+                column twice or lacks a key header of `plan.required` (before the first block,
+                naming the headers); if a value, or an element of a list, does not parse as
+                its type (naming the header and the type, and quoting Arrow's message); or if
+                a futures block holds a session date other than the plan's session, or none.
                 Every message names the file. An error that `plan.to_ns` raises propagates
                 unchanged, unless it is an Arrow error, which becomes `WireError` like any
                 other.
@@ -299,7 +300,14 @@ class FlatFile:
             )
             for block in reader:
                 yield self._apply(block, plan), drift
-        except (pa.ArrowException, OSError, EOFError, zlib.error, UnicodeDecodeError) as error:
+        except (
+            pa.ArrowException,
+            OSError,
+            EOFError,
+            zlib.error,
+            UnicodeDecodeError,
+            csv.Error,
+        ) as error:
             raise WireError(
                 f"cannot read {self._location}: {_describe(error, names, read_types)}",
                 host=self._host,
