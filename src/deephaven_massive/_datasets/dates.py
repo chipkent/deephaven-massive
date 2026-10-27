@@ -50,6 +50,7 @@ __all__ = [
     "FuturesSessions",
     "TimeRange",
     "bounds",
+    "calendar_day",
     "check_order",
     "flat_file_published",
     "futures_session",
@@ -396,3 +397,35 @@ def bounds(spec: DatasetSpec, start: DateLike, end: DateLike) -> TimeRange | Fut
         return futures_sessions(first, last)
     zone = NEW_YORK if spec.asset_class is None else DAY_ZONES[spec.asset_class]
     return history_range(first, last, zone)
+
+
+def calendar_day(spec: DatasetSpec, value: DateLike, name: str) -> date:
+    """Turn the single day a dataset's path takes into a calendar date in its day zone.
+
+    Endpoints such as the daily open-close summary take one day in the request path. A date
+    or a `"YYYY-MM-DD"` string is that day as given. An aware `datetime` names the calendar day
+    it falls on in the dataset's day zone (New York for stocks, options, indices, and datasets
+    without an asset class; UTC for forex and crypto; Chicago for futures), so
+    `datetime(2025, 3, 4, 2, 0, tzinfo=UTC)` is 2025-03-03 for a stock and 2025-03-04 for
+    crypto.
+
+    Args:
+        spec: The dataset, whose asset class picks the zone.
+        value: The day, as an ISO-8601 string, a `date`, or an aware `datetime`.
+        name: The parameter's name, used in error messages (`"date"`).
+
+    An unparseable or naive value raises the `TypeError` or `ValueError` of `parse_date_like`.
+
+    Returns:
+        The calendar date to put in the request.
+    """
+    parsed = parse_date_like(value, name)
+    if not isinstance(parsed, datetime):
+        return parsed
+    if spec.asset_class is AssetClass.FUTURES:
+        zone: tzinfo = CHICAGO
+    elif spec.asset_class is None:
+        zone = NEW_YORK
+    else:
+        zone = DAY_ZONES[spec.asset_class]
+    return parsed.astimezone(zone).date()
