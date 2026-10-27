@@ -232,6 +232,7 @@ def test_an_iso_instant_lands_as_exact_utc_nanoseconds() -> None:
         (WireType.LONG, 1.0),
         (WireType.BOOL, 1),
         (WireType.ISO_INSTANT, "2026-01-02T03:04:05"),
+        (WireType.ISO_INSTANT, "9999-12-31T00:00:00Z"),
         (WireType.INT_ARRAY, [2**31]),
     ],
 )

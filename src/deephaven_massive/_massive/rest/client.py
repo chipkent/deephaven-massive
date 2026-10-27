@@ -286,7 +286,8 @@ class RestClient:
         """Request one target, retrying per the schedule.
 
         A transient failure sleeps this thread; a 429 moves the not-before instant, which the
-        next attempt (and every other thread's) waits for.
+        next attempt (and every other thread's) waits for. A 429 on the last attempt still
+        moves the instant (by its `Retry-After`, else 60 s) before its error is raised.
 
         Args:
             rest_path: The path, for decoding.
@@ -302,14 +303,17 @@ class RestClient:
             outcome = self._attempt(rest_path, request)
             if not isinstance(outcome, _Retryable):
                 return outcome
+            # The last attempt's wait goes unused, except that a 429 still moves the shared
+            # instant, so the client's other requests back off even when this one gives up.
+            step = min(retry, MAX_RETRIES - 1)
+            if outcome.rate_limited:
+                wait = rate_limit_wait(step, outcome.retry_after)
+                self._defer(wait)
+            else:
+                wait = transient_wait(step, _JITTER.random())
             if retry == MAX_RETRIES:
                 _log.error("%s; giving up after %d attempts", outcome.error, retry + 1)
                 raise outcome.error
-            if outcome.rate_limited:
-                wait = rate_limit_wait(retry, outcome.retry_after)
-                self._defer(wait)
-            else:
-                wait = transient_wait(retry, _JITTER.random())
             _log.info("%s; retry %d of %d in %.2f s", outcome.error, retry + 1, MAX_RETRIES, wait)
             if not outcome.rate_limited:
                 self._clock.sleep(wait)

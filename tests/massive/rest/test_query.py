@@ -281,6 +281,32 @@ def test_next_url_on_another_origin_is_refused(url: str) -> None:
         query.next_target(url, _ORIGIN)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:pw@api.polygon.io/v3/x?cursor=c&apiKey=secret",
+        "https://api.massive.com:99999/v3/x?apiKey=secret",
+        "ftp://api.massive.com/v3/x?apiKey=secret",
+        "/v3/x?api%4Bey=secret",
+    ],
+)
+def test_a_refused_next_url_is_quoted_without_credentials(url: str) -> None:
+    with pytest.raises(ValueError, match="leaves") as caught:
+        query.next_target(url, _ORIGIN)
+    message = str(caught.value)
+    assert "secret" not in message
+    assert "pw" not in message
+
+
+def test_a_refused_next_url_keeps_the_rest_of_its_query() -> None:
+    url = "https://user:pw@api.polygon.io/v3/x?cursor=c&apiKey=secret"
+    with pytest.raises(ValueError, match="leaves") as caught:
+        query.next_target(url, _ORIGIN)
+    assert str(caught.value) == (
+        "next_url 'https://api.polygon.io/v3/x?cursor=c' leaves https://api.massive.com:443"
+    )
+
+
 def test_next_url_ignores_user_info_and_fragment() -> None:
     url = "https://user:pw@api.massive.com/v3/x?cursor=c#frag"
     assert query.next_target(url, _ORIGIN) == "/v3/x?cursor=c"

@@ -355,6 +355,25 @@ def test_a_persistent_429_is_a_wire_error_with_status_429(
     assert len(fake_rest.requests) == 4
 
 
+@pytest.mark.parametrize(("retry_after", "held"), [(None, 60.0), ("9", 9.0)])
+def test_a_429_on_the_last_attempt_still_holds_back_the_next_request(
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    *,
+    clock: FakeClock,
+    retry_after: str | None,
+    held: float,
+) -> None:
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers=headers))
+    fake_rest.reply("/v3/trades/MSFT", _ok())
+    with pytest.raises(WireError):
+        client.get(_TRADES, _AAPL, {})
+    before = clock.sleeps
+    client.get(_TRADES, {"stockTicker": "MSFT"}, {})
+    assert clock.sleeps == [*before, held]
+
+
 def test_a_retry_after_over_60_seconds_fails_at_once_naming_the_wait(
     client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
@@ -530,6 +549,20 @@ def test_a_next_url_on_another_host_is_refused_and_never_requested(
         next(pages)
     assert caught.value.host == "127.0.0.1"
     assert len(fake_rest.requests) == 1
+
+
+def test_a_refused_next_url_never_puts_the_key_in_an_error_or_a_log(
+    client: RestClient, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    leaked = f"https://api.polygon.io/v3/trades/AAPL?cursor=1&apiKey={_KEY}"
+    fake_rest.reply("/v3/trades/AAPL", _ok(next_url=leaked))
+    with pytest.raises(WireError) as caught:
+        list(client.pages(_TRADES, _AAPL, {}))
+    assert "api.polygon.io/v3/trades/AAPL?cursor=1" in caught.value.message
+    assert _KEY not in caught.value.message
+    assert _KEY not in str(caught.value.__cause__)
+    assert not any(_KEY in r.getMessage() for r in caplog.records)
 
 
 def test_a_reset_while_paging_retries_that_page_not_the_first(

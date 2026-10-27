@@ -1979,8 +1979,9 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   dot mapping of [section 9](#9-filters) happens before the client.
 - **Paging.** `pages` follows each page's `next_url`, which carries the cursor and the query.
   A `next_url` whose scheme, host, or port differ from `rest_base_url` raises `WireError` and
-  is never requested; any other `next_url` is requested on the base URL's origin, its query
-  kept byte for byte without `apiKey`. `limit` (at least 1) is the total-row cap: paging stops
+  is never requested, and the error quotes it without `apiKey` or user information; any other
+  `next_url` is requested on the base URL's origin, its query kept byte for byte without
+  `apiKey`. `limit` (at least 1) is the total-row cap: paging stops
   once that many rows have been yielded, and the last page is truncated. Only one page of rows
   is held at a time. A body without an envelope (`result_key` `None`, a list) ends paging.
 - **Retries** follow `net/retry.py`. At most 3 retries (4 attempts); every request is a `GET`,
@@ -1988,7 +1989,8 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   2 s, each with up to 20% upward jitter. HTTP 429 waits the `Retry-After` value in either form
   (delta-seconds or HTTP-date), otherwise 15, 30, then 60 s; a `Retry-After` above 60 s raises
   `WireError(status=429)` at once, naming the requested wait. After a 429 the client sets its
-  not-before instant, so concurrent workers back off together instead of multiplying 429s. A
+  not-before instant, so concurrent workers back off together instead of multiplying 429s;
+  a 429 on the last attempt still sets it (its `Retry-After`, else 60 s) before it raises. A
   TLS certificate failure (`ssl.SSLCertVerificationError`) is never retried: it raises
   `WireError` at once, naming `SSL_CERT_FILE`. A connection reset in the middle of paging
   retries **that page** (its `next_url`), never the first page. Redirects are never followed
@@ -2219,8 +2221,9 @@ one-element list); `epoch ⊔ epoch = epoch`, each source keeping its own unit. 
 `boolean`, `string` and `json-text` to `String`, `date` to `LocalDate`, `epoch` and
 `iso-instant` to `Instant`, and `int-array` to `int[]`. An `iso-instant` is ISO-8601
 date-time text with seconds and an offset (`Z` or `±HH:MM`), decoded to exact integer
-nanoseconds since the epoch; text without an offset is an unconvertible value, never assumed
-UTC. An `int-array` element outside the
+nanoseconds since the epoch; text without an offset, or an instant outside the signed
+64-bit nanosecond range (1677 to 2262), is an unconvertible value, never assumed UTC or
+clamped. An `int-array` element outside the
 `int32` range is an unconvertible value.
 
 **Hand input.** All of it lives in `refresh/`, every entry carries a reason, and an entry that

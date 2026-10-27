@@ -12,7 +12,7 @@ builds its own columns from it.
 | `bool` | `true` or `false` (never a number) | `bool` |
 | `string` | text | `str` |
 | `date` | text `YYYY-MM-DD` naming a real date | `datetime.date` |
-| `iso-instant` | ISO-8601 date-time text with seconds and `Z` or a `±HH:MM` offset | `int` ns |
+| `iso-instant` | ISO-8601 date-time text, seconds, offset `Z` or `±HH:MM` | `int` ns, int64 |
 | `int-array` | a list of integers, each in the signed 32-bit range | `list[int]` |
 | `json-text` | any JSON value | `str`, compact JSON |
 
@@ -166,11 +166,13 @@ def _instant(value: object) -> int:
         value: A decoded JSON value.
 
     Returns:
-        The instant in UTC, exact to the nanosecond.
+        The instant in UTC, exact to the nanosecond, within the signed 64-bit range (from
+        1677-09-21 to 2262-04-11), which an Arrow `timestamp[ns]` can hold.
 
     Raises:
         UnconvertibleError: If `value` is not ISO-8601 date-time text with seconds and an
-            offset (`Z` or `±HH:MM`), or names no real date, time of day, or offset.
+            offset (`Z` or `±HH:MM`), or names no real date, time of day, or offset. Raised by
+            `_long` for an instant outside the signed 64-bit nanosecond range.
     """
     match = _INSTANT.fullmatch(value) if isinstance(value, str) else None
     if match is None:
@@ -181,7 +183,7 @@ def _instant(value: object) -> int:
     if match["sign"] == "-":
         offset = -offset
     total = day * _SECONDS_PER_DAY + clock - offset
-    return total * _NANOS_PER_SECOND + int((match["fraction"] or "").ljust(9, "0"))
+    return _long(total * _NANOS_PER_SECOND + int((match["fraction"] or "").ljust(9, "0")))
 
 
 def _int_array(value: object) -> list[int]:

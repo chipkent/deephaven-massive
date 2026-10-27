@@ -306,7 +306,9 @@ def next_target(next_url: str, origin: Origin) -> str:
     Massive's `next_url` is an absolute URL that carries the cursor and the original query.
     The client requests it only on the REST host it was built for: the bearer key must never
     go to another host. Any `apiKey` query parameter is removed, so the key is never put in a
-    URL (and so never in a log); the rest of the query is kept byte for byte.
+    URL (and so never in a log); the rest of the query is kept byte for byte. The error for a
+    refused `next_url` quotes it without `apiKey` and without user information, so no
+    credential reaches an exception or a log either.
 
     Args:
         next_url: The `next_url` of the previous page.
@@ -317,10 +319,8 @@ def next_target(next_url: str, origin: Origin) -> str:
 
     Raises:
         ValueError: If `next_url` is not an absolute `http` or `https` URL, or its scheme,
-            host, or port differs from `origin`'s; the message names both.
+            host, or port differs from `origin`'s; the message names both, redacted.
     """
-    if origin_of(next_url) != origin:
-        raise ValueError(f"next_url {next_url!r} leaves {origin[0]}://{origin[1]}:{origin[2]}")
     parts = urlsplit(next_url)
     kept = [
         item
@@ -328,4 +328,12 @@ def next_target(next_url: str, origin: Origin) -> str:
         if item and unquote(item.partition("=")[0]) != "apiKey"
     ]
     path = parts.path or "/"
-    return f"{path}?{'&'.join(kept)}" if kept else path
+    target = f"{path}?{'&'.join(kept)}" if kept else path
+    try:
+        points_to: Origin | None = origin_of(next_url)
+    except ValueError:
+        points_to = None
+    if points_to != origin:
+        shown = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}{target}"
+        raise ValueError(f"next_url {shown!r} leaves {origin[0]}://{origin[1]}:{origin[2]}")
+    return target
