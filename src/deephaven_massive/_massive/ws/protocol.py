@@ -11,10 +11,13 @@ tested without a socket; `ws.client` owns the socket and calls in here:
   authentication frame.
 - **Received frames.** `FrameDecoder` decodes each frame once, with the `net.codec` JSON codec,
   into `Status` events and per-channel `Data`: rows keyed by long-form column, `Reject`s for the
-  rows that fail validation, and the `DriftReport` of the channel's objects in the frame.
+  rows that fail validation, and the `DriftReport` of the channel's objects in the frame. Each
+  value goes through `spec.convert.convert`, the converter the REST client uses too, so a value
+  means the same on both transports.
 - **Failures.** `classify_failure` decides whether an exception from opening the socket is
   fatal or retryable, from websockets' own rule and two overrides, and how long a retryable
-  one must wait at least.
+  one must wait at least. The overrides use the shared `net.retry` helpers: `is_tls_failure`
+  and the `Retry-After` reader.
 
 Topics are exact strings throughout: nothing here matches one topic as a prefix of another.
 Symbols are passed through as the wire spells them (`EUR/USD`, `BTC-USD`); mapping them to
@@ -25,13 +28,10 @@ This module imports the standard library, `websockets`, `net`, and `spec`.
 
 from __future__ import annotations
 
-import email.utils
 import json
 import logging
 import re
-import ssl
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
 from enum import StrEnum
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Literal
@@ -41,10 +41,12 @@ from websockets.exceptions import InvalidStatus
 
 from deephaven_massive._massive.net import codec
 from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.net.retry import is_tls_failure, retry_after_seconds
+from deephaven_massive._massive.spec.convert import UnconvertibleError, convert
 from deephaven_massive._massive.spec.types import DriftReport, Source, Transport, WireType
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Iterable, Sequence
 
 __all__ = [
     "MAX_TOPICS_PER_FRAME",
@@ -68,14 +70,6 @@ Massive does not document a frame-size limit; 1,000 topics of options contracts 
 of about 25 KB, which is conservative.
 """
 
-_INT64 = (-(2**63), 2**63 - 1)
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-# An ISO-8601 instant: whole seconds, an optional fraction of up to 9 digits, a required offset.
-_ISO_INSTANT = re.compile(
-    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})"
-)
-_INT32 = (-(2**31), 2**31 - 1)
-# How much of an offending value an error message quotes.
 _QUOTE_LIMIT = 50
 # How much of an undecodable frame a log message quotes.
 _LOG_LIMIT = 200
@@ -252,16 +246,17 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
         the `Retry-After` of an HTTP 429 (0.0 when absent or unreadable), and 0.0 otherwise,
         so the backoff alone decides.
     """
-    if isinstance(error, ssl.SSLCertVerificationError):
+    if is_tls_failure(error):
         return WireError(
-            f"TLS certificate verification failed for {host}: {error.verify_message}; "
+            f"TLS certificate verification failed for {host}: {error}; "
             "set SSL_CERT_FILE to a bundle that trusts the server's certificate",
             host=host,
             path=path,
         )
     status = error.response.status_code if isinstance(error, InvalidStatus) else None
     if isinstance(error, InvalidStatus) and status == HTTPStatus.TOO_MANY_REQUESTS:
-        return _retry_after(error.response.headers.get("Retry-After"), now)
+        wait = retry_after_seconds(error.response.headers.get("Retry-After"), now)
+        return 0.0 if wait is None else wait
     if process_exception(error) is None:
         return 0.0
     reason = f"HTTP {status}" if status is not None else f"{type(error).__name__}: {error}"
@@ -271,32 +266,6 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
         host=host,
         path=path,
     )
-
-
-def _retry_after(value: str | None, now: float) -> float:
-    """Return the seconds a `Retry-After` header asks to wait.
-
-    Args:
-        value: The header's value: delta-seconds (`"120"`) or an HTTP-date; `None` when absent.
-        now: The current time in seconds since the Unix epoch.
-
-    Returns:
-        The wait in seconds, never negative; 0.0 when the header is absent, and 0.0 with a
-        WARNING quoting it when it is unreadable.
-    """
-    if value is None:
-        return 0.0
-    value = value.strip()
-    if value.isascii() and value.isdigit():
-        return float(value)
-    try:
-        when = email.utils.parsedate_to_datetime(value)
-    except ValueError:
-        logger.warning("ignoring an unreadable Retry-After header: %r", value[:_LOG_LIMIT])
-        return 0.0
-    if when.tzinfo is None:  # an HTTP-date is always GMT; "-0000" parses as naive
-        when = when.replace(tzinfo=UTC)
-    return max(0.0, when.timestamp() - now)
 
 
 def _quote(value: object, limit: int = _QUOTE_LIMIT) -> str:
@@ -312,195 +281,6 @@ def _quote(value: object, limit: int = _QUOTE_LIMIT) -> str:
     return repr(value)[:limit]
 
 
-class _UnconvertibleError(ValueError):
-    """A wire value that does not fit its field's `WireType`; the message names the type."""
-
-
-def _integer(value: object, bounds: tuple[int, int], expected: str) -> int:
-    """Return an integer that is not a `bool` and lies within `bounds`.
-
-    Args:
-        value: The decoded JSON value.
-        bounds: The inclusive range.
-        expected: The type's name, for the error.
-
-    Returns:
-        The value.
-
-    Raises:
-        _UnconvertibleError: If the value is not such an integer.
-    """
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise _UnconvertibleError(expected)
-    if not bounds[0] <= value <= bounds[1]:
-        raise _UnconvertibleError(f"{expected} in [{bounds[0]}, {bounds[1]}]")
-    return value
-
-
-def _long(value: object) -> int:
-    """Convert a `LONG` or `EPOCH` value. An epoch keeps its count; the library applies its unit.
-
-    Args:
-        value: The decoded JSON value, not `None`.
-
-    Returns:
-        The value, an `int` within int64 and never a `bool`.
-    """
-    return _integer(value, _INT64, "an int64")
-
-
-def _double(value: object) -> float:
-    """Convert a `DOUBLE` value.
-
-    Args:
-        value: The decoded JSON value, not `None`.
-
-    Returns:
-        The number as a `float`.
-
-    Raises:
-        _UnconvertibleError: If the value is a `bool` or not a number, or an integer too large
-            for a double.
-    """
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise _UnconvertibleError("a number")
-    try:
-        return float(value)
-    except OverflowError:  # an integer of more than about 308 digits
-        raise _UnconvertibleError("a number within the range of a double") from None
-
-
-def _bool(value: object) -> bool:
-    """Convert a `BOOL` value.
-
-    Args:
-        value: The decoded JSON value, not `None`.
-
-    Returns:
-        The value.
-
-    Raises:
-        _UnconvertibleError: If the value is not `true` or `false` (a number never is).
-    """
-    if not isinstance(value, bool):
-        raise _UnconvertibleError("true or false")
-    return value
-
-
-def _string(value: object) -> str:
-    """Convert a `STRING` value.
-
-    Args:
-        value: The decoded JSON value, not `None`.
-
-    Returns:
-        The value.
-
-    Raises:
-        _UnconvertibleError: If the value is not text (a number never is).
-    """
-    if not isinstance(value, str):
-        raise _UnconvertibleError("text")
-    return value
-
-
-def _date(value: object) -> date:
-    """Convert a `DATE` value.
-
-    Args:
-        value: The decoded JSON value, not `None`.
-
-    Returns:
-        The calendar date.
-
-    Raises:
-        _UnconvertibleError: If the value is not `YYYY-MM-DD` text (week dates and the basic
-            format are refused too).
-    """
-    expected = "a date as YYYY-MM-DD"
-    if not isinstance(value, str) or len(value) != len("YYYY-MM-DD"):
-        raise _UnconvertibleError(expected)
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        raise _UnconvertibleError(expected) from None
-
-
-def _instant(value: object) -> int:
-    """Convert an `ISO_INSTANT` value to exact integer nanoseconds since the Unix epoch.
-
-    The text must be `YYYY-MM-DDTHH:MM:SS`, an optional fraction of 1 to 9 digits, and an
-    offset (`Z` or `+HH:MM`/`-HH:MM`). The fraction is read digit by digit, never through a
-    float or a `datetime` (which keeps only microseconds), so nanoseconds survive exactly.
-
-    Args:
-        value: The decoded JSON value, not `None`.
-
-    Returns:
-        The instant as nanoseconds since 1970-01-01T00:00:00Z.
-
-    Raises:
-        _UnconvertibleError: If the value is not such text: no offset (its zone would be a
-            guess), more than 9 fractional digits, or an impossible date or time.
-    """
-    expected = "an ISO-8601 date-time with an offset"
-    match = _ISO_INSTANT.fullmatch(value) if isinstance(value, str) else None
-    if match is None:
-        raise _UnconvertibleError(expected)
-    seconds, fraction, offset = match.groups()
-    try:
-        whole = datetime.fromisoformat(seconds + ("+00:00" if offset == "Z" else offset))
-    except ValueError:
-        raise _UnconvertibleError(expected) from None
-    elapsed = whole - _EPOCH
-    total_seconds = elapsed.days * 86_400 + elapsed.seconds
-    return total_seconds * 1_000_000_000 + int((fraction or "").ljust(9, "0"))
-
-
-def _int_array(value: object) -> list[int]:
-    """Convert an `INT_ARRAY` value.
-
-    Args:
-        value: The decoded JSON value, not `None`.
-
-    Returns:
-        The list of integers.
-
-    Raises:
-        _UnconvertibleError: If the value is not a list, or an element is a `bool`, not an
-            integer, or outside int32.
-    """
-    if not isinstance(value, list):
-        raise _UnconvertibleError("a list of int32")
-    return [_integer(element, _INT32, "a list of int32") for element in value]
-
-
-def _json_text(value: object) -> str:
-    """Convert a `JSON_TEXT` value: any JSON value, kept as its compact JSON text.
-
-    Args:
-        value: The decoded JSON value, not `None`.
-
-    Returns:
-        The text, such as `'{"a":1}'`; a string value keeps its quotes.
-    """
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-
-
-# Each wire type's converter. Every converter takes a non-null decoded JSON value and returns
-# its Python form, or raises `_UnconvertibleError`; nothing is coerced.
-_CONVERTERS: dict[WireType, Callable[[object], object]] = {
-    WireType.LONG: _long,
-    WireType.EPOCH: _long,
-    WireType.DOUBLE: _double,
-    WireType.BOOL: _bool,
-    WireType.STRING: _string,
-    WireType.DATE: _date,
-    WireType.ISO_INSTANT: _instant,
-    WireType.INT_ARRAY: _int_array,
-    WireType.JSON_TEXT: _json_text,
-}
-
 # A word of a refusal message that may name a topic: a run of characters with no space,
 # comma, semicolon, quote, bracket, or parenthesis.
 _WORD = re.compile(r"""[^\s,;'"()\[\]]+""")
@@ -513,13 +293,13 @@ class _Step:
     Attributes:
         wire_key: The key on the wire.
         column: The long-form column it fills.
-        convert: The converter of the field's `WireType`.
+        wire_type: The field's type, which `spec.convert.convert` checks each value against.
         required: Whether a missing value (or null) rejects the row.
     """
 
     wire_key: str
     column: str
-    convert: Callable[[object], object]
+    wire_type: WireType
     required: bool = False
 
 
@@ -561,7 +341,7 @@ class _Channel:
             _Step(
                 wire_key=f.wire_key,
                 column=f.column,
-                convert=_CONVERTERS[f.wire_type],
+                wire_type=f.wire_type,
                 required=f.wire_key in required,
             )
             for f in source.fields
@@ -786,10 +566,11 @@ class FrameDecoder:
                 row[step.column] = None
                 continue
             try:
-                row[step.column] = step.convert(value)
-            except _UnconvertibleError as error:
+                row[step.column] = convert(step.wire_type, value)
+            except UnconvertibleError:
                 problem = (
-                    f"field {step.wire_key!r} ({step.column}) expects {error}, got {_quote(value)}"
+                    f"field {step.wire_key!r} ({step.column}) expects {step.wire_type}, "
+                    f"got {_quote(value)}"
                 )
                 into.rejects.append(self._reject(channel, item, problem))
                 return

@@ -3,7 +3,8 @@
 Each client runs on its own thread, as in production. The tests synchronize with it through
 conditions (the recorder's and the fake server's), never by sleeping: backoff waits go through
 an injected `Sleeper` that records each wait and either returns at once or holds until
-`close()` cancels it, and time comes from an injected `Clock`.
+`close()` cancels it, and time comes from the shared `FakeClock` (`tests/_fakes/clock.py`),
+whose monotonic time moves only when a test advances it.
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ from deephaven_massive._massive.spec.types import (
 from deephaven_massive._massive.ws import client as client_module
 from deephaven_massive._massive.ws.client import WsClient, WsState
 from deephaven_massive._massive.ws.protocol import Status, StatusKind
+
+# Imported directly, as the REST client's tests do: each client needs its own clock, built
+# with the client inside the factory fixture below, which a shared fixture cannot provide.
+from tests._fakes.clock import FakeClock
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -148,28 +153,12 @@ class Sleeper:
             return list(self.waits)
 
 
-class Clock:
-    """The injected wall clock, advanced by the test."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._now = 1_000_000.0
-
-    def __call__(self) -> float:
-        with self._lock:
-            return self._now
-
-    def advance(self, seconds: float) -> None:
-        with self._lock:
-            self._now += seconds
-
-
 @dataclass
 class Harness:
     client: WsClient
     recorder: Recorder
     sleeper: Sleeper
-    clock: Clock
+    clock: FakeClock
 
     def on_loop(self, action: Callable[[], object]) -> object:
         # Run `action` on the client's loop thread; its result or exception comes back here.
@@ -192,7 +181,7 @@ def make_client(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[..., Har
         recorder: Recorder | None = None,
     ) -> Harness:
         recorder = recorder or Recorder()
-        sleeper, clock = Sleeper(free_waits), Clock()
+        sleeper, clock = Sleeper(free_waits), FakeClock()
         client = WsClient(
             url or fake_ws_server.url(),
             api_key=KEY,
@@ -288,7 +277,7 @@ def test_max_connections_waits_for_a_slot_then_retries(
     h.recorder.wait_open(1)
     assert h.recorder.states() == [WsState.CONNECTING, WsState.WAITING_SLOT, WsState.CONNECTING]
     [(_, at)] = [s for s in h.recorder.of("state") if s[0] is WsState.WAITING_SLOT]
-    assert at == h.clock() + 1.0
+    assert at == h.clock.time() + 1.0
     assert h.sleeper.waits == [1.0]
     assert len(fake_ws_server.connections) == 2
 
@@ -389,7 +378,7 @@ def test_an_http_429_waits_the_longer_of_retry_after_and_the_backoff(
     h.recorder.wait_open(1)
     assert h.sleeper.waits == [wait]
     [(_, at)] = [s for s in h.recorder.of("state") if s[0] is WsState.RECONNECTING]
-    assert at == h.clock() + wait
+    assert at == h.clock.time() + wait
 
 
 def test_a_refused_connection_is_retried(

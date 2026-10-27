@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import ssl
 from datetime import UTC, date, datetime
 from email.utils import format_datetime
@@ -22,7 +21,6 @@ from deephaven_massive._massive.spec.types import (
     WireType,
     WireUnit,
 )
-from deephaven_massive._massive.ws import protocol
 from deephaven_massive._massive.ws.protocol import (
     MAX_TOPICS_PER_FRAME,
     Data,
@@ -263,120 +261,55 @@ def test_a_single_object_frame_is_decoded(decoder: FrameDecoder) -> None:
 
 
 # --- conversions --------------------------------------------------------------------------------
+# `spec.convert` owns the rules of every type and is tested there; these tests show that the
+# decoder applies it to every field and turns its refusal into a reject.
+
+
+def test_every_field_goes_through_the_shared_converter(decoder: FrameDecoder) -> None:
+    item = {
+        "ev": "E",
+        "b": False,
+        "d": "2026-01-02",
+        "i": "2026-01-02T14:30:00.123456789Z",
+        "j": {"a": [1, "é"]},
+    }
+    [row] = _decode_one(decoder, item).rows
+    assert row == {
+        "Flag": False,
+        "Day": date(2026, 1, 2),
+        "When": 1_767_364_200_123_456_789,
+        "Extra": '{"a":[1,"é"]}',
+    }
 
 
 @pytest.mark.parametrize(
     "case",
     [
-        ("b", False, False),
-        ("d", "2026-01-02", date(2026, 1, 2)),
-        ("i", "2026-01-02T14:30:00Z", 1_767_364_200_000_000_000),
-        ("i", "2026-01-02T09:30:00-05:00", 1_767_364_200_000_000_000),
-        ("i", "2026-01-02T14:30:00.123456789Z", 1_767_364_200_123_456_789),
-        ("i", "2026-01-02T14:30:00.5+00:00", 1_767_364_200_500_000_000),
-        ("i", "1969-12-31T23:59:59.25Z", -750_000_000),
-        ("j", {"a": [1, "é"]}, '{"a":[1,"é"]}'),
-        ("j", "text", '"text"'),
-    ],
-)
-def test_values_convert_to_their_python_form(
-    decoder: FrameDecoder, case: tuple[str, object, object]
-) -> None:
-    key, value, expected = case
-    data = _decode_one(decoder, {"ev": "E", key: value})
-    [row] = data.rows
-    converted = row[{"b": "Flag", "d": "Day", "i": "When", "j": "Extra"}[key]]
-    assert converted == expected
-    assert type(converted) is type(expected)
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        ("s", 2**63 - 1, 2**63 - 1),
-        ("s", -(2**63), -(2**63)),
-        ("t", 1536036818784, 1536036818784),
-        ("c", [2**31 - 1, -(2**31)], [2**31 - 1, -(2**31)]),
-    ],
-)
-def test_integers_at_their_limits_are_accepted(
-    decoder: FrameDecoder, case: tuple[str, object, object]
-) -> None:
-    key, value, expected = case
-    [row] = _decode_one(decoder, {"ev": "T", "sym": "A", key: value}).rows
-    assert row[{"s": "Size", "t": "SipTimestamp", "c": "Conditions"}[key]] == expected
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        ("p", "1.5", "a number"),
-        ("p", True, "a number"),
-        ("s", 1.5, "an int64"),
-        ("s", True, "an int64"),
-        ("s", 2**63, "an int64 in [-9223372036854775808, 9223372036854775807]"),
-        ("t", "1536036818784", "an int64"),
-        ("c", 5, "a list of int32"),
-        ("c", [1, 2**31], "a list of int32 in [-2147483648, 2147483647]"),
-        ("c", [True], "a list of int32"),
-        ("sym", 5, "text"),
+        ("p", "1.5", "double"),
+        ("s", True, "long"),
+        ("t", "1536036818784", "epoch"),
+        ("c", [1, 2**31], "int-array"),
+        ("sym", 5, "string"),
     ],
 )
 def test_an_unconvertible_value_rejects_its_row(
     decoder: FrameDecoder, case: tuple[str, object, str]
 ) -> None:
     key, value, expects = case
-    item = {"ev": "T", "sym": "AAPL", key: value}
-    data = _decode_one(decoder, item)
+    data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", key: value})
     assert data.rows == []
     [reject] = data.rejects
     assert reject.channel == "T"
     assert reject.symbol is None  # no symbol column was declared
-    assert isinstance(reject.error, WireError)
     assert (reject.error.host, reject.error.path, reject.error.status) == (HOST, PATH, None)
     assert f"field {key!r}" in reject.error.message
-    assert f"expects {expects}, got " in reject.error.message
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        ("b", 1, "true or false"),
-        ("b", "true", "true or false"),
-        ("d", "2026-1-2", "a date as YYYY-MM-DD"),
-        ("d", "2026-13-01", "a date as YYYY-MM-DD"),
-        ("d", "2026W011x", "a date as YYYY-MM-DD"),
-        ("d", 20260102, "a date as YYYY-MM-DD"),
-        ("i", "2026-01-02", "an ISO-8601 date-time with an offset"),
-        ("i", "2026-01-02T14:30:00", "an ISO-8601 date-time with an offset"),
-        ("i", "2026-01-02T14:30:00.1234567891Z", "an ISO-8601 date-time with an offset"),
-        ("i", "2026-01-02T25:00:00Z", "an ISO-8601 date-time with an offset"),
-        ("i", "2026-01-02T14:30:00+0000", "an ISO-8601 date-time with an offset"),
-        ("i", 1, "an ISO-8601 date-time with an offset"),
-    ],
-)
-def test_text_types_refuse_what_they_cannot_parse(
-    decoder: FrameDecoder, case: tuple[str, object, str]
-) -> None:
-    key, value, expects = case
-    data = _decode_one(decoder, {"ev": "E", key: value})
-    [reject] = data.rejects
     assert f"expects {expects}, got {value!r}" in reject.error.message
 
 
-@pytest.mark.parametrize(
-    "case",
-    [
-        (WireType.LONG, -(2**63) - 1, "an int64 in [-9223372036854775808, 9223372036854775807]"),
-        (WireType.DOUBLE, 10**400, "a number within the range of a double"),
-    ],
-)
-def test_converters_refuse_integers_beyond_their_range(case: tuple[WireType, int, str]) -> None:
-    # Only the standard-library decoder produces these integers (orjson refuses or rounds them),
-    # so the converters are called directly.
-    wire_type, value, expects = case
-    with pytest.raises(protocol._UnconvertibleError, match=re.escape(expects)):
-        protocol._CONVERTERS[wire_type](value)
+def test_an_instant_without_an_offset_rejects_its_row(decoder: FrameDecoder) -> None:
+    data = _decode_one(decoder, {"ev": "E", "i": "2026-01-02T14:30:00"})
+    [reject] = data.rejects
+    assert "expects iso-instant, got '2026-01-02T14:30:00'" in reject.error.message
 
 
 def test_a_reject_quotes_at_most_50_characters_of_the_value(decoder: FrameDecoder) -> None:
@@ -569,17 +502,27 @@ def test_a_certificate_failure_is_fatal_and_names_ssl_cert_file() -> None:
     assert isinstance(error, WireError)
     assert error.status is None
     assert (error.host, error.path) == (HOST, PATH)
-    assert error.message == (
-        f"TLS certificate verification failed for {HOST}: unable to get local issuer "
-        "certificate; set SSL_CERT_FILE to a bundle that trusts the server's certificate"
+    assert error.message.startswith(f"TLS certificate verification failed for {HOST}: ")
+    assert error.message.endswith(
+        "; set SSL_CERT_FILE to a bundle that trusts the server's certificate"
     )
+
+
+def test_a_wrapped_certificate_failure_is_fatal_too() -> None:
+    wrapper = OSError("connection failed")
+    wrapper.__cause__ = _cert_error()
+    error = _classify(wrapper)
+    assert isinstance(error, WireError)
+    assert "SSL_CERT_FILE" in error.message
 
 
 def test_an_unreadable_retry_after_is_warned_about(caplog: pytest.LogCaptureFixture) -> None:
     assert _classify(_status_error(429, {"Retry-After": "soon"})) == 0.0
     [record] = caplog.records
     assert record.levelno == logging.WARNING
-    assert record.getMessage() == "ignoring an unreadable Retry-After header: 'soon'"
+    assert record.getMessage() == (
+        "ignoring a Retry-After that is neither seconds nor an HTTP date: 'soon'"
+    )
 
 
 def test_an_object_of_exactly_the_declared_shape_has_no_drift(decoder: FrameDecoder) -> None:

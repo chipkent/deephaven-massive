@@ -31,7 +31,6 @@ import asyncio
 import contextlib
 import logging
 import threading
-import time
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
@@ -43,6 +42,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireAuthError, WireError
 from deephaven_massive._massive.net.http import ssl_context
+from deephaven_massive._massive.net.retry import SYSTEM_CLOCK
 from deephaven_massive._massive.ws.backoff import Backoff
 from deephaven_massive._massive.ws.protocol import (
     FrameDecoder,
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 
     from websockets.asyncio.client import ClientConnection
 
+    from deephaven_massive._massive.net.retry import Clock
     from deephaven_massive._massive.spec.types import DriftReport, Source
     from deephaven_massive._massive.ws.protocol import Reject
 
@@ -210,7 +211,7 @@ class WsClient:
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_backoff: float,
         max_reconnect_backoff: float,
-        clock: Callable[[], float] = time.time,
+        clock: Clock = SYSTEM_CLOCK,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """Create the client and its loop; nothing connects until `start()`.
@@ -230,11 +231,14 @@ class WsClient:
                 library passes its configuration's value (at least 15 s); tests pass less.
             max_reconnect_backoff: Seconds the doubling backoff stops at; at least
                 `reconnect_backoff`.
-            clock: The current time in seconds since the Unix epoch. It times the
-                generations for the stable-uptime rule, dates the next attempt, and reads an
-                HTTP-date `Retry-After`. Tests inject a controllable clock.
-            sleep: The coroutine that waits out a backoff. Tests inject one that records the
-                wait and returns at once.
+            clock: The time source the wire clients share (`net.retry.Clock`). Its
+                `monotonic()` times each generation for the stable-uptime rule; its `time()`
+                dates the next attempt and reads an HTTP-date `Retry-After`. Its blocking
+                `wait` is never used: it would stall the loop, and with it every callback
+                and keepalive ping, for a whole backoff. Tests pass a `FakeClock`.
+            sleep: The coroutine that waits out a backoff on the loop; `close()` interrupts it
+                by cancelling the task. Tests inject one that records the wait and returns at
+                once.
 
         Raises:
             ValueError: If `url` is not a `ws://` or `wss://` URL with a host, a source is not a
@@ -467,7 +471,7 @@ class WsClient:
             wait = max(self._backoff.next_wait(ended.uptime), ended.least_wait)
             logger.warning("reconnecting to %s in %.1f s", self._url, wait)
             state = WsState.WAITING_SLOT if ended.waiting_slot else WsState.RECONNECTING
-            self._on_state(state, self._clock() + wait)
+            self._on_state(state, self._clock.time() + wait)
             await self._sleep(wait)
 
     async def _attempt(self) -> _Ended | WireError:
@@ -490,7 +494,9 @@ class WsClient:
                     logger=_WIRE_LOGGER,
                 )
         except (OSError, WebSocketException) as error:  # a timeout is an OSError
-            verdict = classify_failure(error, host=self._host, path=self._path, now=self._clock())
+            verdict = classify_failure(
+                error, host=self._host, path=self._path, now=self._clock.time()
+            )
             if isinstance(verdict, WireError):
                 return verdict
             logger.info("could not connect to %s: %r", self._url, error)
@@ -579,7 +585,7 @@ class WsClient:
         self._generations += 1
         generation = _Generation(number=self._generations, outbox=asyncio.Queue())
         self._current = generation
-        opened_at = self._clock()
+        opened_at = self._clock.monotonic()
         logger.info("authenticated with %s (generation %d)", self._url, generation.number)
         sender = asyncio.create_task(self._send(websocket, generation.outbox))
         no_slot = False
@@ -600,7 +606,7 @@ class WsClient:
             self._current = None
             sender.cancel()
         logger.info("the connection to %s closed (code %s)", self._url, websocket.close_code)
-        return _Ended(uptime=self._clock() - opened_at, waiting_slot=no_slot)
+        return _Ended(uptime=self._clock.monotonic() - opened_at, waiting_slot=no_slot)
 
     @staticmethod
     async def _send(websocket: ClientConnection, outbox: asyncio.Queue[str | None]) -> None:
