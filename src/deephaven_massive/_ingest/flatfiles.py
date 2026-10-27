@@ -4,7 +4,7 @@ Massive publishes one gzip CSV file per dataset and day in the `flatfiles` bucke
 `https://files.massive.com`, under keys `<prefix>/<YYYY>/<MM>/<YYYY-MM-DD>.csv.gz` (for
 example `us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz`). This module is the flat-file
 transport. `HistoryQuery.history()` decides that flat files serve a request
-(`_history_source.choose_source`) and hands it the partition dates to read. The S3 access
+(`history_source.choose_source`) and hands it the partition dates to read. The S3 access
 itself (the bucket client, the key layout, the S3 errors, and the CSV decoding) is the wire
 package's: `_massive.FlatFileClient` opens each file and `_massive.FlatFile` decodes it, and this
 module builds the `_massive.ReadPlan` that says what to keep.
@@ -28,7 +28,7 @@ text such as `NA` or `NULL` is data (both are valid tickers).
 A missing file is judged by its date: on a weekend (for every class but crypto, which trades
 every day) it is skipped silently; on a weekday it is skipped with a WARNING, since it is most
 likely a market holiday. A missing file for the last requested date may instead be late: within
-a day after its publication time (`_history_source.within_publication_grace`) it raises
+a day after its publication time (`history_source.within_publication_grace`) it raises
 `MassiveError` naming both causes, and after that it is skipped with a WARNING like any other
 weekday.
 
@@ -69,8 +69,11 @@ import pyarrow.compute as pc
 from deephaven import merge
 from deephaven.arrow import to_table
 
-from deephaven_massive._catalog import unit_rules
-from deephaven_massive._dates import TimeRange
+from deephaven_massive._datasets.catalog import unit_rules
+from deephaven_massive._datasets.dates import TimeRange
+from deephaven_massive._datasets.history_source import within_publication_grace
+from deephaven_massive._datasets.schema import ColumnType
+from deephaven_massive._datasets.timestamps import TimeField, TimeUnitTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, Transport
 from deephaven_massive._errors import (
     AuthenticationError,
@@ -78,8 +81,6 @@ from deephaven_massive._errors import (
     MassiveError,
     from_wire,
 )
-from deephaven_massive._history_source import within_publication_grace
-from deephaven_massive._liveness import entered
 from deephaven_massive._massive import (
     ReadColumn,
     ReadPlan,
@@ -88,8 +89,7 @@ from deephaven_massive._massive import (
     WireError,
     object_key,
 )
-from deephaven_massive._schema import ColumnType
-from deephaven_massive._timeunits import TimeField, TimeUnitTable
+from deephaven_massive._tables.liveness import entered
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -98,12 +98,12 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    from deephaven_massive._catalog import DatasetSpec
-    from deephaven_massive._dates import FuturesSessions
+    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.dates import FuturesSessions
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import FlatFileClient
     from deephaven_massive._query import Request
     from deephaven_massive._session import SessionCore
-    from deephaven_massive._symbols import NormalizedSymbols
 
 __all__ = ["BLOCK_SIZE", "FlatFileHistory"]
 
@@ -366,7 +366,7 @@ class FlatFileHistory:
         """Return the rows of `window` from the dataset's flat files, as one static table.
 
         Flat files have already been chosen for the request
-        (`_history_source.choose_source`), so the dataset has a file for its timespan. Files
+        (`history_source.choose_source`), so the dataset has a file for its timespan. Files
         are read by a pool of `min(max_concurrency, files)` threads, which end before this
         method returns. If any read fails, or this thread is interrupted, every other read
         stops at its next block, reads that have not started are cancelled, and the failure of
@@ -377,8 +377,8 @@ class FlatFileHistory:
             spec: The dataset.
             request: The normalized arguments, with the raw `start` and `end` bounds, and
                 static symbols (the query reads a reactive symbol table before this call).
-            window: The bounds under the class's day rules (`_dates.bounds`).
-            dates: The partition dates to read (`_history_source.partition_dates`).
+            window: The bounds under the class's day rules (`dates.bounds`).
+            dates: The partition dates to read (`history_source.partition_dates`).
 
         Returns:
             A static table in the dataset's schema: the files' rows in date order (and, for
@@ -566,7 +566,7 @@ class FlatFileHistory:
         A weekend file is skipped silently (except for crypto, which trades every day); a
         weekday file is skipped with a WARNING (most likely a market holiday). The file for the
         last requested date may instead be late, so within
-        `_history_source.PUBLICATION_GRACE` after its publication time it raises; after that it
+        `history_source.PUBLICATION_GRACE` after its publication time it raises; after that it
         is skipped with a WARNING too.
 
         Args:

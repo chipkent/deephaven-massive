@@ -6,7 +6,7 @@ exchanges, condition codes, market status, and market holidays.
 Each dataset is one factory method on `_Reference` that validates its arguments and returns a query;
 nothing touches the network until a verb is called on the query. This module owns the
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the catalog by
-`_catalog.datasets()`.
+`catalog.datasets()`.
 
 Status: no datasets are declared yet. `DATASETS` is empty and `_Reference` has no dataset methods.
 """
@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, ClassVar, Final
 from deephaven_massive._namespaces.base import Namespace
 
 if TYPE_CHECKING:
-    from deephaven_massive._catalog import DatasetSpec
+    from deephaven_massive._datasets.catalog import DatasetSpec
 
 __all__ = ["DATASETS", "_Reference"]
 

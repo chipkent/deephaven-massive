@@ -6,8 +6,8 @@ from typing import cast
 
 import pytest
 
-from deephaven_massive._catalog import DatasetSpec
-from deephaven_massive._dates import (
+from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.dates import (
     CHICAGO,
     DAY_ZONES,
     NEW_YORK,
@@ -22,9 +22,9 @@ from deephaven_massive._dates import (
     parse_date_like,
     publish_time,
 )
+from deephaven_massive._datasets.schema import TRADES
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._query import HistoryQuery
-from deephaven_massive._schema import TRADES
 
 
 @pytest.mark.parametrize(

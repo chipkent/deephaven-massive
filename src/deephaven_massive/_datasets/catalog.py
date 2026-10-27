@@ -26,16 +26,16 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._dates import require_aware
+from deephaven_massive._datasets.dates import require_aware
+from deephaven_massive._datasets.schema import ColumnType, Schema, model_schema
+from deephaven_massive._datasets.timestamps import TimeField, TimeUnit, TimeUnitTable, UnitRule
 from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan, Transport
-from deephaven_massive._schema import ColumnType, Schema, model_schema
-from deephaven_massive._timeunits import TimeField, TimeUnit, TimeUnitTable, UnitRule
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from deephaven_massive._datasets.schema import ColumnOverride, KeyMap
     from deephaven_massive._query import QueryBase
-    from deephaven_massive._schema import ColumnOverride, KeyMap
 
 __all__ = [
     "NAMESPACE_MODULES",
@@ -122,19 +122,19 @@ class DatasetSpec:
     Example:
         ::
 
-            from deephaven_massive import _schema
-            from deephaven_massive._catalog import DatasetSpec
+            from deephaven_massive._datasets import schema
+            from deephaven_massive._datasets.catalog import DatasetSpec
+            from deephaven_massive._datasets.timestamps import TimeUnit
             from deephaven_massive._enums import AssetClass, Transport
             from deephaven_massive._query import StreamHistoryLatestQuery
-            from deephaven_massive._timeunits import TimeUnit
 
             ms, ns = TimeUnit.MILLISECONDS, TimeUnit.NANOSECONDS
             TRADES = DatasetSpec(
                 name="stocks.trades",
                 query_class=StreamHistoryLatestQuery,
                 asset_class=AssetClass.STOCKS,
-                schema=_schema.TRADES.schema,
-                key_maps={Transport.WS: _schema.TRADES.key_maps[Transport.WS]},
+                schema=schema.TRADES.schema,
+                key_maps={Transport.WS: schema.TRADES.key_maps[Transport.WS]},
                 fetch_method="get_last_trade",
                 history_method="list_trades",
                 channels={None: "T"},
@@ -154,7 +154,7 @@ class DatasetSpec:
             multiplier. False datasets key them by None.
         schema: The dataset's union schema. Leave it out for a REST dataset with a
             `rest_model`: the schema is then derived from the model at construction
-            (`_schema.model_schema`, with the dataset's REST time units and `overrides`), so
+            (`schema.model_schema`, with the dataset's REST time units and `overrides`), so
             every check below runs at import for REST datasets too. Exactly one of `schema` and
             `rest_model` is given.
         rest_model: The SDK model class whose fields define the REST columns.
@@ -233,7 +233,7 @@ class DatasetSpec:
                 file is checked).
 
         Deriving the schema from `rest_model` raises the `TypeError` or `ValueError` of
-        `_schema.model_schema` (an unmapped SDK hint, an unknown override path).
+        `schema.model_schema` (an unmapped SDK hint, an unknown override path).
         """
         namespace, _, dataset = self.name.partition(".")
         if not namespace or not dataset:
@@ -389,7 +389,7 @@ def check_filters(spec: DatasetSpec, filters: Mapping[str, object]) -> None:
     Raises:
         ValueError: If a key is not a parameter of the dataset's SDK methods (the message lists
             the valid keys), or a value is of the wrong kind. A naive `datetime` raises the
-            `ValueError` of `_dates.require_aware`.
+            `ValueError` of `dates.require_aware`.
     """
     if not SDK_PARAMS:
         return

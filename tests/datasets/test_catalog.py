@@ -13,8 +13,9 @@ from typing import Any, cast
 
 import pytest
 
-from deephaven_massive import _catalog, _namespaces
-from deephaven_massive._catalog import (
+from deephaven_massive import _namespaces
+from deephaven_massive._datasets import catalog
+from deephaven_massive._datasets.catalog import (
     NAMESPACE_MODULES,
     SCHEMA_FROM_MODEL,
     SDK_PARAMS,
@@ -28,10 +29,10 @@ from deephaven_massive._catalog import (
     time_units,
     unit_rules,
 )
+from deephaven_massive._datasets.schema import TRADES, ColumnOverride, ColumnType
+from deephaven_massive._datasets.timestamps import TimeField, TimeUnit, UnitRule
 from deephaven_massive._enums import AssetClass, Timespan, Transport
 from deephaven_massive._query import Query, StreamHistoryLatestQuery
-from deephaven_massive._schema import TRADES, ColumnOverride, ColumnType
-from deephaven_massive._timeunits import TimeField, TimeUnit, UnitRule
 
 
 @pytest.fixture
@@ -198,7 +199,7 @@ def test_specs_are_identity_hashed() -> None:
 
 
 def test_sdk_params_block_is_generated_and_empty_until_p3() -> None:
-    source = Path(_catalog.__file__).read_text()
+    source = Path(catalog.__file__).read_text()
     begin = source.index("# --- BEGIN GENERATED SDK_PARAMS")
     end = source.index("# --- END GENERATED SDK_PARAMS")
     assert "SDK_PARAMS: Final[" in source[begin:end]
@@ -209,14 +210,14 @@ def test_sdk_params_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(LookupError, match="refresh_massive_catalog"):
         sdk_params("list_trades")
     monkeypatch.setattr(
-        _catalog, "SDK_PARAMS", {"list_trades": {"timestamp_gte": ParamKind.DATETIME}}
+        catalog, "SDK_PARAMS", {"list_trades": {"timestamp_gte": ParamKind.DATETIME}}
     )
     assert sdk_params("list_trades") == {"timestamp_gte": ParamKind.DATETIME}
 
 
 def test_filter_params_merge_methods_and_extras(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        _catalog,
+        catalog,
         "SDK_PARAMS",
         {
             "get_last_trade": {"ticker": ParamKind.STRING},
@@ -283,14 +284,14 @@ def test_filters_are_accepted_until_the_table_is_generated(
     spec = _trades(history_method="list_trades")
     assert dict(SDK_PARAMS) == {}
     check_filters(spec, {"anything": 1})  # accepted: there is no table to check against yet
-    monkeypatch.setattr(_catalog, "SDK_PARAMS", {"list_trades": {"limit": ParamKind.INTEGER}})
+    monkeypatch.setattr(catalog, "SDK_PARAMS", {"list_trades": {"limit": ParamKind.INTEGER}})
     with pytest.raises(ValueError, match="has no filter 'anything'"):
         check_filters(spec, {"anything": 1})  # the same filter, once the table exists
 
 
 def test_filters_are_checked_against_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        _catalog,
+        catalog,
         "SDK_PARAMS",
         {
             "list_trades": {
@@ -333,7 +334,7 @@ def test_filters_are_checked_against_the_sdk(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_date_filters_must_be_dates(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_catalog, "SDK_PARAMS", {"list_trades": {"date": ParamKind.DATE}})
+    monkeypatch.setattr(catalog, "SDK_PARAMS", {"list_trades": {"date": ParamKind.DATE}})
     spec = _trades(history_method="list_trades")
     check_filters(spec, {"date": "2025-01-02"})
     check_filters(spec, {"date": date(2025, 1, 2)})

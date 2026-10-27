@@ -22,7 +22,7 @@ take the session's registry lock.
 The verbs delegate the transport work to three interfaces, one per transport, which the session
 provides through its factory hooks: `RestTransport` (`fetch`, `poll`, REST `history`),
 `StreamTransport` (opening a WebSocket stream), and `FlatFileTransport` (flat-file `history`).
-`history()` chooses its source itself (`_history_source.choose_source`) and then calls one
+`history()` chooses its source itself (`history_source.choose_source`) and then calls one
 transport, so the transports only do I/O.
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
@@ -44,7 +44,13 @@ from deephaven.table import Table
 from deephaven.table_factory import ring_table
 
 from deephaven_massive._config import require_positive_int, require_positive_number
-from deephaven_massive._dates import bounds, parse_date_like
+from deephaven_massive._datasets.dates import bounds, parse_date_like
+from deephaven_massive._datasets.history_source import (
+    choose_source,
+    partition_dates,
+    rest_history_problem,
+)
+from deephaven_massive._datasets.symbols import SymbolTable, canonical_view, symbol_canonicalizer
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -55,20 +61,18 @@ from deephaven_massive._enums import (
     Timespan,
     _require_enum,
 )
-from deephaven_massive._history_source import choose_source, partition_dates, rest_history_problem
-from deephaven_massive._liveness import entered
-from deephaven_massive._symbols import SymbolTable, canonical_view, symbol_canonicalizer
+from deephaven_massive._tables.liveness import entered
 from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from enum import StrEnum
 
-    from deephaven_massive._catalog import DatasetSpec
-    from deephaven_massive._dates import FuturesSessions, TimeRange
-    from deephaven_massive._liveness import StreamHandle
+    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._session import SessionCore
-    from deephaven_massive._symbols import NormalizedSymbols
+    from deephaven_massive._tables.liveness import StreamHandle
     from deephaven_massive._types import DateLike
 
 __all__ = [
@@ -295,7 +299,7 @@ class FlatFileTransport(Protocol):
     """The flat-file transport, provided by `SessionCore.flat_file_transport()`.
 
     It only reads files: `HistoryQuery.history()` has already chosen flat files as the source
-    (`_history_source.choose_source`).
+    (`history_source.choose_source`).
     """
 
     def history(
@@ -314,7 +318,7 @@ class FlatFileTransport(Protocol):
                 symbols (never a reactive table).
             window: The bounds under the class's day rules: a half-open `TimeRange`, or the
                 `FuturesSessions` of date-bounded futures.
-            dates: The partition dates to read (`_history_source.partition_dates`).
+            dates: The partition dates to read (`history_source.partition_dates`).
         """
         ...
 
@@ -374,7 +378,7 @@ def _read_symbol_table(
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
     it reads, so the symbols are one consistent snapshot. Runs on the caller thread, inside the
     session's execution context, with no library lock held. Each row is canonicalized as the
-    stream verbs do (`_symbols.symbol_canonicalizer`): a row that is not a valid symbol of the
+    stream verbs do (`symbols.symbol_canonicalizer`): a row that is not a valid symbol of the
     class is ignored and logged once at WARNING.
 
     Args:
@@ -566,7 +570,7 @@ class StreamQuery(QueryBase):
         row is the latest from a symbol that was watched when it arrived; a group keeps that
         row after the symbol is removed, until a watched symbol ticks in the group. The table
         may hold any accepted spelling (`EUR/USD` for `C:EURUSD`): it is matched through
-        `_symbols.canonical_view`. `last_by()` never seeds
+        `symbols.canonical_view`. `last_by()` never seeds
         from REST: use `snapshots(symbols).poll(n)` for current state on every plan. A `by`
         that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
         unknown column raises `ValueError`.

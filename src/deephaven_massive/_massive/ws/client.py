@@ -2,7 +2,7 @@
 
 `WsClient` owns everything about the wire of one connection: the socket, the handshake and
 authentication, sending subscription frames, decoding every received frame, reconnecting with
-backoff, and closing. The library (`_ws.py`) owns every decision: which topics to subscribe,
+backoff, and closing. The library (`_ingest/ws.py`) owns every decision: which topics to subscribe,
 acknowledgements and their watchdogs, routing rows to streams, and diagnostics. The two meet
 through four callbacks and a handful of loop-thread methods.
 

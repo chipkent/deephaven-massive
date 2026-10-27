@@ -11,8 +11,7 @@ them, and knows nothing of datasets, sessions, or Deephaven:
 
 The package defines and imports nothing itself: `deephaven_massive._massive` maps each of these
 names straight to its submodule, so using `object_key` or `ReadPlan` never imports `client`,
-and with it boto3. It imports only `net` from `_massive`. PEP 8 forbids an underscore in a
-package name, so it is spelled `flatfiles`; the library module that uses it is
-`_flat_files.py`, which builds the read plans and owns the missing-file policy, the reader pool,
-and cancellation.
+and with it boto3. It imports only `net` from `_massive`. The library module that uses it is
+`_ingest/flatfiles.py`, which builds the read plans and owns the missing-file policy, the reader
+pool, and cancellation.
 """

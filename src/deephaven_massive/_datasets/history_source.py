@@ -17,7 +17,7 @@ from `_now`, which tests replace) and makes no network or Deephaven call.
   or more, or `dm.ALL`) read flat files and fewer use REST.
 
 A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
-after the next day starts in the class's day zone (`_dates.publish_time`); futures use their
+after the next day starts in the class's day zone (`dates.publish_time`); futures use their
 Chicago session date. Massive says files land "by approximately 11:00 AM ET the following day".
 """
 
@@ -27,7 +27,7 @@ import logging
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Final, NamedTuple
 
-from deephaven_massive._dates import (
+from deephaven_massive._datasets.dates import (
     CHICAGO,
     DAY_ZONES,
     NEW_YORK,
@@ -43,9 +43,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from datetime import tzinfo
 
-    from deephaven_massive._catalog import DatasetSpec
     from deephaven_massive._config import MassiveConfig
-    from deephaven_massive._dates import TimeRange
+    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.dates import TimeRange
     from deephaven_massive._query import Request
 
 __all__ = [
@@ -73,7 +73,7 @@ _PARTITION_ZONES: Final[Mapping[AssetClass | None, tzinfo]] = dict(
 """The zone whose calendar dates name a class's files and start its publication clock.
 
 Futures files are named by trading session, and Massive standardizes futures data in Central
-Time. A dataset without an asset class uses New York, as `_dates.bounds` does."""
+Time. A dataset without an asset class uses New York, as `dates.bounds` does."""
 
 
 def _now() -> datetime:
@@ -94,11 +94,11 @@ def partition_dates(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> t
     `last`. A futures range given with `datetime` bounds reads the sessions its instants belong
     to, from the session of `start` to the session of the last instant before `end`; a session
     opens at 17:00 Chicago time on the day before its `session_end_date`
-    (`_dates.futures_session`). Its rows are then filtered on `Timestamp`.
+    (`dates.futures_session`). Its rows are then filtered on `Timestamp`.
 
     Args:
         spec: The dataset; its asset class picks the day zone.
-        window: The normalized `history()` bounds (`_dates.bounds`).
+        window: The normalized `history()` bounds (`dates.bounds`).
 
     Returns:
         The partition dates; never empty.

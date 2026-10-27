@@ -141,8 +141,8 @@ def load_fixture() -> Callable[[str, str], bytes]:
     """Return a function that reads a payload fixture from `tests/data/<owner>/<name>`.
 
     `owner` is the mirrored test's path under `tests/` without the `test_` prefix and `.py`
-    (`"symbols"` for `tests/test_symbols.py`), or a test package's path (`"massive/rest"`), so
-    each owner's fixtures stay together.
+    (`"datasets/symbols"` for `tests/datasets/test_symbols.py`), or a test package's path
+    (`"massive/rest"`), so each owner's fixtures stay together.
 
     Returns:
         A function mapping `(owner, name)` to the fixture file's bytes.

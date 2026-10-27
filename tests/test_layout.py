@@ -257,7 +257,7 @@ def _fixtures() -> list[PurePosixPath]:
     ("module", "expected"),
     [
         ("_config.py", "test_config.py"),
-        ("_catalog.py", "test_catalog.py"),
+        ("_datasets/catalog.py", "datasets/test_catalog.py"),
         ("_hosts.py", "test_hosts.py"),
         ("_namespaces/stocks.py", "namespaces/test_stocks.py"),
         ("_massive/rest/client.py", "massive/rest/test_client.py"),
@@ -368,8 +368,9 @@ def test_a_test_file_without_a_module_is_an_orphan() -> None:
 
 
 def test_test_catalog_is_a_plain_mirror() -> None:
-    assert orphans(_paths("_catalog.py"), _paths("test_catalog.py")) == []
-    assert orphans(_paths("_config.py"), _paths("test_catalog.py")) == ["tests/test_catalog.py"]
+    catalog_test = _paths("datasets/test_catalog.py")
+    assert orphans(_paths("_datasets/catalog.py"), catalog_test) == []
+    assert orphans(_paths("_config.py"), catalog_test) == ["tests/datasets/test_catalog.py"]
 
 
 def test_the_approved_exceptions_need_no_module() -> None:
@@ -421,7 +422,7 @@ def test_no_fixture_directory_starts_with_an_underscore() -> None:
 
 def test_an_underscored_fixture_directory_is_reported() -> None:
     fixtures = _paths(
-        "symbols/crypto_tickers.csv",
+        "datasets/symbols/crypto_tickers.csv",
         "_flatfiles/a.csv.gz",
         "_flatfiles/b.csv.gz",
         "massive/_rest/page.json",
@@ -1271,7 +1272,7 @@ def test_the_fakes_may_import_the_network_libraries() -> None:
         "flat-files/manifest.json",
     ],
 )
-@pytest.mark.parametrize("path", [_LIBRARY_FILE, "tests/test_catalog.py"])
+@pytest.mark.parametrize("path", [_LIBRARY_FILE, "tests/datasets/test_catalog.py"])
 def test_outside_code_must_not_name_a_snapshot_file(text: str, path: str) -> None:
     assert _check(path, f"x = {text!r}\n") == [f"{path}:1: names a snapshot file: {text!r}"]
 

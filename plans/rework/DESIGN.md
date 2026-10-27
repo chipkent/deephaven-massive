@@ -218,50 +218,72 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 
 ```
 src/deephaven_massive/
-__init__.py          public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
-_config.py           MassiveConfig (section 5)
-_session.py          MassiveSession, SessionCore, closers, reaper, stream ids (section 6)
-_query.py            the six query classes and their verbs; HostDecision; transport protocols (section 7)
-_enums.py            the fourteen public enums, Recency, ChannelFamily, _require_enum
-_types.py            Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
-_errors.py           MassiveError (.status, .request_id), AuthenticationError, EntitlementError, from_wire
-_catalog.py          DatasetSpec (summary, role paths, kind, per-source key columns, channels,
-                     prefixes, poll defaults, page size), datasets(), members(kind), filter
-                     validation
+__init__.py              public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
+_config.py               MassiveConfig (section 5)
+_enums.py                the fourteen public enums, Recency, ChannelFamily, _require_enum
+_types.py                Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
+_errors.py               MassiveError (.status, .request_id), AuthenticationError, EntitlementError,
+                         from_wire
+_session.py              MassiveSession: builds the catalog, the core, and the session's clients
+                         (section 6)
+_query.py                the six query classes and their verbs, through the core's ports (section 7)
+_reference.py            the column reference: render(provenance) -> {file name: Markdown} from
+                         the catalog, the dataset schemas, and the provenance (pure);
+                         sync(directory, pages) owns docs/datasets/ (section 7.4)
 _namespaces/
-  __init__.py        empty
-  base.py            the shared dataset factory
+  __init__.py            empty
+  base.py                the shared dataset factory
   stocks.py options.py futures.py indices.py forex.py crypto.py
   reference.py indicators.py economy.py partners.py      namespace class + DATASETS
-_schema.py           ColumnType, Column, Schema, WireType -> ColumnType, rename(), dataset_schema()
-                     with column descriptions (section 19.4); describe() (section 7.4)
-_timeunits.py        the one timestamp routine (section 12), the FMV magnitude rule
-_symbols.py          normalization, canonical_view, the Symbol/Underlying rule (section 10)
-_dates.py            DateLike parsing, day zones, sessions, publish_time, [start, end)
-_liveness.py         result and stream scopes, records, reaper queue (section 6.1)
-_diagnostics.py      connections() and streams() with SchemaDrift; DriftRegistry (section 17)
-_rest.py             REST transport: requests from a DatasetSpec, batches renamed and converted,
-                     403/429 policy, drift routing, host-decision cache (single-flight)
-_hosts.py            host resolution from REST evidence (section 13.2)
-_ws.py               connections over WsClient: reconcile, wildcards, watchdogs, the NO_ACK rule,
-                     the verdict rule, the options cap, rejects and drift routing (section 13.3)
-_stream.py           streams, publishers, flush thread, fan-out, bound-failure routing (section 14)
-_watchlist.py        reactive symbol tables
-_poll.py             poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> publish_failure
-_flat_files.py       flat-file transport: read plans, reader pool, cancellation, conversion,
-                     merge to tables, missing-file policy, drift routing (section 16)
-_history_source.py   partition dates, publication grace, REST capability, the AUTO choice; pure, no I/O
-_reference.py        the column reference: render(provenance) -> {file name: Markdown} from
-                     the catalog, the dataset schemas, and the provenance (pure);
-                     sync(directory, pages) owns docs/datasets/ (section 7.4)
-_massive/            the wire package (section 19)
+_datasets/               dataset semantics: no I/O, no threads
+  __init__.py            docstring only
+  catalog.py             DatasetSpec (summary, role paths, kind, per-source key columns, channels,
+                         prefixes, poll defaults, page size), datasets(), members(kind), filter
+                         validation
+  schema.py              ColumnType, Column, Schema, WireType -> ColumnType, rename(),
+                         dataset_schema() with column descriptions (section 19.4)
+  request.py             Request, StreamKey, ParamValue, HostDecision
+  timestamps.py          the one timestamp routine (section 12), the FMV magnitude rule
+  dates.py               DateLike parsing, day zones, sessions, publish_time, [start, end)
+  symbols.py             normalization, the Symbol/Underlying rule (section 10)
+  history_source.py      partition dates, publication grace, REST capability, the AUTO choice
+_tables/                 the Deephaven side: tables, liveness, library threads
+  __init__.py            docstring only
+  core.py                SessionCore, registry_lock, registries, closers, stream ids, the
+                         transport ports (section 6)
+  liveness.py            result and stream scopes, records, reaper queue (section 6.1)
+  diagnostics.py         connections() and streams() with SchemaDrift; DriftRegistry (section 17)
+  columns.py             ColumnType -> Deephaven type, column definitions; describe() (section 7.4)
+  watchlist.py           canonical_view; reactive symbol tables
+  stream.py              streams, publishers, flush thread, fan-out, bound-failure routing
+                         (section 14)
+_ingest/                 the only holder of wire clients
+  __init__.py            docstring only
+  clients.py             SessionClients: the session's wire clients and connections, the ports
+  flatfiles.py           flat-file transport: read plans, reader pool, cancellation, conversion,
+                         merge to tables, missing-file policy, drift routing (section 16)
+  rest.py                REST transport: requests from a DatasetSpec, batches renamed and
+                         converted, 403/429 policy, drift routing, host-decision cache
+                         (single-flight)
+  hosts.py               host resolution from REST evidence (section 13.2)
+  poll.py                poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> publish_failure
+  ws.py                  connections over WsClient: reconcile, wildcards, watchdogs, the NO_ACK
+                         rule, the verdict rule, the options cap, rejects and drift routing
+                         (section 13.3)
+_massive/                the wire package (section 19)
 py.typed
 ```
 
+The root holds the vocabulary every layer names (`_config`, `_enums`, `_errors`, `_types`) and
+the API users touch (`__init__`, `_session`, `_query`, `_reference`, `_namespaces/`). The rest of
+the library is grouped into three packages: `_datasets/` describes datasets, `_tables/` is the
+Deephaven side, and `_ingest/` is the only code that holds wire clients. The `__init__.py` of
+each of the three holds only a docstring.
+
 `_namespaces/` holds plain modules, one namespace class each; it is not a PEP 420 namespace
 package. Each namespace module also declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`).
-`_history_source.py` decides where `history()` reads from; `_flat_files.py` does flat-file I/O
-through `_massive` and never chooses a source.
+`_datasets/history_source.py` decides where `history()` reads from; `_ingest/flatfiles.py` does
+flat-file I/O through `_massive` and never chooses a source.
 
 Supporting files outside the package:
 
@@ -292,18 +314,22 @@ Tests mirror the package. The test file for `deephaven_massive/<path>/<name>.py`
 `tests/<path>/test_init.py`, and a `__main__.py` by `tests/<path>/test_main.py`, so every source
 module has exactly one mirror. `tests/test_init.py` holds the public-surface tests (`dm.__all__`
 equals [section 3](#3-exports) and `__version__` equals the installed distribution's version).
-`tests/test_catalog.py` is the plain mirror of `_catalog.py`. A directory directly under
-`tests/` whose name starts with `_` is a helper package outside the mirror rule; a test module
-(`test_*.py`, `*_test.py`, `conftest.py`) inside one is still checked. Fixtures live in
-`tests/data/<test owner path>/` (for example `tests/data/massive/rest/`), so no fixture
-directory starts with `_`. Examples:
+`tests/datasets/test_catalog.py` is the plain mirror of `_datasets/catalog.py`, like every other
+module's test. A directory directly under `tests/` whose name starts with `_` is a helper
+package outside the mirror rule; a test module (`test_*.py`, `*_test.py`, `conftest.py`) inside
+one is still checked. Fixtures live in `tests/data/<test owner path>/` (for example
+`tests/data/massive/rest/`, `tests/data/ingest/flatfiles/`), so no fixture directory starts
+with `_`. Examples:
 
 | Source | Unit test | Live integration test |
 |---|---|---|
 | `__init__.py` | `tests/test_init.py` | |
 | `_config.py` | `tests/test_config.py` | |
-| `_hosts.py` | `tests/test_hosts.py` | `tests/test_hosts_integration.py` |
-| `_flat_files.py` | `tests/test_flat_files.py` | `tests/test_flat_files_integration.py` |
+| `_datasets/__init__.py` | `tests/datasets/test_init.py` | |
+| `_datasets/catalog.py` | `tests/datasets/test_catalog.py` | |
+| `_tables/core.py` | `tests/tables/test_core.py` | |
+| `_ingest/hosts.py` | `tests/ingest/test_hosts.py` | `tests/ingest/test_hosts_integration.py` |
+| `_ingest/flatfiles.py` | `tests/ingest/test_flatfiles.py` | `tests/ingest/test_flatfiles_integration.py` |
 | `_reference.py` | `tests/test_reference.py` (also the parity test of `docs/datasets/`) | |
 | `_namespaces/__init__.py` | `tests/namespaces/test_init.py` | |
 | `_namespaces/stocks.py` | `tests/namespaces/test_stocks.py` | `tests/namespaces/test_stocks_integration.py` |
@@ -796,7 +822,7 @@ attribute `ColumnDescriptions` and a table description as `TableDescription`, se
 shows a column's description in the column-header tooltip; whether it shows the table
 description anywhere is **UNVERIFIED** ([section 23](#23-open-verification-items)), so it is
 set regardless, for every API client to read. The Python package has no wrapper for them, so
-`_schema.describe(table, spec)` calls them through `jpy`: it casts `table.j_table` to
+`columns.describe(table, spec)` (in `_tables/columns.py`) calls them through `jpy`: it casts `table.j_table` to
 `GridAttributes`, calls `withColumnDescriptions` with a `java.util.HashMap` of every column
 whose description is not empty, then `withDescription`, casts the outcome back to
 `io.deephaven.engine.table.Table`, and wraps it in a new `deephaven.table.Table`.
@@ -1063,7 +1089,7 @@ All return `Query`.
 snapshot. `ALL` is not accepted here (the endpoint requires tickers). Its catalog record is
 named `reference.snapshots` and is declared in `_namespaces/reference.py` with
 `asset_class=None` (each ticker's prefix selects its class,
-§ 10), so `_catalog.datasets()` finds it; `m.streams()` and messages show that name.
+§ 10), so `catalog.datasets()` finds it; `m.streams()` and messages show that name.
 
 ### 8.12 Excluded endpoints
 
@@ -1122,9 +1148,9 @@ used or listed as still to be declared:
 
 - **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft)**, tested against the
   pinned snapshot in `tests/massive/refresh/test_generate.py`;
-- **generated ⊆ used ∪ undeclared**, tested in `tests/test_catalog.py`. Every generated item
+- **generated ⊆ used ∪ undeclared**, tested in `tests/datasets/test_catalog.py`. Every generated item
   is used by a declared dataset or listed in some undeclared file. The file
-  `tests/data/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
+  `tests/data/datasets/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
   declare, so a shared source (the aggregate range path, `/prev`) appears in the file of every
   namespace that will use it, and the files may overlap. A namespace's file must not list a
   source that namespace already uses. Each namespace's dataset planned PR deletes only its own
@@ -1207,7 +1233,7 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
 - A `Table` must have a `Symbol` column. Streams listen to it and subscribe or unsubscribe as
   rows are added or removed. Polls re-read it each cycle. Its rows may use any accepted input
   form: every consumer reads the table through one canonicalized view
-  (`_symbols.canonical_view`), so `last_by()`'s `where_in` filter and the subscribed topics
+  (`symbols.canonical_view`), so `last_by()`'s `where_in` filter and the subscribed topics
   agree on `C:EURUSD` whether the row says `EUR/USD` or `C:EURUSD`. A row that is not a valid
   symbol for the class matches nothing and is logged once at WARNING.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
@@ -1276,7 +1302,7 @@ representation rules ([section 19.4](#194-generated-schemas)) decide which field
 
 **Column types.** Every column's type comes from the type lattice of
 [section 19.4](#194-generated-schemas): each generated field has a `WireType`, the merge joins
-the `WireType`s of one column across a kind's sources, and `_schema` maps the result to a
+the `WireType`s of one column across a kind's sources, and `_datasets/schema.py` maps the result to a
 Deephaven column type (`long`, `double`, `boolean`, `String`, `LocalDate`, `Instant`, `int[]`).
 Sizes come out as `double` wherever any source says `number`; condition codes come out as
 `int[]`; exchange and tape ids come out as `long`.
@@ -1306,7 +1332,7 @@ beside the table, and the indicator `timestamp` fields are its first entries.
 | REST forex `/v1/last_quote` `timestamp`; crypto `/v1/last` `timestamp`; forex `/v1/conversion` `last.timestamp` (the same `last` object as `/v1/last_quote`) | **UNVERIFIED** (`unverified-ms`). The spec tags the `last.timestamp` fields `IMilliseconds`, which agrees; registered as ms with a fixture test. |
 | Flat files: all tick files; `*_aggs_v1.window_start`; `us_indices/values_v1.timestamp` (the documentation says ms, the sample is 19 digits) | ns |
 
-**The timestamp routine.** One routine in `_timeunits.py` converts every epoch-integer
+**The timestamp routine.** One routine in `_datasets/timestamps.py` converts every epoch-integer
 `Instant` on every transport, in this order:
 
 1. **Epoch 0 means absent.** In every epoch `Instant` column except the dataset's declared time
@@ -1459,7 +1485,7 @@ stream verb for that class instead of being guessed at.
 to `business.massive.com` with a WARNING. A wrong guess cannot misbehave silently: the server
 either refuses the topic (an explicit `error` that fails that stream and names
 `ws_hosts[AssetClass.STOCKS]`) or serves what the plan includes. A live integration test
-(`tests/test_hosts_integration.py`, skipped without a key) verifies the host.
+(`tests/ingest/test_hosts_integration.py`, skipped without a key) verifies the host.
 
 **Indices `V`.** The Value page lists only `wss://business.massive.com/indices`, while its plan
 table says Starter delayed and Advanced real-time, and the indices `A`/`AM` pages list
@@ -1473,12 +1499,12 @@ replies; the live integration test must retire this note before 1.0.
 Each connection is one `_massive.WsClient` ([section 19.2](#192-the-websocket-client)) bound to
 one `wss://host/path`. The client runs on its own daemon thread with its own asyncio loop, and
 owns everything about the wire: the socket, authentication, frame encoding and decoding,
-reconnecting with backoff, and closing. `_ws.py` owns everything the library decides: the
+reconnecting with backoff, and closing. `_ingest/ws.py` owns everything the library decides: the
 desired topics, the acknowledgements, the watchdogs, the routing, and the connection's
 diagnostics. Both run on the client's loop thread; other threads reach a connection only through
 `loop.call_soon_threadsafe` with plain data, and through `WsClient.close()`.
 
-The client reports to `_ws.py` through four callbacks, each called on the loop thread, in order:
+The client reports to `_ingest/ws.py` through four callbacks, each called on the loop thread, in order:
 
 - `on_open(generation)`: Massive accepted the key (`auth_success`) on a new socket. A
   **generation** is one authenticated socket; the number increases by one per `on_open`.
@@ -1498,16 +1524,16 @@ The client reports to `_ws.py` through four callbacks, each called on the loop t
   `CLOSED` are terminal, and exactly one of them is reported. The client is the only owner of
   `WAITING_SLOT`; the library displays what it reports.
 
-`_ws.py` parses no frame text. Before it first subscribes a channel on a connection, it calls
+`_ingest/ws.py` parses no frame text. Before it first subscribes a channel on a connection, it calls
 the client's loop-thread method `set_required(channel, keys, *, symbol=None)`: `keys` is a
-`frozenset` of long-form key columns, built by `_ws.py` from the `KeySpec`s that the channel's
+`frozenset` of long-form key columns, built by `_ingest/ws.py` from the `KeySpec`s that the channel's
 dataset declares for that channel's source, excluding `from_request` keys, and `symbol` is the
 long-form column of the channel's `symbol` key (`None` when it declares none). The client keeps
 both across generations and hands them to the decoder, so a row missing one of those keys is a
 `Reject` carrying the row's raw symbol, while any other absent field becomes null. A channel
 with no entry has no required keys and no symbol. Wire symbols are never rewritten in
-`_massive`: `_ws.py` maps the raw values of rows and rejects to canonical symbols with
-`_symbols` when it routes them, and topics use the wire's own form, as the subscribe frames
+`_massive`: `_ingest/ws.py` maps the raw values of rows and rejects to canonical symbols with
+`_datasets/symbols.py` when it routes them, and topics use the wire's own form, as the subscribe frames
 do. It
 then calls the loop-thread methods `subscribe(generation, topics)` and
 `unsubscribe(generation, topics)`. Each sends at once, in
@@ -1549,7 +1575,7 @@ Responsibilities:
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
 | Classify a failed upgrade as fatal or retryable (section 19.2) | client; a fatal one is reported as `FAILED` with `WireError(status=<http>)`, which the library turns into a `MassiveError` naming the HTTP status and the host |
 | Decode frames against `ws.json`; report rows, rejects, and drift | client |
-| Map raw wire symbols to canonical symbols (`_symbols`) when routing rows and rejects | library |
+| Map raw wire symbols to canonical symbols (`_datasets/symbols.py`) when routing rows and rejects | library |
 | Desired topic set, reference counts, single in-flight step, wildcard transitions | library |
 | Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
 | Per-topic acknowledgement bookkeeping, watchdogs, the explicit-verdict rule | library, from `Status` events |
@@ -1660,7 +1686,7 @@ sees:
   the table from `poll()`.
 - **HTTP 429** is retried as section 19.1 specifies (the `Retry-After` value, or 15, 30, then
   60 s; a `Retry-After` above 60 s fails at once); if it persists the client raises
-  `WireError(status=429)`, which becomes `MassiveError("rate limited ...")` with `status=429`. The REST transport (`_rest.py`, not the
+  `WireError(status=429)`, which becomes `MassiveError("rate limited ...")` with `status=429`. The REST transport (`_ingest/rest.py`, not the
   client) then logs once per session at WARNING that Basic keys allow 5 requests per minute and
   that fan-out `poll()` multiplies requests.
 - **HTTP 5xx** and connection failures are retried; if they persist they raise `MassiveError`
@@ -1719,7 +1745,7 @@ logged once.
   [section 7](#7-query-classes-and-verbs).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
   row buffer once. The rows arrive keyed by long-form column; the flush renames them
-  (`_schema.rename`), converts them (`_timeunits`), and builds one Arrow batch in the dataset
+  (`schema.rename`), converts them (`_datasets/timestamps.py`), and builds one Arrow batch in the dataset
   schema. The timestamp bound is applied as a vectorized mask: rows that fail it fail only the
   streams that would have received them ([section 19.5](#195-runtime-drift)) and are dropped
   from the batch. Rejected rows never enter a buffer. The batch is converted once with
@@ -1809,7 +1835,7 @@ flat-file only.
 
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
 nothing is split between the sources. A dataset without instruments counts as `ALL`.
-`HistoryQuery.history()` makes the choice (`_history_source.choose_source`) and then calls one
+`HistoryQuery.history()` makes the choice (`history_source.choose_source`) and then calls one
 transport; the transports only do I/O. The REST predicate depends only on the dataset's REST
 capabilities (`DatasetSpec.has_rest_history`, `has_grouped_daily`), and the `adjusted` check on
 the typed `Request.adjusted`.
@@ -1832,7 +1858,7 @@ the credentials themselves are wrong (`InvalidAccessKeyId`, `SignatureDoesNotMat
 `s3_secret_access_key`.
 
 Flat files are read through `_massive.FlatFileClient` and `FlatFile`
-([section 19.3](#193-the-flat-file-client)); `_flat_files.py` builds each file's `ReadPlan`.
+([section 19.3](#193-the-flat-file-client)); `_ingest/flatfiles.py` builds each file's `ReadPlan`.
 `pyarrow.csv.open_csv` reads each `.csv.gz` key in 1 MiB blocks (gzip only: every documented
 key is `.csv.gz`). Columns are matched **by name, never by position**: the reader first reads
 the header line, parses it with the `csv` module (quotes and `\r\n` included), and passes those
@@ -1847,8 +1873,8 @@ operations in this order: the futures session check on the whole block, the `Sym
 (`pyarrow.compute.is_in`), the half-open `[start, end)` filter on the time column through the
 plan's converter to nanoseconds (not applied to date-bounded futures, whose files hold exactly
 the requested sessions), and, on the surviving rows only, the rename to long-form names and
-parsing of the list columns (`Conditions`, `Indicators`). `_flat_files.py` then applies
-`_schema.rename` and the `_timeunits` routine. No block is converted to Python objects. A
+parsing of the list columns (`Conditions`, `Indicators`). `_ingest/flatfiles.py` then applies
+`schema.rename` and the `_datasets/timestamps.py` routine. No block is converted to Python objects. A
 file's surviving rows become one static Deephaven table per 16 blocks of data and at the end of
 the file (usually one table per file, since each table carries a fixed JVM-heap cost), and the
 tables are merged.
@@ -1993,7 +2019,7 @@ without the GIL.
   is behind the lock or has a single owner.
 - `ExecutionContext` is captured at session construction. Every library thread enters it before
   any Deephaven call, each time through a fresh Python wrapper of the captured Java context
-  (`_liveness.entered`). The `deephaven` wrapper stores its restore handle on the wrapper object,
+  (`liveness.entered`). The `deephaven` wrapper stores its restore handle on the wrapper object,
   so two threads entering one shared wrapper at once make the first to exit install the other
   thread's previous (empty) context on itself.
 - `LivenessScopeStack` is thread-local, so result scopes are opened and closed on the caller
@@ -2123,9 +2149,6 @@ vendor/massive/      outside the package; Massive's published content, vendored 
   openapi.json  websocket.json  llms.txt  rest/ (the REST pages llms.txt links)
   flat-file pages  manifest.json
 ```
-
-The package is spelled `flatfiles` because PEP 8 forbids the underscore in a package name; the
-library module is `_flat_files.py`. The docstrings say so.
 
 **The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 28
 names, resolving them lazily (PEP 562), so a REST-only session never imports boto3 or
@@ -2291,7 +2314,7 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   per [section 19.5](#195-runtime-drift). It is the only code that walks a wire path; no row
   object or model class sits between the JSON and Arrow. `required` holds long-form columns
   (`KeySpec.column`); a name that is not a column of the path raises `ValueError`. Arrow
-  types: `long` and `epoch` → `int64` (an epoch stays a raw count for `_timeunits`), `double` →
+  types: `long` and `epoch` → `int64` (an epoch stays a raw count for `_datasets/timestamps.py`), `double` →
   `float64`, `bool` → `bool`, `string` and `json-text` (compact JSON) → `string`, `date` →
   `date32` (strict `YYYY-MM-DD`), `iso-instant` → `timestamp[ns, UTC]` built from exact
   integer nanoseconds (up to nine fractional digits, integer arithmetic only, never through a
@@ -2307,7 +2330,7 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
 
 ### 19.2 The WebSocket client
 
-`_massive.WsClient` is one object per connection (one `wss://host/path`), created by `_ws.py`
+`_massive.WsClient` is one object per connection (one `wss://host/path`), created by `_ingest/ws.py`
 and run on its own daemon thread under `asyncio.run`. Its interface and callbacks are those of
 [section 13.3](#133-connection-and-subscription-protocol). **Apart from `start()` (called once by
 its creator, before the loop thread exists), `close()`, and `join(timeout)`, every method must be
@@ -2409,7 +2432,7 @@ the client again as it returns.
   carries the status, the host, and the key, and `request_id` comes from `x-amz-request-id`.
   A wire message says what happened to which object (`HTTP 403 for s3://<bucket>/<key> at
   <endpoint> (<code>: <message>)`); the user-facing remedy (the `MassiveConfig` settings to
-  check, the `venue=` parameter) is added by `_flat_files.py`, whose public texts are those of
+  check, the `venue=` parameter) is added by `_ingest/flatfiles.py`, whose public texts are those of
   [section 16](#16-historysourceauto). Credentials are never logged.
 - **TLS, proxies, retries.** The client is built as `session.client("s3", verify=<the
   net.http CA bundle>, config=Config(proxies=<from net.http>, retries={"total_max_attempts":
@@ -2436,12 +2459,12 @@ ReadColumn(header, column, read_type: pyarrow.DataType, list_type)
 ```
 
 `session` is the futures session check: the header that holds each row's session date and the
-file's date, so `_flat_files.py` builds one plan per call and adds the session per futures
+file's date, so `_ingest/flatfiles.py` builds one plan per call and adds the session per futures
 file. `block_size` is the reader's block of decompressed text, a required field with no default;
-`_flat_files.py` always passes its `BLOCK_SIZE` (1 MiB).
+`_ingest/flatfiles.py` always passes its `BLOCK_SIZE` (1 MiB).
 
-`_flat_files.py` builds the plan from `source(Transport.FLAT_FILES, prefix)`. `to_ns` is the
-`_timeunits` converter, so a wrongly declared unit still raises; the window is never converted
+`_ingest/flatfiles.py` builds the plan from `source(Transport.FLAT_FILES, prefix)`. `to_ns` is the
+`_datasets/timestamps.py` converter, so a wrongly declared unit still raises; the window is never converted
 into wire units.
 
 ### 19.4 Generated schemas
@@ -2517,7 +2540,7 @@ verification, never a column list.
 `epoch` (with its `UNITS` entry). Two types meet for one column name within one kind by these
 joins: `long ⊔ double = double`; `long ⊔ int-array = int-array` (a scalar becomes a
 one-element list); `epoch ⊔ epoch = epoch`, each source keeping its own unit. Any other pair is a
-**type conflict** (the `type-agreement` gate). `_schema` maps `long` to `long`, `double` to
+**type conflict** (the `type-agreement` gate). `_datasets/schema.py` maps `long` to `long`, `double` to
 `double`, `bool` to `boolean`, `string` and `json-text` to `String`, `date` to `LocalDate`, `epoch` and
 `iso-instant` to `Instant`, and `int-array` to `int[]`. An `iso-instant` is ISO-8601
 date-time text with seconds and an offset (`Z` or `±HH:MM`), decoded to exact integer
@@ -2791,10 +2814,10 @@ and the stock text for `price` ("dollar value per whole share") is wrong for cry
 
 A column whose sources carry no description gets `""`, and nothing fails. The sentences of
 rules 2 and 3 are the library's statements about its own columns, not hand input about Massive,
-so they live in `_schema.py`, not in `refresh/`. Every outlet of
+so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
 [section 7.4](#74-column-descriptions) reads these `Column`s and nothing else.
 
-**Catalog gates** (`tests/test_catalog.py`, with negative tests on synthetic `DatasetSpec`s):
+**Catalog gates** (`tests/datasets/test_catalog.py`, with negative tests on synthetic `DatasetSpec`s):
 
 - **Declared keys:** every key a dataset declares for a source is either a field of that source
   after the projection of the dataset's membership (the `indices.values` time key on
@@ -2825,8 +2848,8 @@ Data on the wire can differ from the committed schema until the next refresh. **
 row lacked or held as null; `statuses`: REST envelope statuses outside the
 documented ones). A decoder never raises for drift; REST and flat files raise
 `WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
-session's `_diagnostics.DriftRegistry` (a leaf lock, WARNINGs logged after release) and the
-routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
+session's `diagnostics.DriftRegistry` (a leaf lock, WARNINGs logged after release) and the
+routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
 
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
 |---|---|---|---|---|
@@ -2835,8 +2858,8 @@ routing in `_rest.py`, `_poll.py`, `_ws.py`, `_stream.py`, and `_flat_files.py`.
 | **Missing required key** (a key the dataset declares for this source, not `from_request`; a dataset that declares no key has none) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
-| **Timestamp out of [1990, 2100], or overflow** | in `_timeunits` | in `_timeunits`, in the flush thread as a vectorized mask | in `_timeunits` | Loud failure naming the dataset, the column, the unit, and the value. |
-| **Undocumented value of an interpreted field** (`timeframe`) | `_hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
+| **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | in `_datasets/timestamps.py` | Loud failure naming the dataset, the column, the unit, and the value. |
+| **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
 
 **A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
 `MassiveError` through `from_wire`; `poll()` fails its table through `publish_failure`; a
@@ -2933,7 +2956,7 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   [section 19](#19-wire-clients-and-the-spec-snapshot).
 - **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
-  and `tests/test_catalog.py` passes (the catalog gates, generated ⊆ used ∪ undeclared) ([section
+  and `tests/datasets/test_catalog.py` passes (the catalog gates, generated ⊆ used ∪ undeclared) ([section
   19.4](#194-generated-schemas)). They read only vendored files, never the network.
 - **Column reference:** `tests/test_reference.py` passes: `docs/datasets/` holds exactly the
   rendered pages, byte for byte, with no stale, missing, or extra file, and every dataset
@@ -3234,7 +3257,7 @@ document already reflects them.
     and the API key stays out of objects users routinely leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
     its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares the key
-    columns its sources carry, and `_schema.rename` maps them to `Symbol`, `Timestamp`, and
+    columns its sources carry, and `schema.rename` maps them to `Symbol`, `Timestamp`, and
     `Underlying`. Names are never derived from descriptions, and the refresh gates and the catalog
     gates fail on a wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The
     final names: `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
@@ -3301,12 +3324,12 @@ document already reflects them.
     ([section 13.2](#132-host-decision), [section 19.1](#191-the-rest-client)).
 41. **Test layout:** every path component drops one leading underscore, `__init__.py` maps to
     `test_init.py` and `__main__.py` to `test_main.py`, `_` directories under `tests/` are
-    helpers, and `test_catalog.py` is a plain mirror ([section 4.2](#42-test-layout)).
+    helpers, and `tests/datasets/test_catalog.py` is a plain mirror ([section 4.2](#42-test-layout)).
 42. **Import roots:** `pythonpath = ["."]` and `mypy_path = ["src"]`, fakes imported as
     `tests._fakes…`; ruff bans `import massive` once the dependency is gone.
-43. **Module names:** `_namespaces/` (plain modules of namespace classes), `_flat_files.py`,
-    `_history_source.py`, and the wire package `_massive/flatfiles/` (PEP 8 forbids the
-    underscore in a package name).
+43. **Module names:** `_namespaces/` (plain modules of namespace classes), `_ingest/flatfiles.py`,
+    `_datasets/history_source.py`, and the wire package `_massive/flatfiles/` (PEP 8 forbids the
+    underscore in a package name, and the library module follows the wire package's spelling).
 44. **Release through trusted publishing, on the owner's go-ahead.** When the owner turns
     publishing on, `.github/workflows/release.yml` publishes to PyPI with trusted publishing
     (no long-lived token), and the first version is 0.1.0. Until then no publishing workflow,
@@ -3342,20 +3365,20 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
-| 1 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/test_timeunits.py`: ms and ns fixtures; the out-of-range path raises | `tests/test_timeunits_integration.py`: one request each; the converted `Instant` is within 1 day of now |
-| 2 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/test_timeunits.py`: both magnitudes convert correctly | `tests/namespaces/test_stocks_integration.py` (Business key): one FMV frame converts to a current `Instant` |
-| 3 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/test_flat_files_integration.py` (S3 credentials): one key per venue |
-| 4 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/test_hosts.py`: both replies | `tests/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |
-| 5 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/test_hosts.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/test_hosts_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
-| 6 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/test_hosts.py`: with and without the fields | `tests/test_hosts_integration.py`: record which fields the live payload carries |
-| 7 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/test_ws.py`: verdict and non-verdict messages | `tests/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
-| 8 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/test_ws.py`: removal without an acknowledgement | `tests/test_ws_integration.py`: record whether an acknowledgement arrives |
-| 9 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/test_ws.py`: 2,500 topics produce three frames | `tests/test_ws_integration.py`: a 1,000-topic frame is acknowledged |
-| 10 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/test_ws_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
-| 11 | Exact `max_connections` status text and timing | Any status `max_connections`, in the auth reply or after it, shows `WAITING_SLOT` | `tests/test_ws.py`: both placements | `tests/test_ws_integration.py`: two sessions with one individual key |
+| 1 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path raises | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
+| 2 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_stocks_integration.py` (Business key): one FMV frame converts to a current `Instant` |
+| 3 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
+| 4 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_hosts.py`: both replies | `tests/ingest/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |
+| 5 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/ingest/test_hosts.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/ingest/test_hosts_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
+| 6 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/ingest/test_hosts.py`: with and without the fields | `tests/ingest/test_hosts_integration.py`: record which fields the live payload carries |
+| 7 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/ingest/test_ws.py`: verdict and non-verdict messages | `tests/ingest/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
+| 8 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/ingest/test_ws_integration.py`: record whether an acknowledgement arrives |
+| 9 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/ingest/test_ws_integration.py`: a 1,000-topic frame is acknowledged |
+| 10 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/ingest/test_ws_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
+| 11 | Exact `max_connections` status text and timing | Any status `max_connections`, in the auth reply or after it, shows `WAITING_SLOT` | `tests/ingest/test_ws.py`: both placements | `tests/ingest/test_ws_integration.py`: two sessions with one individual key |
 | 12 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/massive/net/test_codec.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
-| 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/test_history_source.py`: AUTO before and after the cutoff | `tests/test_flat_files_integration.py`: yesterday's key exists after the cutoff |
-| 14 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
-| 15 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/test_flat_files_integration.py` (S3 credentials): request a weekend key and record the status |
-| 16 | Whether the described copy of a keyed `input_table` (a `poll()` result in `REPLACE` or `UPSERT` mode) keeps the input-table attribute, which the web UI reads to offer editing ([section 7.4](#74-column-descriptions)) | The poller writes only through the `input_table` it holds, never through the returned copy, so either outcome keeps the rows correct; the copy carries the descriptions either way | `tests/test_schema.py`: the copy of a keyed `input_table` ticks with its parent, carries `ColumnDescriptions`, and pins whichever input-table attribute behaviour 42.7 shows | None: the embedded JVM settles it |
-| 17 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/test_schema.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
+| 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/datasets/test_history_source.py`: AUTO before and after the cutoff | `tests/ingest/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |
+| 14 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/ingest/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
+| 15 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): request a weekend key and record the status |
+| 16 | Whether the described copy of a keyed `input_table` (a `poll()` result in `REPLACE` or `UPSERT` mode) keeps the input-table attribute, which the web UI reads to offer editing ([section 7.4](#74-column-descriptions)) | The poller writes only through the `input_table` it holds, never through the returned copy, so either outcome keeps the rows correct; the copy carries the descriptions either way | `tests/tables/test_columns.py`: the copy of a keyed `input_table` ticks with its parent, carries `ColumnDescriptions`, and pins whichever input-table attribute behaviour 42.7 shows | None: the embedded JVM settles it |
+| 17 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |

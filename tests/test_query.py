@@ -17,11 +17,21 @@ from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _errors, _history_source
-from deephaven_massive._catalog import DatasetSpec
-from deephaven_massive._dates import FuturesSessions, TimeRange
+from deephaven_massive import _errors
+from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
+from deephaven_massive._datasets.schema import (
+    BARS,
+    INDEX_VALUES,
+    TRADES,
+    Column,
+    ColumnType,
+    Schema,
+)
+from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan, Transport
-from deephaven_massive._liveness import new_scope
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import (
     HistoryLatestQuery,
@@ -33,9 +43,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
-from deephaven_massive._schema import BARS, INDEX_VALUES, TRADES, Column, ColumnType, Schema
-from deephaven_massive._symbols import SymbolTable
-from deephaven_massive._timeunits import TimeUnit
+from deephaven_massive._tables.liveness import new_scope
 
 TIMEOUT = 30.0
 
@@ -373,7 +381,7 @@ def test_history_rest_needs_a_rest_endpoint(
 @pytest.fixture
 def s3_session(monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
     # S3 credentials set explicitly, and a clock at which early March 2025 is published.
-    monkeypatch.setattr(_history_source, "_now", lambda: datetime(2025, 3, 10, 16, tzinfo=UTC))
+    monkeypatch.setattr(history_source, "_now", lambda: datetime(2025, 3, 10, 16, tzinfo=UTC))
     fields = {"api_key": "test-key", "s3_access_key_id": "AKID", "s3_secret_access_key": "sk"}
     config = dm.MassiveConfig(**cast("dict[str, Any]", fields))
     session = dm.MassiveSession(config)
@@ -463,7 +471,7 @@ def test_history_reads_a_reactive_symbol_table_once_for_every_source(
         q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
 
     worker = threading.Thread(target=forced_rest)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._symbols"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._datasets.symbols"):
         worker.start()
         worker.join(TIMEOUT)
     q.history("2025-03-03", "2025-03-03")

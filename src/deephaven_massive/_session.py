@@ -17,8 +17,8 @@ owns:
   one opening or held, unfailed, live stream that serves it;
   every diagnostics row is queued while `registry_lock` is held, so rows reach the tables in
   the order the registry changed;
-- the result registry and the reaper thread (`_liveness.py`);
-- the diagnostics tables and their writer thread (`_diagnostics.py`);
+- the result registry and the reaper thread (`liveness.py`);
+- the diagnostics tables and their writer thread (`diagnostics.py`);
 - one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`).
   The flat-file transport is implemented: the core creates the session's
   `_massive.FlatFileClient` (the S3 client, closed with the session) on the first flat-file read,
@@ -49,17 +49,9 @@ from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
 from deephaven_massive import _massive
 from deephaven_massive._config import MassiveConfig, log_json_codec_once, require_positive_int
-from deephaven_massive._diagnostics import (
-    Diagnostics,
-    StreamRow,
-    StreamState,
-    StreamUpdate,
-    describe_symbols,
-)
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
-from deephaven_massive._flat_files import FlatFileHistory
-from deephaven_massive._liveness import Reaper, ResultRegistry, entered, make_result
+from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._namespaces.base import list_params
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
@@ -71,6 +63,14 @@ from deephaven_massive._namespaces.options import _Options
 from deephaven_massive._namespaces.partners import _Partners
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
+from deephaven_massive._tables.diagnostics import (
+    Diagnostics,
+    StreamRow,
+    StreamState,
+    StreamUpdate,
+    describe_symbols,
+)
+from deephaven_massive._tables.liveness import Reaper, ResultRegistry, entered, make_result
 from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
@@ -80,9 +80,8 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.liveness_scope import LivenessScope
 
-    from deephaven_massive._catalog import DatasetSpec
+    from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._enums import Order
-    from deephaven_massive._liveness import StreamHandle
     from deephaven_massive._massive import FlatFileClient
     from deephaven_massive._query import (
         FlatFileTransport,
@@ -92,6 +91,7 @@ if TYPE_CHECKING:
         StreamKey,
         StreamTransport,
     )
+    from deephaven_massive._tables.liveness import StreamHandle
     from deephaven_massive._types import FilterValue, Symbols
 
 __all__ = ["MassiveSession", "SessionCore"]
@@ -1108,7 +1108,7 @@ class MassiveSession:
 
         Returns:
             The `connections` table, keyed by `Transport`, `AssetClass`, and `Family`;
-            its columns are `_diagnostics.CONNECTIONS`.
+            its columns are `diagnostics.CONNECTIONS`.
         """
         self._core.require_open()
         return self._core.diagnostics.connections
@@ -1122,7 +1122,7 @@ class MassiveSession:
 
         Returns:
             The `streams` table, keyed by `StreamId`; its columns are
-            `_diagnostics.STREAMS`.
+            `diagnostics.STREAMS`.
         """
         self._core.require_open()
         return self._core.diagnostics.streams

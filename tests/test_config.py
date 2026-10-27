@@ -19,7 +19,7 @@ from deephaven_massive._config import (
     json_codec,
     log_json_codec_once,
 )
-from deephaven_massive._dates import NEW_YORK
+from deephaven_massive._datasets.dates import NEW_YORK
 from deephaven_massive._enums import AssetClass
 
 ENV = (

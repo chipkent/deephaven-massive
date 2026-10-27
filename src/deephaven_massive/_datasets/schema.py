@@ -21,7 +21,7 @@ transport does not supply is null: crypto trades have no `Tape`, and stocks have
   `r` is milliseconds), in their `DatasetSpec`.
 
 Timestamp *units* are not decided here: a field becomes an `Instant` column because its dataset
-declares a unit for it (`_timeunits.py`), and the transports convert values to nanoseconds
+declares a unit for it (`timestamps.py`), and the transports convert values to nanoseconds
 before they reach `Schema.to_arrow`.
 """
 
@@ -241,7 +241,7 @@ class Schema:
     Example:
         ::
 
-            from deephaven_massive._schema import Column, ColumnType, Schema
+            from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 
             schema = Schema(
                 "example",
@@ -297,7 +297,7 @@ class Schema:
         A column missing from a row, or `None`, is null. Keys that are not columns are ignored,
         so a caller may pass rows that carry extra fields. Instant values must already be epoch
         nanoseconds or `datetime`s (a naive one is read as UTC); the transports convert units
-        with `_timeunits.py` first. A `float` with a fractional part in a `long` or `int`
+        with `timestamps.py` first. A `float` with a fractional part in a `long` or `int`
         column is a schema mismatch, never truncated. This runs on the calling thread and makes
         no Deephaven call.
 

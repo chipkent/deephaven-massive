@@ -78,16 +78,15 @@ nothing is kept or shimmed for compatibility.
    publish cp313t wheels. Locking must be correct without the GIL.
 7. **Tests mirror the package.** `src/deephaven_massive/<path>/<name>.py` is tested by
    `tests/<path>/test_<name>.py`, where every path component drops one leading underscore
-   (`_namespaces/stocks.py` → `tests/namespaces/test_stocks.py`, `_massive/rest/client.py` →
+   (`_namespaces/stocks.py` → `tests/namespaces/test_stocks.py`, `_datasets/catalog.py` →
+   `tests/datasets/test_catalog.py`, `_massive/rest/client.py` →
    `tests/massive/rest/test_client.py`). A package `__init__.py` is tested by
    `tests/<path>/test_init.py` and a `__main__.py` by `tests/<path>/test_main.py`. Live tests
    end in `_integration.py`. A directory directly under `tests/` whose name starts with `_` is
    a helper package outside the rule (a test module inside one is still checked); there is
    one, `tests/_fakes/`. No directory under `tests/data/` starts with `_`. The only other files
-   allowed are
-   `tests/conftest.py`, `tests/test_layout.py`, and `tests/test_readme.py`
-   (`tests/test_catalog.py` is the plain mirror of `_catalog.py`). `tests/test_layout.py`
-   enforces this; a new exception needs owner approval and a change to `DESIGN.md` § 4.2. The
+   allowed are `tests/conftest.py`, `tests/test_layout.py`, and `tests/test_readme.py`.
+   `tests/test_layout.py` enforces this; a new exception needs owner approval and a change to `DESIGN.md` § 4.2. The
    import roots are the repository root for pytest (`pythonpath = ["."]`) and `src/` for mypy
    (`mypy_path = ["src"]`): test code imports helpers as `tests._fakes…`, so `tests/massive/`
    can never shadow the top-level `massive` package.
@@ -100,7 +99,7 @@ nothing is kept or shimmed for compatibility.
    delete the branch.
 10. **No live testing in unit tests.** Unit tests use the fake REST, WebSocket, and S3 servers in
     `tests/_fakes/` and payload fixtures under `tests/data/<test owner path>/` (for example
-    `tests/data/symbols/`, `tests/data/massive/rest/`). Only `_integration` tests touch
+    `tests/data/datasets/symbols/`, `tests/data/massive/rest/`). Only `_integration` tests touch
     Massive, and only when `MASSIVE_API_KEY` is set.
 11. **Docstrings meet the documentation standard below.** A change to a public signature,
     default, or table semantics updates `DESIGN.md` first (owner decision).

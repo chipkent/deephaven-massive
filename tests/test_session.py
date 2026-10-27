@@ -27,18 +27,11 @@ from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _errors, _session
-from deephaven_massive._catalog import DatasetSpec
 from deephaven_massive._config import json_codec
-from deephaven_massive._diagnostics import ConnectionRow, Diagnostics, StreamRow, StreamUpdate
+from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.schema import TRADES
+from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._liveness import (
-    Reaper,
-    ResultRegistry,
-    StreamHandle,
-    entered,
-    make_result,
-    new_scope,
-)
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
@@ -51,8 +44,20 @@ from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._query import Request, StreamQuery
-from deephaven_massive._schema import TRADES
-from deephaven_massive._symbols import SymbolTable
+from deephaven_massive._tables.diagnostics import (
+    ConnectionRow,
+    Diagnostics,
+    StreamRow,
+    StreamUpdate,
+)
+from deephaven_massive._tables.liveness import (
+    Reaper,
+    ResultRegistry,
+    StreamHandle,
+    entered,
+    make_result,
+    new_scope,
+)
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
@@ -64,9 +69,9 @@ if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
 
-    from deephaven_massive._liveness import ResultRecord
     from deephaven_massive._query import StreamKey
     from deephaven_massive._session import SessionCore
+    from deephaven_massive._tables.liveness import ResultRecord
     from tests._fakes.stream import FakeStreamTransport
 
 TIMEOUT = 30.0

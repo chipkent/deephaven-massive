@@ -3,7 +3,7 @@
 **Status:** approved plan. Merged: rework-design-and-plan (#11), tooling-foundation (#42),
 core-skeleton (#46), final-design (#52), wire-client-dependencies (#53), legacy-deletion (#54),
 final-names (#56), wire-package-scaffold (#60), flat-file-history (#63, restructured from #51),
-rest-client (#66), and rest-wire-schema (#67). In review: websocket-client (#64).
+rest-client (#66), rest-wire-schema (#67), and websocket-client (#64). In review: layer-packages.
 **Companion:** [`DESIGN.md`](DESIGN.md) is the specification; this file is the schedule. When
 they disagree, `DESIGN.md` wins and this file gets a `docs:` fix.
 
@@ -46,7 +46,8 @@ records are now requirements of the library's own clients (DESIGN § 19).
    - [core-skeleton](#core-skeleton) (merged)
    - [The remaining planned PRs](#pkgs): final-design, wire-client-dependencies, legacy-deletion,
      final-names, wire-package-scaffold, flat-file-history, rest-client, websocket-client,
-     rest-wire-schema, field-descriptions, websocket-and-flat-file-wire-schemas,
+     rest-wire-schema, layer-packages, layer-rules, field-descriptions,
+     websocket-and-flat-file-wire-schemas,
      runtime-drift-reporting, flat-file-s3-shared-rules, generated-catalog-and-schemas,
      api-drift-check, massive-sdk-removal, rest-transport, websocket-layer,
      result-column-descriptions, column-reference-pages, the eight dataset planned PRs,
@@ -71,7 +72,9 @@ flowchart LR
     wire_package_scaffold & rest_client --> rest_wire_schema["rest-wire-schema"]
     rest_wire_schema --> field_descriptions["field-descriptions"]
     field_descriptions --> ws_ff_schemas["websocket-and-flat-file-wire-schemas"]
-    flat_file_history --> runtime_drift_reporting["runtime-drift-reporting"]
+    flat_file_history & rest_client & websocket_client & rest_wire_schema --> layer_packages["layer-packages"]
+    layer_packages --> layer_rules["layer-rules"]
+    flat_file_history & layer_rules --> runtime_drift_reporting["runtime-drift-reporting"]
     flat_file_history & rest_client --> flat_file_s3_shared_rules["flat-file-s3-shared-rules"]
     ws_ff_schemas & flat_file_history & runtime_drift_reporting --> generated_catalog["generated-catalog-and-schemas"]
     ws_ff_schemas & flat_file_history & flat_file_s3_shared_rules --> api_drift_check["api-drift-check"]
@@ -80,9 +83,9 @@ flowchart LR
     websocket_client & generated_catalog --> websocket_layer["websocket-layer"]
     rest_transport & websocket_layer --> result_column_descriptions["result-column-descriptions"]
     result_column_descriptions --> column_reference_pages["column-reference-pages"]
-    column_reference_pages --> asset_class_datasets["stocks-, options-, futures-, indices-,<br/>forex-, and crypto-datasets"]
-    column_reference_pages --> other_datasets["reference-indicator-economy-datasets,<br/>partner-datasets"]
-    asset_class_datasets & other_datasets & api_drift_check & massive_sdk_removal --> finish_rework["finish-rework"]
+    rest_transport & websocket_layer --> asset_class_datasets["stocks-, options-, futures-, indices-,<br/>forex-, and crypto-datasets"]
+    rest_transport & websocket_layer --> other_datasets["reference-indicator-economy-datasets,<br/>partner-datasets"]
+    asset_class_datasets & other_datasets & column_reference_pages & api_drift_check & massive_sdk_removal --> finish_rework["finish-rework"]
     asset_class_datasets & other_datasets --> live_integration_suite["live-integration-suite"]
     finish_rework & live_integration_suite --> plan_retirement["plan-retirement"]
     finish_rework -.-> release_workflow["release-workflow<br/>(owner go-ahead only)"]
@@ -95,13 +98,16 @@ them.
 
 **Critical path:** final-design → legacy-deletion → final-names → wire-package-scaffold →
 rest-client → rest-wire-schema → field-descriptions → websocket-and-flat-file-wire-schemas →
-generated-catalog-and-schemas → websocket-layer → result-column-descriptions →
-column-reference-pages → the asset-class dataset planned PRs → finish-rework → plan-retirement.
-The release (release-workflow, release-0.1.0, release-tag) follows only on the owner's
-go-ahead. **Chains alongside it:** wire-package-scaffold → flat-file-history →
-runtime-drift-reporting → generated-catalog-and-schemas; wire-package-scaffold →
-websocket-client → websocket-layer; flat-file-history → flat-file-s3-shared-rules →
-api-drift-check. wire-client-dependencies may merge at any time.
+generated-catalog-and-schemas → websocket-layer → the asset-class dataset planned PRs →
+finish-rework → plan-retirement. The release (release-workflow, release-0.1.0, release-tag)
+follows only on the owner's go-ahead. **Chains alongside it:** layer-packages → layer-rules →
+runtime-drift-reporting → generated-catalog-and-schemas, so rest-transport and websocket-layer
+also come after layer-rules; rest-transport and websocket-layer → result-column-descriptions →
+column-reference-pages → finish-rework, beside the dataset planned PRs;
+wire-package-scaffold → websocket-client → websocket-layer; flat-file-history →
+flat-file-s3-shared-rules → api-drift-check. field-descriptions, flat-file-s3-shared-rules,
+and api-drift-check touch only `_massive` and do not wait for the layer planned PRs.
+wire-client-dependencies may merge at any time.
 
 ---
 
@@ -128,8 +134,8 @@ These rules apply to every planned PR. Planned-PR sections only add to them.
 6. **Owner approvals.** The following are outward-facing and require explicit owner approval
    each time: opening a PR or issue in this repository (the tracking issues of final-design,
    wire-client-dependencies, legacy-deletion, final-names, wire-package-scaffold, rest-client,
-   websocket-client, rest-wire-schema, field-descriptions, websocket-and-flat-file-wire-schemas,
-   runtime-drift-reporting, flat-file-s3-shared-rules, generated-catalog-and-schemas,
+   websocket-client, rest-wire-schema, layer-packages, layer-rules, field-descriptions,
+   websocket-and-flat-file-wire-schemas, runtime-drift-reporting, flat-file-s3-shared-rules, generated-catalog-and-schemas,
    api-drift-check, massive-sdk-removal, result-column-descriptions, column-reference-pages,
    plan-retirement, release-workflow, and release-0.1.0 included), filing an issue on
    `massive-com/client-python` ([upstream-sdk-issues](#upstream-sdk-issues); pull requests there
@@ -139,8 +145,9 @@ These rules apply to every planned PR. Planned-PR sections only add to them.
    `src/deephaven_massive/`: every path component drops one leading underscore
    (`_namespaces/stocks.py` → `tests/namespaces/test_stocks.py`, `_massive/rest/client.py` →
    `tests/massive/rest/test_client.py`); `__init__.py` maps to `test_init.py` and `__main__.py`
-   to `test_main.py`; `test_catalog.py` is the plain mirror of `_catalog.py`. A `_` directory
-   under `tests/` is a helper package outside the rule (`tests/_fakes/`). The only other
+   to `test_main.py`; `_datasets/catalog.py` → `tests/datasets/test_catalog.py` is a plain
+   mirror like any other. A `_` directory under `tests/` is a helper package outside the rule
+   (`tests/_fakes/`). The only other
    exceptions are `tests/conftest.py`, `tests/test_layout.py`, and `tests/test_readme.py`.
    Fixtures live in `tests/data/<test owner path>/`. Import roots: `pythonpath = ["."]` and
    `mypy_path = ["src"]`, with fakes imported as `tests._fakes…`. `tests/test_layout.py`
@@ -184,25 +191,35 @@ disjoint files:
   (field-descriptions adds `spec/descriptions.json` and `Field.description`; api-drift-check adds
   `drift.py`). Each adds its own block to `_massive/__init__.py`, so a later merge rebases that one
   file.
-- **The library modules.** rest-transport owns `_rest.py`, `_hosts.py`, `_poll.py`; websocket-layer
-  owns `_ws.py`, `_stream.py`, `_watchlist.py`; flat-file-history owns `_flat_files.py` and
-  `_history_source.py`; runtime-drift-reporting owns `_diagnostics.py`'s drift registry;
-  generated-catalog-and-schemas owns `_catalog.py`, `_schema.py`, and `_timeunits.py`.
-  `_session.py` has one factory hook per transport, so rest-transport, websocket-layer, and
-  flat-file-history edit disjoint hunks. result-column-descriptions starts after all three have
-  merged, adds `describe()` and the description rule to `_schema.py` and `columns()` to
-  `_query.py`, and adds the `describe()` call at each verb's return in their modules (`_rest.py`,
-  `_poll.py`, `_stream.py`, `_flat_files.py`): ownership passes in sequence, as `flatfiles/`
-  passes from flat-file-history to runtime-drift-reporting and flat-file-s3-shared-rules, so no
-  separate PR is needed. column-reference-pages owns `_reference.py`,
-  `scripts/render_reference.py`, and `tests/test_reference.py`.
+- **The library modules** are grouped by layer ([DESIGN § 4.1](DESIGN.md#41-source-modules)):
+  `_datasets/`, `_tables/`, and `_ingest/`, beside the vocabulary and the API at the root.
+  layer-packages moves the existing modules into them and layer-rules enforces the layers, so
+  both land before any planned PR below edits a library module. rest-transport owns
+  `_ingest/rest.py`, `_ingest/hosts.py`, `_ingest/poll.py`; websocket-layer owns `_ingest/ws.py`
+  and `_tables/stream.py`, and adds the reactive symbol tables to `_tables/watchlist.py`;
+  flat-file-history owned `_ingest/flatfiles.py` and `_datasets/history_source.py`;
+  runtime-drift-reporting owns `_tables/diagnostics.py`'s drift registry;
+  generated-catalog-and-schemas owns `_datasets/catalog.py`, `_datasets/schema.py`, and
+  `_datasets/timestamps.py`. `SessionClients` in `_ingest/clients.py` has one method per
+  transport (`rest()`, `streams()`, `flat_files()`), so rest-transport and websocket-layer edit
+  disjoint methods of `SessionClients`. result-column-descriptions starts after both have merged,
+  adds the description rule to `_datasets/schema.py`, `describe()` to `_tables/columns.py`, and
+  `columns()` to `_query.py`, and adds the `describe()` call at each verb's return in their
+  modules (`_ingest/rest.py`, `_ingest/poll.py`, `_tables/stream.py`, `_ingest/flatfiles.py`):
+  ownership passes in sequence, as `flatfiles/` passes from flat-file-history to
+  runtime-drift-reporting and flat-file-s3-shared-rules, so no separate PR is needed.
+  column-reference-pages owns `_reference.py`, `scripts/render_reference.py`, and
+  `tests/test_reference.py`.
 - **The fakes** follow the clients: rest-client `tests/_fakes/rest.py`, websocket-client `ws.py`,
   flat-file-history `s3.py`, core-skeleton `stream.py`; each adds one self-contained fixture block
   to `tests/conftest.py`.
 - **The dataset planned PRs** edit only `_namespaces/<ns>.py`, its tests and fixtures, and delete
-  only their own `tests/data/catalog/undeclared/<ns>.txt`. There are no lock files and no
+  only their own `tests/data/datasets/catalog/undeclared/<ns>.txt`. There are no lock files and no
   column maps to edit. A needed `refresh/` fix lands first in its own PR.
   reference-indicator-economy-datasets also fills `MassiveSession.snapshots()` in `_session.py`.
+  They run in parallel with result-column-descriptions and column-reference-pages; a dataset
+  planned PR that lands after column-reference-pages also regenerates its own namespace page,
+  because the parity test then requires it.
 - **Generated content** changes only through `python -m deephaven_massive._massive.refresh`; the
   check that it is current is `uv run pytest tests/massive/refresh -q`. The column reference,
   `docs/datasets/`, changes only through `uv run python scripts/render_reference.py`; the check
@@ -652,9 +669,11 @@ not repeat:
 | [rest-client](#rest-client) | `feat: REST client` | wire-package-scaffold |
 | [websocket-client](#websocket-client) | `feat: WebSocket client` | wire-package-scaffold |
 | [rest-wire-schema](#rest-wire-schema) | `feat: generate the REST wire schema from the OpenAPI snapshot` | wire-package-scaffold, rest-client |
+| [layer-packages](#layer-packages) | `refactor: move library modules into layer packages` | flat-file-history, rest-client, websocket-client, rest-wire-schema |
+| [layer-rules](#layer-rules) | `refactor: enforce the library layers` | layer-packages |
 | [field-descriptions](#field-descriptions) | `feat: generated schemas carry vendor field descriptions` | rest-wire-schema |
 | [websocket-and-flat-file-wire-schemas](#websocket-and-flat-file-wire-schemas) | `feat: generate the WebSocket and flat-file wire schemas` | rest-wire-schema, field-descriptions |
-| [runtime-drift-reporting](#runtime-drift-reporting) | `feat: runtime schema drift reporting` | flat-file-history |
+| [runtime-drift-reporting](#runtime-drift-reporting) | `feat: runtime schema drift reporting` | flat-file-history, layer-rules |
 | [flat-file-s3-shared-rules](#flat-file-s3-shared-rules) | `fix: flat-file S3 client follows the shared TLS, proxy, and retry rules` | flat-file-history, rest-client |
 | [generated-catalog-and-schemas](#generated-catalog-and-schemas) | `refactor: catalog and schemas from the generated tables` | websocket-and-flat-file-wire-schemas, flat-file-history, runtime-drift-reporting |
 | [api-drift-check](#api-drift-check) | `feat: Massive API drift check` | websocket-and-flat-file-wire-schemas, flat-file-history, flat-file-s3-shared-rules |
@@ -663,10 +682,10 @@ not repeat:
 | [websocket-layer](#websocket-layer) | `feat: WebSocket layer` | websocket-client, generated-catalog-and-schemas |
 | [result-column-descriptions](#result-column-descriptions) | `feat: result tables carry column descriptions` | rest-transport, websocket-layer |
 | [column-reference-pages](#column-reference-pages) | `feat: generated dataset column reference` | result-column-descriptions |
-| [stocks-datasets, options-datasets, futures-datasets, indices-datasets, forex-datasets, crypto-datasets](#dataset-planned-prs) | `feat: <stocks / options / futures / indices / forex / crypto> datasets` | rest-transport, websocket-layer, column-reference-pages |
-| [reference-indicator-economy-datasets](#dataset-planned-prs) | `feat: reference, indicators, economy, and unified snapshots datasets` | rest-transport, column-reference-pages |
-| [partner-datasets](#dataset-planned-prs) | `feat: partner datasets` | rest-transport, column-reference-pages |
-| [finish-rework](#finish-rework) | `chore: finish rework` | every dataset planned PR, api-drift-check, massive-sdk-removal |
+| [stocks-datasets, options-datasets, futures-datasets, indices-datasets, forex-datasets, crypto-datasets](#dataset-planned-prs) | `feat: <stocks / options / futures / indices / forex / crypto> datasets` | rest-transport, websocket-layer |
+| [reference-indicator-economy-datasets](#dataset-planned-prs) | `feat: reference, indicators, economy, and unified snapshots datasets` | rest-transport, websocket-layer |
+| [partner-datasets](#dataset-planned-prs) | `feat: partner datasets` | rest-transport, websocket-layer |
+| [finish-rework](#finish-rework) | `chore: finish rework` | every dataset planned PR, column-reference-pages, api-drift-check, massive-sdk-removal |
 | [live-integration-suite](#live-integration-suite) | `test: live integration suite` | every dataset planned PR |
 | [plan-retirement](#plan-retirement) | `docs: retire verified notes and the rework plan` | finish-rework, live-integration-suite |
 | [release-workflow](#release-workflow) | `ci: publish to PyPI from a version tag` (on the owner's go-ahead only) | finish-rework |
@@ -1436,12 +1455,13 @@ registry, `SchemaDrift`, the flat-file column); [§ 16](DESIGN.md#16-historysour
 header peek); [§ 12](DESIGN.md#12-timestamp-units-and-day-boundaries) (the timestamp routine
 for flat files); [§ 17](DESIGN.md#17-diagnostics).
 
-**Depends on.** flat-file-history. **Parallel with.** rest-wire-schema,
-websocket-and-flat-file-wire-schemas.
+**Depends on.** flat-file-history, layer-rules (the files below are the layered paths).
+**Parallel with.** field-descriptions, websocket-and-flat-file-wire-schemas.
 
-**Files.** Modify `_diagnostics.py` (`DriftRegistry`, `SchemaDrift`), `_massive/flatfiles/reader.py`
-(the header peek and the missing key header), `_flat_files.py` (routing), `_timeunits.py` (the
-routine; epoch 0 → null moves here from `_flat_files.py`), `tests/_fakes/s3.py`, and their tests.
+**Files.** Modify `_tables/diagnostics.py` (`DriftRegistry`, `SchemaDrift`),
+`_massive/flatfiles/reader.py` (the header peek and the missing key header),
+`_ingest/flatfiles.py` (routing), `_datasets/timestamps.py` (the routine; epoch 0 → null moves
+here from `_ingest/flatfiles.py`), `tests/_fakes/s3.py`, and their tests.
 
 **Tasks.**
 - [ ] The header peek and by-name reading of DESIGN § 16.
@@ -1458,7 +1478,7 @@ routine; epoch 0 → null moves here from `_flat_files.py`), `tests/_fakes/s3.py
 **Verification.**
 ```bash
 ./scripts/check.sh
-uv run pytest tests/test_flat_files.py tests/massive/flatfiles tests/test_diagnostics.py tests/test_timeunits.py -q
+uv run pytest tests/ingest/test_flatfiles.py tests/massive/flatfiles tests/tables/test_diagnostics.py tests/datasets/test_timestamps.py -q
 ```
 
 **Pitfalls.** At 945d060 a missing header fails with Arrow's `include_columns` error and an
@@ -1532,36 +1552,39 @@ uv run pytest tests/massive/flatfiles -q
 schema.
 
 **DESIGN sections implemented.** [§ 19.4](DESIGN.md#194-generated-schemas) (the run-time merge,
-the catalog gates); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_schema.py`);
+the catalog gates); [§ 4.1](DESIGN.md#41-source-modules) (`_datasets/catalog.py`, `_datasets/schema.py`);
 [§ 8.12](DESIGN.md#812-excluded-endpoints) (used coverage);
 [§ 11](DESIGN.md#11-enums-and-types); [§ 12](DESIGN.md#12-timestamp-units-and-day-boundaries)
 (the routine for every transport).
 
-**Depends on.** websocket-and-flat-file-wire-schemas, flat-file-history, runtime-drift-reporting.
-**Parallel with.** websocket-client, flat-file-s3-shared-rules.
+**Depends on.** websocket-and-flat-file-wire-schemas, flat-file-history, runtime-drift-reporting
+(and through it layer-rules). **Parallel with.** flat-file-s3-shared-rules, api-drift-check.
 
-**Files.** Modify `_catalog.py`, `_schema.py`, `_timeunits.py`, `_enums.py`, `_flat_files.py`,
-`_namespaces/base.py`, and the users of `_enums.Transport` (`_query.py`, `_session.py`,
-`_diagnostics.py`, `_history_source.py`), and their tests (`test_catalog`, `test_schema`,
-`test_timeunits`, `test_enums`, `test_query`, `test_session`, `test_diagnostics`,
-`test_history_source`, `namespaces/test_base`); create
-`tests/data/catalog/undeclared/<namespace>.txt`.
+**Files.** Modify `_datasets/catalog.py` (`DatasetSpec`, `KeySpec`, the `Catalog`'s
+`dataset_schema` cache), `_datasets/schema.py`, `_datasets/timestamps.py`, `_enums.py`,
+`_ingest/flatfiles.py`, `_namespaces/base.py`, and the users of `_enums.Transport` (`_query.py`,
+`_session.py`, `_tables/core.py`, `_tables/diagnostics.py`, `_datasets/history_source.py`,
+`_datasets/request.py`), and their tests (`datasets/test_catalog`, `datasets/test_schema`,
+`datasets/test_timestamps`, `test_enums`, `test_query`, `test_session`, `tables/test_core`,
+`tables/test_diagnostics`, `datasets/test_history_source`, `namespaces/test_base`); create
+`tests/data/datasets/catalog/undeclared/<namespace>.txt`. `ParamKind` and `_enums.Transport`
+duplicate the wire package's `ParamKind` and `Transport`; both go.
 
 **Tasks.**
 - [ ] `DatasetSpec` gains `kind`, the per-source key columns (`KeySpec(column, from_request)`,
       optional per role, as DESIGN § 19.4 states), and the role paths (`fetch_path`,
       `history_path`, `grouped_daily_path`, `extra_paths`); `has_rest_history` and
       `has_grouped_daily` read the role paths.
-- [ ] `_schema.rename` and `dataset_schema` (DESIGN § 19.4), reading memberships and their
+- [ ] `schema.rename` and `dataset_schema` (DESIGN § 19.4), reading memberships and their
       projections from `Source.memberships`, never from `refresh/`; a `from_request` key becomes a
       constant column; the cache is computed outside its lock and published under it.
 - [ ] Delete the hand tick schemas, core-skeleton's key maps, `ColumnOverride`, the SDK flattening,
       `TimeUnitTable`, and `_enums.Transport`.
-- [ ] `_flat_files.py` builds plans from `source(Transport.FLAT_FILES, …)`; the timestamp routine
+- [ ] `_ingest/flatfiles.py` builds plans from `source(Transport.FLAT_FILES, …)`; the timestamp routine
       serves every transport.
-- [ ] `tests/test_catalog.py`: the catalog gates and the undeclared files; `_enums` checked against
+- [ ] `tests/datasets/test_catalog.py`: the catalog gates and the undeclared files; `_enums` checked against
       `spec/rest.json`.
-- [ ] Each `tests/data/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
+- [ ] Each `tests/data/datasets/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
       declare; a shared source (the aggregate range path, `/prev`) is listed in every namespace
       that will use it.
 
@@ -1582,7 +1605,7 @@ the catalog gates); [§ 4.1](DESIGN.md#41-source-modules) (`_catalog.py`, `_sche
 **Verification.**
 ```bash
 ./scripts/check.sh
-uv run pytest tests/test_catalog.py tests/test_schema.py tests/test_timeunits.py tests/test_enums.py -q
+uv run pytest tests/datasets/test_catalog.py tests/datasets/test_schema.py tests/datasets/test_timestamps.py tests/test_enums.py -q
 ```
 
 **Pitfalls.** No schema is inferred from data; the merge runs from committed files only.
@@ -1706,27 +1729,29 @@ REST `history`); [§ 9](DESIGN.md#9-filters); [§ 13.1](DESIGN.md#131-invariants
 `RequestsPerCycle`, `SchemaDrift` for `poll()`); [§ 18](DESIGN.md#18-concurrency-model) (poller
 threads).
 
-**Depends on.** rest-client, generated-catalog-and-schemas. **Parallel with.** websocket-layer,
-massive-sdk-removal.
+**Depends on.** rest-client, generated-catalog-and-schemas (and through it layer-rules).
+**Parallel with.** websocket-layer, massive-sdk-removal.
 
 **Files.**
-- Create: `_rest.py`, `_hosts.py`, `_poll.py`, `tests/test_rest.py`, `tests/test_hosts.py`,
-  `tests/test_poll.py`, `tests/data/rest/`, `tests/data/hosts/`.
-- Modify: `_session.py` (the REST factory hook, the session's `RestClient` and its closer,
-  REST rows), `_query.py` (REST verb bodies), `_namespaces/base.py`.
+- Create: `_ingest/rest.py`, `_ingest/hosts.py`, `_ingest/poll.py`, `tests/ingest/test_rest.py`,
+  `tests/ingest/test_hosts.py`, `tests/ingest/test_poll.py`, `tests/data/ingest/rest/`,
+  `tests/data/ingest/hosts/`.
+- Modify: `_ingest/clients.py` (`SessionClients.rest()`: the session's `RestClient`, the
+  host-decision cache, and their closer), `_query.py` (REST verb bodies), `_namespaces/base.py`.
 
 **Tasks.**
-- [ ] One `RestClient` per session, closed through a closer that holds the core weakly.
+- [ ] One `RestClient` per session, held by `SessionClients` and closed through a closer that
+      holds the core weakly.
 - [ ] Requests from the `DatasetSpec`: the role path's `RestPath`, its path segments, the symbol
       parameter, the `start`/`end` wire pair, the validated `filters`, `Request.adjusted` sent as
       `adjusted` when not None, the page size; `limit` is the total-row cap.
-- [ ] Batches from `to_batch`, renamed (`_schema.rename`) and converted (the timestamp routine);
+- [ ] Batches from `to_batch`, renamed (`schema.rename`) and converted (the timestamp routine);
       drift to the `DriftRegistry`; never more than one page of rows held.
 - [ ] Errors per DESIGN § 13.4: `from_wire`; the rate-limit WARNING once per session; fan-out
       404 drops one symbol; `poll()` data failures → `publish_failure`.
-- [ ] `_hosts.py` exactly per DESIGN § 13.2, including the unknown-`timeframe` failure and the
+- [ ] `_ingest/hosts.py` exactly per DESIGN § 13.2, including the unknown-`timeframe` failure and the
       single-flight future cache.
-- [ ] `_poll.py`: `REPLACE`/`UPSERT` on a keyed `input_table` with static key tables for
+- [ ] `_ingest/poll.py`: `REPLACE`/`UPSERT` on a keyed `input_table` with static key tables for
       deletes; `APPEND` on a `table_publisher`; reactive symbols read with `Table.snapshot()` on
       the poller thread; fan-out under `max_concurrency`.
 - [ ] `fetch()` on the latest queries; REST `history()` on `history_path` and
@@ -1745,8 +1770,8 @@ massive-sdk-removal.
 **Verification.**
 ```bash
 ./scripts/check.sh
-uv run pytest tests/test_rest.py tests/test_hosts.py tests/test_poll.py -q
-PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_rest.py tests/test_poll.py -q
+uv run pytest tests/ingest/test_rest.py tests/ingest/test_hosts.py tests/ingest/test_poll.py -q
+PYTHON_GIL=0 uv run --python 3.14t pytest tests/ingest/test_rest.py tests/ingest/test_poll.py -q
 ```
 
 **Pitfalls (Appendices E, F).** A second HTTP path beside `RestClient`; `limit` used as page
@@ -1781,30 +1806,34 @@ routing, the options cap, reactive watchlists, and the live diagnostics.
 [§ 19.5](DESIGN.md#195-runtime-drift) (WebSocket routing, the bound mask);
 [§ 6.1](DESIGN.md#61-how-a-live-table-is-kept-alive-and-released).
 
-**Depends on.** websocket-client, generated-catalog-and-schemas. **Parallel with.** rest-transport,
-massive-sdk-removal.
+**Depends on.** websocket-client, generated-catalog-and-schemas (and through it layer-rules).
+**Parallel with.** rest-transport, massive-sdk-removal.
 
 **Files.**
-- Create: `_ws.py`, `_stream.py`, `_watchlist.py`, `tests/test_ws.py`, `tests/test_stream.py`,
-  `tests/test_watchlist.py`, `tests/data/ws/`.
-- Modify: `tests/_fakes/stream.py` (created in core-skeleton), `_session.py` (the WS factory hook,
-  live rows), `_query.py` (stream verbs), `_namespaces/base.py`.
+- Create: `_ingest/ws.py`, `_tables/stream.py`, `tests/ingest/test_ws.py`,
+  `tests/tables/test_stream.py`, `tests/data/ingest/ws/`.
+- Modify: `_tables/watchlist.py` and `tests/tables/test_watchlist.py` (created in layer-rules;
+  the reactive symbol tables), `_ingest/clients.py` (`SessionClients.streams()`: the per-URL
+  connections and their closer), `tests/_fakes/stream.py` (created in core-skeleton),
+  `_query.py` (stream verbs), `_namespaces/base.py`.
 
 **Tasks.**
 - [ ] One `WsClient` per URL with the channels' generated sources; `on_open`, `on_status`,
       `on_data`, `on_state` per DESIGN § 13.3, all on the loop thread.
 - [ ] The reconcile loop with make-before-break wildcard transitions, single-topic re-send,
       and the `NO_ACK` rule (one reconnect per topic per session).
-- [ ] `_ws.py` builds each channel's required-key set from the dataset's `KeySpec`s for the
+- [ ] `_ingest/ws.py` builds each channel's required-key set from the dataset's `KeySpec`s for the
       channel's source (no `from_request` keys) and its symbol column, calls `set_required`
       before the channel's
-      first subscribe; `tests/test_ws.py` asserts the set and the call order against the fake.
-- [ ] Raw wire symbols of rows and rejects are mapped to canonical symbols with `_symbols`
-      when routed (the client passes them through unchanged).
+      first subscribe; `tests/ingest/test_ws.py` asserts the set and the call order against the
+      fake.
+- [ ] Raw wire symbols of rows and rejects are mapped to canonical symbols with
+      `_datasets/symbols.py` when routed (the client passes them through unchanged).
 - [ ] Rejects fail only their streams; a row with no symbol fails only the channel's `ALL`
       streams and logs at ERROR; drift goes to the `DriftRegistry`.
 - [ ] The flush renames, converts, applies the bound mask, and fans out with `where_in`.
-- [ ] The options cap with deferral; `_watchlist.py`; idle close after 30 s.
+- [ ] The options cap with deferral; the reactive symbol tables in `_tables/watchlist.py`; idle
+      close after 30 s.
 - [ ] The core-skeleton follow-ups: `open_stream`'s `channel` is `str`; `open_stream`
       releases its scope and references if it raises; the shutdown callback logs the `RuntimeError`
       of a closed loop; `blink()` on a failed stream and the `DHError` wrap.
@@ -1819,8 +1848,8 @@ massive-sdk-removal.
 **Verification.**
 ```bash
 ./scripts/check.sh
-uv run pytest tests/test_ws.py tests/test_stream.py tests/test_watchlist.py -q
-PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_ws.py tests/test_stream.py tests/test_watchlist.py -q
+uv run pytest tests/ingest/test_ws.py tests/tables/test_stream.py tests/tables/test_watchlist.py -q
+PYTHON_GIL=0 uv run --python 3.14t pytest tests/ingest/test_ws.py tests/tables/test_stream.py tests/tables/test_watchlist.py -q
 ```
 
 **Pitfalls (Appendices E, H).** Streams never shut down; decode or JVM work on the
@@ -1859,29 +1888,34 @@ described `blink()` copy, a stream failed during its open);
 descriptions”.
 
 **Depends on.** rest-transport, websocket-layer (and through them field-descriptions,
-websocket-and-flat-file-wire-schemas, and generated-catalog-and-schemas). **Parallel with.**
-api-drift-check, massive-sdk-removal. **Before.** column-reference-pages and the dataset planned
-PRs, so that every declared dataset is described from its first PR.
+websocket-and-flat-file-wire-schemas, generated-catalog-and-schemas, and layer-rules).
+**Parallel with.** api-drift-check, massive-sdk-removal, and the dataset planned PRs: the
+descriptions come from each dataset's schema, so a dataset declared before or after this PR is
+described as soon as both have landed. **Before.** column-reference-pages.
 
-**Files.** Modify `_schema.py` (`Column` gains `description`, `supplied_by`, `wire_keys`; the
-three rules; `describe()`), `_catalog.py` (`DatasetSpec.summary`, required, one sentence),
-`_query.py` (`QueryBase.columns()`; every verb ends with `describe()`), and wherever a verb's
-returned table is built (`_rest.py`, `_poll.py`, `_stream.py`, `_flat_files.py`), with their
-tests (`test_schema`, `test_catalog`, `test_query`, `test_rest`, `test_poll`, `test_stream`,
-`test_flat_files`, `namespaces/test_base`).
+**Files.** Modify `_datasets/schema.py` (`Column` gains `description`, `supplied_by`,
+`wire_keys`; the three rules), `_tables/columns.py` (`describe()`, created in layer-rules),
+`_datasets/catalog.py` (`DatasetSpec.summary`, required, one sentence), `_query.py`
+(`QueryBase.columns()`; every verb ends with `describe()`), the namespace modules of every
+dataset declared by then (their summaries), and wherever a verb's returned table is built
+(`_ingest/rest.py`, `_ingest/poll.py`, `_tables/stream.py`, `_ingest/flatfiles.py`), with their
+tests (`datasets/test_schema`, `tables/test_columns`, `datasets/test_catalog`, `test_query`,
+`ingest/test_rest`, `ingest/test_poll`, `tables/test_stream`, `ingest/test_flatfiles`,
+`namespaces/test_base`).
 
 **Tasks.**
 - [ ] `dataset_schema` fills each `Column`'s description by rules 1–3 of DESIGN § 19.4,
       `supplied_by` in the order `REST`, `FLAT_FILES`, `WS`, and `wire_keys` before any
       projection.
-- [ ] `_schema.describe(table, spec)`: cast `j_table` to `GridAttributes` through `jpy`, call
+- [ ] `columns.describe(table, spec)`: cast `j_table` to `GridAttributes` through `jpy`, call
       `withColumnDescriptions` with a `java.util.HashMap` of the non-empty descriptions, then
       `withDescription("<dataset>: <summary>")`, cast back to `Table`, and wrap.
 - [ ] Every verb calls `describe()` on the exact table it returns, after the shape is
       derived, on the caller thread inside the result scope; never under `registry_lock`, on
       the poller, flush, or reader threads, or in a listener.
 - [ ] `QueryBase.columns()` exactly per the DESIGN § 7 docstring contract.
-- [ ] `DatasetSpec.summary` on every synthetic and test spec.
+- [ ] `DatasetSpec.summary` on every synthetic and test spec, and on every dataset declared by
+      then (the first sentence of its factory method's docstring).
 
 **Acceptance criteria.**
 - [ ] Every shape carries `ColumnDescriptions` equal to the schema's non-empty descriptions and
@@ -1909,8 +1943,8 @@ tests (`test_schema`, `test_catalog`, `test_query`, `test_rest`, `test_poll`, `t
 **Verification.**
 ```bash
 ./scripts/check.sh
-uv run pytest tests/test_schema.py tests/test_query.py tests/test_poll.py tests/test_stream.py tests/test_flat_files.py -q
-PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_schema.py tests/test_query.py tests/test_stream.py -q
+uv run pytest tests/datasets/test_schema.py tests/tables/test_columns.py tests/test_query.py tests/ingest/test_poll.py tests/tables/test_stream.py tests/ingest/test_flatfiles.py -q
+PYTHON_GIL=0 uv run --python 3.14t pytest tests/tables/test_columns.py tests/test_query.py tests/tables/test_stream.py -q
 ```
 
 **Pitfalls.** `Table.with_attributes` skips the column check; use `GridAttributes`. Describing
@@ -1919,8 +1953,8 @@ distinct-result rule. Describing before `append_only()` or `ring()` loses the de
 because neither copies attributes. Reading `__doc__` at run time breaks under `python -OO`; the
 summary lives on the `DatasetSpec`.
 
-**Out of scope.** The generated pages and docstring links (column-reference-pages); describing the
-diagnostics tables.
+**Out of scope.** The generated pages (column-reference-pages) and the docstring links (each
+dataset planned PR); describing the diagnostics tables.
 
 **Approval gates.** Opening the PR.
 
@@ -1947,13 +1981,16 @@ renderer, `sync`, the command, the parity test, the docstring rule);
 [§ 22](DESIGN.md#22-decisions) “A generated column reference that cannot hold an orphaned page”.
 
 **Depends on.** result-column-descriptions. **Parallel with.** api-drift-check,
-massive-sdk-removal. **Before.** Every dataset planned PR, so each namespace's planned PR renders
-its own page and links its own docstrings.
+massive-sdk-removal, and the dataset planned PRs. It renders the pages of every dataset declared
+by the time it lands; a dataset planned PR that lands later regenerates its own namespace's
+page. Dataset docstrings link their sections from the first dataset PR on, and the docstring
+test enforces those links from this PR on. **Before.** finish-rework.
 
 **Files.** Create `src/deephaven_massive/_reference.py`, `tests/test_reference.py`, and
-`scripts/render_reference.py`. Modify `AGENTS.md` (the command in **Commands**, and that
-`docs/datasets/` is never edited by hand). No page exists yet: no dataset is declared, so the
-rendered set is empty and `docs/datasets/` is absent until the first dataset planned PR.
+`scripts/render_reference.py`, and `docs/datasets/<namespace>.md` for every namespace with a
+dataset declared by then (none if no dataset planned PR has landed, in which case
+`docs/datasets/` stays absent). Modify `AGENTS.md` (the command in **Commands**, and that
+`docs/datasets/` is never edited by hand).
 
 **Tasks.**
 - [ ] `_reference.render(provenance)`: one page per namespace module with declared datasets,
@@ -1997,8 +2034,8 @@ uv run pytest tests/test_reference.py -q
 column lists into hand-written modules makes them go stale; docstrings link, they never list.
 A script that imports the library before the server starts fails on the first Deephaven import.
 
-**Out of scope.** The pages themselves (each dataset planned PR renders its namespace); `README.md`
-links (finish-rework).
+**Out of scope.** The pages of datasets declared after this PR (each such dataset planned PR
+regenerates its namespace's page); `README.md` links (finish-rework).
 
 **Approval gates.** Opening the PR.
 
@@ -2013,14 +2050,14 @@ from `origin/main` after `git fetch`.
 
 | Name | Title | Branch | Issue | Depends on |
 |---|---|---|---|---|
-| stocks-datasets | `feat: stocks datasets` | `feat/stocks-datasets` | #17 | rest-transport, websocket-layer, column-reference-pages |
-| options-datasets | `feat: options datasets` | `feat/options-datasets` | #18 | rest-transport, websocket-layer, column-reference-pages |
-| futures-datasets | `feat: futures datasets` | `feat/futures-datasets` | #19 | rest-transport, websocket-layer, column-reference-pages |
-| indices-datasets | `feat: indices datasets` | `feat/indices-datasets` | #20 | rest-transport, websocket-layer, column-reference-pages |
-| forex-datasets | `feat: forex datasets` | `feat/forex-datasets` | #21 | rest-transport, websocket-layer, column-reference-pages |
-| crypto-datasets | `feat: crypto datasets` | `feat/crypto-datasets` | #22 | rest-transport, websocket-layer, column-reference-pages |
-| reference-indicator-economy-datasets | `feat: reference, indicators, economy, and unified snapshots datasets` | `feat/reference-datasets` | #23 | rest-transport, column-reference-pages |
-| partner-datasets | `feat: partner datasets` | `feat/partner-datasets` | #24 | rest-transport, column-reference-pages |
+| stocks-datasets | `feat: stocks datasets` | `feat/stocks-datasets` | #17 | rest-transport, websocket-layer |
+| options-datasets | `feat: options datasets` | `feat/options-datasets` | #18 | rest-transport, websocket-layer |
+| futures-datasets | `feat: futures datasets` | `feat/futures-datasets` | #19 | rest-transport, websocket-layer |
+| indices-datasets | `feat: indices datasets` | `feat/indices-datasets` | #20 | rest-transport, websocket-layer |
+| forex-datasets | `feat: forex datasets` | `feat/forex-datasets` | #21 | rest-transport, websocket-layer |
+| crypto-datasets | `feat: crypto datasets` | `feat/crypto-datasets` | #22 | rest-transport, websocket-layer |
+| reference-indicator-economy-datasets | `feat: reference, indicators, economy, and unified snapshots datasets` | `feat/reference-datasets` | #23 | rest-transport, websocket-layer |
+| partner-datasets | `feat: partner datasets` | `feat/partner-datasets` | #24 | rest-transport, websocket-layer |
 
 **Shared goal.** Declare every dataset of the namespace, implement the namespace class's factory
 methods with the exact DESIGN signatures, and prove each dataset with spec-shaped fixtures.
@@ -2029,24 +2066,29 @@ methods with the exact DESIGN signatures, and prove each dataset with spec-shape
 [§ 8](DESIGN.md#8-namespace-tree); [§ 7.1](DESIGN.md#71-bars-overloads) where it has `bars`;
 [§ 9](DESIGN.md#9-filters); [§ 10](DESIGN.md#10-symbols-and-all); [§ 11](DESIGN.md#11-enums-and-types).
 
-**Parallel with.** every other dataset planned PR.
+**Depends on.** rest-transport and websocket-layer, no more: no dataset planned PR waits for
+result-column-descriptions or column-reference-pages. **Parallel with.** every other dataset
+planned PR, result-column-descriptions, and column-reference-pages.
 
 **Shared files.** `_namespaces/<ns>.py` (namespace class and `DATASETS`), its tests and
-fixtures, its generated column reference page `docs/datasets/<ns>.md`, and the deletion of
-`tests/data/catalog/undeclared/<ns>.txt`. No `_massive` diff: a
-needed `refresh/` fix lands first in its own PR.
+fixtures, and the deletion of `tests/data/datasets/catalog/undeclared/<ns>.txt`; and, only when
+column-reference-pages has already merged, its regenerated column reference page
+`docs/datasets/<ns>.md`. No `_massive` diff: a needed `refresh/` fix lands first in its own PR.
 
 **Shared tasks (per dataset).**
-- [ ] A `DatasetSpec`: name, one-sentence summary, query class, kind, the per-source key
-      columns (`KeySpec`), the role paths,
+- [ ] A `DatasetSpec`: name, one-sentence summary (once result-column-descriptions has added
+      `DatasetSpec.summary`; before that, the docstring's first sentence, which that PR copies
+      into the spec), query class, kind, the per-source key columns (`KeySpec`), the role paths,
       channels, prefixes, the `start`/`end` wire pair, poll defaults, page size. No column
       overrides and no unit declarations: those are generated.
 - [ ] The factory method with the exact DESIGN § 8 signature and a docstring that starts with
       the summary, states the transports, `limit`, and `ALL`, and links its column reference
-      section (DESIGN § 7.4); never a column list.
-- [ ] Regenerate the namespace's page with `uv run python scripts/render_reference.py` and
-      review it: every column has the description the rule picks, or an empty one the PR
-      names.
+      section, `docs/datasets/<ns>.md#<dataset>` (DESIGN § 7.4), whether or not the page exists
+      yet; never a column list.
+- [ ] Only when column-reference-pages has already merged: regenerate the namespace's page with
+      `uv run python scripts/render_reference.py` and review it (every column has the
+      description the rule picks, or an empty one the PR names). Otherwise the PR adds no
+      page; column-reference-pages renders it.
 - [ ] A fixture shaped from the spec's example and the docs sample; the test asserts the exact
       request, the column values, each `Instant`, and `Symbol`/`Underlying`.
 - [ ] The § 7.2 `ValueError`s.
@@ -2064,7 +2106,9 @@ needed `refresh/` fix lands first in its own PR.
 **Shared verification.**
 ```bash
 ./scripts/check.sh
-uv run pytest tests/namespaces/test_<ns>.py tests/test_catalog.py tests/test_reference.py -q
+uv run pytest tests/namespaces/test_<ns>.py tests/datasets/test_catalog.py -q
+# Once column-reference-pages has merged:
+uv run pytest tests/test_reference.py -q
 uv run python scripts/render_reference.py && git status --porcelain docs/datasets    # empty
 ```
 
@@ -2085,7 +2129,7 @@ per dataset, no aliases. Read the legacy code, if needed, with
   `financials.*` and `filings.*` namespaces as inner classes.
 - **options-datasets** ([§ 8.2](DESIGN.md#82-moptions)): `trades`, `quotes`, `bars`, `fmv`,
   `chain`, `snapshots` (unified `/v3/snapshot`, 250 per request; `Underlying` parsed; `ALL`
-  allowed), `contracts`, `daily_open_close`. OCC normalization via `_symbols.py`.
+  allowed), `contracts`, `daily_open_close`. OCC normalization via `_datasets/symbols.py`.
 - **futures-datasets** ([§ 8.3](DESIGN.md#83-mfutures)): `trades`, `quotes`, `bars` (no `DAY`;
   `SESSION`; `resolution = f"{multiplier}{unit}"`), `snapshots(product_code)`, `contracts`,
   `products`, `exchanges`, `market_status`, `schedules`. Streams always `/futures`.
@@ -2122,11 +2166,11 @@ move into `AGENTS.md`, and generated = used.
 **DESIGN sections implemented.** [§ 21 Examples](DESIGN.md#21-examples);
 [§ 8.12](DESIGN.md#812-excluded-endpoints) (generated = used).
 
-**Depends on.** Every dataset planned PR, api-drift-check, massive-sdk-removal. **Parallel with.**
-live-integration-suite.
+**Depends on.** Every dataset planned PR, column-reference-pages, api-drift-check,
+massive-sdk-removal. **Parallel with.** live-integration-suite.
 
 **Files.** Create `tests/test_readme.py`. Modify `README.md`, `AGENTS.md`, and
-`tests/test_catalog.py` (asserts that no undeclared file remains).
+`tests/datasets/test_catalog.py` (asserts that no undeclared file remains).
 
 **Tasks.**
 - [ ] `tests/test_readme.py`: each DESIGN § 21 example runs in the embedded JVM against the
@@ -2147,7 +2191,7 @@ snapshot` PR, never part of finish-rework.
 **Verification.**
 ```bash
 ./scripts/check.sh
-uv run pytest tests/test_readme.py tests/test_catalog.py -q
+uv run pytest tests/test_readme.py tests/datasets/test_catalog.py -q
 ```
 
 **Pitfalls (Appendix G § 6).** README claims that are false ("Zero-Copy", "lock-free", a
@@ -2176,10 +2220,10 @@ column).
 
 **Depends on.** Every dataset planned PR. **Parallel with.** finish-rework.
 
-**Files.** Create `tests/test_hosts_integration.py`, `tests/test_ws_integration.py`,
-`tests/test_timeunits_integration.py`, `tests/test_flat_files_integration.py`,
+**Files.** Create `tests/ingest/test_hosts_integration.py`, `tests/ingest/test_ws_integration.py`,
+`tests/datasets/test_timestamps_integration.py`, `tests/ingest/test_flatfiles_integration.py`,
 `tests/namespaces/test_stocks_integration.py`. Modify `pyproject.toml` (the `integration`
-marker), `tests/conftest.py`, `.github/workflows/ci.yml`, `tests/data/symbols/crypto_tickers.csv`
+marker), `tests/conftest.py`, `.github/workflows/ci.yml`, `tests/data/datasets/symbols/crypto_tickers.csv`
 (regenerated from the live reference endpoint, with its date in the PR).
 
 **Tasks.**
@@ -2358,7 +2402,7 @@ The rework is complete when all of the following hold on `main`:
 
 - [ ] `./scripts/check.sh` is green locally; every CI job is green, including `3.14t` with
       `PYTHON_GIL=0`.
-- [ ] `tests/test_layout.py`, `tests/test_catalog.py`, `tests/massive/refresh/test_generate.py`,
+- [ ] `tests/test_layout.py`, `tests/datasets/test_catalog.py`, `tests/massive/refresh/test_generate.py`,
       and the 100% branch-coverage gate pass, with no unapproved `pragma: no cover`.
 - [ ] `uv run python -m deephaven_massive._massive.refresh` leaves `spec/*.json` unchanged.
 - [ ] `uv run python scripts/render_reference.py` leaves `docs/datasets/` unchanged, and every
@@ -2421,7 +2465,7 @@ The owner decisions of the final design, each recorded in DESIGN or above:
 | The legacy code is deleted now (legacy-deletion) | Process decision “The legacy implementation is deleted” |
 | The test layout: one underscore dropped per component, the dunder rule | § 4.2; § 22 “Test layout” |
 | S3 follows the shared network rules | § 19.3; § 22 “S3 follows the shared network rules” |
-| Renames: `_namespaces/`, `_flat_files.py`, `_history_source.py`, `_massive/flatfiles/` | § 4.1; § 22 “Module names” |
+| Renames: `_namespaces/`, `_ingest/flatfiles.py`, `_datasets/history_source.py`, `_massive/flatfiles/` | § 4.1; § 22 “Module names” |
 | `python -m deephaven_massive._massive.refresh`; `refresh/` not shipped | § 19.6; § 22 “`refresh/` is not shipped” |
 | The flat-file DESIGN and PLAN text of #51 is carried into the final documents | Process decision “The flat-file DESIGN and PLAN text of #51” |
 | Hand input is naming, grouping, and verification only | § 19.4; § 22 “Hand input is naming, grouping, and verification, never a column list” |

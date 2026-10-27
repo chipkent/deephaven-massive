@@ -16,10 +16,10 @@ from typing import TYPE_CHECKING
 
 from deephaven.stream.table_publisher import TablePublisher, table_publisher
 
-from deephaven_massive._liveness import StreamHandle, new_scope
+from deephaven_massive._tables.liveness import StreamHandle, new_scope
 
 if TYPE_CHECKING:
-    from deephaven_massive._catalog import DatasetSpec
+    from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._query import Request
     from deephaven_massive._session import SessionCore
 

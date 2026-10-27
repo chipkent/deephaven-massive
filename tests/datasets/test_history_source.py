@@ -8,11 +8,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive import _history_source
-from deephaven_massive._catalog import DatasetSpec
-from deephaven_massive._dates import CHICAGO, FuturesSessions, TimeRange, bounds
-from deephaven_massive._enums import AssetClass, HistorySource, Timespan, Transport
-from deephaven_massive._history_source import (
+from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.dates import CHICAGO, FuturesSessions, TimeRange, bounds
+from deephaven_massive._datasets.history_source import (
     SourceChoice,
     choose_source,
     flat_file_prefix,
@@ -20,9 +19,17 @@ from deephaven_massive._history_source import (
     rest_history_problem,
     within_publication_grace,
 )
+from deephaven_massive._datasets.schema import (
+    BARS,
+    INDEX_VALUES,
+    TRADES,
+    Column,
+    ColumnType,
+    Schema,
+)
+from deephaven_massive._datasets.timestamps import TimeUnit
+from deephaven_massive._enums import AssetClass, HistorySource, Timespan, Transport
 from deephaven_massive._query import HistoryQuery, Request
-from deephaven_massive._schema import BARS, INDEX_VALUES, TRADES, Column, ColumnType, Schema
-from deephaven_massive._timeunits import TimeUnit
 
 NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
@@ -422,12 +429,12 @@ def test_every_partition_date_must_be_published() -> None:
 
 
 def test_the_clock_is_read_when_no_instant_is_given(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert _history_source._now().tzinfo is UTC
+    assert history_source._now().tzinfo is UTC
 
     def before_the_cutoff() -> datetime:
         return datetime(2025, 3, 4, 11, 29, tzinfo=NEW_YORK)
 
-    monkeypatch.setattr(_history_source, "_now", before_the_cutoff)
+    monkeypatch.setattr(history_source, "_now", before_the_cutoff)
     with pytest.raises(ValueError, match="2025-03-03 is not yet published"):
         choose_source(
             STOCK_TRADES, request(), MARCH_3, requested=HistorySource.FLAT_FILES, config=config()
@@ -459,5 +466,5 @@ def test_publication_grace_reads_the_clock(monkeypatch: pytest.MonkeyPatch) -> N
     def much_later() -> datetime:
         return datetime(2025, 4, 1, tzinfo=UTC)
 
-    monkeypatch.setattr(_history_source, "_now", much_later)
+    monkeypatch.setattr(history_source, "_now", much_later)
     assert within_publication_grace(STOCK_TRADES, date(2025, 3, 4), cutoff=time(11, 30)) is False
