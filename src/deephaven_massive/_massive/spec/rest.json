@@ -102,7 +102,7 @@
     {"column": "BenzingaId", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "benzinga_id"},
     {"column": "FirmName", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "firm_name"},
     {"column": "FullName", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "full_name"},
-    {"column": "LastUpdated", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "last_updated"},
+    {"column": "LastUpdated", "declared_type": "string", "required": false, "type": "iso-instant", "unit": null, "wire_key": "last_updated"},
     {"column": "OverallAvgReturn", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "overall_avg_return"},
     {"column": "OverallAvgReturnPercentile", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "overall_avg_return_percentile"},
     {"column": "OverallSuccessRate", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "overall_success_rate"},
@@ -280,7 +280,7 @@
    "fields": [
     {"column": "BenzingaId", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "benzinga_id"},
     {"column": "Currency", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "currency"},
-    {"column": "LastUpdated", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "last_updated"},
+    {"column": "LastUpdated", "declared_type": "string", "required": false, "type": "iso-instant", "unit": null, "wire_key": "last_updated"},
     {"column": "Name", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "name"}
    ],
    "memberships": []
@@ -1240,7 +1240,7 @@
     {"column": "Name", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "name"},
     {"column": "ProductCode", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "product_code"},
     {"column": "SessionEndDate", "declared_type": null, "required": false, "type": "date", "unit": null, "wire_key": "session_end_date"},
-    {"column": "Timestamp", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "timestamp"},
+    {"column": "Timestamp", "declared_type": "string", "required": false, "type": "iso-instant", "unit": null, "wire_key": "timestamp"},
     {"column": "TradingVenue", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "trading_venue"}
    ],
    "memberships": []
@@ -1292,7 +1292,7 @@
     {"column": "ClearingSymbol", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "clearing_symbol"},
     {"column": "ClearingVenue", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "clearing_venue"},
     {"column": "Date", "declared_type": null, "required": true, "type": "date", "unit": null, "wire_key": "date"},
-    {"column": "LastUpdated", "declared_type": null, "required": false, "type": "iso-instant", "unit": null, "wire_key": "last_updated"},
+    {"column": "LastUpdated", "declared_type": "iso-instant", "required": false, "type": "date", "unit": null, "wire_key": "last_updated"},
     {"column": "Name", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "name"},
     {"column": "PriceQuotation", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "price_quotation"},
     {"column": "ProductCode", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "product_code"},
@@ -2538,7 +2538,7 @@
     {"column": "LastBid", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "last.bid"},
     {"column": "LastExchange", "declared_type": null, "required": false, "type": "long", "unit": null, "wire_key": "last.exchange"},
     {"column": "LastTimestamp", "declared_type": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "last.timestamp"},
-    {"column": "Pair", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"},
+    {"column": "Symbol", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"},
     {"column": "To", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "to"}
    ],
    "memberships": []
@@ -2794,7 +2794,7 @@
     {"column": "IndicesGroupsSAndP", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "indicesGroups.s_and_p"},
     {"column": "IndicesGroupsSocieteGenerale", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "indicesGroups.societe_generale"},
     {"column": "Market", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "market"},
-    {"column": "ServerTime", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "serverTime"}
+    {"column": "ServerTime", "declared_type": "string", "required": false, "type": "iso-instant", "unit": null, "wire_key": "serverTime"}
    ],
    "memberships": []
   },
@@ -2829,7 +2829,7 @@
     {"column": "IsUtc", "declared_type": null, "required": true, "type": "bool", "unit": null, "wire_key": "isUTC"},
     {"column": "Open", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "open"},
     {"column": "OpenTrades", "declared_type": null, "required": true, "type": "json-text", "unit": null, "wire_key": "openTrades"},
-    {"column": "Pair", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"}
+    {"column": "Symbol", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"}
    ],
    "memberships": []
   },
@@ -2848,7 +2848,7 @@
     {"column": "Low", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "low"},
     {"column": "Open", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "open"},
     {"column": "PreMarket", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "preMarket"},
-    {"column": "Ticker", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"}
+    {"column": "Symbol", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"}
    ],
    "memberships": []
   },
@@ -2869,7 +2869,7 @@
     {"column": "Open", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "open"},
     {"column": "Otc", "declared_type": null, "required": false, "type": "bool", "unit": null, "wire_key": "otc"},
     {"column": "PreMarket", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "preMarket"},
-    {"column": "Ticker", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"},
+    {"column": "Symbol", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"},
     {"column": "Volume", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "volume"}
    ],
    "memberships": []
@@ -2891,7 +2891,7 @@
     {"column": "Open", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "open"},
     {"column": "Otc", "declared_type": null, "required": false, "type": "bool", "unit": null, "wire_key": "otc"},
     {"column": "PreMarket", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "preMarket"},
-    {"column": "Ticker", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"},
+    {"column": "Symbol", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "symbol"},
     {"column": "Volume", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "volume"}
    ],
    "memberships": []
@@ -2996,8 +2996,8 @@
     {"in_path": true, "kind": "string", "name": "cryptoTicker", "unit": null, "values": []},
     {"in_path": true, "kind": "integer", "name": "multiplier", "unit": null, "values": []},
     {"in_path": true, "kind": "enum", "name": "timespan", "unit": null, "values": ["second", "minute", "hour", "day", "week", "month", "quarter", "year"]},
-    {"in_path": true, "kind": "string", "name": "from", "unit": null, "values": []},
-    {"in_path": true, "kind": "string", "name": "to", "unit": null, "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "from", "unit": "ms", "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "to", "unit": "ms", "values": []},
     {"in_path": false, "kind": "boolean", "name": "adjusted", "unit": null, "values": []},
     {"in_path": false, "kind": "enum", "name": "sort", "unit": null, "values": ["asc", "desc"]},
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
@@ -3041,8 +3041,8 @@
     {"in_path": true, "kind": "string", "name": "forexTicker", "unit": null, "values": []},
     {"in_path": true, "kind": "integer", "name": "multiplier", "unit": null, "values": []},
     {"in_path": true, "kind": "enum", "name": "timespan", "unit": null, "values": ["second", "minute", "hour", "day", "week", "month", "quarter", "year"]},
-    {"in_path": true, "kind": "string", "name": "from", "unit": null, "values": []},
-    {"in_path": true, "kind": "string", "name": "to", "unit": null, "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "from", "unit": "ms", "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "to", "unit": "ms", "values": []},
     {"in_path": false, "kind": "boolean", "name": "adjusted", "unit": null, "values": []},
     {"in_path": false, "kind": "enum", "name": "sort", "unit": null, "values": ["asc", "desc"]},
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
@@ -3082,8 +3082,8 @@
     {"in_path": true, "kind": "string", "name": "indicesTicker", "unit": null, "values": []},
     {"in_path": true, "kind": "integer", "name": "multiplier", "unit": null, "values": []},
     {"in_path": true, "kind": "enum", "name": "timespan", "unit": null, "values": ["second", "minute", "hour", "day", "week", "month", "quarter", "year"]},
-    {"in_path": true, "kind": "string", "name": "from", "unit": null, "values": []},
-    {"in_path": true, "kind": "string", "name": "to", "unit": null, "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "from", "unit": "ms", "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "to", "unit": "ms", "values": []},
     {"in_path": false, "kind": "enum", "name": "sort", "unit": null, "values": ["asc", "desc"]},
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
    ],
@@ -3123,8 +3123,8 @@
     {"in_path": true, "kind": "string", "name": "optionsTicker", "unit": null, "values": []},
     {"in_path": true, "kind": "integer", "name": "multiplier", "unit": null, "values": []},
     {"in_path": true, "kind": "enum", "name": "timespan", "unit": null, "values": ["second", "minute", "hour", "day", "week", "month", "quarter", "year"]},
-    {"in_path": true, "kind": "string", "name": "from", "unit": null, "values": []},
-    {"in_path": true, "kind": "string", "name": "to", "unit": null, "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "from", "unit": "ms", "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "to", "unit": "ms", "values": []},
     {"in_path": false, "kind": "boolean", "name": "adjusted", "unit": null, "values": []},
     {"in_path": false, "kind": "enum", "name": "sort", "unit": null, "values": ["asc", "desc"]},
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
@@ -3168,8 +3168,8 @@
     {"in_path": true, "kind": "string", "name": "stocksTicker", "unit": null, "values": []},
     {"in_path": true, "kind": "integer", "name": "multiplier", "unit": null, "values": []},
     {"in_path": true, "kind": "enum", "name": "timespan", "unit": null, "values": ["second", "minute", "hour", "day", "week", "month", "quarter", "year"]},
-    {"in_path": true, "kind": "string", "name": "from", "unit": null, "values": []},
-    {"in_path": true, "kind": "string", "name": "to", "unit": null, "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "from", "unit": "ms", "values": []},
+    {"in_path": true, "kind": "timestamp", "name": "to", "unit": "ms", "values": []},
     {"in_path": false, "kind": "boolean", "name": "adjusted", "unit": null, "values": []},
     {"in_path": false, "kind": "enum", "name": "sort", "unit": null, "values": ["asc", "desc"]},
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
@@ -3313,7 +3313,7 @@
     {"column": "LastTradeId", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "lastTrade.i"},
     {"column": "LastTradePrice", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastTrade.p"},
     {"column": "LastTradeSize", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastTrade.s"},
-    {"column": "LastTradeTimestamp", "declared_type": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "lastTrade.t"},
+    {"column": "LastTradeParticipantTimestamp", "declared_type": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "lastTrade.t"},
     {"column": "LastTradeExchange", "declared_type": null, "required": true, "type": "long", "unit": null, "wire_key": "lastTrade.x"},
     {"column": "MinuteClose", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "min.c"},
     {"column": "MinuteHigh", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "min.h"},
@@ -3354,7 +3354,7 @@
     {"column": "LastTradeId", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "lastTrade.i"},
     {"column": "LastTradePrice", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastTrade.p"},
     {"column": "LastTradeSize", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastTrade.s"},
-    {"column": "LastTradeTimestamp", "declared_type": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "lastTrade.t"},
+    {"column": "LastTradeParticipantTimestamp", "declared_type": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "lastTrade.t"},
     {"column": "LastTradeExchange", "declared_type": null, "required": true, "type": "long", "unit": null, "wire_key": "lastTrade.x"},
     {"column": "MinuteClose", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "min.c"},
     {"column": "MinuteHigh", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "min.h"},
@@ -3390,9 +3390,9 @@
     {"column": "DayOpen", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "day.o"},
     {"column": "DayVolume", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "day.v"},
     {"column": "Fmv", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},
-    {"column": "LastQuoteAsk", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.a"},
-    {"column": "LastQuoteBid", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.b"},
-    {"column": "LastQuoteTimestamp", "declared_type": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "lastQuote.t"},
+    {"column": "LastQuoteAskPrice", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.a"},
+    {"column": "LastQuoteBidPrice", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.b"},
+    {"column": "LastQuoteParticipantTimestamp", "declared_type": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "lastQuote.t"},
     {"column": "LastQuoteExchange", "declared_type": null, "required": true, "type": "long", "unit": null, "wire_key": "lastQuote.x"},
     {"column": "MinuteClose", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "min.c"},
     {"column": "MinuteHigh", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "min.h"},
@@ -3427,9 +3427,9 @@
     {"column": "DayOpen", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "day.o"},
     {"column": "DayVolume", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "day.v"},
     {"column": "Fmv", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},
-    {"column": "LastQuoteAsk", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.a"},
-    {"column": "LastQuoteBid", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.b"},
-    {"column": "LastQuoteTimestamp", "declared_type": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "lastQuote.t"},
+    {"column": "LastQuoteAskPrice", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.a"},
+    {"column": "LastQuoteBidPrice", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.b"},
+    {"column": "LastQuoteParticipantTimestamp", "declared_type": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "lastQuote.t"},
     {"column": "LastQuoteExchange", "declared_type": null, "required": true, "type": "long", "unit": null, "wire_key": "lastQuote.x"},
     {"column": "MinuteClose", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "min.c"},
     {"column": "MinuteHigh", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "min.h"},

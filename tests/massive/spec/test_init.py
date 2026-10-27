@@ -213,3 +213,31 @@ def test_the_schemas_load_without_the_refresh_package() -> None:
         check=True,
     )
     assert int(result.stdout) == len(spec.sources(Transport.REST))
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"column": None}, "'column' is None, not a string"),
+        ({"required": 1}, "'required' is 1, not a boolean"),
+        ({"unit": 5}, "'unit' is 5, not a string"),
+    ],
+)
+def test_parse_coerces_nothing_in_a_field(change: dict[str, object], message: str) -> None:
+    entry = {"key": "s", "fields": [{**_FIELD, **change}], "memberships": []}
+    with pytest.raises(TypeError, match=message):
+        spec.parse(Transport.WS, _file(entry))
+
+
+def test_parse_rejects_parameter_values_that_are_not_strings() -> None:
+    param = {"name": "precision", "kind": "enum", "in_path": False, "values": [0], "unit": None}
+    entry = {"key": "/v1/x", "result_key": None, "fields": [], "memberships": [], "params": [param]}
+    with pytest.raises(TypeError, match="not an array of strings"):
+        spec.parse(Transport.REST, _file(entry))
+
+
+def test_parse_rejects_a_projection_that_is_not_of_strings() -> None:
+    membership = {"kind": "k", "group": "g", "position": 0, "projection": {"x": 1}}
+    entry = {"key": "stocks/T", "fields": [], "memberships": [membership]}
+    with pytest.raises(TypeError, match="not an object of strings"):
+        spec.parse(Transport.WS, _file(entry))

@@ -2217,49 +2217,76 @@ names a source or field the snapshot lacks fails the refresh as stale (G4).
 
 | Kind | Where | What | Example |
 |---|---|---|---|
-| Lexicon | `lexicon.py` | `SHAPES` maps each object shape (aggregate row; snapshot `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`; each WebSocket channel; each futures object) to its lexicon. A lexicon translates a short key to Massive's own long form; identity entries cover short real words (`id`, `cik`, `url`, `low`, `fmv`, `mic`). | trade lexicon `p` → `price`, `t` → `sip_timestamp`; segment `min` → `minute` |
-| `NAMES` | `overrides.py` | `{(source, wire key): (long name, reason)}` for a column the lexicon cannot name: a short key Massive spells out nowhere, or a vendor name the library reserves (`symbol`) | stocks `A`/`AM` `dv` → `decimal_volume`, `dav` → `accumulated_decimal_volume`; futures `A`/`AM` `dv` → `dollar_volume`; `av`, `op`, aggregate `a`, aggregate `z`; open-close `symbol` → `ticker` (or `pair` for a currency pair) |
+| Lexicon | `lexicon.py` | `SHAPES` maps each object shape (aggregate row; snapshot `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`; each WebSocket channel; each futures object) to its lexicon. A lexicon translates a short key to the long name Massive uses for the same field elsewhere in that asset class's REST or flat-file data, and **every entry cites that endpoint or file**; identity entries cover short real words (`id`, `cik`, `url`, `low`, `fmv`, `mic`). | trade lexicon `p` → `price`, `t` → `sip_timestamp` (`/v3/trades/{stockTicker}`); crypto trade `t` → `participant_timestamp` (`/v3/trades/{cryptoTicker}`); forex quote `a` → `ask_price` (`/v3/quotes/{fxTicker}`); segment `min` → `minute` |
+| `NAMES` | `overrides.py` | `{(source, wire key): (long name, description)}` only for a short key Massive gives no long name anywhere: the name is derived from Massive's own description of the field, which the entry quotes exactly; a changed description makes the entry stale (G4). `NAMES` never renames something the vendor already names, and never coins a dataset key column. | snapshot `min.av` → `accumulated_volume` ("The accumulated volume."), `min.dav` → `accumulated_decimal_volume`; WebSocket `av`, `dav`, `op` |
 | `KINDS` | `overrides.py` | `{kind: {group: [sources]}}`: the sources of one dataset kind, grouped per asset class, in source order. Every dataset with a stream or flat-file source has a kind, WebSocket-only `luld`, `imbalances`, and `fmv` included. | `trades: {stocks: [/v3/trades/{stockTicker}, /v2/last/trade/{stocksTicker}, (stocks, T), us_stocks_sip/trades_v1], crypto: […]}` |
 | `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values, `last_updated` → `timestamp` |
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
-| `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp"; with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
-| `TYPE_FIXES` | `overrides.py` | vendor type **errors** only: a declared, field-scoped conversion that the decoder applies deliberately (see **Declared conversions** below); each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23. No REST field needs one at the pinned snapshot. | flat-file `conditions` `integer` → `int-array`; forex `x` (documented as a quoted decimal string) → `long`; crypto `XT` `i` (`integer`) → `string` |
+| `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
+| `TYPE_FIXES` | `overrides.py` | vendor type **errors or omissions** only: a declared, field-scoped conversion that the decoder applies deliberately (see **Declared conversions** below), each citing the documentation sample that shows the real type; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | REST timestamps typed as plain text whose samples are ISO date-times (benzinga analysts and firms `last_updated`, futures market-status `timestamp`, `/v1/marketstatus/now` `serverTime`) → `iso-instant`; futures products `last_updated` (declared date-time, sample `"2025-02-22"`) → `date`; flat-file `conditions` `integer` → `int-array`; forex `x` (documented as a quoted decimal string) → `long`; crypto `XT` `i` (`integer`) → `string` |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, column): reason}`: columns legitimately on one transport | `AccumulatedVolume` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
-| `PARAM_UNITS` | `overrides.py` | `{(path, base parameter): (unit, reason)}`: the unit of every timestamp-like string parameter, or "not an epoch" (sent as date or date-time text) | `/v3/trades` `timestamp` → ns; indicators `timestamp` → ms; benzinga `last_updated` → not an epoch |
+| `PARAM_UNITS` | `overrides.py` | `{(path, base parameter): (unit, reason)}`: the unit of every timestamp-like string parameter, and of any other string parameter documented as taking an epoch, or "not an epoch" (sent as date or date-time text) | `/v3/trades` `timestamp` → ns; indicators `timestamp` → ms; aggregate range `{from}`/`{to}` → ms; benzinga `last_updated` → not an epoch |
 | `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, the executable rows of section 8.12 | `/v1/summaries` |
 
-**The naming rule.** A field's column is derived by splitting its wire path into segments and
-dropping the result key, translating each short key through the lexicon of its shape, applying
-`NAMES`, and PascalCase-joining the segments (`prevDay.vw` becomes `PrevDayVwap`). Names are
-never derived from descriptions. The generator never emits `Symbol` or `Underlying` (gate G2
-stops on either, so a vendor `symbol` needs a `NAMES` entry), and emits `Timestamp` only where
-the vendor's long name is `timestamp`. The WebSocket-only
-names are `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
-aggregate `z` → `AverageTradeSize`, `dav` → `AccumulatedDecimalVolume`, stocks `dv` →
-`DecimalVolume`, and futures `dv` → `DollarVolume`; the snapshot object `min` gives
-`Minute…` columns.
+**The naming policy** (owner-approved), applied mechanically by the generator, with no
+per-column exceptions:
+
+1. **The vendor's long name.** Where Massive's data carries a long field name (REST
+   `/v3/trades` `participant_timestamp`, flat-file `ask_price`), the column is its PascalCase
+   form (`ParticipantTimestamp`, `AskPrice`).
+2. **Abbreviated keys** (WebSocket `p`, aggregate `o`, forex `a`) take the long name Massive
+   itself uses for the same field elsewhere in that asset class's REST or flat-file data. The
+   lexicons are exactly this mapping, one per object shape, and every entry cites the vendor
+   endpoint or file it comes from. One field gets one column on every endpoint and transport:
+   crypto trade `t` is `ParticipantTimestamp`, forex quote `a`/`b` are `AskPrice`/`BidPrice`.
+3. **No long name anywhere** (rare: snapshot and WebSocket `av`, `dav`, `op`): the name is
+   derived from Massive's own description of the field and recorded in `NAMES` with the
+   description quoted. `NAMES` holds only these entries. The snapshot's `min` object, which
+   Massive names nowhere, is the one such case in a lexicon (`min` → `minute`, from "The most
+   recent minute bar for this ticker.").
+4. **Nested objects.** A child column is the parent's name followed by the child's, with no
+   exceptions: `day.o` → `DayOpen`, `min.av` → `MinuteAccumulatedVolume`, `lastQuote.P` →
+   `LastQuoteAskPrice`.
+5. **Dataset keys.** The only renames on top of rules 1–4 are each dataset's declared key
+   columns, `Symbol`, `Timestamp`, and `Underlying`, made by the run-time key rename. A vendor
+   field literally named `symbol` (the open-close and conversion paths) is generated as
+   `Symbol`, its own name, and the key rename uses it as is; `NAMES` may never coin a key column
+   (gate G2). There are no `Ticker` or `Pair` stand-ins.
+6. **Order.** Columns keep the vendor's documented order: the order of the properties in the
+   served document, `allOf` parts in order. Massive serves its specification with every
+   object's keys in alphabetical order, so that is the documented order; the snapshot stores
+   the document in the order served (never re-sorted), and `rest.json` records each source's
+   field order explicitly. The dataset's key columns come first at run time.
+7. **Consistency.** Within one dataset kind, one concept in two columns, or one column for two
+   concepts, fails the refresh (gate G8).
+
+Names are never derived from descriptions except under rule 3, and the generator emits
+`Timestamp` only where the vendor's long name is `timestamp`.
 
 **Refresh gates.** The refresh fails, printing the source, the key, and its description for the
 reviewer, on:
 
 - **G1:** a short key (three characters or fewer, no underscore) with no lexicon, identity, or
   `NAMES` entry;
-- **G2:** two keys of one source producing one column, or a key producing the reserved
-  `Symbol` or `Underlying`;
-- **G3:** a timestamp-like integer field with no `UNITS` entry. ISO date-time text fields
-  (`last_updated` on benzinga and futures products, `timestamp` on futures schedules) are
-  excluded; the representation rules decide them. G3 runs on the long name, after the
-  lexicon and `NAMES`: an integer field is timestamp-like when it has a unit tag, a doc type of
-  `timestamp - integer`, or a long name matching `timestamp`, `*_timestamp`, `updated`,
-  `*_updated`, `window_start`, `window_end`, or `*_time` (the bar lexicon gives `s` and `e`
-  as `window_start` and `end_timestamp`, while a trade's `s` is `size`). A timestamp-like
-  string REST parameter (by its base name) with no `PARAM_UNITS` entry fails the same gate;
+- **G2:** two keys of one source producing one column, or a `NAMES` entry coining a dataset
+  key column (`Symbol`, `Timestamp`, `Underlying`);
+- **G3:** a timestamp-like field left to a default. G3 runs on the snake case of the long
+  name, after the lexicon and `NAMES` (so `serverTime` is `server_time`): a field is
+  timestamp-like when it has a unit tag, a doc type of `timestamp - integer`, or a long name
+  matching `timestamp`, `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or
+  `*_time` (the bar lexicon gives `s` and `e` as `window_start` and `end_timestamp`, while a
+  trade's `s` is `size`). A timestamp-like `long` or `double` needs a `UNITS` entry (a unit,
+  which only an integer may take, or "not a timestamp"); timestamp-like text with no `format`
+  needs a `UNITS` "not a timestamp" entry or a `TYPE_FIXES` entry; text with a `format` is
+  decided by the representation rules. A timestamp-like string REST parameter (by its base
+  name) with no `PARAM_UNITS` entry fails the same gate;
 - **G4:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict, `TYPE_FIXES`,
   `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry naming a source,
   field, or parameter the snapshot lacks, or claiming what the snapshot contradicts (a type fix
   whose declared type the spec no longer gives, a tag conflict the tag no longer contradicts,
-  an exclusion of a path the spec already marks deprecated or draft);
+  a `NAMES` quote the description no longer matches, an exclusion of a path the spec already
+  marks deprecated or draft); an identity entry no generated object uses is stale too;
 - **G5 (type agreement):** within one kind, one column name joins to one `WireType`, unless a
   `TYPE_FIXES` entry resolves it; the message prints both keys' descriptions, because a
   conflict is first treated as a possible naming error (stocks and futures `dv` are exactly
@@ -2267,7 +2294,18 @@ reviewer, on:
 - **G6 (transport agreement):** within one `KINDS` group whose sources span two or more
   transports, every column appears on at least two transports or is in `TRANSPORT_ONLY`,
   which catches a one-sided lexicon slip (`s` becoming `Shares` while REST says `size`);
-- **G7:** a futures kind whose venue pages differ.
+- **G7:** a futures kind whose venue pages differ;
+- **G8 (one concept, one column):** within one kind, a concept (the snake case of a field's
+  last long name) appearing under two column names, or one column name holding two concepts.
+
+The REST refresh also stops on: a vendor file whose SHA-256 differs from the manifest's, or a
+snapshot whose files differ from the manifest's list (`snapshot`); a documented endpoint the
+spec lacks, a generated path no documentation page names, a page that is not an overview yet
+names no endpoint, or an `undocumented` exclusion claim the pages contradict (`docs`); an
+unknown `x-polygon-*` extension on a path or operation, a parameter `oneOf`/`anyOf` that is
+not a choice of date and date-time strings, or a response it cannot read (`shape`); a `UNITS`
+unit that differs from the spec's unit tag without a tag-conflict entry (`units`); and an
+envelope key of a single-object body with a type not the envelope's (`envelope`).
 
 Descriptions differ across transports and change about twenty times as often as keys, so G5 and
 G6, not description matching, are the mechanical checks.
@@ -2393,16 +2431,21 @@ The command runs from a source checkout; `refresh/` is not in the wheel. The par
 requires it byte for byte, and checks documented = generated ⊎ excluded ⊎ (deprecated ∪
 draft).
 
-**The snapshot is stored canonically.** `fetch.py` writes JSON with `sort_keys`, `indent=1`,
-and a final newline, and text with trailing whitespace stripped and a final newline, so refresh
-diffs read line by line and no hook exception is needed. `manifest.json` records the fetch date
-and, per file, its URL and the SHA-256 of the fetched bytes and of the stored file. Besides the
+**The snapshot is stored canonically.** `fetch.py` writes JSON with `indent=1` and a final
+newline, keeping the order in which the vendor served each object's keys (the documented
+column order, never re-sorted), and text with trailing whitespace stripped and a final newline,
+so refresh diffs read line by line and no hook exception is needed. `manifest.json` records the
+fetch date and, per file, its URL and the SHA-256 of the fetched bytes and of the stored file.
+Every refresh re-hashes every file against the manifest and requires the files on disk to be
+exactly the manifest's, so a hand-edited vendor file stops it; the generated file records the
+specification's verified hash. Besides the
 specs, `--fetch` stores every REST page `llms.txt` links, under `snapshot/rest/`, because
 `llms.txt` names pages, not paths: each page's `**Endpoint:**` line is what ties the
 documentation to an OpenAPI path. The documentation host rate-limits a burst of page requests
-with HTTP 429, which the fetch waits out (`Retry-After`, else 2 to 32 s, five times); any other
-failure stops it and leaves the old snapshot in place. The snapshot (about 3 MB, 165 files)
-ships in the sdist and never in the wheel.
+with HTTP 429, which the fetch waits out (`Retry-After`, capped at 60 s, else 2 to 32 s, five
+times); any other failure stops it and leaves the old snapshot in place, and the new snapshot
+is swapped in through a backup directory. The snapshot (about 3 MB, 164 files, fetched
+2026-10-27 UTC) ships in the sdist and never in the wheel.
 
 **`--check`** downloads the live `openapi.json`, `websocket.json`, `llms.txt`, and flat-file
 pages and overviews, compares them semantically with the snapshot (`refresh/drift.py`), prints a
@@ -2836,7 +2879,7 @@ before 1.0.
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
-| 1 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags both `last.timestamp` fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/test_timeunits.py`: ms and ns fixtures; the out-of-range path raises | `tests/test_timeunits_integration.py`: one request each; the converted `Instant` is within 1 day of now |
+| 1 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/test_timeunits.py`: ms and ns fixtures; the out-of-range path raises | `tests/test_timeunits_integration.py`: one request each; the converted `Instant` is within 1 day of now |
 | 2 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/test_timeunits.py`: both magnitudes convert correctly | `tests/namespaces/test_stocks_integration.py` (Business key): one FMV frame converts to a current `Instant` |
 | 3 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/test_flat_files_integration.py` (S3 credentials): one key per venue |
 | 4 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/test_hosts.py`: both replies | `tests/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |

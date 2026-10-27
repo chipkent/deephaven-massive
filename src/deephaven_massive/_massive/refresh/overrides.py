@@ -3,16 +3,20 @@
 The generator reads the vendor's specification for everything it can. This module holds the
 rest, each entry with its reason, and nothing else:
 
-- `NAMES`: the long name of a short key no lexicon can name, because Massive spells it out
-  nowhere;
-- `UNITS`: the unit of every timestamp-like integer field (or "not a timestamp"), verified
-  against the documentation pages; the generator makes the field an `epoch` in that unit;
+- `NAMES`: the long name of a short key Massive gives no long name anywhere, derived from
+  Massive's own description of the field, which the entry quotes;
+- `UNITS`: the unit of every timestamp-like integer field (or "not a timestamp" for a
+  timestamp-like field that is not an epoch), verified against the documentation pages; the
+  generator makes the field an `epoch` in that unit;
 - `TAG_CONFLICTS`: the `UNITS` entries that contradict the specification's own unit tag
   (`x-polygon-go-type`), each with the reason the tag is wrong;
-- `TYPE_FIXES`: declared conversions for fields whose vendor type is wrong;
+- `TYPE_FIXES`: declared conversions for fields whose vendor type is wrong or missing,
+  each with the documentation sample that shows the real type;
 - `RESULT_KEYS`: the paths whose rows do not sit under `results`;
-- `PARAM_UNITS`: the unit of every timestamp-like string parameter (or "sent as date-time
-  text").
+- `PARAM_UNITS`: the unit of every timestamp-like string parameter, and of any other string
+  parameter that takes an epoch (or "sent as date or date-time text");
+- `KINDS`: the dataset kinds, whose sources gate G8 checks for one column per concept. The
+  REST generator alone declares none; the WebSocket and flat-file generators add them.
 
 Every entry names a path template exactly as the specification spells it, and a wire key or
 parameter of that path. An entry that names something the snapshot no longer generates fails
@@ -27,13 +31,21 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from deephaven_massive._massive.refresh.lexicon import (
+    BAR_PATHS,
+    CRYPTO_SNAPSHOTS,
+    FOREX_SNAPSHOTS,
+    RANGE_PATHS,
+    STOCKS_SNAPSHOTS,
+)
 from deephaven_massive._massive.spec.types import WireType, WireUnit
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
 
 
 __all__ = [
+    "KINDS",
     "NAMES",
     "PARAM_UNITS",
     "RESULT_KEYS",
@@ -49,16 +61,19 @@ __all__ = [
 
 @dataclass(frozen=True, kw_only=True)
 class Name:
-    """The long name of a short key that no lexicon covers.
+    """The long name of a short key Massive gives no long name anywhere.
 
     Attributes:
         long_name: The long name of the wire key's last segment, in snake case
-            (`"accumulated_volume"`); the generator PascalCases it with the segments before it.
-        reason: Why this name, given that Massive spells the key out nowhere.
+            (`"accumulated_volume"`); the generator PascalCases it with the segments before it,
+            as for every other field.
+        description: Massive's description of the field, quoted exactly (whitespace aside):
+            the name's only source. The refresh checks the quote against the specification,
+            so a changed description makes the entry stale (gate G4).
     """
 
     long_name: str
-    reason: str
+    description: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -136,87 +151,49 @@ def _for(paths: Iterable[str], keys: Iterable[str], value: Unit) -> dict[tuple[s
     return {(path, key): value for path in paths for key in keys}
 
 
-_STOCKS_SNAPSHOTS = (
-    "/v2/snapshot/locale/us/markets/stocks/tickers",
-    "/v2/snapshot/locale/us/markets/stocks/{direction}",
-)
-_FOREX_SNAPSHOTS = (
-    "/v2/snapshot/locale/global/markets/forex/tickers",
-    "/v2/snapshot/locale/global/markets/forex/{direction}",
-)
-_CRYPTO_SNAPSHOTS = (
-    "/v2/snapshot/locale/global/markets/crypto/tickers",
-    "/v2/snapshot/locale/global/markets/crypto/{direction}",
-)
 _INDICATORS = tuple(
     f"/v1/indicators/{name}/{{{ticker}}}"
     for name in ("ema", "macd", "rsi", "sma")
     for ticker in ("stockTicker", "cryptoTicker")
-)
-_BARS = (
-    "/v2/aggs/grouped/locale/global/market/crypto/{date}",
-    "/v2/aggs/grouped/locale/global/market/fx/{date}",
-    "/v2/aggs/grouped/locale/us/market/stocks/{date}",
-    *(
-        f"/v2/aggs/ticker/{{{ticker}}}/{leaf}"
-        for ticker in (
-            "stocksTicker",
-            "optionsTicker",
-            "indicesTicker",
-            "forexTicker",
-            "cryptoTicker",
-        )
-        for leaf in ("prev", "range/{multiplier}/{timespan}/{from}/{to}")
-    ),
 )
 
 NAMES: Mapping[tuple[str, str], Name] = MappingProxyType(
     {
         **{
             (path, "min.av"): Name(
-                long_name="accumulated_volume",
-                reason="The day's volume so far; Massive spells `av` out nowhere, and the "
-                "WebSocket aggregates use the same key for the same value.",
+                long_name="accumulated_volume", description="The accumulated volume."
             )
-            for path in _STOCKS_SNAPSHOTS
-        },
-        **{
-            (path, "symbol"): Name(
-                long_name="ticker",
-                reason="The vendor's `symbol` is the requested ticker (`AAPL`, `I:NDX`, "
-                "`O:TSLA210903C00700000` in the samples); `Symbol` is reserved for the "
-                "dataset key the library adds.",
-            )
-            for path in (
-                "/v1/open-close/{stocksTicker}/{date}",
-                "/v1/open-close/{optionsTicker}/{date}",
-                "/v1/open-close/{indicesTicker}/{date}",
-            )
-        },
-        **{
-            (path, "symbol"): Name(
-                long_name="pair",
-                reason="The vendor's `symbol` is the currency pair as text (`BTC-USD`, "
-                "`AUD/USD` in the samples), not a Massive ticker; `Symbol` is reserved for "
-                "the dataset key the library adds.",
-            )
-            for path in ("/v1/open-close/crypto/{from}/{to}/{date}", "/v1/conversion/{from}/{to}")
+            for path in STOCKS_SNAPSHOTS
         },
         **{
             (path, "min.dav"): Name(
                 long_name="accumulated_decimal_volume",
-                reason="The day's fractional volume so far: `av` with the `decimal_volume` "
-                "precision of `dv`; Massive spells `dav` out nowhere.",
+                description="The accumulated volume including fractional shares, "
+                "respresented as a string.",
             )
-            for path in _STOCKS_SNAPSHOTS
+            for path in STOCKS_SNAPSHOTS
         },
     }
 )
-"""`(path, wire key)` to the long name of a short key no lexicon covers."""
+"""`(path, wire key)` to the long name of a short key Massive names nowhere."""
 
 _NS_TICKS = Unit(
     unit=WireUnit.NS,
     reason="Documented as a nanosecond Unix timestamp; the documentation samples have 19 digits.",
+)
+_NS_SAMPLE = Unit(
+    unit=WireUnit.NS,
+    reason="The description names no unit; the documentation samples have 19 digits.",
+)
+_UPDATED_NS = Unit(
+    unit=WireUnit.NS,
+    reason="Described only as 'The last updated timestamp.'; the documentation samples have 19 "
+    "digits.",
+)
+_UPDATED_MS = Unit(
+    unit=WireUnit.MS,
+    reason="Described only as 'The last updated timestamp.'; the documentation samples have 13 "
+    "digits (one value, 1605330008999, repeated on the crypto pages).",
 )
 _MS_BARS = Unit(
     unit=WireUnit.MS,
@@ -235,19 +212,22 @@ _MS_LAST = Unit(
 
 UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
     {
-        **_for(_BARS, ("t",), _MS_BARS),
+        **_for(BAR_PATHS, ("t",), _MS_BARS),
         **_for(
             ("/v2/last/trade/{stocksTicker}", "/v2/last/trade/{optionsTicker}"),
             ("t", "y", "f"),
             _NS_TICKS,
         ),
         **_for(("/v2/last/nbbo/{stocksTicker}",), ("t", "y", "f"), _NS_TICKS),
-        **_for(_STOCKS_SNAPSHOTS, ("updated", "lastTrade.t", "lastQuote.t"), _NS_TICKS),
-        **_for(_STOCKS_SNAPSHOTS, ("min.t",), _MS_BARS),
-        **_for(_FOREX_SNAPSHOTS, ("updated", "lastQuote.t"), _MS_SNAPSHOT),
-        **_for(_FOREX_SNAPSHOTS, ("min.t",), _MS_BARS),
-        **_for(_CRYPTO_SNAPSHOTS, ("updated", "lastTrade.t"), _MS_SNAPSHOT),
-        **_for(_CRYPTO_SNAPSHOTS, ("min.t",), _MS_BARS),
+        **_for(STOCKS_SNAPSHOTS, ("lastTrade.t", "lastQuote.t"), _NS_TICKS),
+        **_for(STOCKS_SNAPSHOTS, ("updated",), _UPDATED_NS),
+        **_for(STOCKS_SNAPSHOTS, ("min.t",), _MS_BARS),
+        **_for(FOREX_SNAPSHOTS, ("lastQuote.t",), _MS_SNAPSHOT),
+        **_for(FOREX_SNAPSHOTS, ("updated",), _UPDATED_MS),
+        **_for(FOREX_SNAPSHOTS, ("min.t",), _MS_BARS),
+        **_for(CRYPTO_SNAPSHOTS, ("lastTrade.t",), _MS_SNAPSHOT),
+        **_for(CRYPTO_SNAPSHOTS, ("updated",), _UPDATED_MS),
+        **_for(CRYPTO_SNAPSHOTS, ("min.t",), _MS_BARS),
         **_for(
             ("/v1/last/crypto/{from}/{to}", "/v1/last_quote/currencies/{from}/{to}"),
             ("timestamp",),
@@ -263,21 +243,18 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             ),
         ),
         **_for(("/futures/v1/aggs/{ticker}",), ("window_start",), _NS_TICKS),
-        **_for(
-            ("/futures/v1/quotes/{ticker}",),
-            ("timestamp", "bid_timestamp", "ask_timestamp"),
-            _NS_TICKS,
-        ),
+        **_for(("/futures/v1/quotes/{ticker}",), ("timestamp",), _NS_TICKS),
+        **_for(("/futures/v1/quotes/{ticker}",), ("bid_timestamp", "ask_timestamp"), _NS_SAMPLE),
         **_for(("/futures/v1/trades/{ticker}",), ("timestamp",), _NS_TICKS),
         **_for(
             ("/futures/v1/snapshot",),
-            (
-                "last_quote.ask_timestamp",
-                "last_quote.bid_timestamp",
-                "last_quote.last_updated",
-                "last_trade.last_updated",
-            ),
+            ("last_quote.last_updated", "last_trade.last_updated"),
             _NS_TICKS,
+        ),
+        **_for(
+            ("/futures/v1/snapshot",),
+            ("last_quote.ask_timestamp", "last_quote.bid_timestamp"),
+            _NS_SAMPLE,
         ),
         **_for(
             ("/futures/v1/snapshot",),
@@ -335,7 +312,7 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
         ),
     }
 )
-"""`(path, wire key)` to the unit of a timestamp-like integer field."""
+"""`(path, wire key)` to the unit of a timestamp-like field, or to "not a timestamp"."""
 
 TAG_CONFLICTS: Mapping[tuple[str, str], str] = MappingProxyType(
     {
@@ -346,8 +323,40 @@ TAG_CONFLICTS: Mapping[tuple[str, str], str] = MappingProxyType(
 )
 """`(path, wire key)` of a `UNITS` entry that contradicts its unit tag, with the reason."""
 
-TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType({})
-"""`(path, wire key)` to the declared conversion of a mistyped field. No REST field needs one."""
+_ISO_TEXT = "The specification types it as text with no format; the documentation sample is "
+
+
+def _iso(sample: str) -> TypeFix:
+    """Return the fix of a timestamp the specification leaves as plain text.
+
+    Args:
+        sample: The documentation sample that shows ISO-8601 date-time text.
+
+    Returns:
+        A conversion from `string` to `iso-instant`.
+    """
+    return TypeFix(
+        declared=WireType.STRING,
+        wire_type=WireType.ISO_INSTANT,
+        reason=f"{_ISO_TEXT}ISO-8601 date-time text, {sample}.",
+    )
+
+
+TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
+    {
+        ("/benzinga/v1/analysts", "last_updated"): _iso('"2025-05-19T04:31:12Z"'),
+        ("/benzinga/v1/firms", "last_updated"): _iso('"2020-01-07T12:41:25Z"'),
+        ("/futures/v1/market-status", "timestamp"): _iso('"2025-12-04T23:00:00+00:00"'),
+        ("/v1/marketstatus/now", "serverTime"): _iso('"2020-11-10T17:37:37-05:00"'),
+        ("/futures/v1/products", "last_updated"): TypeFix(
+            declared=WireType.ISO_INSTANT,
+            wire_type=WireType.DATE,
+            reason="The specification declares format date-time, but the documentation sample "
+            'is the date "2025-02-22", which no date-time parser accepts.',
+        ),
+    }
+)
+"""`(path, wire key)` to the declared conversion of a mistyped field."""
 
 
 def _result_keys() -> dict[str, ResultKey]:
@@ -378,7 +387,7 @@ def _result_keys() -> dict[str, ResultKey]:
             "the rows.",
         ),
     }
-    for path in (*_STOCKS_SNAPSHOTS, *_FOREX_SNAPSHOTS, *_CRYPTO_SNAPSHOTS):
+    for path in (*STOCKS_SNAPSHOTS, *FOREX_SNAPSHOTS, *CRYPTO_SNAPSHOTS):
         entries[path] = ResultKey(key="tickers", reason=snapshot)
     for path in _INDICATORS:
         entries[path] = ResultKey(
@@ -415,6 +424,15 @@ PARAM_UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
         ),
         **_for(("/futures/v1/aggs/{ticker}",), ("window_start",), _NS_FILTER),
         **_for(
+            RANGE_PATHS,
+            ("from", "to"),
+            Unit(
+                unit=WireUnit.MS,
+                reason="Documented as 'a date with the format YYYY-MM-DD or a millisecond "
+                "timestamp'.",
+            ),
+        ),
+        **_for(
             _INDICATORS,
             ("timestamp",),
             Unit(
@@ -441,3 +459,6 @@ PARAM_UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
     }
 )
 """`(path, base parameter)` to the unit of a timestamp-like string parameter."""
+
+KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType({})
+"""Kind to asset-class group to its sources, in source order. The REST generator declares none."""

@@ -6,9 +6,10 @@ conditions of a trade, `t` is the start of an aggregate window and the SIP time 
 flat key table cannot work, so the translation goes by **shape**:
 
 - a `Lexicon` maps the short keys of one kind of object to the long names Massive itself uses
-  for the same data where it spells them out (the trade lexicon takes `sip_timestamp` and
-  `participant_timestamp` from `/v3/trades`, the quote lexicon `bid_price` from `/v3/quotes`,
-  and so on); its `reason` names that source;
+  for the same fields elsewhere in that asset class's REST or flat-file data, and every entry
+  cites where (the trade lexicon takes `sip_timestamp` from `/v3/trades/{stockTicker}`, the
+  forex quote lexicon `ask_price` from `/v3/quotes/{fxTicker}`, and so on). So one field gets
+  one column on every endpoint and transport;
 - `SHAPES` says which lexicon applies to which object: `(path, object prefix)`, where the
   prefix is the dotted wire key of the object within a row (`""` for the row itself,
   `"lastTrade"` for a snapshot's last trade);
@@ -18,8 +19,11 @@ flat key table cannot work, so the translation goes by **shape**:
 The generator translates every segment of a wire key through the lexicon of the object it
 sits in, else keeps an identity key or a long key as it is; a short key (three characters or
 fewer, no underscore) that neither covers stops the refresh (gate G1). A lexicon or identity
-entry is never derived from a description. A `SHAPES` entry naming an object the snapshot no
-longer generates is stale and stops the refresh too (gate G4).
+entry never takes a name from a description, with one documented exception: the snapshot's
+`min` object, which Massive names nowhere. A `SHAPES` or `IDENTITY` entry that no generated
+object uses is stale and stops the refresh too (gate G4).
+
+The path tuples at the end (`BAR_PATHS` and the snapshot paths) are shared with `overrides`.
 
 The tables are plain read-only data, built once at import.
 """
@@ -33,7 +37,32 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
-__all__ = ["IDENTITY", "LEXICONS", "SHAPES", "Lexicon"]
+__all__ = [
+    "BAR_PATHS",
+    "CRYPTO_SNAPSHOTS",
+    "FOREX_SNAPSHOTS",
+    "IDENTITY",
+    "LEXICONS",
+    "RANGE_PATHS",
+    "SHAPES",
+    "STOCKS_SNAPSHOTS",
+    "Lexicon",
+    "LongName",
+]
+
+
+@dataclass(frozen=True, kw_only=True)
+class LongName:
+    """The long name of one short key, and where Massive spells it out.
+
+    Attributes:
+        long_name: The long name in snake case, such as `"sip_timestamp"`.
+        source: The vendor endpoint or file whose field carries that name for the same data,
+            such as `"/v3/trades/{stockTicker}"`.
+    """
+
+    long_name: str
+    source: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -42,117 +71,137 @@ class Lexicon:
 
     Attributes:
         name: The lexicon's name, which `SHAPES` refers to.
-        reason: Where Massive spells these keys out, which is where the long names come from.
-        entries: Short key to long name, such as `{"p": "price"}`. Copied into a read-only
-            view.
+        reason: What kind of object the lexicon covers.
+        entries: Short key to its long name and source. Copied into a read-only view.
 
     Example:
         ::
 
             from deephaven_massive._massive.refresh.lexicon import LEXICONS
 
-            assert LEXICONS["trade"].entries["t"] == "sip_timestamp"
+            assert LEXICONS["trade"].entries["t"].long_name == "sip_timestamp"
     """
 
     name: str
     reason: str
-    entries: Mapping[str, str]
+    entries: Mapping[str, LongName]
 
     def __post_init__(self) -> None:
         """Freeze a copy of the entries."""
         object.__setattr__(self, "entries", MappingProxyType(dict(self.entries)))
 
 
+def _from(source: str, **names: str) -> dict[str, LongName]:
+    """Return lexicon entries that all cite one source.
+
+    Args:
+        source: The vendor endpoint or file that spells the names out.
+        **names: Short key to long name.
+
+    Returns:
+        Short key to `LongName`.
+    """
+    return {short: LongName(long_name=name, source=source) for short, name in names.items()}
+
+
+_UNIFIED_BAR = "/v3/snapshot `last_minute` and `session` (the unified snapshot)"
 _AGGREGATE = {
-    "T": "ticker",
-    "o": "open",
-    "h": "high",
-    "l": "low",
-    "c": "close",
-    "v": "volume",
-    "vw": "vwap",
-    "n": "transactions",
-    "t": "window_start",
+    **_from("/v3/snapshot `ticker`", T="ticker"),
+    **_from(_UNIFIED_BAR, o="open", h="high", l="low", c="close", v="volume", vw="vwap"),
+    **_from("/v3/snapshot `last_minute.transactions`", n="transactions"),
+    **_from("the flat-file `*/minute_aggs_v1` and `*/day_aggs_v1` columns", t="window_start"),
 }
 
 _LEXICONS = (
-    Lexicon(
-        name="aggregate",
-        reason="An aggregate bar. The long names are those of the flat-file aggregates and "
-        "/futures/v1/aggs (`window_start`, `transactions`) and of the unified snapshot's "
-        "bars (`vwap`).",
-        entries=_AGGREGATE,
-    ),
+    Lexicon(name="aggregate", reason="An aggregate bar of any asset class.", entries=_AGGREGATE),
     Lexicon(
         name="stocks_bar",
-        reason="A stocks snapshot bar: an aggregate bar plus the fractional volume, which the "
-        "unified snapshot spells `decimal_volume`.",
-        entries={**_AGGREGATE, "dv": "decimal_volume"},
+        reason="A stocks snapshot bar: an aggregate bar plus its fractional volume.",
+        entries={
+            **_AGGREGATE,
+            **_from("/v3/snapshot `last_minute.decimal_volume`", dv="decimal_volume"),
+        },
     ),
     Lexicon(
         name="trade",
-        reason="A stocks or options trade. The long names are those of /v3/trades/{stockTicker}.",
+        reason="A stocks or options trade.",
         entries={
-            "T": "ticker",
-            "c": "conditions",
-            "ds": "decimal_size",
-            "e": "correction",
-            "f": "trf_timestamp",
-            "i": "id",
-            "p": "price",
-            "q": "sequence_number",
-            "r": "trf_id",
-            "s": "size",
-            "t": "sip_timestamp",
-            "x": "exchange",
-            "y": "participant_timestamp",
-            "z": "tape",
+            **_from("/v3/snapshot `ticker`", T="ticker"),
+            **_from(
+                "/v3/trades/{stockTicker}",
+                c="conditions",
+                ds="decimal_size",
+                e="correction",
+                f="trf_timestamp",
+                i="id",
+                p="price",
+                q="sequence_number",
+                r="trf_id",
+                s="size",
+                t="sip_timestamp",
+                x="exchange",
+                y="participant_timestamp",
+                z="tape",
+            ),
         },
     ),
     Lexicon(
         name="quote",
-        reason="A stocks NBBO quote. The long names are those of /v3/quotes/{stockTicker}.",
+        reason="A stocks NBBO quote.",
         entries={
-            "T": "ticker",
-            "P": "ask_price",
-            "S": "ask_size",
-            "X": "ask_exchange",
-            "p": "bid_price",
-            "s": "bid_size",
-            "x": "bid_exchange",
-            "c": "conditions",
-            "i": "indicators",
-            "f": "trf_timestamp",
-            "q": "sequence_number",
-            "t": "sip_timestamp",
-            "y": "participant_timestamp",
-            "z": "tape",
+            **_from("/v3/snapshot `ticker`", T="ticker"),
+            **_from(
+                "/v3/quotes/{stockTicker}",
+                P="ask_price",
+                S="ask_size",
+                X="ask_exchange",
+                p="bid_price",
+                s="bid_size",
+                x="bid_exchange",
+                c="conditions",
+                i="indicators",
+                f="trf_timestamp",
+                q="sequence_number",
+                t="sip_timestamp",
+                y="participant_timestamp",
+                z="tape",
+            ),
         },
     ),
     Lexicon(
         name="forex_quote",
-        reason="A forex quote. The long names are those of the `last` object of "
-        "/v1/last_quote/currencies/{from}/{to}.",
-        entries={"a": "ask", "b": "bid", "t": "timestamp", "x": "exchange"},
-    ),
-    Lexicon(
-        name="crypto_trade",
-        reason="A crypto trade. The long names are those of the `last` object of "
-        "/v1/last/crypto/{from}/{to}, and `id` of /v3/trades/{cryptoTicker}.",
+        reason="A forex quote.",
         entries={
-            "c": "conditions",
-            "i": "id",
-            "p": "price",
-            "s": "size",
-            "t": "timestamp",
-            "x": "exchange",
+            **_from(
+                "/v3/quotes/{fxTicker}",
+                a="ask_price",
+                b="bid_price",
+                t="participant_timestamp",
+            ),
+            **_from("/v1/last_quote/currencies/{from}/{to} `last.exchange`", x="exchange"),
         },
     ),
     Lexicon(
+        name="crypto_trade",
+        reason="A crypto trade.",
+        entries=_from(
+            "/v3/trades/{cryptoTicker}",
+            c="conditions",
+            i="id",
+            p="price",
+            s="size",
+            t="participant_timestamp",
+            x="exchange",
+        ),
+    ),
+    Lexicon(
         name="snapshot",
-        reason="A full-market or movers snapshot row, whose minute bar is `min`; the unified "
-        "snapshot calls the same bar `last_minute`, and `minute` is its plain long form.",
-        entries={"min": "minute"},
+        reason="A full-market or movers snapshot row.",
+        entries=_from(
+            "no vendor long name; from the description of `min`, 'The most recent minute bar "
+            "for this ticker.'",
+            min="minute",
+        ),
     ),
 )
 
@@ -167,8 +216,8 @@ IDENTITY: Mapping[str, str] = MappingProxyType(
         "mic": "The ISO 10383 Market Identifier Code, as in Massive's `operating_mic`.",
         "cfi": "The ISO 10962 CFI code of a contract.",
         "low": "An English word: the lowest price or value.",
-        "ask": "An English word: the ask price, as in the forex `last` object.",
-        "bid": "An English word: the bid price, as in the forex `last` object.",
+        "ask": "An English word: the ask price, as the forex `last` object spells it.",
+        "bid": "An English word: the bid price, as the forex `last` object spells it.",
         "day": "An English word: the session day's bar, or the requested date.",
         "fmv": "Fair market value, spelled `fmv` in Massive's `fmv_last_updated`.",
         "otc": "Over the counter, spelled `otc` throughout Massive's documentation.",
@@ -200,7 +249,7 @@ def _shapes(paths: Iterable[str], objects: Mapping[str, str]) -> dict[tuple[str,
     return {(path, prefix): name for path in paths for prefix, name in objects.items()}
 
 
-_BARS = (
+BAR_PATHS: tuple[str, ...] = (
     "/v2/aggs/grouped/locale/global/market/crypto/{date}",
     "/v2/aggs/grouped/locale/global/market/fx/{date}",
     "/v2/aggs/grouped/locale/us/market/stocks/{date}",
@@ -216,19 +265,38 @@ _BARS = (
         for leaf in ("prev", "range/{multiplier}/{timespan}/{from}/{to}")
     ),
 )
+"""The aggregate paths, whose rows are aggregate bars."""
+
+RANGE_PATHS: tuple[str, ...] = tuple(path for path in BAR_PATHS if "/range/" in path)
+"""The aggregate range paths, whose `{from}` and `{to}` bound the bars."""
+
+STOCKS_SNAPSHOTS: tuple[str, ...] = (
+    "/v2/snapshot/locale/us/markets/stocks/tickers",
+    "/v2/snapshot/locale/us/markets/stocks/{direction}",
+)
+"""The stocks full-market and movers snapshots."""
+
+FOREX_SNAPSHOTS: tuple[str, ...] = (
+    "/v2/snapshot/locale/global/markets/forex/tickers",
+    "/v2/snapshot/locale/global/markets/forex/{direction}",
+)
+"""The forex full-market and movers snapshots."""
+
+CRYPTO_SNAPSHOTS: tuple[str, ...] = (
+    "/v2/snapshot/locale/global/markets/crypto/tickers",
+    "/v2/snapshot/locale/global/markets/crypto/{direction}",
+)
+"""The crypto full-market and movers snapshots."""
 
 SHAPES: Mapping[tuple[str, str], str] = MappingProxyType(
     {
-        **_shapes(_BARS, {"": "aggregate"}),
+        **_shapes(BAR_PATHS, {"": "aggregate"}),
         **_shapes(
             ("/v2/last/trade/{stocksTicker}", "/v2/last/trade/{optionsTicker}"), {"": "trade"}
         ),
         **_shapes(("/v2/last/nbbo/{stocksTicker}",), {"": "quote"}),
         **_shapes(
-            (
-                "/v2/snapshot/locale/us/markets/stocks/tickers",
-                "/v2/snapshot/locale/us/markets/stocks/{direction}",
-            ),
+            STOCKS_SNAPSHOTS,
             {
                 "": "snapshot",
                 "day": "stocks_bar",
@@ -239,10 +307,7 @@ SHAPES: Mapping[tuple[str, str], str] = MappingProxyType(
             },
         ),
         **_shapes(
-            (
-                "/v2/snapshot/locale/global/markets/forex/tickers",
-                "/v2/snapshot/locale/global/markets/forex/{direction}",
-            ),
+            FOREX_SNAPSHOTS,
             {
                 "": "snapshot",
                 "day": "aggregate",
@@ -252,10 +317,7 @@ SHAPES: Mapping[tuple[str, str], str] = MappingProxyType(
             },
         ),
         **_shapes(
-            (
-                "/v2/snapshot/locale/global/markets/crypto/tickers",
-                "/v2/snapshot/locale/global/markets/crypto/{direction}",
-            ),
+            CRYPTO_SNAPSHOTS,
             {
                 "": "snapshot",
                 "day": "aggregate",

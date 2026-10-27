@@ -163,15 +163,14 @@ def _source(transport: Transport, entry: dict[str, object]) -> Source:
     """
     fields = tuple(_field(item) for item in _list(entry["fields"]))
     memberships = tuple(_membership(item) for item in _list(entry["memberships"]))
-    key = str(entry["key"])
+    key = _text(entry, "key")
     if transport is not Transport.REST:
         return Source(key=key, transport=transport, fields=fields, memberships=memberships)
-    result_key = entry["result_key"]
     return RestPath(
         key=key,
         fields=fields,
         memberships=memberships,
-        result_key=None if result_key is None else str(result_key),
+        result_key=_optional(entry, "result_key"),
         params=tuple(_param(item) for item in _list(entry["params"])),
     )
 
@@ -193,6 +192,57 @@ def _list(value: object) -> list[dict[str, object]]:
     return value
 
 
+def _text(item: dict[str, object], key: str) -> str:
+    """Return a string member of a JSON object.
+
+    Args:
+        item: The object.
+        key: The member's name.
+
+    Returns:
+        The string.
+
+    Raises:
+        TypeError: If the member is not a string (`null` included); nothing is coerced.
+    """
+    value = item[key]
+    if not isinstance(value, str):
+        raise TypeError(f"{key!r} is {value!r}, not a string")
+    return value
+
+
+def _optional(item: dict[str, object], key: str) -> str | None:
+    """Return a string member of a JSON object that may be `null`.
+
+    Args:
+        item: The object.
+        key: The member's name.
+
+    Returns:
+        The string, or `None` for `null`.
+    """
+    return None if item[key] is None else _text(item, key)
+
+
+def _flag(item: dict[str, object], key: str) -> bool:
+    """Return a boolean member of a JSON object.
+
+    Args:
+        item: The object.
+        key: The member's name.
+
+    Returns:
+        The boolean.
+
+    Raises:
+        TypeError: If the member is not `true` or `false`.
+    """
+    value = item[key]
+    if not isinstance(value, bool):
+        raise TypeError(f"{key!r} is {value!r}, not a boolean")
+    return value
+
+
 def _field(item: dict[str, object]) -> Field:
     """Build a field from its JSON object.
 
@@ -202,15 +252,15 @@ def _field(item: dict[str, object]) -> Field:
     Returns:
         The field.
     """
-    unit = item["unit"]
-    declared = item["declared_type"]
+    unit = _optional(item, "unit")
+    declared = _optional(item, "declared_type")
     return Field(
-        wire_key=str(item["wire_key"]),
-        column=str(item["column"]),
-        wire_type=WireType(str(item["type"])),
-        unit=None if unit is None else WireUnit(str(unit)),
-        required=item["required"] is True,
-        declared_type=None if declared is None else WireType(str(declared)),
+        wire_key=_text(item, "wire_key"),
+        column=_text(item, "column"),
+        wire_type=WireType(_text(item, "type")),
+        unit=None if unit is None else WireUnit(unit),
+        required=_flag(item, "required"),
+        declared_type=None if declared is None else WireType(declared),
     )
 
 
@@ -222,15 +272,20 @@ def _param(item: dict[str, object]) -> Param:
 
     Returns:
         The parameter.
+
+    Raises:
+        TypeError: If `values` is not an array of strings.
     """
-    unit = item["unit"]
+    unit = _optional(item, "unit")
     values = item["values"]
+    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+        raise TypeError(f"'values' is {values!r:.80}, not an array of strings")
     return Param(
-        name=str(item["name"]),
-        kind=ParamKind(str(item["kind"])),
-        in_path=item["in_path"] is True,
-        values=tuple(str(v) for v in values) if isinstance(values, list) else (),
-        unit=None if unit is None else WireUnit(str(unit)),
+        name=_text(item, "name"),
+        kind=ParamKind(_text(item, "kind")),
+        in_path=_flag(item, "in_path"),
+        values=tuple(values),
+        unit=None if unit is None else WireUnit(unit),
     )
 
 
@@ -245,19 +300,20 @@ def _membership(item: dict[str, object]) -> Membership:
         The membership.
 
     Raises:
-        TypeError: If the position is not an integer.
+        TypeError: If the position is not an integer, or the projection is neither `null` nor
+            an object of strings.
     """
     projection = item["projection"]
     position = item["position"]
     if not isinstance(position, int) or isinstance(position, bool):
         raise TypeError(f"membership position {position!r} is not an integer")
+    if projection is not None and (
+        not isinstance(projection, dict) or not all(isinstance(v, str) for v in projection.values())
+    ):
+        raise TypeError(f"membership projection {projection!r:.80} is not an object of strings")
     return Membership(
-        kind=str(item["kind"]),
-        group=str(item["group"]),
+        kind=_text(item, "kind"),
+        group=_text(item, "group"),
         position=position,
-        projection=(
-            {str(k): str(v) for k, v in projection.items()}
-            if isinstance(projection, dict)
-            else None
-        ),
+        projection=None if projection is None else dict(projection),
     )

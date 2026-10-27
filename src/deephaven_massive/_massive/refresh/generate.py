@@ -1,7 +1,8 @@
 """Generate `spec/rest.json` from the vendored snapshot, stopping at anything it cannot name.
 
 This is the REST half of the refresh. `refresh()` reads the snapshot (`snapshot/openapi.json`,
-`snapshot/llms.txt`, and the REST pages under `snapshot/rest/`), turns every generated OpenAPI
+`snapshot/llms.txt`, and the REST pages under `snapshot/rest/`), verifies every file against
+`snapshot/manifest.json`, turns every generated OpenAPI
 path into a `RestPath`, checks the result against the refresh gates, and writes
 `spec/rest.json` in its canonical form. Nothing here touches the network.
 
@@ -19,7 +20,9 @@ path into a `RestPath`, checks the result against the refresh gates, and writes
 for a body that is itself the rows. A JSON-object body without a result key is one row, and
 the envelope keys (`spec.types.ENVELOPE_KEYS`) are left out of its fields. Within a row,
 `$ref` is resolved, `allOf` is merged, a `oneOf` or `anyOf` with one branch is that branch,
-and nested objects are flattened into dotted wire keys (`day.c`), in specification order.
+and nested objects are flattened into dotted wire keys (`day.c`), in the order the served
+document lists them (which is the vendor's documented order; Massive serves every object's
+keys alphabetically, and the snapshot never re-sorts them).
 
 **Representation rules** decide each field's `WireType`: an integer is `long`, or an `epoch`
 when `overrides.UNITS` gives it a unit; a number is `double`; a boolean is `bool`; an array of
@@ -29,11 +32,14 @@ in `_utc`, is an `iso-instant`; a string with `format: date`, or named `date` or
 `date`; any other string is `string`. A `TYPE_FIXES` entry then replaces the type and records
 the vendor's declared type on the field, so the decoder converts it deliberately.
 
-**The naming rule.** A field's column is its wire key split into segments, each segment
-translated to Massive's long form (the lexicon of the object it sits in, else an identity
-entry, else the segment itself when it is not short), the last segment replaced by its
-`NAMES` entry when there is one, and the segments joined in PascalCase: `prevDay.vw` becomes
-`PrevDayVwap`. Names never come from descriptions.
+**The naming policy.** A field's column is its wire key split into segments, each segment
+translated to Massive's long form (the vendor's own long key as it is; a short key through the
+lexicon of the object it sits in, whose entries cite the endpoint that spells the same field
+out; else an identity entry), the last segment replaced by its `NAMES` entry when Massive
+names the key nowhere (a name derived from the field's description, which the entry quotes),
+and the segments joined in PascalCase: `prevDay.vw` becomes `PrevDayVwap`. Nothing else
+renames a field: a vendor `symbol` is generated as `Symbol`, and the library's dataset key
+rename, not the generator, makes the key columns.
 
 **Parameters** keep the specification's order and wire names. Their `ParamKind` follows the
 same kind of mechanical rules: a name ending in `.any_of`, or an array, is `LIST` (sent
@@ -49,21 +55,29 @@ is shown to help a person choose a name; it never chooses one):
 
 - **G1:** a short key (three characters or fewer, no underscore) with no lexicon, identity,
   or `NAMES` entry;
-- **G2:** two fields of one path with one column, or a field named `Symbol` or `Underlying`,
-  the columns the library adds itself from the dataset keys;
-- **G3:** a timestamp-like integer field (a unit tag, or a long name `timestamp`,
-  `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or `*_time`) with no
-  `UNITS` entry, or a timestamp-like string parameter with no `PARAM_UNITS` entry;
-- **G4:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict, `TYPE_FIXES`,
-  `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry naming a path, field, or parameter the
-  snapshot no longer generates, or claiming what the snapshot contradicts;
+- **G2:** two fields of one path with one column, or a `NAMES` entry that coins a dataset
+  key column (`Symbol`, `Timestamp`, `Underlying`);
+- **G3:** a timestamp-like field (a unit tag, or a long name whose snake case is `timestamp`,
+  `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or `*_time`) left to a
+  default: a `long` or `double` with no `UNITS` entry, or text with no `format` and neither a
+  `UNITS` nor a `TYPE_FIXES` entry; or a timestamp-like string parameter with no `PARAM_UNITS`
+  entry;
+- **G4:** a stale hand entry: a lexicon shape, identity, `NAMES`, `UNITS`, tag-conflict,
+  `TYPE_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry naming a path, field, or
+  parameter the snapshot no longer generates, or claiming what the snapshot contradicts;
+- **G8:** within one of `overrides.KINDS`, one concept (the snake case of a field's last long
+  name) in two columns, or one column holding two concepts;
+- **snapshot:** a vendor file whose SHA-256 differs from the manifest's, or a file set that
+  differs from the manifest's;
 - **units:** a `UNITS` unit that differs from the specification's `x-polygon-go-type` tag
   without a tag-conflict entry;
 - **envelope:** an envelope key of a single-object body whose type is not the envelope's;
-- **docs:** a documented endpoint the specification lacks, or an exclusion whose
-  `undocumented` claim the documentation contradicts;
+- **docs:** a documented endpoint the specification lacks, a generated path no page names,
+  a page that is not an overview yet names no endpoint, or an exclusion whose `undocumented`
+  claim the documentation contradicts;
 - **shape:** a response the generator cannot read (no rows under the result key, an untyped
-  field, a parameter outside the path or query).
+  field, a parameter outside the path or query, a parameter choice that is not of date
+  formats), or an unknown `x-polygon-*` extension on a path or its operation.
 
 The generator runs only from a source checkout (`refresh/` is not shipped). It imports the
 standard library and other `_massive` modules only.
@@ -71,10 +85,11 @@ standard library and other `_massive` modules only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 from deephaven_massive._massive.refresh import docs, exclusions, lexicon, overrides
@@ -123,10 +138,27 @@ _TAG_UNITS: Final = {
     "IMicroseconds": WireUnit.US,
     "IMilliseconds": WireUnit.MS,
 }
-# A long name that makes an integer field or a string parameter timestamp-like (gate G3).
+# A long name, in snake case, that makes a field or a string parameter timestamp-like (G3).
 _TIMESTAMP_LIKE: Final = re.compile(
     r"timestamp|.+_timestamp|updated|.+_updated|window_start|window_end|.+_time"
 )
+# The vendor extensions a path item and its GET operation may carry. Any other `x-polygon-*`
+# key is a change at Massive the refresh stops on rather than ignores.
+_PATH_EXTENSIONS: Final = frozenset({"x-polygon-draft", "x-polygon-ignore"})
+_OPERATION_EXTENSIONS: Final = frozenset(
+    {
+        "x-polygon-deprecation",
+        "x-polygon-entitlement-allowed-limited-tickers",
+        "x-polygon-entitlement-allowed-timeframes",
+        "x-polygon-entitlement-data-type",
+        "x-polygon-entitlement-market-type",
+        "x-polygon-experimental",
+        "x-polygon-paginate",
+        "x-polygon-replaces",
+    }
+)
+# The documentation pages that describe an area rather than one endpoint.
+_OVERVIEW_PAGES: Final = frozenset({"overview", "quickstart"})
 # The range and set suffixes of a filter parameter's wire name (`timestamp.gte`).
 _FILTER_SUFFIXES: Final = frozenset({"gt", "gte", "lt", "lte", "any_of"})
 # The types of the scalar schema types, for fields and for parameters.
@@ -140,11 +172,15 @@ _SCALAR_KINDS: Final = {
     "number": ParamKind.NUMBER,
     "boolean": ParamKind.BOOLEAN,
 }
-# The type each envelope key has in Massive's envelope.
-_ENVELOPE_TYPES: Final = {"status": "string", "request_id": "string", "next_url": "string"}
-_ENVELOPE_COUNT_TYPE: Final = "integer"
-# Columns the library adds itself from the dataset keys; the generator never emits them.
-_RESERVED_COLUMNS: Final = frozenset({"Symbol", "Underlying"})
+# The schema type of each envelope key in Massive's envelope; its keys are `ENVELOPE_KEYS`.
+_ENVELOPE_TYPES: Final = {
+    "status": "string",
+    "request_id": "string",
+    "next_url": "string",
+    "count": "integer",
+}
+# The dataset key columns the library's key rename produces; `NAMES` never coins them.
+_KEY_COLUMNS: Final = frozenset({"Symbol", "Timestamp", "Underlying"})
 # How deep `$ref` chains may go before the specification is taken to be cyclic.
 _MAX_REF_DEPTH: Final = 64
 # The longest key gate G1 treats as short.
@@ -156,7 +192,8 @@ class Problem:
     """One reason the refresh stops.
 
     Attributes:
-        gate: The gate that found it (`G1` to `G4`, `units`, `envelope`, `docs`, `shape`).
+        gate: The gate that found it (`G1` to `G4`, `G8`, `units`, `envelope`, `snapshot`,
+            `docs`, `shape`).
         source: The REST path template, or `""` when no path is involved.
         key: The wire key, parameter, or hand-input item concerned; `""` when none.
         message: What is wrong and what would fix it.
@@ -214,14 +251,19 @@ class HandInput:
         lexicons: Lexicon name to lexicon.
         shapes: `(path, object prefix)` to the lexicon name of that object's keys.
         identity: Short keys that are already Massive's long form, each with its reason.
-        names: `(path, wire key)` to the long name of the key's last segment.
-        units: `(path, wire key)` to the unit of an integer field, or to "not a timestamp".
+        names: `(path, wire key)` to the long name of the last segment of a key Massive names
+            nowhere, with the description it is derived from.
+        units: `(path, wire key)` to the unit of an integer field, or to "not a timestamp" for
+            a timestamp-like field that is not an epoch.
         tag_conflicts: `(path, wire key)` of a `units` entry that differs from the vendor's
             unit tag, with the reason the tag is wrong.
         type_fixes: `(path, wire key)` to a declared conversion of a mistyped field.
         result_keys: Path to where its rows sit, when that is not `results`.
-        param_units: `(path, base parameter)` to the unit of a timestamp-like parameter.
+        param_units: `(path, base parameter)` to the unit of a timestamp parameter, or to
+            "not an epoch".
         exclusions: The excluded vendor items.
+        kinds: Kind to asset-class group to the sources of that group, the dataset kinds
+            within which gate G8 requires one column per concept.
     """
 
     lexicons: Mapping[str, lexicon.Lexicon] = field(default_factory=lambda: lexicon.LEXICONS)
@@ -244,6 +286,9 @@ class HandInput:
     exclusions: Sequence[exclusions.Exclusion] = field(
         default_factory=lambda: exclusions.EXCLUSIONS
     )
+    kinds: Mapping[str, Mapping[str, Sequence[str]]] = field(
+        default_factory=lambda: overrides.KINDS
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -255,8 +300,9 @@ class Snapshot:
         llms: The text of the documentation index.
         pages: Each REST page the index links, by its name below the snapshot's `rest/`
             directory (`"stocks/trades-quotes/trades.md"`), as text.
-        openapi_sha256: The SHA-256 the manifest records for the stored specification, written
-            into `rest.json` so every generated file names the snapshot it came from.
+        openapi_sha256: The SHA-256 of the stored specification, verified against the
+            manifest and written into `rest.json`, so every generated file names the snapshot
+            it came from.
     """
 
     openapi: JsonObject
@@ -266,34 +312,41 @@ class Snapshot:
 
     @classmethod
     def load(cls, directory: Path = SNAPSHOT_DIRECTORY) -> Snapshot:
-        """Read a snapshot directory written by `fetch`.
+        """Read a snapshot directory written by `fetch`, verifying it against its manifest.
+
+        Every file is hashed again and compared with the SHA-256 the manifest recorded when it
+        was stored, and the files on disk must be exactly the files the manifest lists. So a
+        hand edit of a vendor file (to get a gate past, say) stops the refresh instead of
+        reaching `rest.json`.
 
         Args:
             directory: The snapshot directory.
 
         Returns:
-            The parsed snapshot.
+            The parsed snapshot, with `openapi_sha256` computed from the file itself.
 
         Raises:
-            RefreshError: If the manifest or the specification is not a JSON object, or a
-                REST page the index links is missing (a `docs` problem).
+            RefreshError: If the manifest or the specification is not a JSON object, a file's
+                hash differs from the manifest's, a file is on disk but not in the manifest or
+                the reverse, or a REST page the index links is missing.
         """
         manifest = json.loads((directory / MANIFEST).read_text(encoding="utf-8"))
         openapi = json.loads((directory / OPENAPI).read_text(encoding="utf-8"))
-        if not isinstance(manifest, dict) or not isinstance(openapi, dict):
+        files = manifest.get("files") if isinstance(manifest, dict) else None
+        if not isinstance(files, dict) or not isinstance(openapi, dict):
             raise RefreshError(
-                [Problem(gate="shape", source="", key="", message="not a JSON object")]
+                [Problem(gate="snapshot", source="", key="", message="not a JSON object")]
             )
+        problems = list(_verify(directory, files))
         llms = (directory / LLMS).read_text(encoding="utf-8")
         pages: dict[str, str] = {}
-        missing: list[Problem] = []
         for url in docs.rest_page_urls(llms):
             name = str(docs.page_file(url))
             path = directory / REST_PAGES / name
             if path.is_file():
                 pages[name] = path.read_text(encoding="utf-8")
             else:
-                missing.append(
+                problems.append(
                     Problem(
                         gate="docs",
                         source="",
@@ -301,10 +354,42 @@ class Snapshot:
                         message=f"the index links {url} but the snapshot lacks the page",
                     )
                 )
-        if missing:
-            raise RefreshError(missing)
-        stored = manifest.get("files", {}).get(OPENAPI, {}).get("stored_sha256", "")
-        return cls(openapi=openapi, llms=llms, pages=pages, openapi_sha256=str(stored))
+        if problems:
+            raise RefreshError(problems)
+        digest = hashlib.sha256((directory / OPENAPI).read_bytes()).hexdigest()
+        return cls(openapi=openapi, llms=llms, pages=pages, openapi_sha256=digest)
+
+
+def _verify(directory: Path, files: Mapping[str, Json]) -> Iterator[Problem]:
+    """Compare a snapshot's files with its manifest.
+
+    Args:
+        directory: The snapshot directory.
+        files: The manifest's `files` object: name to `{"stored_sha256", ...}`.
+
+    Yields:
+        A `snapshot` problem for each file whose hash differs from the manifest's, each file
+        on disk the manifest does not list, and each listed file that is missing.
+    """
+    on_disk = {
+        path.relative_to(directory).as_posix()
+        for path in directory.rglob("*")
+        if path.is_file() and path.name != MANIFEST
+    }
+    for name in sorted(on_disk - set(files)):
+        yield Problem(gate="snapshot", source="", key=name, message="not in the manifest")
+    for name, entry in sorted(files.items()):
+        recorded = entry.get("stored_sha256") if isinstance(entry, dict) else None
+        if name not in on_disk:
+            yield Problem(gate="snapshot", source="", key=name, message="listed but missing")
+        elif hashlib.sha256((directory / name).read_bytes()).hexdigest() != recorded:
+            yield Problem(
+                gate="snapshot",
+                source="",
+                key=name,
+                message="its SHA-256 differs from the manifest's: a vendor file was edited; "
+                "refetch instead",
+            )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -312,7 +397,7 @@ class Coverage:
     """How every path of the specification is accounted for.
 
     Attributes:
-        documented: Every path of the specification.
+        specified: Every path of the specification.
         generated: The paths with a generated `RestPath`.
         excluded: The paths named by an exclusion.
         deprecated: The paths the specification marks deprecated.
@@ -320,7 +405,7 @@ class Coverage:
         pages: Each path a REST documentation page names, mapped to that page's name.
     """
 
-    documented: frozenset[str]
+    specified: frozenset[str]
     generated: frozenset[str]
     excluded: frozenset[str]
     deprecated: frozenset[str]
@@ -549,6 +634,9 @@ class _PathGenerator:
         self.objects: set[str] = {""}
         self.params: set[str] = set()
         self.timestamp_bases: set[str] = set()
+        self.unit_bases: set[str] = set()
+        self.identities: set[str] = set()
+        self.concepts: dict[str, str] = {}
 
     def problem(self, gate: str, key: str, message: str, *, description: str = "") -> None:
         """Record a problem of this path.
@@ -695,7 +783,7 @@ class _PathGenerator:
             name: The envelope key.
             schema: Its resolved schema.
         """
-        expected = _ENVELOPE_TYPES.get(name, _ENVELOPE_COUNT_TYPE)
+        expected = _ENVELOPE_TYPES[name]
         if schema.get("type") != expected:
             self.problem(
                 "envelope",
@@ -723,11 +811,29 @@ class _PathGenerator:
             entries = self.hand.lexicons[lexicon_name].entries if lexicon_name else {}
             override = self.hand.names.get((self.path, raw.wire_key))
             if index == len(segments) - 1 and override is not None:
+                quoted = " ".join(override.description.split())
+                if quoted != " ".join(_text(raw.schema, "description").split()):
+                    self.problem(
+                        "G4",
+                        raw.wire_key,
+                        "NAMES quotes a description the specification no longer gives",
+                        description=_text(raw.schema, "description"),
+                    )
+                coined = column_name([override.long_name])
+                if coined in _KEY_COLUMNS:
+                    self.problem(
+                        "G2",
+                        raw.wire_key,
+                        f"NAMES coins the dataset key column {coined!r}; only the dataset key "
+                        "rename produces it",
+                    )
                 names.append(override.long_name)
             elif segment in entries:
-                names.append(entries[segment])
+                names.append(entries[segment].long_name)
             else:
-                if _short(segment) and segment not in self.hand.identity:
+                if segment in self.hand.identity:
+                    self.identities.add(segment)
+                elif _short(segment):
                     self.problem(
                         "G1",
                         raw.wire_key,
@@ -770,11 +876,13 @@ class _PathGenerator:
         if wire_type is None:
             return None
         description = _text(raw.schema, "description")
-        unit = self.unit(raw, wire_type, long_name=long_names[-1], description=description)
+        fix = self.hand.type_fixes.get((self.path, raw.wire_key))
+        unit = self.unit(
+            raw, wire_type, long_name=long_names[-1], description=description, fixed=fix is not None
+        )
         if unit is not None:
             wire_type = WireType.EPOCH
         declared = None
-        fix = self.hand.type_fixes.get((self.path, raw.wire_key))
         if fix is not None and fix.declared is not wire_type:
             self.problem(
                 "G4",
@@ -785,9 +893,11 @@ class _PathGenerator:
             )
         elif fix is not None:
             declared, wire_type = wire_type, fix.wire_type
+        column = column_name(long_names)
+        self.concepts[column] = _snake(long_names[-1])
         return Field(
             wire_key=raw.wire_key,
-            column=column_name(long_names),
+            column=column,
             wire_type=wire_type,
             unit=unit,
             required=raw.required,
@@ -795,15 +905,29 @@ class _PathGenerator:
         )
 
     def unit(
-        self, raw: _Raw, wire_type: WireType, *, long_name: str, description: str
+        self,
+        raw: _Raw,
+        wire_type: WireType,
+        *,
+        long_name: str,
+        description: str,
+        fixed: bool,
     ) -> WireUnit | None:
-        """Decide an integer field's unit from `UNITS`, checking G3 and the unit tag.
+        """Decide a field's unit from `UNITS`, checking G3 and the unit tag.
+
+        A field is timestamp-like when the specification tags it with a unit, or the snake
+        case of its long name is `timestamp`, `*_timestamp`, `updated`, `*_updated`,
+        `window_start`, `window_end`, or `*_time` (so `serverTime` counts). A timestamp-like
+        `long` or `double` needs a `UNITS` entry, and so does timestamp-like text with no
+        `format`, unless a `TYPE_FIXES` entry types it: nothing timestamp-like is left to a
+        default.
 
         Args:
             raw: The flattened field.
             wire_type: Its type by the representation rules.
             long_name: The long name of its last segment.
             description: The vendor's description.
+            fixed: Whether a `TYPE_FIXES` entry names the field.
 
         Returns:
             The unit of an epoch, or `None` for any other field.
@@ -813,20 +937,31 @@ class _PathGenerator:
         tag = raw.schema.get("x-polygon-go-type")
         tag_name = tag.get("name") if isinstance(tag, dict) else None
         tag_unit = _TAG_UNITS.get(tag_name) if isinstance(tag_name, str) else None
-        if wire_type is not WireType.LONG:
-            if entry is not None:
-                self.problem(
-                    "G4", raw.wire_key, f"UNITS names a {wire_type} field", description=description
-                )
-            return None
+        timestamp_like = tag_unit is not None or bool(_TIMESTAMP_LIKE.fullmatch(_snake(long_name)))
+        untyped_text = wire_type is WireType.STRING and "format" not in raw.schema
+        gated = wire_type in {WireType.LONG, WireType.DOUBLE} or (untyped_text and not fixed)
         if entry is None:
-            if tag_unit is not None or _TIMESTAMP_LIKE.fullmatch(long_name):
+            if timestamp_like and gated:
                 self.problem(
                     "G3",
                     raw.wire_key,
-                    f"timestamp-like integer (tag {tag_name}) has no UNITS entry",
+                    f"timestamp-like {wire_type} (tag {tag_name}) has no UNITS entry"
+                    + (" or TYPE_FIXES entry" if untyped_text else ""),
                     description=description,
                 )
+            return None
+        if entry.unit is not None and wire_type is not WireType.LONG:
+            self.problem(
+                "G4",
+                raw.wire_key,
+                f"UNITS gives a unit to a {wire_type} field; only an integer is an epoch",
+                description=description,
+            )
+            return None
+        if wire_type not in {WireType.LONG, WireType.DOUBLE, WireType.STRING}:
+            self.problem(
+                "G4", raw.wire_key, f"UNITS names a {wire_type} field", description=description
+            )
             return None
         conflict = entry.unit is not None and tag_unit is not None and entry.unit is not tag_unit
         if conflict and key not in self.hand.tag_conflicts:
@@ -849,13 +984,6 @@ class _PathGenerator:
         """
         seen: dict[str, str] = {}
         for item in fields:
-            if item.column in _RESERVED_COLUMNS:
-                self.problem(
-                    "G2",
-                    item.wire_key,
-                    f"column {item.column!r} is reserved for the dataset key the library adds; "
-                    "add a NAMES entry",
-                )
             if item.column in seen:
                 self.problem(
                     "G2",
@@ -913,10 +1041,12 @@ class _PathGenerator:
     ) -> tuple[ParamKind, tuple[str, ...], WireUnit | None]:
         """Decide a parameter's kind, enum values, and timestamp unit.
 
-        The mechanical rules decide every parameter but a timestamp-like string one (base name
-        `timestamp`, `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or
-        `*_time`), which takes its `PARAM_UNITS` entry: a unit makes it `TIMESTAMP`, "not an
-        epoch" makes it `DATE`, and no entry fails gate G3.
+        The mechanical rules decide every parameter but a string one with a `PARAM_UNITS`
+        entry, or a timestamp-like one (the snake case of its base name is `timestamp`,
+        `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or `*_time`). An
+        entry with a unit makes it `TIMESTAMP` in that unit, "not an epoch" makes it `DATE`,
+        and a timestamp-like one with no entry fails gate G3. A choice of schemas (`oneOf`,
+        `anyOf`) must be a choice of date and date-time strings, which is `DATE`.
 
         Args:
             name: The wire name.
@@ -928,12 +1058,23 @@ class _PathGenerator:
             The kind, the enum values (empty unless `ENUM`), and the unit (`None` unless
             `TIMESTAMP`).
         """
+        for choice in ("oneOf", "anyOf"):
+            branches = schema.get(choice)
+            if isinstance(branches, list) and not all(
+                self.spec.schema(branch, f"{self.path} {name}").get("format")
+                in {"date", "date-time"}
+                for branch in branches
+            ):
+                self.problem(
+                    "shape", name, f"a {choice} parameter that is not a choice of date formats"
+                )
         kind, values = _parameter_rule(name, base, schema)
-        if kind is not ParamKind.STRING or not _TIMESTAMP_LIKE.fullmatch(base):
-            return kind, values, None
         entry = self.hand.param_units.get((self.path, base))
+        timestamp_like = bool(_TIMESTAMP_LIKE.fullmatch(_snake(base)))
+        if schema.get("type") != "string" or kind is ParamKind.LIST:
+            return kind, values, None
         if entry is None:
-            if base not in self.timestamp_bases:
+            if timestamp_like and base not in self.timestamp_bases:
                 self.problem(
                     "G3",
                     base,
@@ -941,11 +1082,24 @@ class _PathGenerator:
                     description=description,
                 )
             self.timestamp_bases.add(base)
-            return ParamKind.STRING, (), None
-        self.timestamp_bases.add(base)
+            return kind, values, None
+        self.unit_bases.add(base)
         if entry.unit is None:
             return ParamKind.DATE, (), None
         return ParamKind.TIMESTAMP, (), entry.unit
+
+
+def _snake(name: str) -> str:
+    """Return a long name in snake case, so gate G3 matches camel-case names too.
+
+    Args:
+        name: A long name, such as `"serverTime"` or `"last_updated"`.
+
+    Returns:
+        The name with camel-case boundaries turned into underscores, lower-cased
+        (`"server_time"`).
+    """
+    return _WORD_BREAK.sub("_", name).lower()
 
 
 def _field_type(schema: JsonObject, last: str) -> WireType | None:
@@ -1047,7 +1201,80 @@ def _documented_pages(snapshot: Snapshot, problems: list[Problem]) -> dict[str, 
             continue
         if path is not None:
             pages.setdefault(path, name)
+        elif PurePosixPath(name).stem not in _OVERVIEW_PAGES:
+            problems.append(
+                Problem(
+                    gate="docs",
+                    source="",
+                    key=name,
+                    message="a page that is not an overview names no endpoint",
+                )
+            )
     return pages
+
+
+def _check_extensions(spec: _Spec, paths: JsonObject) -> Iterator[Problem]:
+    """Report the vendor extensions on a path item or operation that the refresh does not know.
+
+    Args:
+        spec: The specification.
+        paths: Its `paths` object.
+
+    Yields:
+        One `shape` problem per unknown `x-polygon-*` key: a change at Massive whose meaning a
+        person must decide before the refresh can account for the path.
+    """
+    for path, node in paths.items():
+        item = spec.deref(node, path)
+        operation = item.get("get")
+        found = {key for key in item if key.startswith("x-polygon-")} - _PATH_EXTENSIONS
+        if isinstance(operation, dict):
+            found |= {key for key in operation if key.startswith("x-polygon-")} - (
+                _OPERATION_EXTENSIONS
+            )
+        for key in sorted(found):
+            yield Problem(gate="shape", source=path, key=key, message="unknown vendor extension")
+
+
+def _check_kinds(hand: HandInput, generators: Mapping[str, _PathGenerator]) -> Iterator[Problem]:
+    """Require one column per concept, and one concept per column, within each kind (G8).
+
+    A field's concept is the snake case of its last segment's long name (`sip_timestamp`,
+    `ask_price`). Within the sources of one dataset kind, which merge into one table, one
+    concept must always give the same column, and one column must always hold the same
+    concept; otherwise one quantity would land in two columns, or two in one.
+
+    Args:
+        hand: The hand input, whose `kinds` lists each kind's sources.
+        generators: The generator of each generated path, after it ran.
+
+    Yields:
+        One G8 problem per concept with two columns and per column with two concepts.
+    """
+    for kind, groups in sorted(hand.kinds.items()):
+        columns: dict[str, set[str]] = {}
+        concepts: dict[str, set[str]] = {}
+        for source in (s for group in groups.values() for s in group):
+            generator = generators.get(source)
+            for column, concept in (generator.concepts if generator else {}).items():
+                columns.setdefault(concept, set()).add(column)
+                concepts.setdefault(column, set()).add(concept)
+        for concept, names in sorted(columns.items()):
+            if len(names) > 1:
+                yield Problem(
+                    gate="G8",
+                    source="",
+                    key=concept,
+                    message=f"kind {kind!r}: one concept in the columns {sorted(names)}",
+                )
+        for column, names in sorted(concepts.items()):
+            if len(names) > 1:
+                yield Problem(
+                    gate="G8",
+                    source="",
+                    key=column,
+                    message=f"kind {kind!r}: one column holds the concepts {sorted(names)}",
+                )
 
 
 def _stale_entries(hand: HandInput, generators: Mapping[str, _PathGenerator]) -> Iterator[Problem]:
@@ -1087,14 +1314,21 @@ def _stale_entries(hand: HandInput, generators: Mapping[str, _PathGenerator]) ->
             )
     for path, base in hand.param_units:
         generator = generators.get(path)
-        if generator is None or base not in generator.timestamp_bases:
+        if generator is None or base not in generator.unit_bases:
             yield Problem(
                 gate="G4",
                 source=path,
                 key=base,
-                message="PARAM_UNITS entry for no timestamp-like string parameter the "
-                "snapshot generates",
+                message="PARAM_UNITS entry for no string parameter the snapshot generates",
             )
+    used = set().union(*(generator.identities for generator in generators.values()))
+    for key in sorted(set(hand.identity) - used):
+        yield Problem(
+            gate="G4",
+            source="",
+            key=key,
+            message="IDENTITY entry for a key no generated object has",
+        )
     for path in hand.result_keys:
         if path not in generators:
             yield Problem(
@@ -1177,6 +1411,7 @@ def generate_rest(
     pages = _documented_pages(snapshot, problems)
     paths = spec.deref(snapshot.openapi.get("paths"), "paths")
     statuses = {path: _status(spec.deref(item, path)) for path, item in paths.items()}
+    problems += _check_extensions(spec, paths)
     problems += [
         Problem(
             gate="docs",
@@ -1199,16 +1434,27 @@ def generate_rest(
         try:
             value = generator.generate()
         except RefreshError as error:
-            problems += error.problems
+            problems += generator.problems + list(error.problems)
             continue
         problems += generator.problems
         if value is not None:
             generated.append(value)
+        if path not in pages:
+            problems.append(
+                Problem(
+                    gate="docs",
+                    source=path,
+                    key="",
+                    message="generated, but no documentation page names it; exclude it as "
+                    "undocumented",
+                )
+            )
     problems += _stale_entries(hand, generators)
+    problems += _check_kinds(hand, generators)
     if problems:
         raise RefreshError(problems)
     coverage = Coverage(
-        documented=frozenset(statuses),
+        specified=frozenset(statuses),
         generated=frozenset(p.key for p in generated),
         excluded=frozenset(excluded),
         deprecated=frozenset(p for p, s in statuses.items() if s == "deprecated"),
@@ -1319,8 +1565,8 @@ def _rows(lines: Sequence[str], indent: str) -> list[str]:
 
 
 def refresh(
-    snapshot_directory: Path = SNAPSHOT_DIRECTORY,
-    spec_file: Path = SPEC_FILE,
+    snapshot_directory: Path | None = None,
+    spec_file: Path | None = None,
     hand: HandInput | None = None,
 ) -> bool:
     """Regenerate `spec/rest.json` from the snapshot.
@@ -1328,14 +1574,16 @@ def refresh(
     The file is written only when every gate passes and its text changes.
 
     Args:
-        snapshot_directory: The snapshot to read.
-        spec_file: The file to write.
+        snapshot_directory: The snapshot to read; `SNAPSHOT_DIRECTORY` when omitted.
+        spec_file: The file to write; `SPEC_FILE` when omitted. Both defaults are read when
+            the function runs, so a test can point them elsewhere.
         hand: The hand input; the real tables when omitted.
 
     Returns:
         True when the file was written (its text changed), False when it was already current.
     """
-    snapshot = Snapshot.load(snapshot_directory)
+    snapshot = Snapshot.load(snapshot_directory or SNAPSHOT_DIRECTORY)
+    spec_file = spec_file or SPEC_FILE
     paths, _ = generate_rest(snapshot, hand)
     text = render_rest(paths, openapi_sha256=snapshot.openapi_sha256)
     if spec_file.is_file() and spec_file.read_text(encoding="utf-8") == text:

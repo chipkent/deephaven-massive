@@ -8,7 +8,10 @@ has a test that fails when the gate is removed.
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
+import hashlib
 import json
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -62,15 +65,15 @@ def test_every_specified_path_is_accounted_for_exactly_once(
 ) -> None:
     _, coverage = real
     parts = [coverage.generated, coverage.excluded, coverage.deprecated | coverage.draft]
-    assert sum(len(part) for part in parts) == len(coverage.documented)
-    assert frozenset().union(*parts) == coverage.documented
+    assert sum(len(part) for part in parts) == len(coverage.specified)
+    assert frozenset().union(*parts) == coverage.specified
 
 
 def test_every_documented_endpoint_is_specified(
     real: tuple[tuple[RestPath, ...], generate.Coverage],
 ) -> None:
     _, coverage = real
-    assert set(coverage.pages) <= coverage.documented
+    assert set(coverage.pages) <= coverage.specified
     assert coverage.pages  # the pages were read at all
 
 
@@ -145,13 +148,26 @@ def test_the_generated_names_follow_the_lexicons(
     assert columns["min.c"] == "MinuteClose"
     assert columns["lastTrade.t"] == "LastTradeSipTimestamp"
     assert columns["lastQuote.P"] == "LastQuoteAskPrice"
+    assert columns["min.av"] == "MinuteAccumulatedVolume"
     assert columns["min.dav"] == "MinuteAccumulatedDecimalVolume"
+    forex = {
+        f.wire_key: f.column
+        for f in paths["/v2/snapshot/locale/global/markets/forex/tickers"].fields
+    }
+    assert forex["lastQuote.a"] == "LastQuoteAskPrice"
+    assert forex["lastQuote.t"] == "LastQuoteParticipantTimestamp"
+    crypto = {
+        f.wire_key: f.column
+        for f in paths["/v2/snapshot/locale/global/markets/crypto/tickers"].fields
+    }
+    assert crypto["lastTrade.t"] == "LastTradeParticipantTimestamp"
     nbbo = {f.wire_key: f for f in paths["/v2/last/nbbo/{stocksTicker}"].fields}
     assert (nbbo["t"].column, nbbo["t"].unit) == ("SipTimestamp", WireUnit.NS)
     bars = paths["/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"]
     assert bars.field("WindowStart").unit is WireUnit.MS
-    for path in real[0]:
-        assert {"Symbol", "Underlying"}.isdisjoint(f.column for f in path.fields), path.key
+    # A vendor field literally named `symbol` keeps its name; the dataset key rename uses it.
+    open_close = paths["/v1/open-close/{stocksTicker}/{date}"]
+    assert open_close.field("Symbol").wire_key == "symbol"
 
 
 def test_the_indicator_timestamps_are_milliseconds_against_their_tags(
@@ -166,15 +182,49 @@ def test_the_indicator_timestamps_are_milliseconds_against_their_tags(
 
 
 def test_refresh_writes_only_a_changed_file(tmp_path: Path) -> None:
+    committed = generate.SPEC_FILE.read_bytes()
     target = tmp_path / "rest.json"
     assert generate.refresh(spec_file=target) is True
-    assert target.read_text(encoding="utf-8") == generate.SPEC_FILE.read_text(encoding="utf-8")
+    assert target.read_bytes() == committed
     assert generate.refresh(spec_file=target) is False
+    assert generate.SPEC_FILE.read_bytes() == committed
+
+
+def test_the_typed_timestamps_follow_their_samples(
+    real: tuple[tuple[RestPath, ...], generate.Coverage],
+) -> None:
+    # Each REST TYPE_FIXES entry, checked against the documentation sample it cites.
+    paths = {p.key: p for p in real[0]}
+    pages = Snapshot.load().pages
+    for (path, wire_key), fix in overrides.TYPE_FIXES.items():
+        typed = next(f for f in paths[path].fields if f.wire_key == wire_key)
+        assert (typed.wire_type, typed.declared_type) == (fix.wire_type, fix.declared)
+        found = re.search(r'"[^"]+"', fix.reason)
+        assert found is not None, fix.reason
+        sample = found.group()
+
+        page = pages[coverage_page(real[1], path)]
+        assert f'"{wire_key}": {sample}' in page, (path, wire_key)
+        value = json.loads(sample)
+        if fix.wire_type is WireType.DATE:
+            dt.date.fromisoformat(value)
+        else:
+            assert dt.datetime.fromisoformat(value).tzinfo is not None
+
+
+def coverage_page(coverage: generate.Coverage, path: str) -> str:
+    """Return the documentation page that names a path."""
+    return coverage.pages[path]
 
 
 # --- Synthetic specifications ---------------------------------------------------------------
 
 _PATH = "/v1/things/{id}"
+
+
+def _names(**long_names: str) -> dict[str, lexicon.LongName]:
+    """Return lexicon entries, all citing one test source."""
+    return {k: lexicon.LongName(long_name=v, source="test") for k, v in long_names.items()}
 
 
 def _row(**properties: object) -> Mapping[str, object]:
@@ -213,11 +263,22 @@ def _snapshot(
     *,
     pages: dict[str, str] | None = None,
     schemas: Mapping[str, object] | None = None,
+    undocumented: Sequence[str] = (),
 ) -> Snapshot:
+    """Return a snapshot of `paths`, each documented by a page unless named in `undocumented`.
+
+    Pages given in `pages` come first; every other path gets a generated page.
+    """
     document = {"openapi": "3.0.3", "paths": paths, "components": {"schemas": schemas or {}}}
     # A JSON round trip gives the document the type a decoded specification has.
     openapi = json.loads(json.dumps(document))
-    return Snapshot(openapi=openapi, llms="", pages=pages or {}, openapi_sha256="0" * 64)
+    named = dict(pages or {})
+    covered = set(named.values())
+    for index, path in enumerate(paths):
+        endpoint = f"**Endpoint:** `GET {path}`\n"
+        if path not in undocumented and endpoint not in covered:
+            named[f"auto/page-{index}.md"] = endpoint
+    return Snapshot(openapi=openapi, llms="", pages=named, openapi_sha256="0" * 64)
 
 
 def _hand(
@@ -232,6 +293,7 @@ def _hand(
     result_keys: Mapping[str, overrides.ResultKey] | None = None,
     param_units: Mapping[tuple[str, str], overrides.Unit] | None = None,
     exclusions: Sequence[exclusions_module.Exclusion] = (),
+    kinds: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
 ) -> HandInput:
     """Return hand input with every table empty except those given."""
     return HandInput(
@@ -245,6 +307,7 @@ def _hand(
         result_keys=result_keys or {},
         param_units=param_units or {},
         exclusions=exclusions,
+        kinds=kinds or {},
     )
 
 
@@ -472,8 +535,8 @@ def test_column_names(long_names: list[str], column: str) -> None:
 
 def test_lexicons_identity_and_names_translate_short_keys() -> None:
     lexicons = {
-        "bar": lexicon.Lexicon(name="bar", reason="test", entries={"c": "close", "min": "minute"}),
-        "trade": lexicon.Lexicon(name="trade", reason="test", entries={"p": "price"}),
+        "bar": lexicon.Lexicon(name="bar", reason="test", entries=_names(c="close", min="minute")),
+        "trade": lexicon.Lexicon(name="trade", reason="test", entries=_names(p="price")),
     }
     row = _row(
         c={"type": "number"},
@@ -485,7 +548,7 @@ def test_lexicons_identity_and_names_translate_short_keys() -> None:
         lexicons=lexicons,
         shapes={(_PATH, ""): "bar", (_PATH, "min"): "bar", (_PATH, "last"): "trade"},
         identity={"id": "a word"},
-        names={(_PATH, "last.av"): overrides.Name(long_name="accumulated_volume", reason="test")},
+        names={(_PATH, "last.av"): overrides.Name(long_name="accumulated_volume", description="")},
     )
     path = _one(row, hand)
     assert [(f.wire_key, f.column) for f in path.fields] == [
@@ -525,15 +588,25 @@ def test_gate_g2_two_keys_with_one_column() -> None:
     assert _problems(snapshot) == [("G2", _PATH, "last_price")]
 
 
-@pytest.mark.parametrize("key", ["symbol", "underlying"])
-def test_gate_g2_a_reserved_column(key: str) -> None:
-    snapshot = _snapshot({_PATH: _item(_row(**{key: {"type": "string"}}))})
-    assert _problems(snapshot) == [("G2", _PATH, key)]
+def test_a_vendor_symbol_keeps_its_name() -> None:
+    # The dataset key rename, not the generator, turns a key field into `Symbol`; a field the
+    # vendor itself calls `symbol` is simply generated as such.
+    assert [f.column for f in _one(_row(symbol={"type": "string"})).fields] == ["Symbol"]
 
 
-def test_a_names_entry_renames_a_reserved_column() -> None:
-    hand = _hand(names={(_PATH, "symbol"): overrides.Name(long_name="ticker", reason="test")})
-    assert [f.column for f in _one(_row(symbol={"type": "string"}), hand).fields] == ["Ticker"]
+@pytest.mark.parametrize("long_name", ["symbol", "underlying", "timestamp"])
+def test_gate_g2_names_never_coins_a_key_column(long_name: str) -> None:
+    hand = _hand(names={(_PATH, "sym"): overrides.Name(long_name=long_name, description="")})
+    snapshot = _snapshot({_PATH: _item(_row(sym={"type": "boolean"}))})
+    assert _problems(snapshot, hand) == [("G2", _PATH, "sym")]
+
+
+def test_gate_g4_a_names_quote_the_specification_no_longer_gives() -> None:
+    hand = _hand(names={(_PATH, "av"): overrides.Name(long_name="volume", description="Old.")})
+    snapshot = _snapshot({_PATH: _item(_row(av={"type": "integer", "description": "New."}))})
+    assert _problems(snapshot, hand) == [("G4", _PATH, "av")]
+    quoted = _hand(names={(_PATH, "av"): overrides.Name(long_name="volume", description=" New. ")})
+    assert [f.column for f in generate_rest(snapshot, quoted)[0][0].fields] == ["Volume"]
 
 
 # Gate G3 and units.
@@ -564,7 +637,7 @@ def test_gate_g3_a_unit_tag_makes_any_integer_timestamp_like() -> None:
 
 def test_gate_g3_runs_on_the_long_name() -> None:
     lexicons = {
-        "trade": lexicon.Lexicon(name="trade", reason="test", entries={"t": "sip_timestamp"})
+        "trade": lexicon.Lexicon(name="trade", reason="test", entries=_names(t="sip_timestamp"))
     }
     snapshot = _snapshot({_PATH: _item(_row(t={"type": "integer"}))})
     assert _problems(snapshot, _hand(lexicons=lexicons, shapes={(_PATH, ""): "trade"})) == [
@@ -619,7 +692,7 @@ def test_gate_g4_a_type_fix_the_specification_no_longer_needs() -> None:
 # Parameters.
 
 
-def _param(name: str, schema: dict[str, object], *, where: str = "query") -> dict[str, object]:
+def _param(name: str, schema: Mapping[str, object], *, where: str = "query") -> dict[str, object]:
     return {"name": name, "in": where, "schema": schema}
 
 
@@ -731,7 +804,8 @@ def test_gate_g4_hand_entries_naming_nothing() -> None:
     hand = _hand(
         lexicons=lexicons,
         shapes={(_PATH, "gone"): "bar", ("/gone", ""): "bar"},
-        names={(_PATH, "gone"): overrides.Name(long_name="x", reason="test")},
+        names={(_PATH, "gone"): overrides.Name(long_name="x", description="")},
+        identity={"zz": "unused"},
         units={("/gone", "t"): _MS},
         tag_conflicts={(_PATH, "gone"): "test"},
         type_fixes={
@@ -753,6 +827,7 @@ def test_gate_g4_hand_entries_naming_nothing() -> None:
             ("G4", _PATH, "gone"),  # type fixes
             ("G4", "/gone", ""),  # result keys
             ("G4", _PATH, "gone"),  # param units
+            ("G4", "", "zz"),  # identity
         ]
     )
 
@@ -782,8 +857,8 @@ def test_paths_are_classified() -> None:
     assert coverage.excluded == {"/c/{id}"}
     assert coverage.draft == {"/b/{id}"}
     assert coverage.deprecated == {"/e/{id}", "/f/{id}"}
-    assert coverage.documented == {"/a/{id}", "/b/{id}", "/c/{id}", "/d/{id}", "/e/{id}", "/f/{id}"}
-    assert coverage.pages == {"/c/{id}": "c.md"}
+    assert coverage.specified == {"/a/{id}", "/b/{id}", "/c/{id}", "/d/{id}", "/e/{id}", "/f/{id}"}
+    assert coverage.pages["/c/{id}"] == "c.md"
 
 
 def test_exclusions_of_other_transports_are_left_to_their_generators() -> None:
@@ -826,7 +901,7 @@ def test_gate_docs_an_undocumented_exclusion_that_is_documented() -> None:
 
 def test_gate_docs_a_documented_exclusion_that_no_page_names() -> None:
     entry = exclusions.Exclusion(kind=Transport.REST, item=_PATH, reason="t")
-    snapshot = _snapshot({_PATH: _item(_row(price={"type": "number"}))})
+    snapshot = _snapshot({_PATH: _item(_row(price={"type": "number"}))}, undocumented=[_PATH])
     assert _problems(snapshot, _hand(exclusions=(entry,))) == [("docs", _PATH, "")]
 
 
@@ -883,14 +958,19 @@ def test_problem_text_without_a_description() -> None:
 
 
 def _write_snapshot(directory: Path, *, llms: str, pages: dict[str, str]) -> None:
-    directory.mkdir()
-    manifest = {"files": {"openapi.json": {"stored_sha256": "ab" * 32}}}
+    """Write a snapshot whose manifest lists every file with its true hash."""
+    files = {"openapi.json": json.dumps({"paths": {}}), "llms.txt": llms}
+    files.update({f"rest/{name}": text for name, text in pages.items()})
+    for name, text in files.items():
+        (directory / name).parent.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_text(text, encoding="utf-8")
+    manifest = {
+        "files": {
+            name: {"stored_sha256": hashlib.sha256(text.encode()).hexdigest()}
+            for name, text in files.items()
+        }
+    }
     (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (directory / "openapi.json").write_text(json.dumps({"paths": {}}), encoding="utf-8")
-    (directory / "llms.txt").write_text(llms, encoding="utf-8")
-    for name, text in pages.items():
-        (directory / "rest" / name).parent.mkdir(parents=True, exist_ok=True)
-        (directory / "rest" / name).write_text(text, encoding="utf-8")
 
 
 _INDEX = "## REST API\n- [Trades](https://massive.com/docs/rest/stocks/trades.md): Trades\n"
@@ -901,7 +981,36 @@ def test_a_snapshot_loads(tmp_path: Path) -> None:
     snapshot = Snapshot.load(tmp_path / "s")
     assert snapshot.pages == {"stocks/trades.md": "page"}
     assert snapshot.openapi == {"paths": {}}
-    assert snapshot.openapi_sha256 == "ab" * 32
+    expected = hashlib.sha256((tmp_path / "s" / "openapi.json").read_bytes()).hexdigest()
+    assert snapshot.openapi_sha256 == expected
+
+
+def test_the_real_snapshot_matches_its_manifest() -> None:
+    manifest = json.loads((generate.SNAPSHOT_DIRECTORY / "manifest.json").read_text("utf-8"))
+    assert Snapshot.load().openapi_sha256 == manifest["files"]["openapi.json"]["stored_sha256"]
+
+
+def test_gate_snapshot_an_edited_vendor_file(tmp_path: Path) -> None:
+    _write_snapshot(tmp_path / "s", llms=_INDEX, pages={"stocks/trades.md": "page"})
+    page = tmp_path / "s" / "rest" / "stocks" / "trades.md"
+    page.write_text("pagf", encoding="utf-8")  # one byte changed
+    with pytest.raises(RefreshError) as caught:
+        Snapshot.load(tmp_path / "s")
+    assert [(p.gate, p.key) for p in caught.value.problems] == [
+        ("snapshot", "rest/stocks/trades.md")
+    ]
+
+
+def test_gate_snapshot_files_must_match_the_manifest_exactly(tmp_path: Path) -> None:
+    _write_snapshot(tmp_path / "s", llms=_INDEX, pages={"stocks/trades.md": "page"})
+    (tmp_path / "s" / "stray.md").write_text("added by hand", encoding="utf-8")
+    (tmp_path / "s" / "rest" / "stocks" / "trades.md").rename(tmp_path / "trades.md")
+    with pytest.raises(RefreshError) as caught:
+        Snapshot.load(tmp_path / "s")
+    assert [(p.gate, p.key, p.message) for p in caught.value.problems if p.gate == "snapshot"] == [
+        ("snapshot", "rest/stocks/trades.md", "listed but missing"),
+        ("snapshot", "stray.md", "not in the manifest"),
+    ]
 
 
 def test_gate_docs_a_linked_page_missing_from_the_snapshot(tmp_path: Path) -> None:
@@ -916,7 +1025,7 @@ def test_a_snapshot_that_is_not_json_objects_is_reported(tmp_path: Path) -> None
     (tmp_path / "s" / "openapi.json").write_text("[]", encoding="utf-8")
     with pytest.raises(RefreshError) as caught:
         Snapshot.load(tmp_path / "s")
-    assert [p.gate for p in caught.value.problems] == ["shape"]
+    assert [p.gate for p in caught.value.problems] == ["snapshot"]
 
 
 def test_the_default_hand_input_is_the_real_tables() -> None:
@@ -931,6 +1040,7 @@ def test_the_default_hand_input_is_the_real_tables() -> None:
     assert hand.result_keys is overrides.RESULT_KEYS
     assert hand.param_units is overrides.PARAM_UNITS
     assert hand.exclusions is exclusions.EXCLUSIONS
+    assert hand.kinds is overrides.KINDS
 
 
 def test_render_writes_one_line_per_field_and_parameter() -> None:
@@ -948,3 +1058,141 @@ def test_render_writes_one_line_per_field_and_parameter() -> None:
     ]
     assert '    {"column": "Price", "declared_type": null, ' in text
     assert text.endswith("}\n")
+
+
+# Gate G3 beyond plain integers.
+
+
+@pytest.mark.parametrize("key", ["serverTime", "lastUpdated", "sipTimestamp"])
+def test_gate_g3_matches_camel_case_names(key: str) -> None:
+    snapshot = _snapshot({_PATH: _item(_row(**{key: {"type": "integer"}}))})
+    assert _problems(snapshot) == [("G3", _PATH, key)]
+
+
+def test_gate_g3_covers_numbers() -> None:
+    snapshot = _snapshot({_PATH: _item(_row(timestamp={"type": "number"}))})
+    assert _problems(snapshot) == [("G3", _PATH, "timestamp")]
+
+
+def test_gate_g3_covers_text_with_no_format() -> None:
+    snapshot = _snapshot({_PATH: _item(_row(serverTime={"type": "string"}))})
+    assert _problems(snapshot) == [("G3", _PATH, "serverTime")]
+
+
+def test_timestamp_like_text_is_decided_by_a_type_fix_or_a_units_entry() -> None:
+    row = _row(serverTime={"type": "string"})
+    fix = overrides.TypeFix(declared=WireType.STRING, wire_type=WireType.ISO_INSTANT, reason="t")
+    fixed = _one(row, _hand(type_fixes={(_PATH, "serverTime"): fix}))
+    assert _types(fixed) == {"serverTime": (WireType.ISO_INSTANT, None)}
+    text = overrides.Unit(unit=None, reason="free text, not a time")
+    kept = _one(row, _hand(units={(_PATH, "serverTime"): text}))
+    assert _types(kept) == {"serverTime": (WireType.STRING, None)}
+
+
+def test_formatted_timestamp_text_needs_no_entry() -> None:
+    row = _row(updated={"type": "string", "format": "date-time"})
+    assert _types(_one(row)) == {"updated": (WireType.ISO_INSTANT, None)}
+
+
+@pytest.mark.parametrize("kind", ["number", "string"])
+def test_gate_g4_a_unit_on_a_number_or_text(kind: str) -> None:
+    snapshot = _snapshot({_PATH: _item(_row(timestamp={"type": kind}))})
+    assert _problems(snapshot, _hand(units={(_PATH, "timestamp"): _MS})) == [
+        ("G4", _PATH, "timestamp")
+    ]
+
+
+def test_gate_g4_units_on_a_field_that_cannot_be_a_timestamp() -> None:
+    entry = overrides.Unit(unit=None, reason="t")
+    snapshot = _snapshot({_PATH: _item(_row(flags={"type": "boolean"}))})
+    assert _problems(snapshot, _hand(units={(_PATH, "flags"): entry})) == [("G4", _PATH, "flags")]
+
+
+# Parameters beyond the timestamp-like names.
+
+
+def test_param_units_make_any_named_string_parameter_a_timestamp() -> None:
+    params = [_param("from", {"type": "string"})]
+    hand = _hand(param_units={(_PATH, "from"): _MS})
+    path = _one(_row(price={"type": "number"}), hand, params=params)
+    assert (path.params[1].kind, path.params[1].unit) == (ParamKind.TIMESTAMP, WireUnit.MS)
+
+
+def test_gate_shape_a_parameter_choice_that_is_not_of_date_formats() -> None:
+    choice = {"oneOf": [{"type": "integer"}, {"type": "string", "format": "date"}]}
+    snapshot = _snapshot(
+        {_PATH: _item(_row(price={"type": "number"}), params=[_param("since", choice)])}
+    )
+    assert _problems(snapshot) == [("shape", _PATH, "since")]
+
+
+# Vendor extensions and the documentation.
+
+
+def test_gate_shape_an_unknown_vendor_extension() -> None:
+    row = _row(price={"type": "number"})
+    snapshot = _snapshot(
+        {
+            "/a/{id}": _item(row, extra={"x-polygon-new-flag": True}),
+            "/b/{id}": _item(row, operation_extra={"x-polygon-beta": True}),
+            "/c/{id}": _item(row, operation_extra={"x-polygon-experimental": {}}),
+        }
+    )
+    assert _problems(snapshot) == [
+        ("shape", "/a/{id}", "x-polygon-new-flag"),
+        ("shape", "/b/{id}", "x-polygon-beta"),
+    ]
+
+
+def test_gate_docs_a_generated_path_no_page_names() -> None:
+    snapshot = _snapshot({_PATH: _item(_row(price={"type": "number"}))}, undocumented=[_PATH])
+    assert _problems(snapshot) == [("docs", _PATH, "")]
+
+
+def test_gate_docs_a_page_that_is_not_an_overview_names_no_endpoint() -> None:
+    pages = {"stocks/overview.md": "# Stocks\n", "stocks/trades.md": "# Trades, no endpoint\n"}
+    snapshot = _snapshot({_PATH: _item(_row(price={"type": "number"}))}, pages=pages)
+    assert _problems(snapshot) == [("docs", "", "stocks/trades.md")]
+
+
+# Gate G8: one concept, one column, within a kind.
+
+
+def test_gate_g8_one_concept_in_two_columns_within_a_kind() -> None:
+    snapshot = _snapshot(
+        {
+            "/a/{id}": _item(_row(price={"type": "number"})),
+            "/b/{id}": _item(_row(last=_row(price={"type": "number"}))),
+        }
+    )
+    both = {"trades": {"stocks": ["/a/{id}"], "crypto": ["/b/{id}"]}}
+    assert _problems(snapshot, _hand(kinds=both)) == [("G8", "", "price")]
+    one = {"trades": {"stocks": ["/a/{id}"]}, "bars": {"stocks": ["/b/{id}"]}}
+    assert len(generate_rest(snapshot, _hand(kinds=one))[0]) == 2
+
+
+def test_gate_g8_one_column_for_two_concepts_within_a_kind() -> None:
+    snapshot = _snapshot(
+        {
+            "/a/{id}": _item(_row(last=_row(trade_price={"type": "number"}))),
+            "/b/{id}": _item(_row(last_trade=_row(price={"type": "number"}))),
+        }
+    )
+    kinds = {"trades": {"stocks": ["/a/{id}", "/b/{id}"]}}
+    problems = _problems(snapshot, _hand(kinds=kinds))
+    assert ("G8", "", "LastTradePrice") in problems
+
+
+# Problems are never lost.
+
+
+def test_problems_found_before_an_unreadable_schema_are_kept() -> None:
+    # The mistyped envelope key is reported before the bad reference stops the path.
+    row = _row(status={"type": "integer"}, nested={"$ref": "#/components/schemas/Missing"})
+    hand = _hand(result_keys={_PATH: overrides.ResultKey(key=None, reason="test")})
+    snapshot = _snapshot({_PATH: _item(row, result=None, array=False)})
+    assert sorted(gate for gate, _, _ in _problems(snapshot, hand)) == ["envelope", "shape"]
+
+
+def test_the_envelope_types_cover_exactly_the_envelope_keys() -> None:
+    assert set(generate._ENVELOPE_TYPES) == ENVELOPE_KEYS

@@ -20,12 +20,11 @@ if TYPE_CHECKING:
 # --- Canonical forms ------------------------------------------------------------------------
 
 
-def test_canonical_json_sorts_indents_and_ends_with_a_newline() -> None:
+def test_canonical_json_keeps_the_vendor_order_indents_and_ends_with_a_newline() -> None:
+    # The order of an object's properties is the documented column order; it is never sorted.
     raw = '{"b": [1, {"d": "é", "c": null}], "a": true}'.encode()
-    assert (
-        fetch.canonical_json(raw, "u")
-        == ('{\n "a": true,\n "b": [\n  1,\n  {\n   "c": null,\n   "d": "é"\n  }\n ]\n}\n').encode()
-    )
+    expected = '{\n "b": [\n  1,\n  {\n   "d": "é",\n   "c": null\n  }\n ],\n "a": true\n}\n'
+    assert fetch.canonical_json(raw, "u") == expected.encode()
 
 
 def test_canonical_json_rejects_what_is_not_json() -> None:
@@ -95,7 +94,7 @@ def test_fetch_stores_every_source_canonically_with_a_manifest(tmp_path: Path) -
         "manifest.json",
     ]
     stored_spec = (target / "openapi.json").read_bytes()
-    assert stored_spec == b'{\n "openapi": "3.0.3",\n "paths": {}\n}\n'
+    assert stored_spec == b'{\n "paths": {},\n "openapi": "3.0.3"\n}\n'
     page = (target / "rest/stocks/trades-quotes/trades.md").read_bytes()
     assert page == b"**Endpoint:** `GET /v3/trades/{stockTicker}`\n"
     manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
@@ -115,9 +114,11 @@ def test_fetch_replaces_the_old_snapshot_entirely(tmp_path: Path) -> None:
     (target / "rest" / "gone").mkdir(parents=True)
     (target / "rest" / "gone" / "page.md").write_text("removed by Massive\n", encoding="utf-8")
     (tmp_path / "snapshot-incoming").mkdir()  # a staging directory left by an interrupted run
+    (tmp_path / "snapshot-previous").mkdir()  # a backup left by an interrupted swap
     fetch.fetch(target, get=_getter(_sources()), today=dt.date(2026, 1, 1))
     assert not (target / "rest" / "gone").exists()
     assert not (tmp_path / "snapshot-incoming").exists()
+    assert not (tmp_path / "snapshot-previous").exists()
 
 
 def test_a_failed_fetch_leaves_the_old_snapshot_untouched(tmp_path: Path) -> None:
@@ -219,6 +220,14 @@ def test_a_429_waits_the_retry_after_seconds(server: _Server) -> None:
     with fetch.HttpGetter(sleep=waits.append) as getter:
         assert getter(f"{server.url}/x") == b"ok"
     assert waits == [3.0]
+
+
+def test_a_retry_after_beyond_a_minute_is_capped(server: _Server) -> None:
+    server.script = [(429, {"Retry-After": "86400"}, b""), (200, {}, b"ok")]
+    waits: list[float] = []
+    with fetch.HttpGetter(sleep=waits.append) as getter:
+        assert getter(f"{server.url}/x") == b"ok"
+    assert waits == [60.0]
 
 
 def test_a_429_without_a_numeric_retry_after_backs_off_then_fails(server: _Server) -> None:

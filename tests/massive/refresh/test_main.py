@@ -13,10 +13,18 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_the_plain_run_reports_an_up_to_date_schema(capsys: pytest.CaptureFixture[str]) -> None:
-    # The committed schema matches the snapshot (the parity test), so nothing is written.
+def test_the_plain_run_reports_an_up_to_date_schema(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The run regenerates a copy, never the committed file, so this test cannot hide a parity
+    # failure by rewriting it.
+    committed = generate.SPEC_FILE.read_bytes()
+    copy = tmp_path / "rest.json"
+    copy.write_bytes(committed)
+    monkeypatch.setattr(generate, "SPEC_FILE", copy)
     assert command.main([]) == 0
-    assert capsys.readouterr().out == f"{generate.SPEC_FILE} is up to date\n"
+    assert capsys.readouterr().out == f"{copy} is up to date\n"
+    assert copy.read_bytes() == committed
 
 
 def test_the_plain_run_reports_an_update(

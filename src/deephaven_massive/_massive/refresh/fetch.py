@@ -14,21 +14,24 @@ snapshot directory (`refresh/snapshot/`) with the live vendor sources:
 
 **Canonical storage.** Every file is rewritten into one canonical form, so a refresh diff
 reads line by line and the repository's whitespace hooks never need an exception: JSON is
-re-serialized with sorted keys, an indent of one space, and a final newline; text has the
-trailing whitespace of every line removed, trailing blank lines dropped, and one final
-newline. The stored hash covers that canonical form, the fetched hash the raw bytes.
+re-serialized with an indent of one space and a final newline, keeping the vendor's key order
+(the order of an object's properties is the documented column order, so it is never sorted);
+text has the trailing whitespace of every line removed, trailing blank lines dropped, and one
+final newline. The stored hash covers that canonical form, the fetched hash the raw bytes.
 
 **Untrusted input.** The downloads are data, never code: JSON is parsed with the standard
 library, text is decoded as UTF-8, nothing is evaluated, and a page URL is accepted only below
 `https://massive.com/docs/rest/` with plain lower-case path segments (`docs.page_file`), so no
 URL can name a file outside the snapshot. Every download completes, and every file is
 canonicalized, before anything is written; the new snapshot is then built in a sibling
-directory and swapped in, so a failed fetch leaves the old snapshot untouched.
+directory and swapped in through a backup directory, so a failed fetch leaves the old snapshot
+untouched.
 
 The network is reached only through the `get` callable that `fetch` receives. The default,
 `HttpGetter`, uses urllib3 with the CA bundle and proxy of `net.http`, sends the library's
-`User-Agent`, follows no redirects, and does not retry: a person runs this command by hand and
-reruns it after a failure. Tests pass a dictionary-backed `get` instead.
+`User-Agent`, and follows no redirects. It retries only HTTP 429, which the documentation host
+answers to a burst of page requests (see `HttpGetter`); any other failure stops the fetch, and
+a person reruns the command. Tests pass a dictionary-backed `get` instead.
 """
 
 from __future__ import annotations
@@ -88,6 +91,8 @@ _HTTP_TOO_MANY_REQUESTS = 429
 # The waits before each retry of a 429 without a numeric Retry-After, in seconds; a 429 after
 # the last wait fails.
 _RATE_LIMIT_WAITS = (2.0, 4.0, 8.0, 16.0, 32.0)
+# The longest wait obeyed, in seconds, whatever Retry-After asks.
+_MAX_WAIT = 60.0
 
 
 class FetchError(RuntimeError):
@@ -136,8 +141,8 @@ def canonical_json(raw: bytes, url: str) -> bytes:
         url: Where it came from, for the error message.
 
     Returns:
-        UTF-8 JSON with sorted keys, a one-space indent, non-ASCII characters kept as they
-        are, and a final newline.
+        UTF-8 JSON with the document's own key order, a one-space indent, non-ASCII characters
+        kept as they are, and a final newline.
 
     Raises:
         FetchError: If the bytes are not UTF-8 or not JSON.
@@ -146,7 +151,7 @@ def canonical_json(raw: bytes, url: str) -> bytes:
         document = json.loads(_decode(raw, url))
     except json.JSONDecodeError as error:
         raise FetchError(f"{url} is not JSON: {error}") from None
-    return (json.dumps(document, sort_keys=True, indent=1, ensure_ascii=False) + "\n").encode()
+    return (json.dumps(document, indent=1, ensure_ascii=False) + "\n").encode()
 
 
 def canonical_text(raw: bytes, url: str) -> bytes:
@@ -193,7 +198,8 @@ class HttpGetter:
 
     The documentation host answers a burst of page requests with HTTP 429. A 429 is the one
     answer that is retried: the getter waits the `Retry-After` seconds when the server sends
-    a number, else 2, 4, 8, 16, then 32 seconds, and gives up after five waits. Every other
+    a number (never more than 60), else 2, 4, 8, 16, then 32 seconds, and gives up after five
+    waits. Every other
     failure fails at once; a person reruns the command.
 
     Example:
@@ -287,7 +293,8 @@ class HttpGetter:
             if response.status != _HTTP_TOO_MANY_REQUESTS or wait is None:
                 raise FetchError(f"GET {url} answered HTTP {response.status}")
             retry_after = response.headers.get("Retry-After", "")
-            self._sleep(float(retry_after) if retry_after.isdigit() else wait)
+            asked = float(retry_after) if retry_after.isdigit() else wait
+            self._sleep(min(asked, _MAX_WAIT))
 
 
 def _download(get: Callable[[str], bytes]) -> list[_Stored]:
@@ -356,9 +363,11 @@ def fetch(
     """Replace the snapshot in `directory` with freshly downloaded vendor sources.
 
     Everything is downloaded and canonicalized first. The new snapshot is then written to a
-    sibling directory, the old one is removed, and the new one is renamed into place, so a
-    failure while downloading leaves the old snapshot as it was. Files of the old snapshot
-    that the new one lacks (a page Massive removed) are gone afterwards.
+    sibling directory (`<name>-incoming`); the old one is renamed aside (`<name>-previous`),
+    the new one is renamed into place, and only then is the old one removed. A failure while
+    downloading leaves the old snapshot as it was, and at no point is the snapshot directory
+    half written. Files of the old snapshot that the new one lacks (a page Massive removed)
+    are gone afterwards.
 
     Args:
         directory: The snapshot directory, normally `refresh/snapshot/`. Its parent must exist.
@@ -380,12 +389,16 @@ def fetch(
         files = _download(get)
     manifest = _manifest(files, today or dt.datetime.now(dt.UTC).date())
     staging = directory.with_name(f"{directory.name}-incoming")
+    backup = directory.with_name(f"{directory.name}-previous")
     shutil.rmtree(staging, ignore_errors=True)
+    shutil.rmtree(backup, ignore_errors=True)
     for file in files:
         target = staging / file.name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(file.stored)
     (staging / MANIFEST).write_bytes(manifest)
-    shutil.rmtree(directory, ignore_errors=True)
+    if directory.exists():
+        directory.rename(backup)
     staging.rename(directory)
+    shutil.rmtree(backup, ignore_errors=True)
     return [file.name for file in files] + [MANIFEST]
