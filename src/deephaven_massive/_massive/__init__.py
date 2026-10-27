@@ -16,6 +16,11 @@ imports only the standard library, `urllib3`, `websockets`, `certifi`, `orjson`,
 Interface:
     - `WireError`, `WireAuthError`, `WireEntitlementError`: the errors every client raises;
       `deephaven_massive._errors.from_wire` turns each into its public counterpart.
+    - `source`, `sources`: the generated description of each REST path (and, later, each
+      WebSocket channel and flat-file prefix), loaded once from the committed `spec/*.json`.
+    - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
+      `DriftReport`: the value types of that description. A `RestPath`'s parameters are
+      `Param`s, reached through `RestPath.params`.
     - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
       client, one file being decoded into Arrow batches, what to read from it, and where a
       dataset's file for a day lives.
@@ -28,7 +33,10 @@ its clients' dependencies, and never Deephaven.
 Example:
     ::
 
-        from deephaven_massive._massive import WireError
+        from deephaven_massive._massive import Transport, WireError, source
+
+        trades = source(Transport.REST, "/v3/trades/{stockTicker}")
+        assert trades.field("Price").wire_key == "price"
 
         try:
             raise WireError("HTTP 503 from GET /v3/trades/AAPL", status=503)
@@ -40,16 +48,26 @@ from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
 __all__ = [
+    "DriftReport",
+    "Field",
     "FlatFile",
     "FlatFileClient",
     "Page",
+    "ParamKind",
     "ReadColumn",
     "ReadPlan",
     "RestClient",
+    "RestPath",
+    "Source",
+    "Transport",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WireType",
+    "WireUnit",
     "object_key",
+    "source",
+    "sources",
     "to_batch",
 ]
 
@@ -64,6 +82,16 @@ _EXPORTS: dict[str, str] = {
     "WireAuthError": "deephaven_massive._massive.net.errors",
     "WireEntitlementError": "deephaven_massive._massive.net.errors",
     "WireError": "deephaven_massive._massive.net.errors",
+    "source": "deephaven_massive._massive.spec",
+    "sources": "deephaven_massive._massive.spec",
+    "DriftReport": "deephaven_massive._massive.spec.types",
+    "Field": "deephaven_massive._massive.spec.types",
+    "ParamKind": "deephaven_massive._massive.spec.types",
+    "RestPath": "deephaven_massive._massive.spec.types",
+    "Source": "deephaven_massive._massive.spec.types",
+    "Transport": "deephaven_massive._massive.spec.types",
+    "WireType": "deephaven_massive._massive.spec.types",
+    "WireUnit": "deephaven_massive._massive.spec.types",
     "object_key": "deephaven_massive._massive.flatfiles.layout",
     "to_batch": "deephaven_massive._massive.rest.batch",
 }
@@ -82,6 +110,17 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.rest.batch import to_batch
     from deephaven_massive._massive.rest.client import RestClient
     from deephaven_massive._massive.rest.response import Page
+    from deephaven_massive._massive.spec import source, sources
+    from deephaven_massive._massive.spec.types import (
+        DriftReport,
+        Field,
+        ParamKind,
+        RestPath,
+        Source,
+        Transport,
+        WireType,
+        WireUnit,
+    )
 else:
 
     def __getattr__(name: str) -> object:
