@@ -296,10 +296,66 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
             ),
             True,  # a symbol filled from the request
         ),
+        # A symbol parameter over a string field selects one instrument per row.
+        (
+            DatasetSpec(
+                name="reference.tickers", fetch_path="/v3/reference/tickers", symbol_param="ticker"
+            ),
+            True,
+        ),
+        (
+            DatasetSpec(
+                name="stocks.snapshots",
+                asset_class=AssetClass.STOCKS,
+                fetch_path="/v2/snapshot/locale/us/markets/stocks/tickers",
+                symbol_param="tickers",
+            ),
+            True,
+        ),
+        # One over a list of tickers does not: the rows describe a filing or an article.
+        (
+            DatasetSpec(
+                name="stocks.balance_sheets",
+                asset_class=AssetClass.STOCKS,
+                fetch_path="/stocks/financials/v1/balance-sheets",
+                symbol_param="tickers.any_of",
+            ),
+            False,
+        ),
+        (
+            DatasetSpec(
+                name="reference.news", fetch_path="/v2/reference/news", symbol_param="ticker"
+            ),
+            False,
+        ),
+        # A parameter whose field the rows lack still names the instruments asked for.
+        (DatasetSpec(name="a.b", fetch_path="/v3/reference/exchanges", symbol_param="mic"), True),
     ],
 )
 def test_a_dataset_takes_symbols_by_its_transports(spec: DatasetSpec, expected: bool) -> None:
-    assert spec.takes_symbols is expected
+    assert Catalog((spec,)).takes_symbols(spec) is expected
+
+
+def test_a_filing_keeps_its_tickers_and_has_no_symbol() -> None:
+    path = "/stocks/financials/v1/balance-sheets"
+    sheets = DatasetSpec(
+        name="stocks.balance_sheets",
+        asset_class=AssetClass.STOCKS,
+        fetch_path=path,
+        symbol_param="tickers.any_of",
+        poll_keys=("Cik",),
+    )
+    assert problems(sheets) == ()
+    columns = Catalog((sheets,)).dataset_schema(sheets).column_names
+    assert "Tickers" in columns
+    assert "Symbol" not in columns
+    # Its list of tickers can never be the symbol.
+    assert problems(change(sheets, keys={(R, path): keys("Tickers")})) == (
+        (
+            "declared keys: stocks.balance_sheets: REST /stocks/financials/v1/balance-sheets: the "
+            "symbol key 'Tickers' is json-text, not a string"
+        ),
+    )
 
 
 def test_rest_capabilities() -> None:
@@ -451,7 +507,7 @@ def test_a_classed_reference_dataset_declares_no_key() -> None:
         fetch_path="/futures/v1/exchanges",
         poll_keys=("Id",),
     )
-    assert not exchanges.takes_symbols
+    assert not Catalog((exchanges,)).takes_symbols(exchanges)
     assert problems(exchanges) == ()
     # Once it takes symbols, it must say where its rows carry them.
     assert problems(change(exchanges, symbol_param="mic")) == (
@@ -586,18 +642,21 @@ def test_unique_columns_gate() -> None:
 
 
 def test_member_types_gate() -> None:
-    # The crypto stream's price as its symbol joins the kind's text Symbol: a conflict.
-    priced = {**CRYPTO_TRADES.keys, (W, "crypto/XT"): keys("Price", "ParticipantTimestamp")}
-    crypto = change(CRYPTO_TRADES, keys=priced)
-    found = problems(STOCK_TRADES, crypto)
+    # The crypto stream's price as its fan-out joins the stocks stream's text Underlying.
+    text = {**STOCK_TRADES.keys, (W, "stocks/T"): keys("Ticker", "SipTimestamp", fanout="Id")}
+    priced = {
+        **CRYPTO_TRADES.keys,
+        (W, "crypto/XT"): keys("Pair", "ParticipantTimestamp", fanout="Price"),
+    }
+    found = problems(change(STOCK_TRADES, keys=text), change(CRYPTO_TRADES, keys=priced))
     assert found == (
         (
-            "member types: stocks.trades: column 'Symbol' is string elsewhere but double in "
-            "crypto.trades WS crypto/XT"
+            "member types: stocks.trades: column 'Underlying' is string elsewhere but double "
+            "in crypto.trades WS crypto/XT"
         ),
         (
-            "member types: crypto.trades: column 'Symbol' is string elsewhere but double in "
-            "crypto.trades WS crypto/XT"
+            "member types: crypto.trades: column 'Underlying' is string elsewhere but double "
+            "in crypto.trades WS crypto/XT"
         ),
     )
 
@@ -626,6 +685,17 @@ def test_declared_keys_gate_needs_an_instant_as_the_time_key() -> None:
     undated = change(dated, keys={})
     assert problems(undated) == ()
     assert "Date" in Catalog((undated,)).dataset_schema(undated).column_names
+
+
+def test_fanout_keys_of_datasets_in_no_kind_need_not_agree() -> None:
+    # A filer CIK and a related company: two datasets in no kind, each consistent alone.
+    holdings = DatasetSpec(
+        name="stocks.institutional_holdings",
+        fetch_path="/stocks/filings/vX/13-F",
+        keys={(R, "/stocks/filings/vX/13-F"): keys(fanout=KeySpec("FilerCik", instrument=False))},
+        poll_keys=("AccessionNumber",),
+    )
+    assert problems(holdings, RELATED) == ()
 
 
 def test_fanout_keys_agree_on_instrument() -> None:
@@ -834,7 +904,6 @@ def test_a_path_parameter_is_no_filter() -> None:
         # The symbol parameter's family: its base and every suffixed form.
         "ticker",
         "ticker_any_of",
-        "ticker_gte",
         # The time axis's family, not only the start/end pair.
         "ex_dividend_date",
         "ex_dividend_date_gt",
@@ -846,6 +915,26 @@ def test_a_path_parameter_is_no_filter() -> None:
 def test_the_library_sets_some_parameters_itself(key: str) -> None:
     with pytest.raises(ValueError, match=rf"has no filter '{key}'"):
         check(DIVIDENDS, {key: "x"})
+
+
+def test_the_symbol_parameter_reserves_only_its_equality_forms() -> None:
+    # An alphabetical range of tickers is a filter `symbols` cannot express.
+    check(DIVIDENDS, {"ticker_gte": "A", "ticker_lt": "B"})
+    sheets = DatasetSpec(
+        name="stocks.balance_sheets",
+        asset_class=AssetClass.STOCKS,
+        fetch_path="/stocks/financials/v1/balance-sheets",
+        symbol_param="tickers.any_of",
+    )
+    for key in ("tickers", "tickers_any_of", "tickers_all_of"):
+        with pytest.raises(ValueError, match=rf"has no filter '{key}'"):
+            check(sheets, {key: "AAPL"})
+    assert catalog_module.symbol_family("ticker.any_of") == {
+        "ticker",
+        "ticker.any_of",
+        "ticker.all_of",
+    }
+    assert "date.all_of" in catalog_module.param_family("date.gte")
 
 
 def test_filter_values_must_fit_their_kind() -> None:

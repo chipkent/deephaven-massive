@@ -1035,9 +1035,16 @@ Notation:
   source it reads as `KeySpec`s ([section 19.4](#194-generated-schemas), "Keys are declared
   per source"): the `symbol`, `time`, and instrument `fanout` keys become `Symbol`,
   `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column. A
-  `time` key is always an instant, so `Timestamp` is an `Instant`; an axis that is a
-  calendar date ("axis `date`" below: `short_volume`, `share_float`, `economy.*`, the TMX
-  events) keeps its `LocalDate` column, such as `Date`, and declares no `time` key.
+  `time` key is always an instant, so `Timestamp` is an `Instant`. Every axis below that is
+  a calendar date (all but the instants `published_utc`, `published`, and the indicators'
+  `timestamp`: the dividends, splits, IPOs, short interest and volume, float, financials,
+  filings, futures schedules, economy, and TMX axes) keeps its `LocalDate` column under its
+  own name, such as `Date` or `ExDividendDate`, and declares no `time` key. Datasets whose
+  rows each list several tickers (a JSON `tickers` field) describe a filing, a company, or
+  an article, not one instrument: the three financial statements, `filings.insider_holdings`
+  and `filings.insider_transactions` (Forms 3 and 4), `filings.disclosures_8k`,
+  `reference.news`, and `partners.benzinga.news` have no `Symbol`, keep their `Tickers`
+  column, and use `symbols` only as a request filter ([section 10](#10-symbols-and-all)).
 
 ### 8.1 `m.stocks`
 
@@ -1305,8 +1312,13 @@ Validation is synchronous at query construction, against the generated parameter
 dataset's paths (`RestPath.params` of `spec/rest.json`,
 [section 19.4](#194-generated-schemas)), which carry each
 parameter's kind and, for an enum parameter, its values. A dataset's accepted filters are the
-union over its paths, minus the parameters the library sets itself (path segments, the symbol
-parameter, the axis pair, `limit`, `sort`, `order`, and the typed keyword parameters). An unknown
+union over its paths, minus the parameters the library sets itself: path segments; the
+equality forms of the symbol parameter (its base name, `.any_of`, and `.all_of`: `ticker`,
+`ticker.any_of`, `ticker.all_of`), while its range forms (`ticker.gte`, `ticker.lt`) stay
+filters, since `symbols` cannot express an alphabetical range; the whole family of the time
+axis (its base name and every `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and `.all_of` form,
+so `date.any_of` is reserved too although `start` and `end` cannot express a list of dates);
+`limit`, `sort`, `order`; and the typed keyword parameters. An unknown
 key, a value of the wrong kind, or a value outside a parameter's enum raises `ValueError` naming
 the valid keys or values. When Massive adds a filter, refreshing the snapshot adds it; no code
 changes.
@@ -1314,8 +1326,9 @@ changes.
 `start` and `end` map to the wire parameter pair recorded per dataset in the catalog
 (`timestamp.gte`/`timestamp.lt`, `published_utc.gte`/`published_utc.lte`,
 `ex_dividend_date.gte`/`ex_dividend_date.lte`, `filing_date.gte`/`filing_date.lte`,
-`session_end_date.gte`/`session_end_date.lte`, and so on). Passing the same axis through
-`filters` (as `timestamp_gte`, for example) raises `ValueError`.
+`session_end_date.gte`/`session_end_date.lte`, and so on). Passing any form of the same axis
+through `filters` (as `timestamp_gte`, `timestamp_lte`, or `timestamp`, for example) raises
+`ValueError`.
 
 ## 10. Symbols and `ALL`
 
@@ -1356,7 +1369,11 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   as a path parameter, as `/v3/trades/{t}` and `/v2/aggs/ticker/{t}/…` do, or holds it outside
   the result key, as `/v1/last/crypto` and `/v1/last_quote` do), `Symbol` is filled from the
   request ([section 19.4](#194-generated-schemas)). A dataset whose rows describe no instrument
-  (`reference.exchanges`, `economy.*`) has no `Symbol` column.
+  (`reference.exchanges`, `economy.*`) has no `Symbol` column. Nor does a dataset whose rows
+  each list several tickers, because no single instrument is the row's: the three financial
+  statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, and
+  `partners.benzinga.news` keep their `Tickers` column (JSON text), and `symbols` there only
+  filters the request (`tickers.any_of` or `ticker`). `Symbol` is never a list.
 
 ## 11. Enums and types
 
@@ -2989,10 +3006,15 @@ columns as `KeySpec(column, from_request=False, instrument=True)`, grouped per s
 
 - every source of a dataset in a kind declares `symbol` and `time`;
 - every source of any other instrument dataset declares `symbol`. A dataset is an instrument
-  dataset when it takes symbols: it has channels, flat files, a `symbol_param`,
-  `per_symbol`, or a symbol filled from the request. Its asset class alone does not make it
-  one: `futures.exchanges` and `futures.schedules` keep `FUTURES` for the session-day rule
-  and take no symbols;
+  dataset when it takes symbols: it has channels, flat files, `per_symbol`, a symbol
+  filled from the request, or a `symbol_param` that filters a single-ticker field. A
+  `symbol_param` over a list-valued field (the generated `tickers` field of a filing or an
+  article is `json-text`) does not make one: those rows have no `Symbol`
+  ([section 10](#10-symbols-and-all)). The field is the row field of the parameter's base
+  name, singular or plural, read from the generated path, never from a hand list. Its asset
+  class alone does not make a dataset one either: `futures.exchanges` and
+  `futures.schedules` keep `FUTURES` for the session-day rule and take no symbols;
+- a `symbol` key from the rows is a `string` field: a list of tickers is never `Symbol`;
 - any other dataset declares only the keys its rows carry, possibly none: `reference.exchanges`,
   `conditions`, `market_status`, `market_holidays`, and `ticker_types`, `futures.exchanges`,
   and `benzinga.firms` declare none, and `economy.*` declares none either: it keeps its `Date`

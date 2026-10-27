@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Final, cast
 from deephaven_massive._datasets.dates import parse_date_like, require_aware
 from deephaven_massive._datasets.schema import dataset_schema, rename
 from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan
-from deephaven_massive._massive import ParamKind, Transport, sources
+from deephaven_massive._massive import ParamKind, Transport, WireType, sources
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -63,8 +63,14 @@ _LIBRARY_PARAMS: Final = frozenset({"limit", "sort", "order", "adjusted"})
 _TIME_KINDS: Final = frozenset({ParamKind.DATE, ParamKind.TIMESTAMP})
 """The parameter kinds whose text value must be an ISO-8601 date or an instant with an offset."""
 
-_FILTER_SUFFIXES: Final = ("gt", "gte", "lt", "lte", "any_of")
+_FILTER_SUFFIXES: Final = ("gt", "gte", "lt", "lte", "any_of", "all_of")
 """The suffixes the specification adds to a parameter's base name (`timestamp.gte`)."""
+
+_EQUALITY_SUFFIXES: Final = ("any_of", "all_of")
+"""The suffixes that, like the base name, select rows by equal values (`tickers.any_of`)."""
+
+_LIST_TYPES: Final = frozenset({WireType.JSON_TEXT, WireType.INT_ARRAY})
+"""Wire types of a field that holds several values, such as a filing's list of tickers."""
 
 _SOURCE_GONE: Final = "deprecated or removed in the snapshot"
 
@@ -270,8 +276,10 @@ class DatasetSpec:
         Raises:
             ValueError: If the name is not `"<namespace>.<dataset>"`; the keys of `channels`
                 or `flat_file_prefixes` do not match `is_bars`; a dataset with channels or a
-                kind has no `asset_class`; `keys` names a source the dataset does not use, or
-                fills a `time` or `session` key from the request; a flat-file prefix does not
+                kind has no `asset_class`; `keys` names a source the dataset does not use,
+                fills a `time` or `session` key from the request, marks a key other than
+                `fanout` as no instrument, or fills a non-instrument fan-out key from the
+                request; a flat-file prefix does not
                 declare its `symbol` and `time` keys from its own columns (and, for futures,
                 its `session` key, against which every futures file is checked); or the
                 transports match no query class (see the class docstring and `_check_verbs`).
@@ -318,26 +326,6 @@ class DatasetSpec:
             *((Transport.FLAT_FILES, prefix) for prefix in self.flat_file_prefixes.values()),
         ]
         return tuple(dict.fromkeys(found))
-
-    @property
-    def takes_symbols(self) -> bool:
-        """True for an instrument dataset: one whose requests name instruments.
-
-        A dataset takes symbols when it has channels or flat files (both are read per
-        instrument), a `symbol_param`, `per_symbol` requests, or a symbol filled from the
-        request. Its asset class alone does not make it one: `futures.exchanges` keeps
-        `FUTURES` for the session-day rule and takes no symbols.
-        """
-        from_request = any(
-            keys.symbol is not None and keys.symbol.from_request for keys in self.keys.values()
-        )
-        return bool(
-            self.channels
-            or self.flat_file_prefixes
-            or self.symbol_param is not None
-            or self.per_symbol
-            or from_request
-        )
 
     @property
     def axis_params(self) -> frozenset[str]:
@@ -467,14 +455,34 @@ class DatasetSpec:
 def param_family(name: str) -> frozenset[str]:
     """Return a wire parameter, its base name, and every suffixed form of the base.
 
+    The time axis reserves this whole family: no filter may bound or select the axis beside
+    `start` and `end`, although `start` and `end` cannot express an `.any_of` list of dates.
+
     Args:
         name: A wire parameter name, such as `"timestamp.gte"` or `"ticker"`.
 
     Returns:
-        The base (`"timestamp"`) and its `.gt`, `.gte`, `.lt`, `.lte`, and `.any_of` forms.
+        The base (`"timestamp"`) and its `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and
+        `.all_of` forms.
     """
     base = name.split(".", 1)[0]
     return frozenset({base, *(f"{base}.{suffix}" for suffix in _FILTER_SUFFIXES)})
+
+
+def symbol_family(name: str) -> frozenset[str]:
+    """Return the equality forms of a symbol parameter, which only `symbols` may set.
+
+    The range forms stay filters: `ticker_gte` and `ticker_lt` select an alphabetical range
+    of tickers, which `symbols` cannot express.
+
+    Args:
+        name: The symbol parameter, such as `"ticker.any_of"` or `"tickers"`.
+
+    Returns:
+        The base (`"ticker"`) and its `.any_of` and `.all_of` forms.
+    """
+    base = name.split(".", 1)[0]
+    return frozenset({base, *(f"{base}.{suffix}" for suffix in _EQUALITY_SUFFIXES)})
 
 
 def filter_key(name: str) -> str:
@@ -679,8 +687,9 @@ class Catalog:
         Runs synchronously when the query is built. A key is a wire parameter's name with its
         dots written as underscores (`strike_price_gte` for `strike_price.gte`), for any query
         parameter of any of the dataset's REST paths, except the ones the library sets itself:
-        the symbol parameter and the time axis, each with its base name and every suffixed
-        form of it (`param_family`), `limit`, `sort`, `order`, and `adjusted`.
+        the equality forms of the symbol parameter (`symbol_family`: its base, `.any_of`, and
+        `.all_of`), the whole family of the time axis (`param_family`: its base and every
+        suffixed form), `limit`, `sort`, `order`, and `adjusted`.
 
         Args:
             spec: The dataset.
@@ -697,7 +706,7 @@ class Catalog:
         """
         if not filters:
             return
-        symbols = () if spec.symbol_param is None else param_family(spec.symbol_param)
+        symbols = () if spec.symbol_param is None else symbol_family(spec.symbol_param)
         reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols}
         params = {
             filter_key(param.name): param
@@ -745,7 +754,7 @@ class Catalog:
         - **declared keys:** every key a dataset declares for a source is a column of that
           source after the projection of the dataset's membership, or is filled from the
           request; every source of a dataset in a kind declares `symbol` and `time`, and every
-          source of an instrument dataset (`DatasetSpec.takes_symbols`) declares `symbol`; a
+          source of an instrument dataset (`takes_symbols`) declares `symbol`; a
           `time` key is an `epoch` or `iso-instant` field, so `Timestamp` is an `Instant`; and
           the `fanout` keys agree on `KeySpec.instrument` across the dataset's sources and
           across the members of its kind.
@@ -803,7 +812,7 @@ class Catalog:
         needed: tuple[str, ...] = ()
         if spec.kind is not None:
             needed = ("symbol", "time")
-        elif spec.takes_symbols:
+        elif self.takes_symbols(spec):
             needed = ("symbol",)
         found = []
         for transport, key in spec.sources:
@@ -819,6 +828,40 @@ class Catalog:
             except ValueError as error:
                 found.append(str(error))
         return found + self._fanout_problems(spec)
+
+    def takes_symbols(self, spec: DatasetSpec) -> bool:
+        """Tell whether a dataset is an instrument dataset: one whose rows each name one.
+
+        A dataset takes symbols when it has channels or flat files (both are read per
+        instrument), `per_symbol` requests, a symbol filled from the request, or a
+        `symbol_param` that selects rows by one ticker each. A symbol parameter that filters a
+        field holding several tickers (a filing's or an article's `tickers`, a JSON list) does
+        not make one: such a row describes no single instrument, so the dataset has no
+        `Symbol` and keeps its `Tickers` column. The filtered field is the row field of the
+        parameter's base name, singular or plural (`tickers.any_of` filters `tickers`, and
+        `ticker` filters `tickers` on the news path); with no such field, the parameter counts.
+        Its asset class alone does not make a dataset an instrument dataset:
+        `futures.exchanges` keeps `FUTURES` for the session-day rule and takes no symbols.
+
+        Args:
+            spec: The dataset; its REST paths are generated.
+
+        Returns:
+            True for an instrument dataset.
+
+        An unknown REST path raises the `KeyError` of `source`.
+        """
+        from_request = any(
+            keys.symbol is not None and keys.symbol.from_request for keys in spec.keys.values()
+        )
+        if spec.channels or spec.flat_file_prefixes or spec.per_symbol or from_request:
+            return True
+        primary = spec.history_path or spec.fetch_path
+        if spec.symbol_param is None or primary is None:
+            return False
+        stem = spec.symbol_param.split(".", 1)[0].removesuffix("s")
+        filtered = [f for f in self._rest(primary).fields if f.wire_key.removesuffix("s") == stem]
+        return not any(f.wire_type in _LIST_TYPES for f in filtered)
 
     def _fanout_problems(self, spec: DatasetSpec) -> list[str]:
         """Check that the dataset's fan-out keys agree on whether they name an instrument.

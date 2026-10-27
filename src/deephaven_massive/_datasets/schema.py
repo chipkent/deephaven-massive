@@ -412,11 +412,11 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
         The columns, keys filled from the request first, then the fields in source order.
 
     Raises:
-        ValueError: If a declared key is not a column of the source after the projection
-            a time key is not an `epoch` or `iso-instant` field, or two keys name one column
-            (`"declared keys: ..."`),
-            or two columns share a name after the rename
-            (`"unique columns: ..."`); the message names the dataset and the source.
+        ValueError: If a declared key is not a column of the source after the projection,
+            a time key is not an `epoch` or `iso-instant` field, a symbol key from the rows
+            is not a `string` field, or two keys name one column (`"declared keys: ..."`); or
+            if two columns share a name after the rename (`"unique columns: ..."`). The
+            message names the dataset and the source.
     """
     projection = _projection(spec, source)
     fields = [f for f in source.fields if projection is None or f.wire_key in projection]
@@ -440,6 +440,12 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
             raise ValueError(
                 f"declared keys: {where}: the time key {key.column!r} is "
                 f"{by_column[key.column].wire_type}, not an instant (epoch or iso-instant)"
+            )
+        elif role == "symbol" and by_column[key.column].wire_type is not WireType.STRING:
+            # A list of tickers describes no single instrument (a filing's `tickers`).
+            raise ValueError(
+                f"declared keys: {where}: the symbol key {key.column!r} is "
+                f"{by_column[key.column].wire_type}, not a string"
             )
         elif key.column in roles:
             # One column cannot take two names: the second rename would replace the first.
@@ -502,8 +508,9 @@ def _by_position(
     """Return a member's sources in the order of their positions in its kind's group.
 
     The merge walks them in this order, so a schema's column order follows the generated
-    memberships, never the order of the spec's role paths or mappings. A source without a
-    membership (every source of a dataset in no kind) keeps its declared place after them.
+    memberships, never the order of the spec's role paths or mappings. Every source of a
+    kind dataset holds a position (the kind-membership gate); a dataset in no kind has none,
+    so its sources keep their declared order.
 
     Args:
         member: The dataset.
@@ -514,10 +521,9 @@ def _by_position(
     """
     found = [(transport, key, source(transport, key)) for transport, key in member.sources]
 
-    def rank(item: tuple[int, tuple[Transport, str, Source]]) -> tuple[bool, int, int]:
+    def rank(item: tuple[int, tuple[Transport, str, Source]]) -> tuple[int, int]:
         index, (_, _, generated) = item
-        position = _position(member, generated)
-        return (position is None, position or 0, index)
+        return (_position(member, generated) or 0, index)
 
     return [entry for _, entry in sorted(enumerate(found), key=rank)]
 
