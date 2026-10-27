@@ -257,6 +257,17 @@ ENUM_PARAMETERS = {
     "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
     "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
+    **dict.fromkeys(
+        (
+            "_Options.bars.timespan",
+            "_Options.chain.contract_type",
+            "_Options.chain.order",
+            "_Options.snapshots.order",
+            "_Options.contracts.contract_type",
+            "_Options.contracts.order",
+        ),
+        "namespaces/test_options.py::test_enum_arguments_reject_plain_strings",
+    ),
 }
 
 
