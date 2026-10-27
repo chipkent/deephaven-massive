@@ -14,8 +14,13 @@ to keep.
   `MassiveConfig.max_concurrency` at a time, each in blocks of `BLOCK_SIZE` bytes. Each block
   is first checked (futures sessions), then filtered to the requested symbols with
   `pyarrow.compute.is_in` (symbol pushdown) and to the half-open `[start, end)` range on
-  `Timestamp`; only the surviving rows are renamed to the dataset's PascalCase columns, have
-  their condition and indicator lists parsed, and are converted to the column types here. A
+  `Timestamp`; only the surviving rows are renamed to the dataset's columns, have their
+  condition and indicator lists parsed, and are converted to the column types here. The
+  headers, their types, and their timestamp units are the prefix's generated fields
+  (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
+  columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
+  do not carry is null and a column a kind widens (an integer size in a `double` column) is
+  widened. A
   file's surviving rows become one static Deephaven table per `_TABLE_BLOCKS` blocks of data
   (usually one table per file), and the tables are merged at the end. No block is ever
   converted to Python objects. Arrow reads about 32 blocks ahead of the consumer on its own
@@ -37,8 +42,9 @@ Columns are matched by header name, never by position, so a file whose columns a
 reads identically. Every `Instant` column goes through the timestamp routine of
 `_datasets/timestamps.py`: Massive writes `0` where a timestamp has no value (`trf_timestamp` of
 a trade without a TRF), so in every `Instant` column except `Timestamp` a `0` becomes null; each
-value is then scaled to nanoseconds by its declared unit, with an overflow check, and must lie in
-1990 to 2100, so a wrongly declared unit fails the read instead of returning wrong instants.
+value is then scaled to nanoseconds by its field's unit, with an overflow check, and must lie in
+1990 to 2100, so a file in another unit than documented fails the read instead of returning
+wrong instants.
 
 Schema drift is reported, not raised: a header the dataset does not document is dropped, and a
 documented header the file lacks becomes a column of nulls; each logs one WARNING per
@@ -201,7 +207,8 @@ def _conform(values: pa.Array, target: pa.DataType) -> pa.Array:
 
     A source joins its kind with its own wire type, which the merged column may widen: a
     `long` in a `double` column is cast, and a `long` in an `int[]` column becomes a
-    one-element list (a null stays null).
+    one-element list (a null stays null). A column already of its type is cast to itself, at
+    no cost.
 
     Args:
         values: The column as read, in its wire type's Arrow type.
@@ -210,8 +217,6 @@ def _conform(values: pa.Array, target: pa.DataType) -> pa.Array:
     Returns:
         The column in `target`.
     """
-    if values.type == target:
-        return values
     if pa.types.is_list(target) and not pa.types.is_list(values.type):
         offsets = pa.array(range(len(values) + 1), pa.int32())
         items = pc.cast(values, target.value_type)

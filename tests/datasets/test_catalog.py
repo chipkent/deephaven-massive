@@ -681,6 +681,13 @@ def test_filters_are_the_query_parameters_of_the_dataset_paths() -> None:
         check(DIVIDENDS, {"pay_date_lte": "2025-01-01"})
 
 
+def test_a_path_parameter_is_no_filter() -> None:
+    indicator = DatasetSpec(name="indicators.sma", fetch_path="/v1/indicators/sma/{stockTicker}")
+    check(indicator, {"window": 50})
+    with pytest.raises(ValueError, match=r"has no filter 'stockTicker'"):
+        check(indicator, {"stockTicker": "AAPL"})
+
+
 @pytest.mark.parametrize(
     "key", ["limit", "sort", "ticker_any_of", "ex_dividend_date_gte", "ex_dividend_date_lte"]
 )

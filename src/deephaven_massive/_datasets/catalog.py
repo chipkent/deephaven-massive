@@ -386,14 +386,8 @@ class DatasetSpec:
             ValueError: If a prefix lacks its `symbol` or `time` key, or, for futures, its
                 `session` key, or fills one from the request.
         """
-        needed = (
-            ("symbol", "time", "session")
-            if self.asset_class is AssetClass.FUTURES
-            else (
-                "symbol",
-                "time",
-            )
-        )
+        futures = self.asset_class is AssetClass.FUTURES
+        needed = ("symbol", "time", *(("session",) if futures else ()))
         for prefix in self.flat_file_prefixes.values():
             declared = dict(self.keys_for(Transport.FLAT_FILES, prefix).declared())
             lacking = [r for r in needed if r not in declared or declared[r].from_request]
@@ -736,8 +730,11 @@ class Catalog:
         Returns:
             The `declared keys` and `unique columns` failures.
         """
-        instrument = spec.asset_class is not None or "symbol" in spec.declared_roles
-        needed = ("symbol", "time") if spec.kind is not None else ("symbol",) if instrument else ()
+        needed: tuple[str, ...] = ()
+        if spec.kind is not None:
+            needed = ("symbol", "time")
+        elif spec.asset_class is not None or "symbol" in spec.declared_roles:
+            needed = ("symbol",)  # an instrument dataset
         found = []
         for transport, key in spec.sources:
             roles = {role for role, _ in spec.keys_for(transport, key).declared()}

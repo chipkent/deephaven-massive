@@ -27,6 +27,8 @@ from deephaven_massive._tables.columns import col_defs
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 ALL_TYPES = Schema("all", tuple(Column(t.name.title().replace("_", ""), t) for t in ColumnType))
+# The wire interface names `Source.memberships` but exports no constructor for an element.
+MEMBERSHIP = type(source(R, "/v3/snapshot/indices").memberships[0])
 
 
 # --- Column types and Schema -----------------------------------------------------------------
@@ -272,6 +274,34 @@ def test_a_projection_keeps_and_names_the_member_fields() -> None:
         "Exchange",
         "Timestamp",
     ]
+
+
+def test_a_projection_belongs_to_the_dataset_group() -> None:
+    # One source in two groups of one kind, projected differently in each.
+    shared = Source(
+        key="/shared",
+        transport=R,
+        fields=(
+            Field(wire_key="ticker", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="ask", column="Ask", wire_type=WireType.DOUBLE),
+        ),
+        memberships=(
+            MEMBERSHIP(kind="quotes", group="stocks", position=0, projection={"ask": "AskPrice"}),
+            MEMBERSHIP(
+                kind="quotes",
+                group="forex",
+                position=0,
+                projection={"ticker": "Ticker", "ask": "Offer"},
+            ),
+        ),
+    )
+    forex = spec(
+        "forex.quotes",
+        {(R, "/shared"): SourceKeys(KeySpec("Ticker"))},
+        asset_class=AssetClass.FOREX,
+        kind="quotes",
+    )
+    assert [c.column for c in rename(forex, shared)] == ["Symbol", "Offer"]
 
 
 def test_the_fmv_channel_takes_the_magnitude_rule() -> None:
