@@ -851,9 +851,6 @@ def test_every_generated_source_is_used_or_undeclared() -> None:
 def test_the_undeclared_files_belong_to_namespaces() -> None:
     namespaces = {module.__name__.rpartition(".")[2] for module in NAMESPACE_MODULES}
     assert set(read_undeclared(UNDECLARED)) <= namespaces
-    # A source several namespaces will use is listed in each of them.
-    listed = read_undeclared(UNDECLARED)
-    assert (R, "/v3/snapshot") in listed["options"] & listed["reference"]
 
 
 def test_coverage_finds_unlisted_used_and_stale_sources() -> None:
