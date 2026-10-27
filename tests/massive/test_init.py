@@ -10,22 +10,34 @@ from types import ModuleType
 import pytest
 
 from deephaven_massive import _massive
+from deephaven_massive._massive import spec
 from deephaven_massive._massive.flatfiles import client as flatfiles_client
 from deephaven_massive._massive.flatfiles import layout, reader
 from deephaven_massive._massive.net import errors
 from deephaven_massive._massive.rest import batch, client, response
+from deephaven_massive._massive.spec import types
 
 EXPECTED_INTERFACE = [
+    "DriftReport",
+    "Field",
     "FlatFile",
     "FlatFileClient",
     "Page",
+    "ParamKind",
     "ReadColumn",
     "ReadPlan",
     "RestClient",
+    "RestPath",
+    "Source",
+    "Transport",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WireType",
+    "WireUnit",
     "object_key",
+    "source",
+    "sources",
     "to_batch",
 ]
 
@@ -38,6 +50,12 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.WireError is errors.WireError
     assert _massive.WireAuthError is errors.WireAuthError
     assert _massive.WireEntitlementError is errors.WireEntitlementError
+    assert _massive.source is spec.source
+    assert _massive.sources is spec.sources
+    for name in ("DriftReport", "Field", "ParamKind", "RestPath", "Source", "Transport"):
+        assert getattr(_massive, name) is getattr(types, name)
+    assert _massive.WireType is types.WireType
+    assert _massive.WireUnit is types.WireUnit
     assert _massive.FlatFileClient is flatfiles_client.FlatFileClient
     assert _massive.FlatFile is reader.FlatFile
     assert _massive.ReadPlan is reader.ReadPlan

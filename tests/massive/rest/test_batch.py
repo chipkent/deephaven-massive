@@ -10,6 +10,7 @@ import pytest
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.spec.types import (
+    Conversion,
     DriftReport,
     Field,
     Param,
@@ -245,3 +246,18 @@ def test_an_unconvertible_value_names_the_field_type_and_50_characters() -> None
     assert str(error) == f'/v3/x: v must be long, got "{"x" * 49}'
     assert (error.status, error.path, error.host) == (None, "/v3/x", None)
     assert error.__cause__ is None
+
+
+def test_a_declared_conversion_is_applied_and_named_on_failure() -> None:
+    # A timestamp the vendor's spec leaves as plain text, decoded as the instant its samples
+    # show; a value that is not one fails, naming the conversion.
+    when = Field(
+        wire_key="serverTime",
+        column="ServerTime",
+        wire_type=WireType.ISO_INSTANT,
+        conversion=Conversion.ISO_TEXT_INSTANT,
+    )
+    batch, _ = to_batch([{"serverTime": "1970-01-01T00:00:01Z"}], _path(when), required=())
+    assert batch.column(0).cast(pa.int64()).to_pylist() == [1_000_000_000]
+    with pytest.raises(WireError, match=r"iso-instant \(by the conversion iso-text-instant\)"):
+        to_batch([{"serverTime": "soon"}], _path(when), required=())
