@@ -48,7 +48,7 @@ from deephaven.table import Table
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
 from deephaven_massive import _massive
-from deephaven_massive._config import MassiveConfig, log_json_codec_once, require_positive_int
+from deephaven_massive._config import MassiveConfig, require_positive_int
 from deephaven_massive._diagnostics import (
     Diagnostics,
     StreamRow,
@@ -976,7 +976,6 @@ class MassiveSession:
                 "create the session from the console or an application script, or use "
                 "make_user_exec_ctx() without freeze_vars."
             )
-        log_json_codec_once()
         core = SessionCore(config, exec_ctx, _next_label())
         _register(core)
         self._core = core
