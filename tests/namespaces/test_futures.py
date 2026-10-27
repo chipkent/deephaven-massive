@@ -1,6 +1,7 @@
 """Tests for the `m.futures` namespace: its dataset specs, factory methods, and schemas."""
 
 import csv
+import inspect
 import io
 import json
 import re
@@ -92,7 +93,6 @@ _PLAIN = cast("Any", "text")
         (lambda f: f.snapshots("ESZ5", order=_PLAIN), "order must be dm.Order"),
         (lambda f: f.contracts(order=_PLAIN), "order must be dm.Order"),
         (lambda f: f.products(order=_PLAIN), "order must be dm.Order"),
-        (lambda f: f.market_status(order=_PLAIN), "order must be dm.Order"),
         (lambda f: f.schedules(order=_PLAIN), "order must be dm.Order"),
     ],
     ids=[
@@ -103,7 +103,6 @@ _PLAIN = cast("Any", "text")
         "snapshots.order",
         "contracts.order",
         "products.order",
-        "market_status.order",
         "schedules.order",
     ],
 )
@@ -192,8 +191,11 @@ def test_contracts(massive_session: dm.MassiveSession) -> None:
 
 
 def test_products(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.futures.products(limit=5, filters={"sector": "precious"})
+    q = massive_session.futures.products(
+        product_code="GC", sort="name", limit=5, filters={"sector": "precious"}
+    )
     assert type(q) is Query
+    assert request(q).params == (("product_code", "GC"), ("sort", "name"))
     assert request(q).limit == 5
     with pytest.raises(ValueError, match="filter 'sector' takes"):
         massive_session.futures.products(filters={"sector": "nonsense"})
@@ -208,19 +210,30 @@ def test_exchanges(massive_session: dm.MassiveSession) -> None:
     assert repr(q) == "<Query futures.exchanges>"
 
 
+@pytest.mark.parametrize("name", ["exchanges", "market_status"])
+def test_a_path_without_sort_offers_no_sort_or_order(name: str) -> None:
+    parameters = inspect.signature(getattr(futures._Futures, name)).parameters
+    assert not {"sort", "order"} & set(parameters)
+
+
 def test_market_status(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.futures.market_status(filters={"product_code_any_of": ["ES", "CL"]})
+    q = massive_session.futures.market_status(
+        product_code="ES", limit=3, filters={"product_code_gte": "C"}
+    )
     assert type(q) is Query
-    assert request(q).filters == (("product_code_any_of", ("ES", "CL")),)
+    assert request(q).params == (("product_code", "ES"),)
+    assert request(q).filters == (("product_code_gte", "C"),)
+    assert request(q).limit == 3
     with pytest.raises(ValueError, match="has no filter 'ticker'"):
         massive_session.futures.market_status(filters={"ticker": "ESZ5"})
 
 
 def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.schedules(
-        "2025-12-22", date(2025, 12, 26), filters={"product_code": "ES"}
+        "2025-12-22", date(2025, 12, 26), product_code="ES", filters={"trading_venue": "XCME"}
     )
     assert type(q) is Query
+    assert request(q).params == (("product_code", "ES"),)
     assert request(q).start == date(2025, 12, 22)
     assert request(q).end == date(2025, 12, 26)
     assert request(massive_session.futures.schedules()).start is None
@@ -316,7 +329,7 @@ def test_docstrings_link_the_column_reference(spec: DatasetSpec) -> None:
     doc = getattr(futures._Futures, dataset).__doc__
     assert doc is not None
     assert f"{DOCS}#{dataset.replace('.', '-')}" in doc
-    assert doc.splitlines()[0].endswith(".")
+    assert doc.splitlines()[0] == spec.summary
     assert "columns()" in doc
 
 
