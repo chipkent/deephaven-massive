@@ -1398,8 +1398,8 @@ websocket-layer.
 - Modify: `_session.py` (builds `CATALOG`, the core, and `SessionClients`, then calls
   `core.attach(clients)` once), `_tables/core.py` (`attach`, the `IngestPorts` protocol, and
   `catalog`; no ingest import), `_datasets/catalog.py` (`query_class` leaves `DatasetSpec`;
-  `NAMESPACE_MODULES` and the computed import go; a `Catalog` holds the specs by name and
-  `members(kind)`), `_datasets/schema.py` (`dh_type` and `col_defs` move out),
+  `NAMESPACE_MODULES` and the computed import go; a `Catalog` holds the specs by name; its
+  `members(kind)` arrives with `kind` in generated-catalog-and-schemas), `_datasets/schema.py` (`dh_type` and `col_defs` move out),
   `_datasets/symbols.py` (`canonical_view` and the `Table` branch of `normalize` move out),
   `_namespaces/base.py` (`query_class(spec)`, `bar_query_class`, the `Table` branch of
   `build_query`), `_namespaces/__init__.py` (gains its docstring: the file is empty today, and
@@ -1413,7 +1413,8 @@ websocket-layer.
       and `flat_files()` (the `IngestPorts` protocol in `_tables/core.py`) and registers its
       closers with `core.on_close`. The body of today's `SessionCore.flat_file_transport` moves
       to `SessionClients.flat_files`.
-- [ ] `_session.py` builds `CATALOG = Catalog((*stocks.DATASETS, …))` once, at import, from
+- [ ] `_session.py` names every namespace module once, in `NAMESPACE_MODULES`, and builds
+      `CATALOG` from their `DATASETS` once, at import, from
       static imports of every namespace module, and hands it to the core; ingest reads
       `core.catalog`. A test asserts every namespace module is in `CATALOG`.
 - [ ] The query class is derived from the spec, not declared. With S = the spec has channels,
@@ -1762,8 +1763,8 @@ the catalog gates); [§ 4.1](DESIGN.md#41-source-modules) (`_datasets/catalog.py
 **Depends on.** websocket-and-flat-file-wire-schemas, flat-file-history, runtime-drift-reporting
 (and through it layer-rules). **Parallel with.** flat-file-s3-shared-rules, api-drift-check.
 
-**Files.** Modify `_datasets/catalog.py` (`DatasetSpec`, `KeySpec`, the `Catalog`'s
-`dataset_schema` cache), `_datasets/schema.py`, `_datasets/timestamps.py`, `_enums.py`,
+**Files.** Modify `_datasets/catalog.py` (`DatasetSpec`, `KeySpec`, `Catalog.members(kind)`
+and the `Catalog`'s `dataset_schema` cache), `_datasets/schema.py`, `_datasets/timestamps.py`, `_enums.py`,
 `_ingest/flatfiles.py`, `_namespaces/base.py`, and the users of `_enums.Transport` (`_query.py`,
 `_session.py`, `_tables/core.py`, `_tables/diagnostics.py`, `_datasets/history_source.py`,
 `_datasets/request.py`), and their tests (`datasets/test_catalog`, `datasets/test_schema`,
@@ -1773,6 +1774,8 @@ the catalog gates); [§ 4.1](DESIGN.md#41-source-modules) (`_datasets/catalog.py
 duplicate the wire package's `ParamKind` and `Transport`; both go.
 
 **Tasks.**
+- [ ] `Catalog.members(kind)`: the specs of one kind, in the order of their memberships,
+      for the merge below (layer-rules left it out, since no spec had a `kind` yet).
 - [ ] `DatasetSpec` gains `kind`, the per-source key columns (`KeySpec(column, from_request)`,
       optional per role, as DESIGN § 19.4 states), and the role paths (`fetch_path`,
       `history_path`, `grouped_daily_path`, `extra_paths`); `has_rest_history` and
