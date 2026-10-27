@@ -1,7 +1,18 @@
-"""The flat-file (S3) client of the Massive wire package (a marker for now, with no contents).
+"""The flat-file (S3) client of the Massive wire package.
 
-It is the home of the client for Massive's S3 flat files: object keys, the bucket client, the
-S3 error mapping, and CSV decoding into Arrow batches. It may import only `net` and `spec` from
-`_massive`. PEP 8 forbids an underscore in a package name, so it is spelled `flatfiles`; the
-library module that uses it is `_flat_files.py`.
+Massive publishes one gzip CSV file per dataset and day in an S3 bucket. This package reads
+them, and knows nothing of datasets, sessions, or Deephaven:
+
+- `layout`: `object_key`, where a dataset's file for a day lives in the bucket.
+- `client`: `FlatFileClient`, the bucket's boto3 client, its S3 error mapping to the wire errors,
+  and its close.
+- `reader`: `FlatFile`, one object's body decoded block by block into Arrow batches, filtered
+  and renamed as a `ReadPlan` of `ReadColumn`s says.
+
+The package defines and imports nothing itself: `deephaven_massive._massive` maps each of these
+names straight to its submodule, so using `object_key` or `ReadPlan` never imports `client`,
+and with it boto3. It imports only `net` from `_massive`. PEP 8 forbids an underscore in a
+package name, so it is spelled `flatfiles`; the library module that uses it is
+`_flat_files.py`, which builds the read plans and owns the missing-file policy, the reader pool,
+and cancellation.
 """

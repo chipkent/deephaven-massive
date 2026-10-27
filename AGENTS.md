@@ -173,8 +173,9 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 - `tests/conftest.py` starts one embedded Deephaven server per process in `pytest_configure`,
   before collection, with a 25 ms update-graph cycle
   (`PeriodicUpdateGraph.targetCycleDurationMillis`, checked at startup because the JVM
-  silently ignores an unknown property). Never start or stop another `Server`. Test modules
-  may import `deephaven` at module level.
+  silently ignores an unknown property). Never start or stop another `Server` in the pytest
+  process; a subprocess test may start its own. Test modules may import `deephaven` at module
+  level.
 - `pytest_configure` runs `trylast` so the JVM installs its signal handlers after pytest's
   faulthandler. The JVM raises SIGSEGV on purpose; in the other order the first one kills the
   process. A `hs_err_pid*.log` file means the JVM crashed: investigate it, do not ignore it.

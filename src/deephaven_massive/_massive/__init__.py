@@ -21,6 +21,9 @@ Interface:
     - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
       `DriftReport`: the value types of that description. A `RestPath`'s parameters are
       `Param`s, reached through `RestPath.params`.
+    - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
+      client, one file being decoded into Arrow batches, what to read from it, and where a
+      dataset's file for a day lives.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
 
@@ -47,8 +50,12 @@ from typing import TYPE_CHECKING
 __all__ = [
     "DriftReport",
     "Field",
+    "FlatFile",
+    "FlatFileClient",
     "Page",
     "ParamKind",
+    "ReadColumn",
+    "ReadPlan",
     "RestClient",
     "RestPath",
     "Source",
@@ -58,6 +65,7 @@ __all__ = [
     "WireError",
     "WireType",
     "WireUnit",
+    "object_key",
     "source",
     "sources",
     "to_batch",
@@ -65,7 +73,11 @@ __all__ = [
 
 # Each name of the interface, and the module that defines it.
 _EXPORTS: dict[str, str] = {
+    "FlatFile": "deephaven_massive._massive.flatfiles.reader",
+    "FlatFileClient": "deephaven_massive._massive.flatfiles.client",
     "Page": "deephaven_massive._massive.rest.response",
+    "ReadColumn": "deephaven_massive._massive.flatfiles.reader",
+    "ReadPlan": "deephaven_massive._massive.flatfiles.reader",
     "RestClient": "deephaven_massive._massive.rest.client",
     "WireAuthError": "deephaven_massive._massive.net.errors",
     "WireEntitlementError": "deephaven_massive._massive.net.errors",
@@ -80,12 +92,16 @@ _EXPORTS: dict[str, str] = {
     "Transport": "deephaven_massive._massive.spec.types",
     "WireType": "deephaven_massive._massive.spec.types",
     "WireUnit": "deephaven_massive._massive.spec.types",
+    "object_key": "deephaven_massive._massive.flatfiles.layout",
     "to_batch": "deephaven_massive._massive.rest.batch",
 }
 
 # Type checkers read the imports, so they see each name's real type and flag a name outside
 # the interface; at run time `__getattr__` resolves the names instead.
 if TYPE_CHECKING:
+    from deephaven_massive._massive.flatfiles.client import FlatFileClient
+    from deephaven_massive._massive.flatfiles.layout import object_key
+    from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
     from deephaven_massive._massive.net.errors import (
         WireAuthError,
         WireEntitlementError,

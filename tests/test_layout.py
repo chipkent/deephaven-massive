@@ -19,8 +19,9 @@ the imports of every module with `ast`:
 
 - Inside `_massive`, a module imports only the standard library, the wire libraries
   (`urllib3`, `websockets`, `certifi`, `orjson`, `boto3`, `botocore`, `pyarrow`), and other
-  `_massive` modules; never Deephaven, `jpy`, or the rest of the library. The one exception is
-  `typing_extensions` inside `if TYPE_CHECKING:`, which never runs.
+  `_massive` modules; never Deephaven, `jpy`, or the rest of the library. The exceptions are
+  `typing_extensions` anywhere and `types_boto3_s3` in `flatfiles`, inside
+  `if TYPE_CHECKING:`, which never runs.
 - Its subpackages are layered: `net` and `spec` import nothing else in `_massive`; `rest`,
   `ws`, and `flatfiles` import only `net` and `spec`; `refresh` may import anything, and only
   `refresh` and its tests import `refresh`.
@@ -34,8 +35,11 @@ the imports of every module with `ast`:
 
 A module named in a string counts as imported, since that is the form every dynamic import
 (`importlib.import_module` under any alias, `__import__`), patch (`mock.patch`,
-`monkeypatch.setattr`), and `sys.modules` lookup takes. Inside `_massive`, a module outside
-the six known subpackages is itself a violation, so a new module cannot escape the layers.
+`monkeypatch.setattr`), and `sys.modules` lookup takes. A string with a leading dot (such as
+the file extension `".csv.gz"`) is not a module name; a relative name counts only as the first
+argument of `import_module` with a literal package, and resolves against that package. Inside
+`_massive`, a module outside the six known subpackages is itself a violation, so a new module
+cannot escape the layers.
 This file is exempt from the rules on strings, since it names what it forbids. A bare string
 naming a network library outside `_massive` (a logger name such as `"urllib3"` passed to
 `caplog.at_level`, say) is flagged on purpose: details of those libraries belong inside the
@@ -452,8 +456,13 @@ _LAYERS = {
     "flatfiles": frozenset({"flatfiles", "net", "spec"}),
 }
 _REFRESH = "refresh"
-# A library `_massive` may import for type checking only (`override` on Python 3.11).
-_TYPE_ONLY_LIBRARY = "typing_extensions"
+# The libraries `_massive` may import for type checking only, and the layers that may: any
+# layer for `typing_extensions` (`override` on Python 3.11), only `flatfiles` for the boto3
+# stubs' `S3Client`.
+_TYPE_ONLY_LIBRARIES: dict[str, frozenset[str] | None] = {
+    "typing_extensions": None,
+    "types_boto3_s3": frozenset({"flatfiles"}),
+}
 
 # The vendor files of the spec snapshot, and its directory (outside the package, at the top of
 # the checkout).
@@ -504,8 +513,10 @@ def _imports(tree: ast.Module, package: str) -> list[tuple[int, str]]:
     """Return every module a file imports by statement, as absolute names with their line.
 
     A `from a import b` counts as importing `a.b`, since `b` may be a submodule, and so does
-    `__import__("a", fromlist=["b"])` with literal names. Every other dynamic import names its
-    module in a string, which `_module_strings` reports.
+    `__import__("a", fromlist=["b"])` with literal names. A relative name passed to
+    `import_module` with a literal package (`import_module("._massive.net", "deephaven_massive")`
+    or `package=`) counts as importing the module it resolves to. Every other dynamic import
+    names its module in a string, which `_module_strings` reports.
 
     Args:
         tree: The file's syntax tree.
@@ -528,7 +539,38 @@ def _imports(tree: ast.Module, package: str) -> list[tuple[int, str]]:
             )
         elif isinstance(node, ast.Call) and ast.unparse(node.func) == "__import__" and node.args:
             found.extend((node.lineno, name) for name in _fromlist_imports(node))
+        elif isinstance(node, ast.Call) and (relative := _relative_import(node)) is not None:
+            found.append((node.lineno, relative))
     return found
+
+
+def _relative_import(call: ast.Call) -> str | None:
+    """Resolve `import_module("<.relative>", <package>)` with literal arguments.
+
+    Args:
+        call: A call expression.
+
+    Returns:
+        The absolute module name, or `None` when the call is not `import_module` (by any
+        attribute path, such as `importlib.import_module`) or its name or package is not a
+        literal, or the name is not relative.
+    """
+    if ast.unparse(call.func).split(".")[-1] != "import_module" or not call.args:
+        return None
+    name = call.args[0]
+    package = next((k.value for k in call.keywords if k.arg == "package"), None)
+    if package is None and len(call.args) > 1:
+        package = call.args[1]
+    if not (
+        isinstance(name, ast.Constant)
+        and isinstance(name.value, str)
+        and name.value.startswith(".")
+        and isinstance(package, ast.Constant)
+        and isinstance(package.value, str)
+    ):
+        return None
+    stripped = name.value.lstrip(".")
+    return _absolute(package.value, len(name.value) - len(stripped), stripped or None)
 
 
 def _fromlist_imports(call: ast.Call) -> list[str]:
@@ -579,8 +621,9 @@ def _module_strings(tree: ast.Module) -> list[tuple[int, str]]:
 
     A module named in a string can be imported (`importlib.import_module`, `__import__`, under
     any alias or keyword), patched (`mock.patch`, `monkeypatch.setattr`), or looked up
-    (`sys.modules`), so the rules treat such a string as an import. A relative name such as
-    `"._massive.net"` is read as being under `deephaven_massive`.
+    (`sys.modules`), so the rules treat such a string as an import. A string that starts with
+    a dot is not a module name on its own (`".csv.gz"` is a file extension): it names a module
+    only as the relative argument of `import_module`, which `_imports` resolves.
 
     Args:
         tree: The file's syntax tree.
@@ -596,12 +639,11 @@ def _module_strings(tree: ast.Module) -> list[tuple[int, str]]:
             not isinstance(node, ast.Constant)
             or not isinstance(node.value, str)
             or id(node) in skipped
+            or node.value.startswith(".")
             or not _DOTTED_NAME.fullmatch(node.value)
         ):
             continue
         name = node.value
-        if name.startswith("."):
-            name = f"{_PACKAGE}.{name.lstrip('.')}"
         if name.split(".")[0] in _NAMED_TOPS:
             found.append((node.lineno, name))
     return found
@@ -757,8 +799,10 @@ def _wire_rules(where: str, tree: ast.Module, *, module: str, package: str) -> l
     found = []
     for line, name in [*_imports(tree, package), *_module_strings(tree)]:
         top = name.split(".")[0]
-        if top == _TYPE_ONLY_LIBRARY and line in type_only:
-            continue
+        if top in _TYPE_ONLY_LIBRARIES and line in type_only:
+            layers = _TYPE_ONLY_LIBRARIES[top]
+            if layers is None or layer in layers:
+                continue
         if _inside(name, _WIRE):
             target = _wire_layer(name)
             if target == _REFRESH and layer != _REFRESH:
@@ -929,7 +973,7 @@ def test_the_wire_package_must_not_import_outside_its_allow_list(source: str, na
     assert message.startswith(f"{_WIRE_FILE}:1: the wire package must not import {name}")
 
 
-def test_the_wire_package_may_import_typing_extensions_for_type_checking_only() -> None:
+def test_the_wire_package_may_import_the_type_only_libraries_for_type_checking_only() -> None:
     type_only = (
         "from typing import TYPE_CHECKING\n"
         "if TYPE_CHECKING:\n"
@@ -945,6 +989,23 @@ def test_the_wire_package_may_import_typing_extensions_for_type_checking_only() 
     ]:
         [message] = _check(_WIRE_FILE, source)
         assert message.startswith(f"{_WIRE_FILE}:{line}: the wire package must not import")
+
+
+_FLAT_FILE_CLIENT = "src/deephaven_massive/_massive/flatfiles/client.py"
+
+
+def test_only_flatfiles_may_import_the_boto3_s3_stubs_for_type_checking_only() -> None:
+    stubs = "if TYPE_CHECKING:\n    from types_boto3_s3.client import S3Client\n"
+    assert _check(_FLAT_FILE_CLIENT, stubs) == []
+    for path, source, line in [
+        (_WIRE_FILE, stubs, 2),  # another subpackage
+        ("src/deephaven_massive/_massive/net/http.py", stubs, 2),
+        (_FLAT_FILE_CLIENT, "from types_boto3_s3.client import S3Client\n", 1),
+        (_FLAT_FILE_CLIENT, "if TYPE_CHECKING:\n    pass\nelse:\n    import types_boto3_s3\n", 4),
+        (_FLAT_FILE_CLIENT, "if TYPE_CHECKING:\n    import types_boto3_ec2\n", 2),
+    ]:
+        [message] = _check(path, source)
+        assert message.startswith(f"{path}:{line}: the wire package must not import")
 
 
 # Inside the wire package: the layers.
@@ -1078,6 +1139,19 @@ def test_the_library_may_use_the_interface_through_relative_imports() -> None:
             "__import__('deephaven_massive._massive', None, None, ('spec',))\n",
             "deephaven_massive._massive.spec",
         ),
+        # A relative name is resolved against the literal package given with it.
+        (
+            "importlib.import_module('._massive.net', 'deephaven_massive')\n",
+            "deephaven_massive._massive.net",
+        ),
+        (
+            "import_module('.net', package='deephaven_massive._massive')\n",
+            "deephaven_massive._massive.net",
+        ),
+        (
+            "importlib.import_module('.._massive.rest', 'deephaven_massive._namespaces')\n",
+            "deephaven_massive._massive.rest",
+        ),
     ],
 )
 def test_outside_code_must_not_import_a_wire_submodule(source: str, name: str) -> None:
@@ -1104,10 +1178,6 @@ def test_outside_code_must_not_import_a_wire_submodule(source: str, name: str) -
         ),
         (
             "importlib.import_module(name='deephaven_massive._massive.net')\n",
-            "deephaven_massive._massive.net",
-        ),
-        (
-            "importlib.import_module('._massive.net', 'deephaven_massive')\n",
             "deephaven_massive._massive.net",
         ),
         ("__import__('deephaven_massive._massive.ws')\n", "deephaven_massive._massive.ws"),
@@ -1143,6 +1213,11 @@ def test_outside_code_must_not_name_a_wire_submodule(source: str, name: str) -> 
         "x = 'deephaven_massive._massive.WireError'\n",
         "x = 'deephaven_massive._types'\n",
         "x = 'results'\ny = 'net'\nz = 'stocks/T'\n",
+        # A string with a leading dot is a module only as import_module's relative argument.
+        "suffix = '.csv.gz'\nkind = '._massive.net'\n",
+        "importlib.import_module('._massive.net')\n",  # no package: Python itself refuses
+        "importlib.import_module('.net', name)\n",  # a package that is not a literal
+        "os.path.join('._massive', 'deephaven_massive')\n",  # not import_module
         '"""See deephaven_massive._massive.net for the codec."""\n',
     ],
 )

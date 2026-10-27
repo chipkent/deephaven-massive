@@ -1675,8 +1675,9 @@ Keys are read by a per-call pool of `min(max_concurrency, keys)` threads. A fail
 interrupt of the calling thread, or `m.close()` stops every other read at its next block, and
 reads not yet started are cancelled; the failure of the earliest file is raised. After a close,
 no request starts once a reader has seen the close; a request already in flight is discarded
-(its connection pool is closed once the call's reads have drained), and the call raises
-`MassiveError("MassiveSession #1 is closed")`, whatever that request returned.
+(the client closes its connection pool once more as that request returns, so nothing it opened
+outlives the close), and the call raises `MassiveError("MassiveSession #1 is closed")`,
+whatever that request returned.
 
 ## 17. Diagnostics
 
@@ -1774,8 +1775,11 @@ without the GIL.
   - the REST transport's host-decision cache, which holds one future per (class, family);
     callers wait on a future outside every lock (§ 13.2);
   - `FlatFileClient`'s lock, one per session, which guards the creation and the close of the
-    boto3 S3 client (creation reads local AWS configuration but makes no request); its closed
-    flag is a `threading.Event`, read without the lock by the reader threads;
+    boto3 S3 client (creation reads local AWS configuration but makes no request, since the
+    credentials are given); its closed flag is a `threading.Event`, read without the lock by
+    the reader threads. The session creates the `FlatFileClient` itself on its first flat-file
+    read, under `registry_lock` (the constructor only stores settings), and registers its close
+    after releasing the lock;
   - the `_massive.spec` loaders, which load each generated file once;
   - `RestClient`'s not-before instant (section 19.1);
   - the session's `DriftRegistry`, whose WARNINGs are logged after the lock is released;
@@ -1888,9 +1892,11 @@ ws/                  imports net, spec
                      rows + rejects + DriftReport, symbol normalization, failure classification
   backoff.py         backoff policy, stable-uptime reset
 flatfiles/           imports net, spec
-  __init__.py        FlatFileClient, FlatFile, ReadPlan, ReadColumn, object_key
+  __init__.py        docstring only: _massive's interface maps each name to its submodule,
+                     so no flat-file name but FlatFileClient imports boto3
   client.py          FlatFileClient: lazy boto3 client under a leaf lock, closed flag,
-                     open(key) -> FlatFile | None, S3 error mapping, prefixes(), close()
+                     open(key) -> FlatFile | None, S3 error mapping, prefixes(), close();
+                     botocore's body read errors become OSError
   layout.py          object_key(prefix, day, venue): <prefix>/<YYYY>/<MM>/<date>.csv.gz; {venue} template
   reader.py          FlatFile.batches(plan) -> (RecordBatch, DriftReport) per block; header peek
 refresh/             build time only; excluded from the wheel; may import any of the above
@@ -1955,8 +1961,9 @@ negative test per rule:
 - Inside `_massive`, a module imports only the standard library, `urllib3`, `websockets`,
   `certifi`, the optional `orjson`, `boto3`, `botocore`, `pyarrow`, and other `_massive`
   modules. It never imports `deephaven`, `deephaven_server`, `jpy`, or any module outside
-  `_massive`. The one exception is `typing_extensions` inside `if TYPE_CHECKING:` (for
-  `override` on Python 3.11), which never runs.
+  `_massive`. The exceptions are `typing_extensions` (for `override` on Python 3.11) and, in
+  `flatfiles` only, `types_boto3_s3` (for `S3Client`), inside `if TYPE_CHECKING:` only, which
+  never runs.
 - **Layers.** `net` and `spec` import nothing else in `_massive`. `rest`, `ws`, and `flatfiles`
   import only `net` and `spec`. `refresh` may import any of them, and only `refresh` and its
   tests import `refresh`.
@@ -2177,8 +2184,11 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
 ### 19.3 The flat-file client
 
 `_massive.FlatFileClient(access_key_id, secret_access_key, endpoint_url, bucket, max_pool)` is
-one object per session, closed by `m.close()`. It creates its boto3 S3 client lazily, under a
-leaf lock, and keeps a closed flag (a `threading.Event`); once closed, it makes no request.
+one object per session, created by the session's first flat-file read (only after the source
+choice has required both credentials, which are therefore `str`) and closed by `m.close()`. It
+creates its boto3 S3 client lazily, under a leaf lock, and keeps a closed flag (a
+`threading.Event`); once closed, it makes no request. A request in flight at the close closes
+the client again as it returns.
 
 - **`open(key) -> FlatFile | None`.** `None` for a missing key (404). `object_key(prefix, day,
   venue)` builds keys as `<prefix>/<YYYY>/<MM>/<date>.csv.gz`, filling a `{venue}` template.
@@ -2186,9 +2196,12 @@ leaf lock, and keeps a closed flag (a `threading.Event`); once closed, it makes 
   `VENUES = ("cme", "cbot", "nymex", "comex")` in `refresh/overrides.py`, which a library test
   checks against `FuturesVenue`.
 - **Error mapping.** An S3 error code `InvalidAccessKeyId` or `SignatureDoesNotMatch` is
-  `WireAuthError`; any other 403 is `WireEntitlementError`; anything else is `WireError`. The
-  messages keep the flat-file transport's texts ([section 16](#16-historysourceauto)).
-  `request_id` comes from `x-amz-request-id`. Credentials are never logged.
+  `WireAuthError`; any other 403 is `WireEntitlementError`; anything else is `WireError`. Each
+  carries the status, the host, and the key, and `request_id` comes from `x-amz-request-id`.
+  A wire message says what happened to which object (`HTTP 403 for s3://<bucket>/<key> at
+  <endpoint> (<code>: <message>)`); the user-facing remedy (the `MassiveConfig` settings to
+  check, the `venue=` parameter) is added by `_flat_files.py`, whose public texts are those of
+  [section 16](#16-historysourceauto). Credentials are never logged.
 - **TLS, proxies, retries.** The client is built as `session.client("s3", verify=<the
   net.http CA bundle>, config=Config(proxies=<from net.http>, retries={"total_max_attempts":
   1}))`: the CA bundle is `SSL_CERT_FILE`, else certifi (`SSL_CERT_DIR` does not apply to S3),
@@ -2198,6 +2211,8 @@ leaf lock, and keeps a closed flag (a `threading.Event`); once closed, it makes 
   through a body.
 - **`prefixes()`** lists the bucket's top-level prefixes, for `--check`.
 
+`FlatFile(body, key, location, host)` reads any binary stream whose failed reads raise
+`OSError`; the client wraps the response body so, and the reader imports no botocore.
 `FlatFile.batches(plan)` yields one `(RecordBatch, DriftReport)` per block, in this order:
 (1) the futures session check; (2) the symbol filter (`is_in`); (3) `[start, end)` on
 `plan.to_ns(time column)`; (4) on the survivors, the rename to long-form names and list
@@ -2207,9 +2222,14 @@ safe from any thread.
 
 ```python
 ReadPlan(columns: tuple[ReadColumn, ...], symbol_header, symbols, time_header, window_ns,
-         to_ns, session_header, required)
+         to_ns, session: tuple[str, date] | None, block_size: int, required)
 ReadColumn(header, column, read_type: pyarrow.DataType, list_type)
 ```
+
+`session` is the futures session check: the header that holds each row's session date and the
+file's date, so `_flat_files.py` builds one plan per call and adds the session per futures
+file. `block_size` is the reader's block of decompressed text, a required field with no default;
+`_flat_files.py` always passes its `BLOCK_SIZE` (1 MiB).
 
 `_flat_files.py` builds the plan from `source(Transport.FLAT_FILES, prefix)`. `to_ns` is the
 `_timeunits` converter, so a wrongly declared unit still raises; the window is never converted

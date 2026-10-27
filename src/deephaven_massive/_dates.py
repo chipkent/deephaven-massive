@@ -11,7 +11,9 @@ A date-only bound means a whole day in the asset class's *day zone*:
 - **UTC** for forex and crypto;
 - **trading sessions** for futures: a date names the session whose `session_end_date` equals
   it. Futures bars are requested over a `window_start` range widened by one day on each side
-  in America/Chicago and then filtered on `SessionEndDate`.
+  in America/Chicago and then filtered on `SessionEndDate`. The futures trading day rolls at
+  17:00 Chicago time, so an instant belongs to the session of its Chicago date until 17:00 and
+  to the next day's session from then on (`futures_session`).
 
 Ranges are half-open, `[start, end)`. A date `start` is that day's midnight; a date `end` is the
 *next* day's midnight, so `history("2025-03-03", "2025-03-03")` is the whole of March 3.
@@ -50,6 +52,7 @@ __all__ = [
     "bounds",
     "check_order",
     "flat_file_published",
+    "futures_session",
     "futures_sessions",
     "history_range",
     "parse_date_like",
@@ -298,6 +301,27 @@ def futures_sessions(start: date, end: date) -> FuturesSessions:
         raise ValueError(f"start ({start}) must not be after end ({end})")
     window = TimeRange(_midnight(start - _ONE_DAY, CHICAGO), _midnight(end + 2 * _ONE_DAY, CHICAGO))
     return FuturesSessions(start, end, window)
+
+
+_SESSION_ROLL: Final = timedelta(hours=7)
+"""Adding this to a Chicago time moves 17:00, when the next futures session opens, to midnight."""
+
+
+def futures_session(moment: datetime) -> date:
+    """Return the futures trading session an instant belongs to, as its `session_end_date`.
+
+    The futures trading day rolls at 17:00 America/Chicago (the weekly open is Sunday 17:00
+    CT, and 16:00 to 17:00 CT is the daily maintenance break), so an instant before 17:00
+    Chicago time belongs to the session ending on its Chicago date, and one at or after 17:00 to
+    the session ending the next day. Daylight-saving changes are followed through the zone.
+
+    Args:
+        moment: An aware `datetime`.
+
+    Returns:
+        The session's end date.
+    """
+    return (moment.astimezone(CHICAGO) + _SESSION_ROLL).date()
 
 
 def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:

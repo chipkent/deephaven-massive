@@ -227,7 +227,10 @@ class DatasetSpec:
                 `rest_model` is given, a WebSocket dataset (one with `channels`) has a
                 `rest_model` instead of a hand-written schema or no `asset_class`, an
                 unverified unit is not among `time_units`, a key map fills an `Instant` column
-                from a field with no `time_units` entry, or a key column is not in `schema`.
+                from a field with no `time_units` entry, a key column is not in `schema`, or a
+                dataset with flat files has no `FLAT_FILES` key map filling `Symbol` and
+                `Timestamp` (and, for futures, `SessionEndDate`, against which every futures
+                file is checked).
 
         Deriving the schema from `rest_model` raises the `TypeError` or `ValueError` of
         `_schema.model_schema` (an unmapped SDK hint, an unknown override path).
@@ -269,6 +272,7 @@ class DatasetSpec:
         missing = sorted(set(self.poll_keys) - set(self.schema.column_names))
         if missing:
             raise ValueError(f"{self.name}: poll_keys {missing} are not columns")
+        self._check_flat_files()
         instants = {c.name for c in self.schema.columns if c.type is ColumnType.INSTANT}
         unitless = sorted(
             f"{transport.value}:{key}"
@@ -280,6 +284,36 @@ class DatasetSpec:
             # Caught here, at import, rather than as a LookupError on a transport thread at
             # the first frame or page.
             raise ValueError(f"{self.name}: Instant fields {unitless} have no time_units")
+
+    @property
+    def has_rest_history(self) -> bool:
+        """True when the dataset has a REST history endpoint (`history(source=REST)` works)."""
+        return self.history_method is not None
+
+    @property
+    def has_grouped_daily(self) -> bool:
+        """True when a grouped-daily REST endpoint serves `dm.ALL` 1-day bars, one request a day."""
+        return self.grouped_daily_method is not None
+
+    def _check_flat_files(self) -> None:
+        """Check that a dataset with flat files can be read from them.
+
+        Every flat-file read filters on `Symbol` and `Timestamp`, and every futures file is
+        checked against its key's session through `SessionEndDate`, so those columns must be
+        filled from the files' headers.
+
+        Raises:
+            ValueError: If the dataset has flat-file prefixes but its `FLAT_FILES` key map does
+                not fill `Symbol` and `Timestamp`, and `SessionEndDate` for futures.
+        """
+        if not self.flat_file_prefixes:
+            return
+        needed = {"Symbol", "Timestamp"}
+        if self.asset_class is AssetClass.FUTURES:
+            needed.add("SessionEndDate")
+        lacking = sorted(needed - set(self.key_maps.get(Transport.FLAT_FILES, {}).values()))
+        if lacking:
+            raise ValueError(f"{self.name}: the FLAT_FILES key map must fill {lacking}")
 
 
 # --- BEGIN GENERATED SDK_PARAMS ---------------------------------------------------------------
