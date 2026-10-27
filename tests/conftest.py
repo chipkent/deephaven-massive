@@ -289,22 +289,16 @@ _AWS_IDENTITY_VARIABLES = (
 
 
 @pytest.fixture
-def fake_s3(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeS3:
-    """Answer every flat-file S3 client the library creates from a `FakeS3` (`tests/_fakes/s3.py`).
+def no_aws_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hide the machine's AWS settings from boto3 for the test, so every machine sees the same.
 
-    The library's own client factory still runs (credentials, endpoint, signing configuration);
-    the fake then answers the client's requests inside botocore, so nothing leaves the process.
-    The machine's AWS settings are hidden for the test, so every machine sees the same thing:
-    the AWS configuration and credentials files are an empty file, the variables that name a
+    The AWS configuration and credentials files are an empty file, the variables that name a
     profile or credentials are unset, and the instance metadata service is never asked. A test
     may set its own on top.
 
     Args:
         monkeypatch: Undoes the environment changes after the test.
         tmp_path: Holds the empty AWS configuration file.
-
-    Returns:
-        The fake, for storing objects and inspecting requests.
     """
     empty = tmp_path / "aws-empty"
     empty.write_text("")
@@ -313,6 +307,23 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeS3:
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     for name in _AWS_IDENTITY_VARIABLES:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
+    """Answer every flat-file S3 client the library creates from a `FakeS3` (`tests/_fakes/s3.py`).
+
+    The library's own client factory still runs (credentials, endpoint, signing configuration);
+    the fake then answers the client's requests inside botocore, so nothing leaves the process.
+    The machine's AWS settings are hidden for the test (`no_aws_settings`).
+
+    Args:
+        monkeypatch: Undoes the wrapping of boto3's client factory after the test.
+        no_aws_settings: Hides the machine's AWS settings.
+
+    Returns:
+        The fake, for storing objects and inspecting requests.
+    """
     s3 = importlib.import_module("tests._fakes.s3")
     fake: FakeS3 = s3.FakeS3()
     fake.install(monkeypatch)

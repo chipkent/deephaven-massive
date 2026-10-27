@@ -1,5 +1,6 @@
 """Tests for flat-file history: source choice, partition dates, and streaming S3 reads."""
 
+import functools
 import gc
 import gzip
 import logging
@@ -45,6 +46,7 @@ from deephaven_massive._ingest import flatfiles
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery
 from deephaven_massive._types import override
+from tests._fakes.clock import FakeClock
 
 TIMEOUT = 30.0
 NEW_YORK = ZoneInfo("America/New_York")
@@ -233,6 +235,14 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
 
     set_now(NOW)
     return set_now
+
+
+@pytest.fixture(autouse=True)
+def _virtual_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every session's flat-file client a fake clock, so its retry waits never sleep."""
+    monkeypatch.setattr(
+        _massive, "FlatFileClient", functools.partial(_massive.FlatFileClient, clock=FakeClock())
+    )
 
 
 @pytest.fixture
@@ -1242,11 +1252,11 @@ def test_the_earliest_failure_is_raised(
             assert asked.wait(TIMEOUT)
 
     fake_s3.before_answer = order
-    fake_s3.refuse(TRADES_0303, status=500, code="InternalError", message="first")
+    fake_s3.refuse(TRADES_0303, status=501, code="NotImplemented", message="first")
     fake_s3.refuse(TRADES_0304, status=403, code="AccessDenied", message="second")
     m = dm.MassiveSession(config(max_concurrency=2))
     try:
-        with pytest.raises(dm.MassiveError, match="HTTP 500") as info:
+        with pytest.raises(dm.MassiveError, match="HTTP 501") as info:
             query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04")
         assert not isinstance(info.value, dm.EntitlementError)
     finally:

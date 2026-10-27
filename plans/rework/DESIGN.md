@@ -2445,12 +2445,22 @@ the client again as it returns.
   check, the `venue=` parameter) is added by `_ingest/flatfiles.py`, whose public texts are those of
   [section 16](#16-historysourceauto). Credentials are never logged.
 - **TLS, proxies, retries.** The client is built as `session.client("s3", verify=<the
-  net.http CA bundle>, config=Config(proxies=<from net.http>, retries={"total_max_attempts":
-  1}))`: the CA bundle is `SSL_CERT_FILE`, else certifi (`SSL_CERT_DIR` does not apply to S3),
-  and botocore's own retries are off; the shared
-  `net/retry.py` schedule retries HTTP 500, 503 `SlowDown`, `RequestTimeout`, and connection
-  errors before the first byte. A TLS failure is never retried, and neither is a failure partway
-  through a body.
+  net.http CA bundle>, config=Config(proxies=<from net.http>, proxies_config={"proxy_ca_bundle":
+  <the same bundle>}, retries={"total_max_attempts": 1, "mode": "standard"}))`: the CA bundle
+  is `SSL_CERT_FILE`, else certifi (`SSL_CERT_DIR` does not apply to S3), and also verifies an
+  HTTPS proxy, as the REST client's context does; botocore's own retries are off, and the mode
+  is pinned so `AWS_RETRY_MODE=adaptive` cannot add botocore's client-side rate limiter, which
+  sleeps outside the injected `Clock`. The shared `net/retry.py` schedule (0.5, 1, 2 s plus
+  jitter, waited on the client's `Clock`, which `close()` interrupts) retries the
+  `TRANSIENT_STATUSES` (HTTP 500, 502, 503 `SlowDown`, 504), the S3 error code
+  `RequestTimeout` (HTTP 400), and connection errors before the first byte (botocore's
+  `ConnectionError` family, `ConnectionClosedError`, and `ReadTimeoutError`; not the bare
+  `HTTPClientError` botocore raises for any unexpected exception in its HTTP layer). A TLS failure (botocore's `SSLError`, or
+  any error `is_tls_failure` recognises) is never retried, and a certificate failure's message
+  names `SSL_CERT_FILE`; neither is a failure partway through a body: rows already handed on
+  cannot be taken back. The bundle and proxy are read when the first `open` creates the boto3
+  client, outside the client's leaf lock, because on macOS the system proxy exceptions can
+  resolve the endpoint's host name.
 - **`prefixes()`** lists the bucket's top-level prefixes, for `--check`.
 
 `FlatFile(body, key, location, host)` reads any binary stream whose failed reads raise
