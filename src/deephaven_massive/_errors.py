@@ -8,6 +8,14 @@ on:
 - `EntitlementError`: the key is valid, but the plan lacks the dataset, the WebSocket host, or
   the timeframe that was requested.
 
+Every `MassiveError` carries two read-only attributes, set when the error came from an HTTP
+response and `None` otherwise: `status`, the HTTP status, and `request_id`, the `request_id` of
+Massive's response. Branch on `status` (for example 404 or 429) instead of parsing messages.
+
+The wire package `deephaven_massive._massive` raises its own errors (`WireError`,
+`WireAuthError`, `WireEntitlementError`), and `from_wire` turns each into its public
+counterpart here, keeping the message, `status`, and `request_id`. Users never see a wire error.
+
 Parameter mistakes are not `MassiveError`s: a wrong *value* raises `ValueError` and a wrong
 *type* (for example a plain string where an enum member is required) raises `TypeError`, both
 synchronously on the calling thread.
@@ -27,27 +35,57 @@ from __future__ import annotations
 import logging
 import threading
 
-__all__ = ["AuthenticationError", "EntitlementError", "MassiveError", "log_once"]
+from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
+
+__all__ = ["AuthenticationError", "EntitlementError", "MassiveError", "from_wire", "log_once"]
 
 
 class MassiveError(Exception):
     """Base class of every error that Massive or this library reports.
 
     Raised directly for failures that are neither authentication nor entitlement problems: a
-    transport error, an HTTP error other than 403, a rate limit that outlived the SDK's retries,
-    a closed session, or a timestamp whose declared unit does not fit its magnitude. The message
-    always carries the context needed to act on it (the host, the dataset, the server's text).
+    transport error, an HTTP error other than 401 or 403, a rate limit that outlived the
+    retries, a closed session, or a timestamp whose declared unit does not fit its magnitude.
+    The message always carries the context needed to act on it (the host, the dataset, the
+    server's text). `status` and `request_id` are read-only and safe to read from any thread.
 
     Example:
-        Catch every library failure in one place::
+        Catch every library failure in one place, and branch on the HTTP status::
 
             import deephaven_massive as dm
 
             try:
-                m = dm.MassiveSession()
+                raise dm.MassiveError("rate limited", status=429, request_id="abc123")
             except dm.MassiveError as e:
-                print(f"cannot start Massive: {e}")
+                if e.status == 429:
+                    print(f"slow down (request {e.request_id}): {e}")
     """
+
+    def __init__(
+        self, *args: object, status: int | None = None, request_id: str | None = None
+    ) -> None:
+        """Create the error.
+
+        Args:
+            *args: The exception's arguments, as for `Exception`; normally one message.
+            status: The HTTP status of the response the error came from, or `None` when it did
+                not come from an HTTP response.
+            request_id: The `request_id` of Massive's response, or `None` when there was no
+                response or it carried none.
+        """
+        super().__init__(*args)
+        self._status = status
+        self._request_id = request_id
+
+    @property
+    def status(self) -> int | None:
+        """The HTTP status of the response the error came from (such as 404 or 429), or `None`."""
+        return self._status
+
+    @property
+    def request_id(self) -> str | None:
+        """The `request_id` of Massive's response, for a support request, or `None`."""
+        return self._request_id
 
 
 class AuthenticationError(MassiveError):
@@ -91,6 +129,31 @@ class EntitlementError(MassiveError):
             except dm.EntitlementError as e:
                 print(f"not on this plan: {e}")
     """
+
+
+def from_wire(error: WireError) -> MassiveError:
+    """Return the public error for an error raised by the wire package.
+
+    The REST, WebSocket, and flat-file transports call it on every `WireError` they do not
+    handle themselves, then raise the result `from` the wire error (static verbs) or fail a
+    table with it (`poll()` and streams). It creates a new exception and has no side effects.
+
+    Args:
+        error: The wire error.
+
+    Returns:
+        `AuthenticationError` for a `WireAuthError`, `EntitlementError` for a
+        `WireEntitlementError`, and `MassiveError` for any other `WireError`, with the wire
+        error's message, `status`, and `request_id`.
+    """
+    public: type[MassiveError]
+    if isinstance(error, WireAuthError):
+        public = AuthenticationError
+    elif isinstance(error, WireEntitlementError):
+        public = EntitlementError
+    else:
+        public = MassiveError
+    return public(error.message, status=error.status, request_id=error.request_id)
 
 
 _logged_lock = threading.Lock()
