@@ -102,10 +102,14 @@ class OpenApi:
     def schema(self, node: Json, where: str, depth: int = 0) -> JsonObject:
         """Resolve a schema: follow `$ref`, merge `allOf`, and unwrap a one-branch choice.
 
-        `allOf` parts are merged in order: their properties (a later part's property replaces
-        an earlier one of the same name), the union of their `required` lists, and their other
-        keys, first part first. A `oneOf` or `anyOf` with exactly one branch is that branch;
-        one with two or more branches is returned as is (the caller makes it `json-text`).
+        `allOf` parts are merged in order. When any part is an object (typed `object`, or
+        carrying `properties`), or no part has a type, the result is an object schema: the
+        parts' properties (a later part's property replaces an earlier one of the same name),
+        the union of their `required` lists, and their other keys, first part first. Otherwise
+        the result keeps the scalar type the typed parts share, with the parts' keys, first
+        part first, so `allOf: [{type: integer}, {minimum: 0}]` is a non-negative integer. A
+        `oneOf` or `anyOf` with exactly one branch is that branch; one with two or more
+        branches is returned as is (the caller makes it `json-text`).
 
         A `description` written beside a `$ref`, an `allOf`, or a one-branch choice describes
         this use of the schema, so it replaces the one the resolved schema carries: the
@@ -121,8 +125,8 @@ class OpenApi:
             The resolved schema.
 
         Raises:
-            RefreshError: If parts and choices nest more than 64 deep (a cycle), or a
-                reference cannot be followed.
+            RefreshError: If parts and choices nest more than 64 deep (a cycle), a reference
+                cannot be followed, or two `allOf` parts have different scalar types.
         """
         if depth > _MAX_DEPTH:
             raise RefreshError([shape_problem(where, "schema nesting too deep; it may be cyclic")])
@@ -156,21 +160,73 @@ class OpenApi:
         parts = resolved.get("allOf")
         if not isinstance(parts, list):
             return resolved
-        merged: dict[str, Json] = {"type": "object"}
-        merged_properties: dict[str, Json] = {}
-        merged_required: list[Json] = []
-        for part in parts:
-            piece = self.schema(part, where, depth + 1)
+        return _merge_all_of([self.schema(part, where, depth + 1) for part in parts], where)
+
+
+def _common_type(pieces: list[JsonObject], where: str) -> Json:
+    """Return the type of the schema the resolved parts of an `allOf` merge into.
+
+    A part with `properties` counts as `object` whatever its `type` says. Any object part
+    makes the merge an object: the vendor writes some response bodies as a string part (the
+    status field's schema, put beside the body instead of inside it) next to the object part,
+    and the body is the object. Otherwise the scalar parts must agree, since no value is both
+    an integer and a string; parts without a type (a bare constraint or description) take the
+    others', and a merge with no typed part at all is an object.
+
+    Args:
+        pieces: The resolved parts.
+        where: The path and key, for messages.
+
+    Returns:
+        `object`, or the one scalar type the typed parts share.
+
+    Raises:
+        RefreshError: If two parts have different scalar types.
+    """
+    types: list[Json] = []
+    for piece in pieces:
+        kind = "object" if "properties" in piece else piece.get("type")
+        if kind == "object":
+            return kind
+        if kind is not None and kind not in types:
+            types.append(kind)
+    if len(types) > 1:
+        listed = ", ".join(repr(kind) for kind in types)
+        raise RefreshError([shape_problem(where, f"allOf parts disagree on the type: {listed}")])
+    return types[0] if types else "object"
+
+
+def _merge_all_of(pieces: list[JsonObject], where: str) -> JsonObject:
+    """Merge the resolved parts of an `allOf`, as `OpenApi.schema` describes.
+
+    Args:
+        pieces: The resolved parts, in order.
+        where: The path and key, for messages.
+
+    Returns:
+        The merged schema, typed by the parts' common type. An object schema also carries the
+        merged `properties` and `required`; a scalar one carries only the parts' own keys.
+    """
+    kind = _common_type(pieces, where)
+    merged: dict[str, Json] = {"type": kind}
+    if kind != "object":
+        for piece in pieces:
             for key, value in piece.items():
-                if key == "properties" and isinstance(value, dict):
-                    merged_properties.update(value)
-                elif key == "required" and isinstance(value, list):
-                    merged_required += [name for name in value if name not in merged_required]
-                else:
-                    merged.setdefault(key, value)
-        merged["properties"] = merged_properties
-        merged["required"] = merged_required
+                merged.setdefault(key, value)
         return merged
+    merged_properties: dict[str, Json] = {}
+    merged_required: list[Json] = []
+    for piece in pieces:
+        for key, value in piece.items():
+            if key == "properties" and isinstance(value, dict):
+                merged_properties.update(value)
+            elif key == "required" and isinstance(value, list):
+                merged_required += [name for name in value if name not in merged_required]
+            else:
+                merged.setdefault(key, value)
+    merged["properties"] = merged_properties
+    merged["required"] = merged_required
+    return merged
 
 
 def properties(schema: JsonObject) -> JsonObject | None:
