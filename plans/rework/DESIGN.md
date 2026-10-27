@@ -2136,7 +2136,11 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
   alone. The client reports `RECONNECTING` with the next attempt's time before each wait.
 - **Fatal and retryable failures.** `protocol.py` classifies an exception from `connect()`:
   - an HTTP 429 at the upgrade is retryable, and its wait is the larger of its `Retry-After`
-    and the backoff;
+    and the backoff, with the `Retry-After` capped at `max_reconnect_backoff`, so every wait
+    still lies in `[reconnect_backoff, max_reconnect_backoff]`. This differs from REST, which
+    gives up on a `Retry-After` above 60 s because a caller is blocked on the request: the
+    WebSocket client never gives up, and an unbounded `Retry-After` would leave its streams
+    silent for as long as the server named;
   - a TLS certificate failure (`ssl.SSLCertVerificationError`) is fatal, naming
     `SSL_CERT_FILE`, although it is an `OSError`;
   - everything else follows websockets' public rule, `websockets.client.process_exception`

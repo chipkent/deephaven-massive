@@ -86,6 +86,7 @@ class Recorder:
         self.events: list[tuple[Any, ...]] = []
         self.threads: set[int] = set()
         self.open_hook: Callable[[int], None] | None = None
+        self.state_hook: Callable[[WsState], None] | None = None
 
     def _add(self, event: tuple[Any, ...]) -> None:
         with self._cond:
@@ -107,6 +108,8 @@ class Recorder:
 
     def on_state(self, state: WsState, detail: float | WireError | None) -> None:
         self._add(("state", state, detail))
+        if self.state_hook is not None:
+            self.state_hook(state)
 
     def wait_for(self, predicate: Callable[[list[tuple[Any, ...]]], bool]) -> None:
         with self._cond:
@@ -366,15 +369,23 @@ def test_an_http_503_is_retried_after_the_backoff(
     assert h.recorder.states() == [WsState.CONNECTING, WsState.RECONNECTING, WsState.CONNECTING]
 
 
-@pytest.mark.parametrize("case", [("500", 500.0), ("1", 2.0)], ids=["retry-after", "backoff"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("5", (2.0, 10.0), 5.0),  # Retry-After is longer than the backoff
+        ("1", (2.0, 2.0), 2.0),  # the backoff is longer than Retry-After
+        ("500", (2.0, 10.0), 10.0),  # Retry-After is capped at max_reconnect_backoff
+    ],
+    ids=["retry-after", "backoff", "capped"],
+)
 def test_an_http_429_waits_the_longer_of_retry_after_and_the_backoff(
     make_client: Callable[..., Harness],
     fake_ws_server: FakeMassiveServer,
-    case: tuple[str, float],
+    case: tuple[str, tuple[float, float], float],
 ) -> None:
-    retry_after, wait = case
+    retry_after, backoff, wait = case
     fake_ws_server.reject_next(429, {"Retry-After": retry_after})
-    h = make_client(backoff=(2.0, 2.0))
+    h = make_client(backoff=backoff)
     h.recorder.wait_open(1)
     assert h.sleeper.waits == [wait]
     [(_, at)] = [s for s in h.recorder.of("state") if s[0] is WsState.RECONNECTING]
@@ -783,14 +794,12 @@ def test_an_on_state_that_raises_at_the_end_is_logged(
     make_client: Callable[..., Harness], caplog: pytest.LogCaptureFixture
 ) -> None:
     recorder = Recorder()
-    h = make_client(start=False, recorder=recorder)
 
-    def on_state(state: WsState, detail: float | WireError | None) -> None:
-        recorder.on_state(state, detail)
+    def raise_on(state: WsState) -> None:
         raise RuntimeError(state)
 
-    h.client._on_state = on_state
-    h.client.start()
+    recorder.state_hook = raise_on  # the client gets it through the recorder's on_state
+    h = make_client(recorder=recorder)
     assert h.client.join(10.0)
     # CONNECTING raised, which failed the client; FAILED raised too, and was only logged.
     assert recorder.states() == [WsState.CONNECTING, WsState.FAILED]

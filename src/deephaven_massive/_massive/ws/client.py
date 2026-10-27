@@ -122,7 +122,8 @@ class _Ended:
         waiting_slot: Whether the server reported `max_connections`, as the reply to the key
             or as a status before it closed an authenticated socket.
         least_wait: The least wait before the next attempt that the failure demands (an HTTP
-            429's `Retry-After`); the backoff may be longer.
+            429's `Retry-After`); the backoff may be longer, and the client caps it at
+            `max_reconnect_backoff`.
     """
 
     uptime: float | None = None
@@ -230,7 +231,12 @@ class WsClient:
             reconnect_backoff: Seconds of the first wait before trying again; positive. The
                 library passes its configuration's value (at least 15 s); tests pass less.
             max_reconnect_backoff: Seconds the doubling backoff stops at; at least
-                `reconnect_backoff`.
+                `reconnect_backoff`. It also caps an HTTP 429's `Retry-After`, so every wait
+                lies within `[reconnect_backoff, max_reconnect_backoff]`. The REST client
+                instead gives up on a `Retry-After` above 60 s, because a caller is blocked on
+                that request; this client never gives up, so honouring an unbounded
+                `Retry-After` would leave its streams silent for as long as the server named,
+                while a capped wait only retries sooner and meets another 429 at worst.
             clock: The time source the wire clients share (`net.retry.Clock`). Its
                 `monotonic()` times each generation for the stable-uptime rule; its `time()`
                 dates the next attempt and reads an HTTP-date `Retry-After`. Its blocking
@@ -254,6 +260,7 @@ class WsClient:
         self._ssl = ssl_context() if parts.scheme == "wss" else None
         self._decoder = FrameDecoder(sources, host=self._host, path=self._path)
         self._backoff = Backoff(reconnect_backoff, max_reconnect_backoff)
+        self._max_wait = max_reconnect_backoff
         self._on_open = on_open
         self._on_status = on_status
         self._on_data = on_data
@@ -468,7 +475,8 @@ class WsClient:
             ended = await self._attempt()
             if isinstance(ended, WireError):
                 return ended
-            wait = max(self._backoff.next_wait(ended.uptime), ended.least_wait)
+            least = min(ended.least_wait, self._max_wait)  # a Retry-After, capped
+            wait = max(self._backoff.next_wait(ended.uptime), least)
             logger.warning("reconnecting to %s in %.1f s", self._url, wait)
             state = WsState.WAITING_SLOT if ended.waiting_slot else WsState.RECONNECTING
             self._on_state(state, self._clock.time() + wait)
