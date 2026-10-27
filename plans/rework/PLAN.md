@@ -1943,7 +1943,9 @@ threads).
   `tests/ingest/test_hosts.py`, `tests/ingest/test_poll.py`, `tests/data/ingest/rest/`,
   `tests/data/ingest/hosts/`.
 - Modify: `_ingest/clients.py` (`SessionClients.rest()`: the session's `RestClient`, the
-  host-decision cache, and their closer), `_query.py` (REST verb bodies), `_namespaces/base.py`.
+  host-decision cache, and their closer), `_query.py` (REST verb bodies and the
+  `StreamHistoryLatestQuery.fetch` docstring), `_namespaces/base.py`, `_datasets/catalog.py`
+  (`DatasetSpec.symbols_per_request`; the typed-parameter reservation in filter validation).
 
 **Tasks.**
 - [ ] One `RestClient` per session, held by `SessionClients` and closed through a closer that
@@ -1964,11 +1966,34 @@ threads).
       the poller thread; fan-out under `max_concurrency`.
 - [ ] `fetch()` on the latest queries; REST `history()` on `history_path` and
       `grouped_daily_path`.
+- [ ] `sort` and `order` per DESIGN § 9: sent as they are where the path has an `order`
+      parameter, folded into `sort=<field>.<asc|desc>` where it has none; `order` without
+      `sort` raises `ValueError` at query construction.
+- [ ] The typed-parameter reservation in the shared filter check (DESIGN § 9): a `filters` key
+      naming a typed keyword parameter, or any of its `.gt`/`.gte`/`.lt`/`.lte`/`.any_of`/
+      `.all_of` forms, raises `ValueError` naming the parameter. Dataset PRs that landed
+      first drop their local guards in the same PR.
+- [ ] Request building per DESIGN § 13.4: path parameters other than the symbol filled from
+      `Request.params`; the bars `{from}`/`{to}` filled from `history()`'s bounds in the form
+      the path's parameter kind gives (no `time_axis` on bars); futures trades and quotes on
+      the `timestamp` range widened to whole Chicago sessions (DESIGN § 12);
+      `DatasetSpec.symbols_per_request` and the `ticker.any_of` batching; the per-symbol
+      detail path chosen from the role paths; `canonical(spec.asset_class, value)` on symbols
+      read from rows; error rows kept by `snapshots()` and dropped, with one WARNING per
+      ticker, by a projected `fetch()`.
+- [ ] Correct the `StreamHistoryLatestQuery.fetch` docstring in `_query.py`: "one request per
+      symbol" is wrong for a batched projected snapshot (`indices.values`). The "no namespace
+      declares…" class docstrings and their examples stay for finish-rework.
 - [ ] A `poll()` that races `close()` never starts a poller the session will not stop
       (register its cleanup through `SessionCore.on_close`).
 
 **Acceptance criteria.**
 - [ ] Every § 13.2 branch has a fixture test, including an unknown `timeframe`.
+- [ ] Fixture tests on synthetic specs cover each request rule above: both `order` forms and
+      `order` without `sort`; a reserved typed-parameter key; a path parameter and a bars
+      range filled into the path; 251 symbols sent as two batches; the detail path with
+      symbols and the list path without; a row symbol canonicalized; an error row kept and
+      dropped.
 - [ ] A § 19.5 data failure fails only the affected `poll()` table.
 - [ ] Single-flight resolution under 16 threads.
 - [ ] `poll(mode=REPLACE)` evicts keys absent from the latest cycle, including on an empty
@@ -2290,6 +2315,20 @@ fixtures, and the deletion of `tests/data/datasets/catalog/undeclared/<ns>.txt`;
 column-reference-pages has already merged, its regenerated column reference page
 `docs/datasets/<ns>.md`. No `_massive` diff: a needed `refresh/` fix lands first in its own PR.
 
+Shared test files and helpers, which no dataset PR edits beyond what is stated here:
+- `tests/test_enums.py` `ENUM_PARAMETERS`: each dataset PR appends its own entries, each
+  pointing at a rejection test in its own test module. Append-only; a merge conflict is
+  resolved by keeping both sides.
+- `tests/namespaces/test_base.py` (`_hints` included) and `tests/datasets/test_catalog.py`:
+  not edited. The undeclared-source check accepts a deleted `<ns>.txt`, so each dataset PR
+  deletes only its own file.
+- One-day path parameters (`daily_open_close(..., date)` and the like) go through
+  `calendar_day(spec, value, "date")` in `_datasets/dates.py` (an aware `datetime` becomes the
+  calendar day in the dataset's day zone); no namespace module keeps its own copy.
+- `filters` reservations of typed parameters live in the shared filter check (rest-transport);
+  a dataset PR that lands first may guard locally and drops the guard once that check lands.
+- The `_query.py` class docstrings and their examples are finish-rework's, not a dataset PR's.
+
 **Shared tasks (per dataset).**
 - [ ] A `DatasetSpec`: name, one-sentence summary (once result-column-descriptions has added
       `DatasetSpec.summary`; before that, the docstring's first sentence, which that PR copies
@@ -2309,8 +2348,8 @@ column-reference-pages has already merged, its regenerated column reference page
 - [ ] The § 7.2 `ValueError`s.
 - [ ] Streamed datasets: one frame lands in `blink()`; flat-file datasets: a one-block round
       trip.
-- [ ] Real docstring examples on the query classes, `MassiveSession`, the enums, and
-      `EntitlementError` once the namespace's datasets exist.
+- [ ] Real docstring examples on `MassiveSession`, the enums, and `EntitlementError` once the
+      namespace's datasets exist (the query classes' examples are finish-rework's).
 
 **Shared acceptance criteria.**
 - [ ] Every DESIGN § 8 row of the namespace is declared and tested.
@@ -2394,6 +2433,8 @@ massive-sdk-removal. **Parallel with.** live-integration-suite.
       verbs, symbols, hosts, the namespace index (linking each namespace's column reference page
       and `columns()`), lifecycle, diagnostics, development.
 - [ ] Fold the durable rules into `AGENTS.md`.
+- [ ] Replace the "no namespace declares a dataset of this kind yet" sentences of the
+      `_query.py` class docstrings with real examples against declared datasets.
 
 A refresh of the snapshot, when Massive has changed, is its own `chore: refresh the Massive
 snapshot` PR, never part of finish-rework.
