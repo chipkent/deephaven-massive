@@ -119,7 +119,12 @@ def _half_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def no_proxy_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+def network_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    """Unset every proxy and certificate variable, so a test sets only the ones it is about.
+
+    Returns:
+        The monkeypatch, for the test's own settings.
+    """
     for name in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(name.upper(), raising=False)
@@ -672,13 +677,13 @@ def factory_calls(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> list[dict
 def test_the_client_follows_the_shared_tls_and_proxy_rules_and_never_retries_itself(
     *,
     factory_calls: list[dict[str, object]],
-    no_proxy_env: pytest.MonkeyPatch,
+    network_env: pytest.MonkeyPatch,
     environment: dict[str, str],
     bundle: str,
     proxy: str | None,
 ) -> None:
     for name, value in environment.items():
-        no_proxy_env.setenv(name, value)
+        network_env.setenv(name, value)
     client = make_client()
     try:
         client.open(KEY)
@@ -701,14 +706,14 @@ def tls_server() -> Iterator[FakeRestServer]:
 
 
 @pytest.fixture
-def trusted(no_proxy_env: pytest.MonkeyPatch, no_aws_settings: None) -> pytest.MonkeyPatch:
+def trusted(network_env: pytest.MonkeyPatch, no_aws_settings: None) -> pytest.MonkeyPatch:
     """Trust the TLS fake's certificate, with no proxy and none of the machine's AWS settings.
 
     Returns:
         The monkeypatch, for further environment changes.
     """
-    no_proxy_env.setenv("SSL_CERT_FILE", str(DATA / "tls_cert.pem"))
-    return no_proxy_env
+    network_env.setenv("SSL_CERT_FILE", str(DATA / "tls_cert.pem"))
+    return network_env
 
 
 _SLOW_DOWN = (
@@ -724,7 +729,7 @@ def _symbols(file: FlatFile | None) -> list[str]:
 
 
 def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(
-    *, tls_server: FakeRestServer, no_proxy_env: pytest.MonkeyPatch, no_aws_settings: None
+    *, tls_server: FakeRestServer, network_env: pytest.MonkeyPatch, no_aws_settings: None
 ) -> None:
     clock = FakeClock()
     client = make_client(endpoint_url=tls_server.url, clock=clock)
@@ -778,9 +783,9 @@ def test_the_proxy_carries_its_credentials_and_no_secret_is_logged(
         assert client.open(KEY) is None
     finally:
         client.close()
+    # One tunnel per attempt: the reset closed the first.
     connects = fake_rest.requests
-    assert connects
-    assert {r.method for r in connects} == {"CONNECT"}
+    assert [r.method for r in connects] == ["CONNECT", "CONNECT"]
     # base64 of "alice:s@cret"
     assert {r.headers["proxy-authorization"] for r in connects} == {"Basic YWxpY2U6c0BjcmV0"}
     assert len(tls_server.requests) == 2
@@ -793,3 +798,21 @@ def test_the_proxy_carries_its_credentials_and_no_secret_is_logged(
         assert "s@cret" not in text
         if record.name.startswith("deephaven_massive"):
             assert ACCESS_KEY not in text
+
+
+def test_an_unreachable_proxy_is_retried_and_its_password_stays_out_of_the_error(
+    *, trusted: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    # Port 9 (discard) on loopback refuses the connection.
+    trusted.setenv("HTTPS_PROXY", "http://alice:topsecret@127.0.0.1:9")
+    clock = FakeClock()
+    client = make_client(clock=clock)
+    try:
+        with pytest.raises(WireError, match="proxy") as info:
+            client.open(KEY)
+    finally:
+        client.close()
+    assert clock.waits == WAITS
+    assert "topsecret" not in info.value.message
+    assert not any("topsecret" in r.getMessage() for r in caplog.records)
