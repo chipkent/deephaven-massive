@@ -1,7 +1,8 @@
 """Download Massive's published specifications and store them as the canonical snapshot.
 
 `python -m deephaven_massive._massive.refresh --fetch` calls `fetch`, which replaces the
-snapshot directory (`refresh/snapshot/`) with the live vendor sources:
+vendored snapshot (`vendor/massive/` in the source checkout, whose layout and manifest
+`snapshot` owns) with the live vendor sources:
 
 - `openapi.json`: the REST specification from `https://api.massive.com/openapi`. The older
   `https://api.massive.com/specs/rest.json` is a stale subset of about 33 paths and is never
@@ -23,9 +24,9 @@ final newline. The stored hash covers that canonical form, the fetched hash the 
 library, text is decoded as UTF-8, nothing is evaluated, and a page URL is accepted only below
 `https://massive.com/docs/rest/` with plain lower-case path segments (`docs.page_file`), so no
 URL can name a file outside the snapshot. Every download completes, and every file is
-canonicalized, before anything is written; the new snapshot is then built in a sibling
-directory and swapped in through a backup directory, so a failed fetch leaves the old snapshot
-untouched.
+canonicalized, before anything is written; `snapshot.store` then builds the new snapshot in
+a sibling directory and swaps it in through a backup directory, so a failed fetch leaves the
+old snapshot untouched.
 
 The network is reached only through the `get` callable that `fetch` receives. The default,
 `HttpGetter`, uses urllib3 with the CA bundle and proxy of `net.http`, sends the library's
@@ -37,27 +38,23 @@ a person reruns the command. Tests pass a dictionary-backed `get` instead.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
-import shutil
 import time
 import urllib.parse
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT, http
-from deephaven_massive._massive.refresh import docs
+from deephaven_massive._massive.refresh import docs, snapshot
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
     from pathlib import Path
     from typing import Self
 
 __all__ = [
     "LLMS_URL",
-    "MANIFEST",
     "OPENAPI_URL",
     "FetchError",
     "HttpGetter",
@@ -71,18 +68,6 @@ OPENAPI_URL = "https://api.massive.com/openapi"
 
 LLMS_URL = "https://massive.com/docs/llms.txt"
 """Where Massive publishes its documentation index."""
-
-OPENAPI = "openapi.json"
-"""The snapshot file of the REST specification."""
-
-LLMS = "llms.txt"
-"""The snapshot file of the documentation index."""
-
-REST_PAGES = "rest"
-"""The snapshot directory of the REST documentation pages."""
-
-MANIFEST = "manifest.json"
-"""The snapshot file that records where every other file came from."""
 
 # Connect and read timeouts for one download, in seconds. The specification is about 1 MB.
 _TIMEOUT = urllib3.Timeout(connect=10.0, read=60.0)
@@ -100,18 +85,6 @@ class FetchError(RuntimeError):
 
     The snapshot on disk is unchanged when this is raised.
     """
-
-
-def _sha256(data: bytes) -> str:
-    """Return the hexadecimal SHA-256 digest of `data`.
-
-    Args:
-        data: The bytes to hash.
-
-    Returns:
-        64 lower-case hexadecimal digits.
-    """
-    return hashlib.sha256(data).hexdigest()
 
 
 def _decode(raw: bytes, url: str) -> str:
@@ -169,23 +142,6 @@ def canonical_text(raw: bytes, url: str) -> bytes:
     """
     lines = [line.rstrip() for line in _decode(raw, url).splitlines()]
     return ("\n".join(lines).rstrip("\n") + "\n").encode()
-
-
-@dataclass(frozen=True, kw_only=True)
-class _Stored:
-    """One snapshot file, ready to write.
-
-    Attributes:
-        name: The path relative to the snapshot directory, with `/` separators.
-        url: Where it was downloaded from.
-        raw: The bytes as downloaded.
-        stored: The canonical bytes to write.
-    """
-
-    name: str
-    url: str
-    raw: bytes
-    stored: bytes
 
 
 class HttpGetter:
@@ -297,7 +253,7 @@ class HttpGetter:
             self._sleep(min(asked, _MAX_WAIT))
 
 
-def _download(get: Callable[[str], bytes]) -> list[_Stored]:
+def _download(get: Callable[[str], bytes]) -> list[snapshot.VendorFile]:
     """Download every vendor source and put each in canonical form.
 
     Args:
@@ -312,46 +268,24 @@ def _download(get: Callable[[str], bytes]) -> list[_Stored]:
         FetchError: If the index links a page outside the REST documentation.
     """
     spec = get(OPENAPI_URL)
+    stored_spec = canonical_json(spec, OPENAPI_URL)
     files = [
-        _Stored(name=OPENAPI, url=OPENAPI_URL, raw=spec, stored=canonical_json(spec, OPENAPI_URL))
+        snapshot.VendorFile(name=snapshot.OPENAPI, url=OPENAPI_URL, raw=spec, stored=stored_spec)
     ]
     index_raw = get(LLMS_URL)
     index = canonical_text(index_raw, LLMS_URL)
-    files.append(_Stored(name=LLMS, url=LLMS_URL, raw=index_raw, stored=index))
+    files.append(snapshot.VendorFile(name=snapshot.LLMS, url=LLMS_URL, raw=index_raw, stored=index))
     try:
         urls = docs.rest_page_urls(index.decode())
     except docs.DocsError as error:
         raise FetchError(f"{LLMS_URL}: {error}") from None
     for url in urls:
         page = get(url)
-        name = f"{REST_PAGES}/{docs.page_file(url)}"
-        files.append(_Stored(name=name, url=url, raw=page, stored=canonical_text(page, url)))
+        name = f"{snapshot.REST_PAGES}/{docs.page_file(url)}"
+        files.append(
+            snapshot.VendorFile(name=name, url=url, raw=page, stored=canonical_text(page, url))
+        )
     return files
-
-
-def _manifest(files: list[_Stored], fetched: dt.date) -> bytes:
-    """Return the manifest of a snapshot, in canonical JSON.
-
-    Args:
-        files: The snapshot's files.
-        fetched: The day of the fetch.
-
-    Returns:
-        `{"fetched": "<YYYY-MM-DD>", "files": {<name>: {"url", "fetched_sha256",
-        "stored_sha256"}}}`, canonical.
-    """
-    document: Mapping[str, object] = {
-        "fetched": fetched.isoformat(),
-        "files": {
-            file.name: {
-                "url": file.url,
-                "fetched_sha256": _sha256(file.raw),
-                "stored_sha256": _sha256(file.stored),
-            }
-            for file in files
-        },
-    }
-    return (json.dumps(document, sort_keys=True, indent=1) + "\n").encode()
 
 
 def fetch(
@@ -362,15 +296,13 @@ def fetch(
 ) -> list[str]:
     """Replace the snapshot in `directory` with freshly downloaded vendor sources.
 
-    Everything is downloaded and canonicalized first. The new snapshot is then written to a
-    sibling directory (`<name>-incoming`); the old one is renamed aside (`<name>-previous`),
-    the new one is renamed into place, and only then is the old one removed. A failure while
-    downloading leaves the old snapshot as it was, and at no point is the snapshot directory
-    half written. Files of the old snapshot that the new one lacks (a page Massive removed)
-    are gone afterwards.
+    Everything is downloaded and canonicalized first; only then does `snapshot.store` write
+    the new snapshot with its manifest and swap it into place, so a failure while downloading
+    leaves the old snapshot as it was. Files of the old snapshot that the new one lacks (a
+    page Massive removed) are gone afterwards.
 
     Args:
-        directory: The snapshot directory, normally `refresh/snapshot/`. Its parent must exist.
+        directory: The snapshot directory, normally `snapshot.DIRECTORY`.
         get: Returns the body of a URL and raises `FetchError` on failure; an `HttpGetter`
             when omitted. Network access happens only through it.
         today: The fetch date written to the manifest; today's UTC date when omitted.
@@ -387,18 +319,4 @@ def fetch(
             files = _download(getter)
     else:
         files = _download(get)
-    manifest = _manifest(files, today or dt.datetime.now(dt.UTC).date())
-    staging = directory.with_name(f"{directory.name}-incoming")
-    backup = directory.with_name(f"{directory.name}-previous")
-    shutil.rmtree(staging, ignore_errors=True)
-    shutil.rmtree(backup, ignore_errors=True)
-    for file in files:
-        target = staging / file.name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(file.stored)
-    (staging / MANIFEST).write_bytes(manifest)
-    if directory.exists():
-        directory.rename(backup)
-    staging.rename(directory)
-    shutil.rmtree(backup, ignore_errors=True)
-    return [file.name for file in files] + [MANIFEST]
+    return snapshot.store(directory, files, fetched=today or dt.datetime.now(dt.UTC).date())

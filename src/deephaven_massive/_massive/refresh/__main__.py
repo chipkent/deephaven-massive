@@ -1,6 +1,7 @@
 """The refresh command: `python -m deephaven_massive._massive.refresh [--fetch]`.
 
-Run it from a source checkout with `uv run`; the package is not in the wheel.
+Run it from a source checkout with `uv run`; neither the package nor the vendored snapshot it
+reads (`vendor/massive/`) is in a distribution.
 
 - With no option, it regenerates `spec/rest.json` from the vendored snapshot, checking every
   refresh gate first. It reads no network. When a gate stops it, it prints every problem
@@ -20,7 +21,8 @@ import argparse
 import sys
 from typing import TYPE_CHECKING
 
-from deephaven_massive._massive.refresh import fetch, generate
+from deephaven_massive._massive.refresh import fetch, generate, render, snapshot
+from deephaven_massive._massive.refresh.gates import RefreshError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,23 +45,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=_PROG,
         description="Regenerate the wire schemas from the vendored snapshot of Massive's "
-        "published specifications.",
+        "published specifications (vendor/massive/ in the source checkout).",
     )
     parser.add_argument(
         "--fetch",
         action="store_true",
-        help="replace the snapshot with the live vendor sources (reads public Massive URLs)",
+        help="replace the vendored snapshot with the live vendor sources (reads public "
+        "Massive URLs)",
     )
     options = parser.parse_args(argv)
     try:
         if options.fetch:
-            names = fetch.fetch(generate.SNAPSHOT_DIRECTORY)
-            sys.stdout.write(f"stored {len(names)} files in {generate.SNAPSHOT_DIRECTORY}\n")
+            names = fetch.fetch(snapshot.DIRECTORY)
+            sys.stdout.write(f"stored {len(names)} files in {snapshot.DIRECTORY}\n")
             sys.stdout.write(f"now run `{_PROG}` to regenerate the schemas\n")
         else:
             changed = generate.refresh()
-            sys.stdout.write(f"{generate.SPEC_FILE} {'updated' if changed else 'is up to date'}\n")
-    except (generate.RefreshError, fetch.FetchError) as error:
+            sys.stdout.write(f"{render.REST_FILE} {'updated' if changed else 'is up to date'}\n")
+    except (RefreshError, fetch.FetchError) as error:
         sys.stderr.write(f"{error}\n")
         return 1
     return 0

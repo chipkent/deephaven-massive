@@ -29,7 +29,8 @@ the imports of every module with `ast`:
   `_massive` submodule, reads only names in `_massive.__all__` (by `.` or a literal
   `getattr`, through any alias of the package or of the root package), imports none of
   `urllib3`, `websockets`, `certifi`, `boto3`, or `botocore` (`tests/_fakes/` excepted), and
-  names no file of the vendored spec snapshot.
+  names no file of the vendored spec snapshot (`vendor/massive/`, outside the package, which
+  only the refresh reads).
 
 A module named in a string counts as imported, since that is the form every dynamic import
 (`importlib.import_module` under any alias, `__import__`), patch (`mock.patch`,
@@ -454,9 +455,10 @@ _REFRESH = "refresh"
 # A library `_massive` may import for type checking only (`override` on Python 3.11).
 _TYPE_ONLY_LIBRARY = "typing_extensions"
 
-# The vendor files of the spec snapshot, and its directory.
+# The vendor files of the spec snapshot, and its directory (outside the package, at the top of
+# the checkout).
 _SNAPSHOT_FILES = frozenset({"openapi.json", "websocket.json", "llms.txt", "manifest.json"})
-_SNAPSHOT_DIRECTORY = "refresh/snapshot"
+_SNAPSHOT_DIRECTORY = "vendor/massive"
 
 # A string that may name a module: dotted identifiers, optionally relative.
 _DOTTED_NAME = re.compile(r"\.*[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
@@ -1186,11 +1188,11 @@ def test_the_fakes_may_import_the_network_libraries() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "src/deephaven_massive/_massive/refresh/snapshot/openapi.json",
+        "vendor/massive/openapi.json",
         "openapi.json",
         "websocket.json",
         "llms.txt",
-        "refresh/snapshot",
+        "vendor/massive",
         "flat-files/manifest.json",
     ],
 )
@@ -1202,7 +1204,7 @@ def test_outside_code_must_not_name_a_snapshot_file(text: str, path: str) -> Non
 @pytest.mark.parametrize(
     "source",
     [
-        '"""Generated from openapi.json, with refresh/snapshot as its input."""\n',
+        '"""Generated from openapi.json, with vendor/massive as its input."""\n',
         "x = 'snapshot'\ny = 'snapshots()'\nz = 'rest.json'\n",
     ],
 )

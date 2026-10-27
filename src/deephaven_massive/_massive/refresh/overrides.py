@@ -15,12 +15,14 @@ rest, each entry with its reason, and nothing else:
 - `RESULT_KEYS`: the paths whose rows do not sit under `results`;
 - `PARAM_UNITS`: the unit of every timestamp-like string parameter, and of any other string
   parameter that takes an epoch (or "sent as date or date-time text");
-- `KINDS`: the dataset kinds, whose sources gate G8 checks for one concept per column. The
-  REST generator alone declares none; the WebSocket and flat-file generators add them.
+- `KINDS`: the dataset kinds, whose sources the `concept-collision` gate checks for one
+  concept per column. The REST generator alone declares none; the WebSocket and flat-file
+  generators add them.
 
 Every entry names a path template exactly as the specification spells it, and a wire key or
 parameter of that path. An entry that names something the snapshot no longer generates fails
-the refresh (gate G4), so this module can only shrink as the vendor fixes its specification.
+the refresh (the `stale-entry` gate), so this module can only shrink as the vendor fixes its
+specification.
 
 The tables are plain read-only data, built once at import.
 """
@@ -70,7 +72,7 @@ class Name:
             as for every other field.
         description: Massive's description of the field, quoted exactly (whitespace aside):
             the name's only source. The refresh checks the quote against the specification,
-            so a changed description makes the entry stale (gate G4).
+            so a changed description makes the entry stale (the `stale-entry` gate).
     """
 
     long_name: str

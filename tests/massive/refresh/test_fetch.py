@@ -110,15 +110,13 @@ def test_fetch_stores_every_source_canonically_with_a_manifest(tmp_path: Path) -
 
 
 def test_fetch_replaces_the_old_snapshot_entirely(tmp_path: Path) -> None:
-    target = tmp_path / "snapshot"
+    # The swap itself is tested with `snapshot.store`; here only that fetch goes through it.
+    target = tmp_path / "massive"
     (target / "rest" / "gone").mkdir(parents=True)
     (target / "rest" / "gone" / "page.md").write_text("removed by Massive\n", encoding="utf-8")
-    (tmp_path / "snapshot-incoming").mkdir()  # a staging directory left by an interrupted run
-    (tmp_path / "snapshot-previous").mkdir()  # a backup left by an interrupted swap
     fetch.fetch(target, get=_getter(_sources()), today=dt.date(2026, 1, 1))
     assert not (target / "rest" / "gone").exists()
-    assert not (tmp_path / "snapshot-incoming").exists()
-    assert not (tmp_path / "snapshot-previous").exists()
+    assert (target / "manifest.json").is_file()
 
 
 def test_a_failed_fetch_leaves_the_old_snapshot_untouched(tmp_path: Path) -> None:

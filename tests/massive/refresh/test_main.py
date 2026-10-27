@@ -7,21 +7,26 @@ from typing import TYPE_CHECKING
 import pytest
 
 from deephaven_massive._massive.refresh import __main__ as command
-from deephaven_massive._massive.refresh import fetch, generate
+from deephaven_massive._massive.refresh import fetch, generate, render, snapshot
+from deephaven_massive._massive.refresh.gates import Gate, Problem, RefreshError
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
+@pytest.mark.skipif(
+    not snapshot.DIRECTORY.is_dir(),
+    reason="the vendored snapshot (vendor/massive/) is in a source checkout only",
+)
 def test_the_plain_run_reports_an_up_to_date_schema(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # The run regenerates a copy, never the committed file, so this test cannot hide a parity
     # failure by rewriting it.
-    committed = generate.SPEC_FILE.read_bytes()
+    committed = render.REST_FILE.read_bytes()
     copy = tmp_path / "rest.json"
     copy.write_bytes(committed)
-    monkeypatch.setattr(generate, "SPEC_FILE", copy)
+    monkeypatch.setattr(render, "REST_FILE", copy)
     assert command.main([]) == 0
     assert capsys.readouterr().out == f"{copy} is up to date\n"
     assert copy.read_bytes() == committed
@@ -34,22 +39,22 @@ def test_the_plain_run_reports_an_update(
     # command's report of it is.
     monkeypatch.setattr(generate, "refresh", lambda: True)
     assert command.main([]) == 0
-    assert capsys.readouterr().out == f"{generate.SPEC_FILE} updated\n"
+    assert capsys.readouterr().out == f"{render.REST_FILE} updated\n"
 
 
 def test_a_stopped_refresh_prints_the_problems_and_fails(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    problem = generate.Problem(gate="G1", source="/v1/x", key="p", message="short key")
+    problem = Problem(gate=Gate.SHORT_KEY, source="/v1/x", key="p", message="short key")
 
     def stopped() -> bool:
-        raise generate.RefreshError([problem])
+        raise RefreshError([problem])
 
     monkeypatch.setattr(generate, "refresh", stopped)
     assert command.main([]) == 1
     output = capsys.readouterr()
     assert output.out == ""
-    assert output.err == "the refresh stopped on 1 problem(s):\nG1 /v1/x p: short key\n"
+    assert output.err == "the refresh stopped on 1 problem(s):\nshort-key /v1/x p: short key\n"
 
 
 def test_fetch_replaces_the_snapshot(
@@ -63,9 +68,9 @@ def test_fetch_replaces_the_snapshot(
 
     monkeypatch.setattr(fetch, "fetch", fetched)
     assert command.main(["--fetch"]) == 0
-    assert calls == [generate.SNAPSHOT_DIRECTORY]
+    assert calls == [snapshot.DIRECTORY]
     assert capsys.readouterr().out.splitlines() == [
-        f"stored 2 files in {generate.SNAPSHOT_DIRECTORY}",
+        f"stored 2 files in {snapshot.DIRECTORY}",
         "now run `python -m deephaven_massive._massive.refresh` to regenerate the schemas",
     ]
 
@@ -86,6 +91,13 @@ def test_check_is_not_an_option_yet(capsys: pytest.CaptureFixture[str]) -> None:
         command.main(["--check"])
     assert caught.value.code == 2
     assert "unrecognized arguments: --check" in capsys.readouterr().err
+
+
+def test_the_help_names_the_vendored_snapshot(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        command.main(["--help"])
+    assert caught.value.code == 0
+    assert "vendor/massive/" in " ".join(capsys.readouterr().out.split())
 
 
 def test_running_the_module_runs_main(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -236,5 +236,5 @@ hs_err_pid*.log
 uv.lock
 
 # An interrupted `refresh --fetch` leaves its staging or backup directory beside the snapshot.
-src/deephaven_massive/_massive/refresh/snapshot-incoming/
-src/deephaven_massive/_massive/refresh/snapshot-previous/
+vendor/massive-incoming/
+vendor/massive-previous/

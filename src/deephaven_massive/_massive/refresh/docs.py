@@ -15,9 +15,10 @@ This module turns those documents into plain values and nothing else:
 - `page_file(url)` maps a REST page URL to its file under the snapshot's `rest/` directory;
 - `endpoint(page)` reads a page's endpoint line.
 
-`generate` uses them to decide which OpenAPI paths are documented. Every input is untrusted
-vendor text: it is parsed with anchored regular expressions, never evaluated, and a page URL
-outside `https://massive.com/docs/rest/` is rejected before it can name a file.
+`fetch` and `snapshot` use them to store and find the pages, and `rest` to decide which
+OpenAPI paths are documented. Every input is untrusted vendor text: it is parsed with anchored
+regular expressions, never evaluated, and a page URL outside `https://massive.com/docs/rest/`
+is rejected before it can name a file.
 
 This module imports only the standard library.
 """

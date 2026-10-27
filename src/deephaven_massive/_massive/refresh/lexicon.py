@@ -18,9 +18,9 @@ flat key table cannot work, so the translation goes by **shape**:
 
 The generator translates every segment of a wire key through the lexicon of the object it
 sits in, else keeps an identity key or a long key as it is; a short key (three characters or
-fewer, no underscore) that neither covers stops the refresh (gate G1). A lexicon or identity
-entry never takes a name from a description. A `SHAPES` or `IDENTITY` entry that no generated
-object uses is stale and stops the refresh too (gate G4).
+fewer, no underscore) that neither covers stops the refresh (the `short-key` gate). A lexicon
+or identity entry never takes a name from a description. A `SHAPES` or `IDENTITY` entry that
+no generated object uses is stale and stops the refresh too (the `stale-entry` gate).
 
 The path tuples at the end (`BAR_PATHS` and the snapshot paths) are shared with `overrides`.
 
