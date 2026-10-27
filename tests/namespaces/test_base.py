@@ -6,7 +6,9 @@ from typing import Any, cast
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._catalog import DatasetSpec, ParamKind
+from deephaven_massive._datasets.catalog import DatasetSpec, ParamKind
+from deephaven_massive._datasets.schema import BARS, TRADES, Column, ColumnType, Schema
+from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, Transport
 from deephaven_massive._namespaces.base import Namespace, bar_query_class, build_query, list_params
 from deephaven_massive._query import (
@@ -17,8 +19,6 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
-from deephaven_massive._schema import BARS, TRADES, Column, ColumnType, Schema
-from deephaven_massive._timeunits import TimeUnit
 
 S, LD = ColumnType.STRING, ColumnType.LOCAL_DATE
 
@@ -264,7 +264,7 @@ def test_filters_go_through_the_sdk_check(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "deephaven_massive._catalog.SDK_PARAMS",
+        "deephaven_massive._datasets.catalog.SDK_PARAMS",
         {"list_stocks_dividends": {"pay_date_lte": ParamKind.DATE}},
     )
     build(massive_session, DIVIDENDS, filters={"pay_date_lte": "2025-12-31"})

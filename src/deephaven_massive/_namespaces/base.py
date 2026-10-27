@@ -5,9 +5,9 @@ module does the work they share when a dataset method is called:
 
 - `Namespace` is the base class of the namespace classes; it holds the session core, which
   each factory method passes to `build_query`.
-- `build_query` normalizes symbols (`_symbols.normalize`), rejects `dm.ALL` where the dataset
-  cannot serve it (naming the alternative), parses the time-axis bounds, and normalizes the
-  typed parameters and the `filters` mapping into a hashable `Request`.
+- `build_query` normalizes symbols (`normalize` in `_datasets/symbols.py`), rejects `dm.ALL`
+  where the dataset cannot serve it (naming the alternative), parses the time-axis bounds,
+  and normalizes the typed parameters and the `filters` mapping into a hashable `Request`.
 - `bar_query_class` is the run-time half of the `bars()` overloads: it picks the most specific query
   class for the actual timespan and multiplier and rejects the timespans the asset class's endpoint
   does not accept.
@@ -16,9 +16,10 @@ module does the work they share when a dataset method is called:
   it is a total-row cap, not the SDK's page-size parameter.
 
 Filter keys and value kinds are checked against the generated SDK parameter table
-(`_catalog.check_filters`) synchronously at construction, so a bad filter fails before any verb
-runs; the check is active once that table has been generated. Everything here runs synchronously on
-the calling thread, makes no network call, and creates no table.
+(`check_filters` in `_datasets/catalog.py`) synchronously at construction, so a bad filter
+fails before any verb runs; the check is active once that table has been generated.
+Everything here runs synchronously on the calling thread, makes no network call, and creates no
+table.
 """
 
 from __future__ import annotations
@@ -28,24 +29,24 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar
 
-from deephaven_massive._catalog import check_filters
 from deephaven_massive._config import require_positive_int
-from deephaven_massive._dates import check_order, parse_date_like, require_aware
+from deephaven_massive._datasets.catalog import check_filters
+from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
+from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.symbols import normalize
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
     QueryBase,
-    Request,
     StreamHistoryQuery,
 )
-from deephaven_massive._symbols import normalize
 from deephaven_massive._types import _All, override
 
 if TYPE_CHECKING:
-    from deephaven_massive._catalog import DatasetSpec
-    from deephaven_massive._query import ParamValue
-    from deephaven_massive._session import SessionCore
+    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.request import ParamValue
+    from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
 __all__ = ["Namespace", "bar_query_class", "build_query", "list_params"]
@@ -162,8 +163,8 @@ def _value(name: str, value: object) -> ParamValue:
             enum member, or a sequence of `str`; for a list or tuple, the message names the
             first element that is not a `str`.
 
-    A naive `datetime` raises the `ValueError` of `_dates.require_aware`, the same message as
-    a naive time bound.
+    A naive `datetime` raises the `ValueError` of `require_aware` in `_datasets/dates.py`, the
+    same message as a naive time bound.
     """
     if isinstance(value, datetime):
         require_aware(name, value, value)
@@ -260,8 +261,9 @@ def build_query(
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
-    or `ValueError` of the helper that checks them (`_symbols.normalize`, `_require_enum`,
-    `_dates.parse_date_like`, `bar_query_class`, `require_positive_int` for `limit`).
+    or `ValueError` of the helper that checks them (`normalize` in `_datasets/symbols.py`,
+    `_require_enum`, `parse_date_like` in `_datasets/dates.py`, `bar_query_class`,
+    `require_positive_int` for `limit`).
     """
     normalized = None if symbols is None else normalize(spec.asset_class, symbols)
     if isinstance(normalized, _All) and all_alternative is not None:

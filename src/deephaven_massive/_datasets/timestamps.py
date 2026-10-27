@@ -3,7 +3,7 @@
 Massive sends epoch timestamps in milliseconds on some transports and nanoseconds on others, and the
 unit of a field is not always the one its documentation states. The previous code base guessed units
 from magnitudes, which hid unit bugs. Here every timestamp field is *declared*: each dataset's
-`DatasetSpec.time_units` maps `(transport, field)` to a `TimeUnit`, and `_catalog.time_units()`
+`DatasetSpec.time_units` maps `(transport, field)` to a `TimeUnit`, and `catalog.time_units()`
 composes those declarations into one `TimeUnitTable`. The table refuses to convert a field nobody
 registered.
 
@@ -111,7 +111,7 @@ class TimeField(NamedTuple):
 class TimeUnitTable:
     """The `(dataset, transport, field) -> UnitRule` lookup, with conversions to nanoseconds.
 
-    One instance is built by `_catalog.time_units()` from every `DatasetSpec`'s declarations
+    One instance is built by `catalog.time_units()` from every `DatasetSpec`'s declarations
     and shared, read-only, by every transport. Instances are immutable after construction and
     safe to use from any thread. Converting a field that has no declared unit raises
     `LookupError`, because guessing a unit is exactly the bug this table exists to prevent.
@@ -119,8 +119,13 @@ class TimeUnitTable:
     Example:
         ::
 
+            from deephaven_massive._datasets.timestamps import (
+                TimeField,
+                TimeUnit,
+                TimeUnitTable,
+                UnitRule,
+            )
             from deephaven_massive._enums import Transport
-            from deephaven_massive._timeunits import TimeField, TimeUnit, TimeUnitTable, UnitRule
 
             trades_t = TimeField("stocks.trades", Transport.WS, "t")
             table = TimeUnitTable({trades_t: UnitRule(TimeUnit.MILLISECONDS)})

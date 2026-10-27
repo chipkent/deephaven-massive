@@ -10,7 +10,7 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive import _query, _session
 from deephaven_massive._config import MassiveConfig
-from deephaven_massive._dates import NEW_YORK
+from deephaven_massive._datasets.dates import NEW_YORK
 from deephaven_massive._enums import AssetClass
 
 ENV = (

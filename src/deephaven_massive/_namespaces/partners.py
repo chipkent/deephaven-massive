@@ -10,7 +10,7 @@ Partner datasets stay nested by vendor, one class each:
 - `m.partners.fable` (`_Fable`): European consumer-spending merchant aggregates and hierarchy.
 
 This module owns the partners' `DatasetSpec`s, exported as `DATASETS` and composed into the
-catalog by `_catalog.datasets()`.
+catalog by `datasets()` in `_datasets/catalog.py`.
 
 Status: no datasets are declared yet. `DATASETS` is empty and the vendor classes have no dataset
 methods.
@@ -24,8 +24,8 @@ from typing import TYPE_CHECKING, ClassVar, Final
 from deephaven_massive._namespaces.base import Namespace
 
 if TYPE_CHECKING:
-    from deephaven_massive._catalog import DatasetSpec
-    from deephaven_massive._session import SessionCore
+    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._tables.core import SessionCore
 
 __all__ = ["DATASETS", "_Benzinga", "_EtfGlobal", "_Fable", "_Partners", "_Tmx"]
 

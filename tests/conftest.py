@@ -141,8 +141,8 @@ def load_fixture() -> Callable[[str, str], bytes]:
     """Return a function that reads a payload fixture from `tests/data/<owner>/<name>`.
 
     `owner` is the mirrored test's path under `tests/` without the `test_` prefix and `.py`
-    (`"symbols"` for `tests/test_symbols.py`), or a test package's path (`"massive/rest"`), so
-    each owner's fixtures stay together.
+    (`"datasets/symbols"` for `tests/datasets/test_symbols.py`), or a test package's path
+    (`"massive/rest"`), so each owner's fixtures stay together.
 
     Returns:
         A function mapping `(owner, name)` to the fixture file's bytes.
@@ -215,12 +215,12 @@ def massive_session() -> Iterator[MassiveSession]:
 def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Number each test's streams from 1, so tests can name them by id.
 
-    Stream ids are process-unique in the library (a module-level counter in `_session.py`);
-    each test gets a fresh counter.
+    Stream ids are process-unique in the library (a module-level counter in
+    `_tables/core.py`); each test gets a fresh counter.
     """
-    session = importlib.import_module("deephaven_massive._session")
+    core = importlib.import_module("deephaven_massive._tables.core")
     itertools = importlib.import_module("itertools")
-    monkeypatch.setattr(session, "_stream_numbers", itertools.count(1))
+    monkeypatch.setattr(core, "_stream_numbers", itertools.count(1))
 
 
 @pytest.fixture
@@ -289,22 +289,16 @@ _AWS_IDENTITY_VARIABLES = (
 
 
 @pytest.fixture
-def fake_s3(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeS3:
-    """Answer every flat-file S3 client the library creates from a `FakeS3` (`tests/_fakes/s3.py`).
+def no_aws_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hide the machine's AWS settings from boto3 for the test, so every machine sees the same.
 
-    The library's own client factory still runs (credentials, endpoint, signing configuration);
-    the fake then answers the client's requests inside botocore, so nothing leaves the process.
-    The machine's AWS settings are hidden for the test, so every machine sees the same thing:
-    the AWS configuration and credentials files are an empty file, the variables that name a
+    The AWS configuration and credentials files are an empty file, the variables that name a
     profile or credentials are unset, and the instance metadata service is never asked. A test
     may set its own on top.
 
     Args:
         monkeypatch: Undoes the environment changes after the test.
         tmp_path: Holds the empty AWS configuration file.
-
-    Returns:
-        The fake, for storing objects and inspecting requests.
     """
     empty = tmp_path / "aws-empty"
     empty.write_text("")
@@ -313,6 +307,23 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeS3:
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     for name in _AWS_IDENTITY_VARIABLES:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
+    """Answer every flat-file S3 client the library creates from a `FakeS3` (`tests/_fakes/s3.py`).
+
+    The library's own client factory still runs (credentials, endpoint, signing configuration);
+    the fake then answers the client's requests inside botocore, so nothing leaves the process.
+    The machine's AWS settings are hidden for the test (`no_aws_settings`).
+
+    Args:
+        monkeypatch: Undoes the wrapping of boto3's client factory after the test.
+        no_aws_settings: Hides the machine's AWS settings.
+
+    Returns:
+        The fake, for storing objects and inspecting requests.
+    """
     s3 = importlib.import_module("tests._fakes.s3")
     fake: FakeS3 = s3.FakeS3()
     fake.install(monkeypatch)

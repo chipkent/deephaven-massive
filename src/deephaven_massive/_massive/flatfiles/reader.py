@@ -21,8 +21,8 @@ Python objects.
 
 `ReadPlan` and `ReadColumn` describe what to read; the library builds them from a dataset, so
 this module knows no dataset. It imports only the standard library, `pyarrow`, and `net`: the
-client hands it a stream whose read errors are `OSError`s, so it needs no botocore. The package
-is spelled `flatfiles`; the library module that uses it is `_flat_files.py`.
+client hands it a stream whose read errors are `OSError`s, so it needs no botocore. The library
+module that uses it is `_ingest/flatfiles.py`.
 """
 
 from __future__ import annotations
@@ -82,8 +82,8 @@ class ReadColumn:
 class ReadPlan:
     """What to read from one flat file, and which rows to keep.
 
-    The library builds one per file (`_flat_files.py`), from the dataset's flat-file headers and
-    the request; it is read-only and may be shared between threads.
+    The library builds one per file (`_ingest/flatfiles.py`), from the dataset's flat-file headers
+    and the request; it is read-only and may be shared between threads.
 
     Attributes:
         columns: The headers to read, in the order of the batches' columns.

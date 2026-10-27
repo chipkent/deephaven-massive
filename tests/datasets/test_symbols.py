@@ -14,8 +14,7 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive import _errors
-from deephaven_massive._enums import AssetClass
-from deephaven_massive._symbols import (
+from deephaven_massive._datasets.symbols import (
     CRYPTO_QUOTES,
     SymbolTable,
     canonical,
@@ -25,6 +24,7 @@ from deephaven_massive._symbols import (
     underlying,
     ws_symbol,
 )
+from deephaven_massive._enums import AssetClass
 
 if TYPE_CHECKING:
     from deephaven_massive._types import Symbols
@@ -191,7 +191,7 @@ def test_crypto_quotes_cover_the_vendored_tickers(
     # The fixture is assembled from well-known pairs, not from a live listing (no API key was
     # available). Regenerate it from /v3/reference/tickers?market=crypto with a live key, and
     # widen CRYPTO_QUOTES if this test then fails.
-    text = load_fixture("symbols", "crypto_tickers.csv").decode()
+    text = load_fixture("datasets/symbols", "crypto_tickers.csv").decode()
     rows = list(csv.DictReader(io.StringIO(text)))
     assert len(rows) > 20
     for row in rows:
@@ -248,7 +248,7 @@ def test_symbol_canonicalizer(
     to_canonical = symbol_canonicalizer(FX)
     assert to_canonical("EUR/USD") == "C:EURUSD"
     assert to_canonical(None) is None
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._symbols"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._datasets.symbols"):
         assert to_canonical("not a pair") is None
         assert to_canonical("EURUSDX") is None
     assert len(caplog.records) == 1

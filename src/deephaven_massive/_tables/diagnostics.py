@@ -31,18 +31,18 @@ import pyarrow as pa
 from deephaven import arrow as dh_arrow
 from deephaven import input_table
 
+from deephaven_massive._datasets.schema import Column, ColumnType, Schema, pascal_case
+from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._errors import MassiveError
-from deephaven_massive._liveness import QueueWorker, new_scope
-from deephaven_massive._schema import Column, ColumnType, Schema, pascal_case
-from deephaven_massive._symbols import SymbolTable
+from deephaven_massive._tables.liveness import QueueWorker, new_scope
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
 
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Transport
-    from deephaven_massive._symbols import NormalizedSymbols
 
 __all__ = [
     "CONNECTIONS",

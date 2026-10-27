@@ -11,7 +11,7 @@ form to its `wire_type`), and stored as:
 
 | `WireType` | Arrow type |
 |---|---|
-| `long`, `epoch` (a raw count in the field's unit; `_timeunits` converts it later) | `int64` |
+| `long`, `epoch` (a raw count in its unit; `_datasets/timestamps.py` converts it) | `int64` |
 | `double` | `float64` |
 | `bool` | `bool` |
 | `string`, `json-text` (compact JSON) | `string` |
