@@ -849,7 +849,7 @@ and `request_id`, the lazy `__init__`); [§ 19](DESIGN.md#19-wire-clients-and-th
 - [ ] `net/http.py` (CA bundle, proxy selection) and `net/codec.py` (orjson when installed,
       logged once).
 - [ ] `spec/types.py`: `Transport`, `Source` (with `memberships`), `Membership(kind, group,
-      position, projection: Mapping[wire_key, long_name] | None)`, `RestPath`, `Field`,
+      position, projection: Mapping[wire_key, column] | None)`, `RestPath`, `Field`,
       `Param`, `ParamKind`, `WireType`, `WireUnit`, `DriftReport`, frozen, standard library
       only.
 - [ ] The lazy package `__init__.py` files.
