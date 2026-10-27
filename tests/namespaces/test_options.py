@@ -427,6 +427,10 @@ def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSe
         "params": {"date": date(2025, 1, 2)},
         "filters": {},
     }
+    assert q._request.adjusted is True
+    assert daily(CONTRACT, "2025-01-02", adjusted=False)._request.adjusted is False
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        daily(CONTRACT, "2025-01-02", adjusted=cast("bool", 0))
     with pytest.raises(ValueError, match=r"use m\.options\.snapshots\(dm\.ALL\)"):
         daily(dm.ALL, "2025-01-02")
     with pytest.raises(TypeError):

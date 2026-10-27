@@ -24,11 +24,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import DAY_ZONES, parse_date_like
+from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -121,6 +120,7 @@ def _from_path(time: str) -> SourceKeys:
 
 TRADES: Final = DatasetSpec(
     name="options.trades",
+    summary="Trades of US-listed options contracts (OPRA), tick by tick.",
     asset_class=AssetClass.OPTIONS,
     kind="trades",
     fetch_path=_LAST_TRADE,
@@ -139,6 +139,7 @@ TRADES: Final = DatasetSpec(
 
 QUOTES: Final = DatasetSpec(
     name="options.quotes",
+    summary="Quotes of US-listed options contracts (OPRA), tick by tick.",
     asset_class=AssetClass.OPTIONS,
     kind="quotes",
     history_path=_QUOTES,
@@ -155,6 +156,7 @@ QUOTES: Final = DatasetSpec(
 
 BARS: Final = DatasetSpec(
     name="options.bars",
+    summary="Aggregate bars (open, high, low, close, volume) of US-listed options contracts.",
     asset_class=AssetClass.OPTIONS,
     is_bars=True,
     kind="bars",
@@ -175,6 +177,7 @@ BARS: Final = DatasetSpec(
 
 FMV: Final = DatasetSpec(
     name="options.fmv",
+    summary="Massive's fair market value of US-listed options contracts, streamed in real time.",
     asset_class=AssetClass.OPTIONS,
     kind="fmv",
     channels={None: "FMV"},
@@ -184,6 +187,7 @@ FMV: Final = DatasetSpec(
 
 CHAIN: Final = DatasetSpec(
     name="options.chain",
+    summary="The snapshot of every contract in one underlying's option chain.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CHAIN,
     keys={(_REST, _CHAIN): _keys("DetailsTicker", fanout="UnderlyingAssetTicker")},
@@ -192,6 +196,7 @@ CHAIN: Final = DatasetSpec(
 
 SNAPSHOTS: Final = DatasetSpec(
     name="options.snapshots",
+    summary="The current snapshot of each requested options contract, with its greeks.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_SNAPSHOT,
     keys={(_REST, _SNAPSHOT): _keys("Ticker", fanout="UnderlyingAssetTicker")},
@@ -201,6 +206,7 @@ SNAPSHOTS: Final = DatasetSpec(
 
 CONTRACTS: Final = DatasetSpec(
     name="options.contracts",
+    summary="Reference data on options contracts: type, exercise style, expiration, and strike.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CONTRACTS,
     extra_paths=(_CONTRACT,),
@@ -215,6 +221,7 @@ CONTRACTS: Final = DatasetSpec(
 
 DAILY_OPEN_CLOSE: Final = DatasetSpec(
     name="options.daily_open_close",
+    summary="The open, high, low, close, and volume of each options contract on one day.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_OPEN_CLOSE,
     keys={(_REST, _OPEN_CLOSE): _keys("Symbol")},
@@ -721,7 +728,7 @@ class _Options(Namespace):
         if contract_type is not None:
             params["contract_type"] = _require_enum(contract_type, ContractType, "contract_type")
         if as_of is not None:
-            params["as_of"] = _day(as_of, "as_of")
+            params["as_of"] = calendar_day(CONTRACTS, as_of, "as_of")
         if expired is not None:
             if not isinstance(expired, bool):
                 raise TypeError(f"expired must be a bool, not {type(expired).__name__}")
@@ -740,7 +747,7 @@ class _Options(Namespace):
             ),
         )
 
-    def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
+    def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open, high, low, close, and volume of each options contract on one day.
 
         One row per contract (`Symbol`) for the day (`From`), with its pre-market and
@@ -759,13 +766,15 @@ class _Options(Namespace):
         It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a symbol is
         not an OCC option symbol, a sequence is empty or an exhausted generator, a table has no
         `Symbol` column, or `date` is a naive `datetime` or not ISO-8601; `TypeError` if `symbols`
-        or `date` is of another type.
+        or `date` is of another type, or `adjusted` is not a `bool`.
 
         Args:
             symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
                 sequence, or a Deephaven table with a `Symbol` column.
             date: The trading day, as an ISO-8601 date, a `date`, or an aware `datetime` (its
                 date in New York).
+            adjusted: Whether the prices are adjusted for splits of the underlying; True by
+                default.
 
         Returns:
             A query with `fetch()` and `poll()`.
@@ -782,27 +791,7 @@ class _Options(Namespace):
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
                 all_alternative="m.options.snapshots(dm.ALL)",
-                params={"date": _day(date, "date")},
+                adjusted=adjusted,
+                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )
-
-
-def _day(value: DateLike, name: str) -> date:
-    """Return the trading day a date-like argument names.
-
-    It raises at once, before any request: `TypeError` if `value` is not a `str`, `date`, or
-    `datetime`; `ValueError` if `value` is a naive `datetime`, or text that is not ISO-8601 or has a
-    time without an offset.
-
-    Args:
-        value: An ISO-8601 date or timestamp with an offset, a `date`, or an aware `datetime`.
-        name: The argument's name, for messages.
-
-    Returns:
-        The date; a moment becomes its date in New York, the options market's day zone.
-
-    """
-    parsed = parse_date_like(value, name)
-    if isinstance(parsed, datetime):
-        return parsed.astimezone(DAY_ZONES[AssetClass.OPTIONS]).date()
-    return parsed
