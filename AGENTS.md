@@ -84,7 +84,9 @@ nothing is kept or shimmed for compatibility.
 11. **Docstrings meet the documentation standard below.** A change to a public signature,
     default, or table semantics updates `DESIGN.md` first (owner decision).
 12. **Dependencies** (the declarations in `pyproject.toml`) change only in dedicated
-    `chore(deps):` PRs. `uv.lock` is not committed: every sync resolves the newest versions.
+    `chore(deps):` PRs. `uv.lock` is not committed: CI starts with no lock and resolves the newest
+    versions on every run, `scripts/check.sh` does the same locally with `uv sync --upgrade`,
+    and a plain local `uv sync` keeps the existing lock.
 13. **One wire package** (from the `PLAN.md` package PC1a, which creates it and its boundary
     tests). `src/deephaven_massive/_massive/` owns all Massive wire access
     (REST, WebSocket, and S3 flat files), the vendored spec snapshot, the generated schemas,
