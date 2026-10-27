@@ -727,7 +727,7 @@ git diff --stat origin/main -- . ':!plans' ':!AGENTS.md'      # empty
 |---|---|
 | **Branch** | `chore/deps-wire-clients` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #70 |
 
 **Goal.** Declare the libraries the wire clients import, so nothing relies on a dependency that
 only `massive` brings in.
@@ -771,7 +771,7 @@ rm -rf .venv && uv sync --upgrade
 |---|---|
 | **Branch** | `chore/delete-legacy` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #71 |
 
 **Goal.** Delete the legacy implementation and every temporary exclusion now, so no shadow of
 the old layout remains. References to it read `git show 519fad8:<path>`.
@@ -818,7 +818,7 @@ uv build && unzip -l dist/*.whl | grep -E 'engine/|/domains/|schemas/' ; test $?
 |---|---|
 | **Branch** | `refactor/final-names` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #72 |
 
 **Goal.** Rename to the final layout before new code lands: `_domains/` to `_namespaces/`, the
 test paths to the rule of DESIGN § 4.2, and the import roots.
@@ -872,7 +872,7 @@ change.
 |---|---|
 | **Branch** | `feat/wire-package-scaffold` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #73 |
 
 **Goal.** Create the wire package's skeleton and everything the later wire planned PRs share, so
 rest-client, websocket-client, flat-file-history, and rest-wire-schema import nothing from each
@@ -1060,7 +1060,7 @@ planned PRs); REST history (rest-transport); live S3 tests (live-integration-sui
 |---|---|
 | **Branch** | `feat/rest-client` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #74 |
 
 **Goal.** A REST client that speaks Massive's documented REST protocol exactly, shared safely by
 every thread of a session, that turns pages into Arrow batches of the generated fields and
@@ -1120,7 +1120,7 @@ retries underneath the client.
 |---|---|
 | **Branch** | `feat/websocket-client` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #75 |
 
 **Goal.** A WebSocket client for one `wss://host/path`, confined to its own loop thread, that
 decodes every frame against injected generated sources into status events, rows, rejects, and
@@ -1185,7 +1185,7 @@ which would send binary frames.
 |---|---|
 | **Branch** | `feat/rest-wire-schema` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #76 |
 
 **Goal.** The refresh command, the canonical snapshot, and `spec/rest.json`: every non-excluded
 documented REST path named and given units. Scope: about 120 paths, with about 90
@@ -1263,7 +1263,7 @@ Never derive a name from a description.
 |---|---|
 | **Branch** | `feat/field-descriptions` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #77 |
 
 **Goal.** The refresh records the vendor's description of every REST field, normalized to plain
 text, in a separate generated file, `spec/descriptions.json`, and the `spec` loader joins it
@@ -1343,7 +1343,7 @@ column-reference-pages).
 |---|---|
 | **Branch** | `feat/ws-flat-file-wire-schemas` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #78 |
 
 **Goal.** `spec/ws.json` and `spec/flatfiles.json`, the dataset kinds, and the gates that make
 names, types, and transports agree.
@@ -1408,7 +1408,7 @@ tape or average trade size); a flat key table cannot work.
 |---|---|
 | **Branch** | `feat/runtime-drift` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #79 |
 
 **Goal.** Report drift and fail loudly on bad data for flat files, and add the diagnostics
 column and registry every transport uses.
@@ -1459,7 +1459,7 @@ extra one is ignored silently; read by name.
 |---|---|
 | **Branch** | `fix/flat-file-s3-net` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #80 |
 
 **Goal.** S3 follows the same TLS, proxy, and retry rules as REST.
 
@@ -1508,7 +1508,7 @@ uv run pytest tests/massive/flatfiles -q
 |---|---|
 | **Branch** | `refactor/generated-schemas` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #81 |
 
 **Goal.** Derive every dataset schema from the generated tables and delete every hand-written
 schema.
@@ -1582,7 +1582,7 @@ uv run pytest tests/test_catalog.py tests/test_schema.py tests/test_timeunits.py
 |---|---|
 | **Branch** | `feat/api-drift-check` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #82 |
 
 **Goal.** `--check` and the weekly drift job.
 
@@ -1632,7 +1632,7 @@ uv run python -m deephaven_massive._massive.refresh --check    # live; prints th
 |---|---|
 | **Branch** | `chore/deps-remove-massive` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #83 |
 
 **Goal.** Remove the `massive` dependency and its fork source.
 
@@ -1819,7 +1819,7 @@ tearing down a whole URL on one entitlement error; prefix matching between topic
 |---|---|
 | **Branch** | `feat/column-descriptions` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #84 |
 
 **Goal.** Every verb returns a table whose columns carry their descriptions (the web UI's
 column-header tooltip) and whose table description names the dataset; every query gains the
@@ -1912,7 +1912,7 @@ diagnostics tables.
 |---|---|
 | **Branch** | `feat/column-reference` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #85 |
 
 **Goal.** The column reference: committed `docs/datasets/<namespace>.md` pages generated from
 the dataset schemas, one command that owns the whole directory so that no page is ever
@@ -2189,7 +2189,7 @@ MASSIVE_API_KEY=… uv run pytest -m integration -q    # owner only
 |---|---|
 | **Branch** | `docs/retire-plans` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #86 |
 
 **Goal.** Retire each UNVERIFIED note that live-integration-suite verified and delete
 `plans/rework/`.
@@ -2231,7 +2231,7 @@ git grep -n "UNVERIFIED\|plans/rework"
 |---|---|
 | **Branch** | `ci/release-workflow` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #87 |
 
 **Starts only on the owner's go-ahead.** Publishing is not turned on. Until the owner says so,
 no release workflow, GitHub environment, or pending trusted publisher is created, and no other
@@ -2274,7 +2274,7 @@ publishes to PyPI, where a version can never be re-uploaded.
 |---|---|
 | **Branch** | `chore/release-0.1.0` |
 | **Base** | `origin/main` after `git fetch` |
-| **Issue** | TBD (owner approval to create) |
+| **Issue** | #88 |
 
 **Starts only on the owner's go-ahead.** Publishing is not turned on. Until the owner says so,
 no release workflow, GitHub environment, or pending trusted publisher is created, and no other
