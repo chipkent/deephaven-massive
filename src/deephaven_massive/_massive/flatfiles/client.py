@@ -23,20 +23,23 @@ The client follows the network rules the REST and WebSocket clients follow, from
   only a bundle file, so `SSL_CERT_DIR` does not apply to flat files.
 - **Proxy.** `net.http.https_proxy` chooses the proxy (`HTTPS_PROXY`, `NO_PROXY`, or the
   system's settings), and botocore sends a user and password in its URL as
-  `Proxy-Authorization`.
+  `Proxy-Authorization`. With no proxy, botocore is told so explicitly and never consults the
+  environment itself. Messages name the proxy by its URL without the user and password.
 - **Retries.** botocore's own retries are off (one attempt per call). A request that fails
   before the first byte of the object arrives is retried on the schedule of `net.retry`, at
   most `MAX_RETRIES` times, with every wait taken on the client's `Clock`: HTTP 500, 502,
-  503 (S3's `SlowDown`), and 504, S3's `RequestTimeout` error (HTTP 400), and a connection
-  that cannot be made, is reset, or times out. A TLS failure is never retried, and neither is a
-  failure part-way through a body: rows already handed on cannot be taken back, so the read
-  fails instead.
+  503 (S3's `SlowDown`), and 504, S3's `RequestTimeout` error (HTTP 400), a connection that
+  cannot be made, is reset, or times out, and an error response whose body is cut short or
+  stalls. Each retry is logged at INFO and giving up at ERROR. A TLS failure is never
+  retried, nor is a proxy's refusal of its credentials (HTTP 407: the same credentials would be
+  refused again, and a corporate proxy may lock the account), nor a failure part-way through
+  an object's body: rows already handed on cannot be taken back, so the read fails instead.
 
 The body of an object reaches `FlatFile` through a small stream that turns botocore's read
 errors (a connection dropped part-way through the body) into `OSError`, so the reader needs no
-botocore. This module imports only the standard library, `boto3`, `botocore`, and the rest of
-`flatfiles` and `net`; the package's interface resolves it only when `FlatFileClient` is first
-used, so a session that reads no flat file never imports boto3.
+botocore. This module imports only the standard library, `boto3`, `botocore`, `urllib3`, and
+the rest of `flatfiles` and `net`; the package's interface resolves it only when
+`FlatFileClient` is first used, so a session that reads no flat file never imports boto3.
 """
 
 from __future__ import annotations
@@ -50,23 +53,28 @@ from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
 import boto3
+import botocore.session
 from botocore.config import Config
 from botocore.exceptions import (
     BotoCoreError,
     ClientError,
     ConnectionClosedError,
+    ProxyConnectionError,
     ReadTimeoutError,
     SSLError,
 )
 from botocore.exceptions import ConnectionError as BotoConnectionError
+from urllib3.exceptions import ProtocolError
+from urllib3.exceptions import ReadTimeoutError as ResponseReadTimeoutError
 
 from deephaven_massive._massive.flatfiles.reader import FlatFile
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
-from deephaven_massive._massive.net.http import ca_file, https_proxy
+from deephaven_massive._massive.net.http import ca_file, https_proxy, proxy_credentials
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     SYSTEM_CLOCK,
     TRANSIENT_STATUSES,
+    is_proxy_auth_failure,
     is_tls_failure,
     transient_wait,
 )
@@ -97,6 +105,18 @@ _CONNECTION_ERRORS: Final = (BotoConnectionError, ConnectionClosedError, ReadTim
 
 Its other `HTTPClientError`s are not among them: botocore raises the bare class for any
 unexpected exception inside the HTTP layer, which a retry would only repeat."""
+
+_RESPONSE_CUT_SHORT: Final = (ProtocolError, ResponseReadTimeoutError)
+"""urllib3's errors for an error response whose body is reset or stalls.
+
+botocore reads an error response's body outside its own error handling, so these reach the
+caller unwrapped. No byte of the object has arrived, so the request is retried."""
+
+_CONNECT_TIMEOUT: Final = 60.0
+"""Seconds to wait for a connection to the endpoint or the proxy (botocore's default)."""
+
+_READ_TIMEOUT: Final = 60.0
+"""Seconds to wait for each read of a response (botocore's default)."""
 
 
 @dataclass(frozen=True)
@@ -157,11 +177,12 @@ class FlatFileClient:
 
     The library's session creates one on its first flat-file read and closes it when the
     session closes. The boto3 client is created by the first `open`, under the client's own
-    leaf lock (no network call and no wait happen while it is held, since the credentials are
-    given and boto3 need not look for them), and shared by every reader thread, since boto3
-    clients are thread-safe. Once `close()` has run, no request starts; a request already in
-    flight when the client closed is answered, and its connection pool is closed once more as
-    it returns, so nothing it opened outlives the close.
+    leaf lock (no network call and no wait happen while it is held: the credentials are given,
+    the proxy is decided before the lock is taken, and the `legacy` defaults mode keeps boto3
+    from asking the instance-metadata service for a region), and shared by every reader
+    thread, since boto3 clients are thread-safe. Once `close()` has run, no request starts; a
+    request already in flight when the client closed is answered, and its connection pool is
+    closed once more as it returns, so nothing it opened outlives the close.
 
     Example:
         ::
@@ -194,6 +215,7 @@ class FlatFileClient:
         "_host",
         "_lock",
         "_max_pool",
+        "_proxy",
         "_secret_access_key",
     )
 
@@ -230,6 +252,8 @@ class FlatFileClient:
         self._clock = clock
         self._lock = threading.Lock()
         self._client: S3Client | None = None
+        # The proxy the client was created with, without its user and password, for messages.
+        self._proxy: str | None = None
         self._closed = threading.Event()
 
     @property
@@ -289,7 +313,7 @@ class FlatFileClient:
         Raises:
             WireError: When the failure is not retryable; see `open`.
         """
-        client = self._client_for(key)
+        client, proxy = self._client_for(key)
         try:
             body = client.get_object(Bucket=self._bucket, Key=key)["Body"]
         except ClientError as error:
@@ -309,6 +333,16 @@ class FlatFileClient:
                     host=self._host,
                     path=key,
                 ) from error
+            if is_proxy_auth_failure(error):
+                # The same credentials would be refused again, and a corporate proxy may lock
+                # the account after a few refusals.
+                raise WireError(
+                    f"cannot read {location}: the proxy {proxy} refused its credentials (HTTP "
+                    "407); check the user and password in HTTPS_PROXY",
+                    status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
+                    host=self._host,
+                    path=key,
+                ) from error
             if isinstance(error, SSLError):
                 # Any other TLS failure (a protocol mismatch, a handshake the server ends) is
                 # a configuration problem a retry cannot fix either.
@@ -317,10 +351,21 @@ class FlatFileClient:
                     host=self._host,
                     path=key,
                 ) from error
-            failure = WireError(f"cannot read {location}: {error}", host=self._host, path=key)
+            failure = WireError(
+                f"cannot read {location}: {_describe(error, proxy)}", host=self._host, path=key
+            )
             if isinstance(error, _CONNECTION_ERRORS):
                 return _Retryable(failure, error)
             raise failure from error
+        except _RESPONSE_CUT_SHORT as error:
+            return _Retryable(
+                WireError(
+                    f"cannot read {location}: the error response was cut short ({error})",
+                    host=self._host,
+                    path=key,
+                ),
+                error,
+            )
         finally:
             if self._closed.is_set():
                 # The client was closed while this request was in flight, and the request may
@@ -340,8 +385,8 @@ class FlatFileClient:
         if client is not None:
             client.close()
 
-    def _client_for(self, key: str) -> S3Client:
-        """Return the boto3 client, creating it on the first call.
+    def _client_for(self, key: str) -> tuple[S3Client, str | None]:
+        """Return the boto3 client and its proxy, creating the client on the first call.
 
         The certificate bundle and the proxy are read first, outside the client's lock: on
         macOS, the system's proxy exceptions can make the proxy lookup resolve the endpoint's
@@ -353,7 +398,8 @@ class FlatFileClient:
             key: The key about to be requested, for the errors' `path`.
 
         Returns:
-            The shared boto3 S3 client.
+            The shared boto3 S3 client, and the URL of its proxy without the user and password
+            (None when it connects directly), for messages.
 
         Raises:
             WireError: If the client is closed, or boto3 cannot create the client (for
@@ -362,7 +408,7 @@ class FlatFileClient:
         with self._lock:
             self._refuse_if_closed(key)
             if self._client is not None:
-                return self._client
+                return self._client, self._proxy
         bundle = ca_file()
         proxy = https_proxy(self._host or "")
         with self._lock:
@@ -376,7 +422,8 @@ class FlatFileClient:
                         f"cannot create the S3 client for {self._endpoint_url}: {error}",
                         host=self._host,
                     ) from error
-            return self._client
+                self._proxy = None if proxy is None else proxy_credentials(proxy)[0]
+            return self._client, self._proxy
 
     def _refuse_if_closed(self, key: str) -> None:
         """Raise if `close()` has run; the caller holds the client's lock.
@@ -403,7 +450,12 @@ class FlatFileClient:
         makes one attempt per call, so that `open` alone decides what is retried and every
         wait goes through the client's clock. The retry mode is fixed at `standard` because
         `AWS_RETRY_MODE=adaptive` would otherwise add botocore's client-side rate limiter,
-        which sleeps on its own clock.
+        which sleeps on its own clock. With no proxy, `proxies` is an empty mapping rather than
+        None, because None makes botocore look the proxy up itself, under the client's lock
+        and from more variables (`HTTP_PROXY`, `ALL_PROXY`) than the other clients read. The
+        session's defaults mode is fixed at `legacy` because `AWS_DEFAULTS_MODE=auto` would
+        make boto3 ask the instance-metadata service for the region, a network call under the
+        lock.
 
         Args:
             bundle: The certificate bundle (`ca_file()`) that verifies the endpoint and an
@@ -413,9 +465,13 @@ class FlatFileClient:
         Returns:
             A client for the endpoint; it makes no request until it is used.
         """
+        core = botocore.session.get_session()
+        # A session setting outranks AWS_DEFAULTS_MODE and the user's AWS configuration files.
+        core.set_config_variable("defaults_mode", "legacy")
         session = boto3.session.Session(
             aws_access_key_id=self._access_key_id,
             aws_secret_access_key=self._secret_access_key,
+            botocore_session=core,
         )
         return session.client(
             "s3",
@@ -424,7 +480,9 @@ class FlatFileClient:
             config=Config(
                 signature_version="s3v4",
                 max_pool_connections=self._max_pool,
-                proxies=None if proxy is None else {"https": proxy},
+                connect_timeout=_CONNECT_TIMEOUT,
+                read_timeout=_READ_TIMEOUT,
+                proxies={} if proxy is None else {"https": proxy},
                 proxies_config={"proxy_ca_bundle": bundle},
                 retries={"total_max_attempts": 1, "mode": "standard"},
             ),
@@ -464,3 +522,23 @@ class FlatFileClient:
         if code in _CREDENTIAL_ERRORS:
             return WireAuthError(refused, **context)
         return WireEntitlementError(refused, **context)
+
+
+def _describe(error: BotoCoreError, proxy: str | None) -> str:
+    """Describe a botocore failure for a message, never with a proxy's user and password.
+
+    botocore masks the password in a proxy URL by replacing its first occurrence, so a
+    password that also appears earlier in the URL (`http://h:h@proxy`) stays in its message.
+    A failure to reach the proxy is therefore described from the proxy URL without its user
+    and password, and the underlying error, which names no credential.
+
+    Args:
+        error: The failure.
+        proxy: The proxy URL without its user and password, or None.
+
+    Returns:
+        The description.
+    """
+    if isinstance(error, ProxyConnectionError):
+        return f"cannot connect through the proxy {proxy} ({error.kwargs.get('error')})"
+    return str(error)

@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import io
 import logging
+import random
+import socket
 import ssl
+import struct
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import boto3
+import botocore.utils
 import certifi
 import pyarrow as pa
 import pytest
@@ -54,6 +58,8 @@ PRIVATE_KEY = "flat-file-secret"
 OWNER = "massive/flatfiles"
 ENDPOINT = "https://files.massive.com"
 DATA = Path(__file__).resolve().parents[2] / "data" / OWNER
+_CLIENT_JITTER = client_module._JITTER
+"""The client's own jitter source, which the autouse `_half_jitter` fixture replaces."""
 WAITS = [0.55, 1.1, 2.2]
 """The three transient waits, 0.5, 1, and 2 s, each 10 % longer with the jitter fixed at 0.5."""
 
@@ -332,6 +338,27 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
     ]
 
 
+@pytest.mark.parametrize("jitter", [0.0, 0.99])
+def test_the_drawn_jitter_lengthens_each_wait(
+    *,
+    client: FlatFileClient,
+    fake_s3: FakeS3,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    jitter: float,
+) -> None:
+    monkeypatch.setattr(client_module, "_JITTER", _Jitter(jitter))
+    fake_s3.fail(KEY, "unreachable")
+    with pytest.raises(WireError):
+        client.open(KEY)
+    assert clock.waits == pytest.approx([base * (1 + 0.2 * jitter) for base in (0.5, 1.0, 2.0)])
+
+
+def test_the_jitter_source_is_the_operating_system() -> None:
+    # Read at import, before the autouse fixture puts its stand-in in place.
+    assert isinstance(_CLIENT_JITTER, random.SystemRandom)
+
+
 def test_an_object_that_answers_after_a_transient_failure_opens(
     *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock
 ) -> None:
@@ -508,10 +535,14 @@ def test_closing_the_client_ends_a_retry_wait(fake_s3: FakeS3) -> None:
         except WireError as error:
             raised.append(error)
 
-    reader = threading.Thread(target=read)
+    # A daemon, and closed in a `finally`, so a regression fails the test instead of hanging
+    # the process at exit.
+    reader = threading.Thread(target=read, daemon=True)
     reader.start()
-    clock.wait_for_sleepers(1)
-    client.close()
+    try:
+        clock.wait_for_sleepers(1)
+    finally:
+        client.close()
     reader.join(TIMEOUT)
     assert not reader.is_alive()
     (error,) = raised
@@ -702,9 +733,50 @@ def test_the_client_follows_the_shared_tls_and_proxy_rules_and_never_retries_its
     (kwargs,) = factory_calls
     assert kwargs["verify"] == bundle
     config = cast("Any", kwargs["config"])  # botocore declares no type for its settings
-    assert config.proxies == (None if proxy is None else {"https": proxy})
+    # An empty mapping, not None: None would make botocore look the proxy up itself.
+    assert config.proxies == ({} if proxy is None else {"https": proxy})
     assert config.proxies_config == {"proxy_ca_bundle": bundle}
     assert config.retries == {"total_max_attempts": 1, "mode": "standard"}
+    assert (config.connect_timeout, config.read_timeout) == (60.0, 60.0)
+
+
+def test_botocore_never_looks_the_proxy_up_itself(
+    *, fake_s3: FakeS3, network_env: pytest.MonkeyPatch
+) -> None:
+    # The proxy is decided outside the client's lock; botocore's own lookup would run under it,
+    # and on macOS it can resolve the host name.
+    network_env.setenv("HTTPS_PROXY", "http://proxy.corp:3128")
+    network_env.setenv("NO_PROXY", "files.massive.com")
+    lookups: list[str] = []
+    network_env.setattr(botocore.utils, "proxy_bypass", lookups.append)
+    client = make_client()
+    try:
+        client.open(KEY)
+    finally:
+        client.close()
+    assert lookups == []
+    assert len(fake_s3.clients) == 1
+
+
+def test_the_defaults_mode_never_asks_the_instance_metadata_service(
+    *, fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `auto` would look the region up on the instance-metadata service, under the client's lock.
+    monkeypatch.setenv("AWS_DEFAULTS_MODE", "auto")
+    monkeypatch.delenv("AWS_EC2_METADATA_DISABLED")
+    asked: list[object] = []
+
+    def provide(provider: object) -> None:
+        asked.append(provider)
+
+    monkeypatch.setattr(botocore.utils.IMDSRegionProvider, "provide", provide)
+    client = make_client()
+    try:
+        client.open(KEY)
+    finally:
+        client.close()
+    assert asked == []
+    assert len(fake_s3.clients) == 1
 
 
 @pytest.fixture
@@ -801,28 +873,193 @@ def test_the_proxy_carries_its_credentials_and_no_secret_is_logged(
     assert len(tls_server.requests) == 2
     assert all("proxy-authorization" not in r.headers for r in tls_server.requests)
     assert any(r.name == client_module.__name__ for r in caplog.records)  # the retry
+    # botocore's own DEBUG records are among those checked: the signed request is logged.
+    assert any(
+        r.name.startswith("botocore") and r.levelno == logging.DEBUG and "Authorization" in text
+        for r in caplog.records
+        for text in [r.getMessage()]
+    )
     for record in caplog.records:
         text = record.getMessage()
+        # The secret and the proxy password never appear, botocore's DEBUG records included.
         assert PRIVATE_KEY not in text
         assert "s%40cret" not in text
         assert "s@cret" not in text
+        assert "YWxpY2U6c0BjcmV0" not in text  # base64 of "alice:s@cret"
+        # The documented exception: botocore's DEBUG records, enabled only on request, may show
+        # the access key id and the request signature. The library's own records never do.
         if record.name.startswith("deephaven_massive"):
             assert ACCESS_KEY not in text
 
 
+def _closed_port() -> int:
+    """Return a loopback port nothing listens on: bound by this process, then released."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port: int = probe.getsockname()[1]
+    return port
+
+
+@pytest.mark.parametrize(
+    ("user", "password"),
+    [("alice", "topsecret"), ("h", "h")],
+    ids=["a-password", "a-password-that-appears-earlier-in-the-url"],
+)
 def test_an_unreachable_proxy_is_retried_and_its_password_stays_out_of_the_error(
-    *, trusted: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    *, trusted: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, user: str, password: str
 ) -> None:
+    # botocore masks a proxy password by replacing its first occurrence in the URL, which for
+    # `http://h:h@...` is the `h` of `http`; the client names the proxy without credentials.
     caplog.set_level(logging.DEBUG)
-    # Port 9 (discard) on loopback refuses the connection.
-    trusted.setenv("HTTPS_PROXY", "http://alice:topsecret@127.0.0.1:9")
+    port = _closed_port()
+    trusted.setenv("HTTPS_PROXY", f"http://{user}:{password}@127.0.0.1:{port}")
     clock = FakeClock()
     client = make_client(clock=clock)
     try:
-        with pytest.raises(WireError, match="proxy") as info:
+        with pytest.raises(WireError) as info:
             client.open(KEY)
     finally:
         client.close()
     assert clock.waits == WAITS
-    assert "topsecret" not in info.value.message
-    assert not any("topsecret" in r.getMessage() for r in caplog.records)
+    assert info.value.message.startswith(
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: cannot connect "
+        f"through the proxy http://127.0.0.1:{port} ("
+    )
+    secret = f"{user}:{password}@"
+    assert secret not in info.value.message
+    assert "***" not in info.value.message
+    assert not any(secret in r.getMessage() for r in caplog.records)
+    assert any(r.name == client_module.__name__ for r in caplog.records)
+
+
+def test_a_proxy_that_refuses_the_credentials_is_never_retried(
+    *,
+    tls_server: FakeRestServer,
+    fake_rest: FakeRestServer,
+    trusted: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Repeating credentials the proxy refused could lock the account on a corporate proxy.
+    caplog.set_level(logging.DEBUG)
+    proxy = fake_rest.url.removeprefix("http://")
+    trusted.setenv("HTTPS_PROXY", f"http://alice:wr0ng@{proxy}")
+    fake_rest.refuse_tunnels(407)
+    clock = FakeClock()
+    client = make_client(endpoint_url=tls_server.url, clock=clock)
+    try:
+        with pytest.raises(WireError) as info:
+            client.open(KEY)
+    finally:
+        client.close()
+    assert info.value.message == (
+        f"cannot read s3://flatfiles/{KEY} at {tls_server.url}: the proxy {fake_rest.url} "
+        "refused its credentials (HTTP 407); check the user and password in HTTPS_PROXY"
+    )
+    assert (info.value.status, info.value.path) == (407, KEY)
+    assert [r.method for r in fake_rest.requests] == ["CONNECT"]
+    assert (tls_server.requests, clock.waits) == ([], [])
+    assert not any("wr0ng" in r.getMessage() for r in caplog.records)
+
+
+class _ErrorBodyServer:
+    """An HTTP server on 127.0.0.1 whose answers break while an error response's body is sent.
+
+    Each connection takes the next scripted behaviour: `"reset"` sends the head of a 503 and
+    part of its body, then resets the connection; `"stall"` sends the same and then nothing
+    more until the server closes; any `bytes` is a 200 response with that body.
+    """
+
+    _HEAD = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 500\r\n\r\n<Error><Code>Slow"
+
+    def __init__(self, *behaviours: str | bytes) -> None:
+        self._behaviours = list(behaviours)
+        self._lock = threading.Lock()
+        self._released = threading.Event()
+        self.connections = 0
+        self._socket = socket.socket()
+        self._socket.bind(("127.0.0.1", 0))
+        self._socket.listen(8)
+        self.url = f"http://127.0.0.1:{self._socket.getsockname()[1]}"
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def close(self) -> None:
+        self._released.set()
+        self._socket.close()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                connection, _ = self._socket.accept()
+            except OSError:
+                return
+            with self._lock:
+                self.connections += 1
+                behaviour = self._behaviours.pop(0)
+            threading.Thread(target=self._serve, args=(connection, behaviour), daemon=True).start()
+
+    def _serve(self, connection: socket.socket, behaviour: str | bytes) -> None:
+        with connection:
+            request = b""
+            while b"\r\n\r\n" not in request:
+                request += connection.recv(65536)
+            if isinstance(behaviour, bytes):
+                head = f"HTTP/1.1 200 OK\r\nContent-Length: {len(behaviour)}\r\n\r\n"
+                connection.sendall(head.encode() + behaviour)
+                self._released.wait(TIMEOUT)
+                return
+            connection.sendall(self._HEAD)
+            if behaviour == "stall":
+                self._released.wait(TIMEOUT)
+                return
+            # Linger zero: the close resets the connection rather than ending it in order.
+            connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+
+
+@pytest.fixture
+def error_body_env(network_env: pytest.MonkeyPatch, no_aws_settings: None) -> pytest.MonkeyPatch:
+    """Shorten the read timeout to 0.2 s of real time, so a stalled body times out quickly.
+
+    Returns:
+        The monkeypatch.
+    """
+    network_env.setattr(client_module, "_READ_TIMEOUT", 0.2)
+    return network_env
+
+
+@pytest.mark.parametrize("behaviour", ["reset", "stall"])
+def test_an_error_response_cut_short_is_retried_over_the_network(
+    *, error_body_env: pytest.MonkeyPatch, behaviour: str
+) -> None:
+    server = _ErrorBodyServer(behaviour, b"data")
+    clock = FakeClock()
+    client = make_client(endpoint_url=server.url, clock=clock)
+    try:
+        file = client.open(KEY)
+        assert isinstance(file, FlatFile)
+        file.close()
+    finally:
+        client.close()
+        server.close()
+    assert server.connections == 2
+    assert clock.waits == WAITS[:1]
+
+
+def test_an_error_response_cut_short_every_time_is_a_wire_error_after_the_retries(
+    error_body_env: pytest.MonkeyPatch,
+) -> None:
+    server = _ErrorBodyServer(*["reset"] * 4)
+    clock = FakeClock()
+    client = make_client(endpoint_url=server.url, clock=clock)
+    try:
+        with pytest.raises(WireError) as info:
+            client.open(KEY)
+    finally:
+        client.close()
+        server.close()
+    assert info.value.message.startswith(
+        f"cannot read s3://flatfiles/{KEY} at {server.url}: the error response was cut short ("
+    )
+    assert isinstance(info.value.__cause__, ProtocolError)
+    assert (info.value.status, info.value.path) == (None, KEY)
+    assert server.connections == 4
+    assert clock.waits == WAITS
