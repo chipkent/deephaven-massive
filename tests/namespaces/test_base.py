@@ -101,12 +101,14 @@ def test_bar_timespan_rules() -> None:
         bar_query_class(STOCK_BARS, Timespan.SESSION, 1)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
         bar_query_class(STOCK_BARS, "day", 1)
-    with pytest.raises(TypeError, match="multiplier must be an int"):
-        bar_query_class(STOCK_BARS, Timespan.DAY, True)
-    with pytest.raises(TypeError, match="multiplier must be an int"):
-        bar_query_class(STOCK_BARS, Timespan.DAY, 1.0)
     with pytest.raises(ValueError, match="multiplier must be positive"):
         bar_query_class(STOCK_BARS, Timespan.DAY, 0)
+
+
+@pytest.mark.parametrize("multiplier", [True, 1.0])
+def test_bar_multiplier_must_be_an_int(multiplier: object) -> None:
+    with pytest.raises(TypeError, match="multiplier must be an int"):
+        bar_query_class(STOCK_BARS, Timespan.DAY, multiplier)
 
 
 def test_list_params() -> None:

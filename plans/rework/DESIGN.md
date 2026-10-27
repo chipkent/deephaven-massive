@@ -2434,17 +2434,21 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
     plain `uv sync` or `uv run` keeps the local lock. Because `ALL` enables new rules as they ship, a new
     release may surface new findings; the next PR fixes them (or proposes an ignore for owner
     approval).
-  - `preview = true` with `explicit-preview-rules = true`, enabling only `DOC201`, `DOC501`, and
-    `DOC502` (docstring Returns and Raises sections must match the code).
-  - Global ignores: the rules that conflict with `ruff format` (`COM812`, `COM819`, `W191`,
-    `E111`, `E114`, `E117`, `D206`, `D300`, `Q000`–`Q003`), plus `TRY003`, `EM101`, `EM102`,
-    `PLR0913`, `FBT003`, and `CPY001`.
+  - `preview = true` with `explicit-preview-rules = true`, enabling only the preview rules
+    selected by name: `DOC201`, `DOC501`, and `DOC502` (docstring Returns and Raises sections
+    must match the code), and `PLR0904`, `PLR0914`, and `PLR0916` (the Pylint limits on public
+    methods, local variables, and boolean expressions, which are still preview rules). Preview
+    also switches some stable rules to their preview behavior.
+  - Global ignores: `COM812`, which conflicts with `ruff format` (it is the only one of ruff's
+    documented formatter-overlap rules that reports anything on formatted code; the others stay
+    enabled), plus `TRY003`, `EM101`, `EM102`, `PLR0913`, and `CPY001`.
   - Enforced on purpose: `E501` at 100 columns, `ANN401` (no `Any`), the `TC` import rules,
-    `SLF001` in `src/`, `C901` at a maximum of 12, the `PLR091x` limits, and `PLR0917` with
-    `max-positional-args = 3`.
-  - Ignored in `tests/` only: `S101`, `PLR2004`, `SLF001`, `ARG001`, `ARG002`, `ARG005`,
-    `FBT001`, `FBT002`, and `D100`–`D107` (test docstrings are optional, but any that exist
-    must be well formed).
+    `SLF001` in `src/`, `C901` at a maximum of 12, the Pylint size limits (`PLR0904` and
+    `PLR0911`–`PLR0916`, except `PLR0913` above), and `PLR0917` with `max-positional-args = 3`.
+  - Ignored in `tests/` only: `S101`, `PLR2004`, `SLF001`, `ARG001`, `ARG002`, `FBT001`
+    (listener stand-ins keep Deephaven's `on_update(update, is_replay)` signature), and
+    `D100`–`D103` and `D107` (test docstrings are optional, but any that exist must be well
+    formed).
   - `src = ["src", "."]`, the same import roots as mypy and pytest, and
     `namespace-packages = ["tests"]` (`tests/` has no `__init__.py`), so `INP001` needs no
     ignore. `banned-api` bans both `conftest` and `tests.conftest`.
@@ -2463,7 +2467,7 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Coverage is not in
   `addopts`, so single-test runs and debuggers work.
 - **Coverage.** `branch = true`, `fail_under = 100`, `exclude_also = ["if TYPE_CHECKING:",
-  "@overload"]`.
+  "@(typing\\.)?overload"]`, each with a reason.
 - **Deephaven imports.** Module-level wherever used at run time; imports used only in
   annotations go under `TYPE_CHECKING` (enforced by `TC`). `tests/conftest.py` starts the
   embedded JVM in `pytest_configure`, before collection.
