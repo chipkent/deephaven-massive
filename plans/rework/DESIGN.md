@@ -2103,6 +2103,7 @@ refresh/             build time only; excluded from the wheel; may import any of
   docs.py            flat-file "Columns" tables, overview prefix tables, llms.txt and the
                      endpoint line of each REST page it links
   openapi.py         OpenAPI reading: $ref, allOf merge, one-branch choices, checked accessors
+  plain_text.py      the four fixed rules that turn a vendor description into plain text
   naming.py          the naming policy shared by every transport: PascalCase columns, snake
                      case concepts, short and timestamp-like names, the dataset key columns
   rest.py            REST paths -> RestPath: flattening, representation rules, names,
@@ -2110,7 +2111,7 @@ refresh/             build time only; excluded from the wheel; may import any of
   ws.py, flatfiles.py  the WebSocket and flat-file generators (with the type lattice)
   gates.py           Gate (the named gates of section 19.4), Problem, RefreshError, and the
                      checks that span paths: stale entries, exclusions, concept collisions
-  render.py          spec/*.json in canonical text; plain_text, the description normalization
+  render.py          spec/*.json in canonical text
   hand_input.py      HandInput: the hand tables bundled for the generators
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
   overrides.py       NAMES, KINDS, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
@@ -2646,20 +2647,28 @@ checks.
 that users can read what each column means ([section 7.4](#74-column-descriptions)).
 
 - **Where they come from.** REST: the OpenAPI `description` of each response property, after
-  `$ref` and `allOf` are resolved; at the 2026-10-27 snapshot, 1,597 of the 1,599 leaf
-  response fields of the generated paths carry one (the two without are futures
-  `/futures/v1/snapshot` `details.product_code` and `details.ticker`). WebSocket: the `description` of each message
-  property in `websocket.json`. Flat files: the description cell of the page's "Columns"
+  `$ref` and `allOf` are resolved, the description nearest the field winning (one written
+  beside a `$ref`, an `allOf`, or a one-branch choice describes that use and replaces the
+  referenced schema's own); at the 2026-10-27 snapshot, 1,597 of the 1,599 leaf response
+  fields of the generated paths carry one (the two without are futures
+  `/futures/v1/snapshot` `details.product_code` and `details.ticker`). WebSocket: the
+  `description` of each message property in `websocket.json`. Flat files: the description cell of the page's "Columns"
   table, where the page has one. The coverage of the last two is measured when their
   generators land. The REST documentation pages are rendered from the same OpenAPI text and add
   nothing to it.
-- **Normalization**, by fixed rules and no hand input, so every outlet can show plain text:
-  a Markdown link `[text](url)` becomes `text (url)`; an HTML link `<a href="url" …>text</a>`
-  becomes `text (url)`; every run of whitespace, newlines included, becomes one space, and the
-  ends are trimmed. Nothing else changes: no entity is unescaped, no other markup is removed,
-  and nothing is shortened. At the 2026-10-27 snapshot 66 of the generated REST fields'
-  descriptions contain a link (170 description strings of the whole specification do). The
-  refresh's `render.plain_text` is the one implementation, used by every generator.
+- **Normalization**, by four fixed rules and no hand input, so every outlet can show plain
+  text: (1) an HTML link `<a href="url" …>text</a>`, with any other attributes and the `href`
+  quoted or not, becomes `text (url)`; (2) then a Markdown link `[text](url)`, with or without a
+  title, becomes `text (url)`; (3) a link URL that is root-relative (`/docs/…`) is resolved
+  against the origin of the documentation index URL the manifest records
+  (`https://massive.com`), so a reader in an IDE or the console can follow it; (4) every run of
+  whitespace, newlines included, becomes one space, and the ends are trimmed. Nothing else
+  changes: no entity is unescaped, no other markup is removed, nothing is shortened, and a URL
+  is kept as fetched otherwise. At the 2026-10-27 snapshot 66 of the generated REST fields'
+  descriptions contain a link, one of them root-relative (170 description strings of the whole
+  specification do). `refresh/plain_text.py` is the one implementation, used by every
+  generator. A test of the committed file fails when any link syntax survives, so a new vendor
+  form shows on the refresh that brings it.
 - **No gate.** A field without a description gets `""`, and nothing stops the refresh.
   Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
   changed description is an ordinary line in the refresh diff.
@@ -2674,26 +2683,29 @@ that users can read what each column means ([section 7.4](#74-column-description
   {
    "generated_by": "python -m deephaven_massive._massive.refresh",
    "fetched": "<the snapshot's fetch date, from the manifest>",
-   "urls": {"<transport>": {"<source key>": "<the vendor URL that documents the source>"}},
+   "urls": {"<transport>": {"<source key>": ["<each vendor URL that documents the source>"]}},
    "descriptions": {"<transport>": {"<source key>": {"<wire key>": "<plain text>"}}}
   }
   ```
 
   A field without a description has no entry, and a source with no described field has no
-  entry under `descriptions`. Every generated source has a URL: for REST, the URL of the
-  documentation page that names its path (every generated path has one, by the `docs` gate),
-  as the snapshot's manifest records it. The entries are one per line, in generated order, so a
-  reworded description is one changed line of the diff.
+  entry under `descriptions`. Every generated source has at least one URL, sorted and as
+  fetched: for REST, every documentation page that names its path (every generated path has
+  one, by the `docs` gate; a path several asset classes share, such as
+  `/v3/reference/tickers`, has one page per asset class), as the snapshot's manifest records
+  it. The entries are one per line, in generated order, so a reworded description is one
+  changed line of the diff.
 - **Joined at load.** `Field` gains `description: str = ""`, and the `spec` loader fills it
   from `descriptions.json` when it loads the schema files, under the same once-only lock. An
   entry that names a source or wire key the schema files lack raises at load: the files are
-  generated together, so only a hand edit can cause it. A description belongs to a
-  `(source, wire key)`, so a projected field keeps the description of its wire key.
-  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], str])` exposes
-  the fetch date and the URL of each source, for the footer of the column reference; it loads
-  every transport the file names a URL for, and a URL of a source the schema files lack raises
-  the same way. Each file is read once under the lock, whichever of `sources` and `provenance`
-  comes first. No other name is added to the interface.
+  generated together, so only a hand edit can cause it. The same load checks the URLs: a
+  source without one, or a URL of a source the schema lacks, raises, so `sources` and
+  `provenance` reject the same files. A description belongs to a `(source, wire key)`, so a
+  projected field keeps the description of its wire key. `provenance() -> Provenance(fetched:
+  date, urls: Mapping[tuple[Transport, str], tuple[str, ...]])` exposes the fetch date and the
+  URLs of each source, for the footer of the column reference; it loads every transport the
+  file gives URLs for. Each file is read once under the lock, whichever of `sources` and
+  `provenance` comes first. No other name is added to the interface.
 
 **Dataset schemas** are merged at run time, after the rename, never inferred from data:
 
@@ -2884,8 +2896,9 @@ column order, never re-sorted), and text with trailing whitespace stripped and a
 so refresh diffs read line by line and no hook exception is needed. `manifest.json` records the
 fetch date and, per file, its URL and the SHA-256 of the fetched bytes and of the stored file.
 Every refresh re-hashes every file against the manifest and requires the files on disk to be
-exactly the manifest's, so a hand-edited vendor file stops it; the generated file records the
-specification's verified hash. Besides the
+exactly the manifest's, so a hand-edited vendor file stops it; the generated files record
+only the fetch date (`descriptions.json`); the manifest committed beside them holds every hash,
+and the parity test binds the two. Besides the
 specs, `--fetch` stores every REST page `llms.txt` links, under `vendor/massive/rest/`, because
 `llms.txt` names pages, not paths: each page's `**Endpoint:**` line is what ties the
 documentation to an OpenAPI path. The documentation host rate-limits a burst of page requests

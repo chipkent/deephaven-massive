@@ -3,115 +3,357 @@
  "fetched": "2026-10-27",
  "urls": {
   "REST": {
-   "/benzinga/v1/analyst-insights": "https://massive.com/docs/rest/partners/benzinga/analyst-insights.md",
-   "/benzinga/v1/analysts": "https://massive.com/docs/rest/partners/benzinga/analyst-details.md",
-   "/benzinga/v1/bulls-bears-say": "https://massive.com/docs/rest/partners/benzinga/bulls-bears-say.md",
-   "/benzinga/v1/consensus-ratings/{ticker}": "https://massive.com/docs/rest/partners/benzinga/consensus-ratings.md",
-   "/benzinga/v1/earnings": "https://massive.com/docs/rest/partners/benzinga/earnings.md",
-   "/benzinga/v1/firms": "https://massive.com/docs/rest/partners/benzinga/firm-details.md",
-   "/benzinga/v1/guidance": "https://massive.com/docs/rest/partners/benzinga/corporate-guidance.md",
-   "/benzinga/v1/ratings": "https://massive.com/docs/rest/partners/benzinga/analyst-ratings.md",
-   "/benzinga/v2/news": "https://massive.com/docs/rest/partners/benzinga/news.md",
-   "/consumer-spending/eu/v1/merchant-aggregates": "https://massive.com/docs/rest/alternative/consumer-spending/merchant-aggregates.md",
-   "/consumer-spending/eu/v1/merchant-hierarchy": "https://massive.com/docs/rest/alternative/consumer-spending/merchant-hierarchy.md",
-   "/etf-global/v1/analytics": "https://massive.com/docs/rest/partners/etf-global/analytics.md",
-   "/etf-global/v1/constituents": "https://massive.com/docs/rest/partners/etf-global/constituents.md",
-   "/etf-global/v1/fund-flows": "https://massive.com/docs/rest/partners/etf-global/fundflows.md",
-   "/etf-global/v1/profiles": "https://massive.com/docs/rest/partners/etf-global/profiles.md",
-   "/etf-global/v1/taxonomies": "https://massive.com/docs/rest/partners/etf-global/taxonomies.md",
-   "/fed/v1/funding-conditions": "https://massive.com/docs/rest/economy/funding-conditions.md",
-   "/fed/v1/inflation": "https://massive.com/docs/rest/economy/inflation.md",
-   "/fed/v1/inflation-expectations": "https://massive.com/docs/rest/economy/inflation-expectations.md",
-   "/fed/v1/labor-market": "https://massive.com/docs/rest/economy/labor-market.md",
-   "/fed/v1/treasury-yields": "https://massive.com/docs/rest/economy/treasury-yields.md",
-   "/futures/v1/aggs/{ticker}": "https://massive.com/docs/rest/futures/aggregates.md",
-   "/futures/v1/contracts": "https://massive.com/docs/rest/futures/contracts.md",
-   "/futures/v1/exchanges": "https://massive.com/docs/rest/futures/market-operations/exchanges.md",
-   "/futures/v1/market-status": "https://massive.com/docs/rest/futures/market-operations/market-status.md",
-   "/futures/v1/products": "https://massive.com/docs/rest/futures/products.md",
-   "/futures/v1/quotes/{ticker}": "https://massive.com/docs/rest/futures/trades-quotes/quotes.md",
-   "/futures/v1/schedules": "https://massive.com/docs/rest/futures/schedules.md",
-   "/futures/v1/snapshot": "https://massive.com/docs/rest/futures/snapshots/contracts-snapshot.md",
-   "/futures/v1/trades/{ticker}": "https://massive.com/docs/rest/futures/trades-quotes/trades.md",
-   "/stocks/filings/10-K/vX/sections": "https://massive.com/docs/rest/stocks/filings/10-k-sections.md",
-   "/stocks/filings/8-K/vX/disclosures": "https://massive.com/docs/rest/stocks/filings/8-k-disclosures.md",
-   "/stocks/filings/8-K/vX/text": "https://massive.com/docs/rest/stocks/filings/8-k-text.md",
-   "/stocks/filings/vX/13-F": "https://massive.com/docs/rest/stocks/filings/13-f-filings.md",
-   "/stocks/filings/vX/form-3": "https://massive.com/docs/rest/stocks/filings/form-3.md",
-   "/stocks/filings/vX/form-4": "https://massive.com/docs/rest/stocks/filings/form-4.md",
-   "/stocks/filings/vX/index": "https://massive.com/docs/rest/stocks/filings/index.md",
-   "/stocks/filings/vX/risk-factors": "https://massive.com/docs/rest/stocks/filings/risk-factors.md",
-   "/stocks/financials/v1/balance-sheets": "https://massive.com/docs/rest/stocks/fundamentals/balance-sheets.md",
-   "/stocks/financials/v1/cash-flow-statements": "https://massive.com/docs/rest/stocks/fundamentals/cash-flow-statements.md",
-   "/stocks/financials/v1/income-statements": "https://massive.com/docs/rest/stocks/fundamentals/income-statements.md",
-   "/stocks/financials/v1/ratios": "https://massive.com/docs/rest/stocks/fundamentals/ratios.md",
-   "/stocks/taxonomies/vX/disclosures": "https://massive.com/docs/rest/stocks/filings/disclosure-categories.md",
-   "/stocks/taxonomies/vX/risk-factors": "https://massive.com/docs/rest/stocks/filings/risk-categories.md",
-   "/stocks/v1/dividends": "https://massive.com/docs/rest/stocks/corporate-actions/dividends.md",
-   "/stocks/v1/short-interest": "https://massive.com/docs/rest/stocks/fundamentals/short-interest.md",
-   "/stocks/v1/short-volume": "https://massive.com/docs/rest/stocks/fundamentals/short-volume.md",
-   "/stocks/v1/splits": "https://massive.com/docs/rest/stocks/corporate-actions/splits.md",
-   "/stocks/vX/float": "https://massive.com/docs/rest/stocks/fundamentals/float.md",
-   "/tmx/v1/corporate-events": "https://massive.com/docs/rest/partners/tmx/corporate-events.md",
-   "/v1/conversion/{from}/{to}": "https://massive.com/docs/rest/forex/currency-conversion.md",
-   "/v1/indicators/ema/{cryptoTicker}": "https://massive.com/docs/rest/crypto/technical-indicators/exponential-moving-average.md",
-   "/v1/indicators/ema/{stockTicker}": "https://massive.com/docs/rest/stocks/technical-indicators/exponential-moving-average.md",
-   "/v1/indicators/macd/{cryptoTicker}": "https://massive.com/docs/rest/crypto/technical-indicators/moving-average-convergence-divergence.md",
-   "/v1/indicators/macd/{stockTicker}": "https://massive.com/docs/rest/stocks/technical-indicators/moving-average-convergence-divergence.md",
-   "/v1/indicators/rsi/{cryptoTicker}": "https://massive.com/docs/rest/crypto/technical-indicators/relative-strength-index.md",
-   "/v1/indicators/rsi/{stockTicker}": "https://massive.com/docs/rest/stocks/technical-indicators/relative-strength-index.md",
-   "/v1/indicators/sma/{cryptoTicker}": "https://massive.com/docs/rest/crypto/technical-indicators/simple-moving-average.md",
-   "/v1/indicators/sma/{stockTicker}": "https://massive.com/docs/rest/stocks/technical-indicators/simple-moving-average.md",
-   "/v1/last/crypto/{from}/{to}": "https://massive.com/docs/rest/crypto/trades/last-trade.md",
-   "/v1/last_quote/currencies/{from}/{to}": "https://massive.com/docs/rest/forex/quotes/last-quote.md",
-   "/v1/marketstatus/now": "https://massive.com/docs/rest/crypto/market-operations/market-status.md",
-   "/v1/marketstatus/upcoming": "https://massive.com/docs/rest/crypto/market-operations/market-holidays.md",
-   "/v1/open-close/crypto/{from}/{to}/{date}": "https://massive.com/docs/rest/crypto/aggregates/daily-ticker-summary.md",
-   "/v1/open-close/{indicesTicker}/{date}": "https://massive.com/docs/rest/indices/aggregates/daily-ticker-summary.md",
-   "/v1/open-close/{optionsTicker}/{date}": "https://massive.com/docs/rest/options/aggregates/daily-ticker-summary.md",
-   "/v1/open-close/{stocksTicker}/{date}": "https://massive.com/docs/rest/stocks/aggregates/daily-ticker-summary.md",
-   "/v1/related-companies/{ticker}": "https://massive.com/docs/rest/stocks/tickers/related-tickers.md",
-   "/v2/aggs/grouped/locale/global/market/crypto/{date}": "https://massive.com/docs/rest/crypto/aggregates/daily-market-summary.md",
-   "/v2/aggs/grouped/locale/global/market/fx/{date}": "https://massive.com/docs/rest/forex/aggregates/daily-market-summary.md",
-   "/v2/aggs/grouped/locale/us/market/stocks/{date}": "https://massive.com/docs/rest/stocks/aggregates/daily-market-summary.md",
-   "/v2/aggs/ticker/{cryptoTicker}/prev": "https://massive.com/docs/rest/crypto/aggregates/previous-day-bar.md",
-   "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}": "https://massive.com/docs/rest/crypto/aggregates/custom-bars.md",
-   "/v2/aggs/ticker/{forexTicker}/prev": "https://massive.com/docs/rest/forex/aggregates/previous-day-bar.md",
-   "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}": "https://massive.com/docs/rest/forex/aggregates/custom-bars.md",
-   "/v2/aggs/ticker/{indicesTicker}/prev": "https://massive.com/docs/rest/indices/aggregates/previous-day-bar.md",
-   "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}": "https://massive.com/docs/rest/indices/aggregates/custom-bars.md",
-   "/v2/aggs/ticker/{optionsTicker}/prev": "https://massive.com/docs/rest/options/aggregates/previous-day-bar.md",
-   "/v2/aggs/ticker/{optionsTicker}/range/{multiplier}/{timespan}/{from}/{to}": "https://massive.com/docs/rest/options/aggregates/custom-bars.md",
-   "/v2/aggs/ticker/{stocksTicker}/prev": "https://massive.com/docs/rest/stocks/aggregates/previous-day-bar.md",
-   "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}": "https://massive.com/docs/rest/stocks/aggregates/custom-bars.md",
-   "/v2/last/nbbo/{stocksTicker}": "https://massive.com/docs/rest/stocks/trades-quotes/last-quote.md",
-   "/v2/last/trade/{optionsTicker}": "https://massive.com/docs/rest/options/trades-quotes/last-trade.md",
-   "/v2/last/trade/{stocksTicker}": "https://massive.com/docs/rest/stocks/trades-quotes/last-trade.md",
-   "/v2/reference/news": "https://massive.com/docs/rest/stocks/news.md",
-   "/v2/snapshot/locale/global/markets/crypto/tickers": "https://massive.com/docs/rest/crypto/snapshots/full-market-snapshot.md",
-   "/v2/snapshot/locale/global/markets/crypto/{direction}": "https://massive.com/docs/rest/crypto/snapshots/top-market-movers.md",
-   "/v2/snapshot/locale/global/markets/forex/tickers": "https://massive.com/docs/rest/forex/snapshots/full-market-snapshot.md",
-   "/v2/snapshot/locale/global/markets/forex/{direction}": "https://massive.com/docs/rest/forex/snapshots/top-market-movers.md",
-   "/v2/snapshot/locale/us/markets/stocks/tickers": "https://massive.com/docs/rest/stocks/snapshots/full-market-snapshot.md",
-   "/v2/snapshot/locale/us/markets/stocks/{direction}": "https://massive.com/docs/rest/stocks/snapshots/top-market-movers.md",
-   "/v3/quotes/{fxTicker}": "https://massive.com/docs/rest/forex/quotes/quotes.md",
-   "/v3/quotes/{optionsTicker}": "https://massive.com/docs/rest/options/trades-quotes/quotes.md",
-   "/v3/quotes/{stockTicker}": "https://massive.com/docs/rest/stocks/trades-quotes/quotes.md",
-   "/v3/reference/conditions": "https://massive.com/docs/rest/crypto/market-operations/condition-codes.md",
-   "/v3/reference/exchanges": "https://massive.com/docs/rest/crypto/market-operations/exchanges.md",
-   "/v3/reference/options/contracts": "https://massive.com/docs/rest/options/contracts/all-contracts.md",
-   "/v3/reference/options/contracts/{options_ticker}": "https://massive.com/docs/rest/options/contracts/contract-overview.md",
-   "/v3/reference/tickers": "https://massive.com/docs/rest/crypto/tickers/all-tickers.md",
-   "/v3/reference/tickers/types": "https://massive.com/docs/rest/forex/tickers/ticker-types.md",
-   "/v3/reference/tickers/{ticker}": "https://massive.com/docs/rest/crypto/tickers/ticker-overview.md",
-   "/v3/snapshot": "https://massive.com/docs/rest/crypto/snapshots/unified-snapshot.md",
-   "/v3/snapshot/indices": "https://massive.com/docs/rest/indices/snapshots/indices-snapshot.md",
-   "/v3/snapshot/options/{underlyingAsset}": "https://massive.com/docs/rest/options/snapshots/option-chain-snapshot.md",
-   "/v3/trades/{cryptoTicker}": "https://massive.com/docs/rest/crypto/trades/trades.md",
-   "/v3/trades/{optionsTicker}": "https://massive.com/docs/rest/options/trades-quotes/trades.md",
-   "/v3/trades/{stockTicker}": "https://massive.com/docs/rest/stocks/trades-quotes/trades.md",
-   "/vX/reference/ipos": "https://massive.com/docs/rest/stocks/corporate-actions/ipos.md",
-   "/vX/reference/tickers/{id}/events": "https://massive.com/docs/rest/stocks/corporate-actions/ticker-events.md"
+   "/benzinga/v1/analyst-insights": [
+    "https://massive.com/docs/rest/partners/benzinga/analyst-insights.md"
+   ],
+   "/benzinga/v1/analysts": [
+    "https://massive.com/docs/rest/partners/benzinga/analyst-details.md"
+   ],
+   "/benzinga/v1/bulls-bears-say": [
+    "https://massive.com/docs/rest/partners/benzinga/bulls-bears-say.md"
+   ],
+   "/benzinga/v1/consensus-ratings/{ticker}": [
+    "https://massive.com/docs/rest/partners/benzinga/consensus-ratings.md"
+   ],
+   "/benzinga/v1/earnings": [
+    "https://massive.com/docs/rest/partners/benzinga/earnings.md"
+   ],
+   "/benzinga/v1/firms": [
+    "https://massive.com/docs/rest/partners/benzinga/firm-details.md"
+   ],
+   "/benzinga/v1/guidance": [
+    "https://massive.com/docs/rest/partners/benzinga/corporate-guidance.md"
+   ],
+   "/benzinga/v1/ratings": [
+    "https://massive.com/docs/rest/partners/benzinga/analyst-ratings.md"
+   ],
+   "/benzinga/v2/news": [
+    "https://massive.com/docs/rest/partners/benzinga/news.md"
+   ],
+   "/consumer-spending/eu/v1/merchant-aggregates": [
+    "https://massive.com/docs/rest/alternative/consumer-spending/merchant-aggregates.md"
+   ],
+   "/consumer-spending/eu/v1/merchant-hierarchy": [
+    "https://massive.com/docs/rest/alternative/consumer-spending/merchant-hierarchy.md"
+   ],
+   "/etf-global/v1/analytics": [
+    "https://massive.com/docs/rest/partners/etf-global/analytics.md"
+   ],
+   "/etf-global/v1/constituents": [
+    "https://massive.com/docs/rest/partners/etf-global/constituents.md"
+   ],
+   "/etf-global/v1/fund-flows": [
+    "https://massive.com/docs/rest/partners/etf-global/fundflows.md"
+   ],
+   "/etf-global/v1/profiles": [
+    "https://massive.com/docs/rest/partners/etf-global/profiles.md"
+   ],
+   "/etf-global/v1/taxonomies": [
+    "https://massive.com/docs/rest/partners/etf-global/taxonomies.md"
+   ],
+   "/fed/v1/funding-conditions": [
+    "https://massive.com/docs/rest/economy/funding-conditions.md"
+   ],
+   "/fed/v1/inflation": [
+    "https://massive.com/docs/rest/economy/inflation.md"
+   ],
+   "/fed/v1/inflation-expectations": [
+    "https://massive.com/docs/rest/economy/inflation-expectations.md"
+   ],
+   "/fed/v1/labor-market": [
+    "https://massive.com/docs/rest/economy/labor-market.md"
+   ],
+   "/fed/v1/treasury-yields": [
+    "https://massive.com/docs/rest/economy/treasury-yields.md"
+   ],
+   "/futures/v1/aggs/{ticker}": [
+    "https://massive.com/docs/rest/futures/aggregates.md"
+   ],
+   "/futures/v1/contracts": [
+    "https://massive.com/docs/rest/futures/contracts.md"
+   ],
+   "/futures/v1/exchanges": [
+    "https://massive.com/docs/rest/futures/market-operations/exchanges.md"
+   ],
+   "/futures/v1/market-status": [
+    "https://massive.com/docs/rest/futures/market-operations/market-status.md"
+   ],
+   "/futures/v1/products": [
+    "https://massive.com/docs/rest/futures/products.md"
+   ],
+   "/futures/v1/quotes/{ticker}": [
+    "https://massive.com/docs/rest/futures/trades-quotes/quotes.md"
+   ],
+   "/futures/v1/schedules": [
+    "https://massive.com/docs/rest/futures/schedules.md"
+   ],
+   "/futures/v1/snapshot": [
+    "https://massive.com/docs/rest/futures/snapshots/contracts-snapshot.md"
+   ],
+   "/futures/v1/trades/{ticker}": [
+    "https://massive.com/docs/rest/futures/trades-quotes/trades.md"
+   ],
+   "/stocks/filings/10-K/vX/sections": [
+    "https://massive.com/docs/rest/stocks/filings/10-k-sections.md"
+   ],
+   "/stocks/filings/8-K/vX/disclosures": [
+    "https://massive.com/docs/rest/stocks/filings/8-k-disclosures.md"
+   ],
+   "/stocks/filings/8-K/vX/text": [
+    "https://massive.com/docs/rest/stocks/filings/8-k-text.md"
+   ],
+   "/stocks/filings/vX/13-F": [
+    "https://massive.com/docs/rest/stocks/filings/13-f-filings.md"
+   ],
+   "/stocks/filings/vX/form-3": [
+    "https://massive.com/docs/rest/stocks/filings/form-3.md"
+   ],
+   "/stocks/filings/vX/form-4": [
+    "https://massive.com/docs/rest/stocks/filings/form-4.md"
+   ],
+   "/stocks/filings/vX/index": [
+    "https://massive.com/docs/rest/stocks/filings/index.md"
+   ],
+   "/stocks/filings/vX/risk-factors": [
+    "https://massive.com/docs/rest/stocks/filings/risk-factors.md"
+   ],
+   "/stocks/financials/v1/balance-sheets": [
+    "https://massive.com/docs/rest/stocks/fundamentals/balance-sheets.md"
+   ],
+   "/stocks/financials/v1/cash-flow-statements": [
+    "https://massive.com/docs/rest/stocks/fundamentals/cash-flow-statements.md"
+   ],
+   "/stocks/financials/v1/income-statements": [
+    "https://massive.com/docs/rest/stocks/fundamentals/income-statements.md"
+   ],
+   "/stocks/financials/v1/ratios": [
+    "https://massive.com/docs/rest/stocks/fundamentals/ratios.md"
+   ],
+   "/stocks/taxonomies/vX/disclosures": [
+    "https://massive.com/docs/rest/stocks/filings/disclosure-categories.md"
+   ],
+   "/stocks/taxonomies/vX/risk-factors": [
+    "https://massive.com/docs/rest/stocks/filings/risk-categories.md"
+   ],
+   "/stocks/v1/dividends": [
+    "https://massive.com/docs/rest/stocks/corporate-actions/dividends.md"
+   ],
+   "/stocks/v1/short-interest": [
+    "https://massive.com/docs/rest/stocks/fundamentals/short-interest.md"
+   ],
+   "/stocks/v1/short-volume": [
+    "https://massive.com/docs/rest/stocks/fundamentals/short-volume.md"
+   ],
+   "/stocks/v1/splits": [
+    "https://massive.com/docs/rest/stocks/corporate-actions/splits.md"
+   ],
+   "/stocks/vX/float": [
+    "https://massive.com/docs/rest/stocks/fundamentals/float.md"
+   ],
+   "/tmx/v1/corporate-events": [
+    "https://massive.com/docs/rest/partners/tmx/corporate-events.md"
+   ],
+   "/v1/conversion/{from}/{to}": [
+    "https://massive.com/docs/rest/forex/currency-conversion.md"
+   ],
+   "/v1/indicators/ema/{cryptoTicker}": [
+    "https://massive.com/docs/rest/crypto/technical-indicators/exponential-moving-average.md"
+   ],
+   "/v1/indicators/ema/{stockTicker}": [
+    "https://massive.com/docs/rest/stocks/technical-indicators/exponential-moving-average.md"
+   ],
+   "/v1/indicators/macd/{cryptoTicker}": [
+    "https://massive.com/docs/rest/crypto/technical-indicators/moving-average-convergence-divergence.md"
+   ],
+   "/v1/indicators/macd/{stockTicker}": [
+    "https://massive.com/docs/rest/stocks/technical-indicators/moving-average-convergence-divergence.md"
+   ],
+   "/v1/indicators/rsi/{cryptoTicker}": [
+    "https://massive.com/docs/rest/crypto/technical-indicators/relative-strength-index.md"
+   ],
+   "/v1/indicators/rsi/{stockTicker}": [
+    "https://massive.com/docs/rest/stocks/technical-indicators/relative-strength-index.md"
+   ],
+   "/v1/indicators/sma/{cryptoTicker}": [
+    "https://massive.com/docs/rest/crypto/technical-indicators/simple-moving-average.md"
+   ],
+   "/v1/indicators/sma/{stockTicker}": [
+    "https://massive.com/docs/rest/stocks/technical-indicators/simple-moving-average.md"
+   ],
+   "/v1/last/crypto/{from}/{to}": [
+    "https://massive.com/docs/rest/crypto/trades/last-trade.md"
+   ],
+   "/v1/last_quote/currencies/{from}/{to}": [
+    "https://massive.com/docs/rest/forex/quotes/last-quote.md"
+   ],
+   "/v1/marketstatus/now": [
+    "https://massive.com/docs/rest/crypto/market-operations/market-status.md",
+    "https://massive.com/docs/rest/forex/market-operations/market-status.md",
+    "https://massive.com/docs/rest/indices/market-operations/market-status.md",
+    "https://massive.com/docs/rest/options/market-operations/market-status.md",
+    "https://massive.com/docs/rest/stocks/market-operations/market-status.md"
+   ],
+   "/v1/marketstatus/upcoming": [
+    "https://massive.com/docs/rest/crypto/market-operations/market-holidays.md",
+    "https://massive.com/docs/rest/forex/market-operations/market-holidays.md",
+    "https://massive.com/docs/rest/indices/market-operations/market-holidays.md",
+    "https://massive.com/docs/rest/options/market-operations/market-holidays.md",
+    "https://massive.com/docs/rest/stocks/market-operations/market-holidays.md"
+   ],
+   "/v1/open-close/crypto/{from}/{to}/{date}": [
+    "https://massive.com/docs/rest/crypto/aggregates/daily-ticker-summary.md"
+   ],
+   "/v1/open-close/{indicesTicker}/{date}": [
+    "https://massive.com/docs/rest/indices/aggregates/daily-ticker-summary.md"
+   ],
+   "/v1/open-close/{optionsTicker}/{date}": [
+    "https://massive.com/docs/rest/options/aggregates/daily-ticker-summary.md"
+   ],
+   "/v1/open-close/{stocksTicker}/{date}": [
+    "https://massive.com/docs/rest/stocks/aggregates/daily-ticker-summary.md"
+   ],
+   "/v1/related-companies/{ticker}": [
+    "https://massive.com/docs/rest/stocks/tickers/related-tickers.md"
+   ],
+   "/v2/aggs/grouped/locale/global/market/crypto/{date}": [
+    "https://massive.com/docs/rest/crypto/aggregates/daily-market-summary.md"
+   ],
+   "/v2/aggs/grouped/locale/global/market/fx/{date}": [
+    "https://massive.com/docs/rest/forex/aggregates/daily-market-summary.md"
+   ],
+   "/v2/aggs/grouped/locale/us/market/stocks/{date}": [
+    "https://massive.com/docs/rest/stocks/aggregates/daily-market-summary.md"
+   ],
+   "/v2/aggs/ticker/{cryptoTicker}/prev": [
+    "https://massive.com/docs/rest/crypto/aggregates/previous-day-bar.md"
+   ],
+   "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}": [
+    "https://massive.com/docs/rest/crypto/aggregates/custom-bars.md"
+   ],
+   "/v2/aggs/ticker/{forexTicker}/prev": [
+    "https://massive.com/docs/rest/forex/aggregates/previous-day-bar.md"
+   ],
+   "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}": [
+    "https://massive.com/docs/rest/forex/aggregates/custom-bars.md"
+   ],
+   "/v2/aggs/ticker/{indicesTicker}/prev": [
+    "https://massive.com/docs/rest/indices/aggregates/previous-day-bar.md"
+   ],
+   "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}": [
+    "https://massive.com/docs/rest/indices/aggregates/custom-bars.md"
+   ],
+   "/v2/aggs/ticker/{optionsTicker}/prev": [
+    "https://massive.com/docs/rest/options/aggregates/previous-day-bar.md"
+   ],
+   "/v2/aggs/ticker/{optionsTicker}/range/{multiplier}/{timespan}/{from}/{to}": [
+    "https://massive.com/docs/rest/options/aggregates/custom-bars.md"
+   ],
+   "/v2/aggs/ticker/{stocksTicker}/prev": [
+    "https://massive.com/docs/rest/stocks/aggregates/previous-day-bar.md"
+   ],
+   "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}": [
+    "https://massive.com/docs/rest/stocks/aggregates/custom-bars.md"
+   ],
+   "/v2/last/nbbo/{stocksTicker}": [
+    "https://massive.com/docs/rest/stocks/trades-quotes/last-quote.md"
+   ],
+   "/v2/last/trade/{optionsTicker}": [
+    "https://massive.com/docs/rest/options/trades-quotes/last-trade.md"
+   ],
+   "/v2/last/trade/{stocksTicker}": [
+    "https://massive.com/docs/rest/stocks/trades-quotes/last-trade.md"
+   ],
+   "/v2/reference/news": [
+    "https://massive.com/docs/rest/stocks/news.md"
+   ],
+   "/v2/snapshot/locale/global/markets/crypto/tickers": [
+    "https://massive.com/docs/rest/crypto/snapshots/full-market-snapshot.md"
+   ],
+   "/v2/snapshot/locale/global/markets/crypto/{direction}": [
+    "https://massive.com/docs/rest/crypto/snapshots/top-market-movers.md"
+   ],
+   "/v2/snapshot/locale/global/markets/forex/tickers": [
+    "https://massive.com/docs/rest/forex/snapshots/full-market-snapshot.md"
+   ],
+   "/v2/snapshot/locale/global/markets/forex/{direction}": [
+    "https://massive.com/docs/rest/forex/snapshots/top-market-movers.md"
+   ],
+   "/v2/snapshot/locale/us/markets/stocks/tickers": [
+    "https://massive.com/docs/rest/stocks/snapshots/full-market-snapshot.md"
+   ],
+   "/v2/snapshot/locale/us/markets/stocks/{direction}": [
+    "https://massive.com/docs/rest/stocks/snapshots/top-market-movers.md"
+   ],
+   "/v3/quotes/{fxTicker}": [
+    "https://massive.com/docs/rest/forex/quotes/quotes.md"
+   ],
+   "/v3/quotes/{optionsTicker}": [
+    "https://massive.com/docs/rest/options/trades-quotes/quotes.md"
+   ],
+   "/v3/quotes/{stockTicker}": [
+    "https://massive.com/docs/rest/stocks/trades-quotes/quotes.md"
+   ],
+   "/v3/reference/conditions": [
+    "https://massive.com/docs/rest/crypto/market-operations/condition-codes.md",
+    "https://massive.com/docs/rest/options/market-operations/condition-codes.md",
+    "https://massive.com/docs/rest/stocks/market-operations/condition-codes.md"
+   ],
+   "/v3/reference/exchanges": [
+    "https://massive.com/docs/rest/crypto/market-operations/exchanges.md",
+    "https://massive.com/docs/rest/forex/market-operations/exchanges.md",
+    "https://massive.com/docs/rest/options/market-operations/exchanges.md",
+    "https://massive.com/docs/rest/stocks/market-operations/exchanges.md"
+   ],
+   "/v3/reference/options/contracts": [
+    "https://massive.com/docs/rest/options/contracts/all-contracts.md"
+   ],
+   "/v3/reference/options/contracts/{options_ticker}": [
+    "https://massive.com/docs/rest/options/contracts/contract-overview.md"
+   ],
+   "/v3/reference/tickers": [
+    "https://massive.com/docs/rest/crypto/tickers/all-tickers.md",
+    "https://massive.com/docs/rest/forex/tickers/all-tickers.md",
+    "https://massive.com/docs/rest/indices/tickers/all-tickers.md",
+    "https://massive.com/docs/rest/stocks/tickers/all-tickers.md"
+   ],
+   "/v3/reference/tickers/types": [
+    "https://massive.com/docs/rest/forex/tickers/ticker-types.md",
+    "https://massive.com/docs/rest/stocks/tickers/ticker-types.md"
+   ],
+   "/v3/reference/tickers/{ticker}": [
+    "https://massive.com/docs/rest/crypto/tickers/ticker-overview.md",
+    "https://massive.com/docs/rest/forex/tickers/ticker-overview.md",
+    "https://massive.com/docs/rest/indices/tickers/ticker-overview.md",
+    "https://massive.com/docs/rest/stocks/tickers/ticker-overview.md"
+   ],
+   "/v3/snapshot": [
+    "https://massive.com/docs/rest/crypto/snapshots/unified-snapshot.md",
+    "https://massive.com/docs/rest/forex/snapshots/unified-snapshot.md",
+    "https://massive.com/docs/rest/indices/snapshots/unified-snapshot.md",
+    "https://massive.com/docs/rest/options/snapshots/unified-snapshot.md",
+    "https://massive.com/docs/rest/stocks/snapshots/unified-snapshot.md"
+   ],
+   "/v3/snapshot/indices": [
+    "https://massive.com/docs/rest/indices/snapshots/indices-snapshot.md"
+   ],
+   "/v3/snapshot/options/{underlyingAsset}": [
+    "https://massive.com/docs/rest/options/snapshots/option-chain-snapshot.md"
+   ],
+   "/v3/trades/{cryptoTicker}": [
+    "https://massive.com/docs/rest/crypto/trades/trades.md"
+   ],
+   "/v3/trades/{optionsTicker}": [
+    "https://massive.com/docs/rest/options/trades-quotes/trades.md"
+   ],
+   "/v3/trades/{stockTicker}": [
+    "https://massive.com/docs/rest/stocks/trades-quotes/trades.md"
+   ],
+   "/vX/reference/ipos": [
+    "https://massive.com/docs/rest/stocks/corporate-actions/ipos.md"
+   ],
+   "/vX/reference/tickers/{id}/events": [
+    "https://massive.com/docs/rest/stocks/corporate-actions/ticker-events.md"
+   ]
   }
  },
  "descriptions": {
@@ -539,7 +781,7 @@
    },
    "/futures/v1/aggs/{ticker}": {
     "close": "The last price within the timeframe.",
-    "dollar_volume": "The sum of price × size across all trades in the window, expressed in the contract's quoted price units, which are the same units as the bar's open, high, low, and close. Despite the field name, no contract multiplier is applied, so this is not a notional dollar value. See the Products endpoint (/docs/rest/futures/products) for contract multiplier details. Because dollar_volume is a raw sum, you can use it to compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume across the bars in the window and divide by the summed volume.",
+    "dollar_volume": "The sum of price × size across all trades in the window, expressed in the contract's quoted price units, which are the same units as the bar's open, high, low, and close. Despite the field name, no contract multiplier is applied, so this is not a notional dollar value. See the Products endpoint (https://massive.com/docs/rest/futures/products) for contract multiplier details. Because dollar_volume is a raw sum, you can use it to compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume across the bars in the window and divide by the summed volume.",
     "high": "The highest price within the timeframe.",
     "low": "The lowest price within the timeframe.",
     "open": "The opening price within the timeframe.",

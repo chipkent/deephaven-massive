@@ -20,8 +20,9 @@ Modules:
       parameter rules.
     - `naming`: the naming policy shared by every transport.
     - `gates`: the refresh gates, the problems they report, and the checks that span paths.
+    - `plain_text`: the fixed rules that turn a vendor's field description into plain text.
     - `render`: writes `spec/rest.json` and `spec/descriptions.json` in their canonical
-      text, and turns a vendor description into plain text.
+      text.
     - `hand_input`: bundles the hand input for the generators.
     - `lexicon`, `overrides`, `exclusions`: every piece of hand input, each entry with its
       reason. Nothing else in the refresh is written by hand.

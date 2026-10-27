@@ -9,8 +9,8 @@ so a refresh diff shows each changed field as one changed line.
 
 The vendor's descriptions go in `descriptions.json` alone, never in `rest.json`: they change
 far more often than the schema, and a refresh that only rewords them must leave `rest.json`
-unchanged, so a reviewer sees at once that no schema moved. `plain_text` is the one rule that
-turns a vendor description into the text recorded there, for every transport's generator.
+unchanged, so a reviewer sees at once that no schema moved. The descriptions arrive already
+plain text (`plain_text`, applied by the generators).
 
 It imports the standard library and `spec.types` only.
 """
@@ -18,7 +18,6 @@ It imports the standard library and `spec.types` only.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -33,7 +32,6 @@ __all__ = [
     "DESCRIPTIONS_FILE",
     "REST_FILE",
     "SPEC_DIRECTORY",
-    "plain_text",
     "render_descriptions",
     "render_rest",
 ]
@@ -46,16 +44,6 @@ REST_FILE: Final = SPEC_DIRECTORY / "rest.json"
 
 DESCRIPTIONS_FILE: Final = SPEC_DIRECTORY / "descriptions.json"
 """The generated file of the vendor's field descriptions, fetch date, and source URLs."""
-
-# A Markdown link, `[text](url)`, and an HTML link, `<a href="url" ...>text</a>`, whose
-# attributes may come in any order and whose text may span lines.
-_MARKDOWN_LINK: Final = re.compile(r"\[(?P<text>[^\]]*)\]\((?P<url>[^)\s]*)\)")
-_HTML_LINK: Final = re.compile(
-    r"""<a\s[^>]*?\bhref\s*=\s*(?P<quote>["'])(?P<url>.*?)(?P=quote)[^>]*>(?P<text>.*?)</a\s*>""",
-    re.IGNORECASE | re.DOTALL,
-)
-# A run of whitespace, newlines included.
-_WHITESPACE: Final = re.compile(r"\s+")
 
 # The command that writes the file, recorded in it.
 _GENERATED_BY: Final = "python -m deephaven_massive._massive.refresh"
@@ -123,49 +111,30 @@ def _rows(lines: Sequence[str], indent: str) -> list[str]:
     return [f"{indent}{line}{',' if i < len(lines) - 1 else ''}" for i, line in enumerate(lines)]
 
 
-def plain_text(description: str) -> str:
-    """Return a vendor description as the plain text recorded in `descriptions.json`.
-
-    Exactly three rules apply, with no hand input, so every place that shows a description
-    shows the same readable text: a Markdown link `[text](url)` becomes `text (url)`; an HTML
-    link `<a href="url" ...>text</a>`, with any other attributes, becomes `text (url)`; and
-    every run of whitespace, newlines included, becomes one space, with the ends trimmed.
-    Nothing else changes: entities are not unescaped, other markup is kept, and nothing is
-    shortened.
-
-    Args:
-        description: The vendor's text, such as an OpenAPI `description`.
-
-    Returns:
-        The plain text; `""` for a description that is empty or only whitespace.
-    """
-    text = _HTML_LINK.sub(lambda link: f"{link['text']} ({link['url']})", description)
-    text = _MARKDOWN_LINK.sub(lambda link: f"{link['text']} ({link['url']})", text)
-    return _WHITESPACE.sub(" ", text).strip()
-
-
 def render_descriptions(
     sources: Mapping[Transport, Sequence[Source]],
     *,
     fetched: dt.date,
-    urls: Mapping[Transport, Mapping[str, str]],
+    urls: Mapping[Transport, Mapping[str, Sequence[str]]],
 ) -> str:
     """Return the canonical text of `descriptions.json`.
 
     Transports, sources, and fields keep the order they are given in. A field whose
     `description` is empty has no entry, and a source with no described field has none
-    either; every source given in `urls` keeps its URL.
+    either; every source given in `urls` keeps its URLs, sorted.
 
     Args:
         sources: The generated sources of each transport, each field's `description` already
             plain text (`plain_text`).
         fetched: The day the snapshot they came from was downloaded.
-        urls: Per transport, the vendor URL of each source key.
+        urls: Per transport, the vendor URLs that document each source key: for REST, every
+            documentation page that names the path (a path shared by several asset classes,
+            such as `/v3/reference/tickers`, has one page per asset class).
 
     Returns:
         The file's text: `{"generated_by", "fetched", "urls": {<transport>: {<source key>:
-        <url>}}, "descriptions": {<transport>: {<source key>: {<wire key>: <text>}}}}`, one
-        line per URL and per description, ending in a newline.
+        [<url>, ...]}}, "descriptions": {<transport>: {<source key>: {<wire key>: <text>}}}}`,
+        one line per URL and per description, ending in a newline.
     """
     texts: dict[str, dict[str, dict[str, str]]] = {}
     for transport, described in sources.items():
@@ -177,7 +146,10 @@ def render_descriptions(
     document = {
         "generated_by": _GENERATED_BY,
         "fetched": fetched.isoformat(),
-        "urls": {transport.value: dict(by_key) for transport, by_key in urls.items()},
+        "urls": {
+            transport.value: {key: sorted(found) for key, found in by_key.items()}
+            for transport, by_key in urls.items()
+        },
         "descriptions": texts,
     }
     return json.dumps(document, indent=1, ensure_ascii=False) + "\n"

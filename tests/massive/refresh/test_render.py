@@ -1,16 +1,10 @@
-"""Tests for the canonical text of `spec/rest.json` and `spec/descriptions.json`.
-
-Also the three rules that turn a vendor description into the plain text recorded in
-`descriptions.json`, and nothing beyond them.
-"""
+"""Tests for the canonical text of `spec/rest.json` and `spec/descriptions.json`."""
 
 from __future__ import annotations
 
 import dataclasses
 import datetime as dt
 import json
-
-import pytest
 
 from deephaven_massive._massive.refresh import render
 from deephaven_massive._massive.spec.types import (
@@ -99,6 +93,7 @@ def test_the_files_are_the_spec_package_data() -> None:
 # The descriptions file.
 
 _URL = "https://massive.com/docs/rest/things.md"
+_OTHER = "https://massive.com/docs/rest/crypto/things.md"
 
 
 def test_render_descriptions_writes_the_documented_format() -> None:
@@ -110,12 +105,13 @@ def test_render_descriptions_writes_the_documented_format() -> None:
     text = render.render_descriptions(
         {Transport.REST: [_PATH], Transport.WS: [channel]},
         fetched=dt.date(2026, 10, 27),
-        urls={Transport.REST: {_PATH.key: _URL}},
+        urls={Transport.REST: {_PATH.key: (_URL, _OTHER)}},
     )
     assert json.loads(text) == {
         "generated_by": "python -m deephaven_massive._massive.refresh",
         "fetched": "2026-10-27",
-        "urls": {"REST": {_PATH.key: _URL}},
+        # A source's URLs are sorted.
+        "urls": {"REST": {_PATH.key: [_OTHER, _URL]}},
         # `t` has no description, so it has no entry.
         "descriptions": {
             "REST": {_PATH.key: {"price": "The price."}},
@@ -124,7 +120,7 @@ def test_render_descriptions_writes_the_documented_format() -> None:
     }
     # One line per entry, so a reworded description is one changed line of the diff.
     assert '    "price": "The price."' in text.splitlines()
-    assert f'   "{_PATH.key}": "{_URL}"' in text.splitlines()
+    assert f'    "{_URL}"' in text.splitlines()
     assert text.endswith("}\n")
     assert not text.endswith("\n\n")
 
@@ -138,11 +134,11 @@ def test_a_source_without_descriptions_has_no_entry_but_keeps_its_url() -> None:
         render.render_descriptions(
             {Transport.REST: [bare]},
             fetched=dt.date(2026, 1, 2),
-            urls={Transport.REST: {"/v1/bare": _URL}},
+            urls={Transport.REST: {"/v1/bare": [_URL]}},
         )
     )
     assert document["descriptions"] == {"REST": {}}
-    assert document["urls"] == {"REST": {"/v1/bare": _URL}}
+    assert document["urls"] == {"REST": {"/v1/bare": [_URL]}}
 
 
 def test_render_descriptions_keeps_text_that_is_not_ascii() -> None:
@@ -154,50 +150,3 @@ def test_render_descriptions_keeps_text_that_is_not_ascii() -> None:
         {Transport.REST: [accented]}, fetched=dt.date(2026, 1, 2), urls={}
     )
     assert '"x": "Café ≥ 1"' in text
-
-
-# The three normalization rules, and nothing else.
-
-
-@pytest.mark.parametrize(
-    ("vendor", "plain"),
-    [
-        pytest.param(
-            "See [Stocks Condition Codes](https://massive.com/docs/codes) for each code.",
-            "See Stocks Condition Codes (https://massive.com/docs/codes) for each code.",
-            id="markdown link",
-        ),
-        pytest.param(
-            'See <a rel="nofollow" href="https://massive.com/glossary" target="_blank">the '
-            "glossary</a>.",
-            "See the glossary (https://massive.com/glossary).",
-            id="html link with extra attributes",
-        ),
-        pytest.param(
-            "<A HREF='https://x.example/a'>single\nquotes</A>",
-            "single quotes (https://x.example/a)",
-            id="html link in capitals with single quotes",
-        ),
-        pytest.param(
-            "  The trade's\n  exchange,\tsee\r\n\r\n the   list.  ",
-            "The trade's exchange, see the list.",
-            id="newlines and runs of spaces",
-        ),
-        pytest.param(
-            "The volume weighted average price.",
-            "The volume weighted average price.",
-            id="text with no link is unchanged",
-        ),
-        pytest.param(
-            "SG&amp;A &lt; 5, <b>bold</b>, `code`, [not a link], and a very long sentence " * 3,
-            (
-                "SG&amp;A &lt; 5, <b>bold</b>, `code`, [not a link], and a very long sentence " * 3
-            ).strip(),
-            id="no unescaping, no other markup removed, no truncation",
-        ),
-        pytest.param("", "", id="empty"),
-        pytest.param(" \n\t ", "", id="whitespace only"),
-    ],
-)
-def test_plain_text(vendor: str, plain: str) -> None:
-    assert render.plain_text(vendor) == plain

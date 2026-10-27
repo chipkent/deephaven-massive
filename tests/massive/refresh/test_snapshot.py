@@ -40,7 +40,11 @@ def test_the_real_snapshot_matches_its_manifest() -> None:
     manifest = json.loads((snapshot.DIRECTORY / "manifest.json").read_text("utf-8"))
     loaded = Snapshot.load()
     assert loaded.fetched.isoformat() == manifest["fetched"]
-    assert loaded.urls == {name: entry["url"] for name, entry in manifest["files"].items()}
+    assert loaded.index_url == manifest["files"]["llms.txt"]["url"]
+    assert loaded.origin == "https://massive.com"
+    assert loaded.page_urls.keys() == loaded.pages.keys()
+    for name, url in loaded.page_urls.items():
+        assert manifest["files"][f"rest/{name}"]["url"] == url
 
 
 def test_a_missing_snapshot_says_to_run_from_a_source_checkout(tmp_path: Path) -> None:
@@ -137,11 +141,9 @@ def test_a_stored_snapshot_loads(tmp_path: Path) -> None:
     assert loaded.openapi == {"paths": {}}
     assert loaded.llms == _INDEX
     assert loaded.fetched == dt.date(2026, 1, 1)
-    assert loaded.urls == {
-        "openapi.json": "https://example.com/openapi.json",
-        "llms.txt": "https://example.com/llms.txt",
-        "rest/stocks/trades.md": "https://example.com/rest/stocks/trades.md",
-    }
+    assert loaded.index_url == "https://example.com/llms.txt"
+    assert loaded.origin == "https://example.com"
+    assert loaded.page_urls == {"stocks/trades.md": "https://example.com/rest/stocks/trades.md"}
 
 
 def _edit_manifest(directory: Path, change: dict[str, object]) -> None:

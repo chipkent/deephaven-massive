@@ -36,6 +36,21 @@ def test_the_generated_files_match_the_snapshot_byte_for_byte(tmp_path: Path) ->
         assert (tmp_path / committed.name).read_bytes() == committed.read_bytes(), committed.name
 
 
+def test_no_link_syntax_survives_in_the_descriptions() -> None:
+    # Descriptions have no gate, so a link form the plain-text rules do not know would land
+    # silently; this fails on the refresh that brings one, so the rules can be extended.
+    document = json.loads(render.DESCRIPTIONS_FILE.read_text(encoding="utf-8"))
+    texts = [
+        text
+        for by_key in document["descriptions"].values()
+        for described in by_key.values()
+        for text in described.values()
+    ]
+    assert texts
+    leftovers = [t for t in texts if any(form in t.lower() for form in ("](", "<a", "href"))]
+    assert leftovers == []
+
+
 def test_refresh_writes_only_a_changed_file(tmp_path: Path) -> None:
     committed = [path.read_bytes() for path in _COMMITTED]
     (tmp_path / "rest.json").write_bytes(render.REST_FILE.read_bytes())

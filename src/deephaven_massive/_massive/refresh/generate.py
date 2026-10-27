@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from deephaven_massive._massive.refresh import render
 from deephaven_massive._massive.refresh.rest import generate_rest
-from deephaven_massive._massive.refresh.snapshot import REST_PAGES, Snapshot
+from deephaven_massive._massive.refresh.snapshot import Snapshot
 from deephaven_massive._massive.spec.types import Transport
 
 if TYPE_CHECKING:
@@ -43,9 +43,9 @@ def refresh(
     Each file is written only when every gate passes and its text changes. A `RefreshError`
     from loading the snapshot or from a gate propagates, and nothing is written.
 
-    Each REST source's URL in `descriptions.json` is the URL of the documentation page that
-    names its path, as the snapshot's manifest records it; the generator guarantees every
-    generated path has one.
+    Each REST source's URLs in `descriptions.json` are those of every documentation page
+    that names its path, as the snapshot's manifest records them; the generator guarantees
+    every generated path has at least one.
 
     Args:
         snapshot_directory: The snapshot to read; `snapshot.DIRECTORY` when omitted.
@@ -61,7 +61,9 @@ def refresh(
     snapshot = Snapshot.load(snapshot_directory)
     directory = spec_directory or render.SPEC_DIRECTORY
     paths, coverage = generate_rest(snapshot, hand)
-    urls = {path.key: snapshot.urls[f"{REST_PAGES}/{coverage.pages[path.key]}"] for path in paths}
+    urls = {
+        path.key: [snapshot.page_urls[page] for page in coverage.pages[path.key]] for path in paths
+    }
     texts = {
         render.REST_FILE.name: render.render_rest(paths),
         render.DESCRIPTIONS_FILE.name: render.render_descriptions(

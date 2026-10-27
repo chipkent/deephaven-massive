@@ -42,7 +42,7 @@ _F = TypeVar("_F")
 
 if TYPE_CHECKING:
     import datetime as dt
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
 
     from typing_extensions import override
 else:
@@ -551,7 +551,7 @@ class RestPath(Source):
 
 @dataclass(frozen=True, kw_only=True)
 class Provenance:
-    """Where the generated sources came from: the vendor snapshot's date and each source's URL.
+    """Where the generated sources came from: the vendor snapshot's date and each source's URLs.
 
     `spec.provenance()` returns the one value read from the generated files; tests build their
     own. A generated document cites it, so that a reader can check a column against the
@@ -559,11 +559,13 @@ class Provenance:
 
     Attributes:
         fetched: The day the vendor sources the schemas were generated from were downloaded.
-        urls: Each generated source, by its transport and key, mapped to the vendor's URL
-            that documents it (for REST, the documentation page that names the path). The
-            mapping is copied into a read-only view, so later changes to the caller's mapping
-            have no effect; like a membership's projection, that view cannot be pickled or
-            deep-copied.
+        urls: Each generated source, by its transport and key, mapped to the vendor URLs that
+            document it, sorted and as fetched. For REST these are the documentation pages
+            that name the path: one for most paths, one per asset class for a path several
+            share (`/v3/reference/tickers` has a stocks page, an options page, and so on). The
+            mapping is copied into a read-only view of tuples, so later changes to the caller's
+            mapping have no effect; like a membership's projection, that view cannot be
+            pickled or deep-copied.
 
     Example:
         ::
@@ -575,17 +577,28 @@ class Provenance:
             trades = (Transport.REST, "/v3/trades/{stockTicker}")
             provenance = Provenance(
                 fetched=dt.date(2026, 10, 27),
-                urls={trades: "https://massive.com/docs/rest/stocks/trades-quotes/trades.md"},
+                urls={trades: ["https://massive.com/docs/rest/stocks/trades-quotes/trades.md"]},
             )
-            assert provenance.urls[trades].endswith("/trades.md")
+            assert provenance.urls[trades][0].endswith("/trades.md")
     """
 
     fetched: dt.date
-    urls: Mapping[tuple[Transport, str], str] = dataclasses.field(hash=False)
+    urls: Mapping[tuple[Transport, str], Sequence[str]] = dataclasses.field(hash=False)
 
     def __post_init__(self) -> None:
-        """Freeze a copy of the URLs."""
-        object.__setattr__(self, "urls", MappingProxyType(dict(self.urls)))
+        """Freeze a copy of the URLs, each source's as a tuple.
+
+        Raises:
+            TypeError: If a source's URLs are one string rather than a sequence of strings,
+                which would otherwise be taken apart character by character.
+        """
+        strings = sorted(
+            f"{t}:{k}" for (t, k), found in self.urls.items() if isinstance(found, str)
+        )
+        if strings:
+            raise TypeError(f"the URLs of {strings} are a string, not a sequence of strings")
+        frozen = {key: tuple(found) for key, found in self.urls.items()}
+        object.__setattr__(self, "urls", MappingProxyType(frozen))
 
 
 @dataclass(frozen=True, kw_only=True)

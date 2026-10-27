@@ -8,11 +8,11 @@ against the same description and no schema is written by hand:
   the vendor's description of it), `Param` and `ParamKind` (REST parameters), `Membership` (a
   source's place in a dataset kind), `WireType` and `WireUnit` (a field's type and timestamp
   unit), `DriftReport` (what a payload had that its source did not, and the reverse), and
-  `Provenance` (the vendor snapshot's date and each source's vendor URL).
+  `Provenance` (the vendor snapshot's date and each source's vendor URLs).
 - `rest.json`, next to this module, is generated from Massive's OpenAPI specification by
   `python -m deephaven_massive._massive.refresh` and committed; it is never edited by hand.
   `descriptions.json`, generated beside it by the same command, holds the vendor's
-  description of each field, the snapshot's fetch date, and each source's vendor URL. The
+  description of each field, the snapshot's fetch date, and each source's vendor URLs. The
   descriptions are kept out of `rest.json` so that a refresh that only rewords them leaves the
   schema file byte for byte unchanged. Both ship in the wheel as package data, while the
   refresh that writes them does not.
@@ -40,7 +40,7 @@ Example:
         trades = source(Transport.REST, "/v3/trades/{stockTicker}")
         assert trades.field("SipTimestamp").unit == "ns"
         print(trades.field("Price").description)
-        print(provenance().fetched, provenance().urls[Transport.REST, trades.key])
+        print(provenance().fetched, *provenance().urls[Transport.REST, trades.key])
 """
 
 from __future__ import annotations
@@ -78,23 +78,27 @@ _FILES: Mapping[Transport, str] = MappingProxyType({Transport.REST: "rest.json"}
 # The generated file of the vendor's descriptions, fetch date, and URLs, beside this module.
 _DESCRIPTIONS = "descriptions.json"
 
+# What `parse` joins when it is given no descriptions.
+_NO_DESCRIPTIONS: Mapping[str, Mapping[str, str]] = MappingProxyType({})
+
 
 @dataclass(frozen=True, kw_only=True)
-class Descriptions:
+class DescriptionsFile:
     """The parsed contents of `descriptions.json`, before they are joined to the sources.
 
-    `parse_descriptions` builds it; the loader keeps one and joins it into each transport's
-    sources as they load. Immutable.
+    Internal to the loader: `parse_descriptions` builds it, and the loader keeps one and joins
+    it into each transport's sources as they load. Nothing outside `spec` sees it; the library
+    reads the same data through `Field.description` and `provenance()`. Immutable.
 
     Attributes:
         fetched: The day the vendor sources were downloaded.
-        urls: Per transport, each source key mapped to the vendor URL that documents it.
+        urls: Per transport, each source key mapped to the vendor URLs that document it.
         texts: Per transport, per source key, each described wire key mapped to its plain-text
             description. A field without a description has no entry.
     """
 
     fetched: dt.date
-    urls: Mapping[Transport, Mapping[str, str]]
+    urls: Mapping[Transport, Mapping[str, tuple[str, ...]]]
     texts: Mapping[Transport, Mapping[str, Mapping[str, str]]]
 
 
@@ -102,7 +106,7 @@ class Descriptions:
 class _Cache:
     """What has been loaded so far; read and written only under `_lock`.
 
-    Each value is published once and never changed afterwards.
+    Each value is published once, after it passed every check, and never changed afterwards.
 
     Attributes:
         sources: The sources of each transport loaded so far.
@@ -111,7 +115,7 @@ class _Cache:
     """
 
     sources: dict[Transport, Mapping[str, Source]]
-    descriptions: Descriptions | None = None
+    descriptions: DescriptionsFile | None = None
     provenance: Provenance | None = None
 
 
@@ -131,11 +135,11 @@ def _read(name: str) -> str:
     return resources.files(__name__).joinpath(name).read_text(encoding="utf-8")
 
 
-def _load_descriptions() -> Descriptions:
+def _load_descriptions() -> DescriptionsFile:
     """Return the descriptions file, reading it the first time. The caller holds `_lock`.
 
     A `ValueError` or `TypeError` from `parse_descriptions` (a malformed file) propagates, and
-    nothing is cached.
+    the file stays unread.
 
     Returns:
         The parsed file.
@@ -156,7 +160,10 @@ def _load_descriptions() -> Descriptions:
 def _load(transport: Transport) -> Mapping[str, Source]:
     """Return a transport's sources, loading them the first time. The caller holds `_lock`.
 
-    A `ValueError` or `TypeError` from `parse` or `_load_descriptions` propagates.
+    Loading joins the transport's descriptions into its fields and checks its URLs: the
+    descriptions file must give a URL for exactly the sources the schema file has. A
+    `ValueError` or `TypeError` from `parse` or `_load_descriptions` propagates, and the
+    transport stays unloaded (a descriptions file that parsed stays read).
 
     Args:
         transport: The transport.
@@ -166,14 +173,22 @@ def _load(transport: Transport) -> Mapping[str, Source]:
 
     Raises:
         LookupError: If the transport has no generated file.
+        ValueError: If a source has no URL, or a URL names a source the schema file lacks.
     """
     loaded = _cache.sources.get(transport)
     if loaded is None:
         name = _FILES.get(transport)
         if name is None:
             raise LookupError(f"no generated schema exists for transport {transport}")
-        texts = _load_descriptions().texts.get(transport, {})
-        loaded = parse(transport, _read(name), texts)
+        described = _load_descriptions()
+        loaded = parse(transport, _read(name), described.texts.get(transport, _NO_DESCRIPTIONS))
+        urls = described.urls.get(transport, {})
+        for what, keys in (
+            ("sources without a URL", set(loaded) - set(urls)),
+            ("URLs of sources the schema lacks", set(urls) - set(loaded)),
+        ):
+            if keys:
+                raise ValueError(f"{_DESCRIPTIONS} has {transport} {what}: {sorted(keys)}")
         _cache.sources[transport] = loaded
     return loaded
 
@@ -186,13 +201,14 @@ def sources(transport: Transport) -> Mapping[str, Source]:
     """Return every generated source of a transport, loading its file on first use.
 
     The first call for a transport reads its file and, if no earlier call has, the
-    descriptions file, and joins each field's description into `Field.description`.
+    descriptions file, joins each field's description into `Field.description`, and checks
+    that every source has a URL and every URL a source.
 
     A `LookupError`, if the transport has no generated file in this version of the library,
-    propagates. So does a `ValueError` (a value that breaks a type's invariants, or a
-    description of a source or wire key the schema lacks) or a `TypeError` (a member of the
-    wrong type), either of which means a generated file was edited by hand, and the transport
-    stays unloaded.
+    propagates. So does a `ValueError` (a value that breaks a type's invariants, a member
+    missing, or a description or URL that does not match the schema) or a `TypeError` (a
+    member of the wrong type), either of which means a generated file was edited by hand; the
+    transport then stays unloaded, and a later call tries again.
 
     Args:
         transport: The transport, such as `Transport.REST`.
@@ -234,43 +250,40 @@ def source(transport: Transport, key: str) -> Source:
 
 
 def provenance() -> Provenance:
-    """Return where the generated sources came from: the fetch date and each source's URL.
+    """Return where the generated sources came from: the fetch date and each source's URLs.
 
     A generated document cites it so a reader can check a column against the vendor's own
-    documentation. The first call reads the descriptions file and loads every transport it
-    names a URL for (as `sources` would), so that each URL is checked against a generated
-    source; every later call returns the same value. A `ValueError` or `TypeError` from that
-    loading propagates, and nothing is cached.
+    documentation. The first call loads every transport the descriptions file gives URLs for,
+    exactly as `sources` would, so the URLs it returns have passed the same checks; every later
+    call returns the same value. An error from that loading propagates as it does from
+    `sources`, and the provenance stays unbuilt.
 
     Returns:
-        The snapshot's fetch date and, by `(transport, source key)`, the vendor URL of every
-        generated source.
-
-    Raises:
-        ValueError: If a URL names a source the schema files lack, which means a generated
-            file was edited by hand.
+        The snapshot's fetch date and, by `(transport, source key)`, the sorted vendor URLs of
+        every generated source: for REST, every documentation page that names the path.
     """
     with _lock:
         found = _cache.provenance
         if found is None:
-            loaded = _load_descriptions()
-            urls: dict[tuple[Transport, str], str] = {}
-            for transport, by_key in loaded.urls.items():
-                unknown = sorted(set(by_key) - set(_load(transport)))
-                if unknown:
-                    raise ValueError(f"URLs of {transport} sources the schema lacks: {unknown}")
-                urls.update({(transport, key): url for key, url in by_key.items()})
-            found = Provenance(fetched=loaded.fetched, urls=urls)
+            described = _load_descriptions()
+            urls: dict[tuple[Transport, str], tuple[str, ...]] = {}
+            for transport, by_key in described.urls.items():
+                _load(transport)  # checks this transport's URLs against its sources
+                urls.update({(transport, key): pages for key, pages in by_key.items()})
+            found = Provenance(fetched=described.fetched, urls=urls)
             _cache.provenance = found
     return found
 
 
 def parse(
-    transport: Transport, text: str, descriptions: Mapping[str, Mapping[str, str]] | None = None
+    transport: Transport,
+    text: str,
+    descriptions: Mapping[str, Mapping[str, str]] = _NO_DESCRIPTIONS,
 ) -> Mapping[str, Source]:
     """Turn the text of a generated file into its sources, joining their descriptions.
 
-    `sources` calls this once per transport; tests call it with files of their own.
+    `sources` calls this once per transport; tests call it with files of their own. A
+    `TypeError` (a member of the wrong type; nothing is coerced) propagates.
 
     Args:
         transport: The transport the file describes.
@@ -278,19 +291,18 @@ def parse(
             "memberships"}, ...]}`, as the refresh writes it. `result_key` and `params` are
             read for REST only.
         descriptions: For each source key, each described wire key mapped to its description
-            (the transport's part of `Descriptions.texts`). A field it does not name gets
-            `""`. `None`, the default, describes nothing.
+            (the transport's part of `DescriptionsFile.texts`). A field it does not name gets
+            `""`; by default nothing is described.
 
     Returns:
         A read-only mapping from key to source, in file order.
 
     Raises:
-        ValueError: If a value breaks a type's invariants, two sources share a key, or a
-            description names a source or a wire key the file lacks.
+        ValueError: If a member is missing, a value breaks a type's invariants, two sources
+            share a key, or a description names a source or a wire key the file lacks.
     """
-    descriptions = descriptions or {}
     loaded: dict[str, Source] = {}
-    for entry in json.loads(text)["sources"]:
+    for entry in _list(_member(_object(json.loads(text), "the schema file"), "sources")):
         value = _source(transport, entry, descriptions)
         if value.key in loaded:
             raise ValueError(f"two generated {transport} sources share the key {value.key!r}")
@@ -305,28 +317,35 @@ def parse(
     return MappingProxyType(loaded)
 
 
-def parse_descriptions(text: str) -> Descriptions:
+def parse_descriptions(text: str) -> DescriptionsFile:
     """Turn the text of `descriptions.json` into its values.
 
     The loader calls this once; tests call it with files of their own. A `ValueError` (a
-    `fetched` that is not an ISO date, an unknown transport) or a `TypeError` (a member that
-    does not have the type the format gives it; nothing is coerced) propagates.
+    member missing, a `fetched` that is not an ISO date, an unknown transport) or a
+    `TypeError` (a member of the wrong type; nothing is coerced) propagates.
 
     Args:
         text: The file's JSON text: `{"generated_by", "fetched": "<YYYY-MM-DD>", "urls":
-            {<transport>: {<source key>: <url>}}, "descriptions": {<transport>: {<source
-            key>: {<wire key>: <text>}}}}`, as the refresh writes it.
+            {<transport>: {<source key>: [<url>, ...]}}, "descriptions": {<transport>:
+            {<source key>: {<wire key>: <text>}}}}`, as the refresh writes it.
 
     Returns:
         The parsed values, every mapping read-only.
     """
     document = _object(json.loads(text), "the descriptions file")
-    return Descriptions(
+    urls = _object(_member(document, "urls"), "urls")
+    texts = _object(_member(document, "descriptions"), "descriptions")
+    return DescriptionsFile(
         fetched=dt.date.fromisoformat(_text(document, "fetched")),
         urls=MappingProxyType(
             {
-                Transport(transport): _strings(by_key, f"urls of {transport}")
-                for transport, by_key in _object(document["urls"], "urls").items()
+                Transport(transport): MappingProxyType(
+                    {
+                        key: _string_list(found, f"URLs of {key!r}")
+                        for key, found in _object(by_key, f"URLs of {transport}").items()
+                    }
+                )
+                for transport, by_key in urls.items()
             }
         ),
         texts=MappingProxyType(
@@ -339,10 +358,28 @@ def parse_descriptions(text: str) -> Descriptions:
                         ).items()
                     }
                 )
-                for transport, by_key in _object(document["descriptions"], "descriptions").items()
+                for transport, by_key in texts.items()
             }
         ),
     )
+
+
+def _member(item: dict[str, object], key: str) -> object:
+    """Return a member of a JSON object that the file format requires.
+
+    Args:
+        item: The object.
+        key: The member's name.
+
+    Returns:
+        Its value.
+
+    Raises:
+        ValueError: If the object has no such member.
+    """
+    if key not in item:
+        raise ValueError(f"missing member {key!r} in {sorted(item)}")
+    return item[key]
 
 
 def _object(value: object, what: str) -> dict[str, object]:
@@ -383,6 +420,24 @@ def _strings(value: object, what: str) -> Mapping[str, str]:
     return MappingProxyType(strings)
 
 
+def _string_list(value: object, what: str) -> tuple[str, ...]:
+    """Return a JSON array of strings as a tuple.
+
+    Args:
+        value: The decoded JSON value.
+        what: What it is, for the message.
+
+    Returns:
+        The strings, in order.
+
+    Raises:
+        TypeError: If the value is not an array of strings.
+    """
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise TypeError(f"{what} is {value!r:.80}, not an array of strings")
+    return tuple(value)
+
+
 def _source(
     transport: Transport, entry: dict[str, object], descriptions: Mapping[str, Mapping[str, str]]
 ) -> Source:
@@ -398,8 +453,8 @@ def _source(
     """
     key = _text(entry, "key")
     described = descriptions.get(key, {})
-    fields = tuple(_field(item, described) for item in _list(entry["fields"]))
-    memberships = tuple(_membership(item) for item in _list(entry["memberships"]))
+    fields = tuple(_field(item, described) for item in _list(_member(entry, "fields")))
+    memberships = tuple(_membership(item) for item in _list(_member(entry, "memberships")))
     if transport is not Transport.REST:
         return Source(key=key, transport=transport, fields=fields, memberships=memberships)
     return RestPath(
@@ -407,7 +462,7 @@ def _source(
         fields=fields,
         memberships=memberships,
         result_key=_optional(entry, "result_key"),
-        params=tuple(_param(item) for item in _list(entry["params"])),
+        params=tuple(_param(item) for item in _list(_member(entry, "params"))),
     )
 
 
@@ -441,7 +496,7 @@ def _text(item: dict[str, object], key: str) -> str:
     Raises:
         TypeError: If the member is not a string (`null` included); nothing is coerced.
     """
-    value = item[key]
+    value = _member(item, key)
     if not isinstance(value, str):
         raise TypeError(f"{key!r} is {value!r}, not a string")
     return value
@@ -457,7 +512,7 @@ def _optional(item: dict[str, object], key: str) -> str | None:
     Returns:
         The string, or `None` for `null`.
     """
-    return None if item[key] is None else _text(item, key)
+    return None if _member(item, key) is None else _text(item, key)
 
 
 def _flag(item: dict[str, object], key: str) -> bool:
@@ -473,7 +528,7 @@ def _flag(item: dict[str, object], key: str) -> bool:
     Raises:
         TypeError: If the member is not `true` or `false`.
     """
-    value = item[key]
+    value = _member(item, key)
     if not isinstance(value, bool):
         raise TypeError(f"{key!r} is {value!r}, not a boolean")
     return value
@@ -520,7 +575,7 @@ def _param(item: dict[str, object]) -> Param:
         TypeError: If `values` is not an array of strings.
     """
     unit = _optional(item, "unit")
-    values = item["values"]
+    values = _member(item, "values")
     if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
         raise TypeError(f"'values' is {values!r:.80}, not an array of strings")
     return Param(
@@ -546,8 +601,8 @@ def _membership(item: dict[str, object]) -> Membership:
         TypeError: If the position is not an integer, or the projection is neither `null` nor
             an object of strings.
     """
-    projection = item["projection"]
-    position = item["position"]
+    projection = _member(item, "projection")
+    position = _member(item, "position")
     if not isinstance(position, int) or isinstance(position, bool):
         raise TypeError(f"membership position {position!r} is not an integer")
     if projection is not None and (

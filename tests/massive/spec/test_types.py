@@ -397,12 +397,17 @@ _URL = "https://massive.com/docs/websocket/stocks/trades"
 
 
 def test_provenance_urls_are_copied_and_read_only() -> None:
-    urls = {(Transport.WS, "stocks/T"): _URL}
+    urls = {(Transport.WS, "stocks/T"): [_URL]}
     provenance = Provenance(fetched=dt.date(2026, 10, 27), urls=urls)
     urls.clear()
-    assert provenance.urls == {(Transport.WS, "stocks/T"): _URL}
+    assert provenance.urls == {(Transport.WS, "stocks/T"): (_URL,)}
     with pytest.raises(TypeError):
         cast("dict[tuple[Transport, str], str]", provenance.urls)[Transport.WS, "x"] = _URL
+
+
+def test_provenance_refuses_a_single_string_of_urls() -> None:
+    with pytest.raises(TypeError, match=r"the URLs of \['WS:stocks/T'\] are a string"):
+        Provenance(fetched=dt.date(2026, 10, 27), urls={(Transport.WS, "stocks/T"): _URL})
 
 
 # Every value type.
@@ -421,7 +426,7 @@ def _values() -> list[DataclassInstance]:
         Source(key="stocks/T", transport=Transport.WS, fields=(_price(),)),
         RestPath(key="/v3/trades/{stockTicker}", fields=(), params=(_TICKER,)),
         DriftReport(extra=frozenset({"zz"})),
-        Provenance(fetched=dt.date(2026, 10, 27), urls={(Transport.WS, "stocks/T"): _URL}),
+        Provenance(fetched=dt.date(2026, 10, 27), urls={(Transport.WS, "stocks/T"): (_URL,)}),
     ]
 
 

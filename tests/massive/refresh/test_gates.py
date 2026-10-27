@@ -243,7 +243,7 @@ def _excluding(
 
 @pytest.mark.parametrize("status", ["deprecated", "draft"])
 def test_stale_entry_an_exclusion_the_specification_already_accounts_for(status: str) -> None:
-    problems = check_exclusions(_excluding(_PATH), {_PATH: status}, {_PATH: "page.md"})
+    problems = check_exclusions(_excluding(_PATH), {_PATH: status}, {_PATH: ("page.md",)})
     assert _found(problems) == [("stale-entry", _PATH, "")]
 
 
@@ -254,14 +254,16 @@ def test_stale_entry_an_exclusion_the_specification_lacks() -> None:
 
 def test_docs_an_undocumented_exclusion_that_is_documented() -> None:
     hand = _excluding(_PATH, undocumented=True)
-    assert _found(check_exclusions(hand, {_PATH: ""}, {_PATH: "page.md"})) == [("docs", _PATH, "")]
+    assert _found(check_exclusions(hand, {_PATH: ""}, {_PATH: ("page.md",)})) == [
+        ("docs", _PATH, "")
+    ]
     assert list(check_exclusions(hand, {_PATH: ""}, {})) == []
 
 
 def test_docs_a_documented_exclusion_that_no_page_names() -> None:
     hand = _excluding(_PATH)
     assert _found(check_exclusions(hand, {_PATH: ""}, {})) == [("docs", _PATH, "")]
-    assert list(check_exclusions(hand, {_PATH: ""}, {_PATH: "page.md"})) == []
+    assert list(check_exclusions(hand, {_PATH: ""}, {_PATH: ("page.md",)})) == []
 
 
 def test_exclusions_of_other_transports_are_not_checked_here() -> None:

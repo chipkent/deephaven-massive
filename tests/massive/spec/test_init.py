@@ -312,7 +312,12 @@ def test_provenance_gives_the_fetch_date_and_every_source_url() -> None:
     assert found.fetched.isoformat() == _committed_descriptions()["fetched"]
     assert {key for _, key in found.urls} == set(spec.sources(Transport.REST))
     assert found.urls[Transport.REST, "/v3/trades/{stockTicker}"] == (
-        "https://massive.com/docs/rest/stocks/trades-quotes/trades.md"
+        "https://massive.com/docs/rest/stocks/trades-quotes/trades.md",
+    )
+    # A path several asset classes share cites every page that documents it.
+    assert found.urls[Transport.REST, "/v3/reference/tickers"] == tuple(
+        f"https://massive.com/docs/rest/{asset}/tickers/all-tickers.md"
+        for asset in ("crypto", "forex", "indices", "stocks")
     )
 
 
@@ -349,11 +354,14 @@ def test_parse_rejects_a_description_of_something_the_schema_lacks(
         spec.parse(Transport.WS, _file(_DESCRIBED_ENTRY), descriptions)
 
 
+_URL = "https://massive.com/docs/rest/x.md"
+
+
 def _descriptions(**change: object) -> str:
     document = {
         "generated_by": "python -m deephaven_massive._massive.refresh",
         "fetched": "2026-10-27",
-        "urls": {"REST": {"/v1/x": "https://massive.com/docs/rest/x.md"}},
+        "urls": {"REST": {"/v1/x": [_URL]}},
         "descriptions": {"REST": {"/v1/x": {"price": "The price."}}},
     }
     return json.dumps({**document, **change})
@@ -362,7 +370,7 @@ def _descriptions(**change: object) -> str:
 def test_parse_descriptions_reads_the_generated_format() -> None:
     found = spec.parse_descriptions(_descriptions())
     assert found.fetched == dt.date(2026, 10, 27)
-    assert found.urls == {Transport.REST: {"/v1/x": "https://massive.com/docs/rest/x.md"}}
+    assert found.urls == {Transport.REST: {"/v1/x": (_URL,)}}
     assert found.texts == {Transport.REST: {"/v1/x": {"price": "The price."}}}
     assert isinstance(found.urls, MappingProxyType)
     assert isinstance(found.urls[Transport.REST], MappingProxyType)
@@ -378,7 +386,17 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
         (_descriptions(fetched=None), TypeError, "'fetched' is None, not a string"),
         (_descriptions(urls={"SMS": {}}), ValueError, "'SMS' is not a valid Transport"),
         (_descriptions(urls=[]), TypeError, "urls is \\[\\], not an object"),
-        (_descriptions(urls={"REST": {"/v1/x": 1}}), TypeError, "not an object of strings"),
+        (_descriptions(urls={"REST": []}), TypeError, "URLs of REST is \\[\\], not an object"),
+        (
+            _descriptions(urls={"REST": {"/v1/x": _URL}}),
+            TypeError,
+            "URLs of '/v1/x' is .* not an array of strings",
+        ),
+        (
+            _descriptions(urls={"REST": {"/v1/x": [1]}}),
+            TypeError,
+            "not an array of strings",
+        ),
         (
             _descriptions(descriptions={"REST": {"/v1/x": {"price": None}}}),
             TypeError,
@@ -389,6 +407,12 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
             TypeError,
             "descriptions of REST is .* not an object",
         ),
+        (json.dumps({"fetched": "2026-10-27"}), ValueError, "missing member 'urls'"),
+        (
+            json.dumps({"fetched": "2026-10-27", "urls": {}}),
+            ValueError,
+            "missing member 'descriptions'",
+        ),
     ],
     ids=[
         "not an object",
@@ -396,9 +420,13 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
         "no date",
         "unknown transport",
         "urls not an object",
+        "a transport's urls not an object",
+        "a source's urls not a list",
         "a url not text",
         "a description not text",
         "a transport's descriptions not an object",
+        "no urls",
+        "no descriptions",
     ],
 )
 def test_parse_descriptions_coerces_nothing(
@@ -408,35 +436,100 @@ def test_parse_descriptions_coerces_nothing(
         spec.parse_descriptions(text)
 
 
-def _serve(monkeypatch: pytest.MonkeyPatch, **files: str) -> None:
-    """Serve the given generated files in place of the committed ones, the rest unchanged."""
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("[]", "the schema file is \\[\\], not an object"),
+        ("{}", "missing member 'sources'"),
+        (_file({"key": "s", "memberships": []}), "missing member 'fields'"),
+        (_file({"fields": [], "memberships": []}), "missing member 'key'"),
+    ],
+    ids=["not an object", "no sources", "a source without fields", "a source without a key"],
+)
+def test_parse_names_a_missing_member(text: str, message: str) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        spec.parse(Transport.WS, text)
+
+
+# The loader against generated files of the test's own, so each mismatch shows alone.
+
+_SCHEMA = json.dumps(
+    {
+        "sources": [
+            {
+                "key": "/v1/x",
+                "result_key": "results",
+                "params": [],
+                "fields": [{**_FIELD, "wire_key": "price", "column": "Price"}],
+                "memberships": [],
+            }
+        ]
+    }
+)
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, files: Mapping[str, str]) -> None:
+    """Make the loader read `files`, by file name, instead of the committed generated files.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        files: The text of each generated file, such as `{"rest.json": ...}`; a file not
+            named is read from the package as usual.
+    """
     real = spec._read
-    monkeypatch.setattr(spec, "_read", lambda name: files.get(name.split(".")[0]) or real(name))
+    monkeypatch.setattr(spec, "_read", lambda name: files[name] if name in files else real(name))
 
 
-def test_a_descriptions_file_naming_a_transport_without_a_schema_raises(
+def test_the_loader_joins_and_checks_files_of_its_own(
     unloaded: _Loaded, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _serve(monkeypatch, descriptions=_descriptions(urls={"WS": {}}))
-    with pytest.raises(ValueError, match=r"names transports without a schema: \['WS'\]"):
-        spec.sources(Transport.REST)
+    _serve(monkeypatch, {"rest.json": _SCHEMA, "descriptions.json": _descriptions()})
+    assert spec.source(Transport.REST, "/v1/x").field("Price").description == "The price."
+    assert spec.provenance() == Provenance(
+        fetched=dt.date(2026, 10, 27), urls={(Transport.REST, "/v1/x"): (_URL,)}
+    )
+
+
+@pytest.mark.parametrize(
+    ("descriptions", "message"),
+    [
+        pytest.param(
+            _descriptions(urls={"WS": {}}),
+            r"names transports without a schema: \['WS'\]",
+            id="a transport without a schema",
+        ),
+        pytest.param(
+            _descriptions(descriptions={"REST": {"/v1/y": {"price": "P."}}}),
+            "descriptions name the REST source '/v1/y', which is absent",
+            id="a description of an unknown source",
+        ),
+        pytest.param(
+            _descriptions(urls={"REST": {}}),
+            r"has REST sources without a URL: \['/v1/x'\]",
+            id="a source without a URL",
+        ),
+        pytest.param(
+            _descriptions(urls={"REST": {"/v1/x": [_URL], "/v1/y": [_URL]}}),
+            r"has REST URLs of sources the schema lacks: \['/v1/y'\]",
+            id="a URL of an unknown source",
+        ),
+    ],
+)
+@pytest.mark.parametrize("first", ["sources", "provenance"])
+def test_a_mismatched_file_raises_at_load_whichever_call_comes_first(
+    unloaded: _Loaded,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    descriptions: str,
+    message: str,
+    first: str,
+) -> None:
+    # `sources` and `provenance` reject the same files, and the transport stays unloaded so
+    # that the next call raises again rather than returning what failed.
+    _serve(monkeypatch, {"rest.json": _SCHEMA, "descriptions.json": descriptions})
+    call = spec.provenance if first == "provenance" else lambda: spec.sources(Transport.REST)
+    for _ in range(2):
+        with pytest.raises(ValueError, match=message):
+            call()
     assert unloaded == {}
-    assert spec._cache.descriptions is None
-
-
-def test_a_description_of_an_unknown_source_raises_at_load(
-    unloaded: _Loaded, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _serve(monkeypatch, descriptions=_descriptions(urls={}))
-    with pytest.raises(ValueError, match="descriptions name the REST source '/v1/x'"):
-        spec.sources(Transport.REST)
-    assert unloaded == {}
-
-
-def test_a_url_of_an_unknown_source_raises_at_load(
-    unloaded: _Loaded, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _serve(monkeypatch, descriptions=_descriptions(descriptions={}))
-    with pytest.raises(ValueError, match=r"URLs of REST sources the schema lacks: \['/v1/x'\]"):
-        spec.provenance()
     assert spec._cache.provenance is None
