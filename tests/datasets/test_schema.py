@@ -200,6 +200,7 @@ def spec(
     ((transport, key),) = one
     return DatasetSpec(
         name=name,
+        summary="A dataset for the tests.",
         asset_class=asset_class,
         kind=kind,
         fetch_path=key if transport is R else None,
@@ -243,6 +244,7 @@ def test_the_session_key_keeps_its_column() -> None:
     files = (F, "us_futures_{venue}/trades_v1")
     futures = DatasetSpec(
         name="futures.trades",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.FUTURES,
         flat_file_prefixes={None: files[1]},
         keys={
@@ -325,6 +327,7 @@ def test_required_keys_resolve_to_the_fields_behind_them() -> None:
     trades = (R, "/futures/v1/trades/{ticker}")
     futures = DatasetSpec(
         name="futures.trades",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.FUTURES,
         history_path=trades[1],
         flat_file_prefixes={None: files[1]},
@@ -420,6 +423,7 @@ def test_a_fanout_key_that_is_no_instrument_keeps_its_column_and_is_required() -
     holdings = (R, "/stocks/filings/vX/13-F")
     filings = DatasetSpec(
         name="stocks.institutional_holdings",
+        summary="A dataset for the tests.",
         fetch_path=holdings[1],
         keys={holdings: SourceKeys(fanout=KeySpec("FilerCik", instrument=False))},
     )
@@ -471,6 +475,7 @@ def test_the_merge_follows_the_membership_positions() -> None:
     last = (R, "/v2/last/trade/{stocksTicker}")
     trades = DatasetSpec(
         name="stocks.trades",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         kind="trades",
         fetch_path=last[1],
@@ -508,6 +513,7 @@ def test_the_merge_joins_types_across_sources() -> None:
     both = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
     quotes = DatasetSpec(
         name="stocks.quotes",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         fetch_path=nbbo[1],
         history_path="/v3/quotes/{stockTicker}",
@@ -532,6 +538,7 @@ def test_the_merge_reports_a_type_conflict() -> None:
     )
     stream = DatasetSpec(
         name="stocks.trades",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         history_path="/v3/trades/{stockTicker}",
         channels={None: "T"},
@@ -559,8 +566,18 @@ def test_epochs_of_different_units_share_a_column() -> None:
         transport=W,
         fields=(Field(wire_key="t", column="At", wire_type=WireType.EPOCH, unit=WireUnit.NS),),
     )
-    stream = DatasetSpec(name="stocks.x", asset_class=AssetClass.STOCKS, channels={None: "T"})
-    second = DatasetSpec(name="stocks.y", asset_class=AssetClass.STOCKS, channels={None: "Q"})
+    stream = DatasetSpec(
+        name="stocks.x",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        channels={None: "T"},
+    )
+    second = DatasetSpec(
+        name="stocks.y",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        channels={None: "Q"},
+    )
     tables = {"stocks/T": made, "stocks/Q": other}
     schema = dataset_schema(stream, (stream, second), lambda _, key: tables[key])
     assert schema.columns == (Column("At", ColumnType.INSTANT),)
