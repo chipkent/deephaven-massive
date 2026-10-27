@@ -8,6 +8,8 @@ against the same description and no schema is written by hand:
   `Param` and `ParamKind` (REST parameters), `Membership` (a source's place in a dataset kind),
   `WireType` and `WireUnit` (a field's type and timestamp unit), and `DriftReport` (what a
   payload had that its source did not, and the reverse).
+- `spec.convert` checks one decoded JSON value against its `WireType` and converts it
+  exactly (an ISO instant to integer nanoseconds, for example), for every JSON decoder.
 - The generated `rest.json`, `ws.json`, and `flatfiles.json`, and the loaders that read them
   once into those types, are added beside it by the refresh.
 

@@ -1,0 +1,18 @@
+{
+  "next_url": "https://api.massive.com/v3/trades/AAPL?cursor=YWN0aXZlPXRydWUmZGF0ZT0yMDIxLTA0LTI1",
+  "request_id": "a47d1beb8c11b6ae897ab76cdbbf35a3",
+  "results": [
+    {
+      "conditions": [12, 41],
+      "exchange": 11,
+      "id": "1",
+      "participant_timestamp": 1517562000015577000,
+      "price": 171.55,
+      "sequence_number": 1063,
+      "sip_timestamp": 1517562000016036600,
+      "size": 100,
+      "tape": 3
+    }
+  ],
+  "status": "OK"
+}

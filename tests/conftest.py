@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive import MassiveSession
+    from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
 
@@ -164,6 +165,20 @@ def make_csv_gz() -> Callable[[str], bytes]:
         return gzip.compress(csv_text.encode())
 
     return compress
+
+
+@pytest.fixture
+def fake_rest() -> Iterator[FakeRestServer]:
+    """Yield a started `FakeRestServer` (`tests/_fakes/rest.py`) on 127.0.0.1, closed at teardown.
+
+    Yields:
+        The server; script it with `reply` and read `requests` afterwards.
+    """
+    rest = importlib.import_module("tests._fakes.rest")
+    server: FakeRestServer = rest.FakeRestServer()
+    server.start()
+    yield server
+    server.close()
 
 
 # --- Session fixtures --------------------------------------------------------------------------

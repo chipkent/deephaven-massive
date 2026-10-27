@@ -7,6 +7,7 @@ import pytest
 
 from deephaven_massive import _enums
 from deephaven_massive._massive.spec.types import (
+    ENVELOPE_KEYS,
     DriftReport,
     Field,
     Membership,
@@ -148,6 +149,21 @@ def test_values_on_a_non_enum_param_are_rejected() -> None:
         Param(name="limit", kind=ParamKind.INTEGER, values=("1",))
 
 
+def test_a_timestamp_param_keeps_its_unit() -> None:
+    since = Param(name="timestamp.gte", kind=ParamKind.TIMESTAMP, unit=WireUnit.MS)
+    assert since.unit is WireUnit.MS
+
+
+def test_a_timestamp_param_without_a_unit_is_rejected() -> None:
+    with pytest.raises(ValueError, match="'timestamp': a timestamp needs a unit"):
+        Param(name="timestamp", kind=ParamKind.TIMESTAMP)
+
+
+def test_a_unit_on_a_non_timestamp_param_is_rejected() -> None:
+    with pytest.raises(ValueError, match="'date': a timestamp needs a unit"):
+        Param(name="date", kind=ParamKind.DATE, unit=WireUnit.NS)
+
+
 # Source.
 
 
@@ -281,6 +297,15 @@ def test_a_rest_path_keeps_its_result_key_and_params() -> None:
     assert (path.result_key, path.params) == ("last", params)
 
 
+def test_the_envelope_keys_are_the_ones_that_describe_a_response() -> None:
+    assert frozenset({"status", "request_id", "next_url", "count"}) == ENVELOPE_KEYS
+
+
+def test_a_rest_path_without_an_envelope_has_no_result_key() -> None:
+    path = RestPath(key="/v1/marketstatus/now", fields=(), result_key=None)
+    assert path.result_key is None
+
+
 def test_query_parameters_need_no_placeholder() -> None:
     limit = Param(name="limit", kind=ParamKind.INTEGER)
     path = RestPath(key="/v3/trades/{stockTicker}", fields=(), params=(_TICKER, limit))
@@ -324,7 +349,9 @@ def test_an_inconsistent_rest_path_is_rejected(
 
 
 def test_a_drift_report_defaults_to_no_drift() -> None:
-    assert DriftReport() == DriftReport(extra=frozenset(), missing=frozenset())
+    assert DriftReport() == DriftReport(
+        extra=frozenset(), missing=frozenset(), statuses=frozenset()
+    )
 
 
 # Every value type.

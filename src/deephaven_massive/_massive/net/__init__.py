@@ -7,6 +7,8 @@ WebSocket, and flat-file clients all build on it:
 - `net.errors`: `WireError`, `WireAuthError`, `WireEntitlementError`, re-exported here.
 - `net.http`: the CA bundle and the proxy each client uses.
 - `net.codec`: the JSON decoder (orjson when installed, else a strict standard-library path).
+- `net.retry`: the retry schedule, the `Retry-After` parser, TLS-failure detection, and the
+  injectable `Clock` every wait goes through.
 
 Attributes:
     USER_AGENT: The `User-Agent` every client sends, `deephaven-massive/<version>`, where the

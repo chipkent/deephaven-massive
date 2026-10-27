@@ -19,6 +19,8 @@ Interface:
     - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
       client, one file being decoded into Arrow batches, what to read from it, and where a
       dataset's file for a day lives.
+    - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
+      conversion of a page's rows to an Arrow batch with its drift report.
 
 Names resolve lazily on first access (PEP 562), so importing this package imports none of
 its clients' dependencies, and never Deephaven.
@@ -40,24 +42,30 @@ from typing import TYPE_CHECKING
 __all__ = [
     "FlatFile",
     "FlatFileClient",
+    "Page",
     "ReadColumn",
     "ReadPlan",
+    "RestClient",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
     "object_key",
+    "to_batch",
 ]
 
 # Each name of the interface, and the module that defines it.
 _EXPORTS: dict[str, str] = {
     "FlatFile": "deephaven_massive._massive.flatfiles.reader",
     "FlatFileClient": "deephaven_massive._massive.flatfiles.client",
+    "Page": "deephaven_massive._massive.rest.response",
     "ReadColumn": "deephaven_massive._massive.flatfiles.reader",
     "ReadPlan": "deephaven_massive._massive.flatfiles.reader",
+    "RestClient": "deephaven_massive._massive.rest.client",
     "WireAuthError": "deephaven_massive._massive.net.errors",
     "WireEntitlementError": "deephaven_massive._massive.net.errors",
     "WireError": "deephaven_massive._massive.net.errors",
     "object_key": "deephaven_massive._massive.flatfiles.layout",
+    "to_batch": "deephaven_massive._massive.rest.batch",
 }
 
 # Type checkers read the imports, so they see each name's real type and flag a name outside
@@ -71,6 +79,9 @@ if TYPE_CHECKING:
         WireEntitlementError,
         WireError,
     )
+    from deephaven_massive._massive.rest.batch import to_batch
+    from deephaven_massive._massive.rest.client import RestClient
+    from deephaven_massive._massive.rest.response import Page
 else:
 
     def __getattr__(name: str) -> object:
