@@ -9,9 +9,11 @@ Replies are matched by the request's full target (path and query) first, then by
 alone. Each match consumes the first scripted reply of its queue; the last one is kept, so a
 path scripted once answers every request the same way. An unscripted path answers 404.
 
-The server also behaves as a forwarding HTTP proxy: a request line with an absolute URL
-(`GET http://host/path`) is answered like any other and recorded with `proxied=True`, so a
-test can point `HTTPS_PROXY` at it.
+The server also behaves as an HTTP proxy. A `CONNECT host:port` request is recorded (method
+`CONNECT`, `proxied=True`) and then tunnelled byte for byte to that address, so a test can put
+it in `HTTPS_PROXY` in front of a TLS fake and see exactly what reaches the proxy. A request
+line with an absolute URL (`GET http://host/path`, forwarding) is answered like any other and
+recorded with `proxied=True`.
 
 Every method is safe to call from any thread: the script and the record sit behind one lock.
 Imported lazily by the `fake_rest` fixture in `tests/conftest.py`.
@@ -22,6 +24,8 @@ from __future__ import annotations
 import gzip
 import http.server
 import json
+import select
+import socket
 import ssl
 import threading
 from collections import deque
@@ -64,16 +68,18 @@ class Received:
 
     Attributes:
         target: The path and query, as the client sent them (a proxied absolute URL is reduced
-            to its path and query).
+            to its path and query); for `CONNECT`, the `host:port` tunnelled to.
         headers: The request headers, with lower-case names.
-        proxied: Whether the request line held an absolute URL, as a client sends to a proxy.
-        host_url: For a proxied request, the scheme and host it named; otherwise `""`.
+        proxied: Whether the request was meant for a proxy: an absolute URL, or `CONNECT`.
+        host_url: For a forwarded request, the scheme and host it named; otherwise `""`.
+        method: `GET` or `CONNECT`.
     """
 
     target: str
     headers: Mapping[str, str]
     proxied: bool = False
     host_url: str = ""
+    method: str = "GET"
 
 
 def envelope(
@@ -159,6 +165,16 @@ class FakeRestServer:
         with self._lock:
             self._script.setdefault(target, deque()).extend(replies)
 
+    def reply_first(self, target: str, *replies: Reply) -> None:
+        """Script replies to be used before those already scripted for `target`.
+
+        Args:
+            target: A path, or a path and query, already scripted with `reply`.
+            *replies: The replies, in order, ahead of the existing ones.
+        """
+        with self._lock:
+            self._script[target].extendleft(reversed(replies))
+
     def on_request(self, hook: Callable[[Received], None] | None) -> None:
         """Run `hook` on the server's thread as each request arrives, before it is answered.
 
@@ -173,6 +189,15 @@ class FakeRestServer:
         """A copy of every request received so far, in arrival order."""
         with self._lock:
             return list(self._received)
+
+    def _record(self, received: Received) -> None:
+        """Record a request that gets no scripted reply (a `CONNECT`).
+
+        Args:
+            received: The request.
+        """
+        with self._lock:
+            self._received.append(received)
 
     def _next(self, received: Received) -> tuple[Reply, Callable[[Received], None] | None]:
         """Record a request and choose its reply.
@@ -233,4 +258,39 @@ class FakeRestServer:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def do_CONNECT(self) -> None:
+                fake._record(
+                    Received(
+                        target=self.path,
+                        headers={name.lower(): value for name, value in self.headers.items()},
+                        proxied=True,
+                        method="CONNECT",
+                    )
+                )
+                host, _, port = self.path.rpartition(":")
+                with socket.create_connection((host, int(port)), timeout=10) as upstream:
+                    self.send_response(200, "Connection established")
+                    self.end_headers()
+                    _relay(self.connection, upstream)
+                self.close_connection = True
+
         return Handler
+
+
+def _relay(client: socket.socket, upstream: socket.socket) -> None:
+    """Copy bytes both ways between two sockets until either side closes.
+
+    Args:
+        client: The proxy's connection from the client.
+        upstream: The connection to the tunnelled address.
+    """
+    sockets = [client, upstream]
+    while True:
+        readable, _, _ = select.select(sockets, [], [], 10)
+        if not readable:
+            return
+        for source in readable:
+            data = source.recv(65536)
+            if not data:
+                return
+            (upstream if source is client else client).sendall(data)

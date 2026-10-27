@@ -130,6 +130,9 @@ class Page:
         drift: What the envelope had that is not documented: `statuses` holds an unknown
             `status`. The rows' own drift comes from `to_batch`.
 
+    The `repr` leaves out `rows` and `body`: they can be large, and a body may hold a
+    `next_url` that carries an `apiKey`.
+
     Example:
         ::
 
@@ -139,8 +142,8 @@ class Page:
 
     status: str
     request_id: str | None
-    rows: list[dict[str, object]]
-    body: dict[str, object] | list[object]
+    rows: list[dict[str, object]] = field(repr=False)
+    body: dict[str, object] | list[object] = field(repr=False)
     drift: DriftReport = field(default_factory=DriftReport)
 
 

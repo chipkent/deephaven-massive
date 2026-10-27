@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta, timezone
-from enum import Enum, StrEnum
+from enum import Enum, IntEnum, StrEnum
 
+import numpy as np
 import pytest
 
 from deephaven_massive._massive.rest import query
@@ -16,6 +17,16 @@ class _Order(StrEnum):
 
 class _Code(Enum):
     ONE = 1
+
+
+class _Limit(IntEnum):
+    BIG = 50_000
+
+
+class _NanoDatetime(datetime):
+    """A datetime that carries nanoseconds below the microsecond, like `pandas.Timestamp`."""
+
+    nanosecond = 789
 
 
 _TICKER = Param(name="stockTicker", kind=ParamKind.STRING, in_path=True)
@@ -76,6 +87,13 @@ def test_integers_and_numbers() -> None:
     assert _encode("strike_price.gte", 100) == "100"
     assert _encode("strike_price.gte", 0.1) == "0.1"
     assert _encode("strike_price.gte", 1e-7) == "1e-07"
+
+
+def test_number_subclasses_are_sent_by_value_never_by_their_repr() -> None:
+    assert _encode("limit", _Limit.BIG) == "50000"
+    assert _encode("strike_price.gte", _Limit.BIG) == "50000"
+    # numpy's float64 subclasses float, and its repr is "np.float64(1.5)".
+    assert _encode("strike_price.gte", np.float64(1.5)) == "1.5"
 
 
 def test_an_integer_of_any_size_is_sent_exactly() -> None:
@@ -139,6 +157,20 @@ def test_an_instant_is_sent_in_the_parameter_unit(unit: WireUnit, expected: str)
     param = Param(name="timestamp", kind=ParamKind.TIMESTAMP, unit=unit)
     value = datetime(2026, 1, 1, 0, 0, 0, 123000, tzinfo=UTC)
     assert query.encode_value(param, value) == expected
+
+
+def test_nanoseconds_below_the_microsecond_are_kept() -> None:
+    value = _NanoDatetime(2026, 1, 1, 0, 0, 0, 123456, tzinfo=UTC)
+    param = Param(name="timestamp", kind=ParamKind.TIMESTAMP, unit=WireUnit.NS)
+    assert query.encode_value(param, value) == "1767225600123456789"
+
+
+@pytest.mark.parametrize("unit", [WireUnit.US, WireUnit.MS])
+def test_nanoseconds_below_a_coarser_unit_are_refused_not_dropped(unit: WireUnit) -> None:
+    value = _NanoDatetime(2026, 1, 1, 0, 0, 0, 123000, tzinfo=UTC)
+    param = Param(name="timestamp", kind=ParamKind.TIMESTAMP, unit=unit)
+    with pytest.raises(ValueError, match=f"takes whole {unit} since the epoch"):
+        query.encode_value(param, value)
 
 
 def test_an_instant_in_seconds_is_exact() -> None:

@@ -67,13 +67,14 @@ __all__ = [
 ]
 
 
-ENVELOPE_KEYS = frozenset({"count", "next_url", "request_id", "status"})
+ENVELOPE_KEYS: frozenset[str] = frozenset({"status", "request_id", "next_url", "count"})
 """The keys of Massive's REST envelope that describe a response, never a row.
 
-A path whose body is its rows (`RestPath.result_key` is `None`) still carries some of these
-beside the row's own keys (`/v1/open-close/{stocksTicker}/{date}` has `status`, for example).
-The REST decoder removes them from such a row before it compares the row with the path's
-fields, and the refresh never generates a field for them.
+A path whose body is a single JSON object that is both the envelope and the one row
+(`RestPath.result_key` is `None`: `/v1/open-close/{stocksTicker}/{date}`, `/v1/conversion/...`,
+`/v1/marketstatus/now`) carries some of these beside the row's own keys. The REST decoder
+removes them from such a row before it compares the row with the path's fields, and the refresh
+never generates a field for them. A list body is never an envelope: its rows keep every key.
 """
 
 
@@ -263,8 +264,9 @@ class Param:
         kind: The kind of value the parameter takes.
         in_path: True for a placeholder of the path template, False for a query parameter.
         values: The accepted values of an `ENUM` parameter, in spec order; empty otherwise.
-        unit: The unit an instant is sent in, set exactly when `kind` is `TIMESTAMP`: almost
-            always nanoseconds, but milliseconds for the indicators' `timestamp` filters.
+        unit: The unit an instant is sent in, set exactly when `kind` is `TIMESTAMP`: `NS` for
+            the trade and quote filters, `MS` for the indicator filters. An instant is sent as
+            an exact integer count of it.
     """
 
     name: str
@@ -274,7 +276,7 @@ class Param:
     unit: WireUnit | None = None
 
     def __post_init__(self) -> None:
-        """Check that values are given exactly for an enum, and a unit for a timestamp.
+        """Check that values are given exactly for an enum, and a unit exactly for a timestamp.
 
         Raises:
             ValueError: If `kind` is `ENUM` and `values` is empty, or the reverse; or if `kind`
@@ -447,7 +449,8 @@ class DriftReport:
 
     Attributes:
         extra: Wire keys present in the payload that the source does not declare (dropped).
-        missing: Wire keys the source declares that the payload lacked (decoded as null).
+        missing: Wire keys of the vendor-`required` fields (`Field.required`) that some row
+            lacked or held as null (decoded as null). Absent optional fields are not drift.
         statuses: REST envelope `status` values outside the documented ones (`OK`,
             `DELAYED`, `success`, and the error statuses); the page's rows were still decoded.
             Always empty for WebSocket and flat files.

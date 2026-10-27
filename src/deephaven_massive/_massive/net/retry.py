@@ -26,7 +26,10 @@ import ssl
 import time
 from datetime import UTC
 from email.utils import parsedate_to_datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    import threading
 
 __all__ = [
     "JITTER",
@@ -69,8 +72,9 @@ class Clock(Protocol):
     """The time source a wire client reads and waits on.
 
     The clients take one at construction so tests can substitute a fake that records each
-    wait and advances virtual time instead of sleeping. An implementation must be safe to call
-    from any number of threads at once.
+    wait and advances virtual time instead of sleeping. Every wait is interruptible: a client
+    passes its closed event, so closing it ends every wait at once. An implementation must be
+    safe to call from any number of threads at once.
     """
 
     def monotonic(self) -> float:
@@ -81,13 +85,17 @@ class Clock(Protocol):
         """Return the wall-clock time in seconds since the Unix epoch, for HTTP dates."""
         ...
 
-    def sleep(self, seconds: float) -> None:
-        """Block the calling thread for `seconds` (a positive number)."""
+    def wait(self, event: threading.Event, seconds: float) -> bool:
+        """Block the calling thread for `seconds` (a positive number), or until `event` is set.
+
+        Returns True when `event` is set (the wait was interrupted), False when the time ran
+        out.
+        """
         ...
 
 
 class SystemClock:
-    """The real clock: `time.monotonic`, `time.time`, and `time.sleep`.
+    """The real clock: `time.monotonic`, `time.time`, and `threading.Event.wait`.
 
     It has no state, so the one shared instance, `SYSTEM_CLOCK`, is safe from every thread.
     """
@@ -108,13 +116,17 @@ class SystemClock:
         """
         return time.time()
 
-    def sleep(self, seconds: float) -> None:
-        """Block the calling thread with `time.sleep`.
+    def wait(self, event: threading.Event, seconds: float) -> bool:
+        """Block the calling thread on `event.wait(seconds)`.
 
         Args:
-            seconds: How long to block.
+            event: Ends the wait early when set, such as a client's closed event.
+            seconds: The longest the wait lasts.
+
+        Returns:
+            True if `event` was set, False if the time ran out.
         """
-        time.sleep(seconds)
+        return event.wait(seconds)
 
 
 SYSTEM_CLOCK = SystemClock()

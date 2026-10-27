@@ -49,10 +49,8 @@ __all__ = ["Origin", "encode_value", "next_target", "origin_of", "request_target
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MICROS_PER_SECOND = 1_000_000
 _SECONDS_PER_DAY = 86_400
-# A unit at most a microsecond long: how many of it make one microsecond (exact multiply).
-_PER_MICRO = {WireUnit.NS: 1000, WireUnit.US: 1}
-# A unit longer than a microsecond: how many microseconds make one of it (checked divide).
-_MICROS_PER = {WireUnit.MS: 1000, WireUnit.S: _MICROS_PER_SECOND}
+# How many nanoseconds make one of each unit.
+_NANOS_PER = {WireUnit.NS: 1, WireUnit.US: 1000, WireUnit.MS: 1_000_000, WireUnit.S: 1_000_000_000}
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 Origin = tuple[str, str, int]
@@ -85,21 +83,21 @@ def _instant_count(param: Param, value: datetime, unit: WireUnit) -> int:
 
     Args:
         param: The parameter, for the error message.
-        value: An aware `datetime`.
+        value: An aware `datetime`. A subclass that carries nanoseconds below the microsecond
+            in a `nanosecond` attribute (`pandas.Timestamp`) keeps them.
         unit: The unit to count in.
 
     Returns:
-        The count, computed from the `timedelta`'s days, seconds, and microseconds.
+        The count, computed in integer nanoseconds from the `timedelta`'s days, seconds, and
+        microseconds, plus the value's `nanosecond`, then divided exactly by the unit.
 
     Raises:
         ValueError: If the instant is not a whole number of `unit`.
     """
     delta = value - _EPOCH
     micros = (delta.days * _SECONDS_PER_DAY + delta.seconds) * _MICROS_PER_SECOND
-    micros += delta.microseconds
-    if unit in _PER_MICRO:
-        return micros * _PER_MICRO[unit]
-    count, rest = divmod(micros, _MICROS_PER[unit])
+    nanos = (micros + delta.microseconds) * 1000 + getattr(value, "nanosecond", 0)
+    count, rest = divmod(nanos, _NANOS_PER[unit])
     if rest:
         raise ValueError(
             f"parameter {param.name!r} takes whole {unit} since the epoch; "
@@ -145,7 +143,8 @@ def _number(param: Param, value: object) -> str:
         value: An `int`, or for `NUMBER` also a finite `float`; never a `bool`.
 
     Returns:
-        The number's shortest exact decimal text.
+        The number's shortest exact decimal text. A subclass (an `IntEnum` member, numpy's
+        `float64`) is sent by its numeric value, never by its own `repr`.
 
     Raises:
         TypeError: If `value` is not a number the kind accepts.
@@ -154,9 +153,11 @@ def _number(param: Param, value: object) -> str:
     accepted = (int,) if param.kind is ParamKind.INTEGER else (int, float)
     if isinstance(value, bool) or not isinstance(value, accepted):
         raise TypeError(f"parameter {param.name!r} takes {param.kind} values, not {value!r}")
-    if isinstance(value, float) and not math.isfinite(value):
+    if isinstance(value, int):
+        return str(int(value))
+    if not math.isfinite(value):
         raise ValueError(f"parameter {param.name!r} takes a finite number, not {value!r}")
-    return repr(value)
+    return repr(float(value))
 
 
 def _text(param: Param, value: object) -> str:

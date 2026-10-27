@@ -182,6 +182,19 @@ def test_the_good_statuses() -> None:
     assert frozenset({"OK", "DELAYED", "success"}) == GOOD_STATUSES
 
 
+def test_the_page_repr_leaves_out_rows_and_body() -> None:
+    page = _decode(
+        {"status": "OK", "results": [{"x": "row-data"}], "next_url": "https://h/?apiKey=k"}
+    )
+    shown = repr(page)
+    assert "row-data" not in shown
+    assert "apiKey" not in shown
+    assert shown == (
+        "Page(status='OK', request_id=None, drift=DriftReport(extra=frozenset(), "
+        "missing=frozenset(), statuses=frozenset()))"
+    )
+
+
 def test_delayed_is_kept_on_the_page() -> None:
     assert _decode({"status": "DELAYED", "results": []}).status == "DELAYED"
 

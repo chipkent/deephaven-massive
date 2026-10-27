@@ -6,6 +6,7 @@ Time is virtual: every client gets a `FakeClock`, so retry waits are recorded, n
 from __future__ import annotations
 
 import logging
+import ssl
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -106,7 +107,13 @@ def test_the_pool_never_retries_and_has_the_timeouts_and_size(client: RestClient
 
 @pytest.mark.parametrize(
     "base_url",
-    ["https://api.massive.com/v3", "https://api.massive.com?x=1", "https://u@api.massive.com"],
+    [
+        "https://api.massive.com/v3",
+        "https://api.massive.com?x=1",
+        "https://u@api.massive.com",
+        "https://:pw@api.massive.com",
+        "https://api.massive.com#f",
+    ],
 )
 def test_the_base_url_names_only_an_origin(base_url: str) -> None:
     with pytest.raises(ValueError, match="must name only a scheme, host, and port"):
@@ -116,6 +123,31 @@ def test_the_base_url_names_only_an_origin(base_url: str) -> None:
 def test_the_base_url_is_http_or_https() -> None:
     with pytest.raises(ValueError, match="is not an absolute http or https URL"):
         RestClient(_KEY, base_url="ftp://api.massive.com", max_concurrency=1)
+
+
+@pytest.mark.parametrize("base_url", ["http://api.massive.com", "http://10.0.0.1:8080"])
+def test_plain_http_is_refused_except_for_loopback(base_url: str) -> None:
+    with pytest.raises(ValueError, match="would send the API key in clear text; use https"):
+        RestClient(_KEY, base_url=base_url, max_concurrency=1)
+
+
+@pytest.mark.parametrize(
+    "base_url", ["http://localhost:8080", "http://127.0.0.2", "http://[::1]:8080"]
+)
+def test_plain_http_is_allowed_for_loopback(base_url: str) -> None:
+    RestClient(_KEY, base_url=base_url, max_concurrency=1).close()
+
+
+@pytest.mark.parametrize(
+    "api_key",
+    ["", "s3cr3t\n", " s3cr3t", "s3cr3t ", "s3c r3t", "s3c\tr3t", "s3cr\u00e9t", "s3cr3t\r\nX: y"],
+)
+def test_an_api_key_that_cannot_be_a_header_is_refused_without_being_shown(
+    api_key: str,
+) -> None:
+    with pytest.raises(ValueError, match="api_key must be non-empty visible ASCII") as caught:
+        RestClient(api_key, base_url="https://api.massive.com", max_concurrency=1)
+    assert "s3c" not in str(caught.value)
 
 
 def test_max_concurrency_is_at_least_one() -> None:
@@ -169,35 +201,61 @@ def test_parameters_that_do_not_fit_raise_before_any_request(
 # Proxies and certificates.
 
 
-def test_https_proxy_routes_requests_through_the_proxy(
-    fake_rest: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
+@pytest.fixture
+def tunnelled(tls_server: FakeRestServer, no_proxy_env: pytest.MonkeyPatch) -> FakeRestServer:
+    """Trust the TLS fake and script one page on it, so a client can reach it through a proxy.
+
+    Returns:
+        The TLS fake.
+    """
+    no_proxy_env.setenv("SSL_CERT_FILE", str(_TLS / "tls_cert.pem"))
+    no_proxy_env.delenv("SSL_CERT_DIR", raising=False)
+    tls_server.reply("/v3/trades/AAPL", _ok())
+    return tls_server
+
+
+def test_https_goes_through_the_proxy_in_a_connect_tunnel(
+    tunnelled: FakeRestServer, fake_rest: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
 ) -> None:
     no_proxy_env.setenv("HTTPS_PROXY", fake_rest.url)
-    fake_rest.reply("/v3/trades/AAPL", _ok())
-    rest = RestClient(
-        _KEY, base_url="http://api.massive.test", max_concurrency=1, clock=FakeClock()
-    )
+    rest = _client(tunnelled)
     assert rest.get(_TRADES, _AAPL, {}).rows == [{"i": 1}]
-    (received,) = fake_rest.requests
-    assert (received.proxied, received.host_url) == (True, "http://api.massive.test")
+    (connect,) = fake_rest.requests
+    assert (connect.method, connect.target) == ("CONNECT", tunnelled.url.removeprefix("https://"))
+    (received,) = tunnelled.requests
+    assert received.headers["authorization"] == f"Bearer {_KEY}"
+    rest.close()
 
 
-def test_proxy_credentials_are_sent_as_proxy_authorization(
-    fake_rest: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
+def test_proxy_credentials_go_to_the_proxy_and_the_bearer_key_never_does(
+    tunnelled: FakeRestServer, fake_rest: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
 ) -> None:
     host = fake_rest.url.removeprefix("http://")
     no_proxy_env.setenv("HTTPS_PROXY", f"http://alice:s%40cret@{host}")
-    fake_rest.reply("/v3/trades/AAPL", _ok())
-    rest = RestClient(
-        _KEY, base_url="http://api.massive.test", max_concurrency=1, clock=FakeClock()
-    )
+    rest = _client(tunnelled)
     rest.get(_TRADES, _AAPL, {})
-    (received,) = fake_rest.requests
-    assert received.proxied
+    (connect,) = fake_rest.requests
     # base64 of "alice:s@cret"
-    assert received.headers["proxy-authorization"] == "Basic YWxpY2U6c0BjcmV0"
-    assert received.headers["authorization"] == f"Bearer {_KEY}"
+    assert connect.headers["proxy-authorization"] == "Basic YWxpY2U6c0BjcmV0"
+    assert "authorization" not in connect.headers
+    assert _KEY not in repr(connect.headers)
+    (received,) = tunnelled.requests
+    assert "proxy-authorization" not in received.headers
     assert "s%40cret" not in str(rest._pool.proxy)
+    rest.close()
+
+
+def test_a_proxy_reached_over_https_is_verified_like_massive(
+    no_proxy_env: pytest.MonkeyPatch,
+) -> None:
+    no_proxy_env.setenv("HTTPS_PROXY", "https://proxy.corp:3129")
+    rest = RestClient(_KEY, base_url="https://api.massive.test", max_concurrency=1)
+    assert type(rest._pool).__name__ == "ProxyManager"
+    proxy_context = rest._pool.connection_pool_kw["_proxy_config"].ssl_context
+    assert proxy_context is not None
+    assert proxy_context.verify_mode is ssl.CERT_REQUIRED
+    assert proxy_context.check_hostname
+    rest.close()
 
 
 def test_proxy_credentials_never_reach_an_error_or_a_log(
@@ -206,7 +264,7 @@ def test_proxy_credentials_never_reach_an_error_or_a_log(
     caplog.set_level(logging.DEBUG)
     no_proxy_env.setenv("HTTPS_PROXY", "http://alice:topsecret@127.0.0.1:9")
     rest = RestClient(
-        _KEY, base_url="http://api.massive.test", max_concurrency=1, clock=FakeClock()
+        _KEY, base_url="https://api.massive.test", max_concurrency=1, clock=FakeClock()
     )
     with pytest.raises(WireError, match="failed: ") as caught:
         rest.get(_TRADES, _AAPL, {})
@@ -246,7 +304,7 @@ def test_a_certificate_failure_is_never_retried_and_names_ssl_cert_file(
         rest.get(_TRADES, _AAPL, {})
     assert "SSL_CERT_FILE" in caught.value.message
     assert (caught.value.status, caught.value.path) == (None, "/v3/trades/AAPL")
-    assert clock.sleeps == []
+    assert clock.waits == []
     assert tls_server.requests == []
 
 
@@ -268,7 +326,7 @@ def test_a_transient_status_waits_half_one_and_two_seconds_plus_jitter(
     failure = Reply(b"down", status=status)
     fake_rest.reply("/v3/trades/AAPL", failure, failure, failure, _ok())
     assert client.get(_TRADES, _AAPL, {}).rows == [{"i": 1}]
-    assert clock.sleeps == pytest.approx([0.55, 1.1, 2.2])
+    assert clock.waits == pytest.approx([0.55, 1.1, 2.2])
     assert len(fake_rest.requests) == 4
 
 
@@ -283,7 +341,7 @@ def test_a_persistent_transient_status_fails_after_four_attempts(
     )
     assert caught.value.status == 503
     assert len(fake_rest.requests) == 4
-    assert len(clock.sleeps) == 3
+    assert len(clock.waits) == 3
 
 
 def test_a_connection_reset_is_retried(
@@ -291,7 +349,7 @@ def test_a_connection_reset_is_retried(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", Reply(reset=True), _ok())
     assert client.get(_TRADES, _AAPL, {}).rows == [{"i": 1}]
-    assert clock.sleeps == pytest.approx([0.55])
+    assert clock.waits == pytest.approx([0.55])
 
 
 def test_a_persistent_connection_failure_names_the_host_and_cause(
@@ -302,7 +360,7 @@ def test_a_persistent_connection_failure_names_the_host_and_cause(
         client.get(_TRADES, _AAPL, {})
     assert (caught.value.status, caught.value.host) == (None, "127.0.0.1")
     assert len(fake_rest.requests) == 4
-    assert len(clock.sleeps) == 3
+    assert len(clock.waits) == 3
 
 
 def test_a_refused_connection_is_retried_then_fails(no_proxy_env: pytest.MonkeyPatch) -> None:
@@ -314,7 +372,7 @@ def test_a_refused_connection_is_retried_then_fails(no_proxy_env: pytest.MonkeyP
     rest = RestClient(_KEY, base_url=url, max_concurrency=1, clock=clock)
     with pytest.raises(WireError, match="failed: "):
         rest.get(_TRADES, _AAPL, {})
-    assert len(clock.sleeps) == 3
+    assert len(clock.waits) == 3
 
 
 @pytest.mark.parametrize(
@@ -335,7 +393,7 @@ def test_other_statuses_fail_at_once(
     assert type(caught.value) is kind
     assert caught.value.status == status
     assert len(fake_rest.requests) == 1
-    assert clock.sleeps == []
+    assert clock.waits == []
 
 
 def test_a_redirect_is_never_followed(
@@ -355,7 +413,7 @@ def test_a_429_waits_its_retry_after(
     limited = Reply(b"", status=429, headers={"Retry-After": "7"})
     fake_rest.reply("/v3/trades/AAPL", limited, _ok())
     assert client.get(_TRADES, _AAPL, {}).rows == [{"i": 1}]
-    assert clock.sleeps == [7.0]
+    assert clock.waits == [7.0]
     assert clock.monotonic() == 7.0
 
 
@@ -366,7 +424,7 @@ def test_a_429_with_an_http_date_waits_until_then(
     limited = Reply(b"", status=429, headers={"Retry-After": "Fri, 15 Jan 2027 08:00:12 GMT"})
     fake_rest.reply("/v3/trades/AAPL", limited, _ok())
     client.get(_TRADES, _AAPL, {})
-    assert clock.sleeps == [12.0]
+    assert clock.waits == [12.0]
 
 
 def test_a_429_without_retry_after_waits_15_30_then_60(
@@ -375,7 +433,7 @@ def test_a_429_without_retry_after_waits_15_30_then_60(
     limited = Reply({"message": "slow down"}, status=429)
     fake_rest.reply("/v3/trades/AAPL", limited, limited, limited, _ok())
     assert client.get(_TRADES, _AAPL, {}).rows == [{"i": 1}]
-    assert clock.sleeps == [15.0, 30.0, 60.0]
+    assert clock.waits == [15.0, 30.0, 60.0]
 
 
 def test_a_persistent_429_is_a_wire_error_with_status_429(
@@ -404,9 +462,9 @@ def test_a_429_on_the_last_attempt_still_holds_back_the_next_request(
     fake_rest.reply("/v3/trades/MSFT", _ok())
     with pytest.raises(WireError):
         client.get(_TRADES, _AAPL, {})
-    before = clock.sleeps
+    before = clock.waits
     client.get(_TRADES, {"stockTicker": "MSFT"}, {})
-    assert clock.sleeps == [*before, held]
+    assert clock.waits == [*before, held]
 
 
 def test_a_retry_after_over_60_seconds_fails_at_once_naming_the_wait(
@@ -425,7 +483,18 @@ def test_a_retry_after_over_60_seconds_fails_at_once_naming_the_wait(
     assert (caught.value.status, caught.value.request_id) == (429, "r")
     assert (caught.value.host, caught.value.path) == ("127.0.0.1", "/v3/trades/AAPL")
     assert len(fake_rest.requests) == 1
-    assert clock.sleeps == []
+    assert clock.waits == []
+
+
+def test_a_retry_after_over_60_seconds_holds_back_other_requests_for_60(
+    client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers={"Retry-After": "300"}))
+    fake_rest.reply("/v3/trades/MSFT", _ok())
+    with pytest.raises(WireError, match="asked to wait 300 s"):
+        client.get(_TRADES, _AAPL, {})
+    client.get(_TRADES, {"stockTicker": "MSFT"}, {})
+    assert clock.waits == [60.0]
 
 
 def test_a_retry_after_of_exactly_60_seconds_is_honoured(
@@ -433,7 +502,7 @@ def test_a_retry_after_of_exactly_60_seconds_is_honoured(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers={"Retry-After": "60"}), _ok())
     client.get(_TRADES, _AAPL, {})
-    assert clock.sleeps == [60.0]
+    assert clock.waits == [60.0]
 
 
 def test_a_429_holds_back_every_later_request_of_the_client(
@@ -444,7 +513,7 @@ def test_a_429_holds_back_every_later_request_of_the_client(
     client.get(_TRADES, _AAPL, {})
     # The not-before instant has passed, so the next request goes at once.
     client.get(_TRADES, {"stockTicker": "MSFT"}, {})
-    assert clock.sleeps == [5.0]
+    assert clock.waits == [5.0]
 
 
 def test_the_not_before_instant_holds_back_16_threads_together(fake_rest: FakeRestServer) -> None:
@@ -604,11 +673,7 @@ def test_a_reset_while_paging_retries_that_page_not_the_first(
     client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     expected = _paged(fake_rest, "AAPL", 3)
-    good = Reply(
-        envelope([{"n": 2}, {"n": 3}], next_url=f"{fake_rest.url}/v3/trades/AAPL?cursor=2")
-    )
-    fake_rest.reply("/v3/trades/AAPL?cursor=1", Reply(reset=True), good)
-    fake_rest._script["/v3/trades/AAPL?cursor=1"].popleft()  # drop the plain scripted page
+    fake_rest.reply_first("/v3/trades/AAPL?cursor=1", Reply(reset=True))
     assert _numbers(client.pages(_TRADES, _AAPL, {})) == expected
     targets = [r.target for r in fake_rest.requests]
     assert targets == [
@@ -617,7 +682,24 @@ def test_a_reset_while_paging_retries_that_page_not_the_first(
         "/v3/trades/AAPL?cursor=1",
         "/v3/trades/AAPL?cursor=2",
     ]
-    assert clock.sleeps == pytest.approx([0.55])
+    assert clock.waits == pytest.approx([0.55])
+
+
+def test_a_next_url_that_repeats_the_page_is_refused(
+    client: RestClient, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/v3/trades/AAPL", _ok(next_url=f"{fake_rest.url}/v3/trades/AAPL?cursor=1"))
+    fake_rest.reply(
+        "/v3/trades/AAPL?cursor=1",
+        _ok(next_url=f"{fake_rest.url}/v3/trades/AAPL?cursor=1&apiKey=k"),
+    )
+    pages = client.pages(_TRADES, _AAPL, {})
+    next(pages)
+    next(pages)
+    with pytest.raises(WireError, match=r"next_url repeats the page just fetched") as caught:
+        next(pages)
+    assert caught.value.path == "/v3/trades/AAPL?cursor=1"
+    assert len(fake_rest.requests) == 2
 
 
 def test_a_bad_body_on_a_later_page_is_an_error(
@@ -641,9 +723,8 @@ def test_16_threads_page_through_one_client_with_a_429_and_resets(
         ticker = f"T{i}"
         expected[ticker] = _paged(fake_rest, ticker, 3)
         cursor = f"/v3/trades/{ticker}?cursor=1"
-        fake_rest._script[cursor].appendleft(Reply(reset=True))
-    first = fake_rest._script["/v3/trades/T0"]
-    first.appendleft(Reply(b"", status=429, headers={"Retry-After": "2"}))
+        fake_rest.reply_first(cursor, Reply(reset=True))
+    fake_rest.reply_first("/v3/trades/T0", Reply(b"", status=429, headers={"Retry-After": "2"}))
     arrivals: list[float] = []
     fake_rest.on_request(
         lambda received: (
@@ -700,6 +781,51 @@ def test_a_client_closed_during_a_retry_wait_stops(fake_rest: FakeRestServer) ->
     with pytest.raises(WireError, match="the REST client is closed"):
         rest.get(_TRADES, _AAPL, {})
     assert len(fake_rest.requests) == 1
+
+
+def test_close_ends_a_not_before_wait_at_once(fake_rest: FakeRestServer) -> None:
+    clock = FakeClock(manual=True)
+    rest = _client(fake_rest, clock)
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers={"Retry-After": "60"}))
+    errors: list[WireError] = []
+
+    def call() -> None:
+        try:
+            rest.get(_TRADES, _AAPL, {})
+        except WireError as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=call)
+    thread.start()
+    assert clock.wait_for_sleepers(1) == [60.0]
+    rest.close()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert [e.message for e in errors] == ["GET /v3/trades/AAPL: the REST client is closed"]
+    assert clock.monotonic() == 0.0
+    assert len(fake_rest.requests) == 1
+
+
+def test_close_ends_a_transient_retry_wait_at_once(fake_rest: FakeRestServer) -> None:
+    clock = FakeClock(manual=True)
+    rest = _client(fake_rest, clock)
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=503))
+    errors: list[WireError] = []
+
+    def call() -> None:
+        try:
+            rest.get(_TRADES, _AAPL, {})
+        except WireError as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=call)
+    thread.start()
+    assert clock.wait_for_sleepers(1) == [pytest.approx(0.55)]
+    rest.close()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert [e.message for e in errors] == ["GET /v3/trades/AAPL: the REST client is closed"]
+    assert clock.monotonic() == 0.0
 
 
 # Logging.

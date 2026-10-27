@@ -18,8 +18,10 @@ This module imports only the standard library, `urllib3`, `net`, and `spec`.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import random
+import re
 import threading
 from dataclasses import dataclass, replace
 from http import HTTPStatus
@@ -52,6 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
     from deephaven_massive._massive.net.retry import Clock
+    from deephaven_massive._massive.rest.query import Origin
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec.types import RestPath
 
@@ -75,6 +78,73 @@ _NO_RETRIES = urllib3.Retry(total=False, redirect=False)
 An explicit `Retry`, because urllib3 stores a bare `retries=False` as given in some releases
 and converts it in others; this value means the same in every supported release.
 """
+
+
+_VISIBLE_ASCII = re.compile(r"[!-~]+")
+"""A non-empty run of visible ASCII: what an API key, sent in a header, may contain."""
+
+
+def _check_api_key(api_key: str) -> None:
+    """Refuse an API key that cannot be sent in a header, without ever showing it.
+
+    A key read from a file often ends in a newline; sent as is, `http.client` raises an error
+    that quotes the header, key included. Checking here keeps the key out of every message.
+
+    Args:
+        api_key: The key.
+
+    Raises:
+        ValueError: If the key is empty or holds anything but visible ASCII (a space, a tab,
+            a line break, a non-ASCII letter); the message never includes the key.
+    """
+    if not _VISIBLE_ASCII.fullmatch(api_key):
+        raise ValueError(
+            "api_key must be non-empty visible ASCII, with no whitespace or line break "
+            "(check for a trailing newline)"
+        )
+
+
+def _is_loopback(host: str) -> bool:
+    """Return whether a host name is this machine: `localhost` or a loopback address.
+
+    Args:
+        host: A lower-case host name or IP address, without brackets.
+
+    Returns:
+        True for `localhost`, `127.0.0.0/8`, and `::1`.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _check_base_url(base_url: str) -> Origin:
+    """Check the REST base URL and return its origin.
+
+    Args:
+        base_url: The base URL given to the client.
+
+    Returns:
+        The URL's `(scheme, host, port)`.
+
+    Raises:
+        ValueError: If `base_url` is not an `http` or `https` URL of a host alone (with no
+            user information, path, query, or fragment), or is `http` for a host that is not
+            loopback, which would send the API key in clear text.
+    """
+    origin = origin_of(base_url)
+    parts = urlsplit(base_url)
+    if parts.path not in {"", "/"} or parts.query or parts.fragment or "@" in parts.netloc:
+        raise ValueError(f"base_url {base_url!r} must name only a scheme, host, and port")
+    if origin[0] == "http" and not _is_loopback(origin[1]):
+        raise ValueError(
+            f"base_url {base_url!r} would send the API key in clear text; use https "
+            "(http is allowed only for a loopback host, such as a local test server)"
+        )
+    return origin
 
 
 @dataclass(frozen=True)
@@ -134,9 +204,11 @@ class RestClient:
         `Proxy-Authorization` header; the pool holds the proxy URL without them.
 
         Args:
-            api_key: The Massive API key, sent as a bearer token.
+            api_key: The Massive API key, sent as a bearer token: non-empty visible ASCII,
+                with no whitespace (strip a key read from a file).
             base_url: The scheme and host of the REST API, with an optional port and no path,
-                such as `"https://api.massive.com"`.
+                such as `"https://api.massive.com"`. `http` is accepted only for a loopback
+                host (a local test server), so the key never travels in clear text.
             max_concurrency: The most requests the caller sends at once (a fan-out's
                 workers). The pool keeps that many connections to the host, so none is
                 discarded and reopened under load. At least 1.
@@ -144,17 +216,17 @@ class RestClient:
                 fake; the default is the real clock.
 
         Raises:
-            ValueError: If `base_url` is not an `http` or `https` URL of a host alone, or
-                `max_concurrency` is less than 1.
+            ValueError: If `max_concurrency` is less than 1. A bad `api_key` or `base_url`
+                raises `ValueError` too, from `_check_api_key` and `_check_base_url`: an empty
+                key or one with whitespace (never quoted), a base URL that is not an origin
+                alone, or an `http` base URL for a host that is not loopback.
         """
-        origin = origin_of(base_url)
-        parts = urlsplit(base_url)
-        if parts.path not in {"", "/"} or parts.query or parts.fragment or parts.username:
-            raise ValueError(f"base_url {base_url!r} must name only a scheme, host, and port")
+        _check_api_key(api_key)
+        origin = _check_base_url(base_url)
         if max_concurrency < 1:
             raise ValueError(f"max_concurrency must be at least 1, not {max_concurrency}")
         self._origin = origin
-        self._base = f"{parts.scheme}://{parts.netloc}"
+        self._base = f"{origin[0]}://{urlsplit(base_url).netloc}"
         self._host = origin[1]
         self._clock = clock
         self._headers = {
@@ -170,6 +242,7 @@ class RestClient:
             self._pool = urllib3.ProxyManager(
                 proxy_url,
                 proxy_headers=proxy_headers,
+                proxy_ssl_context=ssl_context(),
                 maxsize=max_concurrency,
                 retries=_NO_RETRIES,
                 timeout=timeout,
@@ -253,8 +326,9 @@ class RestClient:
     def close(self) -> None:
         """Close the pool's connections; every later request raises `WireError`.
 
-        Safe from any thread and idempotent. A request already in flight finishes or fails
-        on its own.
+        Safe from any thread and idempotent. A thread waiting for the not-before instant or
+        a retry stops waiting at once and raises `WireError`; a request already on the wire
+        finishes or fails on its own (within the read timeout).
         """
         self._closed.set()
         self._pool.clear()
@@ -271,7 +345,8 @@ class RestClient:
             Each page, the last cut to `limit`.
 
         Raises:
-            WireError: If a `next_url` leaves the base URL's origin.
+            WireError: If a `next_url` leaves the base URL's origin, or repeats the target
+                just fetched (which would page forever).
         """
         remaining = limit
         while True:
@@ -286,11 +361,19 @@ class RestClient:
             if not isinstance(next_url, str) or not next_url:
                 return
             try:
-                target = next_target(next_url, self._origin)
+                following = next_target(next_url, self._origin)
             except ValueError as error:
                 raise WireError(
                     f"{rest_path.template}: refusing to follow {error}", host=self._host
                 ) from error
+            if following == target:
+                raise WireError(
+                    f"{rest_path.template}: next_url repeats the page just fetched "
+                    f"({target}); refusing to loop",
+                    host=self._host,
+                    path=target,
+                )
+            target = following
 
     def _fetch(self, rest_path: RestPath, target: str) -> Page:
         """Request one target, retrying per the schedule.
@@ -326,7 +409,7 @@ class RestClient:
                 raise outcome.error
             _log.info("%s; retry %d of %d in %.2f s", outcome.error, retry + 1, MAX_RETRIES, wait)
             if not outcome.rate_limited:
-                self._clock.sleep(wait)
+                self._clock.wait(self._closed, wait)
             retry += 1
 
     def _attempt(self, rest_path: RestPath, request: Request) -> Page | _Retryable:
@@ -408,9 +491,13 @@ class RestClient:
 
         Raises:
             WireError: If `Retry-After` asks for more than 60 s; status 429, naming the wait.
+                The not-before instant still moves 60 s ahead first.
         """
         asked = retry_after_seconds(retry_after, self._clock.time())
         if asked is not None and asked > MAX_RETRY_AFTER:
+            # This request gives up, but the client's other requests still back off as long
+            # as the client ever waits, so they do not each collect a 429 of their own.
+            self._defer(MAX_RETRY_AFTER)
             raise WireError(
                 f"{error.message} (Massive asked to wait {asked:.0f} s, more than the "
                 f"{MAX_RETRY_AFTER:.0f} s the client waits)",
@@ -438,12 +525,13 @@ class RestClient:
         """Block until the not-before instant has passed; return at once if it has.
 
         The instant may move later while a thread waits (another 429), so the wait repeats
-        until the instant read is in the past. The lock is held only to read it.
+        until the instant read is in the past. The lock is held only to read it. `close()`
+        ends the wait at once; the caller then sees the client closed.
         """
-        while True:
+        while not self._closed.is_set():
             with self._lock:
                 not_before = self._not_before
             delay = not_before - self._clock.monotonic()
             if delay <= 0:
                 return
-            self._clock.sleep(delay)
+            self._clock.wait(self._closed, delay)

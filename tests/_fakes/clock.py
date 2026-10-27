@@ -4,14 +4,16 @@
 start at fixed values and move only when a thread sleeps (automatic mode) or when the test
 calls `advance` (manual mode):
 
-- **Automatic** (the default): `sleep(d)` returns at once and moves time to at least the
-  sleeper's deadline (its time at the call plus `d`). Sleeps of several threads overlap, as
-  real sleeps do: two threads sleeping 5 s from time 0 end at time 5, not 10.
-- **Manual**: `sleep(d)` blocks until the test advances time past the deadline. A test waits
-  for threads to reach their sleeps with `wait_for_sleepers`, so it can check what they did
-  (and did not do) before releasing them.
+- **Automatic** (the default): `wait(event, d)` returns at once and moves time to at least
+  the waiter's deadline (its time at the call plus `d`). Waits of several threads overlap, as
+  real ones do: two threads waiting 5 s from time 0 end at time 5, not 10.
+- **Manual**: `wait(event, d)` blocks until the test advances time past the deadline. A test
+  waits for threads to reach their waits with `wait_for_sleepers`, so it can check what they
+  did (and did not do) before releasing them.
 
-Every sleep is recorded. All state sits behind one condition, so any thread may call any
+In both modes a wait whose event is set ends at once and returns True, without moving time,
+as `threading.Event.wait` does; a blocked manual wait notices the event within 10 ms of real
+time. Every wait is recorded. All state sits behind one condition, so any thread may call any
 method.
 """
 
@@ -21,6 +23,9 @@ import threading
 
 _WAIT = 10.0
 """Seconds a test waits for sleepers before failing; real time, only on failure."""
+
+_POLL = 0.01
+"""Seconds of real time between checks of a blocked manual wait's event."""
 
 
 class FakeClock:
@@ -50,22 +55,33 @@ class FakeClock:
         with self._changed:
             return self._wall + self._now
 
-    def sleep(self, seconds: float) -> None:
-        """Record a sleep; then end it at once (automatic) or when time reaches it (manual).
+    def wait(self, event: threading.Event, seconds: float) -> bool:
+        """Record a wait; end it at once (automatic), when time reaches it (manual), or on `event`.
 
         Args:
+            event: Ends the wait early when set.
             seconds: The requested duration.
+
+        Returns:
+            True if `event` was set, False if the time ran out.
         """
         with self._changed:
             deadline = self._now + seconds
             self._sleeps.append(seconds)
+            if event.is_set():
+                return True
             if not self._manual:
                 self._now = max(self._now, deadline)
-                return
+                return False
             self._deadlines.append(deadline)
             self._changed.notify_all()
-            self._changed.wait_for(lambda: self._now >= deadline)
+            while not self._changed.wait_for(
+                lambda: self._now >= deadline or event.is_set(), _POLL
+            ):
+                pass
             self._deadlines.remove(deadline)
+            self._changed.notify_all()
+            return event.is_set()
 
     def advance(self, seconds: float) -> None:
         """Move time forward and wake every sleeper whose deadline has come.
@@ -78,7 +94,7 @@ class FakeClock:
             self._changed.notify_all()
 
     def wait_for_sleepers(self, count: int) -> list[float]:
-        """Wait until exactly `count` threads are blocked in a manual sleep.
+        """Wait until exactly `count` threads are blocked in a manual wait.
 
         Args:
             count: The number of sleepers expected.
@@ -95,7 +111,7 @@ class FakeClock:
             return sorted(self._deadlines)
 
     @property
-    def sleeps(self) -> list[float]:
-        """A copy of every requested sleep duration, in call order."""
+    def waits(self) -> list[float]:
+        """A copy of every requested wait duration, in call order."""
         with self._changed:
             return list(self._sleeps)

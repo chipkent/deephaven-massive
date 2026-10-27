@@ -1075,7 +1075,9 @@ needs a timezone: pass an aware datetime or a date`. The same rule and message a
 `datetime` passed as a `filters` value or a typed parameter.
 
 **ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
-becomes an `Instant`; text without a UTC offset is read as UTC. The generator's
+becomes an `Instant`. It must carry an offset (`Z` or `±HH:MM`): text without one is an
+unconvertible value ([section 19.5](#195-runtime-drift)), never read as UTC, and a field that
+really is offset-less UTC needs a declared `TYPE_FIXES` conversion. The generator's
 representation rules ([section 19.4](#194-generated-schemas)) decide which fields are ISO
 `Instant`s and which are dates; any other text timestamp needs a `TYPE_FIXES` entry.
 
@@ -1945,7 +1947,7 @@ client.get(rest_path, path_params, query_params) -> Page             # one reque
 client.pages(rest_path, path_params, query_params, *, limit=None) -> Iterator[Page]
                                                                     # follows next_url
 Page(status: str, request_id: str | None, rows: list[dict], body: dict | list,
-     drift: DriftReport)                                          # drift.statuses only
+     drift: DriftReport)          # drift.statuses only; repr omits rows and body
 to_batch(rows, rest_path, *, required) -> (pyarrow.RecordBatch, DriftReport)
 ```
 
@@ -1957,13 +1959,19 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   `max_concurrency` so fan-out never discards connections, and `Accept-Encoding: gzip`
   (urllib3 decodes it). `User-Agent: deephaven-massive/<version>` (`net.USER_AGENT`).
 - **Authentication.** `Authorization: Bearer <key>` on every request. The key never appears in
-  a URL: an `apiKey` parameter in a `next_url` is removed before the request.
+  a URL: an `apiKey` parameter in a `next_url` is removed before the request. A key that is
+  empty or holds anything but visible ASCII (a trailing newline from a key file) raises
+  `ValueError` at construction, without quoting the key. The base URL must be `https`, except
+  for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), so the key never travels in clear
+  text; it names only a scheme, host, and port (no user information, path, or query).
 - **Proxies and certificates** come from `net.http`: `urllib.request.getproxies()` for
   `HTTPS_PROXY` and `urllib.request.proxy_bypass` for `NO_PROXY` select a `ProxyManager` for
   the REST host or a plain `PoolManager`, read once at construction. A user and password in
   the proxy URL are sent as `Proxy-Authorization` (`net.http.proxy_credentials`; urllib3 does
   not send them itself), and the pool holds the URL without them, so they never reach a log or
-  an error. The CA bundle is the
+  an error. HTTPS goes through the proxy in a `CONNECT` tunnel, so the proxy sees
+  `Proxy-Authorization` and never the bearer key. A proxy reached over `https` is verified
+  with the same `net.http.ssl_context()` as Massive. The CA bundle is the
   system default when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an
   `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise.
 - **Query encoding.** Path parameters are encoded like query values, then percent-encoded
@@ -1991,15 +1999,19 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   so a retry is always safe. HTTP 500, 502, 503, 504 and connection errors wait 0.5, 1, then
   2 s, each with up to 20% upward jitter. HTTP 429 waits the `Retry-After` value in either form
   (delta-seconds or HTTP-date), otherwise 15, 30, then 60 s; a `Retry-After` above 60 s raises
-  `WireError(status=429)` at once, naming the requested wait. After a 429 the client sets its
+  `WireError(status=429)` at once, naming the requested wait, and still sets the not-before
+  instant 60 s ahead, so the other workers stop too. After a 429 the client sets its
   not-before instant, so concurrent workers back off together instead of multiplying 429s;
   a 429 on the last attempt still sets it (its `Retry-After`, else 60 s) before it raises. A
   TLS certificate failure (`ssl.SSLCertVerificationError`) is never retried: it raises
   `WireError` at once, naming `SSL_CERT_FILE`. A connection reset in the middle of paging
   retries **that page** (its `next_url`), never the first page. Redirects are never followed
   (a 3xx is a `WireError`), so the bearer key never leaves the REST host. Every wait goes
-  through an injectable clock (`net.retry.Clock`), so tests never sleep. After `close()`,
-  every request raises `WireError`.
+  through an injectable clock (`net.retry.Clock`, whose `wait(event, seconds)` ends early
+  when the event is set), so tests never sleep. `close()` sets the client's closed event: a
+  thread waiting for the not-before instant or a retry stops at once, and every later request
+  raises `WireError`. A `next_url` that repeats the target just fetched raises `WireError`
+  rather than paging forever.
 - **Error mapping.** After the retries, the client raises: 401 as `WireAuthError`; 403, and a
   200 envelope with `status` `NOT_AUTHORIZED`, as `WireEntitlementError`; every other non-200
   status (429 included), a 200 envelope with `status` `ERROR`, and a connection failure as
@@ -2362,7 +2374,8 @@ installed wheel; the CI build job checks that the wheel holds no `refresh/`.
 
 Data on the wire can differ from the committed schema until the next refresh. **Detection** is in
 `_massive`: each decoder compares a payload with its generated source and returns a
-`DriftReport(extra, missing, statuses)` (`statuses`: REST envelope statuses outside the
+`DriftReport(extra, missing, statuses)` (`missing`: only vendor-`required` fields that some
+row lacked or held as null; `statuses`: REST envelope statuses outside the
 documented ones). A decoder never raises for drift; REST and flat files raise
 `WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
 session's `_diagnostics.DriftRegistry` (a leaf lock, WARNINGs logged after release) and the

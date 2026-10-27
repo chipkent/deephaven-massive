@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ssl
+import threading
 import time
 
 import pytest
@@ -106,10 +107,16 @@ def test_a_cycle_of_exceptions_ends_the_search() -> None:
     assert not retry.is_tls_failure(first)
 
 
-def test_the_system_clock_reads_and_sleeps_on_real_time() -> None:
+def test_the_system_clock_reads_and_waits_on_real_time() -> None:
     clock = retry.SYSTEM_CLOCK
     assert isinstance(clock, retry.SystemClock)
     before = clock.monotonic()
-    clock.sleep(0.001)
+    assert clock.wait(threading.Event(), 0.001) is False
     assert clock.monotonic() > before
     assert abs(clock.time() - time.time()) < 5
+
+
+def test_the_system_clock_wait_ends_when_its_event_is_set() -> None:
+    event = threading.Event()
+    event.set()
+    assert retry.SYSTEM_CLOCK.wait(event, 60.0) is True
