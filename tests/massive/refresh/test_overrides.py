@@ -41,11 +41,15 @@ def test_the_unverified_units_are_the_open_verification_item() -> None:
     assert {overrides.UNITS[key].unit for key in unverified} == {WireUnit.MS}
 
 
-def test_the_type_fixes_type_untyped_or_mistyped_timestamps() -> None:
+def test_the_type_fixes_cover_times_dates_and_identifiers() -> None:
     assert {fix.wire_type for fix in overrides.TYPE_FIXES.values()} == {
         WireType.ISO_INSTANT,
         WireType.DATE,
+        WireType.EPOCH,
+        WireType.STRING,
     }
+    # The epoch's unit is a UNITS entry, as for every other epoch.
+    assert ("/futures/v1/snapshot", "details.settlement_date") in overrides.UNITS
     products = overrides.TYPE_FIXES["/futures/v1/products", "last_updated"]
     assert (products.declared, products.wire_type) == (WireType.ISO_INSTANT, WireType.DATE)
 

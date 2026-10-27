@@ -11,7 +11,7 @@ from deephaven_massive._massive.spec.convert import (
     convert,
     convert_field,
 )
-from deephaven_massive._massive.spec.types import Field, WireType
+from deephaven_massive._massive.spec.types import Field, WireType, WireUnit
 
 
 def _refused(wire_type: WireType, value: object) -> None:
@@ -128,7 +128,7 @@ def test_json_text_is_compact_and_keeps_order_and_unicode() -> None:
 
 
 def _declared(declared: WireType, wire_type: WireType) -> Field:
-    unit = None
+    unit = WireUnit.NS if wire_type is WireType.EPOCH else None
     return Field(wire_key="x", column="X", wire_type=wire_type, unit=unit, declared_type=declared)
 
 
@@ -144,11 +144,22 @@ _CONVERSIONS = [
     (WireType.ISO_INSTANT, WireType.DATE, "2025-02-22", date(2025, 2, 22)),
     (WireType.STRING, WireType.LONG, "48", 48),
     (WireType.LONG, WireType.STRING, 7, "7"),
+    (WireType.LONG, WireType.STRING, "2208", "2208"),  # a quoted identifier
+    (WireType.STRING, WireType.STRING, "464569520", "464569520"),
+    (WireType.STRING, WireType.STRING, 413131, "413131"),  # an identifier sent as an integer
+    (WireType.DOUBLE, WireType.STRING, "1.0", "1.0"),
+    (WireType.DOUBLE, WireType.STRING, 1.0, "1.0"),
+    (WireType.DOUBLE, WireType.STRING, 2, "2"),
     (WireType.LONG, WireType.INT_ARRAY, 12, [12]),
+    (WireType.DATE, WireType.DATE, "2023-03-10", date(2023, 3, 10)),
+    (WireType.DATE, WireType.DATE, "2023-03-10T00:00:00.000Z", date(2023, 3, 10)),
+    (WireType.DATE, WireType.DATE, "2023-03-10T01:00:00+01:00", date(2023, 3, 10)),
+    (WireType.DATE, WireType.DATE, "1969-12-31T00:00:00Z", date(1969, 12, 31)),
+    (WireType.DATE, WireType.EPOCH, 1_753_851_600_000_000_000, 1_753_851_600_000_000_000),
 ]
 
 
-@pytest.mark.parametrize("case", _CONVERSIONS, ids=lambda case: f"{case[0]}-{case[1]}")
+@pytest.mark.parametrize("case", _CONVERSIONS, ids=lambda case: f"{case[0]}-{case[1]}-{case[2]!r}")
 def test_each_declared_conversion_converts(
     case: tuple[WireType, WireType, object, object],
 ) -> None:
@@ -166,8 +177,17 @@ def test_each_declared_conversion_converts(
         (WireType.STRING, WireType.LONG, " 48"),
         (WireType.STRING, WireType.LONG, 48),  # the declared form is text
         (WireType.STRING, WireType.LONG, str(2**63)),
-        (WireType.LONG, WireType.STRING, "7"),
         (WireType.LONG, WireType.STRING, True),
+        (WireType.LONG, WireType.STRING, 7.5),
+        (WireType.STRING, WireType.STRING, False),
+        (WireType.STRING, WireType.STRING, 2**63),
+        (WireType.DOUBLE, WireType.STRING, True),
+        (WireType.DOUBLE, WireType.STRING, None),
+        (WireType.DATE, WireType.DATE, "2023-03-10T05:00:00Z"),  # a time that would be lost
+        (WireType.DATE, WireType.DATE, "2023-03-10T00:00:00"),  # no offset
+        (WireType.DATE, WireType.DATE, 1_678_406_400),
+        (WireType.DATE, WireType.EPOCH, "2025-07-30"),
+        (WireType.DATE, WireType.EPOCH, 2**63),
         (WireType.LONG, WireType.INT_ARRAY, 2**31),
         (WireType.LONG, WireType.INT_ARRAY, [12]),
     ],
@@ -191,5 +211,9 @@ def test_the_declared_pairs_are_the_table() -> None:
         (WireType.ISO_INSTANT, WireType.DATE),
         (WireType.STRING, WireType.LONG),
         (WireType.LONG, WireType.STRING),
+        (WireType.STRING, WireType.STRING),
+        (WireType.DOUBLE, WireType.STRING),
         (WireType.LONG, WireType.INT_ARRAY),
+        (WireType.DATE, WireType.DATE),
+        (WireType.DATE, WireType.EPOCH),
     } == DECLARED_CONVERSIONS

@@ -1396,7 +1396,7 @@
    ],
    "fields": [
     {"column": "DetailsProductCode", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "details.product_code"},
-    {"column": "DetailsSettlementDate", "declared_type": null, "required": false, "type": "date", "unit": null, "wire_key": "details.settlement_date"},
+    {"column": "DetailsSettlementDate", "declared_type": "date", "required": false, "type": "epoch", "unit": "ns", "wire_key": "details.settlement_date"},
     {"column": "DetailsTicker", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "details.ticker"},
     {"column": "LastMinuteClose", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.close"},
     {"column": "LastMinuteHigh", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.high"},
@@ -2265,7 +2265,7 @@
     {"column": "Description", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "description"},
     {"column": "PrimaryCategory", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "primary_category"},
     {"column": "SecondaryCategory", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "secondary_category"},
-    {"column": "Taxonomy", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "taxonomy"},
+    {"column": "Taxonomy", "declared_type": "double", "required": true, "type": "string", "unit": null, "wire_key": "taxonomy"},
     {"column": "TertiaryCategory", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "tertiary_category"}
    ],
    "memberships": []
@@ -2513,7 +2513,7 @@
     {"column": "Name", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "name"},
     {"column": "Status", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "status"},
     {"column": "Ticker", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "TmxCompanyId", "declared_type": null, "required": false, "type": "long", "unit": null, "wire_key": "tmx_company_id"},
+    {"column": "TmxCompanyId", "declared_type": "long", "required": false, "type": "string", "unit": null, "wire_key": "tmx_company_id"},
     {"column": "TmxRecordId", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "tmx_record_id"},
     {"column": "TradingVenue", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "trading_venue"},
     {"column": "Type", "declared_type": null, "required": false, "type": "string", "unit": null, "wire_key": "type"},
@@ -2825,7 +2825,7 @@
    "fields": [
     {"column": "Close", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "close"},
     {"column": "ClosingTrades", "declared_type": null, "required": true, "type": "json-text", "unit": null, "wire_key": "closingTrades"},
-    {"column": "Day", "declared_type": null, "required": true, "type": "date", "unit": null, "wire_key": "day"},
+    {"column": "Day", "declared_type": "date", "required": true, "type": "date", "unit": null, "wire_key": "day"},
     {"column": "IsUtc", "declared_type": null, "required": true, "type": "bool", "unit": null, "wire_key": "isUTC"},
     {"column": "Open", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "open"},
     {"column": "OpenTrades", "declared_type": null, "required": true, "type": "json-text", "unit": null, "wire_key": "openTrades"},
@@ -2843,7 +2843,7 @@
    "fields": [
     {"column": "AfterHours", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "afterHours"},
     {"column": "Close", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "close"},
-    {"column": "From", "declared_type": null, "required": true, "type": "date", "unit": null, "wire_key": "from"},
+    {"column": "From", "declared_type": "date", "required": true, "type": "date", "unit": null, "wire_key": "from"},
     {"column": "High", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "high"},
     {"column": "Low", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "low"},
     {"column": "Open", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "open"},
@@ -3310,7 +3310,7 @@
     {"column": "DayVwap", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "day.vw"},
     {"column": "Fmv", "declared_type": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},
     {"column": "LastTradeConditions", "declared_type": null, "required": true, "type": "int-array", "unit": null, "wire_key": "lastTrade.c"},
-    {"column": "LastTradeId", "declared_type": null, "required": true, "type": "string", "unit": null, "wire_key": "lastTrade.i"},
+    {"column": "LastTradeId", "declared_type": "string", "required": true, "type": "string", "unit": null, "wire_key": "lastTrade.i"},
     {"column": "LastTradePrice", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastTrade.p"},
     {"column": "LastTradeSize", "declared_type": null, "required": true, "type": "double", "unit": null, "wire_key": "lastTrade.s"},
     {"column": "LastTradeParticipantTimestamp", "declared_type": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "lastTrade.t"},

@@ -62,6 +62,11 @@ class Gate(StrEnum):
     CONCEPT_COLLISION = "concept-collision"
     """Within one of `overrides.KINDS`, one column holding two concepts (a concept is a field's
     full long-name path, in snake case)."""
+    EXAMPLE_TYPE = "example-type"
+    """A value of the specification's documented response example that the generated field's
+    conversion refuses: the generated type and the documented wire disagree, so real data
+    shaped like the sample would fail at run time. A `TYPE_FIXES` entry citing the sample
+    decides the type."""
     UNITS = "units"
     """A `UNITS` unit that differs from the specification's `x-polygon-go-type` tag without a
     tag-conflict entry."""

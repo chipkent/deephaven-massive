@@ -31,7 +31,10 @@ integers is `int-array`; an array of anything else, a free-form object, and a ch
 more shapes are `json-text`; a string with `format: date-time`, or no format and a name ending
 in `_utc`, is an `iso-instant`; a string with `format: date`, or named `date` or `*_date`, is a
 `date`; any other string is `string`. A `TYPE_FIXES` entry then replaces the type and records
-the vendor's declared type on the field, so the decoder converts it deliberately.
+the vendor's declared type on the field, so the decoder converts it deliberately (a fix to an
+`epoch` takes its unit from `UNITS`). Every value of the specification's own response example
+must then convert through its field, or the `example-type` gate stops the refresh: a type the
+vendor's sample contradicts is decided by a person, never found at run time.
 
 **Names.** Each segment of a wire key is translated to Massive's long form: the vendor's own
 long key as it is; a short key through the lexicon of the object it sits in, whose entries
@@ -64,6 +67,7 @@ from deephaven_massive._massive.refresh import docs, gates, naming
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required, text
+from deephaven_massive._massive.spec.convert import UnconvertibleError, convert_field
 from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
     Field,
@@ -185,6 +189,8 @@ class _PathGenerator:
         self.unit_bases: set[str] = set()
         self.identities: set[str] = set()
         self.concepts: dict[str, str] = {}
+        # The specification's example of the HTTP 200 response, once `body` has read it.
+        self.example: Json = None
 
     def use(self) -> PathUse:
         """Return what the path consumed so far, for the checks that span paths.
@@ -234,6 +240,7 @@ class _PathGenerator:
         fields = [f for raw in rows if (f := self.field(raw)) is not None]
         self.check_columns(fields)
         params = self.parameters(operation)
+        self.check_example(result_key, fields)
         if len(self.problems) > 0:
             return None
         try:
@@ -258,10 +265,46 @@ class _PathGenerator:
             ok = self.spec.deref(responses.get("200"), self.path)
             content = self.spec.deref(ok.get("content"), self.path)
             media = self.spec.deref(content.get("application/json"), self.path)
+            self.example = media.get("example")
             return self.spec.schema(media.get("schema"), self.path)
         except RefreshError:
             self.problem(Gate.SHAPE, "", "no JSON schema for the HTTP 200 response")
             return None
+
+    def check_example(self, result_key: str | None, fields: Sequence[Field]) -> None:
+        """Convert every value of the response's documented example by its generated field.
+
+        The specification's example of the HTTP 200 response is the vendor's own sample of the
+        wire. A value of it that the field's conversion refuses means the generated type and
+        the documented wire disagree, and real data shaped like the sample would fail at run
+        time; the `example-type` gate stops the refresh instead, so a person decides the type
+        with a `TYPE_FIXES` entry. A response with no example, a missing field, and a null
+        value are not checked. Each field is reported once.
+
+        Args:
+            result_key: Where the example's rows sit, as for the response itself.
+            fields: The path's generated fields.
+        """
+        node = self.example
+        for step in result_key.split(".") if result_key is not None else ():
+            node = node.get(step) if isinstance(node, dict) else None
+        rows = node if isinstance(node, list) else [node]
+        reported: set[str] = set()
+        for row in rows:
+            for item in fields:
+                value = _example_value(row, item.wire_key)
+                if value is None or item.wire_key in reported:
+                    continue
+                try:
+                    convert_field(item, value)
+                except UnconvertibleError:
+                    reported.add(item.wire_key)
+                    self.problem(
+                        Gate.EXAMPLE_TYPE,
+                        item.wire_key,
+                        f"the specification's example value {json.dumps(value)[:80]} does not "
+                        f"convert to {item.wire_type}; add a TYPE_FIXES entry citing it",
+                    )
 
     def rows(self, operation: JsonObject) -> tuple[str | None, list[_Raw] | None]:
         """Find the rows of the response and flatten them.
@@ -435,27 +478,50 @@ class _PathGenerator:
             The generated field, or `None` when its type cannot be decided.
         """
         long_names = self.long_names(raw)
-        wire_type = self.wire_type(raw)
-        if wire_type is None:
+        spec_type = self.wire_type(raw)
+        if spec_type is None:
             return None
         description = text(raw.schema, "description")
         fix = self.hand.type_fixes.get((self.path, raw.wire_key))
-        unit = self.unit(
-            raw, wire_type, long_name=long_names[-1], description=description, fixed=fix is not None
-        )
-        if unit is not None:
-            wire_type = WireType.EPOCH
-        declared = None
-        if fix is not None and fix.declared is not wire_type:
+        if fix is not None and fix.declared is not spec_type:
             self.problem(
                 Gate.STALE_ENTRY,
                 raw.wire_key,
                 f"TYPE_FIXES expects the vendor type {fix.declared}, but the "
-                f"specification now gives {wire_type}",
+                f"specification now gives {spec_type}",
                 description=description,
             )
-        elif fix is not None:
-            declared, wire_type = wire_type, fix.wire_type
+            fix = None
+        # A fix to an epoch is an integer count whose unit comes from UNITS, like any other.
+        to_epoch = fix is not None and fix.wire_type is WireType.EPOCH
+        unit = self.unit(
+            raw,
+            WireType.LONG if to_epoch else spec_type,
+            long_name=long_names[-1],
+            description=description,
+            fixed=fix is not None,
+        )
+        if to_epoch and unit is None:
+            self.problem(
+                Gate.TIMESTAMP_UNIT,
+                raw.wire_key,
+                "TYPE_FIXES makes it an epoch, but no UNITS entry gives its unit",
+                description=description,
+            )
+            return None
+        if unit is not None and fix is not None and not to_epoch:
+            self.problem(
+                Gate.STALE_ENTRY,
+                raw.wire_key,
+                f"UNITS gives a unit to a field TYPE_FIXES converts to {fix.wire_type}",
+                description=description,
+            )
+            return None
+        declared = spec_type if fix is not None else None
+        if unit is not None:
+            wire_type = WireType.EPOCH
+        else:
+            wire_type = fix.wire_type if fix is not None else spec_type
         column = naming.column_name(long_names)
         self.concepts[column] = ".".join(naming.snake(name) for name in long_names)
         return Field(
@@ -650,6 +716,21 @@ class _PathGenerator:
         if entry.unit is None:
             return ParamKind.DATE, (), None
         return ParamKind.TIMESTAMP, (), entry.unit
+
+
+def _example_value(row: Json, wire_key: str) -> Json:
+    """Return the value at a dotted wire key of an example row.
+
+    Args:
+        row: One row of the specification's example.
+        wire_key: The field's dotted wire key (`day.c`).
+
+    Returns:
+        The value, or `None` when the row, or an object on the way, lacks it.
+    """
+    for part in wire_key.split("."):
+        row = row.get(part) if isinstance(row, dict) else None
+    return row
 
 
 def _field_type(schema: JsonObject, last: str) -> WireType | None:

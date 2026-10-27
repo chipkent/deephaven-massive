@@ -2419,8 +2419,10 @@ spec lacks, a generated path no documentation page names, a page that is not an 
 names no endpoint, or an `undocumented` exclusion claim the pages contradict (`docs`); an
 unknown `x-polygon-*` extension on a path or operation, a parameter `oneOf`/`anyOf` that is
 not a choice of date and date-time strings, or a response it cannot read (`shape`); a `UNITS`
-unit that differs from the spec's unit tag without a tag-conflict entry (`units`); and an
-envelope key of a single-object body with a type not the envelope's (`envelope`).
+unit that differs from the spec's unit tag without a tag-conflict entry (`units`); an
+envelope key of a single-object body with a type not the envelope's (`envelope`); and a value
+of the spec's documented response example that its generated field's conversion refuses
+(`example-type`), which a `TYPE_FIXES` entry citing the sample resolves.
 
 Descriptions differ across transports and change about twenty times as often as keys, so
 `type-agreement` and `transport-agreement`, not description matching, are the mechanical
@@ -2451,7 +2453,18 @@ conversion deliberately: forex `x` arrives as a quoted decimal string (`"48"`) a
 `long`. A value that does not parse (`"4.8"`, `"x"`) is an unconvertible value and fails loudly
 like any other ([section 19.5](#195-runtime-drift)). Every entry has a fixture test of both the
 conversion and the failure. A conversion that no entry declares is coercion, which never
-happens.
+happens. A pair of one type twice keeps the type and accepts a second form the vendor
+documents for it: crypto snapshot `lastTrade.i` stays `string` but is also sent as an integer
+(`413131`), and the indices and crypto open-close `from`/`day` stay `date` but are sent as an
+instant at exactly midnight UTC (`"2023-03-10T00:00:00.000Z"`; any other time is refused, and
+the column stays a date so the open-close sources agree). A conversion to `epoch` (futures
+snapshot `details.settlement_date`, declared a date, sample `1753851600000000000`) takes its
+unit from `UNITS`. TMX `tmx_company_id` (`"2208"`) and the risk-factor `taxonomy` version
+(`"1.0"`) become `string`. The pairs are `spec.convert.DECLARED_CONVERSIONS`.
+
+The `example-type` gate checks every value of the specification's own response example (106 of
+the 109 generated REST paths carry one) against its generated field's conversion, so a type
+the vendor's samples contradict stops the refresh instead of failing at run time.
 
 **Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
 columns as `KeySpec(column, from_request)`, one optional declaration per role (`symbol`,

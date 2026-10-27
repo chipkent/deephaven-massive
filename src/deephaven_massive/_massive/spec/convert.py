@@ -29,10 +29,16 @@ the pairs in `DECLARED_CONVERSIONS`:
 | `string` | `iso-instant` | untyped text that is an ISO instant; returns `int` ns |
 | `iso-instant` | `date` | text declared a date-time that is a date; returns `datetime.date` |
 | `string` | `long` | a quoted decimal integer such as `"48"` (digits only); returns `int` |
-| `long` | `string` | an integer sent where text is meant (an identifier); returns `str` |
+| `long` | `string` | an identifier typed as an integer: an integer or text; returns `str` |
+| `string` | `string` | an identifier typed as text, also sent as an integer; returns `str` |
+| `double` | `string` | a label typed as a number (`"1.0"`): text, or a number's JSON text |
 | `long` | `int-array` | one integer where a list is meant (a condition code); returns `list[int]` |
+| `date` | `date` | a date, or an ISO instant at exactly midnight UTC; returns `datetime.date` |
+| `date` | `epoch` | a date sent as an integer epoch count in the field's unit; returns `int` |
 
-A value the declared conversion cannot read (`"4.8"` for a `long`) raises
+A pair of one type twice keeps the type and accepts the second form the vendor documents for
+it, so no value is lost and nothing else is loosened. A value the declared conversion cannot
+read (`"4.8"` for a `long`, a date-time not at midnight UTC for a `date`) raises
 `UnconvertibleError` like any other bad value; no other conversion exists.
 
 An `iso-instant` is computed as exact integer nanoseconds since the Unix epoch (UTC) from its
@@ -283,16 +289,59 @@ def _quoted_integer(value: object) -> int:
     return _long(int(value))
 
 
-def _integer_text(value: object) -> str:
-    """Return an integer identifier as text.
+def _identifier(value: object) -> str:
+    """Return an identifier the vendor sends as text or as an integer, as text.
+
+    Any other value (a `bool`, a float, an integer outside the signed 64-bit range) raises
+    `UnconvertibleError`.
 
     Args:
         value: A decoded JSON value.
 
     Returns:
-        The integer's decimal text.
+        Text unchanged, or an integer's decimal text.
     """
-    return str(_long(value))
+    return value if isinstance(value, str) else str(_long(value))
+
+
+def _number_label(value: object) -> str:
+    """Return a label the specification types as a number (a version such as `"1.0"`) as text.
+
+    Args:
+        value: A decoded JSON value.
+
+    Returns:
+        Text unchanged, or a number's JSON text (`1.0` gives `"1.0"`).
+
+    Raises:
+        UnconvertibleError: If `value` is neither text nor a number (a `bool` is not one).
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise UnconvertibleError
+    return json.dumps(value)
+
+
+def _midnight_date(value: object) -> date:
+    """Return a date the vendor sends as `YYYY-MM-DD` or as an ISO instant at midnight UTC.
+
+    Args:
+        value: A decoded JSON value.
+
+    Returns:
+        The calendar date.
+
+    Raises:
+        UnconvertibleError: If `value` is neither a date nor an ISO instant at exactly
+            midnight UTC: any other time would be lost, so it is refused.
+    """
+    if isinstance(value, str) and _DATE.fullmatch(value):
+        return _date(value)
+    days, rest = divmod(_instant(value), _SECONDS_PER_DAY * _NANOS_PER_SECOND)
+    if rest:
+        raise UnconvertibleError
+    return date.fromordinal(_EPOCH_ORDINAL + days)
 
 
 def _one_code(value: object) -> list[int]:
@@ -312,8 +361,12 @@ _DECLARED: dict[tuple[WireType, WireType], Callable[[object], object]] = {
     (WireType.STRING, WireType.ISO_INSTANT): _instant,
     (WireType.ISO_INSTANT, WireType.DATE): _date,
     (WireType.STRING, WireType.LONG): _quoted_integer,
-    (WireType.LONG, WireType.STRING): _integer_text,
+    (WireType.LONG, WireType.STRING): _identifier,
+    (WireType.STRING, WireType.STRING): _identifier,
+    (WireType.DOUBLE, WireType.STRING): _number_label,
     (WireType.LONG, WireType.INT_ARRAY): _one_code,
+    (WireType.DATE, WireType.DATE): _midnight_date,
+    (WireType.DATE, WireType.EPOCH): _long,
 }
 
 DECLARED_CONVERSIONS: frozenset[tuple[WireType, WireType]] = frozenset(_DECLARED)

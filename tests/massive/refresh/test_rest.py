@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+from datetime import date
 from typing import TYPE_CHECKING
 
 import pytest
@@ -181,23 +182,93 @@ def test_the_indicator_timestamps_are_milliseconds_against_their_tags(
 
 
 @_requires_snapshot
-def test_the_typed_timestamps_follow_their_samples(
+def test_the_type_fixes_follow_their_samples(
     real: tuple[tuple[RestPath, ...], Coverage],
 ) -> None:
-    # Each REST TYPE_FIXES entry, checked against the documentation sample it cites.
+    # Each REST TYPE_FIXES entry, checked against the documentation sample it cites: the
+    # reason quotes a value the path's page shows for the field, and it decodes.
     paths = {p.key: p for p in real[0]}
     pages = Snapshot.load().pages
     for (path, wire_key), fix in overrides.TYPE_FIXES.items():
         typed = next(f for f in paths[path].fields if f.wire_key == wire_key)
         assert (typed.wire_type, typed.declared_type) == (fix.wire_type, fix.declared)
-        found = re.search(r'"[^"]+"', fix.reason)
-        assert found is not None, fix.reason
-        sample = found.group()
-
         page = pages[coverage_page(real[1], path)]
-        assert f'"{wire_key}": {sample}' in page, (path, wire_key)
+        key = wire_key.rsplit(".", 1)[-1]
+        cited = re.findall(r'"[^"]+"|\b\d{6,}\b', fix.reason)
+        shown = [sample for sample in cited if f'"{key}": {sample}' in page]
+        assert shown, (path, wire_key)
         # The sample must decode through the declared conversion the decoder applies.
-        assert convert_field(typed, json.loads(sample)) is not None
+        assert convert_field(typed, json.loads(shown[0])) is not None
+
+
+@_requires_snapshot
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            "/futures/v1/snapshot",
+            "details.settlement_date",
+            (WireType.EPOCH, WireUnit.NS),
+            1_753_851_600_000_000_000,
+            1_753_851_600_000_000_000,
+        ),
+        (
+            "/v1/open-close/{indicesTicker}/{date}",
+            "from",
+            (WireType.DATE, None),
+            "2023-03-10T00:00:00.000Z",
+            date(2023, 3, 10),
+        ),
+        (
+            "/v1/open-close/crypto/{from}/{to}/{date}",
+            "day",
+            (WireType.DATE, None),
+            "2020-10-09T00:00:00.000Z",
+            date(2020, 10, 9),
+        ),
+        (
+            "/v2/snapshot/locale/global/markets/crypto/tickers",
+            "lastTrade.i",
+            (WireType.STRING, None),
+            413131,
+            "413131",
+        ),
+        ("/tmx/v1/corporate-events", "tmx_company_id", (WireType.STRING, None), "2208", "2208"),
+        ("/stocks/taxonomies/vX/risk-factors", "taxonomy", (WireType.STRING, None), "1.0", "1.0"),
+    ],
+    ids=lambda case: f"{case[0]} {case[1]}",
+)
+def test_the_documented_samples_decode(
+    real: tuple[tuple[RestPath, ...], Coverage],
+    case: tuple[str, str, tuple[WireType, WireUnit | None], object, object],
+) -> None:
+    # Each sample the vendor's types contradicted decodes through its generated field.
+    path, wire_key, (wire_type, unit), sample, expected = case
+    typed = next(f for f in {p.key: p for p in real[0]}[path].fields if f.wire_key == wire_key)
+    assert (typed.wire_type, typed.unit) == (wire_type, unit)
+    assert convert_field(typed, sample) == expected
+
+
+@_requires_snapshot
+def test_gate_example_type_finds_the_samples_the_vendor_types_contradict() -> None:
+    # Without their hand input, the vendor's own examples stop the refresh.
+    fixed = {
+        ("/futures/v1/snapshot", "details.settlement_date"),
+        ("/v1/open-close/{indicesTicker}/{date}", "from"),
+        ("/v1/open-close/crypto/{from}/{to}/{date}", "day"),
+        ("/v2/snapshot/locale/global/markets/crypto/tickers", "lastTrade.i"),
+        ("/tmx/v1/corporate-events", "tmx_company_id"),
+        ("/stocks/taxonomies/vX/risk-factors", "taxonomy"),
+    }
+    real_hand = HandInput()
+    hand = dataclasses.replace(
+        real_hand,
+        type_fixes={k: v for k, v in real_hand.type_fixes.items() if k not in fixed},
+        units={k: v for k, v in real_hand.units.items() if k not in fixed},
+    )
+    assert sorted(_problems(Snapshot.load(), hand)) == sorted(
+        ("example-type", path, wire_key) for path, wire_key in fixed
+    )
 
 
 def coverage_page(coverage: Coverage, path: str) -> str:
@@ -227,6 +298,7 @@ def _item(
     array: bool = True,
     extra: Mapping[str, object] | None = None,
     operation_extra: Mapping[str, object] | None = None,
+    example: object = None,
 ) -> dict[str, object]:
     rows: Mapping[str, object] = {"type": "array", "items": row} if array else row
     body = (
@@ -240,7 +312,9 @@ def _item(
     in_path = [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}]
     operation: dict[str, object] = {
         "parameters": in_path + (params or []),
-        "responses": {"200": {"content": {"application/json": {"schema": body}}}},
+        "responses": {
+            "200": {"content": {"application/json": {"schema": body, "example": example}}}
+        },
         **(operation_extra or {}),
     }
     return {"get": operation, **(extra or {})}
@@ -309,6 +383,12 @@ def _one(
 ) -> RestPath:
     item = _item(row, params=params, result=result, array=array)
     paths, _ = generate_rest(_snapshot({_PATH: item}), hand or _hand())
+    (path,) = paths
+    return path
+
+
+def _one_of(snapshot: Snapshot, hand: HandInput) -> RestPath:
+    paths, _ = generate_rest(snapshot, hand)
     (path,) = paths
     return path
 
@@ -660,6 +740,84 @@ def test_gate_stale_entry_a_type_fix_the_specification_no_longer_needs() -> None
     snapshot = _snapshot({_PATH: _item(_row(size={"type": "integer"}))})
     assert _problems(snapshot, _hand(type_fixes={(_PATH, "size"): fix})) == [
         ("stale-entry", _PATH, "size")
+    ]
+
+
+def test_a_type_fix_to_an_epoch_takes_its_unit_from_units() -> None:
+    fix = overrides.TypeFix(declared=WireType.DATE, wire_type=WireType.EPOCH, reason="test")
+    row = _row(settles_on={"type": "string", "format": "date"})
+    hand = _hand(
+        type_fixes={(_PATH, "settles_on"): fix},
+        units={(_PATH, "settles_on"): overrides.Unit(unit=WireUnit.NS, reason="test")},
+    )
+    (field,) = _one(row, hand).fields
+    assert (field.wire_type, field.unit, field.declared_type) == (
+        WireType.EPOCH,
+        WireUnit.NS,
+        WireType.DATE,
+    )
+    without_unit = dataclasses.replace(hand, units={})
+    snapshot = _snapshot({_PATH: _item(row)})
+    assert _problems(snapshot, without_unit) == [("timestamp-unit", _PATH, "settles_on")]
+
+
+def test_gate_stale_entry_a_unit_on_a_field_a_type_fix_keeps_from_an_epoch() -> None:
+    fix = overrides.TypeFix(declared=WireType.LONG, wire_type=WireType.STRING, reason="test")
+    hand = _hand(
+        type_fixes={(_PATH, "ref"): fix}, units={(_PATH, "ref"): _MS}, identity={"ref": ""}
+    )
+    snapshot = _snapshot({_PATH: _item(_row(ref={"type": "integer"}))})
+    assert _problems(snapshot, hand) == [("stale-entry", _PATH, "ref")]
+
+
+# The example-type gate.
+
+
+def test_gate_example_type_a_documented_value_the_type_refuses() -> None:
+    row = _row(code={"type": "integer"}, bar=_row(close={"type": "number"}))
+    example = {
+        "status": "OK",
+        "results": [
+            {"code": "2208", "bar": {"close": 1.5}},
+            {"code": "2209", "bar": {"close": "high"}},
+        ],
+    }
+    snapshot = _snapshot({_PATH: _item(row, example=example)})
+    hand = _hand(identity={"bar": ""})
+    # Each field is reported once, however many rows disagree.
+    assert _problems(snapshot, hand) == [
+        ("example-type", _PATH, "bar.close"),
+        ("example-type", _PATH, "code"),
+    ]
+    fix = overrides.TypeFix(declared=WireType.LONG, wire_type=WireType.STRING, reason="test")
+    fixed = _snapshot({_PATH: _item(_row(code={"type": "integer"}), example=example)})
+    (field,) = _one_of(fixed, _hand(type_fixes={(_PATH, "code"): fix})).fields
+    assert field.wire_type is WireType.STRING
+
+
+def test_gate_example_type_reads_rows_where_the_result_key_says() -> None:
+    hand = _hand(result_keys={_PATH: overrides.ResultKey(key="results.values", reason="test")})
+    row = _row(values={"type": "array", "items": _row(value={"type": "number"})})
+    bad = {"results": {"values": [{"value": "1.0"}]}}
+    snapshot = _snapshot({_PATH: _item(row, array=False, example=bad)})
+    assert _problems(snapshot, hand) == [("example-type", _PATH, "value")]
+    body = _hand(result_keys={_PATH: overrides.ResultKey(key=None, reason="test")})
+    listed = _snapshot(
+        {_PATH: _item(_row(label={"type": "string"}), result=None, example=[{"label": 3}])}
+    )
+    assert _problems(listed, body) == [("example-type", _PATH, "label")]
+
+
+def test_gate_example_type_skips_what_the_example_leaves_out() -> None:
+    row = _row(price={"type": "number"}, size={"type": "integer"}, last=_row(p={"type": "number"}))
+    example = {"results": [{"price": None, "last": None}, "not a row", {"size": 3}]}
+    hand = _hand(identity={"p": ""})
+    assert [
+        f.wire_key for f in _one_of(_snapshot({_PATH: _item(row, example=example)}), hand).fields
+    ] == [
+        "price",
+        "size",
+        "last.p",
     ]
 
 

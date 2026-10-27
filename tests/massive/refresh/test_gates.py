@@ -61,6 +61,7 @@ def test_the_gate_names_are_descriptive() -> None:
         "timestamp-unit",
         "stale-entry",
         "concept-collision",
+        "example-type",
         "units",
         "envelope",
         "docs",

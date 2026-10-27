@@ -99,14 +99,19 @@ class Unit:
 
 @dataclass(frozen=True, kw_only=True)
 class TypeFix:
-    """A declared conversion for a field whose vendor type is wrong.
+    """A declared conversion for a field whose vendor type is wrong or not the only form sent.
+
+    The same type twice keeps the type and accepts a second form the vendor documents for it
+    (an identifier typed as text but also sent as an integer). An `EPOCH` takes its unit from
+    the field's `UNITS` entry, which it then requires.
 
     Attributes:
         declared: The type the specification gives the field, by the representation rules.
             If the specification changes it, the entry is stale and the refresh stops.
         wire_type: The type the field really has; the decoder converts every value from
             `declared` to it, and a value that does not convert fails loudly.
-        reason: The evidence that the vendor's type is wrong.
+        reason: The evidence that the vendor's type is wrong: the path, the field, and the
+            documented sample.
     """
 
     declared: WireType
@@ -118,8 +123,7 @@ class TypeFix:
 
         Raises:
             ValueError: If `spec.convert.DECLARED_CONVERSIONS` has no conversion from
-                `declared` to `wire_type` (the same type twice, an `EPOCH`, whose unit only a
-                `UNITS` entry can give, or any pair no decoder converts).
+                `declared` to `wire_type`: a pair no decoder converts.
         """
         if (self.declared, self.wire_type) not in DECLARED_CONVERSIONS:
             raise ValueError(
@@ -261,6 +265,12 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             ("last_quote.ask_timestamp", "last_quote.bid_timestamp"),
             _NS_SAMPLE,
         ),
+        ("/futures/v1/snapshot", "details.settlement_date"): Unit(
+            unit=WireUnit.NS,
+            reason="The settlement day, sent as an epoch (its `TYPE_FIXES` entry); the "
+            "specification example and the documentation sample, 1753851600000000000, have 19 "
+            "digits.",
+        ),
         **_for(
             ("/futures/v1/snapshot",),
             ("last_minute.last_updated",),
@@ -358,6 +368,53 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
             wire_type=WireType.DATE,
             reason="The specification declares format date-time, but the documentation sample "
             'is the date "2025-02-22", which no date-time parser accepts.',
+        ),
+        ("/futures/v1/snapshot", "details.settlement_date"): TypeFix(
+            declared=WireType.DATE,
+            wire_type=WireType.EPOCH,
+            reason="The specification declares format date, but its example and the "
+            "documentation sample are the integer 1753851600000000000 (2025-07-30 05:00 UTC, "
+            "midnight in Chicago): an epoch in nanoseconds, whose unit `UNITS` gives. "
+            '`/futures/v1/contracts` sends the same field as "2026-12-18", which this '
+            "path's conversion refuses rather than guess a time zone.",
+        ),
+        ("/v1/open-close/{indicesTicker}/{date}", "from"): TypeFix(
+            declared=WireType.DATE,
+            wire_type=WireType.DATE,
+            reason='The documentation sample is "2023-03-10T00:00:00.000Z", the requested '
+            "date as an instant at midnight UTC, where the specification declares a date and "
+            'the stocks and options open-close pages send "2023-01-09". The column stays a '
+            "date, so the open-close sources agree and no time is invented; any other time "
+            "of day is refused.",
+        ),
+        ("/v1/open-close/crypto/{from}/{to}/{date}", "day"): TypeFix(
+            declared=WireType.DATE,
+            wire_type=WireType.DATE,
+            reason='The documentation sample is "2020-10-09T00:00:00.000Z", the requested '
+            "date as an instant at midnight UTC, where the specification declares a date. "
+            "The column stays a date, as on the other open-close sources; any other time of "
+            "day is refused.",
+        ),
+        ("/v2/snapshot/locale/global/markets/crypto/tickers", "lastTrade.i"): TypeFix(
+            declared=WireType.STRING,
+            wire_type=WireType.STRING,
+            reason="The trade ID is typed as text, but this page's example and documentation "
+            "sample send the integer 413131, while the single-ticker and movers pages send "
+            '"464569520". It stays text, which holds either form without loss.',
+        ),
+        ("/tmx/v1/corporate-events", "tmx_company_id"): TypeFix(
+            declared=WireType.LONG,
+            wire_type=WireType.STRING,
+            reason="The specification types the ID as an int64, but its example and the "
+            'documentation sample are the text "2208". An identifier is text: either form is '
+            "kept as its digits.",
+        ),
+        ("/stocks/taxonomies/vX/risk-factors", "taxonomy"): TypeFix(
+            declared=WireType.DOUBLE,
+            wire_type=WireType.STRING,
+            reason="The specification types the taxonomy version as a number, but its example "
+            'and both documentation sample rows are the text "1.0". A version is a label, so '
+            "it is text; a number is kept as its JSON text.",
         ),
     }
 )

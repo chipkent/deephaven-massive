@@ -200,21 +200,19 @@ class Field:
     declared_type: WireType | None = None
 
     def __post_init__(self) -> None:
-        """Check that the unit is set exactly for an epoch, and that a conversion converts.
+        """Check that the unit is set exactly for an epoch.
+
+        Which `(declared_type, wire_type)` pairs exist is `spec.convert`'s to say; the loader
+        checks every generated field against them. A pair of one type twice is one of them: it
+        keeps the type and accepts a second form the vendor documents for it.
 
         Raises:
-            ValueError: If `wire_type` is `EPOCH` and `unit` is `None`, or the reverse; or if
-                `declared_type` equals `wire_type`, which would be a conversion to itself.
+            ValueError: If `wire_type` is `EPOCH` and `unit` is `None`, or the reverse.
         """
         if (self.wire_type is WireType.EPOCH) != (self.unit is not None):
             raise ValueError(
                 f"field {self.wire_key!r}: an epoch needs a unit and any other type has none "
                 f"(type {self.wire_type}, unit {self.unit})"
-            )
-        if self.declared_type is self.wire_type:
-            raise ValueError(
-                f"field {self.wire_key!r}: a declared conversion from {self.declared_type} "
-                "to itself converts nothing"
             )
 
 

@@ -103,9 +103,12 @@ def test_a_field_records_a_declared_conversion() -> None:
     assert _price().declared_type is None
 
 
-def test_a_declared_conversion_to_the_same_type_is_rejected() -> None:
-    with pytest.raises(ValueError, match="'x': a declared conversion from long to itself"):
-        Field(wire_key="x", column="X", wire_type=WireType.LONG, declared_type=WireType.LONG)
+def test_a_declared_conversion_may_keep_the_type() -> None:
+    # An identifier typed as text that the vendor also sends as an integer stays text.
+    trade_id = Field(
+        wire_key="i", column="Id", wire_type=WireType.STRING, declared_type=WireType.STRING
+    )
+    assert trade_id.declared_type is trade_id.wire_type
 
 
 # Membership.
