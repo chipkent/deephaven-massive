@@ -183,7 +183,7 @@ def test_tickers_query(massive_session: dm.MassiveSession) -> None:
     full = ref.tickers(
         symbols=["msft", "AAPL"],
         market=dm.Market.STOCKS,
-        type="CS",
+        ticker_type="CS",
         exchange="XNAS",
         cusip="037833100",
         cik="0000320193",
@@ -295,7 +295,7 @@ def test_lookup_queries(massive_session: dm.MassiveSession) -> None:
     conditions = ref.conditions(
         asset_class=dm.AssetClass.OPTIONS,
         data_type=dm.ConditionDataType.TRADE,
-        id=2,
+        condition_id=2,
         sip=dm.Sip.OPRA,
         sort="id",
         order=dm.Order.ASC,
@@ -365,13 +365,13 @@ def test_dm_all_names_the_alternative(massive_session: dm.MassiveSession) -> Non
 
 def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
-    for name in ("type", "exchange", "cusip", "cik", "search"):
+    for name in ("ticker_type", "exchange", "cusip", "cik", "search"):
         with pytest.raises(TypeError, match=f"{name} must be a str, not int"):
             ref.tickers(**{name: 1})
     with pytest.raises(TypeError, match="active must be a bool, not NoneType"):
         ref.tickers(active=None)
     with pytest.raises(ValueError, match="needs a timezone"):
-        ref.tickers(date=datetime(2025, 1, 2, 9, 30))  # noqa: DTZ001 -- a naive datetime is the error under test
+        ref.tickers(date="2025-01-02T09:30")
     with pytest.raises(ValueError, match="is not an ISO-8601 date"):
         ref.ticker_details("AAPL", date="soon")
     with pytest.raises(ValueError, match="types is empty"):
@@ -381,8 +381,8 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
     with pytest.raises(TypeError, match="types must be a sequence of str, not int"):
         ref.ticker_events("AAPL", types=1)
     for bad in (True, "2"):
-        with pytest.raises(TypeError, match="id must be an int"):
-            ref.conditions(id=bad)
+        with pytest.raises(TypeError, match="condition_id must be an int"):
+            ref.conditions(condition_id=bad)
     with pytest.raises(ValueError, match="published_utc_gte is set through start= and end="):
         ref.news(filters={"published_utc_gte": "2025-01-01"})
     with pytest.raises(ValueError, match="end"):

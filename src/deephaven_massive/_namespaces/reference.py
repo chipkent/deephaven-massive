@@ -273,7 +273,7 @@ class _Reference(Namespace):
         *,
         symbols: Symbols | None = None,
         market: Market | None = None,
-        type: str | None = None,  # noqa: A002 -- the endpoint's parameter name, kept as the public name
+        ticker_type: str | None = None,
         exchange: str | None = None,
         cusip: str | None = None,
         cik: str | None = None,
@@ -299,8 +299,9 @@ class _Reference(Namespace):
             symbols: The tickers to look up, of any asset classes, or a Deephaven table with a
                 `Symbol` column; None for every ticker.
             market: The market to list; None for every market.
-            type: The ticker type code, such as `"CS"` for common stock (`ticker_types()`
-                lists them); None for every type.
+            ticker_type: The ticker type code, such as `"CS"` for common stock
+                (`ticker_types()` lists them), sent as the wire parameter `type`; None
+                for every type.
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
@@ -325,11 +326,10 @@ class _Reference(Namespace):
         `ValueError`; another argument of the wrong type raises `TypeError`.
         """
         if not isinstance(active, bool):
-            # `type` is the ticker-type argument here, so the builtin is out of reach.
-            raise TypeError(f"active must be a bool, not {active.__class__.__name__}")
+            raise TypeError(f"active must be a bool, not {type(active).__name__}")
         params: dict[str, ParamValue | None] = {
             "market": None if market is None else _require_enum(market, Market, "market"),
-            "type": _text("type", type),
+            "type": _text("ticker_type", ticker_type),
             "exchange": _text("exchange", exchange),
             "cusip": _text("cusip", cusip),
             "cik": _text("cik", cik),
@@ -572,7 +572,7 @@ class _Reference(Namespace):
         *,
         asset_class: AssetClass | None = None,
         data_type: ConditionDataType | None = None,
-        id: int | None = None,  # noqa: A002 -- the endpoint's parameter name, kept as the public name
+        condition_id: int | None = None,
         sip: Sip | None = None,
         sort: str | None = None,
         order: Order | None = None,
@@ -591,7 +591,8 @@ class _Reference(Namespace):
             asset_class: The class whose conditions to list (forex is sent as `fx`); None for
                 every class. The endpoint has no futures or indices conditions.
             data_type: The kind of data the conditions apply to; None for every kind.
-            id: One condition's id; None for every condition.
+            condition_id: One condition's id, sent as the wire parameter `id`; None for
+                every condition.
             sip: The SIP whose condition mapping to list; None for every SIP.
             sort: The field to sort by, such as `"id"`; None for the endpoint's default.
             order: The sort direction; None for the endpoint's default.
@@ -604,19 +605,21 @@ class _Reference(Namespace):
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
         Raises:
-            TypeError: If `id` is neither None nor an `int`.
+            TypeError: If `condition_id` is neither None nor an `int`.
 
         An `asset_class` the endpoint does not accept or an unknown filter raises
         `ValueError`; another argument of the wrong type raises `TypeError`.
         """
-        if id is not None and (isinstance(id, bool) or not isinstance(id, int)):
-            raise TypeError(f"id must be an int, not {type(id).__name__}")
+        if condition_id is not None and (
+            isinstance(condition_id, bool) or not isinstance(condition_id, int)
+        ):
+            raise TypeError(f"condition_id must be an int, not {type(condition_id).__name__}")
         params: dict[str, ParamValue | None] = {
             "asset_class": _asset_class(self._core, CONDITIONS, asset_class),
             "data_type": None
             if data_type is None
             else _require_enum(data_type, ConditionDataType, "data_type"),
-            "id": id,
+            "id": condition_id,
             "sip": None if sip is None else _require_enum(sip, Sip, "sip"),
             **list_params(sort=sort, order=order),
         }

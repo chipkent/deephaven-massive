@@ -102,7 +102,8 @@ nothing is kept or shimmed for compatibility.
 8. **Linter ignores need a reason and, if new, owner approval.** Every entry in the ruff ignore
    lists and every inline `# noqa` or `# type: ignore[code]` carries a reason comment. Adding a
    rule to any ignore list, or a new `noqa` category, requires owner approval recorded in the
-   PR. Fix the code first.
+   PR. Fix the code first. Public argument names never shadow builtins: give the argument a
+   descriptive name (`ticker_type`, `condition_id`) and map it to the wire name.
 9. **Coverage is 100% statements and branches.** `# pragma: no cover` needs a reason on the same
    line and owner approval in the PR. Never write a dead defensive branch to satisfy the gate;
    delete the branch.
