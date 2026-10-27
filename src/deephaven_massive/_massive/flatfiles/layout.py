@@ -13,15 +13,12 @@ and which dates a range needs are the library's decisions (`_flat_files.py` and
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from datetime import date
 
 __all__ = ["object_key"]
-
-_EXTENSION: Final = "csv.gz"
-"""Every documented key is a gzip CSV file."""
 
 
 def object_key(prefix: str, day: date, venue: str | None = None) -> str:
@@ -48,4 +45,4 @@ def object_key(prefix: str, day: date, venue: str | None = None) -> str:
             assert key == "us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz"
     """
     base = prefix if venue is None else prefix.format(venue=venue)
-    return f"{base}/{day:%Y}/{day:%m}/{day.isoformat()}.{_EXTENSION}"
+    return f"{base}/{day:%Y}/{day:%m}/{day.isoformat()}.csv.gz"
