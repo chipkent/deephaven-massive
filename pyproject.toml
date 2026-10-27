@@ -38,14 +38,20 @@ dependencies = [
     "botocore>=1.31.62",
     # 2.0 is the first release with inline type information; ProxyManager is older.
     "urllib3>=2.0",
-    # 2022.5.18 is the first release with inline type information (py.typed).
-    "certifi>=2022.5.18",
+    # 2022.6.15.1 is the first release that finds its bundle with importlib.resources.files;
+    # earlier releases call the deprecated importlib.resources.path. It has inline type
+    # information (py.typed), which 2022.5.18 introduced.
+    "certifi>=2022.6.15.1",
     # 15.0 is the first release whose asyncio connect() reads proxies from the environment.
     "websockets>=15.0",
 ]
 
 [project.optional-dependencies]
-orjson = ["orjson>=3.9"]
+orjson = [
+    # 3.9.15 is the first release that rejects JSON nested deeper than 1,024 levels; the codec
+    # relies on that limit to keep deep or hostile bodies from exhausting the C stack.
+    "orjson>=3.9.15",
+]
 
 [project.urls]
 Homepage = "https://github.com/chipkent/deephaven-massive"
