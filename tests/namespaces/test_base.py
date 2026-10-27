@@ -9,6 +9,8 @@ function over a session class and a catalog, so it is checked against the real t
 against synthetic namespaces that break it.
 """
 
+import collections.abc
+import datetime as dt
 import typing
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
@@ -441,7 +443,16 @@ def _hints(function: Callable[..., object]) -> dict[str, Any]:
     Returns:
         The annotations by parameter name, and `"return"`.
     """
-    names = {**vars(_query), **vars(_types), **vars(_enums), "Literal": Literal}
+    # A namespace module imports its typing-only names (`Mapping`, `Sequence`, `date`) under
+    # `TYPE_CHECKING`, so they are not in its globals; supply them here.
+    names = {
+        **vars(collections.abc),
+        **vars(dt),
+        **vars(_query),
+        **vars(_types),
+        **vars(_enums),
+        "Literal": Literal,
+    }
     return typing.get_type_hints(function, localns=names)
 
 

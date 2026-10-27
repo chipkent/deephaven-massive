@@ -14,6 +14,7 @@ from deephaven_massive._datasets.dates import (
     FuturesSessions,
     TimeRange,
     bounds,
+    calendar_day,
     check_order,
     flat_file_published,
     futures_session,
@@ -315,3 +316,21 @@ def test_time_axis_order_compares_instants_across_the_fall_back_hour() -> None:
 )
 def test_futures_session_rolls_at_17_chicago(moment: datetime, session: date) -> None:
     assert futures_session(moment) == session
+
+
+def test_calendar_day_is_the_day_in_the_class_zone() -> None:
+    late = datetime(2025, 3, 4, 2, 0, tzinfo=UTC)  # 21:00 on 3 March in New York and Chicago
+    assert calendar_day(_spec(AssetClass.STOCKS), late, "date") == date(2025, 3, 3)
+    assert calendar_day(_spec(None), late, "date") == date(2025, 3, 3)
+    assert calendar_day(_spec(AssetClass.CRYPTO), late, "date") == date(2025, 3, 4)
+    assert calendar_day(_spec(AssetClass.FUTURES), late, "date") == date(2025, 3, 3)
+    early = datetime(2025, 3, 4, 5, 30, tzinfo=UTC)  # 23:30 in Chicago, 00:30 in New York
+    assert calendar_day(_spec(AssetClass.FUTURES), early, "date") == date(2025, 3, 3)
+    assert calendar_day(_spec(AssetClass.STOCKS), early, "date") == date(2025, 3, 4)
+
+
+def test_calendar_day_keeps_a_date_as_given() -> None:
+    assert calendar_day(_spec(AssetClass.CRYPTO), "2025-03-03", "date") == date(2025, 3, 3)
+    assert calendar_day(_spec(AssetClass.STOCKS), date(2025, 3, 3), "date") == date(2025, 3, 3)
+    with pytest.raises(ValueError, match=r"date='2025-03-03T09:30' needs a timezone"):
+        calendar_day(_spec(AssetClass.STOCKS), "2025-03-03T09:30", "date")
