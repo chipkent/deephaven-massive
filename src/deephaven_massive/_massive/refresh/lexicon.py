@@ -47,8 +47,6 @@ __all__ = [
     "CRYPTO_SNAPSHOTS",
     "FOREX_SNAPSHOTS",
     "IDENTITY",
-    "LAST_QUOTE_ASK",
-    "LAST_QUOTE_BID",
     "LEXICONS",
     "RANGE_PATHS",
     "SHAPES",
@@ -118,14 +116,6 @@ def _from(source: str, **names: str) -> dict[str, LongName]:
 _UNIFIED_BAR = "/v3/snapshot `last_minute` and `session` (the unified snapshot)"
 # Crypto's one REST quote: the unified snapshot's last quote, documented for crypto.
 _CRYPTO_LAST_QUOTE = "/v3/snapshot `last_quote` (the crypto unified snapshot)"
-
-LAST_QUOTE_ASK = "ask"
-"""How Massive's last-quote objects spell a quote's ask price (`/v3/snapshot` `last_quote.ask`,
-`/v1/last_quote/currencies` `ask`); the crypto quote, whose only REST quote is that object,
-follows it. Its quotes data spells the same field `ask_price`."""
-
-LAST_QUOTE_BID = "bid"
-"""How Massive's last-quote objects spell a quote's bid price; see `LAST_QUOTE_ASK`."""
 # Every flat file names its instrument `ticker`, as does the unified snapshot.
 _TICKER = "/v3/snapshot `ticker`, and the `ticker` column of every flat file"
 _AGGREGATE = {
@@ -259,8 +249,7 @@ _LEXICONS = (
                 x="exchange",
                 r="received_timestamp",
             ),
-            **_from(_CRYPTO_LAST_QUOTE, ap=LAST_QUOTE_ASK, bp=LAST_QUOTE_BID),
-            **_from(_CRYPTO_LAST_QUOTE, as_="ask_size", bs="bid_size"),
+            **_from(_CRYPTO_LAST_QUOTE, ap="ask", bp="bid", as_="ask_size", bs="bid_size"),
         },
     ),
     Lexicon(

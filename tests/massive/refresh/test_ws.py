@@ -95,6 +95,22 @@ def test_the_messages_take_the_lexicons_and_names(
 
 
 @_requires_snapshot
+def test_each_kind_lists_its_channels_in_the_specification_s_order() -> None:
+    # `KINDS` positions follow the vendor's own order of the channels (`x-polygon-order`).
+    websocket = json.loads((DIRECTORY / "websocket.json").read_text(encoding="utf-8"))
+    vendor = [
+        channel_key(path)
+        for market in websocket["x-polygon-order"].values()
+        for entry in market["market"]
+        for path in entry["paths"]
+    ]
+    for groups in overrides.KINDS.values():
+        for sources in groups.values():
+            channels = [s for s in sources if s in vendor]
+            assert channels == sorted(channels, key=vendor.index), channels
+
+
+@_requires_snapshot
 def test_the_websocket_type_fixes_follow_their_samples(
     real: tuple[tuple[Source, ...], WsCoverage],
 ) -> None:

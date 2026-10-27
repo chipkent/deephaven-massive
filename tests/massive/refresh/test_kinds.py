@@ -118,6 +118,34 @@ def test_a_projected_member_contributes_its_projection_under_the_kind_s_names() 
     assert _found(problems) == [("stale-entry", "/v3/trades", "gone")]
 
 
+def test_a_projection_that_renames_keeps_every_field() -> None:
+    # A field the projection does not list, such as one the vendor adds later, joins the kind
+    # under its own column.
+    renames = overrides.Projection(renames={"p": "last_price", "gone": "x"}, reason="t")
+    hand = dataclasses.replace(
+        _EMPTY,
+        kinds={"last": {"stocks": ["stocks/T"]}},
+        projections={("last", "stocks/T"): renames},
+    )
+    (member,), problems = kinds.members(hand, _SOURCES)
+    assert member.renames_only
+    assert member.projection == {"sym": "Ticker", "p": "LastPrice", "s": "Size"}
+    assert _found(problems) == [("stale-entry", "stocks/T", "gone")]
+    (channel,) = kinds.apply([_CHANNEL], [member], {})
+    (membership,) = channel.memberships
+    assert membership.projection == {"sym": "Ticker", "p": "LastPrice", "s": "Size"}
+
+
+@pytest.mark.parametrize(
+    "tables",
+    [{}, {"fields": {"a": "b"}, "renames": {"a": "b"}}, {"renames": {}}],
+    ids=["neither", "both", "empty"],
+)
+def test_a_projection_keeps_some_fields_or_renames_some(tables: dict[str, dict[str, str]]) -> None:
+    with pytest.raises(ValueError, match="not both"):
+        overrides.Projection(reason="t", **tables)
+
+
 def test_gate_column_collision_a_projection_giving_two_keys_one_column() -> None:
     projection = overrides.Projection(fields={"price": "value", "size": "value"}, reason="t")
     hand = dataclasses.replace(
@@ -315,7 +343,8 @@ def test_a_projected_member_is_neither_ordered_nor_an_order_reference() -> None:
     )
     orders, problems = kinds.column_orders(_members(hand))
     assert "/v3/trades" not in orders
-    assert problems == []
+    # The kind `x` has a member, but none that keeps all its fields to order it.
+    assert _found(problems) == [("column-order", "/v3/trades", "x")]
     # A projected stream is no order reference: it contributes only some fields, renamed.
     hand = dataclasses.replace(
         _EMPTY,
@@ -326,13 +355,16 @@ def test_a_projected_member_is_neither_ordered_nor_an_order_reference() -> None:
     )
     orders, problems = kinds.column_orders(_members(hand, _SOURCES))
     assert orders == {}
-    assert [(p.gate, p.source) for p in problems] == [("column-order", "/v3/trades")]
+    assert [(p.gate, p.source) for p in problems] == [
+        ("column-order", "/v3/trades"),
+        ("column-order", "stocks/T"),
+    ]
 
 
 def test_a_projection_that_only_renames_is_ordered_and_gives_the_order() -> None:
     # The stream spells its fields its own way; renamed into the kind's names, it gives the
     # order (`Ticker`, `Price`, `Size`) and takes it.
-    renames = overrides.Projection(fields={"sym": "ticker", "p": "price", "s": "size"}, reason="t")
+    renames = overrides.Projection(renames={"sym": "ticker"}, reason="t")
     reversed_channel = dataclasses.replace(_CHANNEL, fields=tuple(reversed(_CHANNEL.fields)))
     sources = {**_SOURCES, "stocks/T": reversed_channel}
     hand = dataclasses.replace(

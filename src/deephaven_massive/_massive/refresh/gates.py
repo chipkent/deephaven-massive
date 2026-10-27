@@ -83,8 +83,8 @@ class Gate(StrEnum):
     of `VENUES`."""
     COLUMN_ORDER = "column-order"
     """A source whose column order cannot be taken from its dataset kind: its group has no
-    flat-file or WebSocket source to give the order, or two of its groups order its columns
-    differently."""
+    flat-file or WebSocket member keeping all its fields to give the order, or two of its
+    groups order its columns differently."""
     CONCEPT_COLLISION = "concept-collision"
     """Within one of `overrides.KINDS`, one column holding two concepts (a concept is a field's
     full long-name path, in snake case)."""
@@ -233,15 +233,21 @@ def concept_collisions(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator
             if projection is None:
                 found = [(column, concept, concept) for column, concept in use.concepts.items()]
             else:
-                found = [
+                renamed = [
                     (
                         naming.column_name([long_name]),
                         naming.snake(long_name),
                         use.concepts[use.columns[wire_key]],
                     )
-                    for wire_key, long_name in projection.fields.items()
+                    for wire_key, long_name in projection.named.items()
                     if wire_key in use.columns
                 ]
+                kept = [
+                    (column, use.concepts[column], use.concepts[column])
+                    for wire_key, column in use.columns.items()
+                    if projection.renames is not None and wire_key not in projection.renames
+                ]
+                found = [*renamed, *kept]
             for column, concept, own in found:
                 concepts.setdefault(column, set()).add(concept)
                 columns.setdefault(own, set()).add(column)

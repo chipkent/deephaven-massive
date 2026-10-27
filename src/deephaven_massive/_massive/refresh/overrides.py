@@ -130,20 +130,52 @@ class TypeFix:
 
 @dataclass(frozen=True, kw_only=True)
 class Projection:
-    """The fields one source contributes to one dataset kind, under the kind's names.
+    """How one source's fields join one dataset kind, inside that membership only.
 
-    A projection limits a source to some of its fields, and renames them, inside one
-    membership only: the source keeps its full fields everywhere else.
+    A projection takes one of two forms, and the source keeps its own fields and names
+    everywhere else:
+
+    - `fields` keeps only the listed wire keys, each under the kind's name for it (the indices
+      snapshot joins the values kind as its ticker, value, and time alone);
+    - `renames` keeps every field and renames only the listed ones (the forex last quote's
+      `ask` as `ask_price`), so a field the vendor adds later joins under its own name.
+
+    Every long name is written through the naming rule, so a projection maps wire keys to
+    PascalCase columns.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.refresh.overrides import Projection
+
+            prices = Projection(renames={"ask": "ask_price"}, reason="One column per field.")
 
     Attributes:
-        fields: Each kept wire key mapped to the long name it takes in the kind, in snake case
-            (`{"last_updated": "timestamp"}`); the generator writes each through the naming
-            rule, so the projection maps wire keys to PascalCase columns.
-        reason: Why the source belongs to the kind only through these fields.
+        reason: Why the source joins the kind this way.
+        fields: The kept wire keys, each mapped to its long name in the kind, in snake case
+            (`{"last_updated": "timestamp"}`); `None` for a projection that renames.
+        renames: The renamed wire keys, each mapped to its long name in the kind; every other
+            field keeps its own column. `None` for a projection that keeps some fields.
     """
 
-    fields: Mapping[str, str]
     reason: str
+    fields: Mapping[str, str] | None = None
+    renames: Mapping[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        """Check that exactly one form is given.
+
+        Raises:
+            ValueError: If both or neither of `fields` and `renames` is given, or the one
+                given is empty.
+        """
+        if (self.fields is None) == (self.renames is None) or not (self.fields or self.renames):
+            raise ValueError("a projection keeps some `fields` or `renames` some, not both")
+
+    @property
+    def named(self) -> Mapping[str, str]:
+        """The wire keys the projection names, each mapped to its long name in the kind."""
+        return self.fields or self.renames or {}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -918,25 +950,11 @@ _QUOTE_PRICES = (
 PROJECTIONS: Mapping[tuple[str, str], Projection] = MappingProxyType(
     {
         ("quotes", "/v1/last_quote/currencies/{from}/{to}"): Projection(
-            fields={
-                "ask": "ask_price",
-                "bid": "bid_price",
-                "exchange": "exchange",
-                "timestamp": "timestamp",
-            },
+            renames={"ask": "ask_price", "bid": "bid_price"},
             reason=_QUOTE_PRICES.format(source="The forex REST last quote"),
         ),
         ("quotes", "crypto/XQ"): Projection(
-            fields={
-                "pair": "pair",
-                "bp": "bid_price",
-                "bs": "bid_size",
-                "ap": "ask_price",
-                "as": "ask_size",
-                "t": "participant_timestamp",
-                "x": "exchange",
-                "r": "received_timestamp",
-            },
+            renames={"ap": "ask_price", "bp": "bid_price"},
             reason=_QUOTE_PRICES.format(
                 source="The crypto quote stream, named after crypto's own last quote,"
             ),

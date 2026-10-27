@@ -9,8 +9,9 @@ it required. A REST source is a `RestPath`, which adds its result key and its pa
 
 A source may belong to dataset **kinds** (trades, quotes, bars, ...): the sources whose rows
 merge into one table schema. Each `Membership` names the kind, the asset-class group within
-it, the source's position in that group, and optionally a projection that keeps only some of
-its fields, under other column names, for that membership only.
+it, the source's position in that group, and optionally a projection: the fields the source
+contributes to that membership, each under its column there, which may keep only some fields or
+keep them all and rename some.
 
 Decoders compare each payload with its source and return a `DriftReport` of the keys that
 were extra or missing.

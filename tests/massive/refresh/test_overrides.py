@@ -47,20 +47,22 @@ def test_names_hold_only_keys_massive_names_nowhere() -> None:
         assert naming.column_name([entry.long_name]) not in naming.KEY_COLUMNS
 
 
-def test_the_owner_s_final_names_of_the_running_figures() -> None:
+def test_the_running_figures_of_the_websocket_aggregates_are_named() -> None:
     # `a`, which Massive names elsewhere (the snapshots' `day.vwap`), is a lexicon entry.
-    names = {
-        key: entry.long_name
+    columns = {
+        (source, key): naming.column_name([entry.long_name])
         for (source, key), entry in overrides.NAMES.items()
         if source in ("stocks/A", "indices/AM")
     }
-    assert {key: naming.column_name([names[key]]) for key in ("av", "op", "z", "dav")} == {
-        "av": "AccumulatedVolume",
-        "op": "OfficialOpen",
-        "z": "AverageTradeSize",
-        "dav": "AccumulatedDecimalVolume",
+    assert columns == {
+        ("stocks/A", "av"): "AccumulatedVolume",
+        ("stocks/A", "dav"): "AccumulatedDecimalVolume",
+        ("stocks/A", "op"): "OfficialOpen",
+        ("stocks/A", "z"): "AverageTradeSize",
+        ("stocks/A", "e"): "EndTimestamp",
+        ("indices/AM", "op"): "OfficialOpen",
+        ("indices/AM", "e"): "EndTimestamp",
     }
-    assert ("stocks/A", "a") not in overrides.NAMES
 
 
 def test_the_indicator_timestamps_are_milliseconds_despite_their_tags() -> None:
@@ -129,6 +131,13 @@ def test_every_kind_lists_each_source_once_per_group() -> None:
             assert len(sources) == len(set(sources))
 
 
+def test_the_last_quote_spellings_join_the_quotes_kind_renamed() -> None:
+    for source in ("/v1/last_quote/currencies/{from}/{to}", "crypto/XQ"):
+        projection = overrides.PROJECTIONS["quotes", source]
+        assert projection.fields is None
+        assert set((projection.renames or {}).values()) == {"ask_price", "bid_price"}
+
+
 def test_every_projection_is_of_a_listed_kind_member() -> None:
     for kind, source in overrides.PROJECTIONS:
         assert any(source in sources for sources in overrides.KINDS[kind].values())
@@ -136,7 +145,7 @@ def test_every_projection_is_of_a_listed_kind_member() -> None:
 
 def test_the_indices_snapshot_joins_the_values_kind_as_ticker_value_and_timestamp() -> None:
     projection = overrides.PROJECTIONS["values", "/v3/snapshot/indices"]
-    assert {k: naming.column_name([v]) for k, v in projection.fields.items()} == {
+    assert {k: naming.column_name([v]) for k, v in projection.named.items()} == {
         "ticker": "Ticker",
         "value": "Value",
         "last_updated": "Timestamp",

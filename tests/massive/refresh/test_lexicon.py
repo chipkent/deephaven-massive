@@ -1,8 +1,17 @@
+import json
+import os
 from typing import cast
 
 import pytest
 
 from deephaven_massive._massive.refresh import lexicon
+from deephaven_massive._massive.refresh.openapi import OpenApi, properties
+from deephaven_massive._massive.refresh.snapshot import DIRECTORY
+
+_requires_snapshot = pytest.mark.skipif(
+    not DIRECTORY.is_dir() and "CI" not in os.environ,
+    reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",
+)
 
 
 def test_every_shape_names_a_lexicon() -> None:
@@ -101,14 +110,20 @@ def test_the_day_vwap_is_named_from_the_snapshots_day_bar() -> None:
     assert "`day.vwap`" in entry.source
 
 
-def test_the_crypto_quote_takes_crypto_s_own_last_quote_names() -> None:
+@_requires_snapshot
+def test_the_crypto_quote_names_are_crypto_s_own_last_quote_keys() -> None:
+    # The lexicon cites the crypto unified snapshot's `last_quote`: its keys must be there.
+    openapi = json.loads((DIRECTORY / "openapi.json").read_text(encoding="utf-8"))
+    spec = OpenApi(openapi)
+    media = openapi["paths"]["/v3/snapshot"]["get"]["responses"]["200"]["content"]
+    body = properties(spec.schema(media["application/json"]["schema"], "/v3/snapshot")) or {}
+    results = spec.schema(body["results"], "/v3/snapshot")
+    item = properties(spec.schema(results["items"], "/v3/snapshot")) or {}
+    last_quote = properties(spec.schema(item["last_quote"], "/v3/snapshot")) or {}
     entries = lexicon.LEXICONS["crypto_quote"].entries
-    assert (entries["ap"].long_name, entries["bp"].long_name) == (
-        lexicon.LAST_QUOTE_ASK,
-        lexicon.LAST_QUOTE_BID,
-    )
-    assert (entries["as"].long_name, entries["bs"].long_name) == ("ask_size", "bid_size")
-    assert all("crypto" in e.source for e in entries.values())
+    for short in ("ap", "bp", "as", "bs"):
+        assert entries[short].source.startswith("/v3/snapshot `last_quote`"), short
+        assert entries[short].long_name in last_quote, short
 
 
 def test_the_range_paths_are_the_aggregate_range_templates() -> None:

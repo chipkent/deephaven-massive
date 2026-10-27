@@ -178,6 +178,25 @@ def test_concept_collision_a_projected_concept_also_in_another_column() -> None:
     assert _found(concept_collisions(hand, uses)) == [("concept-collision", "", "last_updated")]
 
 
+def test_concept_collision_a_renaming_projection_keeps_every_other_concept() -> None:
+    # `ask` joins the quotes kind as `AskPrice`; the source's other fields keep their own
+    # columns and concepts, so a peer's `Exchange` that is another concept collides.
+    uses = {
+        "/last": PathUse(
+            concepts={"Ask": "ask", "Exchange": "exchange"},
+            columns={"ask": "Ask", "exchange": "Exchange"},
+        ),
+        "stream": PathUse(concepts={"AskPrice": "ask_price", "Exchange": "exchange_id"}),
+    }
+    projection = overrides.Projection(renames={"ask": "ask_price"}, reason="test")
+    hand = dataclasses.replace(
+        _EMPTY,
+        kinds={"quotes": {"forex": ["/last", "stream"]}},
+        projections={("quotes", "/last"): projection},
+    )
+    assert _found(concept_collisions(hand, uses)) == [("concept-collision", "", "Exchange")]
+
+
 @pytest.mark.skipif(
     not DIRECTORY.is_dir() and "CI" not in os.environ,
     reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",

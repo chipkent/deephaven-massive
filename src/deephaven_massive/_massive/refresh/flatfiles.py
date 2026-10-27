@@ -111,11 +111,13 @@ def venue_template(prefix: str, venues: Sequence[str]) -> tuple[str, str | None]
 class _FileGenerator(SourceFields):
     """Generate one prefix's `Source` from its dataset page, collecting its problems."""
 
-    def generate(self, page: str) -> Source | None:
-        """Build the prefix's source from its dataset page.
+    def generate(self, page: str, others: Sequence[str] = ()) -> Source | None:
+        """Build the prefix's source from its dataset page, checking every page's samples.
 
         Args:
-            page: The Markdown text of the dataset page.
+            page: The Markdown text of the dataset page the fields come from.
+            others: The other venues' pages of a futures dataset, whose example rows are
+                checked against the same fields (their columns are `_check_venues`'s).
 
         Returns:
             The source, or `None` when a problem prevents building it.
@@ -143,6 +145,26 @@ class _FileGenerator(SourceFields):
             if raw is not None and (item := self.field(raw)) is not None:
                 fields.append(item)
         self.check_columns(fields)
+        self.check_rows(fields, header, samples)
+        for other in others:
+            try:
+                self.check_rows(fields, docs.example_header(other), docs.example_rows(other))
+            except docs.DocsError:
+                continue  # `_check_venues` reports an unreadable venue page
+        if self.problems:
+            return None
+        return Source(key=self.source, transport=Transport.FLAT_FILES, fields=tuple(fields))
+
+    def check_rows(
+        self, fields: Sequence[Field], header: Sequence[str], samples: Sequence[Sequence[str]]
+    ) -> None:
+        """Convert one page's example rows by the generated fields (`example-type`).
+
+        Args:
+            fields: The generated fields.
+            header: The page's "Example Data" header.
+            samples: The page's example rows, cells in header order.
+        """
         by_key = {f.wire_key.lower(): f for f in fields}
         rows: list[Json] = [
             {
@@ -153,9 +175,6 @@ class _FileGenerator(SourceFields):
             for sample in samples
         ]
         self.check_examples(fields, rows, documented=bool(rows), where="in the example rows")
-        if self.problems:
-            return None
-        return Source(key=self.source, transport=Transport.FLAT_FILES, fields=tuple(fields))
 
     def raw(self, column: docs.DocColumn) -> RawField | None:
         """Return a "Columns" row as a field the shared rules read.
@@ -288,7 +307,9 @@ def _check_venues(
         page = snapshot.flat_file_pages[name]
         try:
             table = sorted((c.name, c.type) for c in docs.columns(page))
-            shapes[venue] = (table, [cell.lower() for cell in docs.example_header(page)])
+            header = [cell.lower() for cell in docs.example_header(page)]
+            docs.example_rows(page)  # unreadable rows are this venue's page's problem too
+            shapes[venue] = (table, header)
         except docs.DocsError as error:
             if venue != generated:
                 problems.append(
@@ -362,9 +383,11 @@ def generate_flat_files(
             continue
         if _VENUE in template:
             problems += _check_venues(template, pages, snapshot=snapshot, venues=venues)
-        first = next(iter(pages.values()))
+        first, *others = pages.values()
         generator = _FileGenerator(hand, template, origin=snapshot.origin)
-        value = generator.generate(snapshot.flat_file_pages[first])
+        value = generator.generate(
+            snapshot.flat_file_pages[first], [snapshot.flat_file_pages[o] for o in others]
+        )
         uses[template] = generator.use()
         problems += generator.problems
         if value is not None:

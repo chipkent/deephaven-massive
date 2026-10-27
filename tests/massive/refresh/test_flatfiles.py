@@ -301,6 +301,34 @@ def test_gate_venue_agreement_a_venue_page_with_another_order_or_type(other: str
     ]
 
 
+def test_gate_example_type_reads_every_venue_page_s_rows() -> None:
+    pages = {
+        "futures/overview.md": _overview(
+            ("futures/trades/cme.md", "us_futures_cme/trades_v1"),
+            ("futures/trades/cbot.md", "us_futures_cbot/trades_v1"),
+        ),
+        "futures/trades/cme.md": _dataset(_TRADES, rows=[["ESZ4", "1.5", "2"]]),
+        "futures/trades/cbot.md": _dataset(_TRADES, rows=[["ZBZ4", "1.5", "2.5"]]),
+    }
+    assert _problems(_snapshot(pages), _VENUES) == [
+        ("example-type", "us_futures_{venue}/trades_v1", "size")
+    ]
+
+
+def test_gate_docs_another_venue_s_example_rows_that_cannot_be_read() -> None:
+    pages = {
+        "futures/overview.md": _overview(
+            ("futures/trades/cme.md", "us_futures_cme/trades_v1"),
+            ("futures/trades/cbot.md", "us_futures_cbot/trades_v1"),
+        ),
+        "futures/trades/cme.md": _dataset(_TRADES, rows=[["ESZ4", "1.5", "2"]]),
+        "futures/trades/cbot.md": _dataset(_TRADES, rows=[["ZBZ4", "1.5"]]),
+    }
+    assert _problems(_snapshot(pages), _VENUES) == [
+        ("docs", "us_futures_{venue}/trades_v1", "futures/trades/cbot.md")
+    ]
+
+
 def test_gate_venue_agreement_a_venue_without_a_page() -> None:
     pages = {
         "futures/overview.md": _overview(

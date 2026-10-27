@@ -78,6 +78,8 @@ class Member:
         source: The generated source.
         projection: The wire keys the membership keeps, each mapped to its PascalCase column
             in the kind; `None` keeps every field under its own column.
+        renames_only: Whether the projection keeps every field and only renames some (it
+            came from `Projection.renames`), so the member orders like an unprojected one.
     """
 
     kind: str
@@ -85,6 +87,7 @@ class Member:
     position: int
     source: Source
     projection: Mapping[str, str] | None = None
+    renames_only: bool = False
 
     def columns(self) -> list[tuple[str, Field]]:
         """Return the columns the member contributes to its kind, with the field behind each.
@@ -134,6 +137,7 @@ def members(hand: HandInput, sources: Mapping[str, Source]) -> tuple[list[Member
                     )
                     continue
                 projection = _projection(hand, kind, source, problems=problems)
+                entry = hand.projections.get((kind, key))
                 found.append(
                     Member(
                         kind=kind,
@@ -141,6 +145,7 @@ def members(hand: HandInput, sources: Mapping[str, Source]) -> tuple[list[Member
                         position=position,
                         source=source,
                         projection=projection,
+                        renames_only=entry is not None and entry.renames is not None,
                     )
                 )
     problems += [
@@ -169,8 +174,9 @@ def _projection(
             two projected keys that take one column (`column-collision`).
 
     Returns:
-        The projection, its long names through the naming rule; `None` when `PROJECTIONS`
-        has no entry for the source in the kind.
+        The projection, its long names through the naming rule: the kept fields of a
+        projection that keeps some, or every field (renamed or under its own column) of one
+        that renames; `None` when `PROJECTIONS` has no entry for the source in the kind.
     """
     entry = hand.projections.get((kind, source.key))
     if entry is None:
@@ -183,9 +189,18 @@ def _projection(
             key=wire_key,
             message=f"PROJECTIONS entry of kind {kind!r} for a field the source lacks",
         )
-        for wire_key in sorted(set(entry.fields) - wire_keys)
+        for wire_key in sorted(set(entry.named) - wire_keys)
     )
-    projection = {k: naming.column_name([v]) for k, v in entry.fields.items() if k in wire_keys}
+    if entry.renames is not None:
+        projection = {
+            f.wire_key: naming.column_name([entry.renames[f.wire_key]])
+            if f.wire_key in entry.renames
+            else f.column
+            for f in source.fields
+        }
+    else:
+        named = entry.named
+        projection = {k: naming.column_name([v]) for k, v in named.items() if k in wire_keys}
     taken: dict[str, str] = {}
     for wire_key, column in projection.items():
         if column in taken:
@@ -326,17 +341,18 @@ def column_orders(found: Sequence[Member]) -> tuple[dict[str, tuple[str, ...]], 
 
     Within each `(kind, group)`, the group's order is the columns of its flat-file sources,
     then of its WebSocket sources, then of its other sources, each in `KINDS` order and each
-    column at its first appearance. A member that keeps all its fields (unprojected, or
-    projected only to rename them) takes that order and may give it; a member projected to a
-    few of its fields does neither, and its source keeps its own order.
+    column at its first appearance. A member that keeps all its fields (unprojected, or with a
+    projection that only renames, `Projection.renames`) takes that order and may give it; a
+    member projected to a few of its fields does neither, and its source keeps its own order.
 
     Args:
         found: The members.
 
     Returns:
         Each reordered source's key mapped to its wire keys in order, and a `column-order`
-        problem for each source whose group has no flat-file or WebSocket source to give the
-        order, or whose groups order its fields differently.
+        problem for each member of a group with no flat-file or WebSocket member that keeps
+        all its fields to give the order, and for each source whose groups order its fields
+        differently.
     """
     groups: dict[tuple[str, str], list[Member]] = {}
     for member in found:
@@ -352,10 +368,10 @@ def column_orders(found: Sequence[Member]) -> tuple[dict[str, tuple[str, ...]], 
                     gate=Gate.COLUMN_ORDER,
                     source=m.source.key,
                     key=kind,
-                    message=f"group {group!r} has no flat-file or WebSocket source to give its "
-                    "column order",
+                    message=f"group {group!r} has no flat-file or WebSocket source that keeps "
+                    "all its fields to give its column order",
                 )
-                for m in whole
+                for m in grouped
             ]
             continue
         rank: dict[str, int] = {}
@@ -389,7 +405,7 @@ def _keeps_every_field(member: Member) -> bool:
     Returns:
         True for an unprojected member, and for one whose projection only renames.
     """
-    return member.projection is None or len(member.projection) == len(member.source.fields)
+    return member.projection is None or member.renames_only
 
 
 def apply(
