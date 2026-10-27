@@ -416,6 +416,7 @@ def test_factories_return_the_class_of_their_dataset() -> None:
 def test_each_docstring_links_its_column_reference(spec: DatasetSpec) -> None:
     dataset = spec.name.split(".", 1)[1]
     doc = getattr(indices._Indices, dataset).__doc__
+    assert doc.splitlines()[0] == spec.summary
     assert f"docs/datasets/indices.md#{dataset.replace('.', '-')}," in doc
     assert "`limit`" in doc
     assert "`dm.ALL`" in doc

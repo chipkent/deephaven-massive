@@ -24,11 +24,10 @@ Index symbols carry the `I:` prefix; a symbol without it gets one (`"SPX"` is `"
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import DAY_ZONES, parse_date_like
+from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params
@@ -72,6 +71,7 @@ _REFERENCE: Final = (
 
 VALUES: Final = DatasetSpec(
     name="indices.values",
+    summary="Index levels, tick by tick, as computed by the index providers.",
     asset_class=AssetClass.INDICES,
     kind="values",
     fetch_path=_SNAPSHOT,
@@ -93,6 +93,7 @@ VALUES: Final = DatasetSpec(
 
 BARS: Final = DatasetSpec(
     name="indices.bars",
+    summary="Open, high, low, and close index levels over fixed windows of time.",
     asset_class=AssetClass.INDICES,
     is_bars=True,
     kind="bars",
@@ -122,6 +123,7 @@ BARS: Final = DatasetSpec(
 
 SNAPSHOTS: Final = DatasetSpec(
     name="indices.snapshots",
+    summary="The current state of each index: its level, its session so far, and its status.",
     asset_class=AssetClass.INDICES,
     fetch_path=_SNAPSHOT,
     keys={(_REST, _SNAPSHOT): SourceKeys(symbol=KeySpec("Ticker"))},
@@ -132,6 +134,7 @@ SNAPSHOTS: Final = DatasetSpec(
 
 DAILY_OPEN_CLOSE: Final = DatasetSpec(
     name="indices.daily_open_close",
+    summary="One day's opening, closing, high, and low levels of each index.",
     asset_class=AssetClass.INDICES,
     fetch_path=_OPEN_CLOSE,
     keys={(_REST, _OPEN_CLOSE): SourceKeys(symbol=KeySpec("Symbol"))},
@@ -141,26 +144,6 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (VALUES, BARS, SNAPSHOTS, DAILY_OPEN_CLOSE)
 """Every dataset of `m.indices`, one `DatasetSpec` each, in the order the reference lists them."""
-
-
-def _day(value: DateLike) -> date:
-    """Return the calendar day a `date` argument names, in the indices day zone.
-
-    Args:
-        value: An ISO-8601 date or datetime string, a `date`, or an aware `datetime`; a
-            datetime names the New York calendar day it falls on.
-
-    Returns:
-        The day.
-
-    A `value` that is not a `str`, `date`, or `datetime` raises the `TypeError` of
-    `parse_date_like`, and a naive `datetime`, a time without an offset, or text that is not
-    ISO-8601 its `ValueError`.
-    """
-    parsed = parse_date_like(value, "date")
-    if isinstance(parsed, datetime):
-        return parsed.astimezone(DAY_ZONES[AssetClass.INDICES]).date()
-    return parsed
 
 
 class _Indices(Namespace):
@@ -189,7 +172,9 @@ class _Indices(Namespace):
         stream verbs subscribe to the WebSocket `V` channel. `fetch()` reads the current level
         of each index from the indices snapshot (`/v3/snapshot/indices`), whose `last_updated`
         becomes `Timestamp`, so it returns the same columns as the stream; the snapshot takes
-        many indices per request, so this is one request for the whole list. `history()`
+        many indices per request, so a list needs few requests. An index
+        Massive does not know, or that the plan does not include, is left out of the result
+        with a WARNING that names it and Massive's reason. `history()`
         reads the `us_indices/values_v1` flat files, the only history Massive has for index
         values: it needs S3 credentials, and `source=dm.HistorySource.REST` raises
         `ValueError`. There is no `limit`; every verb returns every row it is asked for.
@@ -420,6 +405,6 @@ class _Indices(Namespace):
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
                 all_alternative="m.indices.snapshots(dm.ALL)",
-                params={"date": _day(date)},
+                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )
