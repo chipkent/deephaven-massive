@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -196,13 +197,13 @@ def test_a_snapshot_compared_with_itself_has_no_drift() -> None:
 def test_the_vendored_snapshot_compared_with_itself_has_no_drift() -> None:
     vendored = Snapshot.load()
     hand = HandInput()
-    committed = Committed.committed()
+    committed = Committed.load()
     assert drift.compare(vendored, vendored, committed=committed, hand=hand) == []
     assert drift.gate_stops(vendored, hand) == []
 
 
-def test_committed_reads_the_generated_files() -> None:
-    committed = Committed.committed()
+def test_committed_keys_load_from_the_generated_files() -> None:
+    committed = Committed.load()
     assert "/v3/trades/{stockTicker}" in committed.rest
     assert "stocks/T" in committed.ws
     assert "us_futures_{venue}/trades_v1" in committed.flat_files
@@ -767,9 +768,14 @@ CREDENTIALS = {
 }
 
 
-def test_check_without_drift_or_credentials(tmp_path: Path) -> None:
+def test_check_without_drift_or_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     before = store(make(), tmp_path / "vendor")
     stored = sorted(p.read_bytes() for p in before.rglob("*") if p.is_file())
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
     report = drift.check(
         snapshot_directory=before,
         get=served(make()).__getitem__,
@@ -778,9 +784,9 @@ def test_check_without_drift_or_credentials(tmp_path: Path) -> None:
         hand=NO_HAND,
     )
     assert report == Report(items=(), fetched=FETCHED, bucket_listed=False)
-    # The vendored snapshot is only read, and nothing is left behind beside it.
+    # The vendored snapshot is only read, and the downloads' scratch directory is removed.
     assert sorted(p.read_bytes() for p in before.rglob("*") if p.is_file()) == stored
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["vendor"]
+    assert list(scratch.iterdir()) == []
 
 
 def test_check_reports_drift_gate_stops_and_unnamed_bucket_prefixes(

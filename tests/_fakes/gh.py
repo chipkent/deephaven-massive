@@ -172,7 +172,6 @@ def main(arguments: list[str]) -> int:
         sys.stderr.write("fake gh: GH_TOKEN and GH_REPO must be set\n")
         return 4
     fake = FakeGh(Path(os.environ[_STATE_VARIABLE]).parent)
-    fake.state = Path(os.environ[_STATE_VARIABLE])
     fake.load()
     fake.calls.append(arguments)
     try:

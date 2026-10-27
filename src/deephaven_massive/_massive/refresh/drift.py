@@ -61,7 +61,7 @@ from deephaven_massive._massive.spec.types import Transport
 
 if TYPE_CHECKING:
     import datetime as dt
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     from deephaven_massive._massive.refresh.openapi import Json, JsonObject
 
@@ -230,7 +230,7 @@ class Report:
 class Committed:
     """The keys of the sources the committed `spec/*.json` generate, per transport.
 
-    `committed()` reads them from the generated files; a test builds its own. Immutable.
+    `load()` reads them from the generated files; a test builds its own. Immutable.
 
     Attributes:
         rest: The REST path templates (`"/v3/trades/{stockTicker}"`).
@@ -243,7 +243,7 @@ class Committed:
     flat_files: frozenset[str]
 
     @classmethod
-    def committed(cls) -> Committed:
+    def load(cls) -> Committed:
         """Read the keys from the generated files the package holds.
 
         Returns:
@@ -769,12 +769,15 @@ def _unaccounted(
     """
     excluded = {kind: {e.item for e in hand.exclusions if e.kind is kind} for kind in Transport}
     excluded_feeds = {ws.channel_key(path) for path in excluded[Transport.WS]}
-    for area, documented, done in (
-        ("REST", _documented_endpoints(after), committed.rest | excluded[Transport.REST]),
-        ("WebSocket", _documented_feeds(after), committed.ws | excluded_feeds),
+    for area, documented, accounted in (
+        (
+            "REST",
+            _documented_endpoints(after),
+            committed.rest | excluded[Transport.REST] | live[Transport.REST],
+        ),
+        ("WebSocket", _documented_feeds(after), committed.ws | excluded_feeds | live[Transport.WS]),
     ):
-        transport = Transport.REST if area == "REST" else Transport.WS
-        for item in sorted(documented - done - live[transport]):
+        for item in sorted(documented - accounted):
             yield Drift(
                 section=Section.UNACCOUNTED,
                 area=area,
@@ -938,7 +941,7 @@ def unnamed_prefixes(
     )
 
 
-def _ordered(items: Iterator[Drift] | list[Drift]) -> list[Drift]:
+def _ordered(items: Iterable[Drift]) -> list[Drift]:
     """Put drift items in report order.
 
     Args:
@@ -975,14 +978,14 @@ def check(
         get: Returns the body of a URL; an `fetch.HttpGetter` when omitted.
         environ: Where the S3 credentials are read (`S3_CREDENTIAL_VARIABLES`);
             `os.environ` when omitted. Without both, the bucket is not listed.
-        committed: The committed keys; `Committed.committed()` when omitted.
+        committed: The committed keys; `Committed.load()` when omitted.
         hand: The hand input; the real tables when omitted.
 
     Returns:
         The report.
     """
     environ = os.environ if environ is None else environ
-    committed = committed or Committed.committed()
+    committed = committed or Committed.load()
     hand = hand or HandInput()
     before = Snapshot.load(snapshot_directory)
     with tempfile.TemporaryDirectory(prefix="massive-drift-") as scratch:
