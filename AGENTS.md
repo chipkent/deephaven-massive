@@ -32,11 +32,12 @@ uv run pytest tests/massive/refresh -q                        # the parity test 
 
 To take a vendor change, run `--fetch`, then the plain refresh, and review the snapshot diff,
 the `spec/*.json` diff, and any hand-input lines in one pull request. When a gate stops the
-refresh it prints each problem (gate, path, key, vendor description); fix it with an entry and
-its reason in one of the hand-input tables, never by editing the generated file: a lexicon,
-`SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_CONFLICTS`,
-`TYPE_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, or `KINDS` entry (`overrides.py`); or an
-`EXCLUSIONS` or `SAMPLE_ERRORS` entry (`exclusions.py`). `--check` (a live drift report)
+refresh it prints each problem (gate, source, key, vendor description); fix it with an entry
+and its reason in one of the hand-input tables, never by editing the generated file: a
+lexicon, `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_CONFLICTS`,
+`TYPE_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, or
+`VENUES` entry (`overrides.py`); or an `EXCLUSIONS` or `SAMPLE_ERRORS` entry
+(`exclusions.py`). `--check` (a live drift report)
 arrives with the `PLAN.md` planned PR api-drift-check.
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong

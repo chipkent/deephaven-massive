@@ -29,17 +29,17 @@ converters above are never loosened:
 |---|---|---|
 | `iso-text-instant` | ISO-8601 instant text the specification leaves untyped | `int` ns |
 | `iso-date-text` | `YYYY-MM-DD` text declared a date-time | `datetime.date` |
-| `quoted-integer` | decimal digits in text, such as `"48"` | `int` |
-| `integer-id-as-text` | an integer in the signed 64-bit range; text is refused | `str` |
+| `quoted-integer` | an integer, or decimal digits in text such as `"48"` | `int` |
 | `text-or-integer-id` | text, or an integer in the signed 64-bit range | `str` |
 | `number-label` | text as sent, or a finite number as float text (`1` gives `"1.0"`) | `str` |
-| `one-code` | one integer in the signed 32-bit range | `list[int]` |
+| `code-list-text` | an integer, or comma-separated integers in text (`"12,37"`) | `list[int]` |
 | `midnight-utc-date` | `YYYY-MM-DD`, or ISO-8601 midnight at offset `Z` or `+00:00` | `date` |
 | `date-as-epoch` | an integer in the signed 64-bit range (a count in the field's unit) | `int` |
+| `integer-as-number` | any number, as `double` accepts it | `float` |
 
 `text-or-integer-id` serves a field the specification declares either an integer or text
 (`Conversion.declarations`). A value the conversion cannot read (`"4.8"` for `quoted-integer`,
-`"7"` for `integer-id-as-text`, a non-zero clock or another offset for `midnight-utc-date`)
+`"12;37"` for `code-list-text`, a non-zero clock or another offset for `midnight-utc-date`)
 raises `UnconvertibleError` like any other bad value.
 
 An `iso-instant` is computed as exact integer nanoseconds since the Unix epoch (UTC) from its
@@ -87,6 +87,8 @@ _INT64 = (-(2**63), 2**63 - 1)
 _INT32 = (-(2**31), 2**31 - 1)
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
 _DECIMAL_INTEGER = re.compile(r"\d+", re.ASCII)
+# Codes written as decimal integers separated by single commas, such as `12,37`.
+_CODE_LIST = re.compile(r"\d+(?:,\d+)*", re.ASCII)
 # Hours 00-23, minutes and seconds 00-59 (no leap second), in the time and in the offset.
 _INSTANT = re.compile(
     r"(?P<date>\d{4}-\d{2}-\d{2})T(?P<h>[01]\d|2[0-3]):(?P<m>[0-5]\d):(?P<s>[0-5]\d)"
@@ -291,21 +293,23 @@ def convert(wire_type: WireType, value: object) -> object:
 
 
 def _quoted_integer(value: object) -> int:
-    """Return a `long` sent as a quoted decimal integer.
+    """Return a `long` sent as an integer or as a quoted decimal integer.
 
     Args:
         value: A decoded JSON value.
 
     Returns:
-        The integer the text spells.
+        The integer, or the integer the text spells.
 
     Raises:
-        UnconvertibleError: If `value` is not text of decimal digits only, or is out of the
-            signed 64-bit range.
+        UnconvertibleError: If `value` is neither an integer nor text of decimal digits only,
+            or is out of the signed 64-bit range.
     """
-    if not isinstance(value, str) or not _DECIMAL_INTEGER.fullmatch(value):
-        raise UnconvertibleError
-    return _long(int(value))
+    if isinstance(value, str):
+        if not _DECIMAL_INTEGER.fullmatch(value):
+            raise UnconvertibleError
+        value = int(value)
+    return _long(value)
 
 
 def _identifier(value: object) -> str:
@@ -321,18 +325,6 @@ def _identifier(value: object) -> str:
         Text unchanged, or an integer's decimal text.
     """
     return value if isinstance(value, str) else str(_long(value))
-
-
-def _integer_id(value: object) -> str:
-    """Return an integer identifier as text; text is refused.
-
-    Args:
-        value: A decoded JSON value.
-
-    Returns:
-        The integer's decimal text.
-    """
-    return str(_long(value))
 
 
 def _number_label(value: object) -> str:
@@ -391,15 +383,23 @@ def _midnight_date(value: object) -> date:
     return _date(match["date"])
 
 
-def _one_code(value: object) -> list[int]:
-    """Return a single integer as a one-element `int-array`.
+def _code_list(value: object) -> list[int]:
+    """Return codes sent as one integer or as comma-separated integers in text.
 
     Args:
-        value: A decoded JSON value.
+        value: A decoded JSON value, or a flat file's cell text.
 
     Returns:
-        A list holding the integer, which must be in the signed 32-bit range.
+        The codes, each in the signed 32-bit range.
+
+    Raises:
+        UnconvertibleError: If `value` is neither an integer nor text of decimal integers
+            separated by single commas.
     """
+    if isinstance(value, str):
+        if not _CODE_LIST.fullmatch(value):
+            raise UnconvertibleError
+        return [_integer(int(code), _INT32) for code in value.split(",")]
     return [_integer(value, _INT32)]
 
 
@@ -409,12 +409,12 @@ _NAMED: Mapping[Conversion, Callable[[object], object]] = MappingProxyType(
         Conversion.ISO_TEXT_INSTANT: _instant,
         Conversion.ISO_DATE_TEXT: _date,
         Conversion.QUOTED_INTEGER: _quoted_integer,
-        Conversion.INTEGER_ID_AS_TEXT: _integer_id,
         Conversion.TEXT_OR_INTEGER_ID: _identifier,
         Conversion.NUMBER_LABEL: _number_label,
-        Conversion.ONE_CODE: _one_code,
+        Conversion.CODE_LIST_TEXT: _code_list,
         Conversion.MIDNIGHT_UTC_DATE: _midnight_date,
         Conversion.DATE_AS_EPOCH: _long,
+        Conversion.INTEGER_AS_NUMBER: _double,
     }
 )
 

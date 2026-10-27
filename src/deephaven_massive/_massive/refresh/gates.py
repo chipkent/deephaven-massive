@@ -1,20 +1,23 @@
-"""The refresh gates: what stops a refresh, how a stop is reported, and the cross-path checks.
+"""The refresh gates: what stops a refresh, how a stop is reported, and the cross-source checks.
 
 A **gate** is a rule the generated schemas and the hand input must pass before anything is
 written. Every generator collects its problems instead of stopping at the first, and the
-refresh then stops with all of them at once (`RefreshError`), each naming its gate, the path,
-the key, and the vendor's description for the reviewer. The description is shown to help a
-person choose a name; it never chooses one. `Gate` lists every gate and what it rejects.
+refresh then stops with all of them at once (`RefreshError`), each naming its gate, the
+source, the key, and the vendor's description for the reviewer. The description is shown to
+help a person choose a name; it never chooses one. `Gate` lists every gate and what it
+rejects.
 
 This module owns the vocabulary every other refresh module reports in (`Gate`, `Problem`,
-`RefreshError`) and the checks that span paths or read the hand input as a whole: stale hand
+`RefreshError`) and the checks that span sources or read the hand input as a whole: stale hand
 entries (`stale_entries`, `unneeded_type_fixes`, `check_exclusions`) and one concept per
 column within a dataset kind (`concept_collisions`). The checks that need one field or
-parameter at a time run inside the generator that meets it (`rest`); the checks here read what
-each path consumed through `PathUse`, so this module depends on no generator.
+parameter at a time run inside the generator that meets it (`rest`, `ws`, `flatfiles`); the
+checks here read what each source consumed through `PathUse`, so this module depends on no
+generator. The checks that read the generated sources of a kind across transports (one type
+and two transports per column, the column order) are `kinds`'s.
 
-It imports the standard library and `spec.types` at run time, and the hand-input types for
-type checking only.
+It imports the standard library, `naming`, and `spec.types` at run time, and the hand-input
+types for type checking only.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from deephaven_massive._massive.refresh import naming
 from deephaven_massive._massive.spec.types import Transport
 
 if TYPE_CHECKING:
@@ -50,8 +54,9 @@ class Gate(StrEnum):
     """A short wire key (three characters or fewer, no underscore) with no lexicon, identity,
     or `NAMES` entry: a column name would be guessed."""
     COLUMN_COLLISION = "column-collision"
-    """Two fields of one path that give one column, or a `NAMES` entry that coins a dataset key
-    column (`Symbol`, `Timestamp`, `Underlying`), which only the dataset key rename makes."""
+    """Two fields of one source that give one column, two keys a projection gives one column,
+    or a `NAMES` entry that coins a dataset key column (`Symbol`, `Timestamp`, `Underlying`),
+    which only the dataset key rename makes."""
     TIMESTAMP_UNIT = "timestamp-unit"
     """A timestamp-like field left to a default: a `long` or `double` with no `UNITS` entry, or
     text with no `format` and neither a `UNITS` nor a `TYPE_FIXES` entry; or a timestamp-like
@@ -63,6 +68,23 @@ class Gate(StrEnum):
     `RESULT_KEYS`, `PARAM_UNITS`, `EXCLUSIONS`, or `SAMPLE_ERRORS` entry) naming a path, field,
     parameter, or sample the snapshot no longer has, or claiming what the snapshot contradicts
     (a `TYPE_FIXES` entry no documented sample needs any more among them)."""
+    TYPE_AGREEMENT = "type-agreement"
+    """Within one of `overrides.KINDS`, one column whose `WireType`s do not join: the type
+    lattice joins `long` with `double` to `double`, `long` with `int-array` to `int-array`,
+    and an `epoch` with an `epoch` (each source keeping its unit), and nothing else. A
+    conflict is first a possible naming error (one name for two fields), so the problem
+    prints both fields' descriptions."""
+    TRANSPORT_AGREEMENT = "transport-agreement"
+    """Within one group of `overrides.KINDS` whose sources span two or more transports, a
+    column only one transport supplies and `TRANSPORT_ONLY` does not name: often a one-sided
+    lexicon slip (a trade's `s` named `Shares` on one transport while another says `size`)."""
+    VENUE_AGREEMENT = "venue-agreement"
+    """A futures flat-file dataset whose venue pages list different columns, or lack a venue
+    of `VENUES`."""
+    COLUMN_ORDER = "column-order"
+    """A source whose column order cannot be taken from its dataset kind: its group has no
+    flat-file or WebSocket member keeping all its fields to give the order, or two of its
+    groups order its columns differently."""
     CONCEPT_COLLISION = "concept-collision"
     """Within one of `overrides.KINDS`, one column holding two concepts (a concept is a field's
     full long-name path, in snake case)."""
@@ -97,7 +119,8 @@ class Problem:
 
     Attributes:
         gate: The gate that found it.
-        source: The REST path template, or `""` when no path is involved.
+        source: The source concerned (a REST path template, a WebSocket channel or
+            specification path, a flat-file prefix, or a dataset kind), or `""` when none is.
         key: The wire key, parameter, or hand-input item concerned; `""` when none.
         message: What is wrong and what would fix it.
         description: The vendor's description of the field or parameter, when it has one.
@@ -146,10 +169,10 @@ class RefreshError(Exception):
 
 @dataclass(frozen=True, kw_only=True)
 class PathUse:
-    """What generating one path consumed, for the checks that span paths.
+    """What generating one source consumed, for the checks that span sources.
 
-    A generator fills one per path it attempts, even one that stopped on a problem, so a hand
-    entry for that path is not reported stale as well.
+    A generator fills one per source it attempts, even one that stopped on a problem, so a
+    hand entry for that source is not reported stale as well.
 
     Attributes:
         wire_keys: The dotted wire key of every leaf field.
@@ -159,9 +182,12 @@ class PathUse:
         identities: The `IDENTITY` keys the path used.
         concepts: Each generated column to its concept: the field's full long-name path, each
             segment in snake case (`last_trade.price`).
+        columns: Each generated field's wire key to its column.
         converted: The wire keys of the generated fields that have a conversion.
         needed_conversions: The wire keys of the fields with a conversion that some
             documented example value needs (a value the declared type alone refuses).
+        example_keys: The keys a documented example sends that the source does not declare,
+            each excused by a `SAMPLE_ERRORS` entry.
     """
 
     wire_keys: frozenset[str] = frozenset()
@@ -169,12 +195,14 @@ class PathUse:
     unit_bases: frozenset[str] = frozenset()
     identities: frozenset[str] = frozenset()
     concepts: Mapping[str, str] = field(default_factory=dict)
+    columns: Mapping[str, str] = field(default_factory=dict)
     converted: frozenset[str] = frozenset()
     needed_conversions: frozenset[str] = frozenset()
+    example_keys: frozenset[str] = frozenset()
 
 
 def concept_collisions(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
-    """Require one concept per column within each dataset kind.
+    """Require one concept per column, and one column per concept, within each dataset kind.
 
     A field's concept is its full long-name path, each segment in snake case (`day.close`,
     `last_trade.sip_timestamp`), so a snapshot's `DayClose`, `LastMinuteClose`, and
@@ -183,22 +211,46 @@ def concept_collisions(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator
     into one table, a column must always hold the same concept, or two quantities would land
     in one column: two paths can read alike once PascalCased (`last.trade_price` and
     `last_trade.price` both give `LastTradePrice`). The reverse, one concept in two columns,
-    cannot happen while a column is the PascalCase of its concept; the projections that rename
-    a kind member's fields extend the gate to it.
+    cannot happen while a column is the PascalCase of its concept, but a projection renames a
+    member's fields: its column holds the concept of its long name, and the field's own
+    concept must not also sit in another column of the kind.
 
     Args:
-        hand: The hand input, whose `kinds` lists each kind's sources.
-        uses: What each generated path consumed; a kind source with no entry adds nothing.
+        hand: The hand input, whose `kinds` lists each kind's sources and whose `projections`
+            rename some of them.
+        uses: What each generated source consumed; a kind source with no entry adds nothing.
 
     Yields:
-        One `concept-collision` problem per column that holds two concepts within a kind.
+        One `concept-collision` problem per column that holds two concepts within a kind, and
+        one per concept that sits in two columns.
     """
     for kind, groups in sorted(hand.kinds.items()):
         concepts: dict[str, set[str]] = {}
+        columns: dict[str, set[str]] = {}
         for source in (s for group in groups.values() for s in group):
-            use = uses.get(source)
-            for column, concept in (use.concepts if use else {}).items():
+            use = uses.get(source) or PathUse()
+            projection = hand.projections.get((kind, source))
+            if projection is None:
+                found = [(column, concept, concept) for column, concept in use.concepts.items()]
+            else:
+                renamed = [
+                    (
+                        naming.column_name([long_name]),
+                        naming.snake(long_name),
+                        use.concepts[use.columns[wire_key]],
+                    )
+                    for wire_key, long_name in projection.named.items()
+                    if wire_key in use.columns
+                ]
+                kept = [
+                    (column, use.concepts[column], use.concepts[column])
+                    for wire_key, column in use.columns.items()
+                    if projection.renames is not None and wire_key not in projection.renames
+                ]
+                found = [*renamed, *kept]
+            for column, concept, own in found:
                 concepts.setdefault(column, set()).add(concept)
+                columns.setdefault(own, set()).add(column)
         for column, names in sorted(concepts.items()):
             if len(names) > 1:
                 yield Problem(
@@ -207,12 +259,21 @@ def concept_collisions(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator
                     key=column,
                     message=f"kind {kind!r}: one column holds the concepts {sorted(names)}",
                 )
+        for concept, named in sorted(columns.items()):
+            if len(named) > 1:
+                yield Problem(
+                    gate=Gate.CONCEPT_COLLISION,
+                    source="",
+                    key=concept,
+                    message=f"kind {kind!r}: one concept sits in the columns {sorted(named)}",
+                )
 
 
 def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
-    """Report the hand entries that name a path, field, object, or parameter not generated.
+    """Report the hand entries that name a source, field, object, or parameter not generated.
 
-    The entries checked here are those whose staleness shows only once every path has run:
+    The entries checked here are those whose staleness shows only once every source of every
+    transport has run:
     `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `SAMPLE_ERRORS`, lexicon `SHAPES`,
     `PARAM_UNITS`, `IDENTITY`, and `RESULT_KEYS`. An entry the snapshot contradicts on a field
     it does generate is reported by the generator that meets the field.
@@ -234,7 +295,7 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
     for table, keys in field_tables:
         for path, wire_key in keys:
             use = uses.get(path)
-            if use is None or wire_key not in use.wire_keys:
+            if use is None or wire_key not in use.wire_keys | use.example_keys:
                 yield Problem(
                     gate=Gate.STALE_ENTRY,
                     source=path,
@@ -283,13 +344,12 @@ def unneeded_type_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterato
     A widening conversion (`Conversion.widens`) exists because a documented sample is in a form
     the declared type refuses. Once no example value of any field the fix names is such a value
     (Massive corrected its sample), the fix is stale. One `TypeFix` object is one decision: the
-    entries `_for` makes from it over a group of paths are needed while any of them is, while
+    entries it fixes, across sources and transports, are needed while any of them is, while
     two fixes written separately are judged separately, however alike. A conversion that only
-    retypes values its declared type accepts (`iso-text-instant`, `quoted-integer`,
-    `integer-id-as-text`, `one-code`) is exempt: it is needed for as long as the specification
-    declares the type, and the declared-type check retires it once that changes. A field that
-    was not generated with its conversion (it stopped on another problem, or the entry is
-    already stale) is left to the check that reported it.
+    retypes values its declared type accepts (`iso-text-instant`) is exempt: it is needed for
+    as long as the specification declares the type, and the declared-type check retires it
+    once that changes. A field that was not generated with its conversion (it stopped on
+    another problem, or the entry is already stale) is left to the check that reported it.
 
     Args:
         hand: The hand input.

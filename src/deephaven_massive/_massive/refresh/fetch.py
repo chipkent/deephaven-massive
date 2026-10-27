@@ -7,9 +7,16 @@ vendored snapshot (`vendor/massive/` in the source checkout, whose layout and ma
 - `openapi.json`: the REST specification from `https://api.massive.com/openapi`. The older
   `https://api.massive.com/specs/rest.json` is a stale subset of about 33 paths and is never
   used;
+- `websocket.json`: the WebSocket specification from
+  `https://api.massive.com/specs/websocket.json`;
 - `llms.txt`: the documentation index from `https://massive.com/docs/llms.txt`;
 - `rest/<area>/.../<page>.md`: every REST documentation page the index links, which is how the
   refresh learns which OpenAPI paths are documented (see `docs`);
+- `websocket/<class>/<page>.md`: every WebSocket documentation page the index links, which
+  names the cluster and channel of its feed;
+- `flat-files/<class>/.../<page>.md`: every flat-file documentation page the index links: the
+  overviews, whose tables name each dataset's bucket prefix, and the dataset pages, whose
+  "Columns" tables are the flat-file schemas;
 - `manifest.json`: the fetch date and, for each file above, its URL, the SHA-256 of the bytes
   as fetched, and the SHA-256 of the file as stored.
 
@@ -22,8 +29,9 @@ final newline. The stored hash covers that canonical form, the fetched hash the 
 
 **Untrusted input.** The downloads are data, never code: JSON is parsed with the standard
 library, text is decoded as UTF-8, nothing is evaluated, and a page URL is accepted only below
-`https://massive.com/docs/rest/` with plain lower-case path segments (`docs.page_file`), so no
-URL can name a file outside the snapshot. Every download completes, and every file is
+its area's prefix (`https://massive.com/docs/rest/`, `.../websocket/`, or `.../flat-files/`)
+with plain lower-case path segments (`docs.page_file`), so no URL can name a file outside the
+snapshot. Every download completes, and every file is
 canonicalized, before anything is written; `snapshot.store` then builds the new snapshot in
 a sibling directory and swaps it in through a backup directory, so a failed fetch leaves the
 old snapshot untouched.
@@ -56,6 +64,7 @@ if TYPE_CHECKING:
 __all__ = [
     "LLMS_URL",
     "OPENAPI_URL",
+    "WEBSOCKET_URL",
     "FetchError",
     "HttpGetter",
     "canonical_json",
@@ -65,6 +74,9 @@ __all__ = [
 
 OPENAPI_URL = "https://api.massive.com/openapi"
 """Where Massive publishes its full REST specification."""
+
+WEBSOCKET_URL = "https://api.massive.com/specs/websocket.json"
+"""Where Massive publishes its WebSocket specification."""
 
 LLMS_URL = "https://massive.com/docs/llms.txt"
 """Where Massive publishes its documentation index."""
@@ -262,29 +274,33 @@ def _download(get: Callable[[str], bytes]) -> list[snapshot.VendorFile]:
     A `FetchError` from `get` or from canonicalizing a document propagates.
 
     Returns:
-        The specification, the index, then the REST pages in index order.
+        The two specifications, the index, then the pages of each documentation area (REST,
+        WebSocket, flat files), each area in index order.
 
     Raises:
-        FetchError: If the index links a page outside the REST documentation.
+        FetchError: If the index links no page of an area, or a page outside its area's
+            documentation.
     """
-    spec = get(OPENAPI_URL)
-    stored_spec = canonical_json(spec, OPENAPI_URL)
-    files = [
-        snapshot.VendorFile(name=snapshot.OPENAPI, url=OPENAPI_URL, raw=spec, stored=stored_spec)
-    ]
+    files = []
+    for name, url in ((snapshot.OPENAPI, OPENAPI_URL), (snapshot.WEBSOCKET, WEBSOCKET_URL)):
+        raw = get(url)
+        files.append(
+            snapshot.VendorFile(name=name, url=url, raw=raw, stored=canonical_json(raw, url))
+        )
     index_raw = get(LLMS_URL)
     index = canonical_text(index_raw, LLMS_URL)
     files.append(snapshot.VendorFile(name=snapshot.LLMS, url=LLMS_URL, raw=index_raw, stored=index))
-    try:
-        urls = docs.rest_page_urls(index.decode())
-    except docs.DocsError as error:
-        raise FetchError(f"{LLMS_URL}: {error}") from None
-    for url in urls:
-        page = get(url)
-        name = snapshot.page_file(url)
-        files.append(
-            snapshot.VendorFile(name=name, url=url, raw=page, stored=canonical_text(page, url))
-        )
+    for area in snapshot.AREA_DIRECTORIES:
+        try:
+            urls = docs.page_urls(index.decode(), area)
+        except docs.DocsError as error:
+            raise FetchError(f"{LLMS_URL}: {error}") from None
+        for url in urls:
+            page = get(url)
+            name = snapshot.page_file(url, area)
+            files.append(
+                snapshot.VendorFile(name=name, url=url, raw=page, stored=canonical_text(page, url))
+            )
     return files
 
 
@@ -307,8 +323,8 @@ def fetch(
             when omitted. Network access happens only through it.
         today: The fetch date written to the manifest; today's UTC date when omitted.
 
-    A `FetchError` (a download failed, the specification is not JSON, a document is not
-    UTF-8, or the index links a page outside the REST documentation) propagates and leaves
+    A `FetchError` (a download failed, a specification is not JSON, a document is not UTF-8,
+    or the index links no page of an area or a page outside its area) propagates and leaves
     the snapshot unchanged.
 
     Returns:

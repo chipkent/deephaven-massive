@@ -148,14 +148,15 @@ jobs:
       - name: Build wheel and sdist
         run: uv build --python 3.11
       - name: Check the distributions ship the wire schema and no refresh code or vendor files
-        # The refresh runs from a source checkout only; the generated spec/*.json (the schema
-        # and the vendor's field descriptions) are package data the library loads at run time.
+        # The refresh runs from a source checkout only; the generated spec/*.json (the REST,
+        # WebSocket, and flat-file schemas and the vendor's field descriptions) are package
+        # data the library loads at run time.
         # The vendored snapshot under vendor/ is Massive's published content and goes in
         # neither distribution.
         run: |
           unzip -Z1 dist/*.whl > "$RUNNER_TEMP/wheel-files.txt"
           tar -tzf dist/*.tar.gz > "$RUNNER_TEMP/sdist-files.txt"
-          for name in rest.json descriptions.json; do
+          for name in rest.json ws.json flatfiles.json descriptions.json; do
             grep -qx "deephaven_massive/_massive/spec/$name" "$RUNNER_TEMP/wheel-files.txt" \
               || { echo "the wheel lacks spec/$name" >&2; exit 1; }
           done

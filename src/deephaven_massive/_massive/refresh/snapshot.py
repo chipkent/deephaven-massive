@@ -7,8 +7,11 @@ generation input: they are not covered by the repository's license and go in nei
 wheel nor the sdist, so the refresh runs from a source checkout only. The layout is:
 
 - `openapi.json`: the REST specification;
+- `websocket.json`: the WebSocket specification;
 - `llms.txt`: the documentation index;
 - `rest/<area>/.../<page>.md`: every REST documentation page the index links;
+- `websocket/<class>/<page>.md`: every WebSocket documentation page the index links;
+- `flat-files/<class>/.../<page>.md`: every flat-file documentation page the index links;
 - `manifest.json`: the fetch date and, for each file above, its URL, the SHA-256 of the bytes
   as fetched, and the SHA-256 of the file as stored.
 
@@ -27,8 +30,9 @@ import datetime as dt
 import hashlib
 import json
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
 
@@ -41,11 +45,12 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.refresh.openapi import Json, JsonObject
 
 __all__ = [
+    "AREA_DIRECTORIES",
     "DIRECTORY",
     "LLMS",
     "MANIFEST",
     "OPENAPI",
-    "REST_PAGES",
+    "WEBSOCKET",
     "Snapshot",
     "VendorFile",
     "page_file",
@@ -61,8 +66,13 @@ OPENAPI: Final = "openapi.json"
 LLMS: Final = "llms.txt"
 """The snapshot file of the documentation index."""
 
-REST_PAGES: Final = "rest"
-"""The snapshot directory of the REST documentation pages."""
+WEBSOCKET: Final = "websocket.json"
+"""The snapshot file of the WebSocket specification."""
+
+AREA_DIRECTORIES: Final[Mapping[docs.Area, str]] = MappingProxyType(
+    {docs.REST: "rest", docs.WEBSOCKET: "websocket", docs.FLAT_FILES: "flat-files"}
+)
+"""The snapshot directory of each documentation area's pages."""
 
 MANIFEST: Final = "manifest.json"
 """The snapshot file that records where every other file came from."""
@@ -72,20 +82,22 @@ MANIFEST: Final = "manifest.json"
 _OS_LITTER: Final = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
 
 
-def page_file(url: str) -> str:
-    """Return where the snapshot stores a REST documentation page.
+def page_file(url: str, area: docs.Area) -> str:
+    """Return where the snapshot stores a documentation page.
 
     `fetch` writes each page here and `Snapshot.load` reads it back, so the layout has one
-    owner. A URL that is not a REST documentation page raises `docs.DocsError`
-    (`docs.page_file` checks it).
+    owner. A URL that is not a page of the area raises `docs.DocsError` (`docs.page_file`
+    checks it).
 
     Args:
         url: A page URL the documentation index links.
+        area: The documentation area the page belongs to.
 
     Returns:
-        The page's name relative to the snapshot directory, `rest/<area>/.../<page>.md`.
+        The page's name relative to the snapshot directory, such as
+        `rest/<area>/.../<page>.md`.
     """
-    return f"{REST_PAGES}/{docs.page_file(url)}"
+    return f"{AREA_DIRECTORIES[area]}/{docs.page_file(url, area)}"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -185,7 +197,8 @@ def store(directory: Path, files: Sequence[VendorFile], *, fetched: dt.date) -> 
 class Snapshot:
     """The vendor sources the generators read, already parsed and verified.
 
-    Created by `load` from a snapshot directory, or by a test directly. Immutable.
+    Created by `load` from a snapshot directory, or by a test directly; a test of one
+    generator may leave the other transports' sources empty. Immutable.
 
     Example:
         ::
@@ -206,6 +219,13 @@ class Snapshot:
             downloaded from, as the manifest records it.
         index_url: The URL the documentation index was downloaded from, as the manifest
             records it (`"https://massive.com/docs/llms.txt"`).
+        websocket: The WebSocket specification; empty when a test gives none.
+        websocket_pages: Each WebSocket page the index links, by its name below the
+            snapshot's `websocket/` directory (`"stocks/trades.md"`), as text.
+        websocket_page_urls: Each WebSocket page, by the same name, mapped to its URL.
+        flat_file_pages: Each flat-file page the index links, by its name below the
+            snapshot's `flat-files/` directory (`"stocks/trades.md"`), as text.
+        flat_file_page_urls: Each flat-file page, by the same name, mapped to its URL.
     """
 
     openapi: JsonObject
@@ -214,6 +234,11 @@ class Snapshot:
     fetched: dt.date
     page_urls: Mapping[str, str]
     index_url: str
+    websocket: JsonObject = field(default_factory=dict)
+    websocket_pages: Mapping[str, str] = field(default_factory=dict)
+    websocket_page_urls: Mapping[str, str] = field(default_factory=dict)
+    flat_file_pages: Mapping[str, str] = field(default_factory=dict)
+    flat_file_page_urls: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def origin(self) -> str:
@@ -241,10 +266,10 @@ class Snapshot:
 
         Raises:
             RefreshError: If the directory does not exist (the refresh runs from a source
-                checkout only), the manifest or the specification is not a JSON object, the
+                checkout only), the manifest or a specification is not a JSON object, the
                 manifest's fetch date is not an ISO date, a file's hash differs from the
                 manifest's or the manifest records no URL for it, a file is on disk but not in
-                the manifest or the reverse, or a REST page the index links is missing.
+                the manifest or the reverse, or a page the index links is missing.
         """
         directory = directory or DIRECTORY
         if not directory.is_dir():
@@ -261,8 +286,11 @@ class Snapshot:
             )
         manifest = json.loads((directory / MANIFEST).read_text(encoding="utf-8"))
         openapi = json.loads((directory / OPENAPI).read_text(encoding="utf-8"))
+        websocket = json.loads((directory / WEBSOCKET).read_text(encoding="utf-8"))
         files = manifest.get("files") if isinstance(manifest, dict) else None
-        if not isinstance(files, dict) or not isinstance(openapi, dict):
+        if not (
+            isinstance(files, dict) and isinstance(openapi, dict) and isinstance(websocket, dict)
+        ):
             raise RefreshError(
                 [Problem(gate=Gate.SNAPSHOT, source="", key="", message="not a JSON object")]
             )
@@ -281,33 +309,68 @@ class Snapshot:
             )
             raise RefreshError(problems) from None
         llms = (directory / LLMS).read_text(encoding="utf-8")
-        pages: dict[str, str] = {}
-        for url in docs.rest_page_urls(llms):
-            stored = page_file(url)
-            name = stored.removeprefix(f"{REST_PAGES}/")
-            path = directory / stored
-            if path.is_file():
-                pages[name] = path.read_text(encoding="utf-8")
-            else:
-                problems.append(
-                    Problem(
-                        gate=Gate.DOCS,
-                        source="",
-                        key=name,
-                        message=f"the index links {url} but the snapshot lacks the page",
-                    )
-                )
+        pages = {
+            area: _pages(directory, llms, area, problems=problems) for area in AREA_DIRECTORIES
+        }
         if problems:
             raise RefreshError(problems)
-        # Every file passed `_verify`, so the manifest records a URL for each one read here.
+        # Every file passed `_verify`, so the manifest records a URL for each page read here.
+        located = {
+            area: {name: urls[f"{AREA_DIRECTORIES[area]}/{name}"] for name in pages[area]}
+            for area in AREA_DIRECTORIES
+        }
         return cls(
             openapi=openapi,
             llms=llms,
-            pages=pages,
+            pages=pages[docs.REST],
             fetched=fetched,
-            page_urls={name: urls[f"{REST_PAGES}/{name}"] for name in pages},
+            page_urls=located[docs.REST],
             index_url=urls[LLMS],
+            websocket=websocket,
+            websocket_pages=pages[docs.WEBSOCKET],
+            websocket_page_urls=located[docs.WEBSOCKET],
+            flat_file_pages=pages[docs.FLAT_FILES],
+            flat_file_page_urls=located[docs.FLAT_FILES],
         )
+
+
+def _pages(
+    directory: Path, llms: str, area: docs.Area, *, problems: list[Problem]
+) -> dict[str, str]:
+    """Read the pages of one documentation area that the index links.
+
+    Args:
+        directory: The snapshot directory.
+        llms: The text of the documentation index.
+        area: The documentation area.
+        problems: Where an index with no link in the area, or a malformed one, and a page the
+            index links but the snapshot lacks are reported (`docs`).
+
+    Returns:
+        Each page that is present, by its name below the area's directory, as text.
+    """
+    pages: dict[str, str] = {}
+    try:
+        urls = docs.page_urls(llms, area)
+    except docs.DocsError as error:
+        problems.append(Problem(gate=Gate.DOCS, source="", key=LLMS, message=str(error)))
+        return pages
+    for url in urls:
+        stored = page_file(url, area)
+        name = stored.removeprefix(f"{AREA_DIRECTORIES[area]}/")
+        path = directory / stored
+        if path.is_file():
+            pages[name] = path.read_text(encoding="utf-8")
+        else:
+            problems.append(
+                Problem(
+                    gate=Gate.DOCS,
+                    source="",
+                    key=name,
+                    message=f"the index links {url} but the snapshot lacks the page",
+                )
+            )
+    return pages
 
 
 def _os_litter(name: str) -> bool:
@@ -315,8 +378,8 @@ def _os_litter(name: str) -> bool:
 
     Finder writes `.DS_Store` and `._*` (AppleDouble) files, and Windows Explorer `Thumbs.db`
     and `desktop.ini`, merely when a person views a folder. No vendor file can have such a
-    name (every stored name is fixed or a lower-case `.md` page below `rest/`), so ignoring
-    them hides no edit; any other stray file still stops the refresh.
+    name (every stored name is fixed or a lower-case `.md` page below a page directory), so
+    ignoring them hides no edit; any other stray file still stops the refresh.
 
     Args:
         name: A file's name, without its directory.

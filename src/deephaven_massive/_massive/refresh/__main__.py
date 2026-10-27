@@ -3,14 +3,15 @@
 Run it from a source checkout with `uv run`; neither the package nor the vendored snapshot it
 reads (`vendor/massive/`) is in a distribution.
 
-- With no option, it regenerates `spec/rest.json` and `spec/descriptions.json` from the
-  vendored snapshot, checking every refresh gate first, and prints each file it changed. It
-  reads no network. When a gate stops it, it prints every problem (the gate, the path, the
-  key, and the vendor's description) and exits with status 1, having written nothing.
-- With `--fetch`, it replaces the snapshot with the live vendor sources (the OpenAPI
-  specification, the documentation index, and the REST pages the index links) and stops; run
-  it again without the option to regenerate from the new snapshot. A failed download leaves
-  the old snapshot in place and exits with status 1.
+- With no option, it regenerates `spec/rest.json`, `spec/ws.json`, `spec/flatfiles.json`,
+  and `spec/descriptions.json` from the vendored snapshot, checking every refresh gate first,
+  and prints each file it changed. It reads no network. When a gate stops it, it prints every
+  problem (the gate, the source, the key, and the vendor's description) and exits with status
+  1, having written nothing.
+- With `--fetch`, it replaces the snapshot with the live vendor sources (the OpenAPI and
+  WebSocket specifications, the documentation index, and the REST, WebSocket, and flat-file
+  pages the index links) and stops; run it again without the option to regenerate from the
+  new snapshot. A failed download leaves the old snapshot in place and exits with status 1.
 
 Review the snapshot diff and the `spec/*.json` diff together in one pull request.
 """

@@ -1,14 +1,15 @@
 """The vendor items the refresh deliberately does not generate, each with its reason.
 
-`EXCLUSIONS` lists the REST paths that are in Massive's OpenAPI specification but get no
-generated source. Each entry names an item present in the pinned snapshot; one that names an
-item the snapshot lacks fails the refresh as stale, so the list can never silently outlive
-the vendor's own sources. Endpoints that are absent from every vendor source are not listed
-here; the design documents them so nobody re-adds them.
+`EXCLUSIONS` lists the items that are in a vendor source but get no generated source: REST
+paths of the OpenAPI specification, WebSocket channels of the WebSocket specification, and
+flat-file prefixes of the flat-file overview pages. Each entry names an item present in the
+pinned snapshot; one that names an item the snapshot lacks fails the refresh as stale, so the
+list can never silently outlive the vendor's own sources. Endpoints that are absent from every
+vendor source are not listed here; the design documents them so nobody re-adds them.
 
-A path the specification marks deprecated (`x-polygon-deprecation`) or draft
+A path or channel the specification marks deprecated (`x-polygon-deprecation`) or draft
 (`x-polygon-draft`) is never generated and never listed here: the specification already
-accounts for it. So every path of the specification is exactly one of generated, excluded,
+accounts for it. So every item of the vendor sources is exactly one of generated, excluded,
 or deprecated-or-draft, and the refresh checks that it is.
 
 `undocumented=True` marks a path the documentation never mentions: no REST page that
@@ -21,8 +22,9 @@ disappears.
 documented example value of a field that is wrong while the field's type is right (a CUSIP
 that lost its leading zero by being written as a number). The `example-type` gate skips
 exactly that value of that field; a `TYPE_FIXES` entry would instead loosen the type to
-accept the wrong form. An entry whose sample the snapshot no longer shows, or no longer
-refuses, fails the refresh as stale.
+accept the wrong form. It also excuses a key a WebSocket example sends that the message
+schema does not declare (the futures trade's `z`). An entry whose sample the snapshot no
+longer shows, or no longer refuses, fails the refresh as stale.
 """
 
 from __future__ import annotations
@@ -44,9 +46,11 @@ class Exclusion:
 
     Attributes:
         kind: The transport of the item.
-        item: The REST path template exactly as the specification spells it.
+        item: The item exactly as its vendor source spells it: a REST path template, a
+            WebSocket specification path (`"/launchpad/stocks/AM"`), or a flat-file prefix.
         reason: Why it is excluded, for the reviewer.
-        undocumented: True when the reason is that no documentation page names the item.
+        undocumented: True when the reason is that no documentation page names the item; only
+            REST exclusions use it.
     """
 
     kind: Transport
@@ -72,6 +76,27 @@ def _rest(item: str, reason: str, *, undocumented: bool = False) -> Exclusion:
         The entry.
     """
     return Exclusion(kind=Transport.REST, item=item, reason=reason, undocumented=undocumented)
+
+
+def _launchpad() -> tuple[Exclusion, ...]:
+    """Return the exclusions of the retired Launchpad channels.
+
+    The WebSocket specification still lists Massive's Launchpad feeds (an aggregate `AM` and a
+    value `LV` channel per asset class, under `/launchpad/`), but Massive retired the product
+    on 2025-06-30, and no documentation page describes them.
+
+    Returns:
+        One exclusion per Launchpad channel.
+    """
+    return tuple(
+        Exclusion(
+            kind=Transport.WS,
+            item=f"/launchpad/{cluster}/{channel}",
+            reason="Launchpad, a retired product; no WebSocket documentation page describes it.",
+        )
+        for cluster in ("stocks", "options", "forex", "crypto")
+        for channel in ("AM", "LV")
+    )
 
 
 def _indicator_variants() -> tuple[Exclusion, ...]:
@@ -120,6 +145,8 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
     _rest("/v1/reference/ipos", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/dev/trades/{ticker}", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/filings/10-K/vX_0/sections", _UNDOCUMENTED, undocumented=True),
+    _rest("/stocks/insiders/vX/activity", _UNDOCUMENTED, undocumented=True),
+    _rest("/stocks/insiders/vX/holdings", _UNDOCUMENTED, undocumented=True),
     _rest(
         "/v2/snapshot/locale/us/markets/stocks/tickers/{stocksTicker}",
         "Covered by the stocks snapshots dataset, which sends the `tickers` filter to the "
@@ -141,6 +168,7 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
         "the same fields for a contract.",
     ),
     *_indicator_variants(),
+    *_launchpad(),
 )
 """Every excluded vendor item."""
 
@@ -150,8 +178,10 @@ class SampleError:
     """One documented example value the refresh does not believe, because the sample is wrong.
 
     Attributes:
-        path: The REST path template exactly as the specification spells it.
-        wire_key: The field's dotted wire key.
+        path: The source key: a REST path template exactly as the specification spells it, or
+            a WebSocket `"<cluster>/<channel>"`.
+        wire_key: The field's dotted wire key, or a key the example sends that the source does
+            not declare.
         sample: The wrong example value, exactly as the specification gives it.
         reason: Why the sample, not the field's type, is wrong.
     """
@@ -163,6 +193,15 @@ class SampleError:
 
 
 SAMPLE_ERRORS: tuple[SampleError, ...] = (
+    SampleError(
+        path="futures/T",
+        wire_key="z",
+        sample=3,
+        reason="The futures trade example sends `z`, which the message schema does not declare "
+        "and no futures source carries (the stocks trade's `z` is its tape, which futures have "
+        "not). Taken as a leftover of the stocks example; a live `z` is dropped and reported "
+        "as drift.",
+    ),
     SampleError(
         path="/vX/reference/ipos",
         wire_key="us_code",

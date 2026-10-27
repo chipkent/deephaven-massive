@@ -1,8 +1,17 @@
+import json
+import os
 from typing import cast
 
 import pytest
 
 from deephaven_massive._massive.refresh import lexicon
+from deephaven_massive._massive.refresh.openapi import OpenApi, properties
+from deephaven_massive._massive.refresh.snapshot import DIRECTORY
+
+_requires_snapshot = pytest.mark.skipif(
+    not DIRECTORY.is_dir() and "CI" not in os.environ,
+    reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",
+)
 
 
 def test_every_shape_names_a_lexicon() -> None:
@@ -17,17 +26,28 @@ def test_lexicons_are_keyed_by_their_names() -> None:
     assert all(name == lex.name for name, lex in lexicon.LEXICONS.items())
 
 
+# The abbreviations longer than a short key: the WebSocket trade's TRF fields.
+_LONG_ABBREVIATIONS = {"trfi": "trf_id", "trft": "trf_timestamp"}
+
+
 @pytest.mark.parametrize("lex", lexicon.LEXICONS.values(), ids=lambda lex: lex.name)
-def test_every_lexicon_entry_is_a_short_key_to_a_cited_snake_case_name(
+def test_every_lexicon_entry_is_an_abbreviation_to_a_cited_snake_case_name(
     lex: lexicon.Lexicon,
 ) -> None:
     assert lex.reason
     for short, entry in lex.entries.items():
-        assert len(short) <= 3, short
+        assert len(short) <= 3 or _LONG_ABBREVIATIONS[short] == entry.long_name, short
         assert "_" not in short, short
+        assert short != entry.long_name, short
         assert entry.long_name == entry.long_name.lower(), entry
         assert " " not in entry.long_name, entry
         assert entry.source, entry
+
+
+def test_a_python_keyword_key_is_spelled_as_the_vendor_does() -> None:
+    # The WebSocket ask size `as` is written `as_` in the table and stored as `as`.
+    assert _long("quote", "as") == "ask_size"
+    assert "as_" not in lexicon.LEXICONS["quote"].entries
 
 
 def test_every_identity_entry_is_short_and_has_a_reason() -> None:
@@ -48,6 +68,12 @@ def test_one_short_key_means_different_things_in_different_shapes() -> None:
     assert _long("trade", "t") == "sip_timestamp"
     assert _long("quote", "s") == "bid_size"
     assert _long("trade", "s") == "size"
+    # `dv` is a stock bar's fractional volume and a futures bar's dollar volume; `z` is a
+    # trade's tape, while an aggregate's average trade size has no long name anywhere (NAMES).
+    assert _long("stocks_bar", "dv") == "decimal_volume"
+    assert _long("futures_bar", "dv") == "dollar_volume"
+    assert _long("trade", "z") == "tape"
+    assert "z" not in lexicon.LEXICONS["aggregate"].entries
 
 
 def test_one_field_gets_one_name_across_endpoints() -> None:
@@ -68,6 +94,36 @@ def test_a_lexicon_copies_and_freezes_its_entries() -> None:
     assert lex.entries == {"p": price}
     with pytest.raises(TypeError):
         cast("dict[str, lexicon.LongName]", lex.entries)["s"] = price
+
+
+def test_every_websocket_channel_has_one_message_shape() -> None:
+    channels = {source for source, _ in lexicon.SHAPES if not source.startswith("/")}
+    assert len(channels) == 28
+    assert all(lexicon.SHAPES.get((c, "")) for c in channels)
+    bars = {c for c in channels if lexicon.SHAPES[c, ""].endswith(("aggregate", "_bar"))}
+    assert len(bars) == 12
+
+
+def test_the_day_vwap_is_named_from_the_snapshots_day_bar() -> None:
+    entry = lexicon.LEXICONS["aggregate"].entries["a"]
+    assert entry.long_name == "day_vwap"
+    assert "`day.vwap`" in entry.source
+
+
+@_requires_snapshot
+def test_the_crypto_quote_names_are_crypto_s_own_last_quote_keys() -> None:
+    # The lexicon cites the crypto unified snapshot's `last_quote`: its keys must be there.
+    openapi = json.loads((DIRECTORY / "openapi.json").read_text(encoding="utf-8"))
+    spec = OpenApi(openapi)
+    media = openapi["paths"]["/v3/snapshot"]["get"]["responses"]["200"]["content"]
+    body = properties(spec.schema(media["application/json"]["schema"], "/v3/snapshot")) or {}
+    results = spec.schema(body["results"], "/v3/snapshot")
+    item = properties(spec.schema(results["items"], "/v3/snapshot")) or {}
+    last_quote = properties(spec.schema(item["last_quote"], "/v3/snapshot")) or {}
+    entries = lexicon.LEXICONS["crypto_quote"].entries
+    for short in ("ap", "bp", "as", "bs"):
+        assert entries[short].source.startswith("/v3/snapshot `last_quote`"), short
+        assert entries[short].long_name in last_quote, short
 
 
 def test_the_range_paths_are_the_aggregate_range_templates() -> None:

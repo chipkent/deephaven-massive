@@ -1,14 +1,214 @@
 {
  "fetched": "2026-10-27",
  "files": {
+  "flat-files/crypto/day-aggregates.md": {
+   "fetched_sha256": "1c0293db35f8951550d720f51da23b8599c62925f66c91278ab6ca2e80b2f053",
+   "stored_sha256": "1c0293db35f8951550d720f51da23b8599c62925f66c91278ab6ca2e80b2f053",
+   "url": "https://massive.com/docs/flat-files/crypto/day-aggregates.md"
+  },
+  "flat-files/crypto/minute-aggregates.md": {
+   "fetched_sha256": "ff2e42a3f014c3092ac7d9d10fde3d9cce90082b55cdab138a06c59f6662afa4",
+   "stored_sha256": "ff2e42a3f014c3092ac7d9d10fde3d9cce90082b55cdab138a06c59f6662afa4",
+   "url": "https://massive.com/docs/flat-files/crypto/minute-aggregates.md"
+  },
+  "flat-files/crypto/overview.md": {
+   "fetched_sha256": "66ccb0f2712ae22d6b9fffec5261dad6915f9b228d6877813cfc9676350b34fa",
+   "stored_sha256": "66ccb0f2712ae22d6b9fffec5261dad6915f9b228d6877813cfc9676350b34fa",
+   "url": "https://massive.com/docs/flat-files/crypto/overview.md"
+  },
+  "flat-files/crypto/trades.md": {
+   "fetched_sha256": "9260ff9bc01681ef5ebe86cbb9ea11d5dc64b5440b1a19c238c5642a09628a34",
+   "stored_sha256": "9260ff9bc01681ef5ebe86cbb9ea11d5dc64b5440b1a19c238c5642a09628a34",
+   "url": "https://massive.com/docs/flat-files/crypto/trades.md"
+  },
+  "flat-files/forex/day-aggregates.md": {
+   "fetched_sha256": "3d06e952aa7c3f48489df4e9fb5b2735fcd1938a49cc0a4c9ffef3a592ff2b5b",
+   "stored_sha256": "3d06e952aa7c3f48489df4e9fb5b2735fcd1938a49cc0a4c9ffef3a592ff2b5b",
+   "url": "https://massive.com/docs/flat-files/forex/day-aggregates.md"
+  },
+  "flat-files/forex/minute-aggregates.md": {
+   "fetched_sha256": "a3a18ba47049f4408f86e657f4a0f532db6f2dddc66bd055212369704ea8c2d1",
+   "stored_sha256": "a3a18ba47049f4408f86e657f4a0f532db6f2dddc66bd055212369704ea8c2d1",
+   "url": "https://massive.com/docs/flat-files/forex/minute-aggregates.md"
+  },
+  "flat-files/forex/overview.md": {
+   "fetched_sha256": "6b3aaa26c710fb7dd1ca989dbbb054ae53fbb68ed5cf9f5bd2da6e0976bf00d7",
+   "stored_sha256": "6b3aaa26c710fb7dd1ca989dbbb054ae53fbb68ed5cf9f5bd2da6e0976bf00d7",
+   "url": "https://massive.com/docs/flat-files/forex/overview.md"
+  },
+  "flat-files/forex/quotes.md": {
+   "fetched_sha256": "80c92a10ce436836210aa055a1caa4bb17025474cd59b031f4bf774454c33503",
+   "stored_sha256": "80c92a10ce436836210aa055a1caa4bb17025474cd59b031f4bf774454c33503",
+   "url": "https://massive.com/docs/flat-files/forex/quotes.md"
+  },
+  "flat-files/futures/minute-aggregates/cbot.md": {
+   "fetched_sha256": "ea2fd10399a79d9faced4efb2e3a41d4c40607935119ca9337f2c562cd97efb4",
+   "stored_sha256": "ea2fd10399a79d9faced4efb2e3a41d4c40607935119ca9337f2c562cd97efb4",
+   "url": "https://massive.com/docs/flat-files/futures/minute-aggregates/cbot.md"
+  },
+  "flat-files/futures/minute-aggregates/cme.md": {
+   "fetched_sha256": "93e0dfe0f58d69e0baa44159b39ddbe4bfdccf7ae2d5d17d7aa418e52aaadaa0",
+   "stored_sha256": "93e0dfe0f58d69e0baa44159b39ddbe4bfdccf7ae2d5d17d7aa418e52aaadaa0",
+   "url": "https://massive.com/docs/flat-files/futures/minute-aggregates/cme.md"
+  },
+  "flat-files/futures/minute-aggregates/comex.md": {
+   "fetched_sha256": "435f6077f860da40f628165d92653501f0cdaedd4dddd6fdd68f4ce9c92019bb",
+   "stored_sha256": "435f6077f860da40f628165d92653501f0cdaedd4dddd6fdd68f4ce9c92019bb",
+   "url": "https://massive.com/docs/flat-files/futures/minute-aggregates/comex.md"
+  },
+  "flat-files/futures/minute-aggregates/nymex.md": {
+   "fetched_sha256": "8b5046247c56f6434c171d23f7259ed27a29cc6c4ea0f9e17a766b5bbadc9a92",
+   "stored_sha256": "8b5046247c56f6434c171d23f7259ed27a29cc6c4ea0f9e17a766b5bbadc9a92",
+   "url": "https://massive.com/docs/flat-files/futures/minute-aggregates/nymex.md"
+  },
+  "flat-files/futures/overview.md": {
+   "fetched_sha256": "5d0cbfa3ed90df91cd9aa1fd7edd542283e42af1fb2f41fe2aa7abe1891f2978",
+   "stored_sha256": "5d0cbfa3ed90df91cd9aa1fd7edd542283e42af1fb2f41fe2aa7abe1891f2978",
+   "url": "https://massive.com/docs/flat-files/futures/overview.md"
+  },
+  "flat-files/futures/quotes/cbot.md": {
+   "fetched_sha256": "0986f2bad435a4c3d609b881568bf4a95b4941ed8dbc390f06cc9745d016606b",
+   "stored_sha256": "0986f2bad435a4c3d609b881568bf4a95b4941ed8dbc390f06cc9745d016606b",
+   "url": "https://massive.com/docs/flat-files/futures/quotes/cbot.md"
+  },
+  "flat-files/futures/quotes/cme.md": {
+   "fetched_sha256": "ec16147e790fed709c126343cb9dcade14099b4a7287103ab6f1ded9d4cb359f",
+   "stored_sha256": "ec16147e790fed709c126343cb9dcade14099b4a7287103ab6f1ded9d4cb359f",
+   "url": "https://massive.com/docs/flat-files/futures/quotes/cme.md"
+  },
+  "flat-files/futures/quotes/comex.md": {
+   "fetched_sha256": "2319ae5e255f227837fd0b5dfac921c80558cfd55615bc0802ecacdf0cb7377a",
+   "stored_sha256": "2319ae5e255f227837fd0b5dfac921c80558cfd55615bc0802ecacdf0cb7377a",
+   "url": "https://massive.com/docs/flat-files/futures/quotes/comex.md"
+  },
+  "flat-files/futures/quotes/nymex.md": {
+   "fetched_sha256": "a53804e996ee1fcf2bcbb0386449047f9293ae63a8c519cbbf8abb09c299b793",
+   "stored_sha256": "a53804e996ee1fcf2bcbb0386449047f9293ae63a8c519cbbf8abb09c299b793",
+   "url": "https://massive.com/docs/flat-files/futures/quotes/nymex.md"
+  },
+  "flat-files/futures/session-aggregates/cbot.md": {
+   "fetched_sha256": "80a3a7ca9293a38462a199873880bc13a3fc5d9922802fda8c46da063efcbe77",
+   "stored_sha256": "80a3a7ca9293a38462a199873880bc13a3fc5d9922802fda8c46da063efcbe77",
+   "url": "https://massive.com/docs/flat-files/futures/session-aggregates/cbot.md"
+  },
+  "flat-files/futures/session-aggregates/cme.md": {
+   "fetched_sha256": "636309223ed501b692a88433fcbea534fc6490d837796d172f8010c9c0f8096f",
+   "stored_sha256": "636309223ed501b692a88433fcbea534fc6490d837796d172f8010c9c0f8096f",
+   "url": "https://massive.com/docs/flat-files/futures/session-aggregates/cme.md"
+  },
+  "flat-files/futures/session-aggregates/comex.md": {
+   "fetched_sha256": "3d97f33993d97cd7916ac03ca94a533f873f1a1b5f7c1d4620732fc95d5ddf24",
+   "stored_sha256": "3d97f33993d97cd7916ac03ca94a533f873f1a1b5f7c1d4620732fc95d5ddf24",
+   "url": "https://massive.com/docs/flat-files/futures/session-aggregates/comex.md"
+  },
+  "flat-files/futures/session-aggregates/nymex.md": {
+   "fetched_sha256": "f1147b8527d756072bd0c94c3cb14e647e7225589549c054c56fc276f49a5cd1",
+   "stored_sha256": "f1147b8527d756072bd0c94c3cb14e647e7225589549c054c56fc276f49a5cd1",
+   "url": "https://massive.com/docs/flat-files/futures/session-aggregates/nymex.md"
+  },
+  "flat-files/futures/trades/cbot.md": {
+   "fetched_sha256": "5f41ee3618bf3eb785232bf891a5569160fa5e309ac4b12e98b1fede24f7cdd3",
+   "stored_sha256": "5f41ee3618bf3eb785232bf891a5569160fa5e309ac4b12e98b1fede24f7cdd3",
+   "url": "https://massive.com/docs/flat-files/futures/trades/cbot.md"
+  },
+  "flat-files/futures/trades/cme.md": {
+   "fetched_sha256": "494468d23aec65785e7fa6a311f1f3405ee9db4682d82dc7b3eea275f5ab849b",
+   "stored_sha256": "494468d23aec65785e7fa6a311f1f3405ee9db4682d82dc7b3eea275f5ab849b",
+   "url": "https://massive.com/docs/flat-files/futures/trades/cme.md"
+  },
+  "flat-files/futures/trades/comex.md": {
+   "fetched_sha256": "0439f169a2b15308a274a08d9ad167a5a50258cb7923d9df22d5033e8f81330d",
+   "stored_sha256": "0439f169a2b15308a274a08d9ad167a5a50258cb7923d9df22d5033e8f81330d",
+   "url": "https://massive.com/docs/flat-files/futures/trades/comex.md"
+  },
+  "flat-files/futures/trades/nymex.md": {
+   "fetched_sha256": "c834c52e357adf28458f6eae4b8b283e26d7c8ff7e70f8b9edc2ee32f84335ca",
+   "stored_sha256": "c834c52e357adf28458f6eae4b8b283e26d7c8ff7e70f8b9edc2ee32f84335ca",
+   "url": "https://massive.com/docs/flat-files/futures/trades/nymex.md"
+  },
+  "flat-files/indices/day-aggregates.md": {
+   "fetched_sha256": "2af9ea266142db8d3f6f0c17b1220970f6219d1a61f3ded50d5236591f84a492",
+   "stored_sha256": "2af9ea266142db8d3f6f0c17b1220970f6219d1a61f3ded50d5236591f84a492",
+   "url": "https://massive.com/docs/flat-files/indices/day-aggregates.md"
+  },
+  "flat-files/indices/minute-aggregates.md": {
+   "fetched_sha256": "9f3965488965d84cfaf2833921d6db69d124517bfca721a4b7cdc20645916c68",
+   "stored_sha256": "9f3965488965d84cfaf2833921d6db69d124517bfca721a4b7cdc20645916c68",
+   "url": "https://massive.com/docs/flat-files/indices/minute-aggregates.md"
+  },
+  "flat-files/indices/overview.md": {
+   "fetched_sha256": "3aef45a32008280a19e9c7962f226e2ac62470fd54172f5ec6c50a46d3affa97",
+   "stored_sha256": "3aef45a32008280a19e9c7962f226e2ac62470fd54172f5ec6c50a46d3affa97",
+   "url": "https://massive.com/docs/flat-files/indices/overview.md"
+  },
+  "flat-files/indices/values.md": {
+   "fetched_sha256": "cf44a4e5dd5ea70f3efd8edb2d49ef553b9e7b41f4a565e3bff609ef46a4a789",
+   "stored_sha256": "cf44a4e5dd5ea70f3efd8edb2d49ef553b9e7b41f4a565e3bff609ef46a4a789",
+   "url": "https://massive.com/docs/flat-files/indices/values.md"
+  },
+  "flat-files/options/day-aggregates.md": {
+   "fetched_sha256": "31629b6af8ad7e6400c139b26241e5691410babcceb37e09d05e70e79a82a61c",
+   "stored_sha256": "31629b6af8ad7e6400c139b26241e5691410babcceb37e09d05e70e79a82a61c",
+   "url": "https://massive.com/docs/flat-files/options/day-aggregates.md"
+  },
+  "flat-files/options/minute-aggregates.md": {
+   "fetched_sha256": "7e0e71b6cb04afa8130552cbe988a8f67fc04793c3244a2999b3ac1b77fb45c0",
+   "stored_sha256": "7e0e71b6cb04afa8130552cbe988a8f67fc04793c3244a2999b3ac1b77fb45c0",
+   "url": "https://massive.com/docs/flat-files/options/minute-aggregates.md"
+  },
+  "flat-files/options/overview.md": {
+   "fetched_sha256": "3a4b3676b1a8286df2385a510a21a6c2e5b3f9a3a8e27f29454ee8338c379099",
+   "stored_sha256": "3a4b3676b1a8286df2385a510a21a6c2e5b3f9a3a8e27f29454ee8338c379099",
+   "url": "https://massive.com/docs/flat-files/options/overview.md"
+  },
+  "flat-files/options/quotes.md": {
+   "fetched_sha256": "6a0c88489c829fd4a92585e90c52bea3e6f5d0e85e9e37b49293133d2fd4beb7",
+   "stored_sha256": "6a0c88489c829fd4a92585e90c52bea3e6f5d0e85e9e37b49293133d2fd4beb7",
+   "url": "https://massive.com/docs/flat-files/options/quotes.md"
+  },
+  "flat-files/options/trades.md": {
+   "fetched_sha256": "054d28cc8000da11374ead62f72fdc6de469b4e9debceab6737a6e57d41a7f1f",
+   "stored_sha256": "054d28cc8000da11374ead62f72fdc6de469b4e9debceab6737a6e57d41a7f1f",
+   "url": "https://massive.com/docs/flat-files/options/trades.md"
+  },
+  "flat-files/quickstart.md": {
+   "fetched_sha256": "552bbff405009f74bf2b54be8493381473101e3312ac88db4c4003cf0f16d3da",
+   "stored_sha256": "dc88fc6ae612f2780575304395d45e6256af038137eaa08866a59e1a176ced59",
+   "url": "https://massive.com/docs/flat-files/quickstart.md"
+  },
+  "flat-files/stocks/day-aggregates.md": {
+   "fetched_sha256": "df4d2c6cf9f8c01d62f73725cdb9c2befa23163ff35e208feab99a1fd0f6b061",
+   "stored_sha256": "df4d2c6cf9f8c01d62f73725cdb9c2befa23163ff35e208feab99a1fd0f6b061",
+   "url": "https://massive.com/docs/flat-files/stocks/day-aggregates.md"
+  },
+  "flat-files/stocks/minute-aggregates.md": {
+   "fetched_sha256": "bd827cbfde22539ab53c603cc3d019c25b7b2825b0381c875c180f6396d66d50",
+   "stored_sha256": "bd827cbfde22539ab53c603cc3d019c25b7b2825b0381c875c180f6396d66d50",
+   "url": "https://massive.com/docs/flat-files/stocks/minute-aggregates.md"
+  },
+  "flat-files/stocks/overview.md": {
+   "fetched_sha256": "84b88daefbd5a9f231d2f0773cea89f4e05a5fa1e3f012181e0752c9ebcc37dd",
+   "stored_sha256": "84b88daefbd5a9f231d2f0773cea89f4e05a5fa1e3f012181e0752c9ebcc37dd",
+   "url": "https://massive.com/docs/flat-files/stocks/overview.md"
+  },
+  "flat-files/stocks/quotes.md": {
+   "fetched_sha256": "eb1f1ee5abcc55806a6f233b49e986947cab8ec4917cc79fae980461146bce56",
+   "stored_sha256": "eb1f1ee5abcc55806a6f233b49e986947cab8ec4917cc79fae980461146bce56",
+   "url": "https://massive.com/docs/flat-files/stocks/quotes.md"
+  },
+  "flat-files/stocks/trades.md": {
+   "fetched_sha256": "965e19fbb1b63f4c4eebf1fdb1708ef66f3a050e7f486ab5bc58e420266fca8a",
+   "stored_sha256": "965e19fbb1b63f4c4eebf1fdb1708ef66f3a050e7f486ab5bc58e420266fca8a",
+   "url": "https://massive.com/docs/flat-files/stocks/trades.md"
+  },
   "llms.txt": {
    "fetched_sha256": "6d9c5b59ae05c731b5a8ee2b805b691de829e948181caf8b72186da8577b2ea6",
    "stored_sha256": "6d9c5b59ae05c731b5a8ee2b805b691de829e948181caf8b72186da8577b2ea6",
    "url": "https://massive.com/docs/llms.txt"
   },
   "openapi.json": {
-   "fetched_sha256": "6a8e4bdf74470fe3bb0b9717789fc8067a05dbe50987f035650785595e57471c",
-   "stored_sha256": "aa890c3342ea587fe915aded87acf88c254a6989927c9fcb1ce28cf2765d5b11",
+   "fetched_sha256": "a810172184cffe258bae9e8a991197f302ef6b7b93b9a36158e16e22e2f65d4c",
+   "stored_sha256": "05793874b027ad5720d680536f3c3e1c94defdd9c9be071694dd9e287a9899f1",
    "url": "https://api.massive.com/openapi"
   },
   "rest/alternative/consumer-spending/merchant-aggregates.md": {
@@ -815,6 +1015,186 @@
    "fetched_sha256": "9e494b1aa220e10b1b2f88881a5e1a09a11f2380d5317bbc9a3f2c6933f4202b",
    "stored_sha256": "9e494b1aa220e10b1b2f88881a5e1a09a11f2380d5317bbc9a3f2c6933f4202b",
    "url": "https://massive.com/docs/rest/stocks/trades-quotes/trades.md"
+  },
+  "websocket.json": {
+   "fetched_sha256": "0c00d55e19ed46a21b171c76564549e7c46155b7d6630b78fe4077fa32720f55",
+   "stored_sha256": "f77b1e8d2806247ef414d006a0f85899dad2cb59c117f6851175f691d343af3b",
+   "url": "https://api.massive.com/specs/websocket.json"
+  },
+  "websocket/crypto/aggregates-per-minute.md": {
+   "fetched_sha256": "f7bc2911e64ab5ac1a76c4e188d0171cf935111ed2040ba29b4d7518f2db72ff",
+   "stored_sha256": "f7bc2911e64ab5ac1a76c4e188d0171cf935111ed2040ba29b4d7518f2db72ff",
+   "url": "https://massive.com/docs/websocket/crypto/aggregates-per-minute.md"
+  },
+  "websocket/crypto/aggregates-per-second.md": {
+   "fetched_sha256": "e955b48b7df325f5b77dd0ad51dabf41040bc113abb1aab9af7379d9bc9ddc46",
+   "stored_sha256": "e955b48b7df325f5b77dd0ad51dabf41040bc113abb1aab9af7379d9bc9ddc46",
+   "url": "https://massive.com/docs/websocket/crypto/aggregates-per-second.md"
+  },
+  "websocket/crypto/fair-market-value.md": {
+   "fetched_sha256": "576a98723356bef32031fbd01649d4b02f8c0fee209936a56ee83fabf8e7c817",
+   "stored_sha256": "576a98723356bef32031fbd01649d4b02f8c0fee209936a56ee83fabf8e7c817",
+   "url": "https://massive.com/docs/websocket/crypto/fair-market-value.md"
+  },
+  "websocket/crypto/overview.md": {
+   "fetched_sha256": "f7bd10e882e00a752bba145590d24a4281dbb4e8c908f0be5ca6a323813f860b",
+   "stored_sha256": "45f938ac4e178cbda935202279d303c9604c97e02050668dfe4108a7b28efa8a",
+   "url": "https://massive.com/docs/websocket/crypto/overview.md"
+  },
+  "websocket/crypto/quotes.md": {
+   "fetched_sha256": "e18d89bfe54ac0102c7c118769bcccc5e856066bcd7f4c2aec7e0f81612f8eec",
+   "stored_sha256": "e18d89bfe54ac0102c7c118769bcccc5e856066bcd7f4c2aec7e0f81612f8eec",
+   "url": "https://massive.com/docs/websocket/crypto/quotes.md"
+  },
+  "websocket/crypto/trades.md": {
+   "fetched_sha256": "0f93794a086d20e26a09934c44b02383f68972838b1577a626c3ac5b11a81ab4",
+   "stored_sha256": "0f93794a086d20e26a09934c44b02383f68972838b1577a626c3ac5b11a81ab4",
+   "url": "https://massive.com/docs/websocket/crypto/trades.md"
+  },
+  "websocket/forex/aggregates-per-minute.md": {
+   "fetched_sha256": "7be864a91e9f168f09082503f9a479c5a72d5811152ae927f65cc531c65a291b",
+   "stored_sha256": "7be864a91e9f168f09082503f9a479c5a72d5811152ae927f65cc531c65a291b",
+   "url": "https://massive.com/docs/websocket/forex/aggregates-per-minute.md"
+  },
+  "websocket/forex/aggregates-per-second.md": {
+   "fetched_sha256": "bead07100f498bcc54fea1a469b2b5f6759cbd4d647fbf99a5a897f6e145122d",
+   "stored_sha256": "bead07100f498bcc54fea1a469b2b5f6759cbd4d647fbf99a5a897f6e145122d",
+   "url": "https://massive.com/docs/websocket/forex/aggregates-per-second.md"
+  },
+  "websocket/forex/fair-market-value.md": {
+   "fetched_sha256": "aa4f783f6df7ef2cf71c4d87637e6fdff5eccd4c6683ec2ead8f3f1e9cd5b8bf",
+   "stored_sha256": "aa4f783f6df7ef2cf71c4d87637e6fdff5eccd4c6683ec2ead8f3f1e9cd5b8bf",
+   "url": "https://massive.com/docs/websocket/forex/fair-market-value.md"
+  },
+  "websocket/forex/overview.md": {
+   "fetched_sha256": "cff7fc3ba4833db1ef354b365d3a69df39dffa730ecf14f85c51e6d999ba3c35",
+   "stored_sha256": "34916d3e231cebe7ec42243649c553802bab254e4b25354cbbb68216bd3535fd",
+   "url": "https://massive.com/docs/websocket/forex/overview.md"
+  },
+  "websocket/forex/quotes.md": {
+   "fetched_sha256": "61338d96f8c633ce8008819c72182e252858d271bf333652916bbbfbc43895ba",
+   "stored_sha256": "61338d96f8c633ce8008819c72182e252858d271bf333652916bbbfbc43895ba",
+   "url": "https://massive.com/docs/websocket/forex/quotes.md"
+  },
+  "websocket/futures/aggregates-per-minute.md": {
+   "fetched_sha256": "6187968048922abaa8ebf3e8ef56014fd0f1f1292866351c6f93d19e7718b442",
+   "stored_sha256": "6187968048922abaa8ebf3e8ef56014fd0f1f1292866351c6f93d19e7718b442",
+   "url": "https://massive.com/docs/websocket/futures/aggregates-per-minute.md"
+  },
+  "websocket/futures/aggregates-per-second.md": {
+   "fetched_sha256": "391ebe6e55a49c6195177034060303ae63079a862eb308aaef07a6e995cbe85e",
+   "stored_sha256": "391ebe6e55a49c6195177034060303ae63079a862eb308aaef07a6e995cbe85e",
+   "url": "https://massive.com/docs/websocket/futures/aggregates-per-second.md"
+  },
+  "websocket/futures/overview.md": {
+   "fetched_sha256": "c2a1dedf4faa19e895f7008501e7e375400aa69d92d0c5c971a16dab10b5d26c",
+   "stored_sha256": "c2a1dedf4faa19e895f7008501e7e375400aa69d92d0c5c971a16dab10b5d26c",
+   "url": "https://massive.com/docs/websocket/futures/overview.md"
+  },
+  "websocket/futures/quotes.md": {
+   "fetched_sha256": "b1c5c2044c2c27c11edc5057e78092f6078c986435ca3202115a530f60d962ea",
+   "stored_sha256": "b1c5c2044c2c27c11edc5057e78092f6078c986435ca3202115a530f60d962ea",
+   "url": "https://massive.com/docs/websocket/futures/quotes.md"
+  },
+  "websocket/futures/trades.md": {
+   "fetched_sha256": "a9e228c9e109064da89cd67b6c62b554ed234f632385728d3b039ba685cdee06",
+   "stored_sha256": "a9e228c9e109064da89cd67b6c62b554ed234f632385728d3b039ba685cdee06",
+   "url": "https://massive.com/docs/websocket/futures/trades.md"
+  },
+  "websocket/indices/aggregates-per-minute.md": {
+   "fetched_sha256": "a06b4ea6f68f52815ba857218c3bfaa2b47c768f762a8f150c0f9c8cfa6ae5ee",
+   "stored_sha256": "a06b4ea6f68f52815ba857218c3bfaa2b47c768f762a8f150c0f9c8cfa6ae5ee",
+   "url": "https://massive.com/docs/websocket/indices/aggregates-per-minute.md"
+  },
+  "websocket/indices/aggregates-per-second.md": {
+   "fetched_sha256": "e93b9cebe1abe943701d250009c967ed1965cde8b0b31d297595c4ba2e02e19c",
+   "stored_sha256": "e93b9cebe1abe943701d250009c967ed1965cde8b0b31d297595c4ba2e02e19c",
+   "url": "https://massive.com/docs/websocket/indices/aggregates-per-second.md"
+  },
+  "websocket/indices/overview.md": {
+   "fetched_sha256": "303aa470e0611aa2ad75f25c1cfb3e0cd9af6b70dace36dbf57359172b572f89",
+   "stored_sha256": "82f9cf602b9663c854d59db0767979b88fa479b3dfc554fe78ab63c1c6da880f",
+   "url": "https://massive.com/docs/websocket/indices/overview.md"
+  },
+  "websocket/indices/value.md": {
+   "fetched_sha256": "02fbcb58a27daf4095792ad0bd18730596ecf806034c97df8ce7be064a51890e",
+   "stored_sha256": "02fbcb58a27daf4095792ad0bd18730596ecf806034c97df8ce7be064a51890e",
+   "url": "https://massive.com/docs/websocket/indices/value.md"
+  },
+  "websocket/options/aggregates-per-minute.md": {
+   "fetched_sha256": "f9c25665489a16b4dcd0a10ee6c7ac3839f4d95fcaa94ad377cdad08b01fa71e",
+   "stored_sha256": "f9c25665489a16b4dcd0a10ee6c7ac3839f4d95fcaa94ad377cdad08b01fa71e",
+   "url": "https://massive.com/docs/websocket/options/aggregates-per-minute.md"
+  },
+  "websocket/options/aggregates-per-second.md": {
+   "fetched_sha256": "ed5312627ef7b569455e7a7edb57f93b077a9cefb241fc3f877e62eee3d29588",
+   "stored_sha256": "ed5312627ef7b569455e7a7edb57f93b077a9cefb241fc3f877e62eee3d29588",
+   "url": "https://massive.com/docs/websocket/options/aggregates-per-second.md"
+  },
+  "websocket/options/fair-market-value.md": {
+   "fetched_sha256": "a7ad91df7c895c056862d229856d162cb2b66ba2126b906238e26d6e2bbda860",
+   "stored_sha256": "a7ad91df7c895c056862d229856d162cb2b66ba2126b906238e26d6e2bbda860",
+   "url": "https://massive.com/docs/websocket/options/fair-market-value.md"
+  },
+  "websocket/options/overview.md": {
+   "fetched_sha256": "97321562a135de2acfd01861c7bd0d7d284a4be7ad9a8ef5f49acac98072c6b7",
+   "stored_sha256": "0fc35016cdc4653110d61cb7b97b3bc6618322580348f08a12759d633f4094a4",
+   "url": "https://massive.com/docs/websocket/options/overview.md"
+  },
+  "websocket/options/quotes.md": {
+   "fetched_sha256": "fecfd268d0d2e89b3e9189040f19c585514f55eb99bb126ea26512082febf1db",
+   "stored_sha256": "fecfd268d0d2e89b3e9189040f19c585514f55eb99bb126ea26512082febf1db",
+   "url": "https://massive.com/docs/websocket/options/quotes.md"
+  },
+  "websocket/options/trades.md": {
+   "fetched_sha256": "cbb03a5a0c808e67876c9105540a4b5c6b41e5ea1d9dce3a990e395ba7156e38",
+   "stored_sha256": "cbb03a5a0c808e67876c9105540a4b5c6b41e5ea1d9dce3a990e395ba7156e38",
+   "url": "https://massive.com/docs/websocket/options/trades.md"
+  },
+  "websocket/quickstart.md": {
+   "fetched_sha256": "f2183b32f4cb8204e80be31480acff98b415d768c2659a0d7f10e923b5576aa5",
+   "stored_sha256": "77f383da0a6ec21fa1bff3d146c6374973ae8168400ad9ec224b2a78589624f2",
+   "url": "https://massive.com/docs/websocket/quickstart.md"
+  },
+  "websocket/stocks/aggregates-per-minute.md": {
+   "fetched_sha256": "f7c1217f053d2ad89dd3417fdb8e95c20c3219db01f27b5a1ef58323d038a939",
+   "stored_sha256": "f7c1217f053d2ad89dd3417fdb8e95c20c3219db01f27b5a1ef58323d038a939",
+   "url": "https://massive.com/docs/websocket/stocks/aggregates-per-minute.md"
+  },
+  "websocket/stocks/aggregates-per-second.md": {
+   "fetched_sha256": "6e0392c1856060928c1211460b571f9eacd53516de2c1366fee14d8b1bcad74f",
+   "stored_sha256": "6e0392c1856060928c1211460b571f9eacd53516de2c1366fee14d8b1bcad74f",
+   "url": "https://massive.com/docs/websocket/stocks/aggregates-per-second.md"
+  },
+  "websocket/stocks/fair-market-value.md": {
+   "fetched_sha256": "84db7bc1a644108550725c8ecd1dc4a6bd3de7672a65d191545f73468282a19b",
+   "stored_sha256": "84db7bc1a644108550725c8ecd1dc4a6bd3de7672a65d191545f73468282a19b",
+   "url": "https://massive.com/docs/websocket/stocks/fair-market-value.md"
+  },
+  "websocket/stocks/imbalances.md": {
+   "fetched_sha256": "559c48c22dba783cf581b1da8bdd80098b6a4aa58421eac3d88b8a50401c3242",
+   "stored_sha256": "559c48c22dba783cf581b1da8bdd80098b6a4aa58421eac3d88b8a50401c3242",
+   "url": "https://massive.com/docs/websocket/stocks/imbalances.md"
+  },
+  "websocket/stocks/luld.md": {
+   "fetched_sha256": "1cb7d126d2e900eab622597a4cb7c302342b0920898566fce28fe446ca9a77e7",
+   "stored_sha256": "1cb7d126d2e900eab622597a4cb7c302342b0920898566fce28fe446ca9a77e7",
+   "url": "https://massive.com/docs/websocket/stocks/luld.md"
+  },
+  "websocket/stocks/overview.md": {
+   "fetched_sha256": "c9e0df33df0831e84672b3fb8992c7a05dbc7f65d9fbb74784a08f220217ef76",
+   "stored_sha256": "ea23d3d9586761e5f21d7bf95fa81da72eb330ebc35a211f36e7da409fa4e87e",
+   "url": "https://massive.com/docs/websocket/stocks/overview.md"
+  },
+  "websocket/stocks/quotes.md": {
+   "fetched_sha256": "ee1e5a330ceaa5e997b9c9612da880bdb706704c2b51ba6d5244b7d6a652fdce",
+   "stored_sha256": "ee1e5a330ceaa5e997b9c9612da880bdb706704c2b51ba6d5244b7d6a652fdce",
+   "url": "https://massive.com/docs/websocket/stocks/quotes.md"
+  },
+  "websocket/stocks/trades.md": {
+   "fetched_sha256": "e0c0c6fa63294cab07d91c216f88ec9279cfe8ff467afcaa77f34964e2cbc116",
+   "stored_sha256": "e0c0c6fa63294cab07d91c216f88ec9279cfe8ff467afcaa77f34964e2cbc116",
+   "url": "https://massive.com/docs/websocket/stocks/trades.md"
   }
  }
 }

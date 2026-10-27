@@ -1,11 +1,11 @@
 """The hand input of the refresh, gathered into one value the generators and gates read.
 
 Everything the refresh does not read from the vendor's own files is hand input: the lexicons
-and identity keys (`lexicon`), the names, units, conversions, result keys, parameter units, and
-dataset kinds (`overrides`), and the excluded vendor items and disbelieved vendor samples
-(`exclusions`). Those modules hold the tables, each entry with its reason; this one only
-bundles them as `HandInput`, so a test can pass small tables of its own instead of the real
-ones.
+and identity keys (`lexicon`); the names, units, conversions, result keys, parameter units,
+dataset kinds and their projections, single-transport columns, and futures venues
+(`overrides`); and the excluded vendor items and disbelieved vendor samples (`exclusions`).
+Those modules hold the tables, each entry with its reason; this one only bundles them as
+`HandInput`, so a test can pass small tables of its own instead of the real ones.
 """
 
 from __future__ import annotations
@@ -41,24 +41,31 @@ class HandInput:
 
     Attributes:
         lexicons: Lexicon name to lexicon.
-        shapes: `(path, object prefix)` to the lexicon name of that object's keys.
+        shapes: `(source, object prefix)` to the lexicon name of that object's keys, where a
+            source is a REST path, a WebSocket `"<cluster>/<channel>"`, or a flat-file prefix.
         identity: Short keys that are already Massive's long form, each with its reason.
-        names: `(path, wire key)` to the long name of the last segment of a key Massive names
-            nowhere, with the description it is derived from.
-        units: `(path, wire key)` to the unit of an integer field, or to "not a timestamp" for
-            a timestamp-like field that is not an epoch.
+        names: `(source, wire key)` to the long name of the last segment of a key Massive
+            names nowhere, with the description it is derived from.
+        units: `(source, wire key)` to the unit of an integer field, or to "not a timestamp"
+            for a timestamp-like field that is not an epoch.
         tag_conflicts: `(path, wire key)` of a `units` entry that differs from the vendor's
             unit tag, with the reason the tag is wrong.
-        type_fixes: `(path, wire key)` to the named conversion of a field whose documented
+        type_fixes: `(source, wire key)` to the named conversion of a field whose documented
             samples its declared type does not fit.
         result_keys: Path to where its rows sit, when that is not `results`.
         param_units: `(path, base parameter)` to the unit of a timestamp parameter, or to
             "not an epoch".
         exclusions: The excluded vendor items.
-        kinds: Kind to asset-class group to the sources of that group, the dataset kinds
-            within which the `concept-collision` gate requires one concept per column.
+        kinds: Kind to asset-class group to the sources of that group: the dataset kinds,
+            written onto each source as its memberships, within which the gates require one
+            concept per column, one type per column, and columns on two transports, and from
+            whose flat-file or WebSocket sources every member takes its column order.
         sample_errors: The documented example values the `example-type` gate does not
             believe, each with its reason.
+        projections: `(kind, source)` to the fields the source contributes to that kind.
+        transport_only: `(kind, group, column)` to why the column is on one transport only
+            in that group.
+        venues: The futures venues folded into a flat-file prefix's `{venue}` template.
     """
 
     lexicons: Mapping[str, lexicon.Lexicon] = field(default_factory=lambda: lexicon.LEXICONS)
@@ -85,3 +92,10 @@ class HandInput:
         default_factory=lambda: overrides.KINDS
     )
     sample_errors: Sequence[SampleError] = field(default_factory=lambda: exclusions.SAMPLE_ERRORS)
+    projections: Mapping[tuple[str, str], overrides.Projection] = field(
+        default_factory=lambda: overrides.PROJECTIONS
+    )
+    transport_only: Mapping[tuple[str, str, str], str] = field(
+        default_factory=lambda: overrides.TRANSPORT_ONLY
+    )
+    venues: Mapping[str, str] = field(default_factory=lambda: overrides.VENUES)

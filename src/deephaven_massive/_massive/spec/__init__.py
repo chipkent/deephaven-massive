@@ -9,12 +9,15 @@ against the same description and no schema is written by hand:
   source's place in a dataset kind), `WireType` and `WireUnit` (a field's type and timestamp
   unit), `DriftReport` (what a payload had that its source did not, and the reverse), and
   `Provenance` (the vendor snapshot's date and each source's vendor URLs).
-- `rest.json`, next to this module, is generated from Massive's OpenAPI specification by
-  `python -m deephaven_massive._massive.refresh` and committed; it is never edited by hand.
-  `descriptions.json`, generated beside it by the same command, holds the vendor's
+- `rest.json`, `ws.json`, and `flatfiles.json`, next to this module, are generated from
+  Massive's OpenAPI specification, its WebSocket specification, and its flat-file
+  documentation pages by `python -m deephaven_massive._massive.refresh` and committed; they
+  are never edited by hand. Each source there records its fields in its dataset kind's order
+  and its memberships of the kinds (`Source.memberships`), so nothing at run time needs the
+  refresh. `descriptions.json`, generated beside them by the same command, holds the vendor's
   description of each field, the snapshot's fetch date, and each source's vendor URLs. The
-  descriptions are kept out of `rest.json` so that a refresh that only rewords them leaves the
-  schema file byte for byte unchanged. Both ship in the wheel as package data, while the
+  descriptions are kept out of the schema files so that a refresh that only rewords them
+  leaves those byte for byte unchanged. All ship in the wheel as package data, while the
   refresh that writes them does not.
 - `spec.convert` checks one decoded JSON value against its `WireType` and converts it
   exactly (an ISO instant to integer nanoseconds, for example), for every JSON decoder,
@@ -72,8 +75,10 @@ if TYPE_CHECKING:
 
 __all__ = ["Conversion", "provenance", "source", "sources"]
 
-# The generated file of each transport that has one, beside this module.
-_FILES: Mapping[Transport, str] = MappingProxyType({Transport.REST: "rest.json"})
+# The generated file of each transport, beside this module.
+_FILES: Mapping[Transport, str] = MappingProxyType(
+    {Transport.REST: "rest.json", Transport.WS: "ws.json", Transport.FLAT_FILES: "flatfiles.json"}
+)
 
 # The generated file of the vendor's descriptions, fetch date, and URLs, beside this module.
 _DESCRIPTIONS = "descriptions.json"
@@ -143,16 +148,10 @@ def _load_descriptions() -> DescriptionsFile:
 
     Returns:
         The parsed file.
-
-    Raises:
-        ValueError: If the file names a transport that has no generated schema file.
     """
     loaded = _cache.descriptions
     if loaded is None:
         loaded = parse_descriptions(_read(_DESCRIPTIONS))
-        unknown = sorted(t.value for t in (set(loaded.urls) | set(loaded.texts)) - set(_FILES))
-        if unknown:
-            raise ValueError(f"{_DESCRIPTIONS} names transports without a schema: {unknown}")
         _cache.descriptions = loaded
     return loaded
 
@@ -172,16 +171,16 @@ def _load(transport: Transport) -> Mapping[str, Source]:
         Its sources, descriptions joined.
 
     Raises:
-        LookupError: If the transport has no generated file.
         ValueError: If a source has no URL, or a URL names a source the schema file lacks.
     """
     loaded = _cache.sources.get(transport)
     if loaded is None:
-        name = _FILES.get(transport)
-        if name is None:
-            raise LookupError(f"no generated schema exists for transport {transport}")
         described = _load_descriptions()
-        loaded = parse(transport, _read(name), described.texts.get(transport, _NO_DESCRIPTIONS))
+        loaded = parse(
+            transport,
+            _read(_FILES[transport]),
+            described.texts.get(transport, _NO_DESCRIPTIONS),
+        )
         urls = described.urls.get(transport, {})
         for what, keys in (
             ("sources without a URL", set(loaded) - set(urls)),
@@ -204,18 +203,18 @@ def sources(transport: Transport) -> Mapping[str, Source]:
     descriptions file, joins each field's description into `Field.description`, and checks
     that every source has a URL and every URL a source.
 
-    A `LookupError`, if the transport has no generated file in this version of the library,
-    propagates. So does a `ValueError` (a value that breaks a type's invariants, a member
-    missing, or a description or URL that does not match the schema) or a `TypeError` (a
-    member of the wrong type), either of which means a generated file was edited by hand; the
-    transport then stays unloaded, and a later call tries again.
+    A `ValueError` (a value that breaks a type's invariants, a member missing, or a
+    description or URL that does not match the schema) or a `TypeError` (a member of the wrong
+    type) propagates; either means a generated file was edited by hand. The transport then
+    stays unloaded, and a later call tries again.
 
     Args:
         transport: The transport, such as `Transport.REST`.
 
     Returns:
         A read-only mapping from each source's key (a REST path template such as
-        `"/v3/trades/{stockTicker}"`) to its value, in the generated file's order. For REST
+        `"/v3/trades/{stockTicker}"`, a channel such as `"stocks/T"`, or a prefix such as
+        `"us_stocks_sip/trades_v1"`) to its value, in the generated file's order. For REST
         every value is a `RestPath`. Every call for one transport returns the same mapping.
     """
     with _lock:
@@ -232,9 +231,11 @@ def source(transport: Transport, key: str) -> Source:
     Args:
         transport: The transport, such as `Transport.REST`.
         key: The source's key: a REST path template exactly as Massive's specification
-            spells it, such as `"/v3/trades/{stockTicker}"`.
+            spells it (`"/v3/trades/{stockTicker}"`), a WebSocket `"<cluster>/<channel>"`
+            (`"stocks/T"`), or a flat-file prefix (`"us_futures_{venue}/trades_v1"`).
 
-    A `LookupError` from `sources`, for a transport with no generated file, propagates.
+    A `ValueError` or `TypeError` from `sources`, for a generated file edited by hand,
+    propagates.
 
     Returns:
         The source; a `RestPath` for REST.

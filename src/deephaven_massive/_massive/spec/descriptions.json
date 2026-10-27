@@ -354,6 +354,169 @@
    "/vX/reference/tickers/{id}/events": [
     "https://massive.com/docs/rest/stocks/corporate-actions/ticker-events.md"
    ]
+  },
+  "WS": {
+   "stocks/T": [
+    "https://massive.com/docs/websocket/stocks/trades.md"
+   ],
+   "stocks/Q": [
+    "https://massive.com/docs/websocket/stocks/quotes.md"
+   ],
+   "stocks/A": [
+    "https://massive.com/docs/websocket/stocks/aggregates-per-second.md"
+   ],
+   "stocks/AM": [
+    "https://massive.com/docs/websocket/stocks/aggregates-per-minute.md"
+   ],
+   "stocks/LULD": [
+    "https://massive.com/docs/websocket/stocks/luld.md"
+   ],
+   "stocks/NOI": [
+    "https://massive.com/docs/websocket/stocks/imbalances.md"
+   ],
+   "stocks/FMV": [
+    "https://massive.com/docs/websocket/stocks/fair-market-value.md"
+   ],
+   "options/T": [
+    "https://massive.com/docs/websocket/options/trades.md"
+   ],
+   "options/Q": [
+    "https://massive.com/docs/websocket/options/quotes.md"
+   ],
+   "options/A": [
+    "https://massive.com/docs/websocket/options/aggregates-per-second.md"
+   ],
+   "options/AM": [
+    "https://massive.com/docs/websocket/options/aggregates-per-minute.md"
+   ],
+   "options/FMV": [
+    "https://massive.com/docs/websocket/options/fair-market-value.md"
+   ],
+   "forex/C": [
+    "https://massive.com/docs/websocket/forex/quotes.md"
+   ],
+   "forex/CA": [
+    "https://massive.com/docs/websocket/forex/aggregates-per-minute.md"
+   ],
+   "forex/CAS": [
+    "https://massive.com/docs/websocket/forex/aggregates-per-second.md"
+   ],
+   "forex/FMV": [
+    "https://massive.com/docs/websocket/forex/fair-market-value.md"
+   ],
+   "crypto/XT": [
+    "https://massive.com/docs/websocket/crypto/trades.md"
+   ],
+   "crypto/XQ": [
+    "https://massive.com/docs/websocket/crypto/quotes.md"
+   ],
+   "crypto/XA": [
+    "https://massive.com/docs/websocket/crypto/aggregates-per-minute.md"
+   ],
+   "crypto/XAS": [
+    "https://massive.com/docs/websocket/crypto/aggregates-per-second.md"
+   ],
+   "crypto/FMV": [
+    "https://massive.com/docs/websocket/crypto/fair-market-value.md"
+   ],
+   "indices/A": [
+    "https://massive.com/docs/websocket/indices/aggregates-per-second.md"
+   ],
+   "indices/AM": [
+    "https://massive.com/docs/websocket/indices/aggregates-per-minute.md"
+   ],
+   "indices/V": [
+    "https://massive.com/docs/websocket/indices/value.md"
+   ],
+   "futures/T": [
+    "https://massive.com/docs/websocket/futures/trades.md"
+   ],
+   "futures/Q": [
+    "https://massive.com/docs/websocket/futures/quotes.md"
+   ],
+   "futures/A": [
+    "https://massive.com/docs/websocket/futures/aggregates-per-second.md"
+   ],
+   "futures/AM": [
+    "https://massive.com/docs/websocket/futures/aggregates-per-minute.md"
+   ]
+  },
+  "FLAT_FILES": {
+   "global_crypto/day_aggs_v1": [
+    "https://massive.com/docs/flat-files/crypto/day-aggregates.md"
+   ],
+   "global_crypto/minute_aggs_v1": [
+    "https://massive.com/docs/flat-files/crypto/minute-aggregates.md"
+   ],
+   "global_crypto/trades_v1": [
+    "https://massive.com/docs/flat-files/crypto/trades.md"
+   ],
+   "global_forex/day_aggs_v1": [
+    "https://massive.com/docs/flat-files/forex/day-aggregates.md"
+   ],
+   "global_forex/minute_aggs_v1": [
+    "https://massive.com/docs/flat-files/forex/minute-aggregates.md"
+   ],
+   "global_forex/quotes_v1": [
+    "https://massive.com/docs/flat-files/forex/quotes.md"
+   ],
+   "us_futures_{venue}/session_aggs_v1": [
+    "https://massive.com/docs/flat-files/futures/session-aggregates/cbot.md",
+    "https://massive.com/docs/flat-files/futures/session-aggregates/cme.md",
+    "https://massive.com/docs/flat-files/futures/session-aggregates/comex.md",
+    "https://massive.com/docs/flat-files/futures/session-aggregates/nymex.md"
+   ],
+   "us_futures_{venue}/minute_aggs_v1": [
+    "https://massive.com/docs/flat-files/futures/minute-aggregates/cbot.md",
+    "https://massive.com/docs/flat-files/futures/minute-aggregates/cme.md",
+    "https://massive.com/docs/flat-files/futures/minute-aggregates/comex.md",
+    "https://massive.com/docs/flat-files/futures/minute-aggregates/nymex.md"
+   ],
+   "us_futures_{venue}/trades_v1": [
+    "https://massive.com/docs/flat-files/futures/trades/cbot.md",
+    "https://massive.com/docs/flat-files/futures/trades/cme.md",
+    "https://massive.com/docs/flat-files/futures/trades/comex.md",
+    "https://massive.com/docs/flat-files/futures/trades/nymex.md"
+   ],
+   "us_futures_{venue}/quotes_v1": [
+    "https://massive.com/docs/flat-files/futures/quotes/cbot.md",
+    "https://massive.com/docs/flat-files/futures/quotes/cme.md",
+    "https://massive.com/docs/flat-files/futures/quotes/comex.md",
+    "https://massive.com/docs/flat-files/futures/quotes/nymex.md"
+   ],
+   "us_indices/day_aggs_v1": [
+    "https://massive.com/docs/flat-files/indices/day-aggregates.md"
+   ],
+   "us_indices/minute_aggs_v1": [
+    "https://massive.com/docs/flat-files/indices/minute-aggregates.md"
+   ],
+   "us_indices/values_v1": [
+    "https://massive.com/docs/flat-files/indices/values.md"
+   ],
+   "us_options_opra/day_aggs_v1": [
+    "https://massive.com/docs/flat-files/options/day-aggregates.md"
+   ],
+   "us_options_opra/minute_aggs_v1": [
+    "https://massive.com/docs/flat-files/options/minute-aggregates.md"
+   ],
+   "us_options_opra/trades_v1": [
+    "https://massive.com/docs/flat-files/options/trades.md"
+   ],
+   "us_options_opra/quotes_v1": [
+    "https://massive.com/docs/flat-files/options/quotes.md"
+   ],
+   "us_stocks_sip/day_aggs_v1": [
+    "https://massive.com/docs/flat-files/stocks/day-aggregates.md"
+   ],
+   "us_stocks_sip/minute_aggs_v1": [
+    "https://massive.com/docs/flat-files/stocks/minute-aggregates.md"
+   ],
+   "us_stocks_sip/trades_v1": [
+    "https://massive.com/docs/flat-files/stocks/trades.md"
+   ],
+   "us_stocks_sip/quotes_v1": [
+    "https://massive.com/docs/flat-files/stocks/quotes.md"
+   ]
   }
  },
  "descriptions": {
@@ -780,17 +943,17 @@
     "yield_7_year": "Market Yield on U.S. Treasury Securities at 7-Year Constant Maturity, Quoted on an Investment Basis"
    },
    "/futures/v1/aggs/{ticker}": {
-    "close": "The last price within the timeframe.",
-    "dollar_volume": "The sum of price × size across all trades in the window, expressed in the contract's quoted price units, which are the same units as the bar's open, high, low, and close. Despite the field name, no contract multiplier is applied, so this is not a notional dollar value. See the Products endpoint (https://massive.com/docs/rest/futures/products) for contract multiplier details. Because dollar_volume is a raw sum, you can use it to compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume across the bars in the window and divide by the summed volume.",
+    "ticker": "The ticker for the contract.",
+    "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format. Sessions are named by this end date, while window_start holds the session's start date, which for session candles is the day before.",
+    "window_start": "The timestamp of the beginning of the candlestick’s aggregation window.",
+    "open": "The opening price within the timeframe.",
     "high": "The highest price within the timeframe.",
     "low": "The lowest price within the timeframe.",
-    "open": "The opening price within the timeframe.",
-    "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format. Sessions are named by this end date, while window_start holds the session's start date, which for session candles is the day before.",
-    "settlement_price": "The price the contract settled at for this session. Included for session, week, month, quarter, and year candles; for multi-session candles it is the settlement of the final session in the period. Not returned for intraday candles (sec, min, hour).",
-    "ticker": "The ticker for the contract.",
-    "transactions": "The number of transactions that occurred within the timeframe.",
+    "close": "The last price within the timeframe.",
     "volume": "The number of contracts that traded within the timeframe.",
-    "window_start": "The timestamp of the beginning of the candlestick’s aggregation window."
+    "dollar_volume": "The sum of price × size across all trades in the window, expressed in the contract's quoted price units, which are the same units as the bar's open, high, low, and close. Despite the field name, no contract multiplier is applied, so this is not a notional dollar value. See the Products endpoint (https://massive.com/docs/rest/futures/products) for contract multiplier details. Because dollar_volume is a raw sum, you can use it to compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume across the bars in the window and divide by the summed volume.",
+    "transactions": "The number of transactions that occurred within the timeframe.",
+    "settlement_price": "The price the contract settled at for this session. Included for session, week, month, quarter, and year candles; for multi-session candles it is the settlement of the final session in the period. Not returned for intraday candles (sec, min, hour)."
    },
    "/futures/v1/contracts": {
     "active": "Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date >= last_trade_date) and false otherwise.",
@@ -855,18 +1018,18 @@
     "unit_of_measure_qty": "The quantity of the unit of measure for this product."
    },
    "/futures/v1/quotes/{ticker}": {
+    "ticker": "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract).",
+    "timestamp": "The time when the quote was generated at the exchange to nanosecond precision.",
+    "sequence_number": "The unique sequence number assigned to this quote by the exchange.",
+    "report_sequence": "The reporting sequence number.",
+    "ask_timestamp": "The time when the ask price was submitted to the exchange.",
     "ask_price": "The ask price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value.",
     "ask_size": "The quote size represents the number of futures contracts available at the given ask price.",
-    "ask_timestamp": "The time when the ask price was submitted to the exchange.",
+    "bid_timestamp": "The time when the bid price was submitted to the exchange.",
     "bid_price": "The bid price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value.",
     "bid_size": "The quote size represents the number of futures contracts available at the given bid price.",
-    "bid_timestamp": "The time when the bid price was submitted to the exchange.",
-    "channel": "The CME multicast channel this event was sourced from.",
-    "report_sequence": "The reporting sequence number.",
-    "sequence_number": "The unique sequence number assigned to this quote by the exchange.",
     "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format.",
-    "ticker": "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract).",
-    "timestamp": "The time when the quote was generated at the exchange to nanosecond precision."
+    "channel": "The CME multicast channel this event was sourced from."
    },
    "/futures/v1/schedules": {
     "event": "The type of session on the given trading date.",
@@ -908,14 +1071,14 @@
     "session.volume": "The number of contracts traded in the session."
    },
    "/futures/v1/trades/{ticker}": {
-    "channel": "The CME multicast channel this event was sourced from.",
-    "price": "The price of the trade. This is the actual dollar value per whole contract of this trade. A trade of 100 contracts with a price of $2.00 would be worth a total dollar value of $200.00.",
-    "report_sequence": "The reporting sequence number.",
-    "sequence_number": "The unique sequence number assigned to this trade.",
-    "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format.",
-    "size": "The total number of contracts exchanged between buyers and sellers on a given trade.",
     "ticker": "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract).",
-    "timestamp": "The time when the trade was generated at the exchange to nanosecond precision."
+    "timestamp": "The time when the trade was generated at the exchange to nanosecond precision.",
+    "sequence_number": "The unique sequence number assigned to this trade.",
+    "report_sequence": "The reporting sequence number.",
+    "price": "The price of the trade. This is the actual dollar value per whole contract of this trade. A trade of 100 contracts with a price of $2.00 would be worth a total dollar value of $200.00.",
+    "size": "The total number of contracts exchanged between buyers and sellers on a given trade.",
+    "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format.",
+    "channel": "The CME multicast channel this event was sourced from."
    },
    "/stocks/filings/10-K/vX/sections": {
     "cik": "SEC Central Index Key (10 digits, zero-padded).",
@@ -1411,184 +1574,184 @@
    },
    "/v2/aggs/grouped/locale/global/market/crypto/{date}": {
     "T": "The exchange symbol that this item is traded under.",
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the end of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
+    "n": "The number of transactions in the aggregate window.",
     "vw": "The volume weighted average price."
    },
    "/v2/aggs/grouped/locale/global/market/fx/{date}": {
     "T": "The exchange symbol that this item is traded under.",
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the end of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
+    "n": "The number of transactions in the aggregate window.",
     "vw": "The volume weighted average price."
    },
    "/v2/aggs/grouped/locale/us/market/stocks/{date}": {
     "T": "The exchange symbol that this item is traded under.",
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
-    "otc": "Whether or not this aggregate is for an OTC ticker. This field will be left off if false.",
     "t": "The Unix millisecond timestamp for the end of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
-    "vw": "The volume weighted average price."
+    "n": "The number of transactions in the aggregate window.",
+    "vw": "The volume weighted average price.",
+    "otc": "Whether or not this aggregate is for an OTC ticker. This field will be left off if false."
    },
    "/v2/aggs/ticker/{cryptoTicker}/prev": {
     "T": "The exchange symbol that this item is traded under.",
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the end of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
+    "n": "The number of transactions in the aggregate window.",
     "vw": "The volume weighted average price."
    },
    "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}": {
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the start of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
+    "n": "The number of transactions in the aggregate window.",
     "vw": "The volume weighted average price."
    },
    "/v2/aggs/ticker/{forexTicker}/prev": {
     "T": "The exchange symbol that this item is traded under.",
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the start of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
+    "n": "The number of transactions in the aggregate window.",
     "vw": "The volume weighted average price."
    },
    "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}": {
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the start of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
+    "n": "The number of transactions in the aggregate window.",
     "vw": "The volume weighted average price."
    },
    "/v2/aggs/ticker/{indicesTicker}/prev": {
     "T": "The exchange symbol that this item is traded under.",
+    "o": "The open value for the symbol in the given time period.",
     "c": "The close value for the symbol in the given time period.",
     "h": "The highest value for the symbol in the given time period.",
     "l": "The lowest value for the symbol in the given time period.",
-    "o": "The open value for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the start of the aggregate window."
    },
    "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}": {
+    "o": "The open value for the symbol in the given time period.",
     "c": "The close value for the symbol in the given time period.",
     "h": "The highest value for the symbol in the given time period.",
     "l": "The lowest value for the symbol in the given time period.",
-    "o": "The open value for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the start of the aggregate window."
    },
    "/v2/aggs/ticker/{optionsTicker}/prev": {
     "T": "The exchange symbol that this item is traded under.",
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the start of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
+    "n": "The number of transactions in the aggregate window.",
     "vw": "The volume weighted average price."
    },
    "/v2/aggs/ticker/{optionsTicker}/range/{multiplier}/{timespan}/{from}/{to}": {
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the start of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
+    "n": "The number of transactions in the aggregate window.",
     "vw": "The volume weighted average price."
    },
    "/v2/aggs/ticker/{stocksTicker}/prev": {
     "T": "The exchange symbol that this item is traded under.",
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
     "t": "The Unix millisecond timestamp for the start of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
+    "n": "The number of transactions in the aggregate window.",
     "vw": "The volume weighted average price."
    },
    "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}": {
+    "v": "The trading volume of the symbol in the given time period.",
+    "o": "The open price for the symbol in the given time period.",
     "c": "The close price for the symbol in the given time period.",
     "h": "The highest price for the symbol in the given time period.",
     "l": "The lowest price for the symbol in the given time period.",
-    "n": "The number of transactions in the aggregate window.",
-    "o": "The open price for the symbol in the given time period.",
-    "otc": "Whether or not this aggregate is for an OTC ticker. This field will be left off if false.",
     "t": "The Unix millisecond timestamp for the start of the aggregate window.",
-    "v": "The trading volume of the symbol in the given time period.",
-    "vw": "The volume weighted average price."
+    "n": "The number of transactions in the aggregate window.",
+    "vw": "The volume weighted average price.",
+    "otc": "Whether or not this aggregate is for an OTC ticker. This field will be left off if false."
    },
    "/v2/last/nbbo/{stocksTicker}": {
-    "P": "The ask price.",
-    "S": "The ask size. This represents the number of shares sellers are offering at the given ask price.",
     "T": "The exchange symbol that this item is traded under.",
     "X": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
-    "c": "A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means.",
-    "f": "The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message.",
-    "i": "A list of indicator codes. See the Conditions and Indicators (https://massive.com/glossary/conditions-indicators) glossary for what each code means.",
-    "p": "The bid price.",
-    "q": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11).",
-    "s": "The bid size. This represents the number of shares buyers are bidding for at the given bid price.",
-    "t": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it.",
+    "P": "The ask price.",
+    "S": "The ask size. This represents the number of shares sellers are offering at the given ask price.",
     "x": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "p": "The bid price.",
+    "s": "The bid size. This represents the number of shares buyers are bidding for at the given bid price.",
+    "c": "A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means.",
+    "i": "A list of indicator codes. See the Conditions and Indicators (https://massive.com/glossary/conditions-indicators) glossary for what each code means.",
     "y": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange.",
-    "z": "There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ"
+    "q": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11).",
+    "t": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it.",
+    "z": "There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ",
+    "f": "The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message."
    },
    "/v2/last/trade/{optionsTicker}": {
     "T": "The exchange symbol that this item is traded under.",
     "c": "A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means.",
     "e": "The trade correction indicator.",
-    "f": "The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message.",
-    "i": "The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID.",
-    "p": "The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00.",
-    "q": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11).",
-    "r": "The ID for the Trade Reporting Facility where the trade took place.",
-    "s": "The size of a trade (also known as volume).",
-    "t": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it.",
     "x": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "p": "The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00.",
+    "t": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it.",
+    "s": "The size of a trade (also known as volume).",
+    "q": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11).",
+    "i": "The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID.",
     "y": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange.",
+    "f": "The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message.",
+    "r": "The ID for the Trade Reporting Facility where the trade took place.",
     "z": "There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ"
    },
    "/v2/last/trade/{stocksTicker}": {
     "T": "The exchange symbol that this item is traded under.",
     "c": "A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means.",
-    "ds": "The size of the trade including the fractional component. This is represented as a decimal string.",
     "e": "The trade correction indicator.",
-    "f": "The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message.",
+    "x": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
     "i": "The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID.",
+    "y": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange.",
     "p": "The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00.",
     "q": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11).",
-    "r": "The ID for the Trade Reporting Facility where the trade took place.",
-    "s": "The size of a trade (also known as volume).",
     "t": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it.",
-    "x": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
-    "y": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange.",
-    "z": "There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ"
+    "s": "The size of a trade (also known as volume).",
+    "z": "There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ",
+    "r": "The ID for the Trade Reporting Facility where the trade took place.",
+    "f": "The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message.",
+    "ds": "The size of the trade including the fractional component. This is represented as a decimal string."
    },
    "/v2/reference/news": {
     "amp_url": "The mobile friendly Accelerated Mobile Page (AMP) URL.",
@@ -2117,24 +2280,23 @@
     "id": "The Trade ID which uniquely identifies a trade on the exchange that the trade happened on.",
     "participant_timestamp": "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the trade was generated at the exchange.",
     "price": "The price of the trade in the base currency of the crypto pair.",
-    "received_timestamp": "The nanosecond accuracy timestamp of when the tick was received by Massive.",
-    "size": "The size of a trade (also known as volume)."
+    "size": "The size of a trade (also known as volume).",
+    "received_timestamp": "The nanosecond accuracy timestamp of when the tick was received by Massive."
    },
    "/v3/trades/{optionsTicker}": {
     "conditions": "A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means.",
     "correction": "The trade correction indicator.",
     "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs.",
-    "id": "The trade ID. Options trades do not have a trade ID, so this field is returned as an empty string.",
-    "participant_timestamp": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange.",
     "price": "The price of the trade. This is the price per share of the underlying, so the total dollar value of a trade is the price multiplied by the size and by the contract multiplier, which is typically 100 shares per contract.",
-    "sequence_number": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be consecutive (e.g. 1, 2, 6, 9, 10, 11).",
     "sip_timestamp": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it.",
-    "size": "The size of a trade (also known as volume)."
+    "size": "The size of a trade (also known as volume).",
+    "sequence_number": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be consecutive (e.g. 1, 2, 6, 9, 10, 11).",
+    "id": "The trade ID. Options trades do not have a trade ID, so this field is returned as an empty string.",
+    "participant_timestamp": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange."
    },
    "/v3/trades/{stockTicker}": {
     "conditions": "A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means.",
     "correction": "The trade correction indicator.",
-    "decimal_size": "The size of the trade including the fractional component. This is represented as a decimal string.",
     "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
     "id": "The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID.",
     "participant_timestamp": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange. Omitted on OTC trades reported through the FINRA ORF (exchange 62), which carry no participant timestamp.",
@@ -2144,7 +2306,8 @@
     "size": "The size of a trade (also known as volume).",
     "tape": "There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ",
     "trf_id": "The ID for the Trade Reporting Facility where the trade took place.",
-    "trf_timestamp": "The nanosecond accuracy TRF (Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this trade."
+    "trf_timestamp": "The nanosecond accuracy TRF (Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this trade.",
+    "decimal_size": "The size of the trade including the fractional component. This is represented as a decimal string."
    },
    "/vX/reference/ipos": {
     "announced_date": "The date when the IPO event was announced.",
@@ -2172,6 +2335,523 @@
     "date": "The date the event took place",
     "event_type": "The type of historical event for the asset",
     "ticker_change.ticker": "A ticker symbol"
+   }
+  },
+  "WS": {
+   "stocks/T": {
+    "sym": "The ticker symbol for the given stock.",
+    "c": "The trade conditions. See Conditions and Indicators (https://massive.com/glossary/us/stocks/conditions-indicators) for Massive's trade conditions glossary.",
+    "x": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "i": "The trade ID.",
+    "pt": "Participant timestamp. The time the trade occurred at the exchange or TRF, in milliseconds epoch. Typically ≤ t (SIP timestamp) due to SIP processing latency, though trades reported through a TRF may occasionally carry a pt up to 1ms after t. Omitted on OTC trades reported through the FINRA ORF (exchange 62), which have no participant timestamp.",
+    "p": "The price.",
+    "q": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11).",
+    "t": "The SIP timestamp in Unix MS.",
+    "s": "The trade size.",
+    "z": "The tape. (1 = NYSE, 2 = AMEX, 3 = Nasdaq).",
+    "trfi": "The ID for the Trade Reporting Facility where the trade took place.",
+    "trft": "The TRF (Trade Reporting Facility) Timestamp in Unix MS. This is the timestamp of when the trade reporting facility received this trade.",
+    "ds": "The trade size including fractional shares, respresented as a string"
+   },
+   "stocks/Q": {
+    "sym": "The ticker symbol for the given stock.",
+    "ax": "The ask exchange ID. May be omitted when there is no ask (see ap).",
+    "ap": "The ask price. Omitted, together with as, when there is no ask (a one-sided or empty market). This is most common around the 4:00 AM ET pre-market open, but can occur at any time.",
+    "as": "The ask size. This represents the number of shares sellers are offering at the given ask price. Omitted when there is no ask (see ap).",
+    "bx": "The bid exchange ID. May be omitted when there is no bid (see bp).",
+    "bp": "The bid price. Omitted, together with bs, when there is no bid (a one-sided or empty market). This is most common around the 4:00 AM ET pre-market open, but can occur at any time.",
+    "bs": "The bid size. This represents the number of shares buyers are bidding for at the given bid price. Omitted when there is no bid (see bp).",
+    "c": "The condition.",
+    "i": "The indicators. For more information, see our glossary of Conditions and Indicators (https://massive.com/glossary/us/stocks/conditions-indicators).",
+    "pt": "Participant timestamp. The time the quote was generated at the exchange, in milliseconds epoch. Typically ≤ t (SIP timestamp) due to SIP processing latency. Omitted on SIP-generated quotes (condition 82), which have no originating exchange participant.",
+    "q": "The sequence number represents the sequence in which quote events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). Values reset after each trading session/day.",
+    "t": "The SIP timestamp in Unix MS.",
+    "z": "The tape. (1 = NYSE, 2 = AMEX, 3 = Nasdaq)."
+   },
+   "stocks/A": {
+    "sym": "The ticker symbol for the given stock.",
+    "v": "The tick volume.",
+    "o": "The opening tick price for this aggregate window.",
+    "c": "The closing tick price for this aggregate window.",
+    "h": "The highest tick price for this aggregate window.",
+    "l": "The lowest tick price for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "dv": "The tick volume including fractional shares, respresented as a string decimal number",
+    "av": "Today's accumulated volume.",
+    "dav": "Today's accumulated volume including fractional shares, respresented as a string decimal number",
+    "op": "Today's official opening price.",
+    "vw": "The tick's volume weighted average price.",
+    "a": "Today's volume weighted average price.",
+    "z": "The average trade size for this aggregate window.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds.",
+    "otc": "Whether or not this aggregate is for an OTC ticker. This field will be left off if false."
+   },
+   "stocks/AM": {
+    "sym": "The ticker symbol for the given stock.",
+    "v": "The tick volume.",
+    "o": "The opening tick price for this aggregate window.",
+    "c": "The closing tick price for this aggregate window.",
+    "h": "The highest tick price for this aggregate window.",
+    "l": "The lowest tick price for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "dv": "The tick volume including fractional shares, respresented as a string decimal number",
+    "av": "Today's accumulated volume.",
+    "dav": "Today's accumulated volume including fractional shares, respresented as a string decimal number",
+    "op": "Today's official opening price.",
+    "vw": "The tick's volume weighted average price.",
+    "a": "Today's volume weighted average price.",
+    "z": "The average trade size for this aggregate window.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds.",
+    "otc": "Whether or not this aggregate is for an OTC ticker. This field will be left off if false."
+   },
+   "stocks/LULD": {
+    "T": "The ticker symbol for the given stock.",
+    "h": "The high price.",
+    "l": "The low price.",
+    "i": "The Indicators. See Conditions and Indicators (https://massive.com/glossary/us/stocks/conditions-indicators) for a glossary (LULD indicators are located near the bottom).",
+    "z": "The tape. (1 = NYSE, 2 = AMEX, 3 = Nasdaq).",
+    "t": "The Timestamp in Unix MS.",
+    "q": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11)."
+   },
+   "stocks/NOI": {
+    "T": "The ticker symbol for the given stock.",
+    "t": "The Timestamp in Unix Ns.",
+    "at": "The time that the auction is planned to take place in the format (hour x 100) + minutes in Eastern Standard Time, for example 930 would be 9:30 am EST, and 1600 would be 4:00 pm EST.",
+    "a": "The auction type. `O` - Early Opening Auction (non-NYSE only) `M` - Core Opening Auction `H` - Reopening Auction (Halt Resume) `C` - Closing Auction `P` - Extreme Closing Imbalance (NYSE only) `R` - Regulatory Closing Imbalance (NYSE only)",
+    "i": "The symbol sequence.",
+    "x": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "o": "The imbalance quantity.",
+    "p": "The paired quantity.",
+    "b": "The book clearing price."
+   },
+   "stocks/FMV": {
+    "fmv": "Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact).",
+    "sym": "The ticker symbol for the given security.",
+    "t": "The nanosecond timestamp."
+   },
+   "options/T": {
+    "sym": "The ticker symbol for the given option contract.",
+    "c": "The trade conditions",
+    "x": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "p": "The price.",
+    "t": "The Timestamp in Unix MS.",
+    "s": "The trade size.",
+    "q": "The sequence number represents the sequence in which trade events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11)."
+   },
+   "options/Q": {
+    "sym": "The ticker symbol for the given option contract.",
+    "ax": "The ask exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "ap": "The ask price.",
+    "as": "The ask size.",
+    "bx": "The bid exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "bp": "The bid price.",
+    "bs": "The bid size.",
+    "q": "The sequence number represents the sequence in which trade events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11).",
+    "t": "The Timestamp in Unix MS."
+   },
+   "options/A": {
+    "sym": "The ticker symbol for the given option contract.",
+    "v": "The tick volume.",
+    "o": "The opening tick price for this aggregate window.",
+    "c": "The closing tick price for this aggregate window.",
+    "h": "The highest tick price for this aggregate window.",
+    "l": "The lowest tick price for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "av": "Today's accumulated volume.",
+    "op": "Today's official opening price.",
+    "vw": "The tick's volume weighted average price.",
+    "a": "Today's volume weighted average price.",
+    "z": "The average trade size for this aggregate window.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds."
+   },
+   "options/AM": {
+    "sym": "The ticker symbol for the given option contract.",
+    "v": "The tick volume.",
+    "o": "The opening tick price for this aggregate window.",
+    "c": "The closing tick price for this aggregate window.",
+    "h": "The highest tick price for this aggregate window.",
+    "l": "The lowest tick price for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "av": "Today's accumulated volume.",
+    "op": "Today's official opening price.",
+    "vw": "The tick's volume weighted average price.",
+    "a": "Today's volume weighted average price.",
+    "z": "The average trade size for this aggregate window.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds."
+   },
+   "options/FMV": {
+    "fmv": "Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact).",
+    "sym": "The ticker symbol for the given security.",
+    "t": "The nanosecond timestamp."
+   },
+   "forex/C": {
+    "p": "The current pair.",
+    "a": "The ask price.",
+    "b": "The bid price.",
+    "t": "The Timestamp in Unix MS.",
+    "x": "The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs."
+   },
+   "forex/CA": {
+    "v": "The volume of trades during this aggregate window.",
+    "o": "The open price for this aggregate window.",
+    "c": "The close price for this aggregate window.",
+    "h": "The high price for this aggregate window.",
+    "l": "The low price for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "pair": "The currency pair.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds."
+   },
+   "forex/CAS": {
+    "v": "The volume of trades during this aggregate window.",
+    "o": "The open price for this aggregate window.",
+    "c": "The close price for this aggregate window.",
+    "h": "The high price for this aggregate window.",
+    "l": "The low price for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "pair": "The currency pair.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds."
+   },
+   "forex/FMV": {
+    "fmv": "Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact).",
+    "sym": "The ticker symbol for the given security.",
+    "t": "The nanosecond timestamp."
+   },
+   "crypto/XT": {
+    "c": "The conditions. 0 (or empty array): empty 1: sellside 2: buyside",
+    "x": "The crypto exchange ID. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a list of exchanges and their IDs.",
+    "i": "The ID of the trade (optional).",
+    "t": "The Timestamp in Unix MS.",
+    "p": "The price.",
+    "s": "The size.",
+    "pair": "The crypto pair.",
+    "r": "The timestamp that the tick was received by Massive."
+   },
+   "crypto/XQ": {
+    "pair": "The crypto pair.",
+    "bp": "The bid price.",
+    "bs": "The bid size.",
+    "ap": "The ask price.",
+    "as": "The ask size.",
+    "t": "The Timestamp in Unix MS.",
+    "x": "The crypto exchange ID. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a list of exchanges and their IDs.",
+    "r": "The timestamp that the tick was received by Massive."
+   },
+   "crypto/XA": {
+    "v": "The volume of trades during this aggregate window.",
+    "o": "The open price for this aggregate window.",
+    "c": "The close price for this aggregate window.",
+    "h": "The high price for this aggregate window.",
+    "l": "The low price for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "pair": "The crypto pair.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds.",
+    "vw": "The volume weighted average price.",
+    "z": "The average trade size for this aggregate window."
+   },
+   "crypto/XAS": {
+    "v": "The volume of trades during this aggregate window.",
+    "o": "The open price for this aggregate window.",
+    "c": "The close price for this aggregate window.",
+    "h": "The high price for this aggregate window.",
+    "l": "The low price for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "pair": "The crypto pair.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds.",
+    "vw": "The volume weighted average price.",
+    "z": "The average trade size for this aggregate window."
+   },
+   "crypto/FMV": {
+    "fmv": "Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact).",
+    "sym": "The ticker symbol for the given security.",
+    "t": "The nanosecond timestamp."
+   },
+   "indices/A": {
+    "sym": "The symbol representing the given index.",
+    "o": "The opening index value for this aggregate window.",
+    "c": "The closing index value for this aggregate window.",
+    "h": "The highest index value for this aggregate window.",
+    "l": "The lowest index value for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "op": "Today's official opening value.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds."
+   },
+   "indices/AM": {
+    "sym": "The symbol representing the given index.",
+    "o": "The opening index value for this aggregate window.",
+    "c": "The closing index value for this aggregate window.",
+    "h": "The highest index value for this aggregate window.",
+    "l": "The lowest index value for this aggregate window.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "op": "Today's official opening value.",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds."
+   },
+   "indices/V": {
+    "T": "The assigned ticker of the index.",
+    "val": "The value of the index.",
+    "t": "The Timestamp in Unix MS."
+   },
+   "futures/T": {
+    "sym": "The ticker symbol for the given future.",
+    "t": "The timestamp in Unix MS.",
+    "q": "The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11).",
+    "p": "The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier.",
+    "s": "The trade size shows the number of futures contracts actually exchanged."
+   },
+   "futures/Q": {
+    "sym": "The ticker symbol for the given future.",
+    "t": "The timestamp in Unix MS.",
+    "at": "The timestamp when the ask was submitted to the exchange.",
+    "ap": "The ask price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value.",
+    "as": "The quote size represents the number of futures contracts available at the given ask price.",
+    "bt": "The timestamp when the bid was submitted to the exchange.",
+    "bp": "The bid price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value.",
+    "bs": "The quote size represents the number of futures contracts available at the given bid price."
+   },
+   "futures/A": {
+    "sym": "The ticker symbol for the given future.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "o": "The opening tick price for this aggregate window.",
+    "h": "The highest tick price for this aggregate window.",
+    "l": "The lowest tick price for this aggregate window.",
+    "c": "The closing tick price for this aggregate window.",
+    "v": "The tick volume.",
+    "dv": "The total US dollar value of shares traded within the aggregate window.",
+    "n": "The total number of transactions that occurred within the aggregate window",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds."
+   },
+   "futures/AM": {
+    "sym": "The ticker symbol for the given future.",
+    "s": "The start timestamp of this aggregate window in Unix Milliseconds.",
+    "o": "The opening tick price for this aggregate window.",
+    "h": "The highest tick price for this aggregate window.",
+    "l": "The lowest tick price for this aggregate window.",
+    "c": "The closing tick price for this aggregate window.",
+    "v": "The tick volume.",
+    "dv": "The total US dollar value of shares traded within the aggregate window.",
+    "n": "The total number of transactions that occurred within the aggregate window",
+    "e": "The end timestamp of this aggregate window in Unix Milliseconds."
+   }
+  },
+  "FLAT_FILES": {
+   "global_crypto/day_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "transactions": "The number of transactions in the aggregate window."
+   },
+   "global_crypto/minute_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "transactions": "The number of transactions in the aggregate window."
+   },
+   "global_crypto/trades_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "conditions": "A list of condition codes. If there are multiple conditions, they will appear in quotations, separated by commas. See Trade Conditions (https://massive.com/knowledge-base/article/stock-trade-conditions) for Massive’s definitions of each condition.",
+    "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "id": "The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID.",
+    "participant_timestamp": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange.",
+    "price": "The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00.",
+    "size": "The size of a trade (also known as volume)."
+   },
+   "global_forex/day_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "transactions": "The number of transactions in the aggregate window."
+   },
+   "global_forex/minute_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "transactions": "The number of transactions in the aggregate window."
+   },
+   "global_forex/quotes_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "ask_exchange": "The ask exchange ID.",
+    "ask_price": "The ask price.",
+    "bid_exchange": "The bid exchange ID.",
+    "bid_price": "The bid price.",
+    "participant_timestamp": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange."
+   },
+   "us_futures_{venue}/session_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "open": "The open price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "dollar_volume": "The total dollar volume of the transactions that occurred within the timeframe.",
+    "transactions": "The number of transactions in the aggregate window.",
+    "settlement_price": "The official settlement price set by the exchange for the contract at the end of the trading session."
+   },
+   "us_futures_{venue}/minute_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "open": "The open price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "dollar_volume": "The total dollar volume of the transactions that occurred within the timeframe.",
+    "transactions": "The number of transactions in the aggregate window."
+   },
+   "us_futures_{venue}/trades_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "timestamp": "The time when the trade was generated at the exchange to nanosecond precision.",
+    "sequence_number": "The sequence number represents the sequence in which trade events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). Values reset after each trading session/day.",
+    "report_sequence": "The reporting sequence number.",
+    "price": "The price of the trade. This is the actual dollar value per whole contract of this trade. A trade of 100 contracts with a price of $2.00 would be worth a total dollar value of $200.00.",
+    "size": "The total number of contracts exchanged between buyers and sellers on a given trade.",
+    "correction": "The trade correction indicator.",
+    "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format."
+   },
+   "us_futures_{venue}/quotes_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "timestamp": "The time when the quote was generated at the exchange to nanosecond precision.",
+    "sequence_number": "The unique sequence number assigned to this quote by the exchange.",
+    "report_sequence": "The reporting sequence number.",
+    "ask_timestamp": "The time when the ask price was submitted to the exchange.",
+    "ask_price": "The ask price.",
+    "ask_size": "The ask size. This represents the number of futures contracts available at the given ask price. An ask size of 2 means there are 2 contracts available to purchase at the given ask price.",
+    "bid_timestamp": "The time when the bid price was submitted to the exchange.",
+    "bid_price": "The bid price.",
+    "bid_size": "The bid size. This represents the number of futures contracts available at the given bid price. A bid size of 2 means there are 2 contracts available to purchase at the given bid price.",
+    "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format."
+   },
+   "us_indices/day_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window."
+   },
+   "us_indices/minute_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window."
+   },
+   "us_indices/values_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "value": "The value of the index.",
+    "timestamp": "The timestamp in Unix MS."
+   },
+   "us_options_opra/day_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "transactions": "The number of transactions in the aggregate window."
+   },
+   "us_options_opra/minute_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "transactions": "The number of transactions in the aggregate window."
+   },
+   "us_options_opra/trades_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "conditions": "A list of condition codes. If there are multiple conditions, they will appear in quotations, separated by commas. See Trade Conditions (https://massive.com/knowledge-base/article/stock-trade-conditions) for Massive’s definitions of each condition.",
+    "correction": "The trade correction indicator.",
+    "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "price": "The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00.",
+    "sip_timestamp": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it.",
+    "size": "The size of a trade (also known as volume)."
+   },
+   "us_options_opra/quotes_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "ask_exchange": "The ask exchange ID.",
+    "ask_price": "The ask price.",
+    "ask_size": "The ask size. This represents the number of contracts sellers are offering at the given ask price.",
+    "bid_exchange": "The bid exchange ID.",
+    "bid_price": "The bid price.",
+    "bid_size": "The bid size. This represents the number of contracts buyers are bidding for at the given bid price.",
+    "sequence_number": "The sequence number represents the sequence in which quote events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). Values reset after each trading session/day.",
+    "sip_timestamp": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."
+   },
+   "us_stocks_sip/day_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "transactions": "The number of transactions in the aggregate window."
+   },
+   "us_stocks_sip/minute_aggs_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "volume": "The trading volume of the symbol in the given time period.",
+    "open": "The open price for the symbol in the given time period.",
+    "close": "The close price for the symbol in the given time period.",
+    "high": "The highest price for the symbol in the given time period.",
+    "low": "The lowest price for the symbol in the given time period.",
+    "window_start": "The Unix nanosecond timestamp for the start of the aggregate window.",
+    "transactions": "The number of transactions in the aggregate window."
+   },
+   "us_stocks_sip/trades_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "conditions": "A list of condition codes. If there are multiple conditions, they will appear in quotations, separated by commas. See Trade Conditions (https://massive.com/knowledge-base/article/stock-trade-conditions) for Massive’s definitions of each condition.",
+    "correction": "The trade correction indicator.",
+    "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
+    "id": "The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID.",
+    "participant_timestamp": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange.",
+    "price": "The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00.",
+    "sequence_number": "The sequence number represents the sequence in which trade events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). Values reset after each trading session/day.",
+    "sip_timestamp": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it.",
+    "size": "The size of a trade (also known as volume).",
+    "tape": "There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C.Tape A is NYSE listed securitiesTape B is NYSE ARCA / NYSE AmericanTape C is NASDAQ",
+    "trf_id": "The ID for the Trade Reporting Facility where the trade took place.",
+    "trf_timestamp": "The nanosecond accuracy TRF (Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this trade."
+   },
+   "us_stocks_sip/quotes_v1": {
+    "ticker": "The exchange symbol that this item is traded under.",
+    "ask_exchange": "The ask exchange ID.",
+    "ask_price": "The ask price.",
+    "ask_size": "The ask size. This represents the number of shares sellers are offering at the given ask price.",
+    "bid_exchange": "The bid exchange ID.",
+    "bid_price": "The bid price.",
+    "bid_size": "The bid size. This represents the number of shares buyers are bidding for at the given bid price.",
+    "conditions": "A list of condition codes. If there are multiple conditions, they will appear in quotations, separated by commas.",
+    "indicators": "A list of indicator codes. If there are multiple indicators, they will appear in quotations, separated by commas.",
+    "participant_timestamp": "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange.",
+    "sequence_number": "The sequence number represents the sequence in which quote events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). Values reset after each trading session/day.",
+    "sip_timestamp": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it.",
+    "tape": "There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C.Tape A is NYSE listed securitiesTape B is NYSE ARCA / NYSE AmericanTape C is NASDAQ",
+    "trf_timestamp": "The nanosecond accuracy TRF (Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this quote."
    }
   }
  }

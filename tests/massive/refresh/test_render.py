@@ -1,4 +1,4 @@
-"""Tests for the canonical text of `spec/rest.json` and `spec/descriptions.json`."""
+"""Tests for the canonical text of the generated files: the schema files and the descriptions."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ import datetime as dt
 import json
 
 from deephaven_massive._massive.refresh import render
+from deephaven_massive._massive.spec import parse
 from deephaven_massive._massive.spec.types import (
     Field,
+    Membership,
     Param,
     ParamKind,
     RestPath,
@@ -84,9 +86,65 @@ def test_render_of_no_paths_is_an_empty_source_list() -> None:
     assert json.loads(render.render_rest([]))["sources"] == []
 
 
+def test_an_empty_list_member_stays_on_one_line() -> None:
+    bare = RestPath(key="/v1/bare", fields=())
+    assert '   "params": [],\n   "fields": [],\n   "memberships": []\n' in render.render_rest(
+        [bare]
+    )
+
+
+_CHANNEL = Source(
+    key="stocks/T",
+    transport=Transport.WS,
+    fields=(
+        Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
+        Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE, description="The price."),
+    ),
+    memberships=(
+        Membership(kind="trades", group="stocks", position=2),
+        Membership(kind="last", group="stocks", position=0, projection={"p": "LastPrice"}),
+    ),
+)
+
+
+def test_render_sources_writes_keys_fields_and_memberships_one_per_line() -> None:
+    text = render.render_sources([_CHANNEL])
+    document = json.loads(text)
+    assert set(document) == {"generated_by", "sources"}
+    (entry,) = document["sources"]
+    assert set(entry) == {"key", "fields", "memberships"}
+    assert entry["memberships"] == [
+        {"group": "stocks", "kind": "trades", "position": 2, "projection": None},
+        {"group": "stocks", "kind": "last", "position": 0, "projection": {"p": "LastPrice"}},
+    ]
+    lines = text.splitlines()
+    assert sum('"wire_key"' in line for line in lines) == 2
+    assert sum('"kind"' in line for line in lines) == 2
+    assert "The price." not in text
+    assert text.endswith("}\n")
+
+
+def test_rendered_sources_load_back_as_they_were() -> None:
+    # The loader reads exactly what the renderer writes, memberships and order included.
+    loaded = parse(
+        Transport.WS, render.render_sources([_CHANNEL]), {"stocks/T": {"p": "The price."}}
+    )
+    assert loaded["stocks/T"] == _CHANNEL
+    memberships = (
+        Membership(kind="trades", group="stocks", position=0),
+        Membership(kind="last", group="stocks", position=1, projection={"price": "LastPrice"}),
+    )
+    member = dataclasses.replace(_PATH, memberships=memberships)
+    assert parse(Transport.REST, render.render_rest([member]))[_PATH.key].memberships == (
+        memberships
+    )
+
+
 def test_the_files_are_the_spec_package_data() -> None:
     assert render.SPEC_DIRECTORY.name == "spec"
     assert render.REST_FILE == render.SPEC_DIRECTORY / "rest.json"
+    assert render.WS_FILE == render.SPEC_DIRECTORY / "ws.json"
+    assert render.FLAT_FILES_FILE == render.SPEC_DIRECTORY / "flatfiles.json"
     assert render.DESCRIPTIONS_FILE == render.SPEC_DIRECTORY / "descriptions.json"
 
 

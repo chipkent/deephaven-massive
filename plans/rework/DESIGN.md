@@ -1223,9 +1223,8 @@ Excluded items fall into two lists.
 | `/v1/summaries` | Not in the documentation index. |
 | Crypto `/book` REST endpoint; WebSocket `XL2` | Deprecated and sunset (the REST path is marked deprecated in the OpenAPI spec). |
 | WebSocket `LV`; Launchpad hosts and paths | Product retired. |
-| WebSocket `/futures/{venue}` | Not documented: the futures WebSocket pages list `/futures` only. |
 | `/v1/historic/*`, `/v2/ticks/*` | Deprecated 2022 (marked deprecated in the OpenAPI spec); replaced by `/v3/trades` and `/v3/quotes`. |
-| Form 5, per-asset `/v1/exchanges` (`/stocks`, `/options`, `/forex`, `/crypto`), `/options/v3/*`, `/v1/reference/ipos`, `/stocks/dev/*`, `vX_0` paths | Present only in the OpenAPI spec; no page `llms.txt` links names them (`undocumented`). |
+| Form 5, per-asset `/v1/exchanges` (`/stocks`, `/options`, `/forex`, `/crypto`), `/options/v3/*`, `/v1/reference/ipos`, `/stocks/dev/*`, `/stocks/insiders/vX/*`, `vX_0` paths | Present only in the OpenAPI spec; no page `llms.txt` links names them (`undocumented`). |
 | `/v1/reference/sec/filings*` | Marked `x-polygon-draft` in the OpenAPI spec and undocumented. |
 | `/v1/indicators/{sma,ema,rsi,macd}/{optionsTicker,indicesTicker,fxTicker}` | The same URL, fields, and parameters as the `{stockTicker}` template, which serves every asset class by the ticker's prefix; a refresh test checks they still repeat it. The `{cryptoTicker}` templates document no `adjusted` parameter, so they are generated in their own right. |
 | Single-ticker v2 snapshots `/v2/snapshot/.../tickers/{t}` | Covered by `snapshots(symbols)` with the `tickers` filter. |
@@ -1238,6 +1237,7 @@ Documentation only:
 | `/benzinga/v1/transcripts` | Never existed. |
 | `/benzinga/v1/news` | Sunset; replaced by `/benzinga/v2/news`. Absent from the OpenAPI spec and the documentation at the pinned snapshot. |
 | `/vX/reference/financials` | Sunset; replaced by `/stocks/financials/v1/*`. Absent from the OpenAPI spec and the documentation at the pinned snapshot. |
+| WebSocket `/futures/{venue}` | Not documented: the futures WebSocket pages list `/futures` only, and `websocket.json` has no such channel at the pinned snapshot. |
 
 `x-polygon-ignore` excludes nothing. It is the vendor's hint to its own SDK generator not to
 emit a second client method for one URL (the per-asset-class templates of `/v3/trades`,
@@ -1430,7 +1430,10 @@ beside the table, and the indicator `timestamp` fields are its first entries.
 
 | Transport and fields | Unit |
 |---|---|
-| WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); `LULD`/`NOI`; options `T`/`Q`; futures `T`/`Q`; indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` (`t`; `XT`/`XQ` received time `r`) | ms (verified on each documentation page) |
+| WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); options `T`/`Q`; futures `T`/`Q` (`t`); indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` (`t`) | ms (documented as Unix ms on each documentation page; 13-digit samples) |
+| WebSocket futures `Q` `bt`, `at`; crypto `XT`/`XQ` received time `r` | ms (the descriptions name no unit; the samples have 13 digits, as do the other times of the same message) |
+| WebSocket `NOI` `t` | ns (documented as Unix ns; the sample has 19 digits) |
+| WebSocket `LULD` `t` | **UNVERIFIED**: documented as Unix ms, but the sample (`1764086430905642800`) has 19 digits, which as ms would overflow; registered as ns. The overflow check and the bound fail loudly on a mismatch. |
 | WebSocket `FMV` `t` | Documented as ns; the documentation sample is `1678220098130` (13 digits, ms). Rule, FMV only: `t >= 10**17` means ns, otherwise ms. Every ns value after 1973-03-03 is at least 10^17, and an ms value reaches 10^17 only in the year 3,170,000, so the rule cannot misclassify. Logged once; tested. |
 | REST `/v3/trades`, `/v3/quotes`, `/v2/last/trade`, `/v2/last/nbbo`; snapshot `last_updated`, `fmv_last_updated`; futures `/trades` and `/quotes` (`timestamp`, `bid_timestamp`, `ask_timestamp`); futures aggregates `window_start` (documented as "nanosecond Unix timestamp"); futures snapshot `last_quote` and `last_trade` times; stocks v2 snapshot `updated`, `lastTrade.t`, `lastQuote.t` | ns |
 | REST aggregates `t`; `/prev` `t`; indicators `timestamp`; futures snapshot `last_minute.last_updated`; every v2 snapshot `min.t`; forex and crypto v2 snapshot `updated`, forex `lastQuote.t`, crypto `lastTrade.t` (13-digit documentation samples) | ms |
@@ -2230,17 +2233,22 @@ refresh/             build time only; excluded from the wheel; may import any of
   snapshot.py        the snapshot's location (vendor/massive/), layout, and manifest; store
                      (staged write, atomic swap) and verified load
   fetch.py           download and put each file in canonical form; stores through snapshot.py
-  docs.py            flat-file "Columns" tables, overview prefix tables, llms.txt and the
-                     endpoint line of each REST page it links
+  docs.py            llms.txt and the pages it links: each REST page's endpoint line, each
+                     WebSocket page's feed (cluster and channel), the flat-file overview
+                     prefix tables, "Columns" tables, and "Example Data" headers
   openapi.py         OpenAPI reading: $ref, allOf merge, one-branch choices, checked accessors
   plain_text.py      the four fixed rules that turn a vendor description into plain text
   naming.py          the naming policy shared by every transport: PascalCase columns, snake
                      case concepts, short and timestamp-like names, the dataset key columns
-  rest.py            REST paths -> RestPath: flattening, representation rules, names,
-                     parameters, path coverage, and the gates met per field or parameter
-  ws.py, flatfiles.py  the WebSocket and flat-file generators (with the type lattice)
+  fields.py          the field rules every generator shares: representation rules, names,
+                     units, type fixes, documented examples, and the gates met per field
+  rest.py            REST paths -> RestPath: flattening, result keys, parameters, path
+                     coverage, and the gates met per parameter
+  ws.py, flatfiles.py  the WebSocket and flat-file generators
+  kinds.py           KINDS and PROJECTIONS -> memberships; the type lattice, type-agreement,
+                     transport-agreement, and the kind column order
   gates.py           Gate (the named gates of section 19.4), Problem, RefreshError, and the
-                     checks that span paths: stale entries, exclusions, concept collisions
+                     checks that span sources: stale entries, exclusions, concept collisions
   render.py          spec/*.json in canonical text
   hand_input.py      HandInput: the hand tables bundled for the generators
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
@@ -2252,8 +2260,8 @@ refresh/             build time only; excluded from the wheel; may import any of
 
 vendor/massive/      outside the package; Massive's published content, vendored as generation
                      input, not covered by the repository's license, in no distribution
-  openapi.json  websocket.json  llms.txt  rest/ (the REST pages llms.txt links)
-  flat-file pages  manifest.json
+  openapi.json  websocket.json  llms.txt  manifest.json
+  rest/  websocket/  flat-files/   (the pages of each area llms.txt links)
 ```
 
 **The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 28
@@ -2535,8 +2543,8 @@ returns.
 - **`open(key) -> FlatFile | None`.** `None` for a missing key (404). `object_key(prefix, day,
   venue)` builds keys as `<prefix>/<YYYY>/<MM>/<date>.csv.gz`, filling a `{venue}` template.
   The generator folds the four concrete futures overview prefixes into that template using
-  `VENUES = ("cme", "cbot", "nymex", "comex")` in `refresh/overrides.py`, which a library test
-  checks against `FuturesVenue`.
+  `VENUES` (`cme`, `cbot`, `nymex`, `comex`, each with its reason) in `refresh/overrides.py`,
+  which a library test checks against `FuturesVenue`.
 - **Error mapping.** An S3 error code `InvalidAccessKeyId` or `SignatureDoesNotMatch` is
   `WireAuthError`; any other 403 is `WireEntitlementError`; anything else is `WireError`. Each
   carries the status, the host, and the key, and `request_id` comes from `x-amz-request-id`.
@@ -2651,21 +2659,33 @@ verification, never a column list.
 - **Flat files.** Every dataset page with a row in its class's overview table. That row's
   `S3 <prefix>` is the source key, so no hand-written page-to-prefix map exists. A futures kind
   keyed by `{venue}` requires its four venue pages to list identical columns. Fields are the
-  page's "Columns" table (name, type) in table order; the example rows are ignored. A dataset
-  page with no overview row is reported as unaccounted by `--check`.
+  page's "Columns" table (name, type, description), in the order of the page's "Example Data"
+  header row, which must name exactly the table's columns (case aside: some pages write
+  `Ticker`): the vendor's tables list the columns in an order of their own (alphabetical on
+  most pages), while the example header is the files' own column order (the stocks
+  aggregates' `ticker, volume, open, close, high, low, window_start, transactions`). The
+  example rows go through the `example-type` gate, each cell read as the file's reader reads
+  it (an empty cell is null; a cell of a text or date column is text; any other cell is a
+  number when it reads as one, else text). A dataset page with no overview row is reported as
+  unaccounted by `--check`.
 - **Representation rules** (generator rules, not hand entries): an array of strings or objects,
   a free-form object, and `oneOf`/`anyOf` become `json-text`; an array of integers becomes
   `int-array`; the WebSocket envelope key `ev` is dropped; a field with a `UNITS` entry becomes
   an `epoch` in that unit; a string with `format: date-time`, or no format and a name ending in
   `_utc`, becomes an `iso-instant`; a string with `format: date`, or named `date` or `*_date`,
   becomes a `date`.
-- **Projections.** `PROJECTIONS {(kind, source): {wire key: long name}}` limits a source to
-  the listed keys, and renames them, **inside one membership only**. The generator writes each
-  long name through the naming rule, so a generated projection maps wire keys to PascalCase
-  columns, the same vocabulary as `Field.column`. Its first entry gives
-  `/v3/snapshot/indices`'s membership of the values kind
-  `{"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"}`, for
-  `indices.values.fetch()`; `indices.snapshots` uses the same source in full.
+- **Projections.** `PROJECTIONS {(kind, source): Projection}` changes how a source joins
+  one kind, **inside one membership only**, in one of two forms. `fields` keeps only the
+  listed keys, under the listed long names: `/v3/snapshot/indices`'s membership of the values
+  kind is `{"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"}`, for
+  `indices.values.fetch()`, while `indices.snapshots` uses the same source in full. `renames`
+  keeps every field and renames only the listed ones, so a field the vendor adds later joins
+  under its own name: the forex last quote and the crypto `XQ` stream join the quotes kind
+  with `ask`/`ap` as `AskPrice` and `bid`/`bp` as `BidPrice`. The generator writes each long
+  name through the naming rule, and the recorded projection maps every wire key it keeps to
+  its PascalCase column, the same vocabulary as `Field.column`. A member whose projection
+  renames is ordered, and gives the order, like an unprojected one (rule 6); a member that
+  keeps only some fields does neither, and its source keeps its own order.
 - **Memberships are written into the generated files.** `KINDS` and `PROJECTIONS` are generator
   inputs in `refresh/`, which is not shipped. The generator writes each source's memberships
   onto its committed entry in `spec/rest.json`, `ws.json`, or `flatfiles.json`, and the `spec`
@@ -2701,12 +2721,12 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | Lexicon | `lexicon.py` | `SHAPES` maps each object shape (aggregate row; snapshot `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`; each WebSocket channel; each futures object) to its lexicon. A lexicon translates a short key to the long name Massive uses for the same field elsewhere in that asset class's REST or flat-file data, and **every entry cites that endpoint or file**; identity entries cover short real words (`id`, `cik`, `url`, `low`, `fmv`, `mic`). | trade lexicon `p` → `price`, `t` → `sip_timestamp` (`/v3/trades/{stockTicker}`); crypto trade `t` → `participant_timestamp` (`/v3/trades/{cryptoTicker}`); forex quote `a` → `ask_price` (`/v3/quotes/{fxTicker}`); segment `min` → `last_minute` (`/v3/snapshot`) |
 | `NAMES` | `overrides.py` | `{(source, wire key): (long name, description)}` only for a short key Massive gives no long name anywhere: the name is derived from Massive's own description of the field, which the entry quotes exactly; a changed description makes the entry stale (`stale-entry`). `NAMES` never renames something the vendor already names, and never coins a dataset key column. | snapshot `min.av` → `accumulated_volume` ("The accumulated volume."), `min.dav` → `accumulated_decimal_volume`; WebSocket `av`, `dav`, `op` |
 | `KINDS` | `overrides.py` | `{kind: {group: [sources]}}`: the sources of one dataset kind, grouped per asset class, in source order. Every dataset with a stream or flat-file source has a kind, WebSocket-only `luld`, `imbalances`, and `fmv` included. | `trades: {stocks: [/v3/trades/{stockTicker}, /v2/last/trade/{stocksTicker}, (stocks, T), us_stocks_sip/trades_v1], crypto: […]}` |
-| `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values, `last_updated` → `timestamp` |
+| `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values, `last_updated` → `timestamp`; the forex last quote and the crypto `XQ` stream → quotes, `ask`/`ap` → `ask_price`, `bid`/`bp` → `bid_price` (2026-10-27: their sources spell the prices as Massive's last-quote objects do, and the quotes table keeps one column per field) |
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
-| `SAMPLE_ERRORS` | `exclusions.py` | `(path, wire key, sample, reason)`: a documented example value that is wrong while the type is right, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
-| `TRANSPORT_ONLY` | `overrides.py` | `{(kind, column): reason}`: columns legitimately on one transport | `AccumulatedVolume` (WebSocket only) |
+| `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
+| `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
 | `PARAM_UNITS` | `overrides.py` | `{(path, base parameter): (unit, reason)}`: the unit of every timestamp-like string parameter, and of any other string parameter documented as taking an epoch, or "not an epoch" (sent as date or date-time text) | `/v3/trades` `timestamp` → ns; indicators `timestamp` → ms; aggregate range `{from}`/`{to}` → ms; benzinga `last_updated` → not an epoch |
 | `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, the executable rows of section 8.12 | `/v1/summaries` |
@@ -2739,16 +2759,29 @@ per-column exceptions:
    file's field lists. Massive's REST documentation lists every object's fields
    alphabetically (the specification's keys, its pages' response-attribute tables, and their
    sample responses all agree), so a REST source keeps that documented order, and a
-   REST-only dataset's columns are alphabetical. The sources of a dataset kind take their order
-   from the kind's flat-file "Columns" table or WebSocket message, which list fields in their
-   vendor's order (the stocks aggregate files: `ticker, volume, open, close, high, low,
-   window_start, transactions`); the WebSocket and flat-file generators apply it. The snapshot stores every document in the order served, never re-sorted. The
+   REST-only dataset's columns are alphabetical. The sources of each group of a dataset kind
+   take their order from the group's flat-file "Example Data" headers and WebSocket messages,
+   which list fields in their vendor's order (the stocks aggregate files: `ticker, volume,
+   open, close, high, low, window_start, transactions`), then the group's other sources' own
+   fields; every member that keeps all its fields (unprojected, or with a projection that only
+   renames) takes that order. A group with no flat-file or WebSocket member keeping all its
+   fields fails the refresh (`column-order`). The snapshot stores every document in the order served, never re-sorted. The
    dataset's key columns come first at run time.
 7. **Consistency.** Within one dataset kind, one column for two concepts fails the refresh
    (the `concept-collision` gate); one concept always gets one column, by rules 1–4.
 
 Names are never derived from descriptions except under rule 3, and the generator emits
 `Timestamp` only where the vendor's long name is `timestamp`.
+
+**Cross-table naming.** Massive sometimes spells one concept differently on different
+endpoints, for example `day.open` and `session.open`, `ask` and `ask_price`, or a nested
+`details.strike_price` and a top-level `strike_price`. Within one table every field has
+exactly one column. Across tables, each table keeps the spelling of its own endpoint, so its
+columns match Massive's documentation for it. Unifying the names across tables (about 30
+concepts, 59 REST columns) and a documented "same concept as" map were both considered and
+declined: the canonical names would shift with Massive's endpoint mix, some concepts look
+alike but differ (a futures session is not a calendar day), and no automatic check can find
+synonyms reliably.
 
 **Refresh gates.** The refresh fails, printing the gate, the source, the key, and its
 description for the reviewer. Every gate has a descriptive name, which is how the code
@@ -2762,8 +2795,8 @@ description for the reviewer. Every gate has a descriptive name, which is how th
   the long name, after the lexicon and `NAMES` (so `serverTime` is `server_time`): a field is
   timestamp-like when it has a unit tag, a doc type of `timestamp - integer`, or a long name
   matching `timestamp`, `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or
-  `*_time` (the bar lexicon gives `s` and `e` as `window_start` and `end_timestamp`, while a
-  trade's `s` is `size`). A timestamp-like `long` or `double` needs a `UNITS` entry (a unit,
+  `*_time` (the bar lexicon gives `s` as `window_start` and `NAMES` gives `e` as
+  `end_timestamp`, while a trade's `s` is `size`). A timestamp-like `long` or `double` needs a `UNITS` entry (a unit,
   which only an integer may take, or "not a timestamp"); timestamp-like text with no `format`
   needs a `UNITS` "not a timestamp" entry or a `TYPE_FIXES` entry; text with a `format` is
   decided by the representation rules. A timestamp-like string REST parameter (by its base
@@ -2782,6 +2815,9 @@ description for the reviewer. Every gate has a descriptive name, which is how th
   transports, every column appears on at least two transports or is in `TRANSPORT_ONLY`,
   which catches a one-sided lexicon slip (`s` becoming `Shares` while REST says `size`);
 - **`venue-agreement`:** a futures kind whose venue pages differ;
+- **`column-order`:** a source whose column order cannot be taken from its kind: its
+  `KINDS` group has no flat-file or WebSocket member keeping all its fields to give the
+  order, or two of its groups order its columns differently (naming policy, rule 6);
 - **`concept-collision` (one concept, one column):** within one kind, one column name holding
   two concepts. A concept is a field's full long-name path, each segment in snake case, so `DayClose` and
   `PrevDayClose` are two concepts, while the v2 snapshot's `lastTrade.p` and the unified
@@ -2817,9 +2853,11 @@ that users can read what each column means ([section 7.4](#74-column-description
   referenced schema's own); at the 2026-10-27 snapshot, 1,597 of the 1,599 leaf response
   fields of the generated paths carry one (the two without are futures
   `/futures/v1/snapshot` `details.product_code` and `details.ticker`). WebSocket: the
-  `description` of each message property in `websocket.json`. Flat files: the description cell of the page's "Columns"
-  table, where the page has one. The coverage of the last two is measured when their
-  generators land. The REST documentation pages are rendered from the same OpenAPI text and add
+  `description` of each message property in `websocket.json`, all 237 fields of the 28
+  generated channels at the 2026-10-27 snapshot. Flat files: the description cell of the
+  page's "Columns" table, all 178 fields of the 21 generated prefixes. A WebSocket source's
+  URLs are the pages of its feed; a flat-file source's, its dataset page (one per venue for a
+  futures template). The REST documentation pages are rendered from the same OpenAPI text and add
   nothing to it.
 - **Normalization**, by four fixed rules and no hand input, so every outlet can show plain
   text: (1) an HTML link `<a href="url" …>text</a>`, with any other attributes and the `href`
@@ -2902,8 +2940,9 @@ specification may declare (`declarations`; a changed declaration makes the entry
 type the field gets, whether it widens (accepts a form the declared type refuses) or only
 retypes values the declared type accepts (`widens`), and exactly the forms it accepts, so no entry silently inherits a meaning nobody chose
 for it. The plain converter of each `WireType` is never loosened, and no conversion is a
-no-op. The decoder applies it deliberately: forex `x` arrives as a quoted decimal string
-(`"48"`) and `quoted-integer` parses it to `long`; a value it cannot read (`"4.8"`, `"x"`) is
+no-op. The decoder applies it deliberately: the WebSocket forex `x` is declared an integer
+but sampled as a quoted decimal string (`"44"`), and `quoted-integer` reads either form as
+the `long`; a value it cannot read (`"4.8"`, `"x"`) is
 an unconvertible value and fails loudly like any other ([section 19.5](#195-runtime-drift)).
 Every entry has a fixture test of both the conversion and the failure; a conversion that no
 entry declares is coercion, which never happens. The conversions:
@@ -2912,22 +2951,26 @@ entry declares is coercion, which never happens. The conversions:
 |---|---|---|---|
 | `iso-text-instant` | `string` → `iso-instant` | ISO-8601 instant text | benzinga analysts and firms `last_updated`, futures market-status `timestamp`, `/v1/marketstatus/now` `serverTime` |
 | `iso-date-text` | `iso-instant` → `date` | `YYYY-MM-DD` | futures products `last_updated` (sample `"2025-02-22"`) |
-| `quoted-integer` | `string` → `long` | decimal digits in text | forex `x` |
-| `integer-id-as-text` | `long` → `string` | an integer only; text fails | WebSocket crypto `XT` `i` |
-| `text-or-integer-id` | `long` or `string` → `string` | text or an integer | crypto full-market and movers snapshots `lastTrade.i`, declared text (samples `413131` and `"517478762"`); TMX `tmx_company_id`, declared an integer (sample `"2208"`) |
+| `quoted-integer` | `long` → `long` | an integer, or decimal digits in text | WebSocket forex `C` `x` (sample `"44"`) |
+| `text-or-integer-id` | `long` or `string` → `string` | text or an integer | the crypto trade ID, one decision: the full-market and movers snapshots `lastTrade.i`, declared text (samples `413131` and `"517478762"`), and WebSocket `XT` `i`, declared an integer (sample `14272084`); TMX `tmx_company_id`, declared an integer (sample `"2208"`) |
 | `number-label` | `double` → `string` | text, or a finite number as float text (`1` gives `"1.0"`) | risk-factor `taxonomy` (sample `"1.0"`) |
-| `one-code` | `long` → `int-array` | one integer | flat-file `conditions` |
+| `code-list-text` | `long` → `int-array` | one integer, or integers separated by commas in text | flat-file `conditions` and stocks quotes `indicators`, one decision (sample `"12,37"`) |
 | `midnight-utc-date` | `date` → `date` | `YYYY-MM-DD`, or midnight with offset `Z` or `+00:00`, giving the written date; any other clock or offset fails | indices open-close `from`, crypto open-close `day` (samples `"…T00:00:00.000Z"`); the column stays a date so the open-close sources agree |
 | `date-as-epoch` | `date` → `epoch` | an integer count; its unit comes from `UNITS` | futures snapshot `details.settlement_date` (sample `1753851600000000000`, an instant in ns; `/futures/v1/contracts` sends the field as a date) |
+| `integer-as-number` | `long` → `double` | any number | WebSocket crypto `XA`/`XAS` `v` (sample `951.6112`), futures `A`/`AM` `dv` (sample `1353.1`) |
 
 The `example-type` gate converts every documented example value through its generated field:
-the specification's response example (106 of the 109 generated REST paths carry one) and each
-field's own `example`. A type the vendor's samples contradict stops the refresh instead of
+the specification's response example (106 of the 109 generated REST paths carry one), each
+WebSocket channel's message example, each flat-file page's example rows, and each field's own
+`example`. A key a WebSocket example sends that its message does not declare stops the
+refresh too, until the message declares it or a `SAMPLE_ERRORS` entry says the example is
+wrong (the futures trade example's `z`). A type the vendor's samples contradict stops the
+refresh instead of
 failing at run time. It also retires fixes: a `TYPE_FIXES` entry is stale once no example
 value of the fields it names (all entries sharing one decision, such as the two crypto
 snapshots, one decision from one `TypeFix` object) is a value the declared type refuses. A
-conversion that only retypes values its declared type accepts (`iso-text-instant`,
-`quoted-integer`, `integer-id-as-text`, `one-code`) is exempt: the declared-type check retires
+conversion that only retypes values its declared type accepts (`iso-text-instant`) is
+exempt: the declared-type check retires
 it once the specification changes the type. A `SAMPLE_ERRORS` entry is stale once the specification no
 longer shows its sample, the field accepts it, or the field is gone; samples compare as JSON
 text, so `1`, `1.0`, and `true` are three samples.
@@ -3068,13 +3111,15 @@ Every refresh re-hashes every file against the manifest and requires the files o
 exactly the manifest's, so a hand-edited vendor file stops it; the generated files record
 only the fetch date (`descriptions.json`); the manifest committed beside them holds every hash,
 and the parity test binds the two. Besides the
-specs, `--fetch` stores every REST page `llms.txt` links, under `vendor/massive/rest/`, because
-`llms.txt` names pages, not paths: each page's `**Endpoint:**` line is what ties the
-documentation to an OpenAPI path. The documentation host rate-limits a burst of page requests
+specs, `--fetch` stores every REST, WebSocket, and flat-file page `llms.txt` links, under
+`vendor/massive/rest/`, `websocket/`, and `flat-files/`, because `llms.txt` names pages, not
+paths: each REST page's `**Endpoint:**` line is what ties the documentation to an OpenAPI
+path, each WebSocket page names its feed's cluster and channel, and the flat-file overview
+and dataset pages are the flat-file schemas. The documentation host rate-limits a burst of page requests
 with HTTP 429, which the fetch waits out (`Retry-After`, capped at 60 s, else 2 to 32 s, five
 times); any other failure stops it and leaves the old snapshot in place, and the new snapshot
 is swapped in through a backup directory (`vendor/massive-incoming/` and
-`vendor/massive-previous/`, both gitignored). The snapshot (about 3 MB, 164 files, fetched
+`vendor/massive-previous/`, both gitignored). The snapshot (about 4 MB, 240 files, fetched
 2026-10-27 UTC) is Massive's published content, vendored as generation input and not covered
 by the repository's license, so it ships in neither the sdist nor the wheel.
 
@@ -3430,7 +3475,9 @@ document already reflects them.
     columns its sources carry, and `rename` in `_datasets/schema.py` maps them to `Symbol`, `Timestamp`, and
     `Underlying`. Names are never derived from descriptions, and the refresh gates and the catalog
     gates fail on a wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The
-    final names: `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
+    final names: `av` → `AccumulatedVolume`, `op` → `OfficialOpen` (2026-10-27: a neutral name
+    for the stocks and options opening price and the indices opening level, as `Open` is),
+    aggregate `a` → `DayVwap`,
     aggregate `z` → `AverageTradeSize`, `dav` → `AccumulatedDecimalVolume`, stocks `dv` →
     `DecimalVolume`, futures `dv` → `DollarVolume`, and the snapshot object `min` → `LastMinute…`.
     The naming policy of section 19.4 (owner decision, 2026-10-27) governs every name.
@@ -3526,13 +3573,16 @@ document already reflects them.
     holds every field's vendor description, normalized to plain text by fixed rules, with no
     gate on a missing one, and is joined into `Field.description` at load; one rule picks each
     dataset column's description ([section 19.4](#194-generated-schemas)).
+49. **Each table keeps its endpoint's spelling** (2026-10-27). One concept spelled two ways by
+    Massive gets one column within a table, but no cross-table unification or synonym map
+    ([section 19.4](#194-generated-schemas), "Cross-table naming").
 
 ## 23. Open verification items
 
 Each item is handled conservatively now, covered by a fixture test in its unit-test module, and
 retired by a live integration test (`*_integration.py`, skipped without `MASSIVE_API_KEY`) in the
 later live-testing planned PR. Each item that a live test refutes becomes an owner decision
-before 1.0. The last two items concern Deephaven, not Massive: the work that adds column
+before 1.0. Items 16 and 17 concern Deephaven, not Massive: the work that adds column
 descriptions settles them in the embedded test JVM and the web UI, and they need no live test.
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
@@ -3554,3 +3604,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 15 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): request a weekend key and record the status |
 | 16 | Whether the described copy of a keyed `input_table` (a `poll()` result in `REPLACE` or `UPSERT` mode) keeps the input-table attribute, which the web UI reads to offer editing ([section 7.4](#74-column-descriptions)) | The poller writes only through the `input_table` it holds, never through the returned copy, so either outcome keeps the rows correct; the copy carries the descriptions either way | `tests/tables/test_columns.py`: the copy of a keyed `input_table` ticks with its parent, carries `ColumnDescriptions`, and pins whichever input-table attribute behaviour 42.7 shows | None: the embedded JVM settles it |
 | 17 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
+| 18 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/namespaces/test_forex_integration.py`: one `C` frame; record the form of `x` |
+| 19 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/namespaces/test_crypto_integration.py`: one `XT` frame; record the form of `i` |
+| 20 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); the overflow check and the [1990, 2100] bound fail loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
+| 21 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |

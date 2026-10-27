@@ -1128,19 +1128,21 @@
     {"in_path": false, "kind": "enum", "name": "sort", "unit": null, "values": ["window_start.asc", "window_start.desc"]}
    ],
    "fields": [
-    {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "close"},
-    {"column": "DollarVolume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "dollar_volume"},
+    {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
+    {"column": "SessionEndDate", "conversion": null, "required": true, "type": "date", "unit": null, "wire_key": "session_end_date"},
+    {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "window_start"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "open"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "high"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "low"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "open"},
-    {"column": "SessionEndDate", "conversion": null, "required": true, "type": "date", "unit": null, "wire_key": "session_end_date"},
-    {"column": "SettlementPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "settlement_price"},
-    {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "Transactions", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "transactions"},
+    {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "close"},
     {"column": "Volume", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "volume"},
-    {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "window_start"}
+    {"column": "DollarVolume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "dollar_volume"},
+    {"column": "Transactions", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "transactions"},
+    {"column": "SettlementPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "settlement_price"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "futures", "kind": "bars", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/futures/v1/contracts",
@@ -1325,20 +1327,22 @@
     {"in_path": true, "kind": "string", "name": "ticker", "unit": null, "values": []}
    ],
    "fields": [
+    {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
+    {"column": "Timestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "timestamp"},
+    {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "sequence_number"},
+    {"column": "ReportSequence", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "report_sequence"},
+    {"column": "AskTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "ask_timestamp"},
     {"column": "AskPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "ask_price"},
     {"column": "AskSize", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "ask_size"},
-    {"column": "AskTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "ask_timestamp"},
+    {"column": "BidTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "bid_timestamp"},
     {"column": "BidPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bid_price"},
     {"column": "BidSize", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "bid_size"},
-    {"column": "BidTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "bid_timestamp"},
-    {"column": "Channel", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "channel"},
-    {"column": "ReportSequence", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "report_sequence"},
-    {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "sequence_number"},
     {"column": "SessionEndDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "session_end_date"},
-    {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "Timestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "timestamp"}
+    {"column": "Channel", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "channel"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "futures", "kind": "quotes", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/futures/v1/schedules",
@@ -1443,16 +1447,18 @@
     {"in_path": true, "kind": "string", "name": "ticker", "unit": null, "values": []}
    ],
    "fields": [
-    {"column": "Channel", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "channel"},
-    {"column": "Price", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "price"},
-    {"column": "ReportSequence", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "report_sequence"},
-    {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "sequence_number"},
-    {"column": "SessionEndDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "session_end_date"},
-    {"column": "Size", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "size"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "Timestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "timestamp"}
+    {"column": "Timestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "timestamp"},
+    {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "sequence_number"},
+    {"column": "ReportSequence", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "report_sequence"},
+    {"column": "Price", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "price"},
+    {"column": "Size", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "size"},
+    {"column": "SessionEndDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "session_end_date"},
+    {"column": "Channel", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "channel"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "futures", "kind": "trades", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/stocks/filings/10-K/vX/sections",
@@ -2752,7 +2758,9 @@
     {"column": "Size", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "size"},
     {"column": "Timestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "timestamp"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "crypto", "kind": "trades", "position": 1, "projection": null}
+   ]
   },
   {
    "key": "/v1/last_quote/currencies/{from}/{to}",
@@ -2767,13 +2775,14 @@
     {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "Timestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "timestamp"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "forex", "kind": "quotes", "position": 1, "projection": {"ask": "AskPrice", "bid": "BidPrice", "exchange": "Exchange", "timestamp": "Timestamp"}}
+   ]
   },
   {
    "key": "/v1/marketstatus/now",
    "result_key": null,
-   "params": [
-   ],
+   "params": [],
    "fields": [
     {"column": "AfterHours", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "afterHours"},
     {"column": "CurrenciesCrypto", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "currencies.crypto"},
@@ -2800,8 +2809,7 @@
   {
    "key": "/v1/marketstatus/upcoming",
    "result_key": null,
-   "params": [
-   ],
+   "params": [],
    "fields": [
     {"column": "Close", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "close"},
     {"column": "Date", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "date"},
@@ -2915,16 +2923,18 @@
    ],
    "fields": [
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "crypto", "kind": "bars", "position": 2, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/grouped/locale/global/market/fx/{date}",
@@ -2935,16 +2945,18 @@
    ],
    "fields": [
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "forex", "kind": "bars", "position": 2, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/grouped/locale/us/market/stocks/{date}",
@@ -2956,17 +2968,19 @@
    ],
    "fields": [
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
-    {"column": "Otc", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "otc"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
-    {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
+    {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"},
+    {"column": "Otc", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "otc"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "stocks", "kind": "bars", "position": 2, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{cryptoTicker}/prev",
@@ -2977,16 +2991,18 @@
    ],
    "fields": [
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "crypto", "kind": "bars", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}",
@@ -3002,16 +3018,18 @@
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
    ],
    "fields": [
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "crypto", "kind": "bars", "position": 1, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{forexTicker}/prev",
@@ -3022,16 +3040,18 @@
    ],
    "fields": [
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "forex", "kind": "bars", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}",
@@ -3047,16 +3067,18 @@
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
    ],
    "fields": [
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "forex", "kind": "bars", "position": 1, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{indicesTicker}/prev",
@@ -3066,13 +3088,15 @@
    ],
    "fields": [
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "indices", "kind": "bars", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}",
@@ -3087,13 +3111,15 @@
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
    ],
    "fields": [
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "indices", "kind": "bars", "position": 1, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{optionsTicker}/prev",
@@ -3104,16 +3130,18 @@
    ],
    "fields": [
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "options", "kind": "bars", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{optionsTicker}/range/{multiplier}/{timespan}/{from}/{to}",
@@ -3129,16 +3157,18 @@
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
    ],
    "fields": [
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "options", "kind": "bars", "position": 1, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{stocksTicker}/prev",
@@ -3149,16 +3179,18 @@
    ],
    "fields": [
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "stocks", "kind": "bars", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}",
@@ -3174,17 +3206,19 @@
     {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []}
    ],
    "fields": [
+    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
+    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
     {"column": "Close", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "High", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "h"},
     {"column": "Low", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
-    {"column": "Open", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "o"},
-    {"column": "Otc", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "otc"},
     {"column": "WindowStart", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "t"},
-    {"column": "Volume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "v"},
-    {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"}
+    {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
+    {"column": "Vwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vw"},
+    {"column": "Otc", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "otc"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "stocks", "kind": "bars", "position": 1, "projection": null}
+   ]
   },
   {
    "key": "/v2/last/nbbo/{stocksTicker}",
@@ -3193,22 +3227,24 @@
     {"in_path": true, "kind": "string", "name": "stocksTicker", "unit": null, "values": []}
    ],
    "fields": [
-    {"column": "AskPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "P"},
-    {"column": "AskSize", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "S"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
     {"column": "AskExchange", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "X"},
-    {"column": "Conditions", "conversion": null, "required": false, "type": "int-array", "unit": null, "wire_key": "c"},
-    {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "f"},
-    {"column": "Indicators", "conversion": null, "required": false, "type": "int-array", "unit": null, "wire_key": "i"},
-    {"column": "BidPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "p"},
-    {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "q"},
-    {"column": "BidSize", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "s"},
-    {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "t"},
+    {"column": "AskPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "P"},
+    {"column": "AskSize", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "S"},
     {"column": "BidExchange", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "x"},
+    {"column": "BidPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "p"},
+    {"column": "BidSize", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "s"},
+    {"column": "Conditions", "conversion": null, "required": false, "type": "int-array", "unit": null, "wire_key": "c"},
+    {"column": "Indicators", "conversion": null, "required": false, "type": "int-array", "unit": null, "wire_key": "i"},
     {"column": "ParticipantTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "y"},
-    {"column": "Tape", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "z"}
+    {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "q"},
+    {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "t"},
+    {"column": "Tape", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "z"},
+    {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "f"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "stocks", "kind": "quotes", "position": 1, "projection": null}
+   ]
   },
   {
    "key": "/v2/last/trade/{optionsTicker}",
@@ -3220,18 +3256,20 @@
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
     {"column": "Conditions", "conversion": null, "required": false, "type": "int-array", "unit": null, "wire_key": "c"},
     {"column": "Correction", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "e"},
-    {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "f"},
-    {"column": "Id", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "i"},
-    {"column": "Price", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "p"},
-    {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "q"},
-    {"column": "TrfId", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "r"},
-    {"column": "Size", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "s"},
-    {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "t"},
     {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "x"},
+    {"column": "Price", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "p"},
+    {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "t"},
+    {"column": "Size", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "s"},
+    {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "q"},
+    {"column": "Id", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "i"},
     {"column": "ParticipantTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "y"},
+    {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "f"},
+    {"column": "TrfId", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "r"},
     {"column": "Tape", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "z"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "options", "kind": "trades", "position": 1, "projection": null}
+   ]
   },
   {
    "key": "/v2/last/trade/{stocksTicker}",
@@ -3242,20 +3280,22 @@
    "fields": [
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "T"},
     {"column": "Conditions", "conversion": null, "required": false, "type": "int-array", "unit": null, "wire_key": "c"},
-    {"column": "DecimalSize", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ds"},
     {"column": "Correction", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "e"},
-    {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "f"},
+    {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "x"},
     {"column": "Id", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "i"},
+    {"column": "ParticipantTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "y"},
     {"column": "Price", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "p"},
     {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "q"},
-    {"column": "TrfId", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "r"},
-    {"column": "Size", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "s"},
     {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "t"},
-    {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "x"},
-    {"column": "ParticipantTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "y"},
-    {"column": "Tape", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "z"}
+    {"column": "Size", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "s"},
+    {"column": "Tape", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "z"},
+    {"column": "TrfId", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "r"},
+    {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "f"},
+    {"column": "DecimalSize", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ds"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "stocks", "kind": "trades", "position": 1, "projection": null}
+   ]
   },
   {
    "key": "/v2/reference/news",
@@ -3581,7 +3621,9 @@
     {"column": "BidPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bid_price"},
     {"column": "ParticipantTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "participant_timestamp"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "forex", "kind": "quotes", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v3/quotes/{optionsTicker}",
@@ -3607,7 +3649,9 @@
     {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "sequence_number"},
     {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "sip_timestamp"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "options", "kind": "quotes", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v3/quotes/{stockTicker}",
@@ -3638,7 +3682,9 @@
     {"column": "Tape", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "tape"},
     {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "trf_timestamp"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "stocks", "kind": "quotes", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v3/reference/conditions",
@@ -3981,7 +4027,9 @@
     {"column": "Type", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "type"},
     {"column": "Value", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "value"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "indices", "kind": "values", "position": 0, "projection": {"last_updated": "Timestamp", "ticker": "Ticker", "value": "Value"}}
+   ]
   },
   {
    "key": "/v3/snapshot/options/{underlyingAsset}",
@@ -4073,10 +4121,12 @@
     {"column": "Id", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "id"},
     {"column": "ParticipantTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "participant_timestamp"},
     {"column": "Price", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "price"},
-    {"column": "ReceivedTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "received_timestamp"},
-    {"column": "Size", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "size"}
+    {"column": "Size", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "size"},
+    {"column": "ReceivedTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "received_timestamp"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "crypto", "kind": "trades", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v3/trades/{optionsTicker}",
@@ -4096,14 +4146,16 @@
     {"column": "Conditions", "conversion": null, "required": false, "type": "int-array", "unit": null, "wire_key": "conditions"},
     {"column": "Correction", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "correction"},
     {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "exchange"},
-    {"column": "Id", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "id"},
-    {"column": "ParticipantTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "participant_timestamp"},
     {"column": "Price", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "price"},
-    {"column": "SequenceNumber", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "sequence_number"},
     {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "sip_timestamp"},
-    {"column": "Size", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "size"}
+    {"column": "Size", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "size"},
+    {"column": "SequenceNumber", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "sequence_number"},
+    {"column": "Id", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "id"},
+    {"column": "ParticipantTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "participant_timestamp"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "options", "kind": "trades", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/v3/trades/{stockTicker}",
@@ -4122,7 +4174,6 @@
    "fields": [
     {"column": "Conditions", "conversion": null, "required": false, "type": "int-array", "unit": null, "wire_key": "conditions"},
     {"column": "Correction", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "correction"},
-    {"column": "DecimalSize", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "decimal_size"},
     {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "Id", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "id"},
     {"column": "ParticipantTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "participant_timestamp"},
@@ -4132,9 +4183,12 @@
     {"column": "Size", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "size"},
     {"column": "Tape", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "tape"},
     {"column": "TrfId", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "trf_id"},
-    {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "trf_timestamp"}
+    {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "trf_timestamp"},
+    {"column": "DecimalSize", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "decimal_size"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "stocks", "kind": "trades", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/vX/reference/ipos",

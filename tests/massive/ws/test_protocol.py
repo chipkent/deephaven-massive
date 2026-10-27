@@ -369,18 +369,18 @@ def test_an_unconvertible_value_rejects_its_row(
 
 def test_a_named_conversion_applies_to_its_field() -> None:
     decoder = FrameDecoder([CONVERTED], host=HOST, path="/forex")
-    [data] = decoder.decode(_frame({"ev": "C", "x": "48", "i": 7}, {"ev": "C", "i": "ab"}))
+    [data] = decoder.decode(_frame({"ev": "C", "x": "48", "i": 7}, {"ev": "C", "x": 49, "i": "ab"}))
     assert isinstance(data, Data)
-    assert data.rows == [{"Exchange": 48, "TradeId": "7"}, {"Exchange": None, "TradeId": "ab"}]
+    assert data.rows == [{"Exchange": 48, "TradeId": "7"}, {"Exchange": 49, "TradeId": "ab"}]
     assert data.rejects == []
 
 
 @pytest.mark.parametrize(
     "case",
     [
-        # Only the named conversion reads the field: a plain `long` is refused too.
+        # Only the named conversion reads the field: neither decimal text nor a float passes.
         ("x", "Exchange", "4.8", "long (by the conversion quoted-integer)", '"4.8"'),
-        ("x", "Exchange", 48, "long (by the conversion quoted-integer)", "48"),
+        ("x", "Exchange", 48.5, "long (by the conversion quoted-integer)", "48.5"),
         ("i", "TradeId", 1.5, "string (by the conversion text-or-integer-id)", "1.5"),
     ],
 )

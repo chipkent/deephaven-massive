@@ -16,9 +16,10 @@ imports only the standard library, `urllib3`, `websockets`, `certifi`, `orjson`,
 Interface:
     - `WireError`, `WireAuthError`, `WireEntitlementError`: the errors every client raises;
       `deephaven_massive._errors.from_wire` turns each into its public counterpart.
-    - `source`, `sources`: the generated description of each REST path (and, later, each
-      WebSocket channel and flat-file prefix), loaded once from the committed `spec/*.json`,
-      each field carrying the vendor's description of it (`Field.description`).
+    - `source`, `sources`: the generated description of each REST path, WebSocket channel,
+      and flat-file prefix, loaded once from the committed `spec/*.json`, each field carrying
+      the vendor's description of it (`Field.description`) and each source its places in the
+      dataset kinds (`Source.memberships`).
     - `provenance`, `Provenance`: the day the vendor sources were fetched and the vendor URL
       of each source, for documents that cite them.
     - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
