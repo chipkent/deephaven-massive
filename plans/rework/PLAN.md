@@ -2131,7 +2131,8 @@ described as soon as both have landed. **Before.** column-reference-pages.
 
 **Files.** Modify `_datasets/schema.py` (`Column` gains `description`, `supplied_by`,
 `wire_keys`; the three rules), `_tables/columns.py` (`describe()`, created in layer-rules),
-`_datasets/catalog.py` (`DatasetSpec.summary`, required, one sentence), `_query.py`
+`_datasets/catalog.py` (`DatasetSpec.summary`, required, one sentence: landed early on its
+own, with the summary docstring rule in `namespaces/test_base`), `_query.py`
 (`QueryBase.columns()`; every verb ends with `describe()`), the namespace modules of every
 dataset declared by then (their summaries), and wherever a verb's returned table is built
 (`_ingest/rest.py`, `_ingest/poll.py`, `_tables/stream.py`, `_ingest/flatfiles.py`), with their
@@ -2245,8 +2246,9 @@ dataset planned PR has landed, in which case `docs/datasets/` stays absent). Mod
       the catalog the session module builds, call `render(catalog, _massive.provenance())`
       and `sync()` on `docs/datasets/`, and print the result. All logic stays in
       `_datasets/column_reference.py`, which coverage measures.
-- [ ] `tests/datasets/test_column_reference.py`: the parity test, the docstring tests (the
-      docstring starts with the summary and names `docs/datasets/<namespace>.md#<dataset>`),
+- [ ] `tests/datasets/test_column_reference.py`: the parity test, the docstring test (the
+      docstring names `docs/datasets/<namespace>.md#<dataset>`; that it starts with the
+      summary is checked in `tests/namespaces/test_base.py`),
       and render and sync tests on a synthetic catalog and `tmp_path`.
 
 **Acceptance criteria.**
@@ -2259,8 +2261,8 @@ dataset planned PR has landed, in which case `docs/datasets/` stays absent). Mod
       `|` escaping, a union-only column's text, a `request` wire cell, one wire-field column
       per transport used, and the footer's date and URLs.
 - [ ] `sync` leaves a page with unchanged bytes untouched (its modification time stays).
-- [ ] A docstring without its anchor, or not starting with its summary, fails the docstring
-      test (on a synthetic namespace class).
+- [ ] A docstring without its anchor fails the docstring test (on a synthetic namespace
+      class).
 - [ ] No module under `src/` imports `deephaven_server` (the layout test is unchanged).
 
 **Verification.**
@@ -2330,9 +2332,9 @@ Shared test files and helpers, which no dataset PR edits beyond what is stated h
 - The `_query.py` class docstrings and their examples are finish-rework's, not a dataset PR's.
 
 **Shared tasks (per dataset).**
-- [ ] A `DatasetSpec`: name, one-sentence summary (once result-column-descriptions has added
-      `DatasetSpec.summary`; before that, the docstring's first sentence, which that PR copies
-      into the spec), query class, kind, the per-source key columns (`KeySpec`), the role paths,
+- [ ] A `DatasetSpec`: name, one-sentence `summary` (required since the dataset-summary PR,
+      which lands it ahead of result-column-descriptions so every dataset PR can set it),
+      query class, kind, the per-source key columns (`KeySpec`), the role paths,
       channels, prefixes, the `start`/`end` wire pair, poll defaults, page size. No column
       overrides and no unit declarations: those are generated.
 - [ ] The factory method with the exact DESIGN § 8 signature and a docstring that starts with
