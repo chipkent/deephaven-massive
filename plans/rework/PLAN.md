@@ -1951,7 +1951,9 @@ threads).
       parameter, the `start`/`end` wire pair, the validated `filters`, `Request.adjusted` sent as
       `adjusted` when not None, the page size; `limit` is the total-row cap.
 - [ ] Batches from `to_batch`, renamed (`rename` in `_datasets/schema.py`) and converted (the timestamp routine);
-      drift to the `DriftRegistry`; never more than one page of rows held.
+      drift to the `DriftRegistry` (`report` outside every lock; a `poll()` table's
+      `SchemaDrift` through `SessionCore.record_stream_drift`, never `record` directly); never
+      more than one page of rows held.
 - [ ] Errors per DESIGN § 13.4: `from_wire`; the rate-limit WARNING once per session; fan-out
       404 drops one symbol; `poll()` data failures → `publish_failure`.
 - [ ] `_ingest/hosts.py` exactly per DESIGN § 13.2, including the unknown-`timeframe` failure and the
@@ -2035,7 +2037,10 @@ routing, the options cap, reactive watchlists, and the live diagnostics.
 - [ ] Raw wire symbols of rows and rejects are mapped to canonical symbols with
       `_datasets/symbols.py` when routed (the client passes them through unchanged).
 - [ ] Rejects fail only their streams; a row with no symbol fails only the channel's `ALL`
-      streams and logs at ERROR; drift goes to the `DriftRegistry`.
+      streams and logs at ERROR; drift goes to the `DriftRegistry`: `report` outside every
+      lock, a stream's `SchemaDrift` through `SessionCore.record_stream_drift`, and a
+      connection's through `record` on its loop thread, which writes its row, and `forget`
+      when the connection leaves its registry.
 - [ ] The flush renames, converts, applies the bound mask, and fans out with `where_in`.
 - [ ] The options cap with deferral; the reactive symbol tables in `_tables/watchlist.py`; idle
       close after 30 s.

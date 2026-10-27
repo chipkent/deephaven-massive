@@ -16,6 +16,7 @@ from deephaven_massive._datasets.timestamps import (
     TimeField,
     TimeUnit,
     TimeUnitTable,
+    UnitMismatchError,
 )
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
@@ -130,7 +131,7 @@ def test_the_bound_includes_1990_and_all_of_2100() -> None:
 def test_milliseconds_declared_as_nanoseconds_fail_the_bound() -> None:
     # A 13-digit millisecond value read as nanoseconds is in January 1970.
     with pytest.raises(
-        MassiveError,
+        UnitMismatchError,
         match=r"^timestamp unit mismatch for stocks\.trades\.sip_timestamp: "
         r"1700000000000 ns is outside 1990 to 2100$",
     ):
@@ -214,3 +215,10 @@ def test_every_declared_timestamp_field_of_every_dataset_has_a_unit() -> None:
 
 def test_fmv_threshold_is_ten_to_the_seventeenth() -> None:
     assert FMV_NS_THRESHOLD == 10**17
+
+
+def test_a_unit_mismatch_is_a_massive_error() -> None:
+    # Callers that catch MassiveError see it; a transport catches the subclass to name the file.
+    assert issubclass(UnitMismatchError, MassiveError)
+    with pytest.raises(UnitMismatchError, match="overflows"):
+        TABLE.to_epoch_ns_array(MS, ints(NANOS))

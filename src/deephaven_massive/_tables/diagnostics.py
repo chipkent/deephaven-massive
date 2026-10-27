@@ -278,8 +278,9 @@ class StreamUpdate:
         path: The cluster path.
         error: Warning text for the `Error` column.
         clear_error: True to set `Error` back to null; takes precedence over `error`.
-        schema_drift: The stream's new `SchemaDrift` text, as `DriftRegistry.record` returns
-            it.
+
+    `SchemaDrift` is not set here: `SessionCore.record_stream_drift` records a stream's drift
+    and writes its row in one step, so concurrent reports cannot leave an older text behind.
     """
 
     rows_published: int | None = None
@@ -289,7 +290,6 @@ class StreamUpdate:
     path: str | None = None
     error: str | None = None
     clear_error: bool = False
-    schema_drift: str | None = None
 
     def apply(self, row: StreamRow) -> StreamRow:
         """Return `row` with the fields this update sets; the others keep their values.
@@ -310,7 +310,6 @@ class StreamUpdate:
             host=row.host if self.host is None else self.host,
             path=row.path if self.path is None else self.path,
             error=None if self.clear_error else row.error if self.error is None else self.error,
-            schema_drift=row.schema_drift if self.schema_drift is None else self.schema_drift,
         )
 
 
@@ -360,16 +359,23 @@ class DriftRegistry:
       outside the documented ones; the page's rows are kept.
     - `record` adds a report to the drift of one stream or connection, its owner, and returns
       the owner's new `SchemaDrift` text when it changed, for the caller to write into the
-      owner's diagnostics row. `forget` drops an owner once its row is final.
+      owner's diagnostics row. `forget` drops an owner once it has left its registry.
 
     Drift is never a failure: a missing key, a value that does not convert, and a timestamp out
     of bounds fail where they are found and never reach the registry.
 
     `SessionCore` creates one per session, and any library thread calls it. Thread-safe: one
-    leaf lock guards its sets and is held only for set operations, never for logging, a
-    Deephaven call, or a wait, so a caller may hold the session's `registry_lock`. For a given
-    owner, `record` is called from one thread at a time (the stream's flush or poll thread, the
-    connection's loop thread), so the texts it returns reach the row in order.
+    leaf lock guards its sets, held for set operations and for building a text, never for
+    logging, a Deephaven call, or a wait. `record` and `forget` may therefore be called with
+    the session's `registry_lock` held. `report` and `report_statuses` must not be: they log,
+    and a log handler may do I/O.
+
+    Every text `record` returns is built under the lock from the owner's entries at that
+    moment, but two calls for one owner can still return in either order, so the row write
+    must be ordered with the call. A stream's row is: `SessionCore.record_stream_drift` calls
+    `record` and writes the row in one `registry_lock` section, and calls `forget` when the
+    stream leaves the registry. A connection's row is written only by its loop thread, which
+    is also where its frames, and so its drift, are decoded.
 
     Example:
         ::
@@ -470,13 +476,14 @@ class DriftRegistry:
                 return None
             seen |= entries
             self._owners[owner] = seen
-        text = ", ".join(sorted(seen))
+            # Built under the lock, so the text is the owner's entries at this moment.
+            text = ", ".join(sorted(seen))
         if len(text) > SCHEMA_DRIFT_SHOWN:
             text = text[: SCHEMA_DRIFT_SHOWN - 1] + "…"
         return text
 
     def forget(self, owner: Hashable) -> None:
-        """Drop an owner's drift once its row is final (the stream or connection has gone).
+        """Drop an owner's drift once it has left its registry; its last row keeps the text.
 
         Args:
             owner: The owner `record` was given; unknown owners are ignored.

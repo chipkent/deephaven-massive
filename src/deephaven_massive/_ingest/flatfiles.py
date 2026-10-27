@@ -84,7 +84,7 @@ from deephaven_massive._datasets.catalog import declared_units
 from deephaven_massive._datasets.dates import TimeRange
 from deephaven_massive._datasets.history_source import within_publication_grace
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._datasets.timestamps import TimeField, TimeUnitTable
+from deephaven_massive._datasets.timestamps import TimeField, TimeUnitTable, UnitMismatchError
 from deephaven_massive._enums import AssetClass, FuturesVenue, Transport
 from deephaven_massive._errors import (
     AuthenticationError,
@@ -302,7 +302,7 @@ class _Transform:
         Returns:
             The block in the dataset's schema.
 
-        A timestamp that overflows or lies outside 1990 to 2100 raises the `MassiveError` of
+        A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
         `TimeUnitTable.instants`.
         """
         arrays = [self._column(batch, column) for column in self.columns]
@@ -397,10 +397,11 @@ class FlatFileHistory:
         holiday"`), when the S3 client cannot be created, the bucket is unreachable or answers
         another error, a file is not the expected gzip CSV (for example, it lacks the symbol or
         time header, or a value does not parse as its type), a timestamp overflows or lies
-        outside 1990 to 2100 (`"timestamp unit mismatch for <dataset>.<header>: ..."`), a
-        futures file holds another session, or the session is closed during the call. Errors
-        that come from S3 carry its `x-amz-request-id` as `request_id`. An extra or missing
-        documented header is not an error: it logs a WARNING once per header and session.
+        outside 1990 to 2100 (`"timestamp unit mismatch for <dataset>.<header>: ..."`, then
+        the file), a futures file holds another session, or the session is closed during the
+        call. Errors that come from S3 carry its `x-amz-request-id` as `request_id`. An extra
+        or missing documented header is not an error: it logs a WARNING once per header and
+        session.
         """
         prefix = spec.flat_file_prefixes[request.timespan]
         transform = _Transform.build(spec, request.symbols, window)
@@ -501,7 +502,8 @@ class FlatFileHistory:
 
         Raises:
             MassiveError: If converting or gathering the file's rows fails in Arrow (out of
-                memory, say): `"cannot read <location>: <Arrow's message>"`. A failed request
+                memory, say): `"cannot read <location>: <Arrow's message>"`; if a timestamp
+                fails the timestamp routine: its text, then `"(in <location>)"`. A failed request
                 or read (for example, a file that is not the expected gzip CSV) raises the
                 public error of `_public`: `MassiveError`, `AuthenticationError`, or
                 `EntitlementError`. A closed session raises the `MassiveError` of
@@ -521,6 +523,9 @@ class FlatFileHistory:
                     )
                 except pa.ArrowException as error:
                     raise MassiveError(f"cannot read {file.location}: {error}") from error
+                except UnitMismatchError as error:
+                    # The routine knows the field, not the file: name the file too.
+                    raise MassiveError(f"{error} (in {file.location})") from error
         except WireError as error:
             public = _public(error, key)
             raise public from error
@@ -535,8 +540,9 @@ class FlatFileHistory:
     ) -> list[Table]:
         """Convert a file's batches to the schema and gather them into static tables.
 
-        Reports each batch's drift to the session's `DriftRegistry`, which logs a WARNING the
-        first time the dataset's flat files show each extra or missing header.
+        Reports the file's drift, which its first batch carries, to the session's
+        `DriftRegistry`, which logs a WARNING the first time the dataset's flat files show each
+        extra or missing header.
 
         Args:
             batches: The file's batches, one per block, each with the file's drift.
@@ -550,9 +556,12 @@ class FlatFileHistory:
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
         size = 0
+        reported = False
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
-                self._core.drift.report(transform.dataset, Transport.FLAT_FILES, drift)
+                if not reported:  # every batch of a file carries the same report
+                    self._core.drift.report(transform.dataset, Transport.FLAT_FILES, drift)
+                    reported = True
                 rows = transform.apply(batch)
                 if rows.num_rows:
                     pending.append(rows)

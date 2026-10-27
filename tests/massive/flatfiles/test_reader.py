@@ -403,17 +403,43 @@ def test_every_missing_key_header_is_named(
 ) -> None:
     with pytest.raises(WireError, match=r"lacks the key column sip_timestamp, ticker$"):
         table(opened(KEY, "price\n1.5\n"), plan())
-    with pytest.raises(WireError, match=r"lacks the key column sip_timestamp, ticker$"):
-        table(opened(KEY, ""), plan())  # an empty file has no header at all
 
 
-def test_a_header_without_rows_yields_nothing(
+@pytest.mark.parametrize(
+    "body", [pytest.param(b"", id="zero-bytes"), pytest.param(gzip.compress(b""), id="empty-gzip")]
+)
+def test_an_empty_file_is_a_wire_error(body: bytes) -> None:
+    file, _ = flat_file(KEY, body)
+    with pytest.raises(WireError) as info:
+        table(file, plan())
+    assert info.value.message == (
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: the file is empty: "
+        "no header line"
+    )
+
+
+def test_a_header_without_rows_yields_one_empty_batch_with_its_drift(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    for text in (TRADE_HEADER, TRADE_HEADER.rstrip("\n")):
+    for text in (TRADE_HEADER, TRADE_HEADER.rstrip("\n"), "ticker,sip_timestamp,halted\n"):
         file = opened(KEY, text)
         with file:
-            assert list(file.batches(plan())) == []
+            ((batch, _),) = list(file.batches(plan()))
+        assert batch.num_rows == 0
+        assert batch.schema == table(opened(KEY, TRADE_HEADER + TRADE_ROWS), plan()).schema
+    # The drift of a file without rows still reaches the caller.
+    report = drift(opened(KEY, "ticker,sip_timestamp,halted\n"), plan())
+    assert report.extra == {"halted"}
+    assert "price" in report.missing
+
+
+def test_a_header_that_names_a_column_twice_is_a_wire_error(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    text = "ticker,price,sip_timestamp,price,id,id\nAAPL,1,1741012200000000000,2,a,b\n"
+    with pytest.raises(WireError) as info:
+        table(opened(KEY, text), plan())
+    assert info.value.message.endswith(": the header names id, price more than once")
 
 
 def test_a_quoted_header_with_crlf_line_ends_is_parsed(
@@ -425,6 +451,31 @@ def test_a_quoted_header_with_crlf_line_ends_is_parsed(
         table(opened(KEY, TRADE_HEADER + TRADE_ROWS), plan())
     )
     assert drift(opened(KEY, text), plan()).missing == frozenset()
+
+
+def test_a_byte_order_mark_before_the_header_is_dropped(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # A byte-order mark must not glue itself to the first name, key header or not.
+    for order in (TRADE_NAMES, ["ticker", *[n for n in TRADE_NAMES if n != "ticker"]]):
+        text = reorder(TRADE_HEADER + TRADE_ROWS, order)
+        expected = table(opened(KEY, text), plan())
+        assert table(opened(KEY, "\ufeff" + text), plan()).equals(expected)
+        assert drift(opened(KEY, "\ufeff" + text), plan()) == drift(opened(KEY, text), plan())
+
+
+def test_a_list_element_that_does_not_convert_names_its_header(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    for conditions in ("12,abc", "12,99999999999", "12,,3"):
+        row = f'"{conditions}",,4,1,1,227.48,100,1741012200000000123,100,3,AAPL,,\n'
+        with pytest.raises(WireError) as info:
+            table(opened(KEY, TRADE_HEADER + row), plan())
+        assert info.value.message.startswith(
+            f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: conditions is not "
+            "list<item: int32>: "
+        )
+        assert isinstance(info.value.__cause__, pa.ArrowInvalid)
 
 
 def test_a_header_longer_than_a_block_is_a_wire_error(

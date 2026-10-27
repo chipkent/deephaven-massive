@@ -17,7 +17,7 @@ epoch nanoseconds, in this order:
    or `ns`); a result that does not fit a signed 64-bit integer raises.
 3. **Bound.** Every result must lie in the years 1990 to 2100.
 
-Steps 2 and 3 raise `MassiveError("timestamp unit mismatch for <dataset>.<field>: ...")`,
+Steps 2 and 3 raise `UnitMismatchError("timestamp unit mismatch for <dataset>.<field>: ...")`,
 naming the field, its declared unit, and the first offending value as Massive sent it. Together
 they catch every unit confusion: milliseconds declared as nanoseconds land in January 1970, and
 nanoseconds declared as milliseconds overflow. `TimeUnitTable.to_epoch_ns_array` is steps 2 and
@@ -59,6 +59,7 @@ __all__ = [
     "TimeField",
     "TimeUnit",
     "TimeUnitTable",
+    "UnitMismatchError",
 ]
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,15 @@ MAX_INSTANT_NS: Final = int((datetime(2101, 1, 1, tzinfo=UTC) - _EPOCH).total_se
 """The first instant past the bound: 2101-01-01T00:00Z, so the whole of 2100 is inside."""
 
 _INT64_MAX: Final = 2**63 - 1
+
+
+class UnitMismatchError(MassiveError):
+    """A timestamp that overflows 64-bit nanoseconds or converts outside 1990 to 2100.
+
+    A `MassiveError`, so a caller that does nothing special reports it as one; a transport
+    catches it by this type to add where the value came from (the flat-file transport names
+    the file) and raises a plain `MassiveError` with the same text.
+    """
 
 
 class TimeUnit(StrEnum):
@@ -197,14 +207,14 @@ class TimeUnitTable:
             Nanoseconds since the Unix epoch.
 
         Raises:
-            MassiveError: If `value` does not fit a 64-bit integer. A value that overflows
-                64-bit nanoseconds or lies outside 1990 to 2100 raises the `MassiveError` of
+            UnitMismatchError: If `value` does not fit a 64-bit integer. A value that overflows
+                64-bit nanoseconds or lies outside 1990 to 2100 raises the `UnitMismatchError` of
                 `to_epoch_ns_array`, and an undeclared field its `LookupError`.
         """
         try:
             values = pa.array([value], pa.int64())
         except (OverflowError, pa.ArrowInvalid):
-            raise MassiveError(
+            raise UnitMismatchError(
                 f"timestamp unit mismatch for {key.label}: {value} does not fit 64 bits"
             ) from None
         nanos: int = self.to_epoch_ns_array(key, values)[0].as_py()
@@ -227,7 +237,7 @@ class TimeUnitTable:
 
         An undeclared field raises the `LookupError` of `unit`. A value that overflows 64-bit
         nanoseconds, or a converted value outside 1990 to 2100, raises
-        `MassiveError("timestamp unit mismatch for <dataset>.<field>: ...")`, naming the unit
+        `UnitMismatchError("timestamp unit mismatch for <dataset>.<field>: ...")`, naming the unit
         and the first offending value as Massive sent it.
         """
         unit = self.unit(key)
@@ -261,7 +271,7 @@ class TimeUnitTable:
         Returns:
             An `int64` Arrow array of nanoseconds since the Unix epoch.
 
-        Raises the `LookupError` and `MassiveError` of `to_epoch_ns_array`.
+        Raises the `LookupError` and `UnitMismatchError` of `to_epoch_ns_array`.
         """
         if not time_column:
             values = pc.cast(values, pa.int64())
@@ -281,7 +291,7 @@ def _scale(key: TimeField, unit: TimeUnit, values: pa.Array) -> pa.Array:
         The `int64` nanoseconds.
 
     Raises:
-        MassiveError: If any value overflows 64-bit nanoseconds; the message names the first.
+        UnitMismatchError: If any value overflows 64-bit nanoseconds; the message names the first.
     """
     factor = _NS_PER[unit]
     if factor == 1:
@@ -292,7 +302,7 @@ def _scale(key: TimeField, unit: TimeUnit, values: pa.Array) -> pa.Array:
         limit = _INT64_MAX // factor
         too_big = pc.or_(pc.greater(values, limit), pc.less(values, -limit))
         first = pc.filter(values, too_big)[0].as_py()
-        raise MassiveError(
+        raise UnitMismatchError(
             f"timestamp unit mismatch for {key.label}: {first} {unit.value} overflows "
             "64-bit nanoseconds"
         ) from None
@@ -308,7 +318,7 @@ def _bound(key: TimeField, unit: TimeUnit, *, sent: pa.Array, nanos: pa.Array) -
         nanos: The converted epoch nanoseconds; nulls are skipped.
 
     Raises:
-        MassiveError: If any instant lies outside the bound; the message names the first
+        UnitMismatchError: If any instant lies outside the bound; the message names the first
             such value as Massive sent it.
     """
     bounds = pc.call_function("min_max", [nanos]).as_py()
@@ -317,6 +327,6 @@ def _bound(key: TimeField, unit: TimeUnit, *, sent: pa.Array, nanos: pa.Array) -
         return
     outside = pc.or_(pc.less(nanos, MIN_INSTANT_NS), pc.greater_equal(nanos, MAX_INSTANT_NS))
     first = pc.filter(sent, outside)[0].as_py()
-    raise MassiveError(
+    raise UnitMismatchError(
         f"timestamp unit mismatch for {key.label}: {first} {unit.value} is outside 1990 to 2100"
     )

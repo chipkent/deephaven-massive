@@ -79,6 +79,19 @@ def _describe(error: Exception, names: list[str], read_types: dict[str, pa.DataT
     return f"{header} is not {read_types[header]}: {error}"
 
 
+def _empty(plan: ReadPlan) -> pa.RecordBatch:
+    """Return a batch with the plan's columns and no rows.
+
+    Args:
+        plan: The plan whose columns the batch has.
+
+    Returns:
+        The empty batch, each column of its `list_type` or `read_type`.
+    """
+    arrays = [pa.array([], column.list_type or column.read_type) for column in plan.columns]
+    return pa.RecordBatch.from_arrays(arrays, names=[column.column for column in plan.columns])
+
+
 class _Stream(Protocol):
     """The binary stream a flat file is read from: an object's body, or any file of bytes."""
 
@@ -224,10 +237,11 @@ class FlatFile:
 
         Reads the header line first and matches columns by name. Yields one batch per block,
         possibly empty, so the consumer can check for cancellation after every block; a file
-        with a header and no rows yields nothing. Each batch has one column per
-        `plan.columns`, named by `ReadColumn.column`, typed by `read_type` (or `list_type`); a
-        documented header the file lacks is a column of nulls. Blocks are read on the calling
-        thread as it iterates; Arrow reads ahead on its own I/O thread.
+        with a header and no rows yields one empty batch, so its drift is still reported.
+        Each batch has one column per `plan.columns`, named by `ReadColumn.column`, typed by
+        `read_type` (or `list_type`); a documented header the file lacks is a column of nulls.
+        Blocks are read on the calling thread as it iterates; Arrow reads ahead on its own I/O
+        thread.
 
         Args:
             plan: What to read and which rows to keep.
@@ -239,13 +253,15 @@ class FlatFile:
 
         Raises:
             WireError: If the body is not gzip, is truncated or corrupt, or the connection
-                drops; if the header line is longer than `plan.block_size` or not UTF-8; if
-                the header lacks a key header of `plan.required` (before the first block,
-                naming the headers); if a value does not parse as its type (the message
-                quotes Arrow's); or if a futures block holds a session date other than the
-                plan's session, or none. Every message names the file. An error that
-                `plan.to_ns` raises propagates unchanged, unless it is an Arrow error, which
-                becomes `WireError` like any other.
+                drops; if the file is empty (no header line); if the header line is longer
+                than `plan.block_size` or not UTF-8; if the header names a column twice or
+                lacks a key header of `plan.required` (before the first block, naming the
+                headers); if a value, or an element of a list, does not parse as its type
+                (naming the header and the type, and quoting Arrow's message); or if a
+                futures block holds a session date other than the plan's session, or none.
+                Every message names the file. An error that `plan.to_ns` raises propagates
+                unchanged, unless it is an Arrow error, which becomes `WireError` like any
+                other.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         names: list[str] = []
@@ -258,7 +274,10 @@ class FlatFile:
                 extra=frozenset(names).difference(read_types),
                 missing=frozenset(read_types).difference(names),
             )
-            if not text.peek(1):  # a header and no rows: Arrow refuses an empty body
+            if not text.peek(1):
+                # A header and no rows. Arrow refuses an empty body, and the drift still has
+                # to reach the library, so the file is one empty batch.
+                yield _empty(plan), drift
                 return
             reader = pacsv.open_csv(
                 pa.PythonFile(text, mode="r"),
@@ -297,29 +316,38 @@ class FlatFile:
         Returns:
             The header names, in file order.
 
-        Raises:
-            WireError: If the line is longer than `plan.block_size`, or the header lacks a
-                key header of `plan.required`; the message names the file and the headers.
+        Raises the `WireError` of `_error` if the file is empty, the line is longer than
+        `plan.block_size`, the header names a column twice, or the header lacks a key header
+        of `plan.required`; the message names the headers.
         """
         line = text.readline(plan.block_size)
+        if not line:
+            # Massive publishes no empty partitions: an empty object is a broken upload.
+            raise self._error("the file is empty: no header line")
         if len(line) == plan.block_size and not line.endswith(b"\n"):
-            raise WireError(
-                f"cannot read {self._location}: the header line is longer than "
-                f"{plan.block_size} bytes",
-                host=self._host,
-                path=self._key,
-            )
-        # The csv module parses quoted names and drops the line end, `\r\n` included.
-        names = next(csv.reader([line.decode()]), [])
+            raise self._error(f"the header line is longer than {plan.block_size} bytes")
+        # The csv module parses quoted names and drops the line end, `\r\n` included;
+        # `utf-8-sig` drops a byte-order mark, as Arrow's own header parsing does.
+        names = next(csv.reader([line.decode("utf-8-sig")]), [])
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            # Matching by name cannot tell which of two equal names holds the column.
+            raise self._error(f"the header names {', '.join(repeated)} more than once")
         lacking = sorted(plan.required - set(names))
         if lacking:
-            raise WireError(
-                f"cannot read {self._location}: the header lacks the key column "
-                f"{', '.join(lacking)}",
-                host=self._host,
-                path=self._key,
-            )
+            raise self._error(f"the header lacks the key column {', '.join(lacking)}")
         return names
+
+    def _error(self, reason: str) -> WireError:
+        """Return the error of a file that cannot be read, naming the file.
+
+        Args:
+            reason: What is wrong with the file.
+
+        Returns:
+            `WireError("cannot read <location>: <reason>")`, for the caller to raise.
+        """
+        return WireError(f"cannot read {self._location}: {reason}", host=self._host, path=self._key)
 
     def _apply(self, block: pa.RecordBatch, plan: ReadPlan) -> pa.RecordBatch:
         """Filter one block and turn its surviving rows into the plan's columns.
@@ -333,7 +361,8 @@ class FlatFile:
 
         Raises:
             WireError: If a futures block holds a session date other than the plan's session,
-                or none; the message names the first such row's date.
+                or none; the message names the first such row's date. A list element that does
+                not parse raises `WireError` too, naming the header and the type.
         """
         if plan.session is not None:
             header, day = plan.session
@@ -362,6 +391,10 @@ class FlatFile:
         for column in plan.columns:
             values = block[column.header]
             if column.list_type is not None:
-                values = pc.cast(pc.split_pattern(values, ","), column.list_type)
+                try:
+                    values = pc.cast(pc.split_pattern(values, ","), column.list_type)
+                except pa.ArrowInvalid as error:
+                    reason = f"{column.header} is not {column.list_type}: {error}"
+                    raise self._error(reason) from error
             arrays.append(values)
         return pa.RecordBatch.from_arrays(arrays, names=[c.column for c in plan.columns])

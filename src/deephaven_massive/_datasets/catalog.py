@@ -212,12 +212,11 @@ class DatasetSpec:
                 or `flat_file_prefixes` do not match `is_bars`, not exactly one of `schema` and
                 `rest_model` is given, a WebSocket dataset (one with `channels`) has a
                 `rest_model` instead of a hand-written schema or no `asset_class`, a key map
-                fills an `Instant` column
-                from a field with no `time_units` entry, a key column is not in `schema`, or a
-                dataset with flat files has no `FLAT_FILES` key map filling `Symbol` and
-                `Timestamp` (and, for futures, `SessionEndDate`, against which every futures
-                file is checked), or the transports match no query class (see the class
-                docstring and `_check_verbs`).
+                fills an `Instant` column from a field with no `time_units` entry, a key column
+                is not in `schema`, or a dataset with flat files has no `FLAT_FILES` key map
+                filling `Symbol` and `Timestamp` (and, for futures, `SessionEndDate`, against
+                which every futures file is checked), or the transports match no query class
+                (see the class docstring and `_check_verbs`).
 
         Deriving the schema from `rest_model` raises the `TypeError` or `ValueError` of
         `schema.model_schema` (an unmapped SDK hint, an unknown override path).
