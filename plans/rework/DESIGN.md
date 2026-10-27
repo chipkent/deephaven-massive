@@ -3,7 +3,7 @@
 This document is the approved design for the clean rework of `deephaven-massive`, a Python
 library that exposes Massive.com (formerly Polygon.io) market data as live and static
 [Deephaven](https://deephaven.io) tables. It is the source of truth for every implementation
-work package in `PLAN.md`. It changes only by owner decision.
+planned PR in `PLAN.md`. It changes only by owner decision.
 
 The design was checked against Massive's OpenAPI spec (`https://api.massive.com/openapi`,
 147 paths), its WebSocket spec (`https://api.massive.com/specs/websocket.json`, 37 channels),
@@ -100,7 +100,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
    ([section 19](#19-wire-clients-and-the-spec-snapshot)). A parity test keeps the generated
    files in step with the snapshot, and an advisory weekly job reports drift in the live specs.
 9. **No live testing as design input.** Unverifiable facts get the conservative choice and a
-   fixture test. Live integration tests are a later work package.
+   fixture test. Live integration tests are a later planned PR.
 10. **Closed categorical sets are enums.** Every closed set of values in a public signature is a
     `StrEnum`. No public signature accepts a string in place of an enum member.
 11. **Schemas are generated at build time and fixed before data.** No schema is hand-written,
@@ -318,7 +318,7 @@ test code imports helpers as `tests._fakes…`. So `tests/massive/` can never sh
 `massive` package.
 
 Integration tests end in `_integration`. They are skipped unless `MASSIVE_API_KEY` is set and
-run only in the later live-testing work package. The exceptions to the mirror rule, and no
+run only in the later live-testing planned PR. The exceptions to the mirror rule, and no
 others:
 
 - `tests/conftest.py`: starts the embedded JVM in `pytest_configure`, before collection, and
@@ -396,12 +396,12 @@ repr(m)  # "<MassiveSession #1 open>" or "<MassiveSession #1 closed>"; the label
 repr(m.stocks)  # "<MassiveSession #1 stocks>"; vendors "<MassiveSession #1 partners.benzinga>"
 ```
 
-`MassiveSession` exposes nothing beyond the names above (§ 22, decision 21). In particular it
-has no `name` or `config` attribute: the session's label (`MassiveSession #1`, a per-process counter) appears in
-its repr, in the same-key WARNING, and in error messages, and nowhere else; the configuration is
-the `MassiveConfig` the caller passed (or `MassiveConfig()`), which the caller already holds. Not
-exposing the configuration keeps the API key one step further from console globals, which every
-user of a Deephaven worker can read.
+`MassiveSession` exposes nothing beyond the names above (§ 22, “Sessions and queries expose no
+introspection attributes”). In particular it has no `name` or `config` attribute: the session's
+label (`MassiveSession #1`, a per-process counter) appears in its repr, in the same-key WARNING,
+and in error messages, and nowhere else; the configuration is the `MassiveConfig` the caller passed
+(or `MassiveConfig()`), which the caller already holds. Not exposing the configuration keeps the
+API key one step further from console globals, which every user of a Deephaven worker can read.
 
 The session must be created inside a Deephaven worker: an `ExecutionContext` must be active.
 The library captures it at construction and enters it on every library thread before any
@@ -534,7 +534,7 @@ return result
   if the failure had arrived just after it: every shape raises Deephaven's `DHError` ("Can not
   listen to failed table") as it derives from the failed blink table, with the hold released.
   `blink()` is no exception, because its described copy listens to the blink table
-  ([section 7.4](#74-column-descriptions)). P4 wraps that error in a
+  ([section 7.4](#74-column-descriptions)). The WebSocket layer wraps that error in a
   `MassiveError` naming the stream's failure.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
@@ -586,7 +586,8 @@ are immutable, hashable, and reusable. A query's repr names its class, its datas
 arguments that differ from their defaults, for example
 `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
 reactive table as `<reactive table>`. Queries have no other attributes: the verbs and `columns()`
-are their whole API (§ 22, decisions 21 and 45).
+are their whole API (§ 22, “Sessions and queries expose no introspection attributes” and
+“`columns()` on every query”).
 
 ```python
 class QueryBase:                           # the base of all six classes below
@@ -1126,8 +1127,8 @@ used or listed as still to be declared:
   `tests/data/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
   declare, so a shared source (the aggregate range path, `/prev`) appears in the file of every
   namespace that will use it, and the files may overlap. A namespace's file must not list a
-  source that namespace already uses. Each namespace's dataset package deletes only its own
-  file, so those packages land in any order; when all are gone, generated = used.
+  source that namespace already uses. Each namespace's dataset planned PR deletes only its own
+  file, so those planned PRs land in any order; when all are gone, generated = used.
 
 `/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}` are ordinary
 generated paths: every path reaches the same REST client in the same way.
@@ -1286,7 +1287,8 @@ The unit of every timestamp-like wire field is a fact about Massive's wire forma
 hand-verified `UNITS` table in `_massive/refresh/overrides.py`, and the generator writes it onto
 each generated field, so callers read it as `source(...).field(column).unit`. A timestamp-like
 field without a `UNITS` entry fails the refresh (the `timestamp-unit` gate,
-[section 19.4](#194-generated-schemas)). The table is complete for every generated source, so no dataset package edits it.
+[section 19.4](#194-generated-schemas)). The table is complete for every generated source, so no
+dataset planned PR edits it.
 
 The OpenAPI spec tags some integer fields with a unit type in `x-polygon-go-type`
 (`INanoseconds`, `IMicroseconds`, `IMilliseconds`, `IDaysPolygonDateString`), but the tags are
@@ -2476,9 +2478,9 @@ verification, never a column list.
   `Membership(kind, group, position, projection: Mapping[wire_key, column] | None)`: the
   kind, the asset-class group, the source's order within the group, and its projection. A
   source in no kind has no memberships; a source may hold several. Everything at run time, the
-  merge and gate C4 included, reads memberships from there and never from `refresh/`. Drift
-  detection stays per source, against the full fields, so projected-away fields are never
-  reported as drift.
+  merge and the kind-membership gate included, reads memberships from there and never from
+  `refresh/`. Drift detection stays per source, against the full fields, so projected-away fields
+  are never reported as drift.
 
 **The type lattice.** `WireType` is one of `long`, `double`, `bool`, `string`, `date`, `epoch`
 (an integer with a unit), `iso-instant`, `int-array`, and `json-text`. OpenAPI `integer`, and
@@ -2766,27 +2768,26 @@ so they live in `_schema.py`, not in `refresh/`. Every outlet of
 
 **Catalog gates** (`tests/test_catalog.py`, with negative tests on synthetic `DatasetSpec`s):
 
-- **C1:** every key a dataset declares for a source is either a field of that source after
-  the projection of the dataset's membership (the `indices.values` time key on
+- **Declared keys:** every key a dataset declares for a source is either a field of that source
+  after the projection of the dataset's membership (the `indices.values` time key on
   `/v3/snapshot/indices` is `timestamp` only after it), or `from_request`; every source of a
   dataset in a kind declares `symbol` and `time`, and every source of an instrument dataset
   declares `symbol`. Its negative tests cover an undeclared kind key, an undeclared instrument
-  symbol, a declared key the source lacks, and a reference dataset that declares none and
-  passes;
-- **C2:** after the rename, no source has a duplicate column;
-- **C3:** across members, one column name gets one `WireType`;
-- **C4:** each kind dataset's sources equal the sources holding a membership of its
+  symbol, a declared key the source lacks, and a reference dataset that declares none and passes;
+- **Unique columns:** after the rename, no source has a duplicate column;
+- **Member types:** across members, one column name gets one `WireType`;
+- **Kind membership:** each kind dataset's sources equal the sources holding a membership of its
   `(kind, group)`;
-- **C5:** every declared wire name (time-axis pair, symbol parameter, path placeholders) is a
-  parameter of its `RestPath`;
-- **C6:** every path, channel, and prefix a dataset uses is generated; a miss names the dataset
-  and says "deprecated or removed in the snapshot";
-- **C7:** generated ⊆ used ∪ undeclared, and no namespace's undeclared file lists a source
+- **Wire parameters:** every declared wire name (time-axis pair, symbol parameter, path
+  placeholders) is a parameter of its `RestPath`;
+- **Generated sources:** every path, channel, and prefix a dataset uses is generated; a miss names
+  the dataset and says "deprecated or removed in the snapshot";
+- **Coverage:** generated ⊆ used ∪ undeclared, and no namespace's undeclared file lists a source
   that namespace already uses ([section 8.12](#812-excluded-endpoints)).
 
 `KINDS` overlaps the catalog by design: the refresh checks names before any dataset is
-declared, and C4 keeps the two in step. A test loads `spec/` with `refresh/` absent, as in an
-installed wheel; the CI build job checks that the wheel holds no `refresh/`.
+declared, and the kind-membership gate keeps the two in step. A test loads `spec/` with `refresh/`
+absent, as in an installed wheel; the CI build job checks that the wheel holds no `refresh/`.
 
 ### 19.5 Runtime drift
 
@@ -2874,17 +2875,17 @@ pull request, and is never a gate.
 
 **Closing the loop.** A person runs `--fetch` and the plain refresh, then reviews one PR holding
 the snapshot diff, the `spec/*.json` diff, and any hand-input lines, and `check.sh` runs every
-refresh gate and C1–C7. What each change does:
+refresh gate and the catalog gates. What each change does:
 
 | Change at Massive | At run time | In the refresh |
 |---|---|---|
 | Field added | Dropped, one WARNING, `SchemaDrift`. | It gets a name (`short-key` asks for a lexicon or `NAMES` line for a short key) and joins its kind (`type-agreement` checks the type, `transport-agreement` the transports). |
-| Field removed | Null; a required field or CSV header warns; a required key fails loudly. | It leaves its source; C1 fails if it was a declared key. |
+| Field removed | Null; a required field or CSV header warns; a required key fails loudly. | It leaves its source; the declared-keys gate fails if it was a declared key. |
 | Field renamed | A removal plus an addition. | The column is renamed in the diff, or stays the same if the long form is unchanged; `transport-agreement` catches a one-sided rename. |
-| Type changed | A value that no longer converts fails loudly. | `type-agreement` or C3 fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
+| Type changed | A value that no longer converts fails loudly. | `type-agreement` or the member-types gate fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
 | Unit changed | The overflow check or the bound fails loudly. | `--check` reports the changed tag, and the `UNITS` entry is re-verified. |
-| New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and C7 fails until a `DatasetSpec` or an `EXCLUSIONS` entry is added. |
-| Endpoint deprecated or removed | `MassiveError` with the HTTP status. | It leaves the generated set, and C6 names every dataset that uses it. |
+| New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and the coverage gate fails until a `DatasetSpec` or an `EXCLUSIONS` entry is added. |
+| Endpoint deprecated or removed | `MassiveError` with the HTTP status. | It leaves the generated set, and the generated-sources gate names every dataset that uses it. |
 
 ## 20. Quality gates
 
@@ -2904,8 +2905,8 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   [section 19](#19-wire-clients-and-the-spec-snapshot).
 - **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
-  and `tests/test_catalog.py` passes (catalog gates C1–C7, generated ⊆ used ∪ undeclared) ([section 19.4](#194-generated-schemas)). They read only vendored files, never
-  the network.
+  and `tests/test_catalog.py` passes (the catalog gates, generated ⊆ used ∪ undeclared) ([section
+  19.4](#194-generated-schemas)). They read only vendored files, never the network.
 - **Column reference:** `tests/test_reference.py` passes: `docs/datasets/` holds exactly the
   rendered pages, byte for byte, with no stale, missing, or extra file, and every dataset
   method's docstring starts with its `DatasetSpec.summary` and names its own section
@@ -2937,7 +2938,7 @@ so flat-file coverage comes from the documentation pages and overviews.
 
 ### 20.1 Tooling configuration
 
-This is the exact configuration the tooling work package applies. Every lint ignore carries a
+This is the exact configuration the tooling planned PR applies. Every lint ignore carries a
 reason comment in `pyproject.toml`; adding one needs owner approval.
 
 - **Ruff.**
@@ -3201,14 +3202,14 @@ document already reflects them.
     `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
     appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error
     messages, and a query's dataset and arguments only in its repr. The public surface stays
-    exactly the verbs, `columns()` (decision 45), and the namespaces, and the API key stays out
-    of objects users routinely leave in console globals.
+    exactly the verbs, `columns()` (see “`columns()` on every query” below), and the namespaces,
+    and the API key stays out of objects users routinely leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
     its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares the key
     columns its sources carry, and `_schema.rename` maps them to `Symbol`, `Timestamp`, and
-    `Underlying`. Names are never derived from descriptions, and the refresh gates and C1–C7
-    fail on a wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The final names:
-    `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
+    `Underlying`. Names are never derived from descriptions, and the refresh gates and the catalog
+    gates fail on a wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The
+    final names: `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
     aggregate `z` → `AverageTradeSize`, `dav` → `AccumulatedDecimalVolume`, stocks `dv` →
     `DecimalVolume`, futures `dv` → `DollarVolume`, and the snapshot object `min` → `LastMinute…`.
     The naming policy of section 19.4 (owner decision, 2026-10-27) governs every name.
@@ -3307,8 +3308,8 @@ document already reflects them.
 
 Each item is handled conservatively now, covered by a fixture test in its unit-test module, and
 retired by a live integration test (`*_integration.py`, skipped without `MASSIVE_API_KEY`) in the
-later live-testing work package. Each item that a live test refutes becomes an owner decision
-before 1.0. Items 16 and 17 concern Deephaven, not Massive: the work that adds column
+later live-testing planned PR. Each item that a live test refutes becomes an owner decision
+before 1.0. The last two items concern Deephaven, not Massive: the work that adds column
 descriptions settles them in the embedded test JVM and the web UI, and they need no live test.
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
