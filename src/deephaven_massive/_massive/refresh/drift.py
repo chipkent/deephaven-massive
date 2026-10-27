@@ -22,7 +22,8 @@ sections, each with the action a person takes:
   rows; and every problem a refresh gate would stop on if the live sources were fetched and
   regenerated (`gate_stops`).
 - **Deprecations** (`Section.DEPRECATIONS`): a path or channel the vendor newly deprecates; a
-  deprecated or removed one the committed `rest.json` or `ws.json` still holds; and a
+  deprecated or removed one the committed `rest.json` or `ws.json` still holds (also when
+  the snapshot was refetched without regenerating, so neither specification has it); and a
   committed flat-file prefix no live overview names any more.
 
 The comparison is semantic: descriptions, examples, key order, and formatting are ignored,
@@ -557,7 +558,8 @@ def _specification_changes(
     snapshot: JsonObject,
     live: JsonObject,
     *,
-    generated: Callable[[str], bool],
+    committed: frozenset[str],
+    key: Callable[[str], str | None],
     file: str,
 ) -> Iterator[Drift]:
     """Compare one specification's paths or channels between the snapshot and the live copy.
@@ -566,15 +568,31 @@ def _specification_changes(
         area: `"REST"` or `"WebSocket"`.
         snapshot: The vendored specification.
         live: The live specification.
-        generated: Whether the committed generated file holds a path.
+        committed: The source keys the committed generated file holds.
+        key: The source key of a specification path (`None` for a path no source can have).
         file: That file's name, for the report.
 
     Yields:
         The drift items: paths new, removed, newly deprecated, deprecated or removed while
         still generated, with another status, or unreadable, and the parameter and field
-        changes of every path in both.
+        changes of every path in both; and every committed source neither specification has
+        any more (the snapshot was refetched, but the schemas were not regenerated).
     """
+
+    def generated(path: str) -> bool:
+        return key(path) in committed
+
     old, new = _operations(snapshot), _operations(live)
+    specified = {key(path) for path in old.keys() | new.keys()}
+    yield from (
+        Drift(
+            section=Section.DEPRECATIONS,
+            area=area,
+            item=source,
+            detail=f"in neither specification, but `{file}` still has it",
+        )
+        for source in sorted(committed - specified)
+    )
     for path in sorted(old.keys() | new.keys()):
         before, after = old.get(path), new.get(path)
         if after is None:
@@ -884,14 +902,16 @@ def compare(
             "REST",
             before.openapi,
             after.openapi,
-            generated=committed.rest.__contains__,
+            committed=committed.rest,
+            key=lambda path: path,
             file="rest.json",
         ),
         *_specification_changes(
             "WebSocket",
             before.websocket,
             after.websocket,
-            generated=lambda path: ws.channel_key(path) in committed.ws,
+            committed=committed.ws,
+            key=ws.channel_key,
             file="ws.json",
         ),
         *_page_changes(before, after),

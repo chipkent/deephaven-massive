@@ -252,6 +252,15 @@ def test_a_removed_path_is_a_deprecation_while_generated_and_a_change_otherwise(
     ]
 
 
+def test_a_committed_source_neither_specification_has_is_a_deprecation() -> None:
+    # The snapshot was refetched after the vendor removed them, but the schemas still hold them.
+    gone = make(rest={}, ws={})
+    assert compare(gone, gone) == [
+        "DEPRECATIONS - REST `/v1/widgets`: in neither specification, but `rest.json` still has it",
+        "DEPRECATIONS - WebSocket `stocks/W`: in neither specification, but `ws.json` still has it",
+    ]
+
+
 def test_a_newly_deprecated_path_is_a_deprecation() -> None:
     before = make(rest={"/v1/widgets": item(), "/v1/other": item()})
     after = make(rest={"/v1/widgets": item(), "/v1/other": item(status="deprecated")})
