@@ -96,7 +96,9 @@ def _ok(*, status: str = "OK", request_id: str = "req-1", next_url: str | None =
 
 def test_the_pool_never_retries_and_has_the_timeouts_and_size(client: RestClient) -> None:
     options = client._pool.connection_pool_kw
-    assert options["retries"].total is False
+    retries = options["retries"]
+    assert retries is client_module._NO_RETRIES
+    assert (retries.total, retries.redirect) == (False, False)
     assert (options["timeout"].connect_timeout, options["timeout"].read_timeout) == (10.0, 30.0)
     assert options["maxsize"] == 4
     assert options["ssl_context"] is not None

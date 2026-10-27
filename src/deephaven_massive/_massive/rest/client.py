@@ -69,6 +69,13 @@ CONNECT_TIMEOUT = 10.0
 READ_TIMEOUT = 30.0
 """Seconds to wait for each read of a response."""
 
+_NO_RETRIES = urllib3.Retry(total=False, redirect=False)
+"""urllib3's own retries, all off: the client retries itself and never follows a redirect.
+
+An explicit `Retry`, because urllib3 stores a bare `retries=False` as given in some releases
+and converts it in others; this value means the same in every supported release.
+"""
+
 
 @dataclass(frozen=True)
 class _Retryable:
@@ -160,14 +167,14 @@ class RestClient:
             urllib3.ProxyManager(
                 proxy,
                 maxsize=max_concurrency,
-                retries=False,
+                retries=_NO_RETRIES,
                 timeout=timeout,
                 ssl_context=ssl_context(),
             )
             if proxy
             else urllib3.PoolManager(
                 maxsize=max_concurrency,
-                retries=False,
+                retries=_NO_RETRIES,
                 timeout=timeout,
                 ssl_context=ssl_context(),
             )
