@@ -46,26 +46,19 @@ step() {
     "$@"
 }
 
-massive_commit() {
-    uv run --no-sync python -c "import json, importlib.metadata as m; \
-print(json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
-}
-
-# uv.lock is not committed, so every run resolves the newest versions, including the latest
-# deephaven-fixes commit of the SDK fork. Offline, a local run keeps what is installed and says
-# so; CI must always test the newest versions, so there a failed upgrade is an error.
+# uv.lock is not committed, so every run resolves the newest versions. Offline, a local run
+# keeps what is installed and says so; CI must always test the newest versions, so there a
+# failed upgrade is an error.
 echo "==> uv sync --upgrade"
 if ! uv sync --quiet --upgrade; then
     if [[ "${CI:-}" == "true" ]]; then
         echo "check.sh: uv sync --upgrade failed" >&2
         exit 1
     fi
-    echo "check.sh: WARNING: uv sync --upgrade failed (offline or a resolution error); using the installed versions," \
-        "massive at $(massive_commit 2>/dev/null || echo 'an unknown commit')" >&2
+    echo "check.sh: WARNING: uv sync --upgrade failed (offline or a resolution error); using the installed versions" >&2
 fi
 # The environment is synced; the steps below run in it as is.
 export UV_NO_SYNC=1
-step "installed massive commit" massive_commit
 
 if ((fix)); then
     step "ruff check --fix" uv run ruff check --fix ${ruff_output[@]+"${ruff_output[@]}"} src tests
