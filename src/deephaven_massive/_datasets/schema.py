@@ -1,80 +1,70 @@
-"""The schema registry: column types, SDK-model flattening, and the four tick schemas.
+"""Dataset schemas: column types, the run-time key rename, and the merge of a kind's sources.
 
-Every dataset kind has exactly one schema, the union of its fields across asset classes and
-transports (WebSocket, REST, and flat files), with PascalCase column names. A column a class or
-transport does not supply is null: crypto trades have no `Tape`, and stocks have no
-`SessionEndDate`. This module holds the machinery that builds and fills those schemas:
+No column list is written by hand. Each source a dataset reads (a REST path, a WebSocket
+channel, a flat-file prefix) is a generated `Source` of the wire package, whose fields already
+carry their long-form PascalCase columns and wire types. This module turns those sources into
+the dataset's table shape:
 
-- `ColumnType`, the closed set of column types (`Instant`, `LocalDate`, `double`, `long`,
-  `int`, `String`, `boolean`, `int[]`), each with its Arrow type.
-- `Schema`, an ordered set of typed columns that turns row dictionaries into an Arrow table.
-- `model_schema`, which derives a REST dataset's schema from an SDK `@modelclass`: nested models
-  are flattened (`last_trade.price` becomes `LastTradePrice`), Python hints map to column
-  types, and an explicit `ColumnOverride` table corrects wrong SDK hints and narrows types.
-  There is no column inference from data and no fallback chain of alternative keys.
-- The four hand-written tick schemas (`TRADES`, `QUOTES`, `BARS`, `INDEX_VALUES`), shared by the
-  WebSocket, REST, and flat-file forms of the tick datasets, each with explicit per-transport
-  key maps (wire key, SDK field, or CSV header to column) for the equity form: the stocks and
-  options WebSocket frames, the SDK REST models, and the documented flat-file headers. Other
-  asset classes declare their own key maps, and the units of their timestamp fields (crypto
-  `r` is milliseconds), in their `DatasetSpec`.
+- `ColumnType`, the closed set of Deephaven column types (`Instant`, `LocalDate`, `double`,
+  `long`, `int`, `String`, `boolean`, `int[]`), each with its Arrow type, and `COLUMN_TYPES`,
+  the fixed map from a field's `WireType` to its column type.
+- `Schema`, an ordered set of typed columns that turns row dictionaries into an Arrow table
+  (used by the diagnostics tables, whose rows are built in Python).
+- `rename`, the run-time key rename of one source for one dataset: the source's fields,
+  through the projection of the dataset's membership of its kind, with the dataset's declared
+  key columns renamed to `Symbol`, `Timestamp`, and `Underlying`, and a key the source does
+  not carry (one filled from the request) added as a constant `String` column. Nothing else
+  changes.
+- `dataset_schema`, the merge: the ordered union by column name of the renamed columns of
+  every source of every member of the dataset's kind (`Catalog.members`), `Symbol`,
+  `Timestamp`, and `Underlying` first where the dataset declares them, each column's wire type
+  the lattice join (`join`) of every contribution. Every member of a kind therefore has the
+  same columns: crypto trades carry the stocks-only `Tape`, always null. `Catalog` caches the
+  result per dataset; this module holds no state.
 
-The Deephaven types of these columns, and the column definitions `table_publisher` and
-`input_table` take, come from `_tables/columns.py`: this module makes no Deephaven call and
-imports Deephaven for type checking only.
-
-Timestamp *units* are not decided here: a field becomes an `Instant` column because its dataset
-declares a unit for it (`timestamps.py`), and the transports convert values to nanoseconds
-before they reach `Schema.to_arrow`.
+The merge runs from the committed generated files only, never from data. The Deephaven types of
+these columns, and the column definitions `table_publisher` and `input_table` take, come from
+`_tables/columns.py`: this module makes no Deephaven call. Epoch timestamps keep their wire
+unit here (`SourceColumn.unit`); the transports convert them with `timestamps.py`.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
 import re
-import types
-import typing
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 
-from deephaven_massive._enums import Transport
+from deephaven_massive._datasets.timestamps import TimeUnit, time_unit
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._massive import WireType
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
-    from _typeshed import DataclassInstance
+    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._massive import Field, Source, Transport
 
 __all__ = [
-    "BARS",
-    "INDEX_VALUES",
-    "QUOTES",
-    "TRADES",
+    "COLUMN_TYPES",
+    "KEY_COLUMNS",
     "Column",
-    "ColumnOverride",
     "ColumnType",
-    "KeyMap",
-    "ModelSchema",
     "Schema",
-    "TickSchema",
-    "flatten",
-    "model_schema",
+    "SourceColumn",
+    "dataset_schema",
+    "join",
     "pascal_case",
+    "rename",
 ]
 
 logger = logging.getLogger(__name__)
 
-KeyMap = typing.Mapping[str, str]
-"""Maps a wire key, SDK field path, or flat-file header to the column it fills."""
-
-_DATE_FIELD: Final = re.compile(r"^(date|.*_date)$")
-_UTC_FIELD: Final = re.compile(r"^.+_utc$")
 _ISO_FRACTION: Final = re.compile(r"\.(\d+)")
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -83,9 +73,9 @@ class ColumnType(StrEnum):
     """The type of a column, named by its Deephaven type.
 
     Each member knows its Arrow type (`arrow_type`); its Deephaven type is `dh_type` in
-    `_tables/columns.py`. Column types follow fixed conventions: timestamps are `Instant`,
-    calendar dates `LocalDate`, sequence numbers `long`, sizes `double` (fractional sizes
-    exist), exchange ids `int`, and condition codes `int[]`.
+    `_tables/columns.py`. A dataset column's type follows from its wire type (`COLUMN_TYPES`):
+    timestamps are `Instant`, calendar dates `LocalDate`, and condition codes `int[]`. `INT` is
+    used only by the library's own diagnostics tables.
     """
 
     INSTANT = "Instant"
@@ -114,6 +104,28 @@ _ARROW_TYPES: Final[Mapping[ColumnType, pa.DataType]] = {
     ColumnType.INT_ARRAY: pa.list_(pa.int32()),
 }
 
+COLUMN_TYPES: Final[Mapping[WireType, ColumnType]] = {
+    WireType.LONG: ColumnType.LONG,
+    WireType.DOUBLE: ColumnType.DOUBLE,
+    WireType.BOOL: ColumnType.BOOLEAN,
+    WireType.STRING: ColumnType.STRING,
+    WireType.JSON_TEXT: ColumnType.STRING,
+    WireType.DATE: ColumnType.LOCAL_DATE,
+    WireType.EPOCH: ColumnType.INSTANT,
+    WireType.ISO_INSTANT: ColumnType.INSTANT,
+    WireType.INT_ARRAY: ColumnType.INT_ARRAY,
+}
+"""The column type of each wire type: `string` and `json-text` are both text, and an `epoch`
+and an `iso-instant` are both an `Instant`."""
+
+KEY_COLUMNS: Final[Mapping[str, str]] = {
+    "symbol": "Symbol",
+    "time": "Timestamp",
+    "fanout": "Underlying",
+}
+"""The column each renamed key role takes. The `session` role keeps its generated column (the
+futures `SessionEndDate`)."""
+
 
 @dataclass(frozen=True, slots=True)
 class Column:
@@ -136,16 +148,14 @@ def _coerce(value: object, column_type: ColumnType) -> object:
 
     Five conversions Arrow does not do by itself: an ISO `YYYY-MM-DD` string becomes a `date`
     for a `LocalDate` column; an ISO-8601 date-time string (`2024-06-24T18:33:53Z`) becomes
-    epoch nanoseconds for an `Instant` column, read as UTC when it carries no offset (Massive's
-    ISO timestamps are UTC), keeping every fraction digit down to the nanosecond; a dict or list
-    becomes its JSON text for a `String` column, nested SDK models included (used by
-    `ColumnOverride(type=ColumnType.STRING)` on composite SDK fields); a single integer becomes
-    a one-element list for an `int[]` column (the WebSocket quote `c` is one condition where
-    REST sends a list); and an integral `float` becomes an `int` for a `long` or `int` column,
-    and for each element of an `int[]` list, while any other `float` there is rejected,
-    because Arrow would silently truncate `7140.08` to `7140`. Everything else passes through
-    for Arrow to check; in particular a naive `datetime` object in an `Instant` column is read
-    as UTC, as Arrow reads it.
+    epoch nanoseconds for an `Instant` column, read as UTC when it carries no offset, keeping
+    every fraction digit down to the nanosecond; a dict or list becomes its JSON text for a
+    `String` column; a single integer becomes a one-element list for an `int[]` column; and an
+    integral `float` becomes an `int` for a `long` or `int` column, and for each element of an
+    `int[]` list, while any other `float` there is rejected, because Arrow would silently
+    truncate `7140.08` to `7140`. Everything else passes through for Arrow to check; in
+    particular a naive `datetime` object in an `Instant` column is read as UTC, as Arrow reads
+    it.
 
     Args:
         value: A non-null value from a row.
@@ -164,7 +174,7 @@ def _coerce(value: object, column_type: ColumnType) -> object:
     if column_type is ColumnType.INSTANT and isinstance(value, str):
         return _iso_to_epoch_ns(value)
     if column_type is ColumnType.STRING and isinstance(value, dict | list):
-        return json.dumps(value, sort_keys=True, default=_jsonable)
+        return json.dumps(value, sort_keys=True)
     if column_type is ColumnType.INT_ARRAY and isinstance(value, int | list):
         items: list[object] = value if isinstance(value, list) else [value]
         return [None if v is None else _coerce(v, ColumnType.INT) for v in items]
@@ -197,23 +207,6 @@ def _iso_to_epoch_ns(text: str) -> int:
     delta = moment - _EPOCH
     seconds = delta.days * 86_400 + delta.seconds
     return seconds * 10**9 + int(fraction[:9].ljust(9, "0"))
-
-
-def _jsonable(value: object) -> object:
-    """Make a nested SDK model JSON-serializable, for `json.dumps(default=...)`.
-
-    Args:
-        value: An object `json` cannot encode by itself.
-
-    Returns:
-        The dictionary of a dataclass instance (nested models included).
-
-    Raises:
-        TypeError: If the value is not a dataclass instance.
-    """
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return dataclasses.asdict(value)
-    raise TypeError(f"{type(value).__name__} is not JSON serializable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,10 +263,9 @@ class Schema:
 
         A column missing from a row, or `None`, is null. Keys that are not columns are ignored,
         so a caller may pass rows that carry extra fields. Instant values must already be epoch
-        nanoseconds or `datetime`s (a naive one is read as UTC); the transports convert units
-        with `timestamps.py` first. A `float` with a fractional part in a `long` or `int`
-        column is a schema mismatch, never truncated. This runs on the calling thread and makes
-        no Deephaven call.
+        nanoseconds or `datetime`s (a naive one is read as UTC). A `float` with a fractional
+        part in a `long` or `int` column is a schema mismatch, never truncated. This runs on the
+        calling thread and makes no Deephaven call.
 
         Args:
             rows: The rows, each a mapping from column name to value.
@@ -305,40 +297,16 @@ class Schema:
         return pa.Table.from_arrays(arrays, schema=self.arrow_schema())
 
 
-@dataclass(frozen=True, slots=True)
-class ColumnOverride:
-    """An explicit correction to the column an SDK model field produces.
-
-    Overrides exist because some SDK type hints are wrong (`IndexValue.timestamp: str`), some
-    types need narrowing (exchange ids are `int`, not `long`), and some fields have no
-    automatic mapping (unions, lists of strings, dictionaries). Each override is tested by the
-    dataset that declares it.
-
-    Without an override, `model_schema` maps a `str` field named `date` or `*_date` to
-    `LocalDate`, a `str` field named `*_utc` (an ISO-8601 timestamp such as `published_utc`)
-    to `Instant`, and an `int` field the dataset declares a time unit for to `Instant`. An
-    override with `type=ColumnType.INSTANT` on any other `str` field parses ISO-8601 text.
-
-    Attributes:
-        type: The column type to use instead of the one the hint implies.
-        name: The column name to use instead of the PascalCase of the field path.
-        drop: True to leave the field out of the schema entirely.
-    """
-
-    type: ColumnType | None = None
-    name: str | None = None
-    drop: bool = False
-
-
 def pascal_case(path: str) -> str:
-    """Turn an SDK field path into a PascalCase column name.
+    """Turn a snake-case name or a dotted path of them into a PascalCase column name.
 
     Every underscore- or dot-separated word is capitalized and joined: `sip_timestamp` becomes
-    `SipTimestamp` and the nested path `last_trade.sip_timestamp` becomes
-    `LastTradeSipTimestamp`. Words that are already capitalized keep their other letters.
+    `SipTimestamp` and `last_trade.sip_timestamp` becomes `LastTradeSipTimestamp`. Words that
+    are already capitalized keep their other letters. The diagnostics tables name their columns
+    with it.
 
     Args:
-        path: A field name or a dot-separated path of nested field names.
+        path: A name or a dot-separated path of names.
 
     Returns:
         The PascalCase column name.
@@ -347,504 +315,167 @@ def pascal_case(path: str) -> str:
     return "".join(word[:1].upper() + word[1:] for word in words if word)
 
 
-def _unwrap_optional(hint: object) -> object:
-    """Strip `None` from an `Optional[...]`/`X | None` hint.
+@dataclass(frozen=True, slots=True)
+class SourceColumn:
+    """One column a source contributes to a dataset, after the projection and the key rename.
+
+    `rename` builds these; a transport reads them to rename a decoded batch's columns, pick the
+    unit of each epoch, and fill a key from the request.
+
+    Attributes:
+        column: The dataset column, such as `"Timestamp"` or `"Price"`.
+        wire_type: The type of the values the source sends; `STRING` for a key filled from the
+            request.
+        field: The generated field behind the column; None for a key filled from the request.
+        unit: The unit of an epoch field (`timestamps.time_unit`); None for any other column.
+        parameter: For a key filled from the request, the request parameter it comes from
+            (`KeySpec.column`, such as `"stocksTicker"`); None otherwise.
+    """
+
+    column: str
+    wire_type: WireType
+    field: Field | None = None
+    unit: TimeUnit | None = None
+    parameter: str | None = None
+
+
+def _projection(spec: DatasetSpec, source: Source) -> Mapping[str, str] | None:
+    """Return the projection of the source's membership of the dataset's kind and group.
 
     Args:
-        hint: A resolved type hint.
+        spec: The dataset.
+        source: One of its sources.
 
     Returns:
-        The single remaining type, or the hint unchanged when it is not a two-way optional.
+        The kept wire keys and their columns, or None when the source joins the dataset with
+        every field under its own column (no kind, no membership, or no projection).
     """
-    if typing.get_origin(hint) in {typing.Union, types.UnionType}:
-        members = [arg for arg in typing.get_args(hint) if arg is not type(None)]
-        if len(members) == 1:
-            return members[0]
-    return hint
+    for membership in source.memberships:
+        if membership.kind == spec.kind and membership.group == spec.group:
+            return membership.projection
+    return None
 
 
-_SCALAR_TYPES: Final[Mapping[object, ColumnType]] = {
-    bool: ColumnType.BOOLEAN,
-    int: ColumnType.LONG,
-    float: ColumnType.DOUBLE,
-    str: ColumnType.STRING,
+def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
+    """Return the columns one source contributes to one dataset.
+
+    The source's fields, kept and named by the projection of the dataset's membership of its
+    kind (`Source.memberships`), in the source's field order; then the dataset's key columns
+    for this source (`DatasetSpec.keys`): the `symbol`, `time`, and `fanout` keys are renamed
+    to `Symbol`, `Timestamp`, and `Underlying`, the `session` key keeps its column, and a key
+    filled from the request comes first, as a constant `String` column. Nothing else changes.
+
+    Args:
+        spec: The dataset.
+        source: One of the dataset's generated sources.
+
+    Returns:
+        The columns, keys filled from the request first, then the fields in source order.
+
+    Raises:
+        ValueError: If a declared key is not a column of the source after the projection
+            (`"declared keys: ..."`), or two columns share a name after the rename
+            (`"unique columns: ..."`); the message names the dataset and the source.
+    """
+    projection = _projection(spec, source)
+    fields = [f for f in source.fields if projection is None or f.wire_key in projection]
+    named = {f.wire_key: f.column if projection is None else projection[f.wire_key] for f in fields}
+    where = f"{spec.name}: {source.transport.value} {source.key}"
+    renames: dict[str, str] = {}
+    columns: list[SourceColumn] = []
+    for role, key in spec.keys_for(source.transport, source.key).declared():
+        target = KEY_COLUMNS.get(role)
+        if key.from_request:
+            # DatasetSpec allows only the symbol and fan-out keys to come from the request.
+            columns.append(SourceColumn(KEY_COLUMNS[role], WireType.STRING, parameter=key.column))
+        elif key.column not in named.values():
+            raise ValueError(
+                f"declared keys: {where}: the {role} key {key.column!r} is not a column of the "
+                "source"
+            )
+        elif target is not None:
+            renames[key.column] = target
+    for field in fields:
+        column = renames.get(named[field.wire_key], named[field.wire_key])
+        unit = None if field.unit is None else time_unit(source, field)
+        columns.append(SourceColumn(column, field.wire_type, field, unit))
+    names = [c.column for c in columns]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"unique columns: {where}: columns {repeated} repeat after the rename")
+    return tuple(columns)
+
+
+_JOINS: Final[Mapping[frozenset[WireType], WireType]] = {
+    frozenset({WireType.LONG, WireType.DOUBLE}): WireType.DOUBLE,
+    frozenset({WireType.LONG, WireType.INT_ARRAY}): WireType.INT_ARRAY,
 }
+"""The widening joins of two different wire types; every other pair is a type conflict."""
 
 
-def _column_type(path: str, hint: object, *, instant: bool) -> ColumnType:
-    """Map one resolved SDK hint to a column type, without overrides.
+def join(first: WireType, second: WireType) -> WireType | None:
+    """Return the lattice join of two wire types of one column, or None for a conflict.
+
+    Equal types join to themselves (two `epoch`s each keep their own unit, so they join too);
+    `long` with `double` gives `double`, and `long` with `int-array` gives `int-array` (a
+    scalar becomes a one-element list). Any other pair is a type conflict.
 
     Args:
-        path: The field's dotted path, used for the date-name rule and in errors.
-        hint: The field's resolved type hint, `Optional` already removed.
-        instant: True when the dataset declares a time unit for this field.
+        first: One contribution's type.
+        second: Another contribution's type.
 
     Returns:
-        `INSTANT` for a declared timestamp or a `str` field named `*_utc`, `LOCAL_DATE` for a
-        `str` field named `date` or `*_date`, `INT_ARRAY` for `List[int]`, and the scalar
-        mapping otherwise (`bool`, `int` to `long`, `float` to `double`, `str`).
-
-    Raises:
-        TypeError: If the hint has no automatic mapping (a union, a list of anything but
-            `int`, a dictionary); the dataset must declare a `ColumnOverride` for it.
+        The joined type, or None when the two conflict.
     """
-    if instant:
-        return ColumnType.INSTANT
-    name = path.rsplit(".", 1)[-1]
-    if hint is str and _UTC_FIELD.match(name):
-        return ColumnType.INSTANT
-    if hint is str and _DATE_FIELD.match(name):
-        return ColumnType.LOCAL_DATE
-    if typing.get_origin(hint) is list and typing.get_args(hint) == (int,):
-        return ColumnType.INT_ARRAY
-    try:
-        return _SCALAR_TYPES[hint]
-    except (KeyError, TypeError):
-        raise TypeError(
-            f"SDK field {path!r} has type {hint!r}, which has no column mapping; "
-            "declare a ColumnOverride for it"
-        ) from None
+    if first is second:
+        return first
+    return _JOINS.get(frozenset({first, second}))
 
 
-@dataclass(frozen=True, slots=True)
-class ModelSchema:
-    """A REST dataset's schema together with the field path behind each column.
+def dataset_schema(
+    spec: DatasetSpec,
+    members: Sequence[DatasetSpec],
+    source: Callable[[Transport, str], Source],
+) -> Schema:
+    """Merge the renamed columns of every member's sources into one dataset's schema.
 
-    Built by `model_schema`. `row()` turns one SDK model instance into a row dictionary for
-    `Schema.to_arrow`.
-
-    Attributes:
-        schema: The dataset's columns.
-        columns_by_path: The column each flattened SDK field path fills; dropped fields are
-            absent.
-    """
-
-    schema: Schema
-    columns_by_path: Mapping[str, str] = field(default_factory=dict)
-
-    def row(self, instance: object) -> dict[str, object]:
-        """Flatten one SDK model instance into a row keyed by column name.
-
-        Timestamp fields keep their raw epoch integers; the REST transport converts their
-        units before building the Arrow batch.
-
-        Args:
-            instance: An instance of the model the schema was built from.
-
-        Returns:
-            A `{column: value}` dictionary with one entry per non-dropped field.
-        """
-        flat = flatten(instance)
-        return {column: flat.get(path) for path, column in self.columns_by_path.items()}
-
-
-def _model_fields(model: type, prefix: str = "") -> Iterable[tuple[str, object]]:
-    """Yield `(dotted path, hint)` for every leaf field of a dataclass model, depth first.
+    The ordered union by column name of `rename(member, s)` for every source `s` of every
+    member, in member order, then source order (`DatasetSpec.sources`), then field order;
+    `Symbol`, `Timestamp`, and `Underlying` come first, in that order, where the dataset
+    declares them. Each column's type is the `join` of every contribution, mapped through
+    `COLUMN_TYPES`. `Catalog.dataset_schema` calls it once per dataset and caches the result.
 
     Args:
-        model: An SDK `@modelclass` (a dataclass).
-        prefix: The dotted path of `model` inside its parent; empty for the root.
-
-    Yields:
-        One `(path, hint)` per leaf field, with `Optional` removed from the hint.
-    """
-    hints = typing.get_type_hints(model)
-    for model_field in dataclasses.fields(model):
-        path = f"{prefix}{model_field.name}"
-        hint = _unwrap_optional(hints[model_field.name])
-        if isinstance(hint, type) and dataclasses.is_dataclass(hint):
-            yield from _model_fields(hint, f"{path}.")
-        else:
-            yield path, hint
-
-
-def model_schema(
-    name: str,
-    model: type,
-    *,
-    instant_fields: Collection[str] = (),
-    overrides: Mapping[str, ColumnOverride] | None = None,
-) -> ModelSchema:
-    """Derive a dataset's schema from an SDK model class.
-
-    Every leaf field of the model becomes one column, in declaration order, with nested models
-    flattened depth first (`last_trade.price` becomes `LastTradePrice`). Types follow the hint
-    (see `ColumnType`), a field listed in `instant_fields` becomes an `Instant`, and an
-    override replaces the type, renames the column, or drops the field. A field with no
-    automatic mapping (a union, a list of anything but `int`, a dictionary) and no override
-    raises `TypeError` naming the field, so every such field is decided explicitly.
-
-    Args:
-        name: The schema's name, usually the dataset name.
-        model: The SDK `@modelclass`, for example `massive.rest.models.Trade`.
-        instant_fields: Dotted paths of the fields the dataset declares time units for.
-        overrides: Corrections keyed by dotted field path.
+        spec: The dataset whose schema is built; it names the schema and decides the leading
+            key columns.
+        members: The datasets whose sources merge, in member order: the datasets of the
+            dataset's kind (`Catalog.members`), or the dataset alone when it is in no kind.
+        source: Returns the generated source of a transport and key.
 
     Returns:
-        The schema and the path behind each column.
+        The schema, named after the dataset.
 
     Raises:
-        ValueError: If `model` is not a dataclass, or an override or instant field names a
-            path the model does not have.
+        ValueError: If two contributions to one column conflict (`"member types: ..."`, naming
+            the column, both types, and the member and source of the second). A failed rename
+            raises the `ValueError` of `rename`, and an unknown source whatever `source` raises.
     """
-    if not dataclasses.is_dataclass(model):
-        raise ValueError(f"{model!r} is not an SDK model class")
-    overrides = overrides or {}
-    leaves = dict(_model_fields(model))
-    unknown = sorted((set(overrides) | set(instant_fields)) - set(leaves))
-    if unknown:
-        raise ValueError(f"{model.__name__} has no fields {unknown}")
-    columns: list[Column] = []
-    columns_by_path: dict[str, str] = {}
-    for path, hint in leaves.items():
-        override = overrides.get(path, ColumnOverride())
-        if override.drop:
-            continue
-        column_type = override.type or _column_type(path, hint, instant=path in instant_fields)
-        column_name = override.name or pascal_case(path)
-        columns.append(Column(column_name, column_type))
-        columns_by_path[path] = column_name
-    return ModelSchema(Schema(name, tuple(columns)), columns_by_path)
-
-
-def flatten(instance: object) -> dict[str, object]:
-    """Flatten an SDK model instance into `{dotted path: value}` for its leaf fields.
-
-    A nested model is recursed into; a nested model that is `None` contributes no keys (its
-    columns are null). Values are not converted.
-
-    Args:
-        instance: A dataclass instance, such as an SDK `TickerSnapshot`.
-
-    Returns:
-        The leaf values keyed by dotted field path, for example
-        `{"ticker": "AAPL", "last_trade.price": 189.5}`.
-
-    Raises:
-        ValueError: If `instance` is not a dataclass instance.
-    """
-    if not dataclasses.is_dataclass(instance) or isinstance(instance, type):
-        raise ValueError(f"{instance!r} is not an SDK model instance")
-    flat: dict[str, object] = {}
-    _flatten_into(flat, instance, "")
-    return flat
-
-
-def _flatten_into(flat: dict[str, object], instance: DataclassInstance, prefix: str) -> None:
-    """Add the leaf values of one dataclass instance to `flat`.
-
-    Args:
-        flat: The dictionary being filled.
-        instance: A dataclass instance.
-        prefix: The dotted path of `instance` inside the root; empty for the root.
-    """
-    for model_field in dataclasses.fields(instance):
-        value = getattr(instance, model_field.name, None)
-        path = f"{prefix}{model_field.name}"
-        if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            _flatten_into(flat, value, f"{path}.")
-        else:
-            flat[path] = value
-
-
-@dataclass(frozen=True, slots=True)
-class TickSchema:
-    """A hand-written tick schema shared by a tick dataset's transports, with its key maps.
-
-    The four tick kinds (trades, quotes, bars, index values) arrive in three forms: WebSocket
-    frames with single-letter keys, SDK REST models with snake-case fields, and flat-file CSV
-    headers. A tick schema fixes the union of their columns once and maps each form's keys to
-    those columns explicitly, one key per column, with no alternatives.
-
-    Attributes:
-        schema: The union columns.
-        key_maps: For each transport, the key (WebSocket key, SDK field, or CSV header) that
-            fills each column, for the equity form of the data.
-    """
-
-    schema: Schema
-    key_maps: Mapping[Transport, KeyMap]
-
-    def __post_init__(self) -> None:
-        """Check that every key map targets columns of the schema.
-
-        Raises:
-            ValueError: If a key map names a column the schema lacks.
-        """
-        names = set(self.schema.column_names)
-        for transport, key_map in self.key_maps.items():
-            unknown = sorted(set(key_map.values()) - names)
-            if unknown:
-                raise ValueError(
-                    f"{self.schema.name} {transport.value} key map targets unknown {unknown}"
+    types: dict[str, WireType] = {}
+    for member in members:
+        for transport, key in member.sources:
+            for contribution in rename(member, source(transport, key)):
+                prior = types.get(contribution.column)
+                joined = (
+                    contribution.wire_type if prior is None else join(prior, contribution.wire_type)
                 )
-
-
-def _schema(name: str, columns: Mapping[str, ColumnType]) -> Schema:
-    """Build a schema from an ordered `{name: type}` mapping.
-
-    Args:
-        name: The schema's name.
-        columns: The columns in table order.
-
-    Returns:
-        The schema.
-    """
-    return Schema(name, tuple(Column(n, t) for n, t in columns.items()))
-
-
-_S, _D, _L, _I, _T, _A, _LD = (
-    ColumnType.STRING,
-    ColumnType.DOUBLE,
-    ColumnType.LONG,
-    ColumnType.INT,
-    ColumnType.INSTANT,
-    ColumnType.INT_ARRAY,
-    ColumnType.LOCAL_DATE,
-)
-
-TRADES: Final = TickSchema(
-    _schema(
-        "trades",
-        {
-            "Symbol": _S,
-            "Timestamp": _T,
-            "Price": _D,
-            "Size": _D,
-            "DecimalSize": _S,
-            "Exchange": _I,
-            "Id": _S,
-            "Conditions": _A,
-            "Tape": _I,
-            "SequenceNumber": _L,
-            "Correction": _I,
-            "ParticipantTimestamp": _T,
-            "TrfId": _I,
-            "TrfTimestamp": _T,
-            # Other asset classes (null for stocks and options): crypto `r`, and the futures
-            # session date, feed channel, and report sequence.
-            "ReceivedTimestamp": _T,
-            "SessionEndDate": _LD,
-            "Channel": _I,
-            "ReportSequence": _L,
-        },
-    ),
-    {
-        # massive.websocket.models.EquityTrade.from_dict
-        Transport.WS: {
-            "sym": "Symbol",
-            "t": "Timestamp",
-            "p": "Price",
-            "s": "Size",
-            "ds": "DecimalSize",
-            "x": "Exchange",
-            "i": "Id",
-            "c": "Conditions",
-            "z": "Tape",
-            "q": "SequenceNumber",
-            "trfi": "TrfId",
-            "trft": "TrfTimestamp",
-        },
-        # massive.rest.models.Trade fields
-        Transport.REST: {
-            "sip_timestamp": "Timestamp",
-            "price": "Price",
-            "size": "Size",
-            "decimal_size": "DecimalSize",
-            "exchange": "Exchange",
-            "id": "Id",
-            "conditions": "Conditions",
-            "tape": "Tape",
-            "sequence_number": "SequenceNumber",
-            "correction": "Correction",
-            "participant_timestamp": "ParticipantTimestamp",
-            "trf_id": "TrfId",
-            "trf_timestamp": "TrfTimestamp",
-        },
-        # us_stocks_sip/trades_v1 headers
-        Transport.FLAT_FILES: {
-            "ticker": "Symbol",
-            "sip_timestamp": "Timestamp",
-            "price": "Price",
-            "size": "Size",
-            "exchange": "Exchange",
-            "id": "Id",
-            "conditions": "Conditions",
-            "tape": "Tape",
-            "sequence_number": "SequenceNumber",
-            "correction": "Correction",
-            "participant_timestamp": "ParticipantTimestamp",
-            "trf_id": "TrfId",
-            "trf_timestamp": "TrfTimestamp",
-        },
-    },
-)
-"""Trades: one row per trade. `Timestamp` is the SIP timestamp."""
-
-QUOTES: Final = TickSchema(
-    _schema(
-        "quotes",
-        {
-            "Symbol": _S,
-            "Timestamp": _T,
-            "BidPrice": _D,
-            "BidSize": _D,
-            "BidExchange": _I,
-            "AskPrice": _D,
-            "AskSize": _D,
-            "AskExchange": _I,
-            "Conditions": _A,
-            "Indicators": _A,
-            "Tape": _I,
-            "SequenceNumber": _L,
-            "ParticipantTimestamp": _T,
-            "TrfId": _I,
-            "TrfTimestamp": _T,
-            # Other asset classes (null for stocks and options): the crypto quote's single
-            # exchange `x` and `r`, and the futures session date, feed channel, report
-            # sequence, and per-side timestamps.
-            "Exchange": _I,
-            "ReceivedTimestamp": _T,
-            "SessionEndDate": _LD,
-            "Channel": _I,
-            "ReportSequence": _L,
-            "BidTimestamp": _T,
-            "AskTimestamp": _T,
-        },
-    ),
-    {
-        # massive.websocket.models.EquityQuote.from_dict; `c` is one condition code.
-        Transport.WS: {
-            "sym": "Symbol",
-            "t": "Timestamp",
-            "bp": "BidPrice",
-            "bs": "BidSize",
-            "bx": "BidExchange",
-            "ap": "AskPrice",
-            "as": "AskSize",
-            "ax": "AskExchange",
-            "c": "Conditions",
-            "i": "Indicators",
-            "z": "Tape",
-            "q": "SequenceNumber",
-            "trfi": "TrfId",
-            "trft": "TrfTimestamp",
-        },
-        # massive.rest.models.Quote fields
-        Transport.REST: {
-            "sip_timestamp": "Timestamp",
-            "bid_price": "BidPrice",
-            "bid_size": "BidSize",
-            "bid_exchange": "BidExchange",
-            "ask_price": "AskPrice",
-            "ask_size": "AskSize",
-            "ask_exchange": "AskExchange",
-            "conditions": "Conditions",
-            "indicators": "Indicators",
-            "tape": "Tape",
-            "sequence_number": "SequenceNumber",
-            "participant_timestamp": "ParticipantTimestamp",
-            "trf_timestamp": "TrfTimestamp",
-        },
-        # us_stocks_sip/quotes_v1 headers
-        Transport.FLAT_FILES: {
-            "ticker": "Symbol",
-            "sip_timestamp": "Timestamp",
-            "bid_price": "BidPrice",
-            "bid_size": "BidSize",
-            "bid_exchange": "BidExchange",
-            "ask_price": "AskPrice",
-            "ask_size": "AskSize",
-            "ask_exchange": "AskExchange",
-            "conditions": "Conditions",
-            "indicators": "Indicators",
-            "tape": "Tape",
-            "sequence_number": "SequenceNumber",
-            "participant_timestamp": "ParticipantTimestamp",
-            "trf_timestamp": "TrfTimestamp",
-        },
-    },
-)
-"""Quotes: one row per NBBO (or BBO) update. `Timestamp` is the SIP timestamp."""
-
-BARS: Final = TickSchema(
-    _schema(
-        "bars",
-        {
-            "Symbol": _S,
-            "Timestamp": _T,
-            "EndTimestamp": _T,
-            "Open": _D,
-            "High": _D,
-            "Low": _D,
-            "Close": _D,
-            "Volume": _D,
-            "Vwap": _D,
-            "Transactions": _L,
-            "AccumulatedVolume": _D,
-            "OfficialOpenPrice": _D,
-            "AggregateVwap": _D,
-            "AverageSize": _D,
-            "Otc": ColumnType.BOOLEAN,
-            # Futures (null for other classes): REST `dollar_volume` and WebSocket `dv`
-            # (`FuturesAgg.total_value`), the session date, and the settlement price.
-            "DollarVolume": _D,
-            "SessionEndDate": _LD,
-            "SettlementPrice": _D,
-        },
-    ),
-    {
-        # massive.websocket.models.EquityAgg.from_dict
-        Transport.WS: {
-            "sym": "Symbol",
-            "s": "Timestamp",
-            "e": "EndTimestamp",
-            "o": "Open",
-            "h": "High",
-            "l": "Low",
-            "c": "Close",
-            "v": "Volume",
-            "vw": "Vwap",
-            "av": "AccumulatedVolume",
-            "op": "OfficialOpenPrice",
-            "a": "AggregateVwap",
-            "z": "AverageSize",
-            "otc": "Otc",
-        },
-        # massive.rest.models.Agg fields
-        Transport.REST: {
-            "timestamp": "Timestamp",
-            "open": "Open",
-            "high": "High",
-            "low": "Low",
-            "close": "Close",
-            "volume": "Volume",
-            "vwap": "Vwap",
-            "transactions": "Transactions",
-            "otc": "Otc",
-        },
-        # us_stocks_sip/{minute,day}_aggs_v1 headers
-        Transport.FLAT_FILES: {
-            "ticker": "Symbol",
-            "window_start": "Timestamp",
-            "open": "Open",
-            "high": "High",
-            "low": "Low",
-            "close": "Close",
-            "volume": "Volume",
-            "transactions": "Transactions",
-        },
-    },
-)
-"""Bars: one row per aggregate window. `Timestamp` is the window start."""
-
-INDEX_VALUES: Final = TickSchema(
-    _schema("index_values", {"Symbol": _S, "Timestamp": _T, "Value": _D}),
-    {
-        # massive.websocket.models.IndexValue.from_dict
-        Transport.WS: {"T": "Symbol", "t": "Timestamp", "val": "Value"},
-        # us_indices/values_v1 headers
-        Transport.FLAT_FILES: {"ticker": "Symbol", "timestamp": "Timestamp", "value": "Value"},
-    },
-)
-"""Index values: one row per published index value."""
+                if joined is None:
+                    raise ValueError(
+                        f"member types: {spec.name}: column {contribution.column!r} is "
+                        f"{prior} elsewhere but {contribution.wire_type} in {member.name} "
+                        f"{transport.value} {key}"
+                    )
+                types[contribution.column] = joined
+    declared = spec.declared_roles
+    leading = [KEY_COLUMNS[role] for role in KEY_COLUMNS if role in declared]
+    order = [*leading, *(name for name in types if name not in leading)]
+    return Schema(spec.name, tuple(Column(name, COLUMN_TYPES[types[name]]) for name in order))

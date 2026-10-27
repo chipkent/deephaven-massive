@@ -20,8 +20,8 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Transport
-from deephaven_massive._massive import DriftReport
+from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
+from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
     SCHEMA_DRIFT_SHOWN,

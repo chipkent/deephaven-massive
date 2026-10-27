@@ -1,0 +1,18 @@
+# The generated sources the crypto namespace will declare, one per line as
+# `<transport> <source key>`. A source shared by several namespaces is listed in each.
+REST /v1/last/crypto/{from}/{to}
+REST /v1/open-close/crypto/{from}/{to}/{date}
+REST /v2/aggs/grouped/locale/global/market/crypto/{date}
+REST /v2/aggs/ticker/{cryptoTicker}/prev
+REST /v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}
+REST /v2/snapshot/locale/global/markets/crypto/tickers
+REST /v2/snapshot/locale/global/markets/crypto/{direction}
+REST /v3/trades/{cryptoTicker}
+WS crypto/XT
+WS crypto/XQ
+WS crypto/XA
+WS crypto/XAS
+WS crypto/FMV
+FLAT_FILES global_crypto/day_aggs_v1
+FLAT_FILES global_crypto/minute_aggs_v1
+FLAT_FILES global_crypto/trades_v1

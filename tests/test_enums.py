@@ -10,11 +10,11 @@ from pathlib import Path
 import pytest
 from deephaven.table import Table
 from deephaven.table_factory import InputTable
-from massive.rest.models import common as sdk
 
 import deephaven_massive as dm
 from deephaven_massive import _enums
 from deephaven_massive._enums import ChannelFamily, Recency, _require_enum
+from deephaven_massive._massive import ParamKind, Transport, sources
 
 EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
     dm.AssetClass: ["stocks", "options", "futures", "indices", "forex", "crypto"],
@@ -43,19 +43,22 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
     dm.Sip: ["CTA", "UTP", "OPRA"],
 }
 
-# Enums that mirror an SDK enum must have the same value set.
-SDK_MIRRORS: dict[type[StrEnum], type[Enum]] = {
-    dm.Order: sdk.Order,
-    dm.Locale: sdk.Locale,
-    dm.Market: sdk.Market,
-    dm.Direction: sdk.Direction,
-    dm.Timeframe: sdk.Timeframe,
-    dm.SeriesType: sdk.SeriesType,
-    dm.Sip: sdk.SIP,
-    dm.ConditionDataType: sdk.DataType,
+# Enums that mirror a parameter enum of the generated REST paths, by parameter name. Every path
+# that has the parameter as an enum must accept exactly the enum's values.
+REST_MIRRORS: dict[type[StrEnum], str] = {
+    dm.Order: "order",
+    dm.Locale: "locale",
+    dm.Market: "market",
+    dm.Direction: "direction",
+    dm.SeriesType: "series_type",
+    dm.Sip: "sip",
+    dm.ConditionDataType: "data_type",
 }
-# reason: dm.AssetClass is not a mirror. Its values are the WebSocket cluster paths (with
-# futures and forex), while the SDK's REST AssetClass has "fx" and no futures.
+# Not mirrors: dm.AssetClass (its values are the WebSocket cluster paths, with futures and
+# forex, while the REST asset_class parameters say "fx" and differ per path); dm.Timespan
+# (it adds SESSION, the futures resolution, and the indicators' timespan has no SECOND);
+# dm.ContractType (the specification lists call and put, and OTHER is documented on the
+# contracts' own pages); dm.Timeframe (the financials take it as free text).
 
 
 @pytest.mark.parametrize(("enum", "values"), EXPECTED_VALUES.items())
@@ -76,9 +79,18 @@ def test_every_exported_enum_is_tested() -> None:
     assert exported == set(EXPECTED_VALUES)
 
 
-@pytest.mark.parametrize(("ours", "theirs"), SDK_MIRRORS.items())
-def test_mirrored_enums_have_the_sdk_value_set(ours: type[StrEnum], theirs: type[Enum]) -> None:
-    assert {m.value for m in ours} == {m.value for m in theirs}
+@pytest.mark.parametrize(("ours", "parameter"), REST_MIRRORS.items())
+def test_mirrored_enums_have_the_value_set_of_the_rest_parameter(
+    ours: type[StrEnum], parameter: str
+) -> None:
+    found = {
+        param.values
+        for path in sources(Transport.REST).values()
+        for param in path.params
+        if param.name == parameter and param.kind is ParamKind.ENUM
+    }
+    assert found  # the parameter is still an enum somewhere
+    assert all(set(values) == {m.value for m in ours} for values in found)
 
 
 def test_internal_enums() -> None:
@@ -127,8 +139,9 @@ def test_module_exports() -> None:
     assert set(_enums.__all__) == {e.__name__ for e in EXPECTED_VALUES} | {
         "Recency",
         "ChannelFamily",
-        "Transport",
     }
+    # The transport is the wire package's, named once for both sides of the boundary.
+    assert not hasattr(_enums, "Transport")
 
 
 # --- The enums-only rule: no Literal of strings in any public signature. ---------------------

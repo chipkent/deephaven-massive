@@ -12,7 +12,6 @@ import tracemalloc
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
@@ -30,23 +29,16 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
-from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import CHICAGO, FuturesSessions, TimeRange, bounds
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.schema import (
-    BARS,
-    INDEX_VALUES,
-    QUOTES,
-    TRADES,
-    Column,
-    ColumnType,
-    Schema,
-)
-from deephaven_massive._datasets.timestamps import TimeUnit
-from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan, Transport
+from deephaven_massive._datasets.schema import Schema
+from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan
 from deephaven_massive._ingest import flatfiles
+from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery
+from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
@@ -56,7 +48,7 @@ if TYPE_CHECKING:
 
 TIMEOUT = 30.0
 NEW_YORK = ZoneInfo("America/New_York")
-FF = Transport.FLAT_FILES
+R, FF = Transport.REST, Transport.FLAT_FILES
 NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
 """A Monday afternoon, when every file of the first week of March 2025 is published."""
 LOGGER = "deephaven_massive"
@@ -82,96 +74,90 @@ class FakeS3(Protocol):
     def keys(self) -> list[str]: ...
 
 
-def _ns(*fields: str) -> dict[tuple[Transport, str], TimeUnit]:
-    return {(FF, name): TimeUnit.NANOSECONDS for name in fields}
+def keys(symbol: str | KeySpec, time: str, *, session: bool = False) -> SourceKeys:
+    # A source's keys: a plain symbol names its column; a futures source adds its session.
+    return SourceKeys(
+        KeySpec(symbol) if isinstance(symbol, str) else symbol,
+        KeySpec(time),
+        session=KeySpec("SessionEndDate") if session else None,
+    )
+
+
+def from_request(parameter: str) -> KeySpec:
+    return KeySpec(parameter, from_request=True)
 
 
 STOCK_TRADES = DatasetSpec(
     name="stocks.trades",
     asset_class=AssetClass.STOCKS,
-    schema=TRADES.schema,
-    key_maps={FF: TRADES.key_maps[FF]},
-    history_method="list_trades",
+    history_path="/v3/trades/{stockTicker}",
     flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
-    time_units=_ns("sip_timestamp", "participant_timestamp", "trf_timestamp"),
+    keys={
+        (R, "/v3/trades/{stockTicker}"): keys(from_request("stockTicker"), "SipTimestamp"),
+        (FF, "us_stocks_sip/trades_v1"): keys("Ticker", "SipTimestamp"),
+    },
 )
 STOCK_QUOTES = DatasetSpec(
     name="stocks.quotes",
     asset_class=AssetClass.STOCKS,
-    schema=QUOTES.schema,
-    key_maps={FF: QUOTES.key_maps[FF]},
-    history_method="list_quotes",
+    history_path="/v3/quotes/{stockTicker}",
     flat_file_prefixes={None: "us_stocks_sip/quotes_v1"},
-    time_units=_ns("sip_timestamp", "participant_timestamp", "trf_timestamp"),
+    keys={
+        (R, "/v3/quotes/{stockTicker}"): keys(from_request("stockTicker"), "SipTimestamp"),
+        (FF, "us_stocks_sip/quotes_v1"): keys("Ticker", "SipTimestamp"),
+    },
 )
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
     asset_class=AssetClass.STOCKS,
-    schema=BARS.schema,
     is_bars=True,
-    key_maps={FF: BARS.key_maps[FF]},
-    history_method="list_aggs",
-    grouped_daily_method="get_grouped_daily_aggs",
+    history_path="/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}",
+    grouped_daily_path="/v2/aggs/grouped/locale/us/market/stocks/{date}",
     flat_file_prefixes={
         Timespan.MINUTE: "us_stocks_sip/minute_aggs_v1",
         Timespan.DAY: "us_stocks_sip/day_aggs_v1",
     },
-    time_units=_ns("window_start"),
+    keys={
+        (FF, "us_stocks_sip/minute_aggs_v1"): keys("Ticker", "WindowStart"),
+        (FF, "us_stocks_sip/day_aggs_v1"): keys("Ticker", "WindowStart"),
+    },
 )
 INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
     asset_class=AssetClass.INDICES,
-    schema=INDEX_VALUES.schema,
-    key_maps={FF: INDEX_VALUES.key_maps[FF]},
     flat_file_prefixes={None: "us_indices/values_v1"},
-    time_units=_ns("timestamp"),
+    keys={(FF, "us_indices/values_v1"): keys("Ticker", "Timestamp")},
 )
 FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
     asset_class=AssetClass.FUTURES,
-    schema=TRADES.schema,
-    key_maps={
-        FF: {
-            "ticker": "Symbol",
-            "timestamp": "Timestamp",
-            "price": "Price",
-            "size": "Size",
-            "exchange": "Exchange",
-            "correction": "Correction",
-            "sequence_number": "SequenceNumber",
-            "report_sequence": "ReportSequence",
-            "session_end_date": "SessionEndDate",
-        }
-    },
-    history_method="list_futures_trades",
+    history_path="/futures/v1/trades/{ticker}",
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
-    time_units=_ns("timestamp"),
+    keys={
+        (R, "/futures/v1/trades/{ticker}"): keys(from_request("ticker"), "Timestamp", session=True),
+        (FF, "us_futures_{venue}/trades_v1"): keys("Ticker", "Timestamp", session=True),
+    },
 )
 CRYPTO_TRADES = DatasetSpec(
     name="crypto.trades",
     asset_class=AssetClass.CRYPTO,
-    schema=TRADES.schema,
-    key_maps={
-        FF: {
-            "ticker": "Symbol",
-            "participant_timestamp": "Timestamp",
-            "price": "Price",
-            "size": "Size",
-            "exchange": "Exchange",
-            "id": "Id",
-            "conditions": "Conditions",
-        }
-    },
-    history_method="list_trades",
+    history_path="/v3/trades/{cryptoTicker}",
     flat_file_prefixes={None: "global_crypto/trades_v1"},
-    time_units=_ns("participant_timestamp"),
+    keys={
+        (R, "/v3/trades/{cryptoTicker}"): keys(
+            from_request("cryptoTicker"), "ParticipantTimestamp"
+        ),
+        (FF, "global_crypto/trades_v1"): keys("Ticker", "ParticipantTimestamp"),
+    },
 )
 YIELDS = DatasetSpec(
-    name="economy.yields",
-    schema=Schema("economy.yields", (Column("Date", ColumnType.LOCAL_DATE),)),
-    poll_keys=("Date",),
-    history_method="list_treasury_yields",
+    name="economy.yields", poll_keys=("Date",), history_path="/fed/v1/treasury-yields"
 )
+
+
+def schema_of(spec: DatasetSpec) -> Schema:
+    return CATALOG.dataset_schema(spec)
+
 
 TRADES_KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-{:02d}.csv.gz"
 TRADES_0303 = TRADES_KEY.format(3)
@@ -409,27 +395,24 @@ def test_trades_are_renamed_typed_and_converted(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    assert {c.name: c.data_type for c in t.columns} == col_defs(TRADES.schema)
+    assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     first, msft, second, spy = rows(t)
     assert first == {
         "Symbol": "AAPL",
         "Timestamp": 1741012200000000123,
-        "Price": 227.48,
-        "Size": 100.0,
-        "DecimalSize": None,
+        "Conditions": [12, 37],
+        "Correction": None,
         "Exchange": 4,
         "Id": "1",
-        "Conditions": [12, 37],
-        "Tape": 3,
-        "SequenceNumber": 100,
-        "Correction": None,
         "ParticipantTimestamp": 1741012199999999000,
+        "Price": 227.48,
+        "SequenceNumber": 100,
+        "Size": 100.0,
+        "Tape": 3,
         "TrfId": None,
         "TrfTimestamp": None,
-        "ReceivedTimestamp": None,
-        "SessionEndDate": None,
-        "Channel": None,
-        "ReportSequence": None,
+        # Only the REST path documents a decimal size: the files' rows hold it null.
+        "DecimalSize": None,
     }
     assert (msft["Symbol"], msft["Conditions"]) == ("MSFT", None)
     assert msft["TrfTimestamp"] is None  # the file says 0: no TRF
@@ -439,49 +422,106 @@ def test_trades_are_renamed_typed_and_converted(
     assert fake_s3.requests == [("flatfiles", TRADES_0303)]
 
 
-def test_instant_columns_convert_by_their_declared_unit(
-    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
-) -> None:
-    units = {**STOCK_TRADES.time_units, (FF, "participant_timestamp"): TimeUnit.MILLISECONDS}
-    spec = replace(STOCK_TRADES, time_units=units)
-    row = trade(1, 1741012200000000123, participant=1741012199999)
-    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row))
-    t = query(session, spec, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    assert pick(t, "Timestamp", "ParticipantTimestamp") == [
-        (1741012200000000123, 1741012199999000000)
+SYNTHETIC_FILES = "us_stocks_sip/trades_v1"
+SYNTHETIC = DatasetSpec(
+    name="stocks.synthetic",
+    asset_class=AssetClass.STOCKS,
+    history_path="/v3/trades/{stockTicker}",
+    flat_file_prefixes={None: SYNTHETIC_FILES},
+    keys={(FF, SYNTHETIC_FILES): keys("Ticker", "SipTimestamp")},
+)
+
+
+def synthetic_catalog() -> Catalog:
+    # A file whose participant time is in milliseconds and whose size and conditions are
+    # integers, merged with REST fields that widen them to a double and a list.
+    files = Source(
+        key=SYNTHETIC_FILES,
+        transport=FF,
+        fields=(
+            Field(wire_key="ticker", column="Ticker", wire_type=WireType.STRING),
+            Field(
+                wire_key="sip_timestamp",
+                column="SipTimestamp",
+                wire_type=WireType.EPOCH,
+                unit=WireUnit.NS,
+            ),
+            Field(
+                wire_key="participant_timestamp",
+                column="ParticipantTimestamp",
+                wire_type=WireType.EPOCH,
+                unit=WireUnit.MS,
+            ),
+            Field(wire_key="size", column="Size", wire_type=WireType.LONG),
+            Field(wire_key="conditions", column="Conditions", wire_type=WireType.LONG),
+        ),
+    )
+    rest = Source(
+        key="/v3/trades/{stockTicker}",
+        transport=R,
+        fields=(
+            Field(wire_key="size", column="Size", wire_type=WireType.DOUBLE),
+            Field(wire_key="conditions", column="Conditions", wire_type=WireType.INT_ARRAY),
+        ),
+    )
+    tables = {FF: {SYNTHETIC_FILES: files}, R: {rest.key: rest}}
+    return Catalog((SYNTHETIC,), source_tables=lambda t: tables.get(t, {}))
+
+
+def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
+    window = bounds(SYNTHETIC, "2025-03-03", "2025-03-03")
+    transform = flatfiles._Transform.build(
+        synthetic_catalog(), SYNTHETIC, prefix=SYNTHETIC_FILES, symbols=dm.ALL, window=window
+    )
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": ["AAPL", "MSFT"],
+            "Timestamp": [1741012200000000123, 1741012200000000124],
+            "ParticipantTimestamp": [1741012199999, 0],
+            "Size": [100, None],
+            "Conditions": [12, None],
+        }
+    )
+    out = transform.apply(batch).to_pydict()
+    assert [
+        None if v is None else int(v.timestamp() * 10**3) for v in out["ParticipantTimestamp"]
+    ] == [
+        1741012199999,
+        None,  # a 0 outside the time column is absent
     ]
+    assert out["Size"] == [100.0, None]
+    assert out["Conditions"] == [[12], None]
+    assert transform.plan.required == frozenset({"ticker", "sip_timestamp"})
 
 
-def test_milliseconds_declared_as_nanoseconds_fail_the_bound(
+def test_milliseconds_in_a_nanosecond_column_fail_the_bound(
     *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:
-    # Milliseconds in a column declared in nanoseconds land in January 1970.
+    # Milliseconds in a column documented in nanoseconds land in January 1970.
     row = trade(1, 1741012200000000000, participant=1741012200000)
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row))
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
         dm.MassiveError,
-        match=r"^timestamp unit mismatch for stocks\.trades\.participant_timestamp: "
+        match=r"^timestamp unit mismatch for stocks\.trades\.ParticipantTimestamp: "
         r"1741012200000 ns is outside 1990 to 2100 "
         rf"\(in {re.escape(LOCATION.format(TRADES_0303))}\)$",
     ):
         q.history("2025-03-03", "2025-03-03")
 
 
-def test_nanoseconds_declared_as_milliseconds_overflow(
+def test_a_wrong_unit_in_the_time_column_fails_at_the_window_filter(
     *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:
-    # The time column too: the window filter converts it, so the overflow fails the read there.
-    units = {**STOCK_TRADES.time_units, (FF, "sip_timestamp"): TimeUnit.MILLISECONDS}
-    spec = replace(STOCK_TRADES, time_units=units)
-    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
+    # The window filter converts the time column, so a wrong unit fails the read there.
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000)))
     with pytest.raises(
         dm.MassiveError,
-        match=r"^timestamp unit mismatch for stocks\.trades\.sip_timestamp: "
-        r"1741012200000000000 ms overflows 64-bit nanoseconds "
+        match=r"^timestamp unit mismatch for stocks\.trades\.Timestamp: "
+        r"1741012200000 ns is outside 1990 to 2100 "
         rf"\(in {re.escape(LOCATION.format(TRADES_0303))}\)$",
     ):
-        query(session, spec, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
 
 
 def test_epoch_zero_is_null_except_in_timestamp(
@@ -503,7 +543,7 @@ def test_epoch_zero_is_null_except_in_timestamp(
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
     with pytest.raises(
         dm.MassiveError,
-        match=r"futures\.trades\.timestamp: 0 ns is outside 1990 to 2100 \(in s3://flatfiles/us_futures_cme/",
+        match=r"futures\.trades\.Timestamp: 0 ns is outside 1990 to 2100 \(in s3://flatfiles/us_futures_cme/",
     ):
         q.history("2025-03-04", "2025-03-04")
 
@@ -562,7 +602,7 @@ def test_no_matching_rows_gives_an_empty_table_with_every_column(
     q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert t.size == 0
-    assert {c.name: c.data_type for c in t.columns} == col_defs(TRADES.schema)
+    assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     assert converted == [0]  # only the empty schema table: no table of an empty block
 
 
@@ -791,7 +831,7 @@ def test_a_weekend_only_range_is_an_empty_table(
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
     assert t.size == 0
-    assert {c.name: c.data_type for c in t.columns} == col_defs(TRADES.schema)
+    assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     assert caplog.messages == [
         "stocks.trades history: source=S3 files=0 skipped=2025-03-01,2025-03-02"
     ]
@@ -1319,7 +1359,9 @@ def test_a_cancelled_or_closed_read_makes_no_request(
     transport = session._core.flat_file_transport()
     assert isinstance(transport, flatfiles.FlatFileHistory)
     window = bounds(STOCK_TRADES, "2025-03-03", "2025-03-03")
-    transform = flatfiles._Transform.build(STOCK_TRADES, dm.ALL, window)
+    transform = flatfiles._Transform.build(
+        CATALOG, STOCK_TRADES, prefix="us_stocks_sip/trades_v1", symbols=dm.ALL, window=window
+    )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = threading.Event()
     cancel.set()
@@ -1801,7 +1843,7 @@ def test_a_missing_header_is_null_and_warned_once(
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
         t = q.history("2025-03-03", "2025-03-03")
         q.history("2025-03-03", "2025-03-03")
-    assert {c.name: c.data_type for c in t.columns} == col_defs(TRADES.schema)
+    assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     assert pick(t, "Id", "TrfId", "ParticipantTimestamp", "TrfTimestamp") == [
         ("1", None, None, None),
         ("2", None, None, None),

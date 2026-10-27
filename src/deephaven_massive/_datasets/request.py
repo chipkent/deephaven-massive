@@ -56,10 +56,11 @@ class Request:
             `params` never holds `adjusted`.
         start: The lower bound of the dataset's time axis (`…T` datasets), or of `history()`.
         end: The upper bound of the dataset's time axis, or of `history()`.
-        params: The dataset's other typed parameters, by SDK parameter name, sorted by name.
-        filters: The `filters` mapping, by SDK parameter name, sorted by name.
+        params: The dataset's other typed parameters, by wire parameter name, sorted by name.
+        filters: The `filters` mapping, by key (a wire parameter name with its dots written as
+            underscores), sorted by name.
         limit: The cap on the total number of rows across pages, or None for every row. It is
-            not an SDK parameter: the page size is internal (`DatasetSpec.page_size`), and
+            not a wire parameter: the page size is internal (`DatasetSpec.page_size`), and
             the REST transport stops paging once `limit` rows have arrived.
     """
 

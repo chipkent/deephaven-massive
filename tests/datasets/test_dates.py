@@ -22,7 +22,6 @@ from deephaven_massive._datasets.dates import (
     parse_date_like,
     publish_time,
 )
-from deephaven_massive._datasets.schema import TRADES
 from deephaven_massive._enums import AssetClass
 
 
@@ -205,8 +204,7 @@ def _spec(asset_class: AssetClass | None) -> DatasetSpec:
     return DatasetSpec(
         name="x.history",
         asset_class=asset_class,
-        schema=TRADES.schema,
-        history_method="list_trades",
+        history_path="/v3/trades/{stockTicker}",
     )
 
 

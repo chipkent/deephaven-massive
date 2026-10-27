@@ -1,0 +1,12 @@
+# The generated sources the indices namespace will declare, one per line as
+# `<transport> <source key>`. A source shared by several namespaces is listed in each.
+REST /v1/open-close/{indicesTicker}/{date}
+REST /v2/aggs/ticker/{indicesTicker}/prev
+REST /v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}
+REST /v3/snapshot/indices
+WS indices/A
+WS indices/AM
+WS indices/V
+FLAT_FILES us_indices/day_aggs_v1
+FLAT_FILES us_indices/minute_aggs_v1
+FLAT_FILES us_indices/values_v1

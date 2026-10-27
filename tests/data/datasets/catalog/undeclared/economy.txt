@@ -1,0 +1,7 @@
+# The generated sources the economy namespace will declare, one per line as
+# `<transport> <source key>`. A source shared by several namespaces is listed in each.
+REST /fed/v1/funding-conditions
+REST /fed/v1/inflation
+REST /fed/v1/inflation-expectations
+REST /fed/v1/labor-market
+REST /fed/v1/treasury-yields

@@ -1,0 +1,10 @@
+# The generated sources the indicators namespace will declare, one per line as
+# `<transport> <source key>`. A source shared by several namespaces is listed in each.
+REST /v1/indicators/ema/{cryptoTicker}
+REST /v1/indicators/ema/{stockTicker}
+REST /v1/indicators/macd/{cryptoTicker}
+REST /v1/indicators/macd/{stockTicker}
+REST /v1/indicators/rsi/{cryptoTicker}
+REST /v1/indicators/rsi/{stockTicker}
+REST /v1/indicators/sma/{cryptoTicker}
+REST /v1/indicators/sma/{stockTicker}

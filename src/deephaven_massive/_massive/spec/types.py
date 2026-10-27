@@ -89,9 +89,9 @@ every key, `status` included (`/v1/marketstatus/upcoming`).
 class Transport(StrEnum):
     """The transport a source is served on.
 
-    It is meant to replace the library's own `_enums.Transport`, whose members and values it
-    copies exactly (a test pins the two together until then). Its values are the text the
-    diagnostics tables show in their `Transport` column.
+    Defined once, here, and used on both sides of the wire boundary: the library names its
+    dataset sources and its drift reports by it. Its values are the text the diagnostics
+    tables show in their `Transport` column.
     """
 
     WS = "WS"

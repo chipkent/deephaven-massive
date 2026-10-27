@@ -1,5 +1,6 @@
 """Tests for the `history()` source choice: partition dates, REST capability, and AUTO."""
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, time
 from typing import Any, cast
@@ -9,7 +10,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
-from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import CHICAGO, FuturesSessions, TimeRange, bounds
 from deephaven_massive._datasets.history_source import (
     SourceChoice,
@@ -20,16 +21,8 @@ from deephaven_massive._datasets.history_source import (
     within_publication_grace,
 )
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.schema import (
-    BARS,
-    INDEX_VALUES,
-    TRADES,
-    Column,
-    ColumnType,
-    Schema,
-)
-from deephaven_massive._datasets.timestamps import TimeUnit
-from deephaven_massive._enums import AssetClass, HistorySource, Timespan, Transport
+from deephaven_massive._enums import AssetClass, HistorySource, Timespan
+from deephaven_massive._massive import Transport
 
 NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
@@ -37,48 +30,66 @@ NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
 """A Monday afternoon, when every file of the first week of March 2025 is published."""
 
 
-def _ns(*fields: str) -> dict[tuple[Transport, str], TimeUnit]:
-    return {(FF, name): TimeUnit.NANOSECONDS for name in fields}
+def files(
+    prefixes: Mapping[Timespan | None, str], time: str, *, session: bool = False
+) -> dict[tuple[Transport, str], SourceKeys]:
+    # The keys every flat-file prefix declares: its ticker, its time, and a futures session.
+    keys = SourceKeys(
+        KeySpec("Ticker"), KeySpec(time), session=KeySpec("SessionEndDate") if session else None
+    )
+    return {(FF, prefix): keys for prefix in prefixes.values()}
+
+
+def bars(
+    spec: DatasetSpec, name: str, *, asset_class: AssetClass, prefixes: dict[Timespan | None, str]
+) -> DatasetSpec:
+    # Another class's bars: its own name, class, and flat files.
+    return replace(
+        spec,
+        name=name,
+        asset_class=asset_class,
+        flat_file_prefixes=prefixes,
+        keys=files(prefixes, "WindowStart"),
+    )
 
 
 STOCK_TRADES = DatasetSpec(
     name="stocks.trades",
     asset_class=AssetClass.STOCKS,
-    schema=TRADES.schema,
-    key_maps={FF: TRADES.key_maps[FF]},
-    history_method="list_trades",
+    history_path="/v3/trades/{stockTicker}",
     flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
-    time_units=_ns("sip_timestamp", "participant_timestamp", "trf_timestamp"),
+    keys=files({None: "us_stocks_sip/trades_v1"}, "SipTimestamp"),
 )
+STOCK_BAR_FILES: dict[Timespan | None, str] = {
+    Timespan.MINUTE: "us_stocks_sip/minute_aggs_v1",
+    Timespan.DAY: "us_stocks_sip/day_aggs_v1",
+}
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
     asset_class=AssetClass.STOCKS,
-    schema=BARS.schema,
     is_bars=True,
-    key_maps={FF: BARS.key_maps[FF]},
-    history_method="list_aggs",
-    grouped_daily_method="get_grouped_daily_aggs",
-    flat_file_prefixes={
-        Timespan.MINUTE: "us_stocks_sip/minute_aggs_v1",
-        Timespan.DAY: "us_stocks_sip/day_aggs_v1",
-    },
-    time_units=_ns("window_start"),
+    history_path="/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}",
+    grouped_daily_path="/v2/aggs/grouped/locale/us/market/stocks/{date}",
+    flat_file_prefixes=STOCK_BAR_FILES,
+    keys=files(STOCK_BAR_FILES, "WindowStart"),
 )
 INDEX_BARS = replace(
-    STOCK_BARS,
-    name="indices.bars",
-    asset_class=AssetClass.INDICES,
-    grouped_daily_method=None,
-    flat_file_prefixes={
-        Timespan.MINUTE: "us_indices/minute_aggs_v1",
-        Timespan.DAY: "us_indices/day_aggs_v1",
-    },
+    bars(
+        STOCK_BARS,
+        "indices.bars",
+        asset_class=AssetClass.INDICES,
+        prefixes={
+            Timespan.MINUTE: "us_indices/minute_aggs_v1",
+            Timespan.DAY: "us_indices/day_aggs_v1",
+        },
+    ),
+    grouped_daily_path=None,
 )
-FOREX_BARS = replace(
+FOREX_BARS = bars(
     STOCK_BARS,
-    name="forex.bars",
+    "forex.bars",
     asset_class=AssetClass.FOREX,
-    flat_file_prefixes={
+    prefixes={
         Timespan.MINUTE: "global_forex/minute_aggs_v1",
         Timespan.DAY: "global_forex/day_aggs_v1",
     },
@@ -86,47 +97,33 @@ FOREX_BARS = replace(
 INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
     asset_class=AssetClass.INDICES,
-    schema=INDEX_VALUES.schema,
-    key_maps={FF: INDEX_VALUES.key_maps[FF]},
     flat_file_prefixes={None: "us_indices/values_v1"},
-    time_units=_ns("timestamp"),
+    keys=files({None: "us_indices/values_v1"}, "Timestamp"),
 )
 FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
     asset_class=AssetClass.FUTURES,
-    schema=TRADES.schema,
-    key_maps={
-        FF: {"ticker": "Symbol", "timestamp": "Timestamp", "session_end_date": "SessionEndDate"}
-    },
-    history_method="list_futures_trades",
+    history_path="/futures/v1/trades/{ticker}",
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
-    time_units=_ns("timestamp"),
+    keys=files({None: "us_futures_{venue}/trades_v1"}, "Timestamp", session=True),
 )
+FUTURES_BAR_FILES: dict[Timespan | None, str] = {
+    Timespan.MINUTE: "us_futures_{venue}/minute_aggs_v1",
+    Timespan.SESSION: "us_futures_{venue}/session_aggs_v1",
+}
 FUTURES_BARS = DatasetSpec(
     name="futures.bars",
     asset_class=AssetClass.FUTURES,
-    schema=BARS.schema,
     is_bars=True,
-    key_maps={
-        FF: {"ticker": "Symbol", "window_start": "Timestamp", "session_end_date": "SessionEndDate"}
-    },
-    history_method="list_futures_aggregates",
-    flat_file_prefixes={
-        Timespan.MINUTE: "us_futures_{venue}/minute_aggs_v1",
-        Timespan.SESSION: "us_futures_{venue}/session_aggs_v1",
-    },
-    time_units=_ns("window_start"),
+    history_path="/futures/v1/aggs/{ticker}",
+    flat_file_prefixes=FUTURES_BAR_FILES,
+    keys=files(FUTURES_BAR_FILES, "WindowStart", session=True),
 )
 YIELDS = DatasetSpec(
-    name="economy.yields",
-    schema=Schema("economy.yields", (Column("Date", ColumnType.LOCAL_DATE),)),
-    poll_keys=("Date",),
-    history_method="list_treasury_yields",
+    name="economy.yields", poll_keys=("Date",), history_path="/fed/v1/treasury-yields"
 )
 # Served by fetch() alone, so it has no history source at all.
-NOWHERE = replace(
-    YIELDS, name="economy.nowhere", history_method=None, fetch_method="list_inflation"
-)
+NOWHERE = replace(YIELDS, name="economy.nowhere", history_path=None, fetch_path="/fed/v1/inflation")
 
 
 def config(**overrides: object) -> dm.MassiveConfig:
@@ -356,7 +353,13 @@ def test_flat_files_forced_reads_flat_files_or_names_every_violation() -> None:
         (FUTURES_BARS, Timespan.SESSION, 1, None, None),
         (FUTURES_BARS, Timespan.MINUTE, 1, None, None),
         (FUTURES_BARS, Timespan.HOUR, 1, None, "hold only 1-minute, 1-session bars"),
-        (replace(STOCK_BARS, flat_file_prefixes={}), Timespan.DAY, 1, None, "has no flat files"),
+        (
+            replace(STOCK_BARS, flat_file_prefixes={}, keys={}),
+            Timespan.DAY,
+            1,
+            None,
+            "has no flat files",
+        ),
         (YIELDS, None, 1, None, "economy.yields has no flat files"),
     ],
 )

@@ -396,7 +396,7 @@ class StreamQuery(QueryBase):
         repeated = sorted({str(key) for key in keys if keys.count(key) > 1})
         if repeated:
             raise ValueError(f"by names {repeated} more than once")
-        columns = self._spec.schema.column_names
+        columns = self._core.catalog.dataset_schema(self._spec).column_names
         unknown = [key for key in keys if key not in columns]
         if unknown:
             raise ValueError(

@@ -55,8 +55,8 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
-from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
     DriftRegistry,
