@@ -257,6 +257,10 @@ ENUM_PARAMETERS = {
     "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
     "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
+    "_Indices.bars.timespan": "namespaces/test_indices.py::test_bars_check_their_argument_types",
+    "_Indices.snapshots.order": (
+        "namespaces/test_indices.py::test_snapshots_check_their_list_parameters"
+    ),
 }
 
 
