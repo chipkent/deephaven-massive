@@ -13,6 +13,9 @@ clients do the waiting, through a `Clock`, so tests replace time with a fake and
   the client gives up at once rather than stall a caller for minutes.
 - **TLS certificate failures** are never retried: the certificate will not change between
   attempts. `is_tls_failure` recognises one however deeply a library wrapped it.
+- **Proxy credential refusals** (a proxy answering a tunnel request with HTTP 407) are never
+  retried either: the same credentials would be refused again, and a corporate proxy may lock
+  the account after a few refusals. `is_proxy_auth_failure` recognises one.
 
 Everything else (401, 403, 404, a body that is not JSON) is not retryable, and the clients
 fail at once. The functions here are pure and keep no state, so they are safe from any
@@ -30,6 +33,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     import threading
+    from collections.abc import Iterator
 
 __all__ = [
     "JITTER",
@@ -41,6 +45,7 @@ __all__ = [
     "TRANSIENT_WAITS",
     "Clock",
     "SystemClock",
+    "is_proxy_auth_failure",
     "is_tls_failure",
     "rate_limit_wait",
     "retry_after_seconds",
@@ -212,6 +217,45 @@ def is_tls_failure(error: BaseException) -> bool:
         True when an `ssl.SSLCertVerificationError` is found among `error`, its arguments, its
         `__cause__`, and its `__context__`, recursively.
     """
+    return any(isinstance(item, ssl.SSLCertVerificationError) for item in _linked(error))
+
+
+_PROXY_AUTH_REFUSED = "Tunnel connection failed: 407 "
+"""How `http.client` words a tunnel request the proxy answered with HTTP 407."""
+
+
+def is_proxy_auth_failure(error: BaseException) -> bool:
+    """Return whether `error` is, or wraps, a proxy's refusal of the client's credentials.
+
+    An HTTPS request through a proxy first asks it for a tunnel (`CONNECT`). A proxy that
+    rejects the credentials answers HTTP 407, which `http.client` raises as
+    `OSError("Tunnel connection failed: 407 <reason>")`, its only report of the status (every
+    supported Python words it so); urllib3 wraps that in its `ProxyError` and botocore in its
+    `ProxyConnectionError`.
+
+    Args:
+        error: The exception a request raised.
+
+    Returns:
+        True when an `OSError` whose message starts `Tunnel connection failed: 407 ` is found
+        among `error`, its arguments, its `__cause__`, and its `__context__`, recursively.
+    """
+    return any(
+        isinstance(item, OSError) and str(item).startswith(_PROXY_AUTH_REFUSED)
+        for item in _linked(error)
+    )
+
+
+def _linked(error: BaseException) -> Iterator[BaseException]:
+    """Yield `error` and every exception linked to it, each once.
+
+    Args:
+        error: The exception to start from.
+
+    Yields:
+        `error`, then the exceptions among its arguments, its `__cause__`, and its
+        `__context__`, recursively; a cycle ends the search.
+    """
     seen: set[int] = set()
     pending = [error]
     while pending:
@@ -219,8 +263,6 @@ def is_tls_failure(error: BaseException) -> bool:
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, ssl.SSLCertVerificationError):
-            return True
+        yield current
         linked = (current.__cause__, current.__context__, *current.args)
         pending.extend(item for item in linked if isinstance(item, BaseException))
-    return False

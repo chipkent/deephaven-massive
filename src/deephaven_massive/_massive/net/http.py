@@ -1,8 +1,9 @@
 """The certificate authorities and the proxy every Massive wire client uses.
 
-Each client reads its TLS and proxy settings from here once, when it is constructed, so a
-corporate network configured through the usual environment variables works the same way for
-REST (urllib3), WebSocket (websockets), and flat files (boto3):
+Each client reads its TLS and proxy settings from here once (the REST and WebSocket clients
+when they are constructed, the flat-file client when its first request creates its boto3
+client), so a corporate network configured through the usual environment variables works the
+same way for REST (urllib3), WebSocket (websockets), and flat files (boto3):
 
 - **Certificate authorities.** When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, the clients
   trust what the system's OpenSSL trusts, which honours both variables. Otherwise they trust
@@ -95,7 +96,8 @@ def proxy_credentials(proxy_url: str) -> tuple[str, dict[str, str]]:
     sends them, so the REST client passes the returned header as its `proxy_headers`, and the
     URL without credentials as the proxy, which keeps the password out of every object a log
     or an error might show. botocore and `websockets` read credentials from the URL
-    themselves, so the other clients need not call this.
+    themselves; the flat-file client calls this only for the URL without credentials, to name
+    the proxy in its messages.
 
     Args:
         proxy_url: The proxy URL, from `https_proxy`. A percent-encoded user or password

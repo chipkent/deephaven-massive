@@ -245,6 +245,27 @@ def test_proxy_credentials_go_to_the_proxy_and_the_bearer_key_never_does(
     rest.close()
 
 
+def test_a_proxy_that_refuses_the_credentials_is_never_retried(
+    tunnelled: FakeRestServer, fake_rest: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
+) -> None:
+    # Repeating credentials the proxy refused could lock the account on a corporate proxy.
+    host = fake_rest.url.removeprefix("http://")
+    no_proxy_env.setenv("HTTPS_PROXY", f"http://alice:wr0ng@{host}")
+    fake_rest.refuse_tunnels(407)
+    clock = FakeClock()
+    rest = _client(tunnelled, clock)
+    with pytest.raises(WireError, match="the proxy refused its credentials") as caught:
+        rest.get(_TRADES, _AAPL, {})
+    rest.close()
+    assert caught.value.message == (
+        "GET /v3/trades/AAPL: the proxy refused its credentials (HTTP 407 for a tunnel to "
+        "127.0.0.1); check the user and password in HTTPS_PROXY"
+    )
+    assert (caught.value.status, caught.value.path) == (407, "/v3/trades/AAPL")
+    assert [r.method for r in fake_rest.requests] == ["CONNECT"]
+    assert (tunnelled.requests, clock.waits) == ([], [])
+
+
 def test_a_proxy_reached_over_https_is_verified_like_massive(
     no_proxy_env: pytest.MonkeyPatch,
 ) -> None:

@@ -2279,8 +2279,11 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   not-before instant, so concurrent workers back off together instead of multiplying 429s;
   a 429 on the last attempt still sets it (its `Retry-After`, else 60 s) before it raises. A
   TLS certificate failure (`ssl.SSLCertVerificationError`) is never retried: it raises
-  `WireError` at once, naming `SSL_CERT_FILE`. A connection reset in the middle of paging
-  retries **that page** (its `next_url`), never the first page. Redirects are never followed
+  `WireError` at once, naming `SSL_CERT_FILE`. Nor is a proxy's refusal of its credentials
+  (HTTP 407 to the tunnel request, `net.retry.is_proxy_auth_failure`): repeating them can lock
+  a corporate account, so it raises `WireError(status=407)` at once, naming `HTTPS_PROXY`. A
+  connection reset in the middle of paging retries **that page** (its `next_url`), never the
+  first page. Redirects are never followed
   (a 3xx is a `WireError`), so the bearer key never leaves the REST host. Every wait goes
   through an injectable clock (`net.retry.Clock`, whose `wait(event, seconds)` ends early
   when the event is set), so tests never sleep. `close()` sets the client's closed event: a
@@ -2425,12 +2428,13 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
 
 ### 19.3 The flat-file client
 
-`_massive.FlatFileClient(access_key_id, secret_access_key, endpoint_url, bucket, max_pool)` is
-one object per session, created by the session's first flat-file read (only after the source
-choice has required both credentials, which are therefore `str`) and closed by `m.close()`. It
-creates its boto3 S3 client lazily, under a leaf lock, and keeps a closed flag (a
-`threading.Event`); once closed, it makes no request. A request in flight at the close closes
-the client again as it returns.
+`_massive.FlatFileClient(access_key_id, secret_access_key, endpoint_url, bucket, max_pool,
+clock=SYSTEM_CLOCK)` is one object per session, created by the session's first flat-file read
+(only after the source choice has required both credentials, which are therefore `str`) and
+closed by `m.close()`; `clock` is the `net.retry.Clock` its retry waits use. It creates its
+boto3 S3 client lazily, under a leaf lock, and keeps a closed flag (a `threading.Event`); once
+closed, it makes no request. A request in flight at the close closes the client again as it
+returns.
 
 - **`open(key) -> FlatFile | None`.** `None` for a missing key (404). `object_key(prefix, day,
   venue)` builds keys as `<prefix>/<YYYY>/<MM>/<date>.csv.gz`, filling a `{venue}` template.
@@ -2442,25 +2446,45 @@ the client again as it returns.
   carries the status, the host, and the key, and `request_id` comes from `x-amz-request-id`.
   A wire message says what happened to which object (`HTTP 403 for s3://<bucket>/<key> at
   <endpoint> (<code>: <message>)`); the user-facing remedy (the `MassiveConfig` settings to
-  check, the `venue=` parameter) is added by `_ingest/flatfiles.py`, whose public texts are those of
-  [section 16](#16-historysourceauto). Credentials are never logged.
-- **TLS, proxies, retries.** The client is built as `session.client("s3", verify=<the
-  net.http CA bundle>, config=Config(proxies=<from net.http>, proxies_config={"proxy_ca_bundle":
-  <the same bundle>}, retries={"total_max_attempts": 1, "mode": "standard"}))`: the CA bundle
-  is `SSL_CERT_FILE`, else certifi (`SSL_CERT_DIR` does not apply to S3), and also verifies an
-  HTTPS proxy, as the REST client's context does; botocore's own retries are off, and the mode
-  is pinned so `AWS_RETRY_MODE=adaptive` cannot add botocore's client-side rate limiter, which
-  sleeps outside the injected `Clock`. The shared `net/retry.py` schedule (0.5, 1, 2 s plus
-  jitter, waited on the client's `Clock`, which `close()` interrupts) retries the
-  `TRANSIENT_STATUSES` (HTTP 500, 502, 503 `SlowDown`, 504), the S3 error code
-  `RequestTimeout` (HTTP 400), and connection errors before the first byte (botocore's
-  `ConnectionError` family, `ConnectionClosedError`, and `ReadTimeoutError`; not the bare
-  `HTTPClientError` botocore raises for any unexpected exception in its HTTP layer). A TLS failure (botocore's `SSLError`, or
-  any error `is_tls_failure` recognises) is never retried, and a certificate failure's message
-  names `SSL_CERT_FILE`; neither is a failure partway through a body: rows already handed on
-  cannot be taken back. The bundle and proxy are read when the first `open` creates the boto3
-  client, outside the client's leaf lock, because on macOS the system proxy exceptions can
-  resolve the endpoint's host name.
+  check, the `venue=` parameter) is added by `_ingest/flatfiles.py`, whose public texts are
+  those of [section 16](#16-historysourceauto). Credentials are never logged, and a message
+  names a proxy by its URL without the user and password (`net.http.proxy_credentials`), never
+  by botocore's masked form, which leaves a password in clear text when it also appears earlier
+  in the URL.
+- **TLS and proxies.** The client is built as `session.client("s3", verify=<the net.http CA
+  bundle>, config=Config(proxies=<from net.http>, proxies_config={"proxy_ca_bundle": <the same
+  bundle>}, retries={"total_max_attempts": 1, "mode": "standard"}, connect_timeout=60,
+  read_timeout=60))` on a botocore session whose `defaults_mode` is `legacy`. The CA bundle is
+  `SSL_CERT_FILE`, else certifi (`SSL_CERT_DIR` does not apply to S3), and it also verifies an
+  HTTPS proxy, as the REST client's context does. `proxies` is `{"https": <url>}`, or `{}` when
+  no proxy applies: `None` would make botocore look the proxy up itself, under the leaf lock and
+  from more variables (`HTTP_PROXY`, `ALL_PROXY`) than the other clients read. The bundle and
+  the proxy are read when the first `open` creates the boto3 client, outside the leaf lock,
+  because on macOS the system proxy exceptions can resolve the endpoint's host name. The
+  `legacy` defaults mode keeps `AWS_DEFAULTS_MODE=auto` from asking the instance-metadata
+  service for a region under the lock.
+- **Retries.** botocore's own retries are off, and the mode is pinned so `AWS_RETRY_MODE=adaptive`
+  cannot add botocore's client-side rate limiter, which sleeps outside the injected `Clock`.
+  The shared `net/retry.py` schedule (0.5, 1, 2 s plus jitter, waited on the client's `Clock`,
+  which `close()` interrupts) retries a failure before the object's first byte:
+  - the `TRANSIENT_STATUSES` (HTTP 500, 502, 503 `SlowDown`, 504) and the S3 error code
+    `RequestTimeout` (HTTP 400);
+  - connection errors: botocore's `ConnectionError` family, `ConnectionClosedError`, and
+    `ReadTimeoutError`, but not the bare `HTTPClientError` botocore raises for any unexpected
+    exception in its HTTP layer;
+  - an error response whose body is reset or stalls: botocore reads that body outside its own
+    error handling, so urllib3's `ProtocolError` and `ReadTimeoutError` reach the client
+    unwrapped.
+
+  Each retry is logged at INFO and giving up at ERROR, naming the object and the failure.
+  Three failures are never retried:
+  - A TLS failure (botocore's `SSLError`, or any error `is_tls_failure` recognises). A
+    certificate failure's message names `SSL_CERT_FILE`.
+  - A proxy's refusal of the client's credentials (HTTP 407 to the tunnel request, which
+    `net.retry.is_proxy_auth_failure` recognises). Repeating credentials the proxy refused can
+    lock a corporate account; the `WireError` has status 407 and names `HTTPS_PROXY`.
+  - A failure partway through an object's body. Rows already handed on cannot be taken back,
+    so the read fails instead.
 - **`prefixes()`** lists the bucket's top-level prefixes, for `--check`.
 
 `FlatFile(body, key, location, host)` reads any binary stream whose failed reads raise
