@@ -6,7 +6,7 @@ import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
 
-from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import (
     COLUMN_TYPES,
     KEY_COLUMNS,
@@ -373,6 +373,23 @@ def test_rename_refuses_a_key_the_source_lacks() -> None:
         match=r"^declared keys: stocks\.trades: WS stocks/T: the symbol key 'Symbol' is not",
     ):
         rename(lacking, source(*trades))
+
+
+def test_rename_refuses_two_keys_on_one_column() -> None:
+    contracts = (R, "/v3/reference/options/contracts")
+    overlapping = spec(
+        "options.contracts",
+        {contracts: SourceKeys(KeySpec("Ticker"), fanout=KeySpec("Ticker"))},
+        asset_class=AssetClass.OPTIONS,
+    )
+    message = (
+        r"^declared keys: options\.contracts: REST /v3/reference/options/contracts: the fanout "
+        r"key 'Ticker' is already the symbol key$"
+    )
+    with pytest.raises(ValueError, match=message):
+        rename(overlapping, source(*contracts))
+    # The gate reports it, and nothing raises past it.
+    assert Catalog((overlapping,)).problems() == (message[1:-1].replace("\\", ""),)
 
 
 def test_rename_refuses_a_repeated_column() -> None:

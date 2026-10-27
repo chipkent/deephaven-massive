@@ -413,7 +413,8 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
 
     Raises:
         ValueError: If a declared key is not a column of the source after the projection
-            or a time key is not an `epoch` or `iso-instant` field (`"declared keys: ..."`),
+            a time key is not an `epoch` or `iso-instant` field, or two keys name one column
+            (`"declared keys: ..."`),
             or two columns share a name after the rename
             (`"unique columns: ..."`); the message names the dataset and the source.
     """
@@ -423,6 +424,7 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
     by_column = {named[f.wire_key]: f for f in fields}
     where = f"{spec.name}: {source.transport.value} {source.key}"
     renames: dict[str, str] = {}
+    roles: dict[str, str] = {}  # each source column a key claims, and the key's role
     columns: list[SourceColumn] = []
     for role, key in spec.keys_for(source.transport, source.key).declared():
         target = key_column(role, key)
@@ -439,8 +441,15 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
                 f"declared keys: {where}: the time key {key.column!r} is "
                 f"{by_column[key.column].wire_type}, not an instant (epoch or iso-instant)"
             )
+        elif key.column in roles:
+            # One column cannot take two names: the second rename would replace the first.
+            raise ValueError(
+                f"declared keys: {where}: the {role} key {key.column!r} is already the "
+                f"{roles[key.column]} key"
+            )
         else:
             renames[key.column] = target
+            roles[key.column] = role
     for field in fields:
         column = renames.get(named[field.wire_key], named[field.wire_key])
         unit = None if field.unit is None else time_unit(source, field)
