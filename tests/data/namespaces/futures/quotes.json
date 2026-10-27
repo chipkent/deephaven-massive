@@ -1,0 +1,33 @@
+{
+  "request_id": "a47d1beb8c11b6ae897ab76cdbbf35a3",
+  "results": [
+    {
+      "ask_size": 0,
+      "ask_timestamp": 1734472800076125400,
+      "bid_price": 2660,
+      "bid_size": 1,
+      "bid_timestamp": 1734472800076125400,
+      "channel": 360,
+      "report_sequence": 2250337,
+      "sequence_number": 15357766,
+      "session_end_date": "2024-12-17",
+      "ticker": "GCJ5",
+      "timestamp": 1734472800076125400
+    },
+    {
+      "ask_price": 2686,
+      "ask_size": 1,
+      "ask_timestamp": 1734472770000588000,
+      "bid_price": 2684.7,
+      "bid_size": 1,
+      "bid_timestamp": 1734472736352455200,
+      "channel": 360,
+      "report_sequence": 2249866,
+      "sequence_number": 15355476,
+      "session_end_date": "2024-12-17",
+      "ticker": "GCJ5",
+      "timestamp": 1734472770000588000
+    }
+  ],
+  "status": "OK"
+}

@@ -1,0 +1,47 @@
+{
+  "count": 1,
+  "request_id": "c4d50f4801874e30b63e674b844cf51f",
+  "results": [
+    {
+      "details": {
+        "settlement_date": 1753851600000000000,
+        "ticker": "CBN5",
+        "product_code": "CB"
+      },
+      "last_minute": {
+        "close": 240.00000000000003,
+        "high": 240.00000000000003,
+        "last_updated": 1746045300000,
+        "low": 240.00000000000003,
+        "open": 240.00000000000003,
+        "volume": 5
+      },
+      "last_quote": {
+        "ask": 240.50000000000003,
+        "ask_size": 3,
+        "ask_timestamp": 1746036204386194000,
+        "bid": 239.50000000000003,
+        "bid_size": 2,
+        "bid_timestamp": 1746035747932118000,
+        "last_updated": 1746046798024234200
+      },
+      "last_trade": {
+        "last_updated": 1746045242858242600,
+        "price": 240.00000000000003,
+        "size": 5
+      },
+      "session": {
+        "change": 21.11,
+        "change_percent": 0.09622134,
+        "close": 240.00000000000003,
+        "high": 241.00000000000003,
+        "low": 240.00000000000003,
+        "open": 240.00000000000003,
+        "previous_settlement": 219.39,
+        "settlement_price": 240.50000000000003,
+        "volume": 55
+      }
+    }
+  ],
+  "status": "OK"
+}

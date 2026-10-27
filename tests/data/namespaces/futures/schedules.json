@@ -1,0 +1,30 @@
+{
+  "request_id": "a83620d1ec6a4cd5b84ea669e377fd47",
+  "results": [
+    {
+      "event": "pre_open",
+      "product_code": "ERL",
+      "product_name": "ERCOT North 345 kV Hub Day-Ahead 5 MW Off-Peak Futures",
+      "session_end_date": "2024-06-10",
+      "timestamp": "2024-06-09T21:00:00+00:00",
+      "trading_venue": "XNYM"
+    },
+    {
+      "event": "open",
+      "product_code": "ERL",
+      "product_name": "ERCOT North 345 kV Hub Day-Ahead 5 MW Off-Peak Futures",
+      "session_end_date": "2024-06-10",
+      "timestamp": "2024-06-09T22:00:00+00:00",
+      "trading_venue": "XNYM"
+    },
+    {
+      "event": "close",
+      "product_code": "ERL",
+      "product_name": "ERCOT North 345 kV Hub Day-Ahead 5 MW Off-Peak Futures",
+      "session_end_date": "2024-06-10",
+      "timestamp": "2024-06-10T21:00:00+00:00",
+      "trading_venue": "XNYM"
+    }
+  ],
+  "status": "OK"
+}

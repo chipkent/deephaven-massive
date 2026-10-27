@@ -1,0 +1,2 @@
+ticker,exchange,session_end_date,window_start,open,high,low,close,volume,dollar_volume,transactions
+GCJ5,1,2025-02-04,1738540800000000000,2850.4,2851.0,2850.1,2850.9,120,342108.0,37

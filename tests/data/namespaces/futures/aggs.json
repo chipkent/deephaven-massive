@@ -1,0 +1,32 @@
+{
+  "request_id": "b452e45b7eaad14151c3e1ce5129b558",
+  "results": [
+    {
+      "close": 2874.2,
+      "dollar_volume": 380717446,
+      "high": 2877.1,
+      "low": 2837.4,
+      "open": 2850.4,
+      "session_end_date": "2025-02-04",
+      "settlement_price": 2875.8,
+      "ticker": "GCJ5",
+      "transactions": 74262,
+      "volume": 133127,
+      "window_start": 1738540800000000000
+    },
+    {
+      "close": 2884.8,
+      "dollar_volume": 448429944.1,
+      "high": 2906,
+      "low": 2870.1,
+      "open": 2873.7,
+      "session_end_date": "2025-02-05",
+      "settlement_price": 2893,
+      "ticker": "GCJ5",
+      "transactions": 83673,
+      "volume": 155170,
+      "window_start": 1738627200000000000
+    }
+  ],
+  "status": "OK"
+}

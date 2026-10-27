@@ -1,0 +1,27 @@
+{
+  "request_id": "000a000a0a0a000a0a0aa00a0a0000a0",
+  "results": [
+    {
+      "active": true,
+      "date": "2026-10-07",
+      "days_to_maturity": 72,
+      "first_trade_date": "2021-09-17",
+      "group_code": "ES",
+      "last_trade_date": "2026-12-18",
+      "max_order_quantity": 3000,
+      "min_order_quantity": 1,
+      "name": "ESZ6 Future",
+      "product_code": "ES",
+      "provider_id": "H3ZLPMESGCUM",
+      "provider_product_id": "VGQ4V6NVXLBW",
+      "settlement_date": "2026-12-18",
+      "settlement_tick_size": 0.0025,
+      "spread_tick_size": 0.01,
+      "ticker": "ESZ6",
+      "trade_tick_size": 0.25,
+      "trading_venue": "XCME",
+      "type": "single"
+    }
+  ],
+  "status": "OK"
+}
