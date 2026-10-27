@@ -34,7 +34,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
-from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.liveness import entered, new_scope
 
 TIMEOUT = 30.0
 
@@ -175,6 +175,7 @@ def test_queries_are_immutable_hashable_and_typed(massive_session: dm.MassiveSes
     assert [name for name in dir(a) if not name.startswith("_")] == [
         "append_only",
         "blink",
+        "columns",
         "fetch",
         "history",
         "last_by",
@@ -628,6 +629,103 @@ def test_the_guard_runs_before_argument_checks(massive_session: dm.MassiveSessio
         q.ring(0)
     with pytest.raises(dm.MassiveError, match="is closed"):
         q.last_by(by="Nope")
+
+
+# --- columns() -------------------------------------------------------------------------------
+
+
+def expected_columns(session: dm.MassiveSession, spec: DatasetSpec) -> list[dict[str, str]]:
+    return [
+        {
+            "Name": c.name,
+            "Type": c.type.value,
+            "Description": c.description,
+            "SuppliedBy": ", ".join(t.value for t in c.supplied_by),
+        }
+        for c in session._core.catalog.dataset_schema(spec).columns
+    ]
+
+
+def test_columns_lists_the_schema_without_any_request(
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    flat: Recorder,
+    *,
+    fake_streams: FakeStreams,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    table = trades(massive_session).columns()
+    assert not table.is_refreshing
+    assert [(c.name, c.data_type) for c in table.columns] == [
+        ("Name", dtypes.string),
+        ("Type", dtypes.string),
+        ("Description", dtypes.string),
+        ("SuppliedBy", dtypes.string),
+    ]
+    listed = dh_to_pylist(table)
+    assert listed == expected_columns(massive_session, TRADES_SPEC)
+    assert listed[0]["Name"] == "Symbol"
+    assert listed[0]["Description"].startswith("The instrument")
+    assert listed[0]["SuppliedBy"] == "REST, WS"
+    # The arguments choose rows, never columns.
+    assert dh_to_pylist(trades(massive_session, ["MSFT", "IBM"]).columns()) == listed
+    assert dh_to_pylist(trades(massive_session, dm.ALL).columns()) == listed
+    assert dh_to_pylist(news(massive_session).columns()) == expected_columns(
+        massive_session, NEWS_SPEC
+    )
+    assert (rest.calls, flat.calls, fake_streams.opened) == ([], [], [])
+    # Not a result: the session tracks nothing and rejects it.
+    assert massive_session._core.results.held() == 0
+    with pytest.raises(ValueError, match="not"):
+        massive_session.release(table)
+
+
+def test_columns_works_on_a_closed_session(
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    q = trades(massive_session)
+    massive_session.close()
+    assert dh_to_pylist(q.columns()) == expected_columns(massive_session, TRADES_SPEC)
+
+
+def test_columns_raises_on_the_update_graph(massive_session: dm.MassiveSession) -> None:
+    q = trades(massive_session)
+    update_graph = massive_session._core.exec_ctx.update_graph
+    with shared_lock(update_graph), pytest.raises(ValueError, match="update-graph lock"):
+        q.columns()
+
+
+def test_columns_from_many_threads_at_once(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    # 16 threads list the columns and open blink() results of one session at the same time.
+    q = trades(massive_session)
+    start = threading.Barrier(16)
+    sizes: list[int] = []
+    blinks: list[Table] = []
+    lock = threading.Lock()
+
+    def work() -> None:
+        start.wait(TIMEOUT)
+        with entered(massive_session._core.exec_ctx):
+            table = q.columns()
+            blink = q.blink()
+        with lock:
+            sizes.append(table.size)
+            blinks.append(blink)
+
+    threads = [threading.Thread(target=work) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(TIMEOUT)
+    columns = len(massive_session._core.catalog.dataset_schema(TRADES_SPEC).columns)
+    assert sizes == [columns] * 16
+    assert len(blinks) == 16
+    assert fake_streams.opened == [("stocks.trades", "T")]
+    for blink in blinks:
+        massive_session.release(blink)
 
 
 FOREX_SPEC = DatasetSpec(

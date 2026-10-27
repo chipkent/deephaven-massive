@@ -560,7 +560,7 @@ These facts are verified in `deephaven-core` `main`:
 ```python
 scope = LivenessScope()                       # library-owned, one per result
 with scope.open():                            # top of the thread-local stack during creation
-    result = describe(shape(stream.blink), spec)
+    result = describe(shape(stream.blink), spec, schema)
                                               # shape: append_only / ring / last_by, or for blink()
                                               #   the blink table itself; describe() returns a new,
                                               #   described table (section 7.4)
@@ -914,10 +914,13 @@ attribute `ColumnDescriptions` and a table description as `TableDescription`, se
 shows a column's description in the column-header tooltip; whether it shows the table
 description anywhere is **UNVERIFIED** ([section 23](#23-open-verification-items)), so it is
 set regardless, for every API client to read. The Python package has no wrapper for them, so
-`columns.describe(table, spec)` (in `_tables/columns.py`) calls them through `jpy`: it casts `table.j_table` to
-`GridAttributes`, calls `withColumnDescriptions` with a `java.util.HashMap` of every column
-whose description is not empty, then `withDescription`, casts the outcome back to
-`io.deephaven.engine.table.Table`, and wraps it in a new `deephaven.table.Table`.
+`columns.describe(table, spec, schema)` (in `_tables/columns.py`, with `schema` the dataset's
+`Catalog.dataset_schema(spec)`) calls them on `table.j_table`, an
+`io.deephaven.engine.table.Table`, which extends `GridAttributes`, so no explicit cast and no
+direct `jpy` import (`jpy` is not a declared dependency) is needed: it calls
+`withColumnDescriptions` with a `java.util.HashMap` (`deephaven.jcompat.j_hashmap`) of every
+column whose description is not empty, then `withDescription`, and wraps the outcome in a new
+`deephaven.table.Table`, whose constructor casts it back to `Table`.
 `withColumnDescriptions` checks that every named column exists, so a schema that disagrees
 with the table fails at once; `Table.with_attributes` skips that check and is not used. The
 table description is `"<dataset>: <summary>"` (`"stocks.trades: Trades of US-listed stocks,
@@ -3659,7 +3662,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/datasets/test_history_source.py`: AUTO before and after the cutoff | `tests/ingest/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |
 | 14 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/ingest/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
 | 15 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): request a weekend key and record the status |
-| 16 | Whether the described copy of a keyed `input_table` (a `poll()` result in `REPLACE` or `UPSERT` mode) keeps the input-table attribute, which the web UI reads to offer editing ([section 7.4](#74-column-descriptions)) | The poller writes only through the `input_table` it holds, never through the returned copy, so either outcome keeps the rows correct; the copy carries the descriptions either way | `tests/tables/test_columns.py`: the copy of a keyed `input_table` ticks with its parent, carries `ColumnDescriptions`, and pins whichever input-table attribute behaviour 42.7 shows | None: the embedded JVM settles it |
+| 16 | Whether the described copy of a keyed `input_table` (a `poll()` result in `REPLACE` or `UPSERT` mode) keeps the input-table attribute, which the web UI reads to offer editing ([section 7.4](#74-column-descriptions)) | The poller writes only through the `input_table` it holds, never through the returned copy, so either outcome keeps the rows correct; the copy carries the descriptions either way | `tests/tables/test_columns.py`: the copy of a keyed `input_table` ticks with its parent, carries `ColumnDescriptions`, and pins whichever input-table attribute behaviour 42.7 shows. Settled: the copy keeps the `InputTable` attribute, because `withColumnDescriptions` and `withDescription` copy every existing attribute | None: the embedded JVM settles it |
 | 17 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
 | 18 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/namespaces/test_forex_integration.py`: one `C` frame; record the form of `x` |
 | 19 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/namespaces/test_crypto_integration.py`: one `XT` frame; record the form of `i` |

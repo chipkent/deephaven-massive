@@ -14,7 +14,9 @@ and each verb returns a Deephaven `Table` of a particular shape:
 | `HistoryLatestQuery`       | `history()` and `fetch()` (the previous session's bar)    |
 
 A verb that cannot work for a dataset does not exist on its query class, so tab completion is the
-contract. Verbs validate their parameters synchronously on the calling thread: a wrong type raises
+contract. Every query also has `columns()`, which is not a verb: it lists the dataset's columns,
+their types, and what each one means, as a static table built without any network call.
+Verbs validate their parameters synchronously on the calling thread: a wrong type raises
 `TypeError` and an invalid value raises `ValueError`. Every verb also raises `ValueError` on a
 Deephaven update-graph thread (for example inside a table listener), because verbs create tables and
 take the session's registry lock.
@@ -56,6 +58,8 @@ from deephaven_massive._enums import (
     PollMode,
     _require_enum,
 )
+from deephaven_massive._tables.columns import column_table
+from deephaven_massive._tables.core import ON_UPDATE_GRAPH, on_update_graph
 from deephaven_massive._tables.liveness import entered
 from deephaven_massive._tables.watchlist import canonical_view
 from deephaven_massive._types import ALL, override
@@ -167,13 +171,48 @@ class QueryBase:
     """The state every query class shares: the session, the dataset, and the arguments.
 
     Frozen and hashable; equality includes the concrete class, so a `StreamQuery` never equals
-    a `HistoryQuery`. Queries have no public attributes: the verbs are the whole API, and the
-    `repr` names the class, the dataset, and the arguments that differ from their defaults.
+    a `HistoryQuery`. Queries have no public attributes: the verbs and `columns()` are the
+    whole API, and the `repr` names the class, the dataset, and the arguments that differ from
+    their defaults.
     """
 
     _core: SessionCore
     _spec: DatasetSpec
     _request: Request
+
+    def columns(self) -> Table:
+        """List this dataset's columns, their types, and what each one means.
+
+        Every verb of the dataset returns these columns in this order, whichever transport
+        serves it; a column the serving transport does not supply is null. The table is built
+        from the committed generated schemas: no request is made, no stream is opened, and it
+        works on a closed session.
+
+        Returns:
+            A static table with one row per column, in result column order:
+            `Name` (String), the column name; `Type` (String), its Deephaven type (`long`,
+            `int`, `double`, `boolean`, `String`, `Instant`, `LocalDate`, or `int[]`);
+            `Description` (String), what the column holds, empty when Massive gives no
+            description; and `SuppliedBy` (String), the transports whose sources fill the
+            column for this dataset, `REST`, `FLAT_FILES`, and `WS` in that order, joined by
+            ", " (`fetch()` and `poll()` are served by REST, the stream verbs by WS, and
+            `history()` by REST or FLAT_FILES); empty for a column that only other datasets
+            of the same kind supply, which this dataset always leaves null.
+
+        Raises:
+            ValueError: If called on an update-graph thread, for example from a table listener.
+
+        Example:
+            ::
+
+                cols = m.stocks.trades(["AAPL"]).columns()
+                stream_only = cols.where("SuppliedBy = `WS`")
+        """
+        if on_update_graph(self._core.exec_ctx):
+            raise ValueError(ON_UPDATE_GRAPH)
+        schema = self._core.catalog.dataset_schema(self._spec)
+        with entered(self._core.exec_ctx):
+            return column_table(schema)
 
     @override
     def __repr__(self) -> str:
