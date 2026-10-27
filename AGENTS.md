@@ -123,6 +123,11 @@ nothing is kept or shimmed for compatibility.
     (by `import`, relative import, or `importlib`), never `urllib3`, `websockets`, `certifi`,
     `boto3`, or `botocore`, and never a snapshot file. `tests/_fakes/` keeps its exception for
     the network libraries. The AST tests in `tests/test_layout.py` enforce all of it.
+14. **Every PR closes its issue on merge.** A PR that delivers a tracked planned PR puts
+    `Closes #<issue>` on its own line in the PR description, so the owner's merge closes the
+    issue. Check it with `gh pr view <n> --json closingIssuesReferences` before asking for review.
+    A PR that delivers only part of an issue says `Refs #<issue>` instead, and its description
+    names what remains. Never close an issue by hand to make up for a missing link.
 
 ## Documentation standard
 
