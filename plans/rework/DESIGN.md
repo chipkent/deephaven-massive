@@ -1034,7 +1034,10 @@ Notation:
   `history_path`, `grouped_daily_path`, `extra_paths`), and declares the key columns of each
   source it reads as `KeySpec`s ([section 19.4](#194-generated-schemas), "Keys are declared
   per source"): the `symbol`, `time`, and instrument `fanout` keys become `Symbol`,
-  `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column.
+  `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column. A
+  `time` key is always an instant, so `Timestamp` is an `Instant`; an axis that is a
+  calendar date ("axis `date`" below: `short_volume`, `share_float`, `economy.*`, the TMX
+  events) keeps its `LocalDate` column, such as `Date`, and declares no `time` key.
 
 ### 8.1 `m.stocks`
 
@@ -2985,10 +2988,18 @@ columns as `KeySpec(column, from_request=False, instrument=True)`, grouped per s
 `SourceKeys`, one optional declaration per role (`symbol`, `time`, `fanout`, `session`):
 
 - every source of a dataset in a kind declares `symbol` and `time`;
-- every source of any other instrument dataset declares `symbol`;
+- every source of any other instrument dataset declares `symbol`. A dataset is an instrument
+  dataset when it takes symbols: it has channels, flat files, a `symbol_param`,
+  `per_symbol`, or a symbol filled from the request. Its asset class alone does not make it
+  one: `futures.exchanges` and `futures.schedules` keep `FUTURES` for the session-day rule
+  and take no symbols;
 - any other dataset declares only the keys its rows carry, possibly none: `reference.exchanges`,
   `conditions`, `market_status`, `market_holidays`, and `ticker_types`, `futures.exchanges`,
-  and `benzinga.firms` declare none, and `economy.*` declares `time` and no `symbol`;
+  and `benzinga.firms` declare none, and `economy.*` declares none either: it keeps its `Date`
+  column (its axis is `time_axis` on `date`);
+- a `time` key is an instant: its field (after the projection) is an `epoch` or an
+  `iso-instant`, so `Timestamp` is always an `Instant`. A dataset whose row time is a
+  calendar date keeps that `LocalDate` column under its own name and declares no `time` key;
 - `fanout` and (futures) `session` are declared only on the sources that carry them;
 - `instrument` says whether a `fanout` key names an instrument: True, the default, renames it
   to `Underlying` (the options underlying, the related company asked about); False keeps its
@@ -3044,8 +3055,11 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
   after the projection of the dataset's membership (the `indices.values` time key on
   `/v3/snapshot/indices` is `timestamp` only after it), or `from_request`; every source of a
   dataset in a kind declares `symbol` and `time`, and every source of an instrument dataset
-  declares `symbol`. Its negative tests cover an undeclared kind key, an undeclared instrument
-  symbol, a declared key the source lacks, and a reference dataset that declares none and passes;
+  (one that takes symbols) declares `symbol`; a `time` key is an `epoch` or `iso-instant`
+  field; a dataset's `fanout` keys agree on `instrument` across its sources and across the
+  members of its kind. Its negative tests cover an undeclared kind key, an undeclared
+  instrument symbol, a declared key the source lacks, a date as the time key, and reference
+  datasets that declare none and pass, one of them with an asset class (`futures.exchanges`);
 - **Unique columns:** after the rename, no source has a duplicate column;
 - **Member types:** across members, one column name gets one `WireType`;
 - **Kind membership:** each kind dataset's sources equal the sources holding a membership of its

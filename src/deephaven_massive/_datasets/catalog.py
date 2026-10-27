@@ -58,10 +58,13 @@ _FROM_REQUEST_ROLES: Final = frozenset({"symbol", "fanout"})
 """The key roles a source may leave out of its rows, filled from the request instead."""
 
 _LIBRARY_PARAMS: Final = frozenset({"limit", "sort", "order", "adjusted"})
+"""Query parameters the library sets from typed arguments, never through `filters`."""
 
 _TIME_KINDS: Final = frozenset({ParamKind.DATE, ParamKind.TIMESTAMP})
 """The parameter kinds whose text value must be an ISO-8601 date or an instant with an offset."""
-"""Query parameters the library sets from typed arguments, never through `filters`."""
+
+_FILTER_SUFFIXES: Final = ("gt", "gte", "lt", "lte", "any_of")
+"""The suffixes the specification adds to a parameter's base name (`timestamp.gte`)."""
 
 _SOURCE_GONE: Final = "deprecated or removed in the snapshot"
 
@@ -82,7 +85,10 @@ class KeySpec:
     Attributes:
         column: The source's generated column that holds the key, after the projection of the
             dataset's membership of its kind (`"Ticker"`, `"SipTimestamp"`). For a key filled
-            from the request, the request parameter it comes from (`"stocksTicker"`).
+            from the request, the request parameter the key's value is sent in
+            (`"stocksTicker"`). A symbol a path takes as two parameters (`{from}/{to}`) names
+            the first, `"from"`: the library sends the pair's two currencies in `from` and
+            `to` and fills the key with the whole symbol, never with `from` alone.
         from_request: True when the source's rows do not carry the key: a symbol taken as a
             path parameter (`/v3/trades/{stockTicker}`) or held outside the result key
             (`/v1/last/crypto/{from}/{to}`). The library then fills the key as a constant
@@ -314,9 +320,34 @@ class DatasetSpec:
         return tuple(dict.fromkeys(found))
 
     @property
-    def declared_roles(self) -> frozenset[str]:
-        """The key roles (`symbol`, `time`, `fanout`, `session`) any source declares."""
-        return frozenset(role for keys in self.keys.values() for role, _ in keys.declared())
+    def takes_symbols(self) -> bool:
+        """True for an instrument dataset: one whose requests name instruments.
+
+        A dataset takes symbols when it has channels or flat files (both are read per
+        instrument), a `symbol_param`, `per_symbol` requests, or a symbol filled from the
+        request. Its asset class alone does not make it one: `futures.exchanges` keeps
+        `FUTURES` for the session-day rule and takes no symbols.
+        """
+        from_request = any(
+            keys.symbol is not None and keys.symbol.from_request for keys in self.keys.values()
+        )
+        return bool(
+            self.channels
+            or self.flat_file_prefixes
+            or self.symbol_param is not None
+            or self.per_symbol
+            or from_request
+        )
+
+    @property
+    def axis_params(self) -> frozenset[str]:
+        """The wire parameters of the time axis, which only `start` and `end` may set.
+
+        Each name of `time_axis`, its base name, and every `.gt`, `.gte`, `.lt`, `.lte`, and
+        `.any_of` form of the base: `("timestamp.gte", "timestamp.lt")` reserves `timestamp`
+        and all of its forms, so no filter can send a second bound beside `start` and `end`.
+        """
+        return frozenset(name for axis in self.time_axis or () for name in param_family(axis))
 
     def keys_for(self, transport: Transport, key: str) -> SourceKeys:
         """Return the key columns one source declares.
@@ -433,7 +464,20 @@ class DatasetSpec:
             )
 
 
-def _filter_key(name: str) -> str:
+def param_family(name: str) -> frozenset[str]:
+    """Return a wire parameter, its base name, and every suffixed form of the base.
+
+    Args:
+        name: A wire parameter name, such as `"timestamp.gte"` or `"ticker"`.
+
+    Returns:
+        The base (`"timestamp"`) and its `.gt`, `.gte`, `.lt`, `.lte`, and `.any_of` forms.
+    """
+    base = name.split(".", 1)[0]
+    return frozenset({base, *(f"{base}.{suffix}" for suffix in _FILTER_SUFFIXES)})
+
+
+def filter_key(name: str) -> str:
     """Return the `filters` key of a wire parameter: its dots written as underscores.
 
     Args:
@@ -469,7 +513,8 @@ def _fits(kind: ParamKind, values: tuple[str, ...], value: object) -> bool:
         ParamKind.ENUM: isinstance(value, str) and str(value) in values,
         ParamKind.DATE: isinstance(value, date | str),
         ParamKind.TIMESTAMP: isinstance(value, date | str),
-        ParamKind.LIST: isinstance(value, str | tuple),
+        ParamKind.LIST: isinstance(value, str)
+        or (isinstance(value, tuple) and all(isinstance(item, str) for item in value)),
     }
     return checks[kind]
 
@@ -486,15 +531,29 @@ class Catalog:
     Example:
         ::
 
-            from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+            from deephaven_massive._datasets.catalog import (
+                Catalog,
+                DatasetSpec,
+                KeySpec,
+                SourceKeys,
+            )
             from deephaven_massive._enums import AssetClass
+            from deephaven_massive._massive import Transport
 
             trades = DatasetSpec(
-                name="stocks.trades", asset_class=AssetClass.STOCKS, channels={None: "T"}
+                name="stocks.trades",
+                asset_class=AssetClass.STOCKS,
+                channels={None: "T"},
+                keys={
+                    (Transport.WS, "stocks/T"): SourceKeys(
+                        KeySpec("Ticker"), KeySpec("SipTimestamp")
+                    )
+                },
             )
             catalog = Catalog((trades,))
             catalog.by_name["stocks.trades"] is trades  # True
-            catalog.dataset_schema(trades).column_names[:2]  # ('Ticker', 'Conditions')
+            catalog.problems()  # (): every gate passes
+            catalog.dataset_schema(trades).column_names[:2]  # ('Symbol', 'Timestamp')
     """
 
     __slots__ = ("_by_name", "_lock", "_schemas", "_sources")
@@ -591,7 +650,7 @@ class Catalog:
             spec: The dataset; a dataset in a kind must be in this catalog.
 
         Returns:
-            The schema: `Symbol`, `Timestamp`, and `Underlying` first where the dataset
+            The schema: `Symbol` and `Timestamp` first where the dataset
             declares them, then every other column of the kind.
 
         Raises:
@@ -620,7 +679,8 @@ class Catalog:
         Runs synchronously when the query is built. A key is a wire parameter's name with its
         dots written as underscores (`strike_price_gte` for `strike_price.gte`), for any query
         parameter of any of the dataset's REST paths, except the ones the library sets itself:
-        the symbol parameter, the `start`/`end` pair, `limit`, `sort`, `order`, and `adjusted`.
+        the symbol parameter and the time axis, each with its base name and every suffixed
+        form of it (`param_family`), `limit`, `sort`, `order`, and `adjusted`.
 
         Args:
             spec: The dataset.
@@ -637,9 +697,10 @@ class Catalog:
         """
         if not filters:
             return
-        reserved = {*_LIBRARY_PARAMS, *(spec.time_axis or ()), spec.symbol_param}
+        symbols = () if spec.symbol_param is None else param_family(spec.symbol_param)
+        reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols}
         params = {
-            _filter_key(param.name): param
+            filter_key(param.name): param
             for path in spec.rest_paths
             for param in self._rest(path).params
             if not param.in_path and param.name not in reserved
@@ -684,8 +745,10 @@ class Catalog:
         - **declared keys:** every key a dataset declares for a source is a column of that
           source after the projection of the dataset's membership, or is filled from the
           request; every source of a dataset in a kind declares `symbol` and `time`, and every
-          source of an instrument dataset (one with an asset class, or with a `symbol` key on
-          any source) declares `symbol`.
+          source of an instrument dataset (`DatasetSpec.takes_symbols`) declares `symbol`; a
+          `time` key is an `epoch` or `iso-instant` field, so `Timestamp` is an `Instant`; and
+          the `fanout` keys agree on `KeySpec.instrument` across the dataset's sources and
+          across the members of its kind.
         - **unique columns:** after the rename, no source has a repeated column.
         - **member types:** across the members of a kind, one column gets one wire type, up to
           the lattice joins.
@@ -740,8 +803,8 @@ class Catalog:
         needed: tuple[str, ...] = ()
         if spec.kind is not None:
             needed = ("symbol", "time")
-        elif spec.asset_class is not None or "symbol" in spec.declared_roles:
-            needed = ("symbol",)  # an instrument dataset
+        elif spec.takes_symbols:
+            needed = ("symbol",)
         found = []
         for transport, key in spec.sources:
             roles = {role for role, _ in spec.keys_for(transport, key).declared()}
@@ -755,7 +818,37 @@ class Catalog:
                 rename(spec, self.source(transport, key))
             except ValueError as error:
                 found.append(str(error))
-        return found
+        return found + self._fanout_problems(spec)
+
+    def _fanout_problems(self, spec: DatasetSpec) -> list[str]:
+        """Check that the dataset's fan-out keys agree on whether they name an instrument.
+
+        Otherwise one table would get both an `Underlying` column and the key's own column.
+        The keys agree across the dataset's sources and across the members of its kind.
+
+        Args:
+            spec: The dataset.
+
+        Returns:
+            The `declared keys` failures about `KeySpec.instrument`.
+        """
+
+        def flags(dataset: DatasetSpec) -> set[bool]:
+            return {k.fanout.instrument for k in dataset.keys.values() if k.fanout is not None}
+
+        if len(flags(spec)) > 1:
+            return [f"declared keys: {spec.name}: its fanout keys disagree on instrument"]
+        members = [
+            m for m in self._by_name.values() if spec.kind is not None and m.kind == spec.kind
+        ]
+        if len(set().union(*map(flags, members))) > 1:
+            return [
+                (
+                    f"declared keys: {spec.name}: the fanout keys of the {spec.kind} kind disagree "
+                    "on instrument"
+                )
+            ]
+        return []
 
     def _kind_problems(self, spec: DatasetSpec) -> list[str]:
         """Check that a kind dataset reads exactly the sources of its kind's group.

@@ -224,8 +224,10 @@ def test_venue_is_an_enum(massive_session: dm.MassiveSession) -> None:
 
 
 def test_filter_validation(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match="set through start= and end="):
-        build(massive_session, DIVIDENDS, filters={"ex_dividend_date_gte": "2025-01-01"})
+    # Every form of the axis, not only the start/end pair, is set through start= and end=.
+    for key in ("ex_dividend_date_gte", "ex_dividend_date", "ex_dividend_date_gt"):
+        with pytest.raises(ValueError, match=rf"^{key} is set through start= and end="):
+            build(massive_session, DIVIDENDS, filters={key: "2025-01-01"})
     with pytest.raises(TypeError, match="filters must be a mapping"):
         build(massive_session, DIVIDENDS, filters=[("a", 1)])
     with pytest.raises(TypeError, match="filter names must be str"):

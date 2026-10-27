@@ -17,7 +17,7 @@ import pytest
 
 from deephaven_massive._datasets import catalog as catalog_module
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.schema import ColumnType, Schema
+from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import AssetClass, Order, Timespan
 from deephaven_massive._massive import ParamKind, Source, Transport, sources
 from deephaven_massive._session import CATALOG, NAMESPACE_MODULES
@@ -278,8 +278,28 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
     assert repeated.sources == ((R, "/v3/reference/exchanges"),)
     assert STOCK_TRADES.group == "stocks"
     assert EXCHANGES.group is None
-    assert STOCK_TRADES.declared_roles == frozenset({"symbol", "time"})
-    assert EXCHANGES.declared_roles == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        (STOCK_TRADES, True),  # channels and flat files
+        (DIVIDENDS, True),  # a symbol parameter
+        (RELATED, True),  # one symbol per request
+        (EXCHANGES, False),
+        (DatasetSpec(name="a.b", history_path="/v3/trades/{stockTicker}"), False),
+        (
+            DatasetSpec(
+                name="a.b",
+                history_path="/v3/trades/{stockTicker}",
+                keys={(R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"))},
+            ),
+            True,  # a symbol filled from the request
+        ),
+    ],
+)
+def test_a_dataset_takes_symbols_by_its_transports(spec: DatasetSpec, expected: bool) -> None:
+    assert spec.takes_symbols is expected
 
 
 def test_rest_capabilities() -> None:
@@ -410,7 +430,8 @@ def test_a_fanout_key_that_is_no_instrument_keeps_its_column() -> None:
     # The same key as an instrument would be the Underlying.
     as_instrument = change(holdings, keys={(R, "/stocks/filings/vX/13-F"): keys(fanout="FilerCik")})
     renamed = Catalog((as_instrument,)).dataset_schema(as_instrument).column_names
-    assert renamed[0] == "Underlying"
+    # The renamed key takes the CIK's place: only Symbol and Timestamp lead.
+    assert renamed.index("Underlying") == columns.index("FilerCik")
     assert "FilerCik" not in renamed
 
 
@@ -421,18 +442,48 @@ def test_a_reference_dataset_declares_no_key() -> None:
     assert "Symbol" not in schema.column_names
 
 
-def test_dataset_schemas_are_cached_and_one_winner_is_shared() -> None:
-    catalog = Catalog((STOCK_TRADES, CRYPTO_TRADES))
-    start = threading.Barrier(16)
+def test_a_classed_reference_dataset_declares_no_key() -> None:
+    # The futures reference datasets keep their class for the session-day rule, but take no
+    # symbols, so they are no instrument datasets and need no symbol key.
+    exchanges = DatasetSpec(
+        name="futures.exchanges",
+        asset_class=AssetClass.FUTURES,
+        fetch_path="/futures/v1/exchanges",
+        poll_keys=("Id",),
+    )
+    assert not exchanges.takes_symbols
+    assert problems(exchanges) == ()
+    # Once it takes symbols, it must say where its rows carry them.
+    assert problems(change(exchanges, symbol_param="mic")) == (
+        "declared keys: futures.exchanges: REST /futures/v1/exchanges declares no symbol key",
+        (
+            "wire parameters: futures.exchanges: symbol parameter 'mic' is not a parameter of "
+            "/futures/v1/exchanges"
+        ),
+    )
 
-    def schema(_: int) -> Schema:
-        start.wait()
-        return catalog.dataset_schema(STOCK_TRADES)
 
-    with ThreadPoolExecutor(16) as pool:
-        results = list(pool.map(schema, range(16)))
-    assert all(result is results[0] for result in results)
-    assert catalog.dataset_schema(STOCK_TRADES) is results[0]
+def test_dataset_schemas_are_cached_and_the_first_published_wins() -> None:
+    # Both threads are inside the merge, past the cache check, before either publishes: the
+    # barrier in the first source lookup of each holds them there.
+    meet = threading.Barrier(2)
+    waited: set[int] = set()
+    waited_lock = threading.Lock()
+
+    def tables(transport: Transport) -> Mapping[str, Source]:
+        with waited_lock:
+            first = threading.get_ident() not in waited
+            waited.add(threading.get_ident())
+        if first:
+            meet.wait(timeout=30)
+        return sources(transport)
+
+    catalog = Catalog((STOCK_TRADES, CRYPTO_TRADES), source_tables=tables)
+    with ThreadPoolExecutor(2) as pool:
+        first, second = pool.map(lambda _: catalog.dataset_schema(STOCK_TRADES), range(2))
+    # Each computed its own schema; both return the one that was published first.
+    assert first is second
+    assert catalog.dataset_schema(STOCK_TRADES) is first
 
 
 def test_a_kind_dataset_must_be_in_the_catalog() -> None:
@@ -518,33 +569,91 @@ def test_a_per_ticker_path_and_a_futures_channel_pass_the_declared_keys_gate() -
 
 
 def test_unique_columns_gate() -> None:
-    # The futures REST rows already carry a Timestamp, so another time key repeats it.
-    clash = {
-        **FUTURES_TRADES.keys,
-        (R, "/futures/v1/trades/{ticker}"): keys(request("ticker"), "SequenceNumber"),
-    }
-    assert problems(change(FUTURES_TRADES, keys=clash)) == (
+    # The open-close rows carry a Symbol of their own, so a symbol from the request repeats it.
+    open_close = DatasetSpec(
+        name="stocks.daily_open_close",
+        asset_class=AssetClass.STOCKS,
+        fetch_path="/v1/open-close/{stocksTicker}/{date}",
+        keys={(R, "/v1/open-close/{stocksTicker}/{date}"): keys(request("stocksTicker"))},
+        per_symbol=True,
+    )
+    assert problems(open_close) == (
         (
-            "unique columns: futures.trades: REST /futures/v1/trades/{ticker}: columns "
-            "['Timestamp'] repeat after the rename"
+            "unique columns: stocks.daily_open_close: REST /v1/open-close/{stocksTicker}/{date}: "
+            "columns ['Symbol'] repeat after the rename"
         ),
     )
 
 
 def test_member_types_gate() -> None:
-    # The crypto stream's text Id as its time joins the kind's epoch Timestamp: a conflict.
-    text_time = {**CRYPTO_TRADES.keys, (W, "crypto/XT"): keys("Pair", "Id")}
-    crypto = change(CRYPTO_TRADES, keys=text_time)
+    # The crypto stream's price as its symbol joins the kind's text Symbol: a conflict.
+    priced = {**CRYPTO_TRADES.keys, (W, "crypto/XT"): keys("Price", "ParticipantTimestamp")}
+    crypto = change(CRYPTO_TRADES, keys=priced)
     found = problems(STOCK_TRADES, crypto)
     assert found == (
         (
-            "member types: stocks.trades: column 'Timestamp' is epoch elsewhere but string in "
+            "member types: stocks.trades: column 'Symbol' is string elsewhere but double in "
             "crypto.trades WS crypto/XT"
         ),
         (
-            "member types: crypto.trades: column 'Timestamp' is epoch elsewhere but string in "
+            "member types: crypto.trades: column 'Symbol' is string elsewhere but double in "
             "crypto.trades WS crypto/XT"
         ),
+    )
+
+
+def test_declared_keys_gate_needs_an_instant_as_the_time_key() -> None:
+    text_time = {**CRYPTO_TRADES.keys, (W, "crypto/XT"): keys("Pair", "Id")}
+    assert problems(change(CRYPTO_TRADES, keys=text_time)) == (
+        (
+            "declared keys: crypto.trades: WS crypto/XT: the time key 'Id' is string, not an "
+            "instant (epoch or iso-instant)"
+        ),
+    )
+    # A calendar date is no instant either: a date-axis dataset keeps its Date column.
+    dated = DatasetSpec(
+        name="economy.inflation",
+        fetch_path="/fed/v1/inflation",
+        keys={(R, "/fed/v1/inflation"): keys(time="Date")},
+        poll_keys=("Date",),
+    )
+    assert problems(dated) == (
+        (
+            "declared keys: economy.inflation: REST /fed/v1/inflation: the time key 'Date' is "
+            "date, not an instant (epoch or iso-instant)"
+        ),
+    )
+    undated = change(dated, keys={})
+    assert problems(undated) == ()
+    assert "Date" in Catalog((undated,)).dataset_schema(undated).column_names
+
+
+def test_fanout_keys_agree_on_instrument() -> None:
+    contracts = (R, "/v3/reference/options/contracts")
+    one = (R, "/v3/reference/options/contracts/{options_ticker}")
+    split = change(
+        CONTRACTS,
+        keys={
+            contracts: keys("Ticker", fanout="UnderlyingTicker"),
+            one: keys("Ticker", fanout=KeySpec("UnderlyingTicker", instrument=False)),
+        },
+    )
+    assert problems(split) == (
+        "declared keys: options.contracts: its fanout keys disagree on instrument",
+    )
+    # Across a kind: two members of one kind that disagree.
+    as_cik = {
+        **STOCK_TRADES.keys,
+        (W, "stocks/T"): keys("Ticker", "SipTimestamp", fanout=KeySpec("Id", instrument=False)),
+    }
+    as_instrument = {
+        **CRYPTO_TRADES.keys,
+        (W, "crypto/XT"): keys("Pair", "ParticipantTimestamp", fanout="Id"),
+    }
+    found = problems(change(STOCK_TRADES, keys=as_cik), change(CRYPTO_TRADES, keys=as_instrument))
+    assert found[:2] == (
+        "declared keys: stocks.trades: the fanout keys of the trades kind disagree on instrument",
+        "declared keys: crypto.trades: the fanout keys of the trades kind disagree on instrument",
     )
 
 
@@ -703,8 +812,6 @@ def test_filters_are_the_query_parameters_of_the_dataset_paths() -> None:
             "frequency_gte": 4,
             "distribution_type": "recurring",
             "distribution_type_any_of": ("recurring", "special"),
-            "ticker_gte": "A",
-            "ex_dividend_date": date(2025, 1, 2),
         },
     )
     check(EXCHANGES, {})  # nothing to check, so no path is read
@@ -720,7 +827,21 @@ def test_a_path_parameter_is_no_filter() -> None:
 
 
 @pytest.mark.parametrize(
-    "key", ["limit", "sort", "ticker_any_of", "ex_dividend_date_gte", "ex_dividend_date_lte"]
+    "key",
+    [
+        "limit",
+        "sort",
+        # The symbol parameter's family: its base and every suffixed form.
+        "ticker",
+        "ticker_any_of",
+        "ticker_gte",
+        # The time axis's family, not only the start/end pair.
+        "ex_dividend_date",
+        "ex_dividend_date_gt",
+        "ex_dividend_date_gte",
+        "ex_dividend_date_lt",
+        "ex_dividend_date_lte",
+    ],
 )
 def test_the_library_sets_some_parameters_itself(key: str) -> None:
     with pytest.raises(ValueError, match=rf"has no filter '{key}'"):
@@ -732,15 +853,18 @@ def test_filter_values_must_fit_their_kind() -> None:
         check(DIVIDENDS, {"frequency": "4"})
     with pytest.raises(ValueError, match=r"takes \['recurring', 'special', .*\], not 'x'"):
         check(DIVIDENDS, {"distribution_type": "x"})
+    # Without a time axis, the date parameter is an ordinary filter.
+    unaxed = change(DIVIDENDS, time_axis=None)
+    check(unaxed, {"ex_dividend_date": date(2025, 1, 2)})
     naive = datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     with pytest.raises(ValueError, match=r"^ex_dividend_date=datetime\.datetime\(2025, 1, 2"):
-        check(DIVIDENDS, {"ex_dividend_date": naive})
+        check(unaxed, {"ex_dividend_date": naive})
     # Text for a date parameter is ISO-8601, and a time in it carries an offset.
     with pytest.raises(ValueError, match=r"^ex_dividend_date='soon' is not an ISO-8601 date"):
-        check(DIVIDENDS, {"ex_dividend_date": "soon"})
+        check(unaxed, {"ex_dividend_date": "soon"})
     with pytest.raises(ValueError, match=r"^ex_dividend_date='2025-01-02T09:30' needs a timezone"):
-        check(DIVIDENDS, {"ex_dividend_date": "2025-01-02T09:30"})
-    check(DIVIDENDS, {"ex_dividend_date": "2025-01-02T09:30:00Z"})
+        check(unaxed, {"ex_dividend_date": "2025-01-02T09:30"})
+    check(unaxed, {"ex_dividend_date": "2025-01-02T09:30:00Z"})
 
 
 @pytest.mark.parametrize(
@@ -753,7 +877,7 @@ def test_filter_values_must_fit_their_kind() -> None:
         (ParamKind.ENUM, ["asc", Order.DESC], ["up", 1]),
         (ParamKind.DATE, [date(2025, 1, 2), datetime(2025, 1, 2, tzinfo=UTC), "2025"], [1]),
         (ParamKind.TIMESTAMP, [date(2025, 1, 2), "2025-01-02"], [1.5]),
-        (ParamKind.LIST, ["a", ("a", "b")], [1, ["a"]]),
+        (ParamKind.LIST, ["a", ("a", "b")], [1, ["a"], ("a", 1)]),
     ],
 )
 def test_each_parameter_kind_takes_its_values(

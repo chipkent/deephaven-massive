@@ -18,8 +18,8 @@ the dataset's table shape:
   changes. `required_fields` resolves the keys a source must carry back to the generated
   fields behind them, for the wire clients' required-key checks.
 - `dataset_schema`, the merge: the ordered union by column name of the renamed columns of
-  every source of every member of the dataset's kind (`Catalog.members`), `Symbol`,
-  `Timestamp`, and `Underlying` first where the dataset declares them, each column's wire type
+  every source of every member of the dataset's kind (`Catalog.members`), `Symbol` and
+  `Timestamp` first where the dataset declares them, each column's wire type
   the lattice join (`join`) of every contribution. Every member of a kind therefore has the
   same columns: crypto trades carry the stocks-only `Tape`, always null. `Catalog` caches the
   result per dataset; this module holds no state.
@@ -377,6 +377,23 @@ def _projection(spec: DatasetSpec, source: Source) -> Mapping[str, str] | None:
     return None
 
 
+def _position(spec: DatasetSpec, source: Source) -> int | None:
+    """Return the source's position in the dataset's kind and group, if it holds one.
+
+    Args:
+        spec: The dataset.
+        source: One of its sources.
+
+    Returns:
+        The membership's position, or None for a source in no membership of the dataset's
+        kind and group (and for every source of a dataset in no kind).
+    """
+    for membership in source.memberships:
+        if membership.kind == spec.kind and membership.group == spec.group:
+            return membership.position
+    return None
+
+
 def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
     """Return the columns one source contributes to one dataset.
 
@@ -396,12 +413,14 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
 
     Raises:
         ValueError: If a declared key is not a column of the source after the projection
-            (`"declared keys: ..."`), or two columns share a name after the rename
+            or a time key is not an `epoch` or `iso-instant` field (`"declared keys: ..."`),
+            or two columns share a name after the rename
             (`"unique columns: ..."`); the message names the dataset and the source.
     """
     projection = _projection(spec, source)
     fields = [f for f in source.fields if projection is None or f.wire_key in projection]
     named = {f.wire_key: f.column if projection is None else projection[f.wire_key] for f in fields}
+    by_column = {named[f.wire_key]: f for f in fields}
     where = f"{spec.name}: {source.transport.value} {source.key}"
     renames: dict[str, str] = {}
     columns: list[SourceColumn] = []
@@ -410,10 +429,15 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
         if key.from_request:
             # DatasetSpec allows only an instrument symbol or fan-out key from the request.
             columns.append(SourceColumn(target, WireType.STRING, parameter=key.column))
-        elif key.column not in named.values():
+        elif key.column not in by_column:
             raise ValueError(
                 f"declared keys: {where}: the {role} key {key.column!r} is not a column of the "
                 "source"
+            )
+        elif role == "time" and by_column[key.column].wire_type not in _INSTANTS:
+            raise ValueError(
+                f"declared keys: {where}: the time key {key.column!r} is "
+                f"{by_column[key.column].wire_type}, not an instant (epoch or iso-instant)"
             )
         else:
             renames[key.column] = target
@@ -455,6 +479,40 @@ def required_fields(spec: DatasetSpec, source: Source) -> tuple[Field, ...]:
     )
 
 
+_LEADING: Final = ("Symbol", "Timestamp")
+"""The key columns a merged schema starts with, in this order, where the dataset declares them;
+every other column, `Underlying` included, takes its place by first appearance."""
+
+_INSTANTS: Final = frozenset({WireType.EPOCH, WireType.ISO_INSTANT})
+"""The wire types a `time` key may have, so that `Timestamp` is always an `Instant`."""
+
+
+def _by_position(
+    member: DatasetSpec, source: Callable[[Transport, str], Source]
+) -> list[tuple[Transport, str, Source]]:
+    """Return a member's sources in the order of their positions in its kind's group.
+
+    The merge walks them in this order, so a schema's column order follows the generated
+    memberships, never the order of the spec's role paths or mappings. A source without a
+    membership (every source of a dataset in no kind) keeps its declared place after them.
+
+    Args:
+        member: The dataset.
+        source: Returns the generated source of a transport and key.
+
+    Returns:
+        `(transport, key, source)` for every source of the member.
+    """
+    found = [(transport, key, source(transport, key)) for transport, key in member.sources]
+
+    def rank(item: tuple[int, tuple[Transport, str, Source]]) -> tuple[bool, int, int]:
+        index, (_, _, generated) = item
+        position = _position(member, generated)
+        return (position is None, position or 0, index)
+
+    return [entry for _, entry in sorted(enumerate(found), key=rank)]
+
+
 _JOINS: Final[Mapping[frozenset[WireType], WireType]] = {
     frozenset({WireType.LONG, WireType.DOUBLE}): WireType.DOUBLE,
     frozenset({WireType.LONG, WireType.INT_ARRAY}): WireType.INT_ARRAY,
@@ -489,10 +547,12 @@ def dataset_schema(
     """Merge the renamed columns of every member's sources into one dataset's schema.
 
     The ordered union by column name of `rename(member, s)` for every source `s` of every
-    member, in member order, then source order (`DatasetSpec.sources`), then field order;
-    `Symbol`, `Timestamp`, and `Underlying` come first, in that order, where the dataset
-    declares them. Each column's type is the `join` of every contribution, mapped through
-    `COLUMN_TYPES`. `Catalog.dataset_schema` calls it once per dataset and caches the result.
+    member, in member order, then the order of the sources' positions in the kind's group
+    (declared order for a source without one), then field order; `Symbol` and then
+    `Timestamp` come first where the dataset declares them, and every other column,
+    `Underlying` included, takes its place by first appearance. Each column's type is the
+    `join` of every contribution, mapped through `COLUMN_TYPES`. `Catalog.dataset_schema`
+    calls it once per dataset and caches the result.
 
     Args:
         spec: The dataset whose schema is built; it names the schema and decides the leading
@@ -511,8 +571,8 @@ def dataset_schema(
     """
     types: dict[str, WireType] = {}
     for member in members:
-        for transport, key in member.sources:
-            for contribution in rename(member, source(transport, key)):
+        for transport, key, found in _by_position(member, source):
+            for contribution in rename(member, found):
                 prior = types.get(contribution.column)
                 joined = (
                     contribution.wire_type if prior is None else join(prior, contribution.wire_type)
@@ -525,6 +585,6 @@ def dataset_schema(
                     )
                 types[contribution.column] = joined
     declared = {key_column(r, k) for keys in spec.keys.values() for r, k in keys.declared()}
-    leading = [name for name in KEY_COLUMNS.values() if name in declared]
+    leading = [name for name in _LEADING if name in declared]
     order = [*leading, *(name for name in types if name not in leading)]
     return Schema(spec.name, tuple(Column(name, COLUMN_TYPES[types[name]]) for name in order))

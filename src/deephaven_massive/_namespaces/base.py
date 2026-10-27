@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, ClassVar
 from deephaven.table import Table
 
 from deephaven_massive._config import require_positive_int
+from deephaven_massive._datasets.catalog import filter_key
 from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
@@ -240,7 +241,8 @@ def _filters(spec: DatasetSpec, filters: object) -> tuple[tuple[str, ParamValue]
     Raises:
         TypeError: If `filters` is not a mapping, a key is not a `str`, or a value has an
             unsupported type.
-        ValueError: If a key is one of the dataset's `start`/`end` parameters, or `adjusted`,
+        ValueError: If a key is a parameter of the dataset's time axis (`DatasetSpec.axis_params`,
+            the `start`/`end` pair's base name and every suffixed form), or `adjusted`,
             which has its own typed argument: a filter would reach REST but not the flat-file
             source choice, which reads only `Request.adjusted`.
     """
@@ -250,7 +252,7 @@ def _filters(spec: DatasetSpec, filters: object) -> tuple[tuple[str, ParamValue]
     for key, value in filters.items():
         if not isinstance(key, str):
             raise TypeError(f"filter names must be str, not {type(key).__name__}")
-        if key in {name.replace(".", "_") for name in spec.time_axis or ()}:
+        if key in {filter_key(name) for name in spec.axis_params}:
             raise ValueError(f"{key} is set through start= and end=, not filters")
         if key == "adjusted":
             raise ValueError("adjusted is set through build_query(adjusted=...), not filters")

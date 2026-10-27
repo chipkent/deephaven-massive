@@ -438,10 +438,51 @@ def test_the_merge_puts_the_declared_keys_first() -> None:
         asset_class=AssetClass.OPTIONS,
     )
     schema = dataset_schema(dataset, (dataset,), lookup)
-    assert schema.column_names[:2] == ("Symbol", "Underlying")
+    names = schema.column_names
+    assert names[:3] == ("Symbol", "AdditionalUnderlyings", "Cfi")
     assert schema.name == "options.contracts"
-    # The other columns keep the source's order.
-    assert schema.column_names[2:4] == ("AdditionalUnderlyings", "Cfi")
+    # Only Symbol and Timestamp lead; Underlying keeps its field's place in the source.
+    fields = [f.column for f in source(*contracts).fields if f.column != "Ticker"]
+    assert names[1:] == tuple("Underlying" if c == "UnderlyingTicker" else c for c in fields)
+
+
+def test_the_merge_follows_the_membership_positions() -> None:
+    # Declared fetch, history, stream, files; the stocks trades group puts the history path
+    # (position 0) before the last-trade path (position 1).
+    sip = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
+    history = (R, "/v3/trades/{stockTicker}")
+    last = (R, "/v2/last/trade/{stocksTicker}")
+    trades = DatasetSpec(
+        name="stocks.trades",
+        asset_class=AssetClass.STOCKS,
+        kind="trades",
+        fetch_path=last[1],
+        history_path=history[1],
+        channels={None: "T"},
+        keys={
+            last: sip,
+            history: SourceKeys(KeySpec("stockTicker", from_request=True), sip.time),
+            (W, "stocks/T"): sip,
+        },
+    )
+    made = Source(
+        key=last[1],
+        transport=R,
+        fields=(
+            Field(wire_key="T", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="z", column="Zeta", wire_type=WireType.LONG),
+            Field(wire_key="t", column="SipTimestamp", wire_type=WireType.EPOCH, unit=WireUnit.NS),
+        ),
+        memberships=(MEMBERSHIP(kind="trades", group="stocks", position=1),),
+    )
+
+    def tables(transport: Transport, key: str) -> Source:
+        return made if key == last[1] else source(transport, key)
+
+    names = dataset_schema(trades, (trades,), tables).column_names
+    # The history path's columns come before the last-trade path's own Zeta.
+    assert names.index("Conditions") < names.index("Zeta")
+    assert names[-1] == "Zeta"
 
 
 def test_the_merge_joins_types_across_sources() -> None:

@@ -1,4 +1,4 @@
-from deephaven_massive._enums import FuturesVenue
+from deephaven_massive._enums import AssetClass, FuturesVenue
 from deephaven_massive._massive.refresh import naming, overrides
 from deephaven_massive._massive.refresh.lexicon import CRYPTO_SNAPSHOTS
 from deephaven_massive._massive.spec.types import Conversion, WireType, WireUnit
@@ -155,3 +155,13 @@ def test_the_indices_snapshot_joins_the_values_kind_as_ticker_value_and_timestam
 def test_every_transport_only_column_is_of_a_kind_s_group() -> None:
     for kind, group, _ in overrides.TRANSPORT_ONLY:
         assert group in overrides.KINDS[kind], (kind, group)
+
+
+def test_kind_groups_are_asset_classes_in_their_order() -> None:
+    # The library orders a kind's members by asset class (`Catalog.members`), and the merged
+    # columns follow the members: the groups of every kind must be asset classes listed in that
+    # same order, so the two orders cannot drift apart.
+    rank = {cls.value: index for index, cls in enumerate(AssetClass)}
+    for kind, groups in overrides.KINDS.items():
+        assert set(groups) <= set(rank), kind
+        assert list(groups) == sorted(groups, key=rank.__getitem__), kind
