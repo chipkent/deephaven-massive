@@ -1,12 +1,13 @@
 """The build-time refresh of the wire schemas: vendored snapshot in, `spec/*.json` out.
 
 `python -m deephaven_massive._massive.refresh` regenerates the committed wire schemas from a
-pinned snapshot of Massive's published specifications, and `--fetch` replaces that snapshot
-with the live sources. The snapshot lives outside the package, in `vendor/massive/` at the
-top of the source checkout: it is Massive's published content, vendored only as generation
-input, not covered by the repository's license, and in neither the wheel nor the sdist. So the
-package runs from a source checkout only; the wheel excludes all of it and ships only the
-generated `spec/*.json`. It may import any part of `_massive`, and nothing but itself and its
+pinned snapshot of Massive's published specifications, `--fetch` replaces that snapshot with
+the live sources, and `--check` reports how the live sources differ from it. The snapshot
+lives outside the package, in `vendor/massive/` at the top of the source checkout: it is
+Massive's published content, vendored only as generation input, not covered by the
+repository's license, and in neither the wheel nor the sdist. So the package runs from a
+source checkout only; the wheel excludes all of it and ships only the generated
+`spec/*.json`. It may import any part of `_massive`, and nothing but itself and its
 own tests imports it.
 
 Modules:
@@ -14,6 +15,8 @@ Modules:
     - `generate`: the refresh itself, composing the modules below and writing the result.
     - `snapshot`: the snapshot's location, layout, and manifest; storing and verified loading.
     - `fetch`: downloads the vendor sources and puts them in canonical form.
+    - `drift`: the drift check: compares the live vendor sources with the snapshot, the
+      committed schemas, and the flat-file bucket, and reports what changed.
     - `docs`: reads the documentation index (`llms.txt`) and the REST, WebSocket, and
       flat-file pages it links.
     - `openapi`: resolves references and merged schemas in the OpenAPI specifications.

@@ -72,6 +72,8 @@ class FakeS3(Protocol):
     closed_bodies: list[str]
     request_id: str
     before_answer: Callable[[str], object] | None
+    listings: list[str | None]
+    page_size: int
 
     def put(self, key: str, data: bytes) -> None: ...
     def put_dropped(self, key: str, data: bytes) -> None: ...
@@ -1064,3 +1066,159 @@ def test_an_error_response_cut_short_every_time_is_a_wire_error_after_the_retrie
     assert (info.value.status, info.value.path) == (None, KEY)
     assert server.connections == 4
     assert clock.waits == WAITS
+
+
+# Listing the bucket's prefixes.
+
+BUCKET = "s3://flatfiles/ at https://files.massive.com"
+
+
+def _store_prefixes(fake_s3: FakeS3, *prefixes: str) -> None:
+    for prefix in prefixes:
+        fake_s3.put(f"{prefix}/trades_v1/2025/03/2025-03-03.csv.gz", b"data")
+
+
+def test_prefixes_lists_every_top_level_prefix_across_pages(
+    *, client: FlatFileClient, fake_s3: FakeS3
+) -> None:
+    _store_prefixes(fake_s3, "us_stocks_sip", "us_options_opra", "global_crypto")
+    fake_s3.put("us_stocks_sip/quotes_v1/2025/03/2025-03-03.csv.gz", b"data")
+    fake_s3.put("README.txt", b"not below a prefix")
+    fake_s3.page_size = 2
+    assert client.prefixes() == ["global_crypto", "us_options_opra", "us_stocks_sip"]
+    # The second page was asked for with the token the first one ended with.
+    assert fake_s3.listings == [None, "after-2"]
+    assert fake_s3.keys() == []
+
+
+def test_prefixes_of_a_bucket_that_fits_one_page_is_one_request(
+    *, client: FlatFileClient, fake_s3: FakeS3
+) -> None:
+    _store_prefixes(fake_s3, "us_stocks_sip")
+    assert client.prefixes() == ["us_stocks_sip"]
+    assert client.prefixes() == ["us_stocks_sip"]
+    assert fake_s3.listings == [None, None]
+    assert len(fake_s3.clients) == 1
+
+
+def test_prefixes_of_an_empty_bucket_is_empty(*, client: FlatFileClient, fake_s3: FakeS3) -> None:
+    assert client.prefixes() == []
+
+
+def test_a_listing_page_is_retried_on_the_shared_schedule(
+    *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock
+) -> None:
+    _store_prefixes(fake_s3, "a", "b", "c")
+    fake_s3.page_size = 2
+    pending = [503, 500]
+
+    def busy_on_the_second_page(_key: str) -> None:
+        if fake_s3.listings and pending:
+            status = pending.pop(0)
+            raise ClientError(
+                {
+                    "Error": {"Code": "SlowDown", "Message": "Try again"},
+                    "ResponseMetadata": {
+                        "HTTPStatusCode": status,
+                        "RequestId": "",
+                        "HostId": "",
+                        "HTTPHeaders": {},
+                        "RetryAttempts": 0,
+                    },
+                },
+                "ListObjectsV2",
+            )
+
+    fake_s3.before_answer = busy_on_the_second_page
+    assert client.prefixes() == ["a", "b", "c"]
+    assert clock.waits == WAITS[:2]
+    # The failed attempts never reached the bucket; the first page was not asked for again.
+    assert fake_s3.listings == [None, "after-2"]
+
+
+def test_a_listing_that_stays_unreachable_is_a_wire_error_after_the_retries(
+    *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=client_module.__name__)
+    fake_s3.fail("", "unreachable")
+    with pytest.raises(WireError, match=f"^cannot list {BUCKET}: ") as info:
+        client.prefixes()
+    assert (info.value.status, info.value.path) == (None, "")
+    assert isinstance(info.value.__cause__, EndpointConnectionError)
+    assert clock.waits == WAITS
+    assert [r.levelno for r in caplog.records if r.name == client_module.__name__] == [
+        logging.INFO,
+        logging.INFO,
+        logging.INFO,
+        logging.ERROR,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "error_type", "message"),
+    [
+        (403, "AccessDenied", WireEntitlementError, f"HTTP 403 for {BUCKET} (AccessDenied: No)"),
+        (
+            403,
+            "InvalidAccessKeyId",
+            WireAuthError,
+            f"HTTP 403 for {BUCKET} (InvalidAccessKeyId: No)",
+        ),
+        (404, "NoSuchBucket", WireError, f"cannot list {BUCKET}: HTTP 404 (NoSuchBucket: No)"),
+    ],
+)
+def test_a_refused_listing_is_a_wire_error_at_once(
+    *,
+    client: FlatFileClient,
+    fake_s3: FakeS3,
+    clock: FakeClock,
+    status: int,
+    code: str,
+    error_type: type[WireError],
+    message: str,
+) -> None:
+    fake_s3.refuse("", status=status, code=code, message="No")
+    with pytest.raises(WireError) as info:
+        client.prefixes()
+    assert type(info.value) is error_type
+    assert info.value.message == message
+    assert (info.value.status, info.value.path, info.value.request_id) == (
+        status,
+        "",
+        fake_s3.request_id,
+    )
+    assert PRIVATE_KEY not in info.value.message
+    assert (fake_s3.listings, clock.waits) == ([None], [])
+
+
+def test_a_closed_client_lists_nothing(*, client: FlatFileClient, fake_s3: FakeS3) -> None:
+    client.close()
+    with pytest.raises(WireError, match=r"the flat-file client for .* is closed") as info:
+        client.prefixes()
+    assert info.value.path == ""
+    assert (fake_s3.listings, fake_s3.clients) == ([], [])
+
+
+def test_closing_the_client_ends_a_listing_retry_wait(fake_s3: FakeS3) -> None:
+    clock = FakeClock(manual=True)
+    client = make_client(clock=clock)
+    fake_s3.fail("", "unreachable")
+    raised: list[WireError] = []
+
+    def list_prefixes() -> None:
+        try:
+            client.prefixes()
+        except WireError as error:
+            raised.append(error)
+
+    lister = threading.Thread(target=list_prefixes, daemon=True)
+    lister.start()
+    try:
+        clock.wait_for_sleepers(1)
+    finally:
+        client.close()
+    lister.join(TIMEOUT)
+    assert not lister.is_alive()
+    (error,) = raised
+    assert error.message == "the flat-file client for https://files.massive.com is closed"
+    assert fake_s3.listings == [None]

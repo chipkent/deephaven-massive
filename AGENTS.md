@@ -27,6 +27,7 @@ they are not covered by the repository's license and are not distributed in the 
 ```bash
 uv run python -m deephaven_massive._massive.refresh           # regenerate spec/*.json; no network
 uv run python -m deephaven_massive._massive.refresh --fetch   # replace the snapshot with the live sources
+uv run python -m deephaven_massive._massive.refresh --check   # live drift report; changes nothing
 uv run pytest tests/massive/refresh -q                        # the parity test and every refresh gate
 ```
 
@@ -37,8 +38,15 @@ and its reason in one of the hand-input tables, never by editing the generated f
 lexicon, `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_CONFLICTS`,
 `TYPE_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, or
 `VENUES` entry (`overrides.py`); or an `EXCLUSIONS` or `SAMPLE_ERRORS` entry
-(`exclusions.py`). `--check` (a live drift report)
-arrives with the `PLAN.md` planned PR api-drift-check.
+(`exclusions.py`).
+
+`--check` downloads the live sources into a scratch directory and prints a Markdown report of
+what differs from the snapshot and the committed schemas, each item under the action that
+resolves it; it exits 0 without drift, 1 with drift, and 2 when the check cannot be made. With
+`MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` set it also lists the flat-file
+bucket's top-level prefixes. `.github/workflows/spec-drift.yml` runs it weekly and on demand
+and keeps one standing "Massive API drift" issue (`scripts/spec-drift-issue.sh`); it is
+advisory, never a required check.
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
