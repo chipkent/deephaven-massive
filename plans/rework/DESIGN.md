@@ -227,19 +227,17 @@ _errors.py               MassiveError (.status, .request_id), AuthenticationErro
 _session.py              MassiveSession: builds the catalog, the core, and the session's clients
                          (section 6)
 _query.py                the six query classes and their verbs, through the core's ports (section 7)
-_reference.py            the column reference: render(provenance) -> {file name: Markdown} from
-                         the catalog, the dataset schemas, and the provenance (pure);
-                         sync(directory, pages) owns docs/datasets/ (section 7.4)
 _namespaces/
   __init__.py            empty
   base.py                the shared dataset factory
   stocks.py options.py futures.py indices.py forex.py crypto.py
   reference.py indicators.py economy.py partners.py      namespace class + DATASETS
-_datasets/               dataset semantics: no I/O, no threads
+_datasets/               dataset semantics: no network I/O, no threads, no Deephaven calls;
+                         only column_reference.sync writes files
   __init__.py            docstring only
   catalog.py             DatasetSpec (summary, role paths, kind, per-source key columns, channels,
-                         prefixes, poll defaults, page size), datasets(), members(kind), filter
-                         validation
+                         prefixes, poll defaults, page size), Catalog (the specs by name,
+                         members(kind)), filter validation
   schema.py              ColumnType, Column, Schema, WireType -> ColumnType, rename(),
                          dataset_schema() with column descriptions (section 19.4)
   request.py             Request, StreamKey, ParamValue, HostDecision
@@ -247,6 +245,9 @@ _datasets/               dataset semantics: no I/O, no threads
   dates.py               DateLike parsing, day zones, sessions, publish_time, [start, end)
   symbols.py             normalization, the Symbol/Underlying rule (section 10)
   history_source.py      partition dates, publication grace, REST capability, the AUTO choice
+  column_reference.py    the column reference: render(catalog, provenance) -> {file name:
+                         Markdown} (pure); sync(directory, pages) owns docs/datasets/
+                         (section 7.4)
 _tables/                 the Deephaven side: tables, liveness, library threads
   __init__.py            docstring only
   core.py                SessionCore, registry_lock, registries, closers, stream ids, the
@@ -275,9 +276,10 @@ py.typed
 ```
 
 The root holds the vocabulary every layer names (`_config`, `_enums`, `_errors`, `_types`) and
-the API users touch (`__init__`, `_session`, `_query`, `_reference`, `_namespaces/`). The rest of
-the library is grouped into three packages: `_datasets/` describes datasets, `_tables/` is the
-Deephaven side, and `_ingest/` is the only code that holds wire clients. The `__init__.py` of
+the API users touch (`__init__`, `_session`, `_query`, `_namespaces/`). The rest of the library
+is grouped into three packages: `_datasets/` describes datasets (and renders their column
+reference from a catalog it is given), `_tables/` is the Deephaven side, and `_ingest/` is the
+only code that holds wire clients. The `__init__.py` of
 each of the three holds only a docstring.
 
 `_namespaces/` holds plain modules, one namespace class each; it is not a PEP 420 namespace
@@ -330,7 +332,7 @@ with `_`. Examples:
 | `_tables/core.py` | `tests/tables/test_core.py` | |
 | `_ingest/hosts.py` | `tests/ingest/test_hosts.py` | `tests/ingest/test_hosts_integration.py` |
 | `_ingest/flatfiles.py` | `tests/ingest/test_flatfiles.py` | `tests/ingest/test_flatfiles_integration.py` |
-| `_reference.py` | `tests/test_reference.py` (also the parity test of `docs/datasets/`) | |
+| `_datasets/column_reference.py` | `tests/datasets/test_column_reference.py` (also the parity test of `docs/datasets/`) | |
 | `_namespaces/__init__.py` | `tests/namespaces/test_init.py` | |
 | `_namespaces/stocks.py` | `tests/namespaces/test_stocks.py` | `tests/namespaces/test_stocks_integration.py` |
 | `_massive/__init__.py` | `tests/massive/test_init.py` | |
@@ -878,34 +880,41 @@ vendor URLs of the sources the page's datasets use, from the `Provenance` passed
 timestamp is an `Instant`, and **Supplied by** with the description already says when a
 column is null. Readers can see what each table holds before they install.
 
-- **The renderer** is `_reference.render(provenance: Provenance) -> dict[str, str]`, a pure
-  function from the catalog, the dataset schemas, and the `provenance` it is given to
-  `{file name: page text}`; it reads no other state, so tests pass a synthetic `Provenance`.
-  It escapes `|` in cells, emits no trailing whitespace, and ends every page with one newline,
-  so the pages pass the commit hooks unchanged. `_reference.sync(directory, pages)` owns the
-  directory: it deletes every file and subdirectory of `directory` that `pages` does not name,
+- **The renderer** is `column_reference.render(catalog: Catalog, provenance: Provenance) ->
+  dict[str, str]` in `_datasets/column_reference.py`, a pure function from the `catalog` (the
+  `Catalog` of `_datasets/catalog.py`: every declared `DatasetSpec`, by name) and `provenance`
+  it is given, and the dataset schemas, to `{file name: page text}`; it reads no
+  other state, so tests pass a synthetic catalog and `Provenance`. A **Deephaven type** cell is
+  the column's `ColumnType` value (`Instant`, `long`, …), so the renderer imports no
+  Deephaven. It escapes `|` in cells, emits no trailing whitespace, and ends every page with one
+  newline, so the pages pass the commit hooks unchanged. `column_reference.sync(directory,
+  pages)`, in the same module, owns the directory: it deletes every file and subdirectory of `directory` that `pages` does not name,
   writes each page whose bytes differ, and returns the names it wrote and deleted. A missing
   `directory` counts as empty: `sync()` creates it only to write a page, so an empty `pages` on a
   missing directory succeeds and writes nothing. Neither touches anything outside the directory.
+  `sync` is the only function of `_datasets` that touches the file system; it makes no network
+  call and no Deephaven call, and keeping it in the module keeps it under the unit tests and
+  the coverage gate, which the script is not.
 - **The command** `uv run python scripts/render_reference.py` regenerates the whole column
-  reference and nothing else. The script starts the embedded Deephaven server (the dataset
-  schemas need Deephaven's types, and the library never imports `deephaven_server`), calls
-  `render(_massive.provenance())` and then `sync()` on `docs/datasets/`, and prints what it
-  wrote and deleted. A renamed or removed namespace or dataset therefore never leaves an
+  reference and nothing else. The script starts the embedded Deephaven server (the API imports
+  Deephaven, and the library never imports `deephaven_server`), imports the library, takes the
+  catalog the session module builds from every namespace module, calls
+  `render(catalog, _massive.provenance())` and then `sync()` on `docs/datasets/`, and prints
+  what it wrote and deleted. It holds no logic of its own. A renamed or removed namespace or dataset therefore never leaves an
   orphaned page: the one command that writes the directory also empties it of everything it
   did not render.
-- **The parity test**, `tests/test_reference.py`, renders the pages in the test JVM and fails
-  on a stale page (bytes differ), a missing page, and any extra file or directory under
-  `docs/datasets/`, naming the command that fixes it. A catalog change or a refresh that moves
+- **The parity test**, `tests/datasets/test_column_reference.py`, renders the pages in the test
+  JVM and fails on a stale page (bytes differ), a missing page, and any extra file or directory
+  under `docs/datasets/`, naming the command that fixes it. A catalog change or a refresh that moves
   a description therefore lands with its regenerated pages in the same pull request.
 - **Dataset method docstrings link, never list.** A column list in a docstring is a
   hand-written schema and goes stale. Each dataset method's docstring starts with its
   `DatasetSpec.summary`, explains the dataset, states its transports, `limit`, and `ALL`, and
   points to its section,
   `https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/<namespace>.md#<dataset>`,
-  to the web UI's column tooltips, and to `columns()`. `tests/test_reference.py` checks that
-  every declared dataset's docstring names `docs/datasets/<namespace>.md#<dataset>` for its own
-  namespace and dataset.
+  to the web UI's column tooltips, and to `columns()`. `tests/datasets/test_column_reference.py`
+  checks that every declared dataset's docstring names `docs/datasets/<namespace>.md#<dataset>`
+  for its own namespace and dataset.
 
 ## 8. Namespace tree
 
@@ -2959,9 +2968,9 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
   and `tests/datasets/test_catalog.py` passes (the catalog gates, generated ⊆ used ∪ undeclared) ([section
   19.4](#194-generated-schemas)). They read only vendored files, never the network.
-- **Column reference:** `tests/test_reference.py` passes: `docs/datasets/` holds exactly the
-  rendered pages, byte for byte, with no stale, missing, or extra file, and every dataset
-  method's docstring starts with its `DatasetSpec.summary` and names its own section
+- **Column reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
+  exactly the rendered pages, byte for byte, with no stale, missing, or extra file, and every
+  dataset method's docstring starts with its `DatasetSpec.summary` and names its own section
   ([section 7.4](#74-column-descriptions)).
 - **Negative tests:** every gate has a negative test that fails when the gate is deleted.
 - **Process:** conventional-commit titles; every change lands through a pull request; only the
@@ -3350,7 +3359,9 @@ document already reflects them.
     `uv run python scripts/render_reference.py`, owns the whole directory: it renders every
     page, deletes every file it did not render, and writes the rest. The parity test fails on a
     stale page, a missing page, and any extra file. Dataset docstrings link to their section and
-    never list columns ([section 7.4](#74-column-descriptions)).
+    never list columns ([section 7.4](#74-column-descriptions)). The renderer and `sync` live in
+    `_datasets/column_reference.py`, which takes the catalog as an argument, so the name never
+    collides with the `m.reference` namespace and the renderer needs nothing from the API.
 48. **Vendor descriptions in a separate generated file** (2026-10-26). `spec/descriptions.json`
     holds every field's vendor description, normalized to plain text by fixed rules, with no
     gate on a missing one, and is joined into `Field.description` at load; one rule picks each

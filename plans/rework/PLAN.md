@@ -208,8 +208,8 @@ disjoint files:
   modules (`_ingest/rest.py`, `_ingest/poll.py`, `_tables/stream.py`, `_ingest/flatfiles.py`):
   ownership passes in sequence, as `flatfiles/` passes from flat-file-history to
   runtime-drift-reporting and flat-file-s3-shared-rules, so no separate PR is needed.
-  column-reference-pages owns `_reference.py`, `scripts/render_reference.py`, and
-  `tests/test_reference.py`.
+  column-reference-pages owns `_datasets/column_reference.py`, `scripts/render_reference.py`,
+  and `tests/datasets/test_column_reference.py`.
 - **The fakes** follow the clients: rest-client `tests/_fakes/rest.py`, websocket-client `ws.py`,
   flat-file-history `s3.py`, core-skeleton `stream.py`; each adds one self-contained fixture block
   to `tests/conftest.py`.
@@ -223,7 +223,7 @@ disjoint files:
 - **Generated content** changes only through `python -m deephaven_massive._massive.refresh`; the
   check that it is current is `uv run pytest tests/massive/refresh -q`. The column reference,
   `docs/datasets/`, changes only through `uv run python scripts/render_reference.py`; the check
-  is `uv run pytest tests/test_reference.py -q`.
+  is `uv run pytest tests/datasets/test_column_reference.py -q`.
 - **`pyproject.toml` dependency changes** happen only in `chore(deps):` PRs
   (wire-client-dependencies, massive-sdk-removal). `uv.lock` is not committed.
 - **Fixture data is per test owner:** `tests/data/<test owner path>/`, loaded through the
@@ -1372,7 +1372,7 @@ moved test moves its fixtures.
 **Goal.** Make the layers a rule. The library has six layers, in order: wire (`_massive/`),
 vocabulary (the root `_config`, `_enums`, `_errors`, `_types`), datasets (`_datasets/`),
 tables (`_tables/`), ingest (`_ingest/`), and API (the root `__init__`, `_session`, `_query`,
-`_reference`, and `_namespaces/`). A module imports only its own layer or lower ones, type-only
+and `_namespaces/`). A module imports only its own layer or lower ones, type-only
 imports included, and `tests/test_layout.py` enforces it. The four upward edges of today's code
 go: the catalog's `query_class` and its namespace-module import, the core's import of the
 flat-file transport, and the Deephaven calls inside `_datasets`.
@@ -1468,8 +1468,9 @@ uv run pytest tests/test_layout.py tests/namespaces/test_base.py tests/ingest/te
 ```
 
 **Pitfalls.** A type-only import counts: moving an upward import under `TYPE_CHECKING` does not
-satisfy the order. `_reference.py` reads the catalog the API builds, so it is in the API layer,
-not in `_datasets`.
+satisfy the order. The column reference renderer (`_datasets/column_reference.py`) takes the
+catalog as an argument, so it stays in `_datasets` although the API builds the catalog; its
+`sync` writes files with `pathlib` only, which the no-I/O-module rule allows.
 
 **Out of scope.** The REST and WebSocket bodies of `SessionClients` (rest-transport,
 websocket-layer); `KeySpec` and the generated schemas (generated-catalog-and-schemas).
@@ -2172,7 +2173,7 @@ link to their section instead of listing columns.
 
 **DESIGN sections implemented.** [§ 7.4](DESIGN.md#74-column-descriptions) (outlet 3: the
 renderer, `sync`, the command, the parity test, the docstring rule);
-[§ 4.1](DESIGN.md#41-source-modules) (`_reference.py`, the supporting files);
+[§ 4.1](DESIGN.md#41-source-modules) (`_datasets/column_reference.py`, the supporting files);
 [§ 20](DESIGN.md#20-quality-gates) (the column-reference gate);
 [§ 22](DESIGN.md#22-decisions) “A generated column reference that cannot hold an orphaned page”.
 
@@ -2182,28 +2183,32 @@ by the time it lands; a dataset planned PR that lands later regenerates its own 
 page. Dataset docstrings link their sections from the first dataset PR on, and the docstring
 test enforces those links from this PR on. **Before.** finish-rework.
 
-**Files.** Create `src/deephaven_massive/_reference.py`, `tests/test_reference.py`, and
-`scripts/render_reference.py`, and `docs/datasets/<namespace>.md` for every namespace with a
-dataset declared by then (none if no dataset planned PR has landed, in which case
-`docs/datasets/` stays absent). Modify `AGENTS.md` (the command in **Commands**, and that
+**Files.** Create `src/deephaven_massive/_datasets/column_reference.py`,
+`tests/datasets/test_column_reference.py`, and `scripts/render_reference.py`, and
+`docs/datasets/<namespace>.md` for every namespace with a dataset declared by then (none if no
+dataset planned PR has landed, in which case `docs/datasets/` stays absent). Modify `AGENTS.md` (the command in **Commands**, and that
 `docs/datasets/` is never edited by hand).
 
 **Tasks.**
-- [ ] `_reference.render(provenance)`: one page per namespace module with declared datasets,
-      sections in declaration order, the explicit `<a id="<dataset>"></a>` anchor (dots as
+- [ ] `column_reference.render(catalog, provenance)`: a pure function of the `Catalog` and
+      `Provenance` it is given (no Deephaven import: a **Deephaven type** cell is the
+      `ColumnType` value); one page per namespace module with declared datasets, sections in
+      declaration order, the explicit `<a id="<dataset>"></a>` anchor (dots as
       hyphens), the heading, `DatasetSpec.summary`, the column table, and the footer from the
       `Provenance` argument; `|` escaped, no trailing whitespace, one final newline.
-- [ ] `_reference.sync(directory, pages)`: delete every file and subdirectory not in `pages`,
-      write each page whose bytes differ, return what it wrote and deleted, touch nothing
-      outside `directory`. A missing `directory` counts as empty and is created only to
-      write a page, so `sync()` with no pages on a missing directory succeeds and writes
-      nothing.
-- [ ] `scripts/render_reference.py`: start the embedded server, then import the library, call
-      `render(_massive.provenance())` and `sync()` on `docs/datasets/`, and print the
-      result. All logic stays in `_reference.py`, which coverage measures.
-- [ ] `tests/test_reference.py`: the parity test, the docstring tests (the docstring starts
-      with the summary and names `docs/datasets/<namespace>.md#<dataset>`), and render and
-      sync tests on a synthetic catalog and `tmp_path`.
+- [ ] `column_reference.sync(directory, pages)`, in the same module: delete every file and
+      subdirectory not in `pages`, write each page whose bytes differ, return what it wrote
+      and deleted, touch nothing outside `directory`. A missing `directory` counts as empty
+      and is created only to write a page, so `sync()` with no pages on a missing directory
+      succeeds and writes nothing. It stays in the module, not the script, so the unit tests
+      and the coverage gate reach it; it makes no network or Deephaven call.
+- [ ] `scripts/render_reference.py`: start the embedded server, then import the library, take
+      the catalog the session module builds, call `render(catalog, _massive.provenance())`
+      and `sync()` on `docs/datasets/`, and print the result. All logic stays in
+      `_datasets/column_reference.py`, which coverage measures.
+- [ ] `tests/datasets/test_column_reference.py`: the parity test, the docstring tests (the
+      docstring starts with the summary and names `docs/datasets/<namespace>.md#<dataset>`),
+      and render and sync tests on a synthetic catalog and `tmp_path`.
 
 **Acceptance criteria.**
 - [ ] On a clean checkout, the command writes and deletes nothing and `git status` stays
@@ -2223,7 +2228,7 @@ dataset declared by then (none if no dataset planned PR has landed, in which cas
 ```bash
 ./scripts/check.sh
 uv run python scripts/render_reference.py && git status --porcelain docs/datasets    # empty
-uv run pytest tests/test_reference.py -q
+uv run pytest tests/datasets/test_column_reference.py -q
 ```
 
 **Pitfalls.** GitHub drops dots from heading anchors, hence the explicit `<a id>`. Generating
@@ -2304,7 +2309,7 @@ column-reference-pages has already merged, its regenerated column reference page
 ./scripts/check.sh
 uv run pytest tests/namespaces/test_<ns>.py tests/datasets/test_catalog.py -q
 # Once column-reference-pages has merged:
-uv run pytest tests/test_reference.py -q
+uv run pytest tests/datasets/test_column_reference.py -q
 uv run python scripts/render_reference.py && git status --porcelain docs/datasets    # empty
 ```
 
