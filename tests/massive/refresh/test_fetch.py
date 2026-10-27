@@ -51,15 +51,25 @@ def test_canonical_text_adds_a_missing_final_newline() -> None:
 # --- fetch with an injected getter ----------------------------------------------------------
 
 _PAGE = "https://massive.com/docs/rest/stocks/trades-quotes/trades.md"
-_INDEX = f"# Massive\n\n## REST API\n\n- [Trades]({_PAGE}): Trades   \n"
+_FEED = "https://massive.com/docs/websocket/stocks/trades.md"
+_FILE = "https://massive.com/docs/flat-files/stocks/trades.md"
+_INDEX = (
+    f"# Massive\n\n## REST API\n\n- [Trades]({_PAGE}): Trades   \n"
+    f"## WebSocket\n- [Trades]({_FEED}): Trades\n"
+    f"## Flat Files\n- [Trades]({_FILE}): Trades\n"
+)
 _SPEC = b'{"paths": {}, "openapi": "3.0.3"}'
+_WS_SPEC = b'{"paths": {"/stocks/T": {}}}'
 
 
 def _sources(**overrides: bytes) -> dict[str, bytes]:
     sources = {
         fetch.OPENAPI_URL: _SPEC,
+        fetch.WEBSOCKET_URL: _WS_SPEC,
         fetch.LLMS_URL: _INDEX.encode(),
         _PAGE: b"**Endpoint:** `GET /v3/trades/{stockTicker}`  \n",
+        _FEED: b"The channel prefix for this feed is `T`.\n",
+        _FILE: b"## Columns\n",
     }
     sources.update(overrides)
     return sources
@@ -86,15 +96,27 @@ def test_fetch_stores_every_source_canonically_with_a_manifest(tmp_path: Path) -
     requested: list[str] = []
     target = tmp_path / "snapshot"
     names = fetch.fetch(target, get=_getter(_sources(), requested), today=dt.date(2026, 10, 26))
-    assert requested == [fetch.OPENAPI_URL, fetch.LLMS_URL, _PAGE]
+    assert requested == [
+        fetch.OPENAPI_URL,
+        fetch.WEBSOCKET_URL,
+        fetch.LLMS_URL,
+        _PAGE,
+        _FEED,
+        _FILE,
+    ]
     assert names == [
         "openapi.json",
+        "websocket.json",
         "llms.txt",
         "rest/stocks/trades-quotes/trades.md",
+        "websocket/stocks/trades.md",
+        "flat-files/stocks/trades.md",
         "manifest.json",
     ]
     stored_spec = (target / "openapi.json").read_bytes()
     assert stored_spec == b'{\n "paths": {},\n "openapi": "3.0.3"\n}\n'
+    assert (target / "websocket.json").read_bytes() == b'{\n "paths": {\n  "/stocks/T": {}\n }\n}\n'
+    assert (target / "flat-files/stocks/trades.md").read_bytes() == b"## Columns\n"
     page = (target / "rest/stocks/trades-quotes/trades.md").read_bytes()
     assert page == b"**Endpoint:** `GET /v3/trades/{stockTicker}`\n"
     manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
@@ -131,9 +153,15 @@ def test_a_failed_fetch_leaves_the_old_snapshot_untouched(tmp_path: Path) -> Non
     assert (target / "openapi.json").read_text(encoding="utf-8") == "old\n"
 
 
-def test_an_index_linking_outside_the_rest_documentation_fails(tmp_path: Path) -> None:
-    index = b"## REST API\n- [Evil](https://example.com/x.md)\n"
-    with pytest.raises(fetch.FetchError, match="not a REST documentation page"):
+def test_an_index_linking_outside_an_area_s_documentation_fails(tmp_path: Path) -> None:
+    index = _INDEX.encode() + b"- [Evil](https://example.com/x.md)\n"
+    with pytest.raises(fetch.FetchError, match="not a Flat Files documentation page"):
+        fetch.fetch(tmp_path / "s", get=_getter(_sources(**{fetch.LLMS_URL: index})))
+
+
+def test_an_index_without_an_area_s_links_fails(tmp_path: Path) -> None:
+    index = _INDEX.split("## WebSocket", maxsplit=1)[0].encode()
+    with pytest.raises(fetch.FetchError, match="no 'WebSocket' links"):
         fetch.fetch(tmp_path / "s", get=_getter(_sources(**{fetch.LLMS_URL: index})))
 
 
@@ -289,4 +317,12 @@ def test_fetch_uses_and_closes_an_http_getter_by_default(
 
     monkeypatch.setattr(fetch, "HttpGetter", Recording)
     fetch.fetch(tmp_path / "s", today=dt.date(2026, 1, 1))
-    assert events == [fetch.OPENAPI_URL, fetch.LLMS_URL, _PAGE, "closed"]
+    assert events == [
+        fetch.OPENAPI_URL,
+        fetch.WEBSOCKET_URL,
+        fetch.LLMS_URL,
+        _PAGE,
+        _FEED,
+        _FILE,
+        "closed",
+    ]

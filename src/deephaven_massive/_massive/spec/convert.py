@@ -29,13 +29,14 @@ converters above are never loosened:
 |---|---|---|
 | `iso-text-instant` | ISO-8601 instant text the specification leaves untyped | `int` ns |
 | `iso-date-text` | `YYYY-MM-DD` text declared a date-time | `datetime.date` |
-| `quoted-integer` | decimal digits in text, such as `"48"` | `int` |
+| `quoted-integer` | decimal digits in text, such as `"48"`; an integer is refused | `int` |
 | `integer-id-as-text` | an integer in the signed 64-bit range; text is refused | `str` |
 | `text-or-integer-id` | text, or an integer in the signed 64-bit range | `str` |
 | `number-label` | text as sent, or a finite number as float text (`1` gives `"1.0"`) | `str` |
 | `one-code` | one integer in the signed 32-bit range | `list[int]` |
 | `midnight-utc-date` | `YYYY-MM-DD`, or ISO-8601 midnight at offset `Z` or `+00:00` | `date` |
 | `date-as-epoch` | an integer in the signed 64-bit range (a count in the field's unit) | `int` |
+| `integer-as-number` | any number, as `double` accepts it | `float` |
 
 `text-or-integer-id` serves a field the specification declares either an integer or text
 (`Conversion.declarations`). A value the conversion cannot read (`"4.8"` for `quoted-integer`,
@@ -415,6 +416,7 @@ _NAMED: Mapping[Conversion, Callable[[object], object]] = MappingProxyType(
         Conversion.ONE_CODE: _one_code,
         Conversion.MIDNIGHT_UTC_DATE: _midnight_date,
         Conversion.DATE_AS_EPOCH: _long,
+        Conversion.INTEGER_AS_NUMBER: _double,
     }
 )
 

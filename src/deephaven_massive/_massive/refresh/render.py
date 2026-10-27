@@ -1,16 +1,18 @@
-"""Render the generated files, `spec/rest.json` and `spec/descriptions.json`, as canonical text.
+"""Render the generated files (`spec/*.json`) as canonical text.
 
-The generators produce `RestPath` values; this module turns them into the text of the
-committed files the runtime loads (`spec.sources()`, `spec.provenance()`), and nothing else;
-`generate` writes them. The text is deterministic, so a refresh that changes nothing leaves
-each file byte for byte as it was, and the parity test can compare the committed files with a
-fresh rendering. Both are JSON with one line per field (and, in `rest.json`, per parameter),
-so a refresh diff shows each changed field as one changed line.
+The generators produce `RestPath` and `Source` values; this module turns them into the text of
+the committed files the runtime loads (`spec.sources()`, `spec.provenance()`), and nothing
+else; `generate` writes them. The text is deterministic, so a refresh that changes nothing
+leaves each file byte for byte as it was, and the parity test can compare the committed files
+with a fresh rendering. All are JSON with one line per field, parameter, and membership, so a
+refresh diff shows each changed field as one changed line. `rest.json` holds the REST paths
+with their result keys and parameters; `ws.json` the WebSocket channels and `flatfiles.json`
+the flat-file prefixes, each with only its key, fields, and memberships.
 
-The vendor's descriptions go in `descriptions.json` alone, never in `rest.json`: they change
-far more often than the schema, and a refresh that only rewords them must leave `rest.json`
-unchanged, so a reviewer sees at once that no schema moved. The descriptions arrive already
-plain text (`plain_text`, applied by the generators).
+The vendor's descriptions go in `descriptions.json` alone, never in a schema file: they change
+far more often than the schema, and a refresh that only rewords them must leave the schema
+files unchanged, so a reviewer sees at once that no schema moved. The descriptions arrive
+already plain text (`plain_text`, applied by the generators).
 
 It imports the standard library and `spec.types` only.
 """
@@ -26,14 +28,24 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from deephaven_massive._massive.refresh.openapi import Json
-    from deephaven_massive._massive.spec.types import Field, Param, RestPath, Source, Transport
+    from deephaven_massive._massive.spec.types import (
+        Field,
+        Membership,
+        Param,
+        RestPath,
+        Source,
+        Transport,
+    )
 
 __all__ = [
     "DESCRIPTIONS_FILE",
+    "FLAT_FILES_FILE",
     "REST_FILE",
     "SPEC_DIRECTORY",
+    "WS_FILE",
     "render_descriptions",
     "render_rest",
+    "render_sources",
 ]
 
 SPEC_DIRECTORY: Final = Path(__file__).parent.parent / "spec"
@@ -41,6 +53,12 @@ SPEC_DIRECTORY: Final = Path(__file__).parent.parent / "spec"
 
 REST_FILE: Final = SPEC_DIRECTORY / "rest.json"
 """The generated REST schema the refresh writes."""
+
+WS_FILE: Final = SPEC_DIRECTORY / "ws.json"
+"""The generated WebSocket schema the refresh writes."""
+
+FLAT_FILES_FILE: Final = SPEC_DIRECTORY / "flatfiles.json"
+"""The generated flat-file schema the refresh writes."""
 
 DESCRIPTIONS_FILE: Final = SPEC_DIRECTORY / "descriptions.json"
 """The generated file of the vendor's field descriptions, fetch date, and source URLs."""
@@ -62,7 +80,7 @@ def _line(value: Mapping[str, Json]) -> str:
 
 
 def _field_json(item: Field) -> dict[str, Json]:
-    """Return a field as it is written to `rest.json`.
+    """Return a field as it is written to a schema file.
 
     Args:
         item: The field.
@@ -96,6 +114,40 @@ def _param_json(item: Param) -> dict[str, Json]:
         "values": list(item.values),
         "unit": item.unit.value if item.unit else None,
     }
+
+
+def _membership_json(item: Membership) -> dict[str, Json]:
+    """Return a membership as it is written to a schema file.
+
+    Args:
+        item: The membership.
+
+    Returns:
+        Every attribute; the projection as an object from wire key to column, or `null`.
+    """
+    return {
+        "kind": item.kind,
+        "group": item.group,
+        "position": item.position,
+        "projection": dict(item.projection) if item.projection is not None else None,
+    }
+
+
+def _list(name: str, lines: Sequence[str], *, last: bool = False) -> list[str]:
+    """Return a member of a source's object that holds one JSON value per line.
+
+    Args:
+        name: The member's name, such as `"fields"`.
+        lines: The values, one JSON text each.
+        last: Whether it is the object's last member, which takes no trailing comma.
+
+    Returns:
+        The member's lines, `[]` on one line when it is empty.
+    """
+    end = "" if last else ","
+    if not lines:
+        return [f'   "{name}": []{end}']
+    return [f'   "{name}": [', *_rows(lines, "    "), f"   ]{end}"]
 
 
 def _rows(lines: Sequence[str], indent: str) -> list[str]:
@@ -168,24 +220,59 @@ def render_rest(paths: Sequence[RestPath]) -> str:
     Returns:
         The file's text, ending in a newline.
     """
+    return _render(
+        [
+            [
+                f'   "result_key": {json.dumps(path.result_key)},',
+                *_list("params", [_line(_param_json(p)) for p in path.params]),
+            ]
+            for path in paths
+        ],
+        paths,
+    )
+
+
+def render_sources(sources: Sequence[Source]) -> str:
+    """Return the canonical text of `ws.json` or `flatfiles.json`.
+
+    Sources keep their order; within a field or membership, keys are sorted. Like
+    `rest.json`, the file records nothing about the snapshot it came from.
+
+    Args:
+        sources: The generated sources of one transport.
+
+    Returns:
+        The file's text, `{"generated_by", "sources": [{"key", "fields", "memberships"}]}`,
+        ending in a newline.
+    """
+    return _render([[] for _ in sources], sources)
+
+
+def _render(extras: Sequence[Sequence[str]], sources: Sequence[Source]) -> str:
+    """Return the text of a schema file.
+
+    Args:
+        extras: For each source, the lines of its members between its key and its fields.
+        sources: The sources.
+
+    Returns:
+        The file's text, ending in a newline.
+    """
     out = [
         "{",
         f' "generated_by": {json.dumps(_GENERATED_BY)},',
         ' "sources": [',
     ]
-    for index, path in enumerate(paths):
+    for index, (extra, source) in enumerate(zip(extras, sources, strict=True)):
         out += [
             "  {",
-            f'   "key": {json.dumps(path.key)},',
-            f'   "result_key": {json.dumps(path.result_key)},',
-            '   "params": [',
-            *_rows([_line(_param_json(p)) for p in path.params], "    "),
-            "   ],",
-            '   "fields": [',
-            *_rows([_line(_field_json(f)) for f in path.fields], "    "),
-            "   ],",
-            '   "memberships": []',
-            "  }" + ("," if index < len(paths) - 1 else ""),
+            f'   "key": {json.dumps(source.key)},',
+            *extra,
+            *_list("fields", [_line(_field_json(f)) for f in source.fields]),
+            *_list(
+                "memberships", [_line(_membership_json(m)) for m in source.memberships], last=True
+            ),
+            "  }" + ("," if index < len(sources) - 1 else ""),
         ]
     out += [" ]", "}"]
     return "\n".join(out) + "\n"

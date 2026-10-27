@@ -20,6 +20,9 @@ def test_the_default_hand_input_is_the_real_tables() -> None:
     assert hand.exclusions is exclusions.EXCLUSIONS
     assert hand.kinds is overrides.KINDS
     assert hand.sample_errors is exclusions.SAMPLE_ERRORS
+    assert hand.projections is overrides.PROJECTIONS
+    assert hand.transport_only is overrides.TRANSPORT_ONLY
+    assert hand.venues is overrides.VENUES
 
 
 def test_a_keyword_replaces_only_its_table() -> None:

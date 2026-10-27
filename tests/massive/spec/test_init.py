@@ -84,12 +84,29 @@ def test_an_unknown_source_names_the_transport_and_key() -> None:
         spec.source(Transport.REST, "/v3/reference/dividends")
 
 
-@pytest.mark.parametrize("transport", [Transport.WS, Transport.FLAT_FILES])
-def test_a_transport_without_a_generated_file(unloaded: _Loaded, transport: Transport) -> None:
-    with pytest.raises(LookupError, match=f"no generated schema exists for transport {transport}"):
-        spec.sources(transport)
-    assert unloaded == {}
-    assert spec._cache.descriptions is None
+@pytest.mark.parametrize(
+    ("transport", "name"), [(Transport.WS, "ws.json"), (Transport.FLAT_FILES, "flatfiles.json")]
+)
+def test_every_transport_loads_its_generated_file(
+    unloaded: _Loaded, transport: Transport, name: str
+) -> None:
+    loaded = spec.sources(transport)
+    text = resources.files(spec).joinpath(name).read_text(encoding="utf-8")
+    assert list(loaded) == [entry["key"] for entry in json.loads(text)["sources"]]
+    assert all(type(value) is Source and value.transport is transport for value in loaded.values())
+    assert unloaded[transport] is loaded
+
+
+def test_channels_and_prefixes_carry_their_memberships_and_descriptions() -> None:
+    trades = spec.source(Transport.WS, "stocks/T")
+    assert trades.memberships == (Membership(kind="trades", group="stocks", position=2),)
+    assert trades.field("SipTimestamp").unit is WireUnit.MS
+    assert trades.field("Price").description == "The price."
+    futures = spec.source(Transport.FLAT_FILES, "us_futures_{venue}/trades_v1")
+    assert [f.wire_key for f in futures.fields][:2] == ["ticker", "timestamp"]
+    assert futures.field("Timestamp").unit is WireUnit.NS
+    (values,) = spec.source(Transport.REST, "/v3/snapshot/indices").memberships
+    assert values.projection == {"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"}
 
 
 def test_sixteen_threads_share_one_first_load(
@@ -125,7 +142,8 @@ def test_sixteen_threads_share_one_first_load(
         thread.start()
     for thread in threads:
         thread.join()
-    assert sorted(reads) == ["descriptions.json", "rest.json"]
+    # The provenance loads every transport the descriptions file gives URLs for.
+    assert sorted(reads) == ["descriptions.json", "flatfiles.json", "rest.json", "ws.json"]
     assert len(results) == 16
     assert all(result[0] is results[0][0] for result in results)
     assert all(result[1] is results[0][1] for result in results)
@@ -220,14 +238,22 @@ def test_the_schemas_load_without_the_refresh_package() -> None:
                 "sys.meta_path.insert(0, Block())\n"
                 "from deephaven_massive._massive import spec\n"
                 "from deephaven_massive._massive.spec.types import Transport\n"
-                "print(len(spec.sources(Transport.REST)))\n"
+                "for transport in Transport:\n"
+                "    found = spec.sources(transport).values()\n"
+                "    print(len(found), sum(len(s.memberships) for s in found))\n"
             ),
         ],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert int(result.stdout) == len(spec.sources(Transport.REST))
+    expected = [
+        f"{len(found)} {sum(len(s.memberships) for s in found)}"
+        for found in (spec.sources(transport).values() for transport in Transport)
+    ]
+    assert result.stdout.splitlines() == expected
+    # Every channel and prefix belongs to a kind, so memberships are read where they matter.
+    assert all(count.split()[1] != "0" for count in expected)
 
 
 @pytest.mark.parametrize(
@@ -310,7 +336,9 @@ def test_provenance_gives_the_fetch_date_and_every_source_url() -> None:
     assert isinstance(found, Provenance)
     assert found is spec.provenance()
     assert found.fetched.isoformat() == _committed_descriptions()["fetched"]
-    assert {key for _, key in found.urls} == set(spec.sources(Transport.REST))
+    assert set(found.urls) == {
+        (transport, key) for transport in Transport for key in spec.sources(transport)
+    }
     assert found.urls[Transport.REST, "/v3/trades/{stockTicker}"] == (
         "https://massive.com/docs/rest/stocks/trades-quotes/trades.md",
     )
@@ -493,11 +521,6 @@ def test_the_loader_joins_and_checks_files_of_its_own(
 @pytest.mark.parametrize(
     ("descriptions", "message"),
     [
-        pytest.param(
-            _descriptions(urls={"WS": {}}),
-            r"names transports without a schema: \['WS'\]",
-            id="a transport without a schema",
-        ),
         pytest.param(
             _descriptions(descriptions={"REST": {"/v1/y": {"price": "P."}}}),
             "descriptions name the REST source '/v1/y', which is absent",

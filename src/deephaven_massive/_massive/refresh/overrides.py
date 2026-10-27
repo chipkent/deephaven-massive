@@ -1,7 +1,7 @@
-"""The hand-verified facts about Massive's REST wire format that its specification lacks.
+"""The hand-verified facts about Massive's wire formats that its specifications lack.
 
-The generator reads the vendor's specification for everything it can. This module holds the
-rest, each entry with its reason, and nothing else:
+The generators read the vendor's specifications and documentation pages for everything they
+can. This module holds the rest, each entry with its reason, and nothing else:
 
 - `NAMES`: the long name of a short key Massive gives no long name anywhere, derived from
   Massive's own description of the field, which the entry quotes;
@@ -15,14 +15,20 @@ rest, each entry with its reason, and nothing else:
 - `RESULT_KEYS`: the paths whose rows do not sit under `results`;
 - `PARAM_UNITS`: the unit of every timestamp-like string parameter, and of any other string
   parameter that takes an epoch (or "sent as date or date-time text");
-- `KINDS`: the dataset kinds, whose sources the `concept-collision` gate checks for one
-  concept per column. The REST generator alone declares none; the WebSocket and flat-file
-  generators add them.
+- `KINDS`: the dataset kinds: the sources, across transports and asset classes, whose rows
+  merge into one table schema. The refresh writes each source's place in them onto the
+  generated files (`Source.memberships`), checks one concept, one type, and two transports
+  per column within them, and orders every member's columns from the kind's flat-file or
+  WebSocket sources;
+- `PROJECTIONS`: the fields a source contributes to one kind, under the kind's names;
+- `TRANSPORT_ONLY`: the columns of a kind legitimately on one transport only;
+- `VENUES`: the futures venues folded into a flat-file prefix's `{venue}` template.
 
-Every entry names a path template exactly as the specification spells it, and a wire key or
-parameter of that path. An entry that names something the snapshot no longer generates fails
-the refresh (the `stale-entry` gate), so this module can only shrink as the vendor fixes its
-specification.
+Every entry names a source by its key (a REST path template exactly as the specification
+spells it, a WebSocket `"<cluster>/<channel>"`, or a flat-file prefix) and a wire key or
+parameter of it. An entry that names something the snapshot no longer generates fails the
+refresh (the `stale-entry` gate), so this module can only shrink as the vendor fixes its
+specifications.
 
 The tables are plain read-only data, built once at import.
 """
@@ -36,9 +42,11 @@ from typing import TYPE_CHECKING, TypeVar
 from deephaven_massive._massive.refresh.lexicon import (
     BAR_PATHS,
     CRYPTO_SNAPSHOTS,
+    FMV_CHANNELS,
     FOREX_SNAPSHOTS,
     RANGE_PATHS,
     STOCKS_SNAPSHOTS,
+    WS_BARS,
 )
 from deephaven_massive._massive.spec.types import Conversion, WireUnit
 
@@ -52,11 +60,15 @@ __all__ = [
     "KINDS",
     "NAMES",
     "PARAM_UNITS",
+    "PROJECTIONS",
     "RESULT_KEYS",
     "TAG_CONFLICTS",
+    "TRANSPORT_ONLY",
     "TYPE_FIXES",
     "UNITS",
+    "VENUES",
     "Name",
+    "Projection",
     "ResultKey",
     "TypeFix",
     "Unit",
@@ -119,6 +131,24 @@ class TypeFix:
 
 
 @dataclass(frozen=True, kw_only=True)
+class Projection:
+    """The fields one source contributes to one dataset kind, under the kind's names.
+
+    A projection limits a source to some of its fields, and renames them, inside one
+    membership only: the source keeps its full fields everywhere else.
+
+    Attributes:
+        fields: Each kept wire key mapped to the long name it takes in the kind, in snake case
+            (`{"last_updated": "timestamp"}`); the generator writes each through the naming
+            rule, so the projection maps wire keys to PascalCase columns.
+        reason: Why the source belongs to the kind only through these fields.
+    """
+
+    fields: Mapping[str, str]
+    reason: str
+
+
+@dataclass(frozen=True, kw_only=True)
 class ResultKey:
     """Where a path's rows sit in its response body, when not under `results`.
 
@@ -152,8 +182,104 @@ _INDICATORS = tuple(
     for ticker in ("stockTicker", "cryptoTicker")
 )
 
+# The WebSocket aggregates of the classes that carry each of the day's running figures.
+_WS_EQUITY_BARS = ("stocks/A", "stocks/AM", "options/A", "options/AM")
+
+
+def _named(sources: Iterable[str], key: str, name: Name) -> dict[tuple[str, str], Name]:
+    """Return the `NAMES` entries of one key that several sources describe alike.
+
+    Args:
+        sources: The source keys.
+        key: The wire key.
+        name: The long name and the description it is derived from.
+
+    Returns:
+        `(source, key)` to `name`, for every source.
+    """
+    return {(source, key): name for source in sources}
+
+
+def _name(long_name: str, description: str) -> Name:
+    """Return a `Name`, so the table below reads one entry per line where it fits.
+
+    Args:
+        long_name: The long name derived from the description.
+        description: The vendor's description, quoted exactly.
+
+    Returns:
+        The entry.
+    """
+    return Name(long_name=long_name, description=description)
+
+
 NAMES: Mapping[tuple[str, str], Name] = MappingProxyType(
     {
+        **_named(_WS_EQUITY_BARS, "av", _name("accumulated_volume", "Today's accumulated volume.")),
+        **_named(
+            ("stocks/A", "stocks/AM"),
+            "dav",
+            _name(
+                "accumulated_decimal_volume",
+                "Today's accumulated volume including fractional shares, respresented as a "
+                "string decimal number",
+            ),
+        ),
+        **_named(
+            _WS_EQUITY_BARS, "op", _name("official_open_price", "Today's official opening price.")
+        ),
+        # One concept, one column: the index bars' official opening value is the same running
+        # figure as the equity bars' official opening price.
+        **_named(
+            ("indices/A", "indices/AM"),
+            "op",
+            _name("official_open_price", "Today's official opening value."),
+        ),
+        **_named(_WS_EQUITY_BARS, "a", _name("day_vwap", "Today's volume weighted average price.")),
+        **_named(
+            (*_WS_EQUITY_BARS, "crypto/XA", "crypto/XAS"),
+            "z",
+            _name("average_trade_size", "The average trade size for this aggregate window."),
+        ),
+        **_named(
+            WS_BARS,
+            "e",
+            _name(
+                "end_timestamp",
+                "The end timestamp of this aggregate window in Unix Milliseconds.",
+            ),
+        ),
+        **_named(("stocks/LULD",), "h", _name("high_price", "The high price.")),
+        **_named(("stocks/LULD",), "l", _name("low_price", "The low price.")),
+        # Neither event has a long name for its time anywhere, and a name may never coin the
+        # dataset key column `Timestamp`; the description says "Timestamp in Unix".
+        **_named(("stocks/LULD",), "t", _name("unix_timestamp", "The Timestamp in Unix MS.")),
+        **_named(("stocks/NOI",), "t", _name("unix_timestamp", "The Timestamp in Unix Ns.")),
+        **_named(
+            ("stocks/NOI",),
+            "at",
+            _name(
+                "auction_time",
+                "The time that the auction is planned to take place in the format (hour x "
+                "100) + minutes in Eastern Standard Time, for example 930 would be 9:30 am EST, "
+                "and 1600 would be 4:00 pm EST.",
+            ),
+        ),
+        **_named(
+            ("stocks/NOI",),
+            "a",
+            _name(
+                "auction_type",
+                "The auction type. `O` - Early Opening Auction (non-NYSE only) `M` - Core "
+                "Opening Auction `H` - Reopening Auction (Halt Resume) `C` - Closing Auction "
+                "`P` - Extreme Closing Imbalance (NYSE only) `R` - Regulatory Closing Imbalance "
+                "(NYSE only)",
+            ),
+        ),
+        **_named(("stocks/NOI",), "i", _name("symbol_sequence", "The symbol sequence.")),
+        **_named(("stocks/NOI",), "o", _name("imbalance_quantity", "The imbalance quantity.")),
+        **_named(("stocks/NOI",), "p", _name("paired_quantity", "The paired quantity.")),
+        **_named(("stocks/NOI",), "b", _name("book_clearing_price", "The book clearing price.")),
         **{
             (path, "min.av"): Name(
                 long_name="accumulated_volume", description="The accumulated volume."
@@ -170,7 +296,7 @@ NAMES: Mapping[tuple[str, str], Name] = MappingProxyType(
         },
     }
 )
-"""`(path, wire key)` to the long name of a short key Massive names nowhere."""
+"""`(source, wire key)` to the long name of a short key Massive names nowhere."""
 
 _NS_TICKS = Unit(
     unit=WireUnit.NS,
@@ -203,6 +329,49 @@ _MS_LAST = Unit(
     reason="Tagged IMilliseconds and documented as a Unix millisecond timestamp, with 13-digit "
     "samples, but not yet confirmed against live data.",
     verified=False,
+)
+
+_MS_WS = Unit(
+    unit=WireUnit.MS,
+    reason="Documented in Unix milliseconds; the documentation samples have 13 digits.",
+)
+_MS_WS_SAMPLE = Unit(
+    unit=WireUnit.MS,
+    reason="The description names no unit; the documentation samples have 13 digits, as do "
+    "the other times of the same message.",
+)
+_NS_FILES = Unit(
+    unit=WireUnit.NS,
+    reason="Documented as a nanosecond Unix timestamp; the example rows have 19 digits.",
+)
+_NS_FILES_SAMPLE = Unit(
+    unit=WireUnit.NS,
+    reason="The description names no unit; the example rows have 19 digits, as do the "
+    "file's other times.",
+)
+# Every flat file of tick or aggregate rows, and the timestamps each carries.
+_FILE_TIMES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    *(
+        (f"{prefix}/{file}", ("window_start",))
+        for prefix in (
+            "us_stocks_sip",
+            "us_options_opra",
+            "us_indices",
+            "global_forex",
+            "global_crypto",
+        )
+        for file in ("minute_aggs_v1", "day_aggs_v1")
+    ),
+    ("us_futures_{venue}/minute_aggs_v1", ("window_start",)),
+    ("us_futures_{venue}/session_aggs_v1", ("window_start",)),
+    ("us_stocks_sip/trades_v1", ("participant_timestamp", "sip_timestamp", "trf_timestamp")),
+    ("us_stocks_sip/quotes_v1", ("participant_timestamp", "sip_timestamp", "trf_timestamp")),
+    ("us_options_opra/trades_v1", ("sip_timestamp",)),
+    ("us_options_opra/quotes_v1", ("sip_timestamp",)),
+    ("global_forex/quotes_v1", ("participant_timestamp",)),
+    ("global_crypto/trades_v1", ("participant_timestamp",)),
+    ("us_futures_{venue}/trades_v1", ("timestamp",)),
+    ("us_futures_{venue}/quotes_v1", ("timestamp",)),
 )
 
 UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
@@ -311,9 +480,56 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             ),
             _NS_TICKS,
         ),
+        # The WebSocket messages.
+        **_for(("stocks/T",), ("t", "pt", "trft"), _MS_WS),
+        **_for(("stocks/Q",), ("t", "pt"), _MS_WS),
+        **_for(("options/T", "options/Q", "forex/C", "indices/V"), ("t",), _MS_WS),
+        **_for(("crypto/XT", "crypto/XQ"), ("t",), _MS_WS),
+        **_for(("crypto/XT", "crypto/XQ"), ("r",), _MS_WS_SAMPLE),
+        **_for(("futures/T", "futures/Q"), ("t",), _MS_WS),
+        **_for(("futures/Q",), ("bt", "at"), _MS_WS_SAMPLE),
+        **_for(WS_BARS, ("s", "e"), _MS_WS),
+        ("stocks/LULD", "t"): Unit(
+            unit=WireUnit.NS,
+            reason="Documented as Unix milliseconds, but the documentation sample, "
+            "1764086430905642800, has 19 digits: as milliseconds it would overflow the "
+            "nanosecond range, so the sample's nanoseconds are taken until live data confirms.",
+            verified=False,
+        ),
+        ("stocks/NOI", "t"): Unit(
+            unit=WireUnit.NS,
+            reason="Documented as Unix nanoseconds; the documentation sample has 19 digits.",
+        ),
+        ("stocks/NOI", "at"): Unit(
+            unit=None,
+            reason="The auction's planned time of day as hour x 100 + minutes (930 is 9:30 am "
+            "Eastern), not an epoch.",
+        ),
+        **_for(
+            FMV_CHANNELS,
+            ("t",),
+            Unit(
+                unit=WireUnit.NS,
+                reason="Documented as a nanosecond timestamp; the options sample has 19 digits, "
+                "but the stocks, forex, and crypto samples have 13. The library tells the two "
+                "apart by magnitude for this field alone.",
+                verified=False,
+            ),
+        ),
+        # The flat files.
+        **{(prefix, key): _NS_FILES for prefix, keys in _FILE_TIMES for key in keys},
+        **_for(
+            ("us_futures_{venue}/quotes_v1",), ("ask_timestamp", "bid_timestamp"), _NS_FILES_SAMPLE
+        ),
+        ("us_indices/values_v1", "timestamp"): Unit(
+            unit=WireUnit.NS,
+            reason="Documented as Unix milliseconds, but every example row has 19 digits, as do "
+            "the other index files' times.",
+            verified=False,
+        ),
     }
 )
-"""`(path, wire key)` to the unit of a timestamp-like field, or to "not a timestamp"."""
+"""`(source, wire key)` to the unit of a timestamp-like field, or to "not a timestamp"."""
 
 TAG_CONFLICTS: Mapping[tuple[str, str], str] = MappingProxyType(
     {
@@ -401,9 +617,62 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
             'and both documentation sample rows are the text "1.0". A version is a label, so '
             "it is text; a number becomes its decimal text with a fraction.",
         ),
+        # The WebSocket messages.
+        ("forex/C", "x"): TypeFix(
+            conversion=Conversion.QUOTED_INTEGER,
+            reason="The specification types the exchange ID as an integer, but its example sends "
+            'the text "44"; the forex quote stream sends the ID as decimal digits in text.',
+        ),
+        ("crypto/XT", "i"): TypeFix(
+            conversion=Conversion.INTEGER_ID_AS_TEXT,
+            reason="The trade ID is typed and sampled as an integer (14272084), while the crypto "
+            "trade's ID is text on REST and in the flat files: an identifier is text, so one "
+            "column keeps one type.",
+        ),
+        **_for(
+            ("crypto/XA", "crypto/XAS"),
+            ("v",),
+            TypeFix(
+                conversion=Conversion.INTEGER_AS_NUMBER,
+                reason="The volume is typed as an integer, but the example sends 951.6112: a "
+                "crypto volume is fractional, as the crypto REST and flat-file volumes are "
+                "typed.",
+            ),
+        ),
+        **_for(
+            ("futures/A", "futures/AM"),
+            ("dv",),
+            TypeFix(
+                conversion=Conversion.INTEGER_AS_NUMBER,
+                reason="The dollar volume is typed as an integer, but the example sends 1353.1: "
+                "a dollar value is fractional, as the futures flat files type it.",
+            ),
+        ),
+        # The flat files.
+        **_for(
+            (
+                "us_stocks_sip/trades_v1",
+                "us_stocks_sip/quotes_v1",
+                "us_options_opra/trades_v1",
+                "global_crypto/trades_v1",
+            ),
+            ("conditions",),
+            TypeFix(
+                conversion=Conversion.ONE_CODE,
+                reason="Documented as an integer, but described as a list of condition codes "
+                'that appears quoted and comma-separated when there are several (sample "12,37"): '
+                "a list, as on REST and the WebSocket.",
+            ),
+        ),
+        ("us_stocks_sip/quotes_v1", "indicators"): TypeFix(
+            conversion=Conversion.ONE_CODE,
+            reason="Documented as an integer, but the quote's indicators are a list of codes, as "
+            "on REST and the WebSocket; the file writes several as quoted, comma-separated "
+            "codes, like its conditions.",
+        ),
     }
 )
-"""`(path, wire key)` to the named conversion of a field its declared type does not fit."""
+"""`(source, wire key)` to the named conversion of a field its declared type does not fit."""
 
 
 def _result_keys() -> dict[str, ResultKey]:
@@ -507,5 +776,206 @@ PARAM_UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
 )
 """`(path, base parameter)` to the unit of a timestamp-like string parameter."""
 
-KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType({})
-"""Kind to asset-class group to its sources, in source order. The REST generator declares none."""
+
+def _bars(ticker: str, *, grouped: str | None = None) -> list[str]:
+    """Return the REST aggregate paths of one asset class, in source order.
+
+    Args:
+        ticker: The class's ticker placeholder, such as `"stocksTicker"`.
+        grouped: The class's market in the grouped-daily path, if it has one.
+
+    Returns:
+        The previous-session bar, the range, and the grouped daily bars.
+    """
+    paths = [
+        f"/v2/aggs/ticker/{{{ticker}}}/prev",
+        f"/v2/aggs/ticker/{{{ticker}}}/range/{{multiplier}}/{{timespan}}/{{from}}/{{to}}",
+    ]
+    if grouped is not None:
+        paths.append(f"/v2/aggs/grouped/locale/{grouped}/{{date}}")
+    return paths
+
+
+KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType(
+    {
+        "trades": {
+            "stocks": [
+                "/v3/trades/{stockTicker}",
+                "/v2/last/trade/{stocksTicker}",
+                "stocks/T",
+                "us_stocks_sip/trades_v1",
+            ],
+            "options": [
+                "/v3/trades/{optionsTicker}",
+                "/v2/last/trade/{optionsTicker}",
+                "options/T",
+                "us_options_opra/trades_v1",
+            ],
+            "futures": ["/futures/v1/trades/{ticker}", "futures/T", "us_futures_{venue}/trades_v1"],
+            "crypto": [
+                "/v3/trades/{cryptoTicker}",
+                "/v1/last/crypto/{from}/{to}",
+                "crypto/XT",
+                "global_crypto/trades_v1",
+            ],
+        },
+        "quotes": {
+            "stocks": [
+                "/v3/quotes/{stockTicker}",
+                "/v2/last/nbbo/{stocksTicker}",
+                "stocks/Q",
+                "us_stocks_sip/quotes_v1",
+            ],
+            "options": ["/v3/quotes/{optionsTicker}", "options/Q", "us_options_opra/quotes_v1"],
+            "futures": ["/futures/v1/quotes/{ticker}", "futures/Q", "us_futures_{venue}/quotes_v1"],
+            "forex": [
+                "/v3/quotes/{fxTicker}",
+                "/v1/last_quote/currencies/{from}/{to}",
+                "forex/C",
+                "global_forex/quotes_v1",
+            ],
+            "crypto": ["crypto/XQ"],
+        },
+        "bars": {
+            "stocks": [
+                *_bars("stocksTicker", grouped="us/market/stocks"),
+                "stocks/A",
+                "stocks/AM",
+                "us_stocks_sip/minute_aggs_v1",
+                "us_stocks_sip/day_aggs_v1",
+            ],
+            "options": [
+                *_bars("optionsTicker"),
+                "options/A",
+                "options/AM",
+                "us_options_opra/minute_aggs_v1",
+                "us_options_opra/day_aggs_v1",
+            ],
+            "futures": [
+                "/futures/v1/aggs/{ticker}",
+                "futures/A",
+                "futures/AM",
+                "us_futures_{venue}/minute_aggs_v1",
+                "us_futures_{venue}/session_aggs_v1",
+            ],
+            "indices": [
+                *_bars("indicesTicker"),
+                "indices/A",
+                "indices/AM",
+                "us_indices/minute_aggs_v1",
+                "us_indices/day_aggs_v1",
+            ],
+            "forex": [
+                *_bars("forexTicker", grouped="global/market/fx"),
+                "forex/CAS",
+                "forex/CA",
+                "global_forex/minute_aggs_v1",
+                "global_forex/day_aggs_v1",
+            ],
+            "crypto": [
+                *_bars("cryptoTicker", grouped="global/market/crypto"),
+                "crypto/XAS",
+                "crypto/XA",
+                "global_crypto/minute_aggs_v1",
+                "global_crypto/day_aggs_v1",
+            ],
+        },
+        "values": {
+            "indices": ["/v3/snapshot/indices", "indices/V", "us_indices/values_v1"],
+        },
+        "luld": {"stocks": ["stocks/LULD"]},
+        "imbalances": {"stocks": ["stocks/NOI"]},
+        "fmv": {
+            "stocks": ["stocks/FMV"],
+            "options": ["options/FMV"],
+            "forex": ["forex/FMV"],
+            "crypto": ["crypto/FMV"],
+        },
+    }
+)
+"""Kind to asset-class group to its sources, in source order.
+
+Every dataset with a WebSocket or flat-file source has a kind, and each kind's group lists the
+REST paths that serve the same rows (history, the latest row, grouped daily bars), then the
+WebSocket channels, then the flat-file prefixes.
+"""
+
+PROJECTIONS: Mapping[tuple[str, str], Projection] = MappingProxyType(
+    {
+        ("values", "/v3/snapshot/indices"): Projection(
+            fields={"ticker": "ticker", "value": "value", "last_updated": "timestamp"},
+            reason="The indices snapshot answers the latest value of an index: its ticker, its "
+            "value, and the time of that value, which the WebSocket and the flat file name "
+            "`timestamp`. Its other fields (the session bar, the market status) belong to the "
+            "snapshot, not to a value row.",
+        ),
+    }
+)
+"""`(kind, source)` to the fields the source contributes to that kind, under the kind's names."""
+
+_RUNNING = (
+    "The WebSocket aggregates carry the day's running figures and the window's end; the REST "
+    "and flat-file bars do not."
+)
+_LAST = (
+    "Only the REST last trade or last quote of this class carries it; the stream and the files "
+    "do not."
+)
+
+TRANSPORT_ONLY: Mapping[tuple[str, str], str] = MappingProxyType(
+    {
+        ("bars", "AccumulatedVolume"): _RUNNING,
+        ("bars", "AccumulatedDecimalVolume"): _RUNNING,
+        ("bars", "AverageTradeSize"): _RUNNING,
+        ("bars", "DayVwap"): _RUNNING,
+        ("bars", "DecimalVolume"): "The stocks WebSocket aggregates carry the fractional "
+        "volume; the stocks REST and flat-file bars do not.",
+        ("bars", "EndTimestamp"): _RUNNING,
+        ("bars", "OfficialOpenPrice"): _RUNNING,
+        ("bars", "Exchange"): "Only the futures minute-bar flat files carry the exchange.",
+        ("bars", "Vwap"): "The forex REST bars carry a volume-weighted average price; the forex "
+        "WebSocket and flat-file bars do not.",
+        ("bars", "Pair"): "The forex and crypto WebSocket aggregates name the instrument `pair`, "
+        "their own long name, where REST and the flat files say `ticker`; it is the dataset's "
+        "symbol key, which the key rename makes `Symbol` on every transport.",
+        ("trades", "Pair"): "The crypto WebSocket trade names the instrument `pair`, its own "
+        "long name; it is the dataset's symbol key, which the key rename makes `Symbol`.",
+        ("trades", "Ticker"): "Of the crypto trades, only the flat file carries the instrument "
+        "as `ticker` (REST takes it from the path or names it `symbol`, the WebSocket `pair`); "
+        "it is the dataset's symbol key, which the key rename makes `Symbol`.",
+        ("trades", "Timestamp"): "The crypto REST last trade names its time `timestamp`, its own "
+        "long name; it is that source's time key, which the key rename makes `Timestamp`.",
+        ("trades", "Id"): _LAST,
+        ("trades", "ParticipantTimestamp"): _LAST,
+        ("trades", "Tape"): _LAST,
+        ("trades", "TrfId"): _LAST,
+        ("trades", "TrfTimestamp"): _LAST,
+        ("trades", "Channel"): "Only the futures REST trades carry the feed channel.",
+        ("trades", "Correction"): "Only the futures trade flat files carry the correction "
+        "indicator.",
+        ("trades", "Exchange"): "Only the futures trade flat files carry the exchange.",
+        ("quotes", "Ask"): "The forex REST last quote names its ask `ask`, its own long name, "
+        "where the stream and the files say `ask_price`.",
+        ("quotes", "Bid"): "The forex REST last quote names its bid `bid`, its own long name, "
+        "where the stream and the files say `bid_price`.",
+        ("quotes", "Timestamp"): "The forex REST last quote names its time `timestamp`, its own "
+        "long name; it is that source's time key, which the key rename makes `Timestamp`.",
+        ("quotes", "Channel"): "Only the futures REST quotes carry the feed channel.",
+        ("quotes", "Exchange"): "Only the futures quote flat files carry the exchange.",
+    }
+)
+"""`(kind, column)` to why the column is legitimately on one transport only."""
+
+VENUES: Mapping[str, str] = MappingProxyType(
+    {
+        "cme": "The Chicago Mercantile Exchange; the futures overview lists a us_futures_cme "
+        "prefix for every futures dataset.",
+        "cbot": "The Chicago Board of Trade; the futures overview lists a us_futures_cbot "
+        "prefix for every futures dataset.",
+        "nymex": "The New York Mercantile Exchange; the futures overview lists a "
+        "us_futures_nymex prefix for every futures dataset.",
+        "comex": "The Commodity Exchange; the futures overview lists a us_futures_comex prefix "
+        "for every futures dataset.",
+    }
+)
+"""The futures venues folded into the `{venue}` template of a flat-file prefix, with reasons."""

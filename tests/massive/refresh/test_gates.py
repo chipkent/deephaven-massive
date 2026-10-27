@@ -1,12 +1,14 @@
-"""Tests for the refresh gates: the reported problems and the checks that span paths.
+"""Tests for the refresh gates: the reported problems and the checks that span sources.
 
-The cross-path checks read plain values (`PathUse`, path statuses, page names), so each is
-shown here on hand-built input; `test_rest.py` shows the generator feeding them.
+The cross-source checks read plain values (`PathUse`, path statuses, page names), so each is
+shown here on hand-built input; `test_rest.py`, `test_ws.py`, and `test_flatfiles.py` show the
+generators feeding them, and one test runs them on the vendored snapshot.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,6 +26,8 @@ from deephaven_massive._massive.refresh.gates import (
     unneeded_type_fixes,
 )
 from deephaven_massive._massive.refresh.hand_input import HandInput
+from deephaven_massive._massive.refresh.rest import generate_rest
+from deephaven_massive._massive.refresh.snapshot import DIRECTORY, Snapshot
 from deephaven_massive._massive.spec.types import Conversion, Transport, WireUnit
 
 if TYPE_CHECKING:
@@ -46,6 +50,9 @@ _EMPTY = HandInput(
     exclusions=(),
     kinds={},
     sample_errors=(),
+    projections={},
+    transport_only={},
+    venues={},
 )
 
 
@@ -62,6 +69,10 @@ def test_the_gate_names_are_descriptive() -> None:
         "column-collision",
         "timestamp-unit",
         "stale-entry",
+        "type-agreement",
+        "transport-agreement",
+        "venue-agreement",
+        "column-order",
         "concept-collision",
         "example-type",
         "units",
@@ -123,6 +134,66 @@ def test_concept_collision_compares_columns_only_within_one_kind() -> None:
         _EMPTY, kinds={"trades": {"stocks": ["/a"]}, "quotes": {"stocks": ["/b"]}}
     )
     assert list(concept_collisions(hand, uses)) == []
+
+
+def _projected(
+    kind: str, source: str, **fields: str
+) -> dict[tuple[str, str], overrides.Projection]:
+    """Return a `PROJECTIONS` table of one entry."""
+    return {(kind, source): overrides.Projection(fields=fields, reason="test")}
+
+
+def test_concept_collision_a_projected_column_holds_its_long_name_s_concept() -> None:
+    # The snapshot's `last_updated` joins the values kind as `Timestamp`, the flat file's own
+    # concept: one concept in one column, and the snapshot's other fields stay out.
+    uses = {
+        "/snapshot": PathUse(
+            concepts={"LastUpdated": "last_updated", "Name": "name"},
+            columns={"last_updated": "LastUpdated", "name": "Name"},
+        ),
+        "file": PathUse(concepts={"Timestamp": "timestamp", "Name": "label"}),
+    }
+    hand = dataclasses.replace(
+        _EMPTY,
+        kinds={"values": {"indices": ["/snapshot", "file"]}},
+        projections=_projected("values", "/snapshot", last_updated="timestamp", gone="gone"),
+    )
+    assert list(concept_collisions(hand, uses)) == []
+
+
+def test_concept_collision_a_projected_concept_also_in_another_column() -> None:
+    # The projection moves `last_updated` into `Timestamp`, while another member of the kind
+    # keeps the same concept in `LastUpdated`: one concept in two columns.
+    uses = {
+        "/snapshot": PathUse(
+            concepts={"LastUpdated": "last_updated"}, columns={"last_updated": "LastUpdated"}
+        ),
+        "/other": PathUse(concepts={"LastUpdated": "last_updated"}),
+    }
+    hand = dataclasses.replace(
+        _EMPTY,
+        kinds={"values": {"indices": ["/snapshot", "/other"]}},
+        projections=_projected("values", "/snapshot", last_updated="timestamp"),
+    )
+    assert _found(concept_collisions(hand, uses)) == [("concept-collision", "", "last_updated")]
+
+
+@pytest.mark.skipif(
+    not DIRECTORY.is_dir() and "CI" not in os.environ,
+    reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",
+)
+def test_concept_collision_passes_a_real_nested_kind() -> None:
+    # The v2 stocks snapshot and the unified snapshot as one kind: `DayClose`,
+    # `LastMinuteClose`, and `PrevDayClose` are distinct concepts, and the v2 `lastTrade.p`
+    # and the unified `last_trade.price` are one concept in one column.
+    v2, unified = "/v2/snapshot/locale/us/markets/stocks/tickers", "/v3/snapshot"
+    paths, coverage = generate_rest(Snapshot.load())
+    by_key = {p.key: p for p in paths}
+    assert by_key[v2].field("LastTradePrice").wire_key == "lastTrade.p"
+    assert by_key[unified].field("LastTradePrice").wire_key == "last_trade.price"
+    assert {"DayClose", "LastMinuteClose", "PrevDayClose"} <= {f.column for f in by_key[v2].fields}
+    hand = dataclasses.replace(_EMPTY, kinds={"snapshots": {"stocks": [v2], "all": [unified]}})
+    assert list(concept_collisions(hand, coverage.uses)) == []
 
 
 # --- Stale hand entries ---------------------------------------------------------------------

@@ -187,8 +187,8 @@ class Conversion(StrEnum):
     ISO_DATE_TEXT = "iso-date-text"
     """Text declared a date-time that is a date, `YYYY-MM-DD` (`iso-instant` to `date`)."""
     QUOTED_INTEGER = "quoted-integer"
-    """An integer sent as decimal digits in text, such as `"48"` (`string` to `long`); it
-    retypes text."""
+    """An integer the specification declares but the vendor sends as decimal digits in text,
+    such as `"44"` (`long` to `long`); an integer itself is refused."""
     INTEGER_ID_AS_TEXT = "integer-id-as-text"
     """An identifier declared an integer and sent as one, kept as text; text is refused
     (`long` to `string`); it retypes integers."""
@@ -206,6 +206,9 @@ class Conversion(StrEnum):
     (`date` to `date`)."""
     DATE_AS_EPOCH = "date-as-epoch"
     """A date sent as an integer epoch count in the field's unit (`date` to `epoch`)."""
+    INTEGER_AS_NUMBER = "integer-as-number"
+    """A quantity declared an integer whose values carry a fraction, such as a crypto volume
+    `951.6112` (`long` to `double`); any number is accepted."""
 
     @property
     def declarations(self) -> frozenset[WireType]:
@@ -237,7 +240,7 @@ _CONVERSION_TYPES: Mapping[Conversion, tuple[frozenset[WireType], WireType, bool
                 False,
             ),
             Conversion.ISO_DATE_TEXT: (frozenset({WireType.ISO_INSTANT}), WireType.DATE, True),
-            Conversion.QUOTED_INTEGER: (frozenset({WireType.STRING}), WireType.LONG, False),
+            Conversion.QUOTED_INTEGER: (frozenset({WireType.LONG}), WireType.LONG, True),
             Conversion.INTEGER_ID_AS_TEXT: (frozenset({WireType.LONG}), WireType.STRING, False),
             Conversion.TEXT_OR_INTEGER_ID: (
                 frozenset({WireType.LONG, WireType.STRING}),
@@ -248,6 +251,7 @@ _CONVERSION_TYPES: Mapping[Conversion, tuple[frozenset[WireType], WireType, bool
             Conversion.ONE_CODE: (frozenset({WireType.LONG}), WireType.INT_ARRAY, False),
             Conversion.MIDNIGHT_UTC_DATE: (frozenset({WireType.DATE}), WireType.DATE, True),
             Conversion.DATE_AS_EPOCH: (frozenset({WireType.DATE}), WireType.EPOCH, True),
+            Conversion.INTEGER_AS_NUMBER: (frozenset({WireType.LONG}), WireType.DOUBLE, True),
         }
     )
 )

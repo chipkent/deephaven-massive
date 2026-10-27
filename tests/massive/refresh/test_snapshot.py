@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from deephaven_massive._massive.refresh import snapshot
+from deephaven_massive._massive.refresh import docs, snapshot
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.snapshot import Snapshot, VendorFile
 
@@ -42,9 +42,16 @@ def test_the_real_snapshot_matches_its_manifest() -> None:
     assert loaded.fetched.isoformat() == manifest["fetched"]
     assert loaded.index_url == manifest["files"]["llms.txt"]["url"]
     assert loaded.origin == "https://massive.com"
-    assert loaded.page_urls.keys() == loaded.pages.keys()
-    for name, url in loaded.page_urls.items():
-        assert manifest["files"][f"rest/{name}"]["url"] == url
+    assert loaded.websocket["openapi"]  # the WebSocket specification was read
+    for area, pages, urls in (
+        ("rest", loaded.pages, loaded.page_urls),
+        ("websocket", loaded.websocket_pages, loaded.websocket_page_urls),
+        ("flat-files", loaded.flat_file_pages, loaded.flat_file_page_urls),
+    ):
+        assert pages
+        assert urls.keys() == pages.keys()
+        for name, url in urls.items():
+            assert manifest["files"][f"{area}/{name}"]["url"] == url
 
 
 def test_a_missing_snapshot_says_to_run_from_a_source_checkout(tmp_path: Path) -> None:
@@ -113,25 +120,61 @@ def test_store_restores_a_snapshot_an_interrupted_swap_left_aside(tmp_path: Path
     assert (target / "openapi.json").read_text(encoding="utf-8") == "old\n"
 
 
-def test_a_rest_page_is_stored_below_rest() -> None:
-    url = "https://massive.com/docs/rest/stocks/trades-quotes/trades.md"
-    assert snapshot.page_file(url) == "rest/stocks/trades-quotes/trades.md"
+@pytest.mark.parametrize(
+    ("url", "area", "stored"),
+    [
+        (
+            "https://massive.com/docs/rest/stocks/trades-quotes/trades.md",
+            docs.REST,
+            "rest/stocks/trades-quotes/trades.md",
+        ),
+        (
+            "https://massive.com/docs/websocket/stocks/trades.md",
+            docs.WEBSOCKET,
+            "websocket/stocks/trades.md",
+        ),
+        (
+            "https://massive.com/docs/flat-files/futures/trades/cme.md",
+            docs.FLAT_FILES,
+            "flat-files/futures/trades/cme.md",
+        ),
+    ],
+)
+def test_each_area_s_pages_are_stored_below_its_directory(
+    url: str, area: docs.Area, stored: str
+) -> None:
+    assert snapshot.page_file(url, area) == stored
 
 
 # --- Loading --------------------------------------------------------------------------------
 
 
+_EXTRA_PAGES = {
+    "websocket/stocks/trades.md": "feed",
+    "flat-files/stocks/trades.md": "columns",
+}
+
+
 def _write_snapshot(directory: Path, *, llms: str, pages: dict[str, str]) -> None:
-    """Write a snapshot whose manifest lists every file with its true hash."""
+    """Write a snapshot whose manifest lists every file with its true hash.
+
+    `pages` are REST pages; the WebSocket and flat-file pages of `_INDEX` are always written.
+    """
     files = [
         _file("openapi.json", json.dumps({"paths": {}}).encode()),
+        _file("websocket.json", json.dumps({"paths": {"/stocks/T": {}}}).encode()),
         _file("llms.txt", llms.encode()),
     ]
     files += [_file(f"rest/{name}", text.encode()) for name, text in pages.items()]
+    files += [_file(name, text.encode()) for name, text in _EXTRA_PAGES.items()]
     snapshot.store(directory, files, fetched=dt.date(2026, 1, 1))
 
 
-_INDEX = "## REST API\n- [Trades](https://massive.com/docs/rest/stocks/trades.md): Trades\n"
+_INDEX = (
+    "## REST API\n- [Trades](https://massive.com/docs/rest/stocks/trades.md): Trades\n"
+    "## WebSocket\n- [Trades](https://massive.com/docs/websocket/stocks/trades.md): Trades\n"
+    "## Flat Files\n- [Trades](https://massive.com/docs/flat-files/stocks/trades.md): Trades\n"
+)
 
 
 def test_a_stored_snapshot_loads(tmp_path: Path) -> None:
@@ -144,6 +187,15 @@ def test_a_stored_snapshot_loads(tmp_path: Path) -> None:
     assert loaded.index_url == "https://example.com/llms.txt"
     assert loaded.origin == "https://example.com"
     assert loaded.page_urls == {"stocks/trades.md": "https://example.com/rest/stocks/trades.md"}
+    assert loaded.websocket == {"paths": {"/stocks/T": {}}}
+    assert loaded.websocket_pages == {"stocks/trades.md": "feed"}
+    assert loaded.websocket_page_urls == {
+        "stocks/trades.md": "https://example.com/websocket/stocks/trades.md"
+    }
+    assert loaded.flat_file_pages == {"stocks/trades.md": "columns"}
+    assert loaded.flat_file_page_urls == {
+        "stocks/trades.md": "https://example.com/flat-files/stocks/trades.md"
+    }
 
 
 def _edit_manifest(directory: Path, change: dict[str, object]) -> None:
@@ -216,15 +268,20 @@ def test_file_browser_litter_is_ignored_but_any_other_stray_file_is_not(tmp_path
 
 
 def test_gate_docs_a_linked_page_missing_from_the_snapshot(tmp_path: Path) -> None:
-    _write_snapshot(tmp_path / "s", llms=_INDEX, pages={})
+    llms = _INDEX + "- [Quotes](https://massive.com/docs/flat-files/stocks/quotes.md): Quotes\n"
+    _write_snapshot(tmp_path / "s", llms=llms, pages={})
     with pytest.raises(RefreshError) as caught:
         Snapshot.load(tmp_path / "s")
-    assert [(p.gate, p.key) for p in caught.value.problems] == [("docs", "stocks/trades.md")]
+    assert [(p.gate, p.key) for p in caught.value.problems] == [
+        ("docs", "stocks/quotes.md"),
+        ("docs", "stocks/trades.md"),
+    ]
 
 
-def test_a_snapshot_that_is_not_json_objects_is_reported(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["openapi.json", "websocket.json"])
+def test_a_snapshot_that_is_not_json_objects_is_reported(tmp_path: Path, name: str) -> None:
     _write_snapshot(tmp_path / "s", llms=_INDEX, pages={"stocks/trades.md": "page"})
-    (tmp_path / "s" / "openapi.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "s" / name).write_text("[]", encoding="utf-8")
     with pytest.raises(RefreshError) as caught:
         Snapshot.load(tmp_path / "s")
     assert [p.gate for p in caught.value.problems] == ["snapshot"]

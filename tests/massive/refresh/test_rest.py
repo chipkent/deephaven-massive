@@ -3,7 +3,10 @@
 The first group runs against the vendored snapshot, and skips where there is none (an sdist
 leaves it out). The rest build small synthetic specifications, so each rule and each gate the
 generator applies is shown in isolation; every gate has a test that fails when the gate is
-removed. The parity of the committed `spec/rest.json` is tested with `generate`.
+removed. A problem is looked for through the whole refresh (`generate.generate`), since the
+checks that span sources (stale hand entries among them) run there, after every generator.
+The field rules every transport shares are those of `fields`, shown here on REST paths. The
+parity of the committed `spec/rest.json` is tested with `generate`.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._massive.refresh import exclusions, lexicon, overrides, rest
+from deephaven_massive._massive.refresh import exclusions, generate, lexicon, overrides, rest
 from deephaven_massive._massive.refresh import exclusions as exclusions_module
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
@@ -188,10 +191,13 @@ def test_the_type_fixes_follow_their_samples(
     real: tuple[tuple[RestPath, ...], Coverage],
 ) -> None:
     # Each REST TYPE_FIXES entry, checked against the documentation sample it cites: the
-    # reason quotes a value the path's page shows for the field, and it decodes.
+    # reason quotes a value the path's page shows for the field, and it decodes. (A REST
+    # source key is a path, which begins with a slash.)
     paths = {p.key: p for p in real[0]}
     pages = Snapshot.load().pages
     for (path, wire_key), fix in overrides.TYPE_FIXES.items():
+        if not path.startswith("/"):
+            continue
         typed = next(f for f in paths[path].fields if f.wire_key == wire_key)
         assert (typed.wire_type, typed.conversion) == (fix.conversion.wire_type, fix.conversion)
         shown_on = [pages[name] for name in coverage_pages(real[1], path)]
@@ -281,18 +287,24 @@ def test_gate_example_type_finds_the_samples_the_vendor_types_contradict() -> No
 
 @_requires_snapshot
 def test_gate_stale_entry_a_shared_type_fix_is_needed_while_any_member_needs_it() -> None:
-    # Without the full-market snapshot, whose sample is an integer, the trade-ID fix the movers
-    # snapshot shares is needed by no sample, so it is stale.
+    # Without the full-market snapshot's share of it (whose integer sample a SAMPLE_ERRORS entry
+    # now excuses instead), the trade-ID fix the movers snapshot shares is needed by no sample,
+    # so it is stale.
     tickers = ("/v2/snapshot/locale/global/markets/crypto/tickers", "lastTrade.i")
     movers = ("/v2/snapshot/locale/global/markets/crypto/{direction}", "lastTrade.i")
     real_hand = HandInput()
-    hand = dataclasses.replace(
-        real_hand, type_fixes={k: v for k, v in real_hand.type_fixes.items() if k != tickers}
+    excused = exclusions.SampleError(
+        path=tickers[0], wire_key=tickers[1], sample=413131, reason="t"
     )
-    assert sorted(_problems(Snapshot.load(), hand)) == [
-        ("example-type", *tickers),
-        ("stale-entry", *movers),
-    ]
+    hand = dataclasses.replace(
+        real_hand,
+        type_fixes={k: v for k, v in real_hand.type_fixes.items() if k != tickers},
+        sample_errors=(*real_hand.sample_errors, excused),
+    )
+    assert sorted(_problems(Snapshot.load(), hand)) == [("stale-entry", *movers)]
+    # Without either, the full-market sample stops its generator first.
+    hand = dataclasses.replace(hand, sample_errors=real_hand.sample_errors)
+    assert sorted(_problems(Snapshot.load(), hand)) == [("example-type", *tickers)]
 
 
 def coverage_pages(coverage: Coverage, path: str) -> tuple[str, ...]:
@@ -418,6 +430,9 @@ def _hand(
         exclusions=exclusions,
         kinds=kinds or {},
         sample_errors=sample_errors,
+        projections={},
+        transport_only={},
+        venues={},
     )
 
 
@@ -443,7 +458,7 @@ def _one_of(snapshot: Snapshot, hand: HandInput) -> RestPath:
 
 def _problems(snapshot: Snapshot, hand: HandInput | None = None) -> list[tuple[str, str, str]]:
     with pytest.raises(RefreshError) as caught:
-        generate_rest(snapshot, hand or _hand())
+        generate.generate(snapshot, hand or _hand())
     return [(p.gate, p.source, p.key) for p in caught.value.problems]
 
 
@@ -824,13 +839,13 @@ def test_gate_stale_entry_units_on_a_field_that_is_not_an_integer() -> None:
 
 def test_a_type_fix_records_its_conversion() -> None:
     fix = overrides.TypeFix(conversion=Conversion.QUOTED_INTEGER, reason="test")
-    path = _one(_row(size={"type": "string"}), _hand(type_fixes={(_PATH, "size"): fix}))
+    path = _one(_row(size={"type": "integer"}), _hand(type_fixes={(_PATH, "size"): fix}))
     (field,) = path.fields
     assert (field.wire_type, field.conversion) == (WireType.LONG, Conversion.QUOTED_INTEGER)
 
 
 def test_gate_stale_entry_a_type_fix_the_specification_no_longer_needs() -> None:
-    fix = overrides.TypeFix(conversion=Conversion.QUOTED_INTEGER, reason="test")
+    fix = overrides.TypeFix(conversion=Conversion.NUMBER_LABEL, reason="test")
     snapshot = _snapshot({_PATH: _item(_row(size={"type": "integer"}))})
     assert _problems(snapshot, _hand(type_fixes={(_PATH, "size"): fix})) == [
         ("stale-entry", _PATH, "size")
@@ -1350,47 +1365,6 @@ def test_gate_docs_a_page_that_is_not_an_overview_names_no_endpoint() -> None:
     pages = {"stocks/overview.md": "# Stocks\n", "stocks/trades.md": "# Trades, no endpoint\n"}
     snapshot = _snapshot({_PATH: _item(_row(price={"type": "number"}))}, pages=pages)
     assert _problems(snapshot) == [("docs", "", "stocks/trades.md")]
-
-
-# The concept-collision gate: one concept, one column, within a kind.
-
-
-@_requires_snapshot
-def test_gate_concept_collision_passes_a_real_nested_kind(
-    real: tuple[tuple[RestPath, ...], Coverage],
-) -> None:
-    # The v2 stocks snapshot and the unified snapshot as one kind: `DayClose`,
-    # `LastMinuteClose`, and `PrevDayClose` are distinct concepts, and the v2 `lastTrade.p`
-    # and the unified `last_trade.price` are one concept in one column.
-    kinds = {
-        "snapshots": {
-            "stocks": ["/v2/snapshot/locale/us/markets/stocks/tickers"],
-            "all": ["/v3/snapshot"],
-        }
-    }
-    paths, _ = generate_rest(Snapshot.load(), dataclasses.replace(HandInput(), kinds=kinds))
-    unified = {p.key: p for p in paths}["/v3/snapshot"]
-    v2 = {p.key: p for p in paths}["/v2/snapshot/locale/us/markets/stocks/tickers"]
-    assert v2.field("LastTradePrice").wire_key == "lastTrade.p"
-    assert unified.field("LastTradePrice").wire_key == "last_trade.price"
-    assert {"DayClose", "LastMinuteClose", "PrevDayClose"} <= {f.column for f in v2.fields}
-
-
-def test_gate_concept_collision_one_column_for_two_concepts_within_a_kind() -> None:
-    # Modeled on the snapshots: two nested paths that PascalCase alike are two concepts.
-    lexicons = {"trade": lexicon.Lexicon(name="trade", reason="t", entries=_names(p="price"))}
-    snapshot = _snapshot(
-        {
-            "/a/{id}": _item(_row(lastTrade=_row(p={"type": "number"}))),
-            "/b/{id}": _item(_row(last_trade=_row(price={"type": "number"}))),
-            "/c/{id}": _item(_row(last=_row(trade_price={"type": "number"}))),
-        }
-    )
-    hand = _hand(lexicons=lexicons, shapes={("/a/{id}", "lastTrade"): "trade"})
-    same = dataclasses.replace(hand, kinds={"trades": {"stocks": ["/a/{id}", "/b/{id}"]}})
-    assert len(generate_rest(snapshot, same)[0]) == 3
-    clash = dataclasses.replace(hand, kinds={"trades": {"stocks": ["/a/{id}", "/c/{id}"]}})
-    assert _problems(snapshot, clash) == [("concept-collision", "", "LastTradePrice")]
 
 
 # Problems are never lost.

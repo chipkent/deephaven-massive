@@ -160,6 +160,8 @@ _CONVERSIONS = [
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00+00:00", date(2023, 3, 10)),
     (Conversion.MIDNIGHT_UTC_DATE, "1969-12-31T00:00:00z", date(1969, 12, 31)),
     (Conversion.DATE_AS_EPOCH, 1_753_851_600_000_000_000, 1_753_851_600_000_000_000),
+    (Conversion.INTEGER_AS_NUMBER, 951.6112, 951.6112),  # a crypto volume
+    (Conversion.INTEGER_AS_NUMBER, 91, 91.0),
 ]
 
 
@@ -177,7 +179,9 @@ def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> No
         (Conversion.QUOTED_INTEGER, "4.8"),
         (Conversion.QUOTED_INTEGER, "-1"),
         (Conversion.QUOTED_INTEGER, " 48"),
-        (Conversion.QUOTED_INTEGER, 48),  # the declared form is text
+        (Conversion.QUOTED_INTEGER, 48),  # the form sent is text
+        (Conversion.INTEGER_AS_NUMBER, "1.5"),
+        (Conversion.INTEGER_AS_NUMBER, True),
         (Conversion.QUOTED_INTEGER, str(2**63)),
         (Conversion.INTEGER_ID_AS_TEXT, "7"),  # integer only: text fails loudly
         (Conversion.INTEGER_ID_AS_TEXT, True),
@@ -215,7 +219,7 @@ def test_a_value_the_conversion_cannot_read_fails(conversion: Conversion, value:
 _SAMPLES = {
     (Conversion.ISO_TEXT_INSTANT, WireType.STRING): "1970-01-01T00:00:01Z",
     (Conversion.ISO_DATE_TEXT, WireType.ISO_INSTANT): "2025-02-22",
-    (Conversion.QUOTED_INTEGER, WireType.STRING): "48",
+    (Conversion.QUOTED_INTEGER, WireType.LONG): "48",
     (Conversion.INTEGER_ID_AS_TEXT, WireType.LONG): 7,
     (Conversion.TEXT_OR_INTEGER_ID, WireType.STRING): 413131,
     (Conversion.TEXT_OR_INTEGER_ID, WireType.LONG): "2208",
@@ -223,6 +227,7 @@ _SAMPLES = {
     (Conversion.ONE_CODE, WireType.LONG): 12,
     (Conversion.MIDNIGHT_UTC_DATE, WireType.DATE): "2023-03-10T00:00:00Z",
     (Conversion.DATE_AS_EPOCH, WireType.DATE): 1,
+    (Conversion.INTEGER_AS_NUMBER, WireType.LONG): 951.6112,
 }
 
 

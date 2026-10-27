@@ -1,28 +1,34 @@
 """The lexicons that translate Massive's short wire keys into its own long names.
 
-Some REST objects use one- and two-letter keys (`{"p": 189.5, "s": 100, "t": ...}`), and one
-letter means different things in different objects: `c` is the close of an aggregate and the
-conditions of a trade, `t` is the start of an aggregate window and the SIP time of a trade. A
-flat key table cannot work, so the translation goes by **shape**:
+Some REST objects and every WebSocket message use one- and two-letter keys
+(`{"p": 189.5, "s": 100, "t": ...}`), and one letter means different things in different
+objects: `c` is the close of an aggregate and the conditions of a trade, `t` is the start of an
+aggregate window and the SIP time of a trade, `z` is a trade's tape and an aggregate's average
+trade size, `dv` is a stock bar's fractional volume and a futures bar's dollar volume. A flat
+key table cannot work, so the translation goes by **shape**:
 
 - a `Lexicon` maps the short keys of one kind of object to the long names Massive itself uses
   for the same fields elsewhere in that asset class's REST or flat-file data, and every entry
   cites where (the trade lexicon takes `sip_timestamp` from `/v3/trades/{stockTicker}`, the
   forex quote lexicon `ask_price` from `/v3/quotes/{fxTicker}`, and so on). So one field gets
   one column on every endpoint and transport;
-- `SHAPES` says which lexicon applies to which object: `(path, object prefix)`, where the
+- `SHAPES` says which lexicon applies to which object: `(source, object prefix)`, where the
+  source is a REST path, a WebSocket `"<cluster>/<channel>"`, or a flat-file prefix, and the
   prefix is the dotted wire key of the object within a row (`""` for the row itself,
   `"lastTrade"` for a snapshot's last trade);
 - `IDENTITY` lists the short keys that are already Massive's long form (`id`, `url`, `low`),
   each with its reason.
 
-The generator translates every segment of a wire key through the lexicon of the object it
-sits in, else keeps an identity key or a long key as it is; a short key (three characters or
-fewer, no underscore) that neither covers stops the refresh (the `short-key` gate). A lexicon
-or identity entry never takes a name from a description. A `SHAPES` or `IDENTITY` entry that
+A lexicon's keys are Massive's abbreviations: mostly short keys (three characters or fewer,
+no underscore), and a few longer ones the WebSocket trade uses (`trfi`, `trft`), which would
+otherwise pass for long names. The generator translates every segment of a wire key through
+the lexicon of the object it sits in, else keeps an identity key or a long key as it is; a
+short key that neither covers stops the refresh (the `short-key` gate). A lexicon or
+identity entry never takes a name from a description. A `SHAPES` or `IDENTITY` entry that
 no generated object uses is stale and stops the refresh too (the `stale-entry` gate).
 
-The path tuples at the end (`BAR_PATHS` and the snapshot paths) are shared with `overrides`.
+The source tuples at the end (`BAR_PATHS`, the snapshot paths, and the WebSocket channels)
+are shared with `overrides`.
 
 The tables are plain read-only data, built once at import.
 """
@@ -39,12 +45,14 @@ if TYPE_CHECKING:
 __all__ = [
     "BAR_PATHS",
     "CRYPTO_SNAPSHOTS",
+    "FMV_CHANNELS",
     "FOREX_SNAPSHOTS",
     "IDENTITY",
     "LEXICONS",
     "RANGE_PATHS",
     "SHAPES",
     "STOCKS_SNAPSHOTS",
+    "WS_BARS",
     "Lexicon",
     "LongName",
 ]
@@ -95,20 +103,30 @@ def _from(source: str, **names: str) -> dict[str, LongName]:
 
     Args:
         source: The vendor endpoint or file that spells the names out.
-        **names: Short key to long name.
+        **names: Short key to long name. A key that is a Python keyword is written with a
+            trailing underscore (`as_` for the WebSocket ask size `as`), which is removed.
 
     Returns:
         Short key to `LongName`.
     """
-    return {short: LongName(long_name=name, source=source) for short, name in names.items()}
+    return {
+        short.removesuffix("_"): LongName(long_name=name, source=source)
+        for short, name in names.items()
+    }
 
 
 _UNIFIED_BAR = "/v3/snapshot `last_minute` and `session` (the unified snapshot)"
+# Every flat file names its instrument `ticker`, as does the unified snapshot.
+_TICKER = "/v3/snapshot `ticker`, and the `ticker` column of every flat file"
 _AGGREGATE = {
-    **_from("/v3/snapshot `ticker`", T="ticker"),
+    **_from(_TICKER, T="ticker", sym="ticker"),
     **_from(_UNIFIED_BAR, o="open", h="high", l="low", c="close", v="volume", vw="vwap"),
     **_from("/v3/snapshot `last_minute.transactions`", n="transactions"),
-    **_from("/futures/v1/aggs `window_start`", t="window_start"),
+    **_from(
+        "/futures/v1/aggs and every `*_aggs_v1` flat file `window_start`",
+        t="window_start",
+        s="window_start",
+    ),
 }
 
 _LEXICONS = (
@@ -122,10 +140,21 @@ _LEXICONS = (
         },
     ),
     Lexicon(
-        name="trade",
-        reason="A stocks or options trade.",
+        name="futures_bar",
+        reason="A futures aggregate bar: an aggregate bar plus its dollar volume.",
         entries={
-            **_from("/v3/snapshot `ticker`", T="ticker"),
+            **_AGGREGATE,
+            **_from(
+                "/futures/v1/aggs/{ticker} and us_futures_{venue}/minute_aggs_v1 `dollar_volume`",
+                dv="dollar_volume",
+            ),
+        },
+    ),
+    Lexicon(
+        name="trade",
+        reason="A stocks or options trade, from the REST last trade or the WebSocket.",
+        entries={
+            **_from(_TICKER, T="ticker", sym="ticker"),
             **_from(
                 "/v3/trades/{stockTicker}",
                 c="conditions",
@@ -141,14 +170,17 @@ _LEXICONS = (
                 x="exchange",
                 y="participant_timestamp",
                 z="tape",
+                pt="participant_timestamp",
+                trfi="trf_id",
+                trft="trf_timestamp",
             ),
         },
     ),
     Lexicon(
         name="quote",
-        reason="A stocks NBBO quote.",
+        reason="A stocks or options quote, from the REST last NBBO or the WebSocket.",
         entries={
-            **_from("/v3/snapshot `ticker`", T="ticker"),
+            **_from(_TICKER, T="ticker", sym="ticker"),
             **_from(
                 "/v3/quotes/{stockTicker}",
                 P="ask_price",
@@ -164,12 +196,19 @@ _LEXICONS = (
                 t="sip_timestamp",
                 y="participant_timestamp",
                 z="tape",
+                ap="ask_price",
+                as_="ask_size",
+                ax="ask_exchange",
+                bp="bid_price",
+                bs="bid_size",
+                bx="bid_exchange",
+                pt="participant_timestamp",
             ),
         },
     ),
     Lexicon(
         name="forex_quote",
-        reason="A forex quote.",
+        reason="A forex quote, from a REST snapshot or the WebSocket.",
         entries={
             **_from(
                 "/v3/quotes/{fxTicker}",
@@ -178,11 +217,12 @@ _LEXICONS = (
                 t="participant_timestamp",
             ),
             **_from("/v1/last_quote/currencies/{from}/{to} `last.exchange`", x="exchange"),
+            **_from("global_forex/quotes_v1 `ticker`", p="ticker"),
         },
     ),
     Lexicon(
         name="crypto_trade",
-        reason="A crypto trade.",
+        reason="A crypto trade, from a REST snapshot or the WebSocket.",
         entries=_from(
             "/v3/trades/{cryptoTicker}",
             c="conditions",
@@ -191,7 +231,88 @@ _LEXICONS = (
             s="size",
             t="participant_timestamp",
             x="exchange",
+            r="received_timestamp",
         ),
+    ),
+    Lexicon(
+        name="crypto_quote",
+        reason="A crypto quote. Crypto has no quotes outside the WebSocket, so each name is "
+        "the one Massive gives the same field of its nearest relative: the crypto trade for "
+        "the times and the exchange, the forex quote for the prices, the stocks quote for "
+        "the sizes.",
+        entries={
+            **_from(
+                "/v3/trades/{cryptoTicker}",
+                t="participant_timestamp",
+                x="exchange",
+                r="received_timestamp",
+            ),
+            **_from("/v3/quotes/{fxTicker}", ap="ask_price", bp="bid_price"),
+            **_from("/v3/quotes/{stockTicker}", as_="ask_size", bs="bid_size"),
+        },
+    ),
+    Lexicon(
+        name="futures_trade",
+        reason="A futures trade from the WebSocket.",
+        entries={
+            **_from(_TICKER, sym="ticker"),
+            **_from(
+                "/futures/v1/trades/{ticker}",
+                p="price",
+                s="size",
+                t="timestamp",
+                q="sequence_number",
+            ),
+        },
+    ),
+    Lexicon(
+        name="futures_quote",
+        reason="A futures quote from the WebSocket.",
+        entries={
+            **_from(_TICKER, sym="ticker"),
+            **_from(
+                "/futures/v1/quotes/{ticker}",
+                ap="ask_price",
+                as_="ask_size",
+                at="ask_timestamp",
+                bp="bid_price",
+                bs="bid_size",
+                bt="bid_timestamp",
+                t="timestamp",
+            ),
+        },
+    ),
+    Lexicon(
+        name="index_value",
+        reason="An index value from the WebSocket.",
+        entries=_from("us_indices/values_v1", T="ticker", val="value", t="timestamp"),
+    ),
+    Lexicon(
+        name="fair_market_value",
+        reason="A fair-market-value tick from the WebSocket.",
+        entries={
+            **_from(_TICKER, sym="ticker"),
+            **_from(
+                "/v3/snapshot `fmv_last_updated`, the time of the fair market value",
+                t="fmv_last_updated",
+            ),
+        },
+    ),
+    Lexicon(
+        name="luld",
+        reason="A limit up-limit down band from the WebSocket.",
+        entries={
+            **_from(_TICKER, T="ticker"),
+            **_from("/v3/quotes/{stockTicker}", i="indicators", q="sequence_number", z="tape"),
+        },
+    ),
+    Lexicon(
+        name="imbalance",
+        reason="A net order imbalance from the WebSocket.",
+        entries={
+            **_from(_TICKER, T="ticker"),
+            **_from("/v3/trades/{stockTicker}", x="exchange"),
+        },
     ),
     Lexicon(
         name="snapshot",
@@ -286,6 +407,25 @@ CRYPTO_SNAPSHOTS: tuple[str, ...] = (
 )
 """The crypto full-market and movers snapshots."""
 
+WS_BARS: tuple[str, ...] = (
+    "stocks/A",
+    "stocks/AM",
+    "options/A",
+    "options/AM",
+    "indices/A",
+    "indices/AM",
+    "futures/A",
+    "futures/AM",
+    "forex/CAS",
+    "forex/CA",
+    "crypto/XAS",
+    "crypto/XA",
+)
+"""The WebSocket aggregate channels, per second and per minute, of every asset class."""
+
+FMV_CHANNELS: tuple[str, ...] = ("stocks/FMV", "options/FMV", "forex/FMV", "crypto/FMV")
+"""The WebSocket fair-market-value channels."""
+
 SHAPES: Mapping[tuple[str, str], str] = MappingProxyType(
     {
         **_shapes(BAR_PATHS, {"": "aggregate"}),
@@ -324,6 +464,22 @@ SHAPES: Mapping[tuple[str, str], str] = MappingProxyType(
                 "lastTrade": "crypto_trade",
             },
         ),
+        **_shapes(("stocks/A", "stocks/AM"), {"": "stocks_bar"}),
+        **_shapes(("futures/A", "futures/AM"), {"": "futures_bar"}),
+        **_shapes(
+            (c for c in WS_BARS if not c.startswith(("stocks/", "futures/"))), {"": "aggregate"}
+        ),
+        **_shapes(("stocks/T", "options/T"), {"": "trade"}),
+        **_shapes(("stocks/Q", "options/Q"), {"": "quote"}),
+        **_shapes(("forex/C",), {"": "forex_quote"}),
+        **_shapes(("crypto/XT",), {"": "crypto_trade"}),
+        **_shapes(("crypto/XQ",), {"": "crypto_quote"}),
+        **_shapes(("futures/T",), {"": "futures_trade"}),
+        **_shapes(("futures/Q",), {"": "futures_quote"}),
+        **_shapes(("indices/V",), {"": "index_value"}),
+        **_shapes(FMV_CHANNELS, {"": "fair_market_value"}),
+        **_shapes(("stocks/LULD",), {"": "luld"}),
+        **_shapes(("stocks/NOI",), {"": "imbalance"}),
     }
 )
-"""`(path, object prefix)` to the lexicon of that object's keys."""
+"""`(source, object prefix)` to the lexicon of that object's keys."""

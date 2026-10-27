@@ -14,15 +14,22 @@ Modules:
     - `generate`: the refresh itself, composing the modules below and writing the result.
     - `snapshot`: the snapshot's location, layout, and manifest; storing and verified loading.
     - `fetch`: downloads the vendor sources and puts them in canonical form.
-    - `docs`: reads the documentation index (`llms.txt`) and the REST pages it links.
-    - `openapi`: resolves references and merged schemas in the OpenAPI specification.
-    - `rest`: turns the specification into REST sources by the representation, naming, and
-      parameter rules.
+    - `docs`: reads the documentation index (`llms.txt`) and the REST, WebSocket, and
+      flat-file pages it links.
+    - `openapi`: resolves references and merged schemas in the OpenAPI specifications.
+    - `fields`: the field rules every generator shares: names, representation, units,
+      conversions, and documented examples.
+    - `rest`: turns the OpenAPI specification into REST sources, with their result keys and
+      parameters.
+    - `ws`: turns the WebSocket specification into WebSocket sources.
+    - `flatfiles`: turns the flat-file pages into flat-file sources.
+    - `kinds`: the dataset kinds across transports: memberships, the type and transport
+      agreement, and the kind column order.
     - `naming`: the naming policy shared by every transport.
-    - `gates`: the refresh gates, the problems they report, and the checks that span paths.
+    - `gates`: the refresh gates, the problems they report, and the checks that span sources.
     - `plain_text`: the fixed rules that turn a vendor's field description into plain text.
-    - `render`: writes `spec/rest.json` and `spec/descriptions.json` in their canonical
-      text.
+    - `render`: writes `spec/rest.json`, `spec/ws.json`, `spec/flatfiles.json`, and
+      `spec/descriptions.json` in their canonical text.
     - `hand_input`: bundles the hand input for the generators.
     - `lexicon`, `overrides`, `exclusions`: every piece of hand input, each entry with its
       reason. Nothing else in the refresh is written by hand.

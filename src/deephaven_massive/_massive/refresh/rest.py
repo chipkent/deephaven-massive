@@ -25,29 +25,9 @@ the envelope keys (`spec.types.ENVELOPE_KEYS`) are left out of its fields. Withi
 the served document lists them (which is the vendor's documented order; Massive serves every
 object's keys alphabetically, and the snapshot never re-sorts them).
 
-**Representation rules** decide each field's `WireType`: an integer is `long`, or an `epoch`
-when `overrides.UNITS` gives it a unit; a number is `double`; a boolean is `bool`; an array of
-integers is `int-array`; an array of anything else, a free-form object, and a choice of two or
-more shapes are `json-text`; a string with `format: date-time`, or no format and a name ending
-in `_utc`, is an `iso-instant`; a string with `format: date`, or named `date` or `*_date`, is a
-`date`; any other string is `string`. A `TYPE_FIXES` entry then gives the field its named
-`Conversion`, whose type replaces the rule's, so the decoder converts it deliberately (a
-conversion to an `epoch` takes its unit from `UNITS`). Every documented example value (the
-response's example and each field's own `example`) must then convert through its field, or
-the `example-type` gate stops the refresh: a type the vendor's sample contradicts is decided
-by a person, never found at run time.
-
-**Names.** Each segment of a wire key is translated to Massive's long form: the vendor's own
-long key as it is; a short key through the lexicon of the object it sits in, whose entries
-cite the endpoint that spells the same field out; else an identity entry. The last segment is
-replaced by its `NAMES` entry when Massive names the key nowhere (a name derived from the
-field's description, which the entry quotes). `naming.column_name` joins the long names in
-PascalCase: `prevDay.vw` becomes `PrevDayVwap`.
-
-**Descriptions.** Each field records the `description` of its schema after `$ref` and `allOf`
-are resolved, as plain text (`plain_text`), for `spec/descriptions.json`. A field
-without one gets `""`, and nothing stops: no name, type, or gate depends on a description,
-except that a `NAMES` entry quotes the one its name was derived from.
+**Fields** are named, typed, given their units and conversions, and checked against the
+response's example and each field's own `example` by the rules every transport shares
+(`fields`). A path in a dataset kind is reordered afterwards, by `kinds`, to its kind's order.
 
 **Parameters** keep the specification's order and wire names. Their `ParamKind` follows the
 same kind of mechanical rules: a name ending in `.any_of`, or an array, is `LIST` (sent
@@ -58,8 +38,8 @@ with `format: date` or `format: date-time`, a choice of string formats, or a bas
 `date`, `*_date`, `*_utc`, or `as_of` is `DATE`; any other string is `STRING`.
 
 The checks on one field or parameter run as the generator meets it; the checks that span
-paths run afterwards, in `gates`. It imports the standard library and other `_massive`
-modules only.
+sources run afterwards, over every transport, in `generate`. It imports the standard library
+and other `_massive` modules only.
 """
 
 from __future__ import annotations
@@ -71,11 +51,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._massive.refresh import docs, gates, naming
+from deephaven_massive._massive.refresh.fields import RawField, SourceFields
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required, text
-from deephaven_massive._massive.refresh.plain_text import plain_text
-from deephaven_massive._massive.spec.convert import UnconvertibleError, convert, convert_field
 from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
     Field,
@@ -83,7 +62,6 @@ from deephaven_massive._massive.spec.types import (
     ParamKind,
     RestPath,
     Transport,
-    WireType,
     WireUnit,
 )
 
@@ -95,12 +73,6 @@ if TYPE_CHECKING:
 
 __all__ = ["Coverage", "generate_rest"]
 
-# The `x-polygon-go-type` names that tag an integer with a unit.
-_TAG_UNITS: Final = {
-    "INanoseconds": WireUnit.NS,
-    "IMicroseconds": WireUnit.US,
-    "IMilliseconds": WireUnit.MS,
-}
 # The vendor extensions a path item and its GET operation may carry, each with what the
 # generator does about it. Any other `x-polygon-*` key is a change at Massive the refresh stops
 # on rather than ignores.
@@ -134,12 +106,7 @@ _OPERATION_EXTENSIONS: Final = MappingProxyType(
 _OVERVIEW_PAGES: Final = frozenset({"overview", "quickstart"})
 # The range and set suffixes of a filter parameter's wire name (`timestamp.gte`).
 _FILTER_SUFFIXES: Final = frozenset({"gt", "gte", "lt", "lte", "any_of"})
-# The types of the scalar schema types, for fields and for parameters.
-_SCALAR_TYPES: Final = {
-    "integer": WireType.LONG,
-    "number": WireType.DOUBLE,
-    "boolean": WireType.BOOL,
-}
+# The kinds of the scalar schema types of a parameter.
 _SCALAR_KINDS: Final = {
     "integer": ParamKind.INTEGER,
     "number": ParamKind.NUMBER,
@@ -167,6 +134,7 @@ class Coverage:
         pages: Each path a REST documentation page names, mapped to the names of every
             page that names it, sorted (a path shared by several asset classes, such as
             `/v3/reference/tickers`, has one page per asset class).
+        uses: What generating each attempted path consumed, for the checks that span sources.
     """
 
     specified: frozenset[str]
@@ -175,25 +143,15 @@ class Coverage:
     deprecated: frozenset[str]
     draft: frozenset[str]
     pages: Mapping[str, tuple[str, ...]]
+    uses: Mapping[str, PathUse]
 
 
-@dataclass(frozen=True)
-class _Raw:
-    """A leaf of a flattened row before it is named and typed.
+class _PathGenerator(SourceFields):
+    """Generate one path's `RestPath`, collecting its problems instead of stopping.
 
-    Attributes:
-        wire_key: The dotted key below the result key.
-        schema: The leaf's resolved schema.
-        required: Whether it and every object above it are required.
+    The field rules are `SourceFields`'s; this class adds what only a REST path has: the
+    response body and its result key, the envelope, and the parameters.
     """
-
-    wire_key: str
-    schema: JsonObject
-    required: bool
-
-
-class _PathGenerator:
-    """Generate one path's `RestPath`, collecting its problems instead of stopping."""
 
     def __init__(self, spec: OpenApi, hand: HandInput, path: str, *, origin: str) -> None:
         """Prepare to generate `path`.
@@ -205,55 +163,11 @@ class _PathGenerator:
             origin: The documentation origin a root-relative link in a description is
                 resolved against (`plain_text`).
         """
-        self.spec = spec
-        self.hand = hand
-        self.origin = origin
+        super().__init__(spec, hand, path, origin=origin)
         self.path = path
-        self.problems: list[Problem] = []
-        self.wire_keys: set[str] = set()
-        self.objects: set[str] = {""}
         self.timestamp_bases: set[str] = set()
-        self.unit_bases: set[str] = set()
-        self.identities: set[str] = set()
-        self.concepts: dict[str, str] = {}
-        # The specification's example of the HTTP 200 response, once `body` has read it, and
-        # each field's own `example`, by wire key.
+        # The specification's example of the HTTP 200 response, once `body` has read it.
         self.example: Json = None
-        self.field_examples: dict[str, Json] = {}
-        self.converted: set[str] = set()
-        # Each generated field's type by the representation rules, before any conversion.
-        self.declared_types: dict[str, WireType] = {}
-        self.needed_conversions: set[str] = set()
-
-    def use(self) -> PathUse:
-        """Return what the path consumed so far, for the checks that span paths.
-
-        Returns:
-            The wire keys, objects, `PARAM_UNITS` bases, identity keys, concepts, and the
-            fields whose conversion a documented example needs.
-        """
-        return PathUse(
-            wire_keys=frozenset(self.wire_keys),
-            objects=frozenset(self.objects),
-            unit_bases=frozenset(self.unit_bases),
-            identities=frozenset(self.identities),
-            concepts=dict(self.concepts),
-            converted=frozenset(self.converted),
-            needed_conversions=frozenset(self.needed_conversions),
-        )
-
-    def problem(self, gate: Gate, key: str, message: str, *, description: str = "") -> None:
-        """Record a problem of this path.
-
-        Args:
-            gate: The gate.
-            key: The wire key or parameter.
-            message: What is wrong.
-            description: The vendor's description, if any.
-        """
-        self.problems.append(
-            Problem(gate=gate, source=self.path, key=key, message=message, description=description)
-        )
 
     def generate(self) -> RestPath | None:
         """Build the path's `RestPath`.
@@ -308,19 +222,10 @@ class _PathGenerator:
             return None
 
     def check_example(self, result_key: str | None, fields: Sequence[Field]) -> None:
-        """Convert every documented example value of the path by its generated field.
+        """Convert the response example's rows and each field's own example by the fields.
 
-        The specification documents the wire twice: the example of the HTTP 200 response and
-        a field's own `example`. A value that the field refuses means the generated type and
-        the documented wire disagree, and real data shaped like the sample would fail at run
-        time, so the `example-type` gate stops the refresh instead. A person then decides: a
-        `TYPE_FIXES` entry when the type is wrong, or a `SAMPLE_ERRORS` entry when the sample
-        is. A missing field and a null value are not checked; each field is reported once.
-
-        It also records which fields' conversions some example value needs (a value the
-        field's declared type alone refuses), for the stale-entry check of `TYPE_FIXES`; and
-        it reports a response example in which no value sits where the result key points,
-        since the gate would otherwise check nothing there without saying so.
+        The rows sit in the example where the result key says, as in a response
+        (`SourceFields.check_examples` does the rest).
 
         Args:
             result_key: Where the example's rows sit, as for the response itself.
@@ -330,59 +235,14 @@ class _PathGenerator:
         for step in result_key.split(".") if result_key is not None else ():
             node = node.get(step) if isinstance(node, dict) else None
         rows = node if isinstance(node, list) else [node]
-        found = {
-            item.wire_key: [_example_value(row, item.wire_key) for row in rows] for item in fields
-        }
-        if self.example is not None and not any(v is not None for vs in found.values() for v in vs):
-            self.problem(
-                Gate.EXAMPLE_TYPE,
-                "",
-                f"the specification's response example has no field values under result key "
-                f"{result_key!r}, so none could be checked",
-            )
-        for item in fields:
-            own = self.field_examples.get(item.wire_key)
-            values = [v for v in [*found[item.wire_key], own] if v is not None]
-            self.check_values(item, values)
+        self.check_examples(
+            fields,
+            rows,
+            documented=self.example is not None,
+            where=f"under result key {result_key!r}",
+        )
 
-    def check_values(self, item: Field, values: Sequence[Json]) -> None:
-        """Convert one field's documented example values, honouring `SAMPLE_ERRORS`.
-
-        Args:
-            item: The generated field.
-            values: Its non-null example values, response first, then its own `example`.
-        """
-        if item.conversion is not None:
-            self.converted.add(item.wire_key)
-        if item.conversion is not None and any(
-            not _converts(self.declared_types[item.wire_key], v) for v in values
-        ):
-            self.needed_conversions.add(item.wire_key)
-        refused = [v for v in values if not _converts_field(item, v)]
-        for error in self.hand.sample_errors:
-            if (error.path, error.wire_key) != (self.path, item.wire_key):
-                continue
-            # Samples compare as JSON text, so `1`, `1.0`, and `true` stay three samples.
-            wrong = _json_text(error.sample)
-            if any(_json_text(v) == wrong for v in refused):
-                refused = [v for v in refused if _json_text(v) != wrong]
-            else:
-                self.problem(
-                    Gate.STALE_ENTRY,
-                    item.wire_key,
-                    f"SAMPLE_ERRORS entry for the sample {json.dumps(error.sample)[:80]}, which "
-                    "the specification no longer gives or the field now accepts",
-                )
-        if refused:
-            self.problem(
-                Gate.EXAMPLE_TYPE,
-                item.wire_key,
-                f"the specification's example value {json.dumps(refused[0])[:80]} does not "
-                f"convert to {item.wire_type}; add a TYPE_FIXES entry citing it, or a "
-                "SAMPLE_ERRORS entry if the sample is wrong",
-            )
-
-    def rows(self, operation: JsonObject) -> tuple[str | None, list[_Raw] | None]:
+    def rows(self, operation: JsonObject) -> tuple[str | None, list[RawField] | None]:
         """Find the rows of the response and flatten them.
 
         Args:
@@ -417,7 +277,7 @@ class _PathGenerator:
         if properties(node) is None:
             self.problem(Gate.SHAPE, "", f"the rows under {result_key!r} are not objects")
             return result_key, None
-        out: list[_Raw] = []
+        out: list[RawField] = []
         skip = ENVELOPE_KEYS if result_key is None and single_object else frozenset()
         self.flatten(node, "", is_required=True, out=out, skip=skip)
         return result_key, out
@@ -428,7 +288,7 @@ class _PathGenerator:
         prefix: str,
         *,
         is_required: bool,
-        out: list[_Raw],
+        out: list[RawField],
         skip: frozenset[str],
     ) -> None:
         """Append the leaves of an object schema to `out`, nested objects flattened.
@@ -456,7 +316,7 @@ class _PathGenerator:
                 )
             else:
                 self.wire_keys.add(wire_key)
-                out.append(_Raw(wire_key, schema, child_required))
+                out.append(RawField(wire_key, schema, child_required))
 
     def check_envelope(self, name: str, schema: JsonObject) -> None:
         """Check that an envelope key of a single-object body has the envelope's type.
@@ -474,236 +334,6 @@ class _PathGenerator:
                 "row data that dropping it would lose",
                 description=text(schema, "description"),
             )
-
-    def long_names(self, raw: _Raw) -> list[str]:
-        """Translate each segment of a wire key to its long name (lexicon, identity, NAMES).
-
-        Args:
-            raw: The flattened field.
-
-        Returns:
-            The long name of each segment; a short key that nothing translates is kept as is,
-            with a `short-key` problem.
-        """
-        segments = raw.wire_key.split(".")
-        names: list[str] = []
-        for index, segment in enumerate(segments):
-            prefix = ".".join(segments[:index])
-            lexicon_name = self.hand.shapes.get((self.path, prefix))
-            entries = self.hand.lexicons[lexicon_name].entries if lexicon_name else {}
-            override = self.hand.names.get((self.path, raw.wire_key))
-            if index == len(segments) - 1 and override is not None:
-                quoted = " ".join(override.description.split())
-                if quoted != " ".join(text(raw.schema, "description").split()):
-                    self.problem(
-                        Gate.STALE_ENTRY,
-                        raw.wire_key,
-                        "NAMES quotes a description the specification no longer gives",
-                        description=text(raw.schema, "description"),
-                    )
-                coined = naming.column_name([override.long_name])
-                if coined in naming.KEY_COLUMNS:
-                    self.problem(
-                        Gate.COLUMN_COLLISION,
-                        raw.wire_key,
-                        f"NAMES coins the dataset key column {coined!r}; only the dataset key "
-                        "rename produces it",
-                    )
-                names.append(override.long_name)
-            elif segment in entries:
-                names.append(entries[segment].long_name)
-            else:
-                if segment in self.hand.identity:
-                    self.identities.add(segment)
-                elif naming.is_short(segment):
-                    self.problem(
-                        Gate.SHORT_KEY,
-                        raw.wire_key,
-                        f"short key {segment!r} has no lexicon, identity, or NAMES entry",
-                        description=text(raw.schema, "description"),
-                    )
-                names.append(segment)
-        return names
-
-    def wire_type(self, raw: _Raw) -> WireType | None:
-        """Apply the representation rules to a field, before units and type fixes.
-
-        Args:
-            raw: The flattened field.
-
-        Returns:
-            The field's type, or `None` (with a problem) for a schema with no usable type.
-        """
-        if raw.schema.get("type") == "array":
-            items = self.spec.schema(raw.schema.get("items", {}), f"{self.path} {raw.wire_key}")
-            return WireType.INT_ARRAY if items.get("type") == "integer" else WireType.JSON_TEXT
-        found = _field_type(raw.schema, raw.wire_key.rsplit(".", 1)[-1])
-        if found is None:
-            self.problem(
-                Gate.SHAPE, raw.wire_key, f"unsupported field type {raw.schema.get('type')!r}"
-            )
-        return found
-
-    def field(self, raw: _Raw) -> Field | None:
-        """Name and type one flattened field, checking its name, unit, and type fix.
-
-        Args:
-            raw: The flattened field.
-
-        Returns:
-            The generated field, or `None` when its type cannot be decided.
-        """
-        long_names = self.long_names(raw)
-        spec_type = self.wire_type(raw)
-        if spec_type is None:
-            return None
-        description = text(raw.schema, "description")
-        self.declared_types[raw.wire_key] = spec_type
-        if "example" in raw.schema:
-            self.field_examples[raw.wire_key] = raw.schema["example"]
-        entry = self.hand.type_fixes.get((self.path, raw.wire_key))
-        fix = entry.conversion if entry is not None else None
-        if fix is not None and spec_type not in fix.declarations:
-            self.problem(
-                Gate.STALE_ENTRY,
-                raw.wire_key,
-                f"TYPE_FIXES expects a vendor type in {sorted(fix.declarations)}, but the "
-                f"specification now gives {spec_type}",
-                description=description,
-            )
-            fix = None
-        # A fix to an epoch is an integer count whose unit comes from UNITS, like any other.
-        to_epoch = fix is not None and fix.wire_type is WireType.EPOCH
-        unit = self.unit(
-            raw,
-            WireType.LONG if to_epoch else spec_type,
-            long_name=long_names[-1],
-            description=description,
-            fixed=fix is not None,
-        )
-        if to_epoch and unit is None:
-            self.problem(
-                Gate.TIMESTAMP_UNIT,
-                raw.wire_key,
-                "TYPE_FIXES makes it an epoch, but no UNITS entry gives its unit",
-                description=description,
-            )
-            return None
-        if unit is not None and fix is not None and not to_epoch:
-            self.problem(
-                Gate.STALE_ENTRY,
-                raw.wire_key,
-                f"UNITS gives a unit to a field TYPE_FIXES converts to {fix.wire_type}",
-                description=description,
-            )
-            return None
-        if unit is not None:
-            wire_type = WireType.EPOCH
-        else:
-            wire_type = fix.wire_type if fix is not None else spec_type
-        column = naming.column_name(long_names)
-        self.concepts[column] = ".".join(naming.snake(name) for name in long_names)
-        return Field(
-            wire_key=raw.wire_key,
-            column=column,
-            wire_type=wire_type,
-            unit=unit,
-            required=raw.required,
-            conversion=fix,
-            description=plain_text(description, origin=self.origin),
-        )
-
-    def unit(
-        self,
-        raw: _Raw,
-        wire_type: WireType,
-        *,
-        long_name: str,
-        description: str,
-        fixed: bool,
-    ) -> WireUnit | None:
-        """Decide a field's unit from `UNITS`, checking the timestamp unit and the unit tag.
-
-        A field is timestamp-like when the specification tags it with a unit, or its long name
-        is (`naming.is_timestamp_like`). A timestamp-like `long` or `double` needs a `UNITS`
-        entry, and so does timestamp-like text with no `format`, unless a `TYPE_FIXES` entry
-        types it: nothing timestamp-like is left to a default.
-
-        Args:
-            raw: The flattened field.
-            wire_type: Its type by the representation rules.
-            long_name: The long name of its last segment.
-            description: The vendor's description.
-            fixed: Whether a `TYPE_FIXES` entry names the field.
-
-        Returns:
-            The unit of an epoch, or `None` for any other field.
-        """
-        key = (self.path, raw.wire_key)
-        entry = self.hand.units.get(key)
-        tag = raw.schema.get("x-polygon-go-type")
-        tag_name = tag.get("name") if isinstance(tag, dict) else None
-        tag_unit = _TAG_UNITS.get(tag_name) if isinstance(tag_name, str) else None
-        timestamp_like = tag_unit is not None or naming.is_timestamp_like(long_name)
-        untyped_text = wire_type is WireType.STRING and "format" not in raw.schema
-        gated = wire_type in {WireType.LONG, WireType.DOUBLE} or (untyped_text and not fixed)
-        if entry is None:
-            if timestamp_like and gated:
-                self.problem(
-                    Gate.TIMESTAMP_UNIT,
-                    raw.wire_key,
-                    f"timestamp-like {wire_type} (tag {tag_name}) has no UNITS entry"
-                    + (" or TYPE_FIXES entry" if untyped_text else ""),
-                    description=description,
-                )
-            return None
-        if entry.unit is not None and wire_type is not WireType.LONG:
-            self.problem(
-                Gate.STALE_ENTRY,
-                raw.wire_key,
-                f"UNITS gives a unit to a {wire_type} field; only an integer is an epoch",
-                description=description,
-            )
-            return None
-        if wire_type not in {WireType.LONG, WireType.DOUBLE, WireType.STRING}:
-            self.problem(
-                Gate.STALE_ENTRY,
-                raw.wire_key,
-                f"UNITS names a {wire_type} field",
-                description=description,
-            )
-            return None
-        conflict = entry.unit is not None and tag_unit is not None and entry.unit is not tag_unit
-        if conflict and key not in self.hand.tag_conflicts:
-            self.problem(
-                Gate.UNITS,
-                raw.wire_key,
-                f"UNITS says {entry.unit} but the specification tags {tag_name}; add a "
-                "TAG_CONFLICTS entry with the reason the tag is wrong",
-                description=description,
-            )
-        if not conflict and key in self.hand.tag_conflicts:
-            self.problem(
-                Gate.STALE_ENTRY, raw.wire_key, "TAG_CONFLICTS entry, but UNITS agrees with the tag"
-            )
-        return entry.unit
-
-    def check_columns(self, fields: Sequence[Field]) -> None:
-        """Report two fields with one column.
-
-        Args:
-            fields: The path's generated fields.
-        """
-        seen: dict[str, str] = {}
-        for item in fields:
-            if item.column in seen:
-                self.problem(
-                    Gate.COLUMN_COLLISION,
-                    item.wire_key,
-                    f"column {item.column!r} is also the column of {seen[item.column]!r}",
-                )
-            else:
-                seen[item.column] = item.wire_key
 
     def parameters(self, operation: JsonObject) -> list[Param]:
         """Generate the path's parameters, checking the unit of timestamp-like strings.
@@ -796,91 +426,6 @@ class _PathGenerator:
         if entry.unit is None:
             return ParamKind.DATE, (), None
         return ParamKind.TIMESTAMP, (), entry.unit
-
-
-def _json_text(value: Json) -> str:
-    """Return a documented value as canonical JSON text, for comparing samples exactly.
-
-    Args:
-        value: A JSON value.
-
-    Returns:
-        Its JSON text, object keys sorted.
-    """
-    return json.dumps(value, sort_keys=True)
-
-
-def _converts(wire_type: WireType, value: Json) -> bool:
-    """Return whether the plain converter of a type accepts a value.
-
-    Args:
-        wire_type: The type.
-        value: A documented example value, not `None`.
-
-    Returns:
-        True when `spec.convert.convert` accepts it.
-    """
-    try:
-        convert(wire_type, value)
-    except UnconvertibleError:
-        return False
-    return True
-
-
-def _converts_field(item: Field, value: Json) -> bool:
-    """Return whether a field, with its conversion if it has one, accepts a value.
-
-    Args:
-        item: The generated field.
-        value: A documented example value, not `None`.
-
-    Returns:
-        True when `spec.convert.convert_field` accepts it.
-    """
-    try:
-        convert_field(item, value)
-    except UnconvertibleError:
-        return False
-    return True
-
-
-def _example_value(row: Json, wire_key: str) -> Json:
-    """Return the value at a dotted wire key of an example row.
-
-    Args:
-        row: One row of the specification's example.
-        wire_key: The field's dotted wire key (`day.c`).
-
-    Returns:
-        The value, or `None` when the row, or an object on the way, lacks it.
-    """
-    for part in wire_key.split("."):
-        row = row.get(part) if isinstance(row, dict) else None
-    return row
-
-
-def _field_type(schema: JsonObject, last: str) -> WireType | None:
-    """Apply the representation rules to a field that is not an array.
-
-    Args:
-        schema: The field's resolved schema.
-        last: The last segment of its wire key, as the vendor spells it.
-
-    Returns:
-        The field's type, or `None` for a schema type the rules do not cover.
-    """
-    kind = schema.get("type")
-    form = schema.get("format")
-    if "oneOf" in schema or "anyOf" in schema or kind == "object":
-        return WireType.JSON_TEXT
-    if kind == "string":
-        if form == "date-time" or (form is None and last.endswith("_utc")):
-            return WireType.ISO_INSTANT
-        dated = form == "date" or last == "date" or last.endswith("_date")
-        return WireType.DATE if dated else WireType.STRING
-    if kind == "number" and form == "integer":
-        return WireType.LONG
-    return _SCALAR_TYPES.get(kind) if isinstance(kind, str) else None
 
 
 def _parameter_rule(name: str, base: str, schema: JsonObject) -> tuple[ParamKind, tuple[str, ...]]:
@@ -997,7 +542,10 @@ def _check_extensions(spec: OpenApi, paths: JsonObject) -> Iterator[Problem]:
 def generate_rest(
     snapshot: Snapshot, hand: HandInput | None = None
 ) -> tuple[tuple[RestPath, ...], Coverage]:
-    """Generate every REST source of the snapshot and check every gate.
+    """Generate every REST source of the snapshot and check the gates met per path.
+
+    The checks that span sources (stale hand entries, the dataset kinds) run afterwards, over
+    every transport, in `generate`; `Coverage.uses` carries what they need.
 
     Args:
         snapshot: The vendored sources.
@@ -1055,9 +603,6 @@ def generate_rest(
                     "undocumented",
                 )
             )
-    problems += gates.stale_entries(hand, uses)
-    problems += gates.unneeded_type_fixes(hand, uses)
-    problems += gates.concept_collisions(hand, uses)
     if problems:
         raise RefreshError(problems)
     coverage = Coverage(
@@ -1067,5 +612,6 @@ def generate_rest(
         deprecated=frozenset(p for p, s in statuses.items() if s == "deprecated"),
         draft=frozenset(p for p, s in statuses.items() if s == "draft"),
         pages=pages,
+        uses=uses,
     )
     return tuple(generated), coverage
