@@ -209,6 +209,19 @@ def test_a_dataset_takes_its_overview_prefix_and_its_example_header_s_order() ->
     assert coverage.pages == {"us_stocks_sip/trades_v1": ("stocks/trades.md",)}
 
 
+def test_the_table_and_the_header_match_whatever_their_case() -> None:
+    # The table's spelling is the wire key, however the header capitalizes it, and the reverse.
+    columns = [("Ticker", "string", "The symbol."), ("price", "number", "The price.")]
+    snapshot = _snapshot(
+        {
+            "stocks/overview.md": _overview(("stocks/trades.md", "us_stocks_sip/trades_v1")),
+            "stocks/trades.md": _dataset(columns, header=["ticker", "PRICE"]),
+        }
+    )
+    (trades,), _ = generate_flat_files(snapshot, _EMPTY)
+    assert [f.wire_key for f in trades.fields] == ["Ticker", "price"]
+
+
 def test_a_documented_timestamp_takes_its_units_entry() -> None:
     columns = [("ticker", "string", "The symbol."), ("start", "timestamp - integer", "The start.")]
     snapshot = _snapshot(
@@ -378,6 +391,21 @@ def test_gate_shape_a_column_type_the_pages_do_not_use() -> None:
         "stocks/trades.md": _dataset([*_TRADES, ("flag", "boolean", "A flag.")]),
     }
     assert _problems(_snapshot(pages)) == [("shape", "us_stocks_sip/trades_v1", "flag")]
+
+
+def test_gate_docs_two_overview_rows_naming_one_prefix() -> None:
+    pages = {
+        "stocks/overview.md": _overview(
+            ("stocks/trades.md", "us_stocks_sip/trades_v1"),
+            ("stocks/trades.md", "us_stocks_sip/trades_v1"),  # the same row twice is harmless
+            ("stocks/other.md", "us_stocks_sip/trades_v1"),
+        ),
+        "stocks/trades.md": _dataset(_TRADES),
+        "stocks/other.md": _dataset(_TRADES),
+    }
+    assert _problems(_snapshot(pages)) == [
+        ("docs", "us_stocks_sip/trades_v1", "stocks/overview.md")
+    ]
 
 
 def test_gate_docs_an_overview_row_naming_a_page_outside_the_snapshot() -> None:

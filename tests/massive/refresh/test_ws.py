@@ -315,15 +315,18 @@ def test_gate_shape_an_unknown_vendor_extension() -> None:
         {"/stocks/T": _channel({"price": _PRICE}, operation_extra={"x-polygon-new": True})}
     )
     assert _problems(snapshot) == [("shape", "/stocks/T", "x-polygon-new")]
+    item = {**_channel({"price": _PRICE}), "x-polygon-draft": True, "summary": "Trades"}
+    assert _problems(_snapshot({"/stocks/T": item})) == [("shape", "/stocks/T", "x-polygon-draft")]
 
 
 @pytest.mark.parametrize(
     "item",
     [
+        {},
         {"get": {"responses": {}}},
         {"get": {"responses": {"200": {"content": {"text/plain": {}}}}}},
     ],
-    ids=["no response", "no JSON"],
+    ids=["no operation", "no response", "no JSON"],
 )
 def test_gate_shape_a_channel_without_a_message_schema(item: dict[str, object]) -> None:
     assert _problems(_snapshot({"/stocks/T": item})) == [("shape", "stocks/T", "")]

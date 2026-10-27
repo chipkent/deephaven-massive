@@ -267,6 +267,20 @@ def test_file_browser_litter_is_ignored_but_any_other_stray_file_is_not(tmp_path
     ]
 
 
+def test_gate_docs_an_index_without_an_area_s_links(tmp_path: Path) -> None:
+    llms = _INDEX.replace("## Flat Files", "## Elsewhere")
+    _write_snapshot(tmp_path / "s", llms=llms, pages={"stocks/trades.md": "page"})
+    (tmp_path / "s" / "flat-files" / "stocks" / "trades.md").unlink()
+    manifest = json.loads((tmp_path / "s" / "manifest.json").read_text(encoding="utf-8"))
+    del manifest["files"]["flat-files/stocks/trades.md"]
+    _edit_manifest(tmp_path / "s", {"files": manifest["files"]})
+    with pytest.raises(RefreshError) as caught:
+        Snapshot.load(tmp_path / "s")
+    assert [(p.gate, p.key, p.message) for p in caught.value.problems] == [
+        ("docs", "llms.txt", "the documentation index has no 'Flat Files' links")
+    ]
+
+
 def test_gate_docs_a_linked_page_missing_from_the_snapshot(tmp_path: Path) -> None:
     llms = _INDEX + "- [Quotes](https://massive.com/docs/flat-files/stocks/quotes.md): Quotes\n"
     _write_snapshot(tmp_path / "s", llms=llms, pages={})

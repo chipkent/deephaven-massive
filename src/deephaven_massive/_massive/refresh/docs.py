@@ -317,10 +317,12 @@ def columns(page: str) -> list[DocColumn]:
         One `DocColumn` per row; empty for a page with no "Columns" heading.
 
     Raises:
-        DocsError: If a row of the table is not a column row (`` | `name` | type | text | ``).
+        DocsError: If the table's second line is not a header separator, or a row of the table
+            is not a column row (`` | `name` | type | text | ``).
     """
+    table = _table(page, "Columns")
     found: list[DocColumn] = []
-    for line in _table(page, "Columns")[_HEADER_LINES:]:
+    for line in _rows(table, "Columns") if table else []:
         row = _COLUMN_ROW.match(line)
         if row is None:
             raise DocsError(f"unreadable Columns row: {line[:120]!r}")
@@ -334,20 +336,35 @@ def example_header(page: str) -> list[str]:
     """Return the header row of a flat-file dataset page's "Example Data" table.
 
     The sample rows themselves are not read: only the header, which lists the columns in the
-    order the vendor's files carry them (the "Columns" table above it is alphabetical).
+    order the vendor's files carry them (the "Columns" table above it is alphabetical). A
+    `DocsError` propagates when the table's second line is not a header separator.
 
     Args:
         page: The Markdown text of a flat-file page.
 
     Returns:
         The header cells, stripped, in order; empty for a page with no "Example Data" table.
-
-    Raises:
-        DocsError: If the table's second line is not a header separator.
     """
     table = _table(page, "Example Data")
     if not table:
         return []
-    if len(table) < _HEADER_LINES or not _SEPARATOR.match(table[1]):
-        raise DocsError(f"unreadable Example Data header: {table[0][:120]!r}")
+    _rows(table, "Example Data")
     return [cell.strip() for cell in table[0].strip().strip("|").split("|")]
+
+
+def _rows(table: list[str], heading: str) -> list[str]:
+    """Return a table's rows below its header, checking the header's separator line.
+
+    Args:
+        table: The table's lines, header first (`_table`); not empty.
+        heading: The heading the table sits under, for the message.
+
+    Returns:
+        The lines after the header and its separator.
+
+    Raises:
+        DocsError: If the second line is not a header separator.
+    """
+    if len(table) < _HEADER_LINES or not _SEPARATOR.match(table[1]):
+        raise DocsError(f"unreadable {heading} header: {table[0][:120]!r}")
+    return table[_HEADER_LINES:]

@@ -118,6 +118,17 @@ def test_a_projected_member_contributes_its_projection_under_the_kind_s_names() 
     assert _found(problems) == [("stale-entry", "/v3/trades", "gone")]
 
 
+def test_gate_column_collision_a_projection_giving_two_keys_one_column() -> None:
+    projection = overrides.Projection(fields={"price": "value", "size": "value"}, reason="t")
+    hand = dataclasses.replace(
+        _EMPTY,
+        kinds={"values": {"stocks": ["/v3/trades"]}},
+        projections={("values", "/v3/trades"): projection},
+    )
+    _, problems = kinds.members(hand, _SOURCES)
+    assert _found(problems) == [("column-collision", "/v3/trades", "size")]
+
+
 def test_gate_stale_entry_kinds_and_projections_naming_nothing() -> None:
     projection = overrides.Projection(fields={"price": "price"}, reason="t")
     hand = dataclasses.replace(
@@ -286,6 +297,17 @@ def test_a_projected_member_is_neither_ordered_nor_an_order_reference() -> None:
     orders, problems = kinds.column_orders(_members(hand))
     assert "/v3/trades" not in orders
     assert problems == []
+    # A projected stream is no order reference: it contributes only some fields, renamed.
+    hand = dataclasses.replace(
+        _EMPTY,
+        kinds={"trades": {"stocks": ["/v3/trades", "stocks/T"]}},
+        projections={
+            ("trades", "stocks/T"): overrides.Projection(fields={"p": "price"}, reason="t")
+        },
+    )
+    orders, problems = kinds.column_orders(_members(hand, _SOURCES))
+    assert orders == {}
+    assert [(p.gate, p.source) for p in problems] == [("column-order", "/v3/trades")]
 
 
 def test_apply_writes_memberships_and_the_order_and_keeps_the_type() -> None:

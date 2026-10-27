@@ -233,6 +233,13 @@ def test_an_unreadable_columns_row_is_rejected() -> None:
         docs.columns(page)
 
 
+def test_a_columns_table_without_a_separator_is_rejected() -> None:
+    # Read as a header, its first column row would be lost without a word.
+    page = _DATASET.replace("|--------|------|-------------|\n", "")
+    with pytest.raises(docs.DocsError, match="unreadable Columns header"):
+        docs.columns(page)
+
+
 def test_example_header_reads_the_files_column_order() -> None:
     assert docs.example_header(_DATASET) == ["Ticker", "window_start", "close", "empty"]
 

@@ -339,20 +339,23 @@ def _pages(
 ) -> dict[str, str]:
     """Read the pages of one documentation area that the index links.
 
-    A `docs.DocsError` from reading the index (no link in the area, or a malformed one)
-    propagates.
-
     Args:
         directory: The snapshot directory.
         llms: The text of the documentation index.
         area: The documentation area.
-        problems: Where a page the index links but the snapshot lacks is reported (`docs`).
+        problems: Where an index with no link in the area, or a malformed one, and a page the
+            index links but the snapshot lacks are reported (`docs`).
 
     Returns:
         Each page that is present, by its name below the area's directory, as text.
     """
     pages: dict[str, str] = {}
-    for url in docs.page_urls(llms, area):
+    try:
+        urls = docs.page_urls(llms, area)
+    except docs.DocsError as error:
+        problems.append(Problem(gate=Gate.DOCS, source="", key=LLMS, message=str(error)))
+        return pages
+    for url in urls:
         stored = page_file(url, area)
         name = stored.removeprefix(f"{AREA_DIRECTORIES[area]}/")
         path = directory / stored

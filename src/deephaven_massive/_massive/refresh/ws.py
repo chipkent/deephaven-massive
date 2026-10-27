@@ -186,7 +186,9 @@ def _deprecated(item: JsonObject) -> bool:
 
 
 def _check_extensions(spec: OpenApi, paths: JsonObject) -> Iterator[Problem]:
-    """Report the vendor extensions on a channel's operation that the refresh does not know.
+    """Report the vendor extensions on a channel or its operation that the refresh does not know.
+
+    A channel's path item carries none; its operation carries only `_OPERATION_EXTENSIONS`.
 
     Args:
         spec: The specification.
@@ -196,11 +198,16 @@ def _check_extensions(spec: OpenApi, paths: JsonObject) -> Iterator[Problem]:
         One `shape` problem per unknown `x-polygon-*` key.
     """
     for path, node in paths.items():
-        operation = spec.deref(node, path).get("get")
-        found = set(operation) if isinstance(operation, dict) else set()
-        for key in sorted(
-            k for k in found - _OPERATION_EXTENSIONS.keys() if k.startswith("x-polygon-")
-        ):
+        item = spec.deref(node, path)
+        operation = item.get("get")
+        found = {k for k in item if k.startswith("x-polygon-")}
+        if isinstance(operation, dict):
+            found |= {
+                k
+                for k in operation
+                if k.startswith("x-polygon-") and k not in _OPERATION_EXTENSIONS
+            }
+        for key in sorted(found):
             yield Problem(gate=Gate.SHAPE, source=path, key=key, message="unknown vendor extension")
 
 

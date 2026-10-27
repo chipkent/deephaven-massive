@@ -167,8 +167,8 @@ def _documented_prefixes(
     Args:
         snapshot: The snapshot.
         venues: The venue names.
-        problems: Where an overview row naming a page outside the snapshot is reported
-            (`docs`).
+        problems: Where an overview row naming a page outside the snapshot, or a prefix
+            another row names with another page, is reported (`docs`).
 
     Returns:
         Prefix or template to `{venue or "": page name}`, in overview order.
@@ -194,7 +194,19 @@ def _documented_prefixes(
                 )
                 continue
             template, venue = venue_template(prefix, venues)
-            prefixes.setdefault(template, {})[venue or ""] = target
+            pages = prefixes.setdefault(template, {})
+            if pages.get(venue or "", target) != target:
+                problems.append(
+                    Problem(
+                        gate=Gate.DOCS,
+                        source=prefix,
+                        key=name,
+                        message=f"two overview rows name this prefix: {pages[venue or '']} and "
+                        f"{target}",
+                    )
+                )
+                continue
+            pages[venue or ""] = target
     return prefixes
 
 

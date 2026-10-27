@@ -1367,6 +1367,27 @@ def test_gate_docs_a_page_that_is_not_an_overview_names_no_endpoint() -> None:
     assert _problems(snapshot) == [("docs", "", "stocks/trades.md")]
 
 
+# The concept-collision gate, through the whole refresh: one concept, one column, in a kind.
+
+
+def test_gate_concept_collision_one_column_for_two_concepts_within_a_kind() -> None:
+    # Two nested paths that PascalCase alike are two concepts. (A kind of REST paths alone
+    # has no flat-file or WebSocket order either, which `column-order` reports too.)
+    lexicons = {"trade": lexicon.Lexicon(name="trade", reason="t", entries=_names(p="price"))}
+    snapshot = _snapshot(
+        {
+            "/a/{id}": _item(_row(lastTrade=_row(p={"type": "number"}))),
+            "/b/{id}": _item(_row(last_trade=_row(price={"type": "number"}))),
+            "/c/{id}": _item(_row(last=_row(trade_price={"type": "number"}))),
+        }
+    )
+    hand = _hand(lexicons=lexicons, shapes={("/a/{id}", "lastTrade"): "trade"})
+    same = dataclasses.replace(hand, kinds={"trades": {"stocks": ["/a/{id}", "/b/{id}"]}})
+    assert {gate for gate, _, _ in _problems(snapshot, same)} == {"column-order"}
+    clash = dataclasses.replace(hand, kinds={"trades": {"stocks": ["/a/{id}", "/c/{id}"]}})
+    assert ("concept-collision", "", "LastTradePrice") in _problems(snapshot, clash)
+
+
 # Problems are never lost.
 
 

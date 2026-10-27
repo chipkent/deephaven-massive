@@ -54,8 +54,9 @@ class Gate(StrEnum):
     """A short wire key (three characters or fewer, no underscore) with no lexicon, identity,
     or `NAMES` entry: a column name would be guessed."""
     COLUMN_COLLISION = "column-collision"
-    """Two fields of one path that give one column, or a `NAMES` entry that coins a dataset key
-    column (`Symbol`, `Timestamp`, `Underlying`), which only the dataset key rename makes."""
+    """Two fields of one source that give one column, two keys a projection gives one column,
+    or a `NAMES` entry that coins a dataset key column (`Symbol`, `Timestamp`, `Underlying`),
+    which only the dataset key rename makes."""
     TIMESTAMP_UNIT = "timestamp-unit"
     """A timestamp-like field left to a default: a `long` or `double` with no `UNITS` entry, or
     text with no `format` and neither a `UNITS` nor a `TYPE_FIXES` entry; or a timestamp-like

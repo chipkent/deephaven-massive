@@ -162,7 +162,8 @@ def _projection(
         hand: The hand input.
         kind: The kind.
         source: The generated source.
-        problems: Where a projected wire key the source lacks is reported (`stale-entry`).
+        problems: Where a projected wire key the source lacks is reported (`stale-entry`), and
+            two projected keys that take one column (`column-collision`).
 
     Returns:
         The projection, its long names through the naming rule; `None` when `PROJECTIONS`
@@ -181,7 +182,21 @@ def _projection(
         )
         for wire_key in sorted(set(entry.fields) - wire_keys)
     )
-    return {k: naming.column_name([v]) for k, v in entry.fields.items() if k in wire_keys}
+    projection = {k: naming.column_name([v]) for k, v in entry.fields.items() if k in wire_keys}
+    taken: dict[str, str] = {}
+    for wire_key, column in projection.items():
+        if column in taken:
+            problems.append(
+                Problem(
+                    gate=Gate.COLUMN_COLLISION,
+                    source=source.key,
+                    key=wire_key,
+                    message=f"PROJECTIONS of kind {kind!r} gives it the column {column!r} of "
+                    f"{taken[column]!r}",
+                )
+            )
+        taken.setdefault(column, wire_key)
+    return projection
 
 
 def join(first: WireType, second: WireType) -> WireType | None:
@@ -324,7 +339,12 @@ def column_orders(found: Sequence[Member]) -> tuple[dict[str, tuple[str, ...]], 
     orders: dict[str, tuple[str, ...]] = {}
     problems: list[Problem] = []
     for (kind, group), grouped in groups.items():
-        ordered = [m for t in _ORDER_TRANSPORTS for m in grouped if m.source.transport is t]
+        ordered = [
+            m
+            for t in _ORDER_TRANSPORTS
+            for m in grouped
+            if m.source.transport is t and m.projection is None
+        ]
         if not ordered:
             problems += [
                 Problem(
@@ -339,7 +359,7 @@ def column_orders(found: Sequence[Member]) -> tuple[dict[str, tuple[str, ...]], 
             ]
             continue
         rank: dict[str, int] = {}
-        for member in [*ordered, *(m for m in grouped if m not in ordered)]:
+        for member in [*ordered, *(m for m in grouped if all(m is not o for o in ordered))]:
             for column, _ in member.columns():
                 rank.setdefault(column, len(rank))
         for member in grouped:
