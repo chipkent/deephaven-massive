@@ -2278,7 +2278,7 @@ names a source or field the snapshot lacks fails the refresh as stale (G4).
 
 | Kind | Where | What | Example |
 |---|---|---|---|
-| Lexicon | `lexicon.py` | `SHAPES` maps each object shape (aggregate row; snapshot `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`; each WebSocket channel; each futures object) to its lexicon. A lexicon translates a short key to the long name Massive uses for the same field elsewhere in that asset class's REST or flat-file data, and **every entry cites that endpoint or file**; identity entries cover short real words (`id`, `cik`, `url`, `low`, `fmv`, `mic`). | trade lexicon `p` → `price`, `t` → `sip_timestamp` (`/v3/trades/{stockTicker}`); crypto trade `t` → `participant_timestamp` (`/v3/trades/{cryptoTicker}`); forex quote `a` → `ask_price` (`/v3/quotes/{fxTicker}`); segment `min` → `minute` |
+| Lexicon | `lexicon.py` | `SHAPES` maps each object shape (aggregate row; snapshot `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`; each WebSocket channel; each futures object) to its lexicon. A lexicon translates a short key to the long name Massive uses for the same field elsewhere in that asset class's REST or flat-file data, and **every entry cites that endpoint or file**; identity entries cover short real words (`id`, `cik`, `url`, `low`, `fmv`, `mic`). | trade lexicon `p` → `price`, `t` → `sip_timestamp` (`/v3/trades/{stockTicker}`); crypto trade `t` → `participant_timestamp` (`/v3/trades/{cryptoTicker}`); forex quote `a` → `ask_price` (`/v3/quotes/{fxTicker}`); segment `min` → `last_minute` (`/v3/snapshot`) |
 | `NAMES` | `overrides.py` | `{(source, wire key): (long name, description)}` only for a short key Massive gives no long name anywhere: the name is derived from Massive's own description of the field, which the entry quotes exactly; a changed description makes the entry stale (G4). `NAMES` never renames something the vendor already names, and never coins a dataset key column. | snapshot `min.av` → `accumulated_volume` ("The accumulated volume."), `min.dav` → `accumulated_decimal_volume`; WebSocket `av`, `dav`, `op` |
 | `KINDS` | `overrides.py` | `{kind: {group: [sources]}}`: the sources of one dataset kind, grouped per asset class, in source order. Every dataset with a stream or flat-file source has a kind, WebSocket-only `luld`, `imbalances`, and `fmv` included. | `trades: {stocks: [/v3/trades/{stockTicker}, /v2/last/trade/{stocksTicker}, (stocks, T), us_stocks_sip/trades_v1], crypto: […]}` |
 | `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values, `last_updated` → `timestamp` |
@@ -2303,12 +2303,12 @@ per-column exceptions:
    crypto trade `t` is `ParticipantTimestamp`, forex quote `a`/`b` are `AskPrice`/`BidPrice`.
 3. **No long name anywhere** (rare: snapshot and WebSocket `av`, `dav`, `op`): the name is
    derived from Massive's own description of the field and recorded in `NAMES` with the
-   description quoted. `NAMES` holds only these entries. The snapshot's `min` object, which
-   Massive names nowhere, is the one such case in a lexicon (`min` → `minute`, from "The most
-   recent minute bar for this ticker.").
+   description quoted. `NAMES` holds only these entries, and an entry names only the key's own
+   segment; its parents are named by rules 1 and 2.
 4. **Nested objects.** A child column is the parent's name followed by the child's, with no
-   exceptions: `day.o` → `DayOpen`, `min.av` → `MinuteAccumulatedVolume`, `lastQuote.P` →
-   `LastQuoteAskPrice`.
+   exceptions: `day.o` → `DayOpen`, `min.av` → `LastMinuteAccumulatedVolume` (the v2
+   snapshot's `min` is the object `/v3/snapshot` and the futures snapshot call `last_minute`),
+   `lastQuote.P` → `LastQuoteAskPrice`.
 5. **Dataset keys.** The only renames on top of rules 1–4 are each dataset's declared key
    columns, `Symbol`, `Timestamp`, and `Underlying`, made by the run-time key rename. A vendor
    field literally named `symbol` (the open-close and conversion paths) is generated as
@@ -2323,8 +2323,8 @@ per-column exceptions:
    vendor's order (the stocks aggregate files: `ticker, volume, open, close, high, low,
    window_start, transactions`); the WebSocket and flat-file generators apply it. The snapshot stores every document in the order served, never re-sorted. The
    dataset's key columns come first at run time.
-7. **Consistency.** Within one dataset kind, one concept in two columns, or one column for two
-   concepts, fails the refresh (gate G8).
+7. **Consistency.** Within one dataset kind, one column for two concepts fails the refresh
+   (gate G8); one concept always gets one column, by rules 1–4.
 
 Names are never derived from descriptions except under rule 3, and the generator emits
 `Timestamp` only where the vendor's long name is `timestamp`.
@@ -2360,8 +2360,13 @@ reviewer, on:
   transports, every column appears on at least two transports or is in `TRANSPORT_ONLY`,
   which catches a one-sided lexicon slip (`s` becoming `Shares` while REST says `size`);
 - **G7:** a futures kind whose venue pages differ;
-- **G8 (one concept, one column):** within one kind, a concept (the snake case of a field's
-  last long name) appearing under two column names, or one column name holding two concepts.
+- **G8 (one concept, one column):** within one kind, one column name holding two concepts. A
+  concept is a field's full long-name path, each segment in snake case, so `DayClose` and
+  `PrevDayClose` are two concepts, while the v2 snapshot's `lastTrade.p` and the unified
+  snapshot's `last_trade.price` are one; two paths that PascalCase alike (`last.trade_price`,
+  `last_trade.price`) fail. The reverse, one concept under two column names, cannot arise
+  while every column is its concept's PascalCase; `PROJECTIONS`, which rename a member's
+  fields, add that check.
 
 The REST refresh also stops on: a vendor file whose SHA-256 differs from the manifest's, or a
 snapshot whose files differ from the manifest's list (`snapshot`); a documented endpoint the
@@ -2865,7 +2870,8 @@ document already reflects them.
     wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The final names:
     `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
     aggregate `z` → `AverageTradeSize`, `dav` → `AccumulatedDecimalVolume`, stocks `dv` →
-    `DecimalVolume`, futures `dv` → `DollarVolume`, and the snapshot object `min` → `Minute…`.
+    `DecimalVolume`, futures `dv` → `DollarVolume`, and the snapshot object `min` → `LastMinute…`.
+    The naming policy of section 19.4 (owner decision, 2026-10-27) governs every name.
 23. **Spec drift is reported, not gated** (2026-10-26). A weekly workflow runs
     `python -m deephaven_massive._massive.refresh --check` and keeps one standing "Massive API
     drift" issue, creating its label when missing; with no drift it does nothing, and it never

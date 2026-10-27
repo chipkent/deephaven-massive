@@ -241,3 +241,9 @@ def test_parse_rejects_a_projection_that_is_not_of_strings() -> None:
     entry = {"key": "stocks/T", "fields": [], "memberships": [membership]}
     with pytest.raises(TypeError, match="not an object of strings"):
         spec.parse(Transport.WS, _file(entry))
+
+
+def test_parse_rejects_a_declared_conversion_the_decoder_lacks() -> None:
+    field = {**_FIELD, "type": "string", "declared_type": "bool"}
+    with pytest.raises(ValueError, match="no declared conversion from bool to string"):
+        spec.parse(Transport.WS, _file({"key": "s", "fields": [field], "memberships": []}))

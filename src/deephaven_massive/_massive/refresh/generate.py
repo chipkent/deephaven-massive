@@ -65,8 +65,8 @@ is shown to help a person choose a name; it never chooses one):
 - **G4:** a stale hand entry: a lexicon shape, identity, `NAMES`, `UNITS`, tag-conflict,
   `TYPE_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry naming a path, field, or
   parameter the snapshot no longer generates, or claiming what the snapshot contradicts;
-- **G8:** within one of `overrides.KINDS`, one concept (the snake case of a field's last long
-  name) in two columns, or one column holding two concepts;
+- **G8:** within one of `overrides.KINDS`, one column holding two concepts (a concept is a
+  field's full long-name path, in snake case);
 - **snapshot:** a vendor file whose SHA-256 differs from the manifest's, or a file set that
   differs from the manifest's;
 - **units:** a `UNITS` unit that differs from the specification's `x-polygon-go-type` tag
@@ -263,7 +263,7 @@ class HandInput:
             "not an epoch".
         exclusions: The excluded vendor items.
         kinds: Kind to asset-class group to the sources of that group, the dataset kinds
-            within which gate G8 requires one column per concept.
+            within which gate G8 requires one concept per column.
     """
 
     lexicons: Mapping[str, lexicon.Lexicon] = field(default_factory=lambda: lexicon.LEXICONS)
@@ -894,7 +894,7 @@ class _PathGenerator:
         elif fix is not None:
             declared, wire_type = wire_type, fix.wire_type
         column = column_name(long_names)
-        self.concepts[column] = _snake(long_names[-1])
+        self.concepts[column] = ".".join(_snake(name) for name in long_names)
         return Field(
             wire_key=raw.wire_key,
             column=column,
@@ -1237,36 +1237,31 @@ def _check_extensions(spec: _Spec, paths: JsonObject) -> Iterator[Problem]:
 
 
 def _check_kinds(hand: HandInput, generators: Mapping[str, _PathGenerator]) -> Iterator[Problem]:
-    """Require one column per concept, and one concept per column, within each kind (G8).
+    """Require one concept per column within each kind (G8).
 
-    A field's concept is the snake case of its last segment's long name (`sip_timestamp`,
-    `ask_price`). Within the sources of one dataset kind, which merge into one table, one
-    concept must always give the same column, and one column must always hold the same
-    concept; otherwise one quantity would land in two columns, or two in one.
+    A field's concept is its full long-name path, each segment in snake case (`day.close`,
+    `last_trade.sip_timestamp`), so a snapshot's `DayClose`, `LastMinuteClose`, and
+    `PrevDayClose` are three concepts, and the v2 snapshot's `lastTrade.p` and the unified
+    snapshot's `last_trade.price` are one. Within the sources of one dataset kind, which merge
+    into one table, a column must always hold the same concept, or two quantities would land
+    in one column: two paths can read alike once PascalCased (`last.trade_price` and
+    `last_trade.price` both give `LastTradePrice`). The reverse, one concept in two columns,
+    cannot happen while a column is the PascalCase of its concept; the projections that rename
+    a kind member's fields extend the gate to it.
 
     Args:
         hand: The hand input, whose `kinds` lists each kind's sources.
         generators: The generator of each generated path, after it ran.
 
     Yields:
-        One G8 problem per concept with two columns and per column with two concepts.
+        One G8 problem per column that holds two concepts within a kind.
     """
     for kind, groups in sorted(hand.kinds.items()):
-        columns: dict[str, set[str]] = {}
         concepts: dict[str, set[str]] = {}
         for source in (s for group in groups.values() for s in group):
             generator = generators.get(source)
             for column, concept in (generator.concepts if generator else {}).items():
-                columns.setdefault(concept, set()).add(column)
                 concepts.setdefault(column, set()).add(concept)
-        for concept, names in sorted(columns.items()):
-            if len(names) > 1:
-                yield Problem(
-                    gate="G8",
-                    source="",
-                    key=concept,
-                    message=f"kind {kind!r}: one concept in the columns {sorted(names)}",
-                )
         for column, names in sorted(concepts.items()):
             if len(names) > 1:
                 yield Problem(

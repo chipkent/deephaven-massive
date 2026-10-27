@@ -8,7 +8,6 @@ has a test that fails when the gate is removed.
 from __future__ import annotations
 
 import dataclasses
-import datetime as dt
 import hashlib
 import json
 import re
@@ -26,6 +25,7 @@ from deephaven_massive._massive.refresh.generate import (
     column_name,
     generate_rest,
 )
+from deephaven_massive._massive.spec.convert import convert_field
 from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
     ParamKind,
@@ -145,11 +145,11 @@ def test_the_generated_names_follow_the_lexicons(
     snapshot = paths["/v2/snapshot/locale/us/markets/stocks/tickers"]
     columns = {f.wire_key: f.column for f in snapshot.fields}
     assert columns["prevDay.vw"] == "PrevDayVwap"
-    assert columns["min.c"] == "MinuteClose"
+    assert columns["min.c"] == "LastMinuteClose"
     assert columns["lastTrade.t"] == "LastTradeSipTimestamp"
     assert columns["lastQuote.P"] == "LastQuoteAskPrice"
-    assert columns["min.av"] == "MinuteAccumulatedVolume"
-    assert columns["min.dav"] == "MinuteAccumulatedDecimalVolume"
+    assert columns["min.av"] == "LastMinuteAccumulatedVolume"
+    assert columns["min.dav"] == "LastMinuteAccumulatedDecimalVolume"
     forex = {
         f.wire_key: f.column
         for f in paths["/v2/snapshot/locale/global/markets/forex/tickers"].fields
@@ -205,11 +205,8 @@ def test_the_typed_timestamps_follow_their_samples(
 
         page = pages[coverage_page(real[1], path)]
         assert f'"{wire_key}": {sample}' in page, (path, wire_key)
-        value = json.loads(sample)
-        if fix.wire_type is WireType.DATE:
-            dt.date.fromisoformat(value)
-        else:
-            assert dt.datetime.fromisoformat(value).tzinfo is not None
+        # The sample must decode through the declared conversion the decoder applies.
+        assert convert_field(typed, json.loads(sample)) is not None
 
 
 def coverage_page(coverage: generate.Coverage, path: str) -> str:
@@ -1158,29 +1155,41 @@ def test_gate_docs_a_page_that_is_not_an_overview_names_no_endpoint() -> None:
 # Gate G8: one concept, one column, within a kind.
 
 
-def test_gate_g8_one_concept_in_two_columns_within_a_kind() -> None:
-    snapshot = _snapshot(
-        {
-            "/a/{id}": _item(_row(price={"type": "number"})),
-            "/b/{id}": _item(_row(last=_row(price={"type": "number"}))),
+def test_gate_g8_passes_a_real_nested_kind(
+    real: tuple[tuple[RestPath, ...], generate.Coverage],
+) -> None:
+    # The v2 stocks snapshot and the unified snapshot as one kind: `DayClose`,
+    # `LastMinuteClose`, and `PrevDayClose` are distinct concepts, and the v2 `lastTrade.p`
+    # and the unified `last_trade.price` are one concept in one column.
+    kinds = {
+        "snapshots": {
+            "stocks": ["/v2/snapshot/locale/us/markets/stocks/tickers"],
+            "all": ["/v3/snapshot"],
         }
-    )
-    both = {"trades": {"stocks": ["/a/{id}"], "crypto": ["/b/{id}"]}}
-    assert _problems(snapshot, _hand(kinds=both)) == [("G8", "", "price")]
-    one = {"trades": {"stocks": ["/a/{id}"]}, "bars": {"stocks": ["/b/{id}"]}}
-    assert len(generate_rest(snapshot, _hand(kinds=one))[0]) == 2
+    }
+    paths, _ = generate_rest(Snapshot.load(), dataclasses.replace(HandInput(), kinds=kinds))
+    unified = {p.key: p for p in paths}["/v3/snapshot"]
+    v2 = {p.key: p for p in paths}["/v2/snapshot/locale/us/markets/stocks/tickers"]
+    assert v2.field("LastTradePrice").wire_key == "lastTrade.p"
+    assert unified.field("LastTradePrice").wire_key == "last_trade.price"
+    assert {"DayClose", "LastMinuteClose", "PrevDayClose"} <= {f.column for f in v2.fields}
 
 
 def test_gate_g8_one_column_for_two_concepts_within_a_kind() -> None:
+    # Modeled on the snapshots: two nested paths that PascalCase alike are two concepts.
+    lexicons = {"trade": lexicon.Lexicon(name="trade", reason="t", entries=_names(p="price"))}
     snapshot = _snapshot(
         {
-            "/a/{id}": _item(_row(last=_row(trade_price={"type": "number"}))),
+            "/a/{id}": _item(_row(lastTrade=_row(p={"type": "number"}))),
             "/b/{id}": _item(_row(last_trade=_row(price={"type": "number"}))),
+            "/c/{id}": _item(_row(last=_row(trade_price={"type": "number"}))),
         }
     )
-    kinds = {"trades": {"stocks": ["/a/{id}", "/b/{id}"]}}
-    problems = _problems(snapshot, _hand(kinds=kinds))
-    assert ("G8", "", "LastTradePrice") in problems
+    hand = _hand(lexicons=lexicons, shapes={("/a/{id}", "lastTrade"): "trade"})
+    same = dataclasses.replace(hand, kinds={"trades": {"stocks": ["/a/{id}", "/b/{id}"]}})
+    assert len(generate_rest(snapshot, same)[0]) == 3
+    clash = dataclasses.replace(hand, kinds={"trades": {"stocks": ["/a/{id}", "/c/{id}"]}})
+    assert _problems(snapshot, clash) == [("G8", "", "LastTradePrice")]
 
 
 # Problems are never lost.

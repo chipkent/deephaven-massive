@@ -19,8 +19,7 @@ flat key table cannot work, so the translation goes by **shape**:
 The generator translates every segment of a wire key through the lexicon of the object it
 sits in, else keeps an identity key or a long key as it is; a short key (three characters or
 fewer, no underscore) that neither covers stops the refresh (gate G1). A lexicon or identity
-entry never takes a name from a description, with one documented exception: the snapshot's
-`min` object, which Massive names nowhere. A `SHAPES` or `IDENTITY` entry that no generated
+entry never takes a name from a description. A `SHAPES` or `IDENTITY` entry that no generated
 object uses is stale and stops the refresh too (gate G4).
 
 The path tuples at the end (`BAR_PATHS` and the snapshot paths) are shared with `overrides`.
@@ -109,7 +108,7 @@ _AGGREGATE = {
     **_from("/v3/snapshot `ticker`", T="ticker"),
     **_from(_UNIFIED_BAR, o="open", h="high", l="low", c="close", v="volume", vw="vwap"),
     **_from("/v3/snapshot `last_minute.transactions`", n="transactions"),
-    **_from("the flat-file `*/minute_aggs_v1` and `*/day_aggs_v1` columns", t="window_start"),
+    **_from("/futures/v1/aggs `window_start`", t="window_start"),
 }
 
 _LEXICONS = (
@@ -198,9 +197,8 @@ _LEXICONS = (
         name="snapshot",
         reason="A full-market or movers snapshot row.",
         entries=_from(
-            "no vendor long name; from the description of `min`, 'The most recent minute bar "
-            "for this ticker.'",
-            min="minute",
+            "/v3/snapshot and /futures/v1/snapshot `last_minute`, the same most-recent minute bar",
+            min="last_minute",
         ),
     ),
 )

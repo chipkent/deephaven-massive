@@ -15,7 +15,7 @@ rest, each entry with its reason, and nothing else:
 - `RESULT_KEYS`: the paths whose rows do not sit under `results`;
 - `PARAM_UNITS`: the unit of every timestamp-like string parameter, and of any other string
   parameter that takes an epoch (or "sent as date or date-time text");
-- `KINDS`: the dataset kinds, whose sources gate G8 checks for one column per concept. The
+- `KINDS`: the dataset kinds, whose sources gate G8 checks for one concept per column. The
   REST generator alone declares none; the WebSocket and flat-file generators add them.
 
 Every entry names a path template exactly as the specification spells it, and a wire key or

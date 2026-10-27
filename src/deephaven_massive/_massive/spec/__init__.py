@@ -42,6 +42,7 @@ from importlib import resources
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, overload
 
+from deephaven_massive._massive.spec.convert import DECLARED_CONVERSIONS
 from deephaven_massive._massive.spec.types import (
     Field,
     Membership,
@@ -254,16 +255,27 @@ def _field(item: dict[str, object]) -> Field:
 
     Returns:
         The field.
+
+    Raises:
+        ValueError: If the field names a declared conversion `spec.convert` does not have, so
+            the problem shows when the file is loaded rather than when a value is decoded.
     """
     unit = _optional(item, "unit")
     declared = _optional(item, "declared_type")
+    wire_type = WireType(_text(item, "type"))
+    declared_type = None if declared is None else WireType(declared)
+    if declared_type is not None and (declared_type, wire_type) not in DECLARED_CONVERSIONS:
+        raise ValueError(
+            f"field {item['wire_key']!r}: no declared conversion from {declared_type} to "
+            f"{wire_type}"
+        )
     return Field(
         wire_key=_text(item, "wire_key"),
         column=_text(item, "column"),
-        wire_type=WireType(_text(item, "type")),
+        wire_type=wire_type,
         unit=None if unit is None else WireUnit(unit),
         required=_flag(item, "required"),
-        declared_type=None if declared is None else WireType(declared),
+        declared_type=declared_type,
     )
 
 
