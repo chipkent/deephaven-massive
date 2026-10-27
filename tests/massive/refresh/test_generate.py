@@ -218,7 +218,9 @@ def test_the_quote_prices_are_generated_names(real: generate.Generated) -> None:
     assert {s.transport for s in members} == set(Transport)
     for source in members:
         columns = {f.column for f in source.fields}
-        if source.key != "/v1/last_quote/currencies/{from}/{to}":  # names them `ask`, `bid`
+        # The forex last quote and the crypto stream, which follows crypto's own last
+        # quote, spell them `ask` and `bid`.
+        if source.key not in {"/v1/last_quote/currencies/{from}/{to}", "crypto/XQ"}:
             assert {"BidPrice", "AskPrice"} <= columns, source.key
 
 
@@ -259,7 +261,9 @@ def _relexicon(name: str, **long_names: str) -> HandInput:
 def test_gate_type_agreement_stocks_dv_against_futures_dv() -> None:
     # Naming the futures dollar volume like the stocks fractional volume puts a double and a
     # string into one column of the bars kind: the naming error the gate exists to catch.
+    # The renamed column is also one the futures stream alone supplies.
     assert _problems(_relexicon("futures_bar", dv="decimal_volume")) == [
+        ("transport-agreement", "bars", "DecimalVolume"),
         ("type-agreement", "bars", "DecimalVolume"),
     ]
 
@@ -287,13 +291,12 @@ def test_gate_transport_agreement_needs_each_transport_only_entry() -> None:
     hand = dataclasses.replace(
         real_hand,
         transport_only={
-            k: v for k, v in real_hand.transport_only.items() if k != ("bars", "AccumulatedVolume")
+            k: v
+            for k, v in real_hand.transport_only.items()
+            if k != ("bars", "options", "AccumulatedVolume")
         },
     )
-    assert _problems(hand) == [
-        ("transport-agreement", "bars", "AccumulatedVolume"),
-        ("transport-agreement", "bars", "AccumulatedVolume"),
-    ]
+    assert _problems(hand) == [("transport-agreement", "bars", "AccumulatedVolume")]
 
 
 def test_gate_stale_entry_a_kind_member_the_snapshot_does_not_generate() -> None:

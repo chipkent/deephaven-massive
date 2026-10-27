@@ -44,7 +44,10 @@ def test_undocumented_exclusions_say_so() -> None:
 def test_every_sample_error_names_one_field_with_a_reason() -> None:
     keys = [(e.path, e.wire_key) for e in exclusions.SAMPLE_ERRORS]
     assert len(keys) == len(set(keys))
-    assert all(e.path.startswith("/") and e.reason for e in exclusions.SAMPLE_ERRORS)
-    # The one known wrong sample: a CUSIP written as a number, its leading zero lost.
-    (cusip,) = exclusions.SAMPLE_ERRORS
-    assert (cusip.path, cusip.wire_key, cusip.sample) == ("/vX/reference/ipos", "us_code", 37833100)
+    assert all(e.reason for e in exclusions.SAMPLE_ERRORS)
+    # The known wrong samples: the futures trade example's undeclared `z`, and a CUSIP written
+    # as a number, its leading zero lost.
+    assert [(e.path, e.wire_key, e.sample) for e in exclusions.SAMPLE_ERRORS] == [
+        ("futures/T", "z", 3),
+        ("/vX/reference/ipos", "us_code", 37833100),
+    ]

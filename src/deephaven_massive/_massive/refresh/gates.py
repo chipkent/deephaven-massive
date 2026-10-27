@@ -186,6 +186,8 @@ class PathUse:
         converted: The wire keys of the generated fields that have a conversion.
         needed_conversions: The wire keys of the fields with a conversion that some
             documented example value needs (a value the declared type alone refuses).
+        example_keys: The keys a documented example sends that the source does not declare,
+            each excused by a `SAMPLE_ERRORS` entry.
     """
 
     wire_keys: frozenset[str] = frozenset()
@@ -196,6 +198,7 @@ class PathUse:
     columns: Mapping[str, str] = field(default_factory=dict)
     converted: frozenset[str] = frozenset()
     needed_conversions: frozenset[str] = frozenset()
+    example_keys: frozenset[str] = frozenset()
 
 
 def concept_collisions(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
@@ -286,7 +289,7 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
     for table, keys in field_tables:
         for path, wire_key in keys:
             use = uses.get(path)
-            if use is None or wire_key not in use.wire_keys:
+            if use is None or wire_key not in use.wire_keys | use.example_keys:
                 yield Problem(
                     gate=Gate.STALE_ENTRY,
                     source=path,
@@ -335,13 +338,12 @@ def unneeded_type_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterato
     A widening conversion (`Conversion.widens`) exists because a documented sample is in a form
     the declared type refuses. Once no example value of any field the fix names is such a value
     (Massive corrected its sample), the fix is stale. One `TypeFix` object is one decision: the
-    entries `_for` makes from it over a group of paths are needed while any of them is, while
+    entries it fixes, across sources and transports, are needed while any of them is, while
     two fixes written separately are judged separately, however alike. A conversion that only
-    retypes values its declared type accepts (`iso-text-instant`, `integer-id-as-text`,
-    `one-code`) is exempt: it is needed for as long as the specification
-    declares the type, and the declared-type check retires it once that changes. A field that
-    was not generated with its conversion (it stopped on another problem, or the entry is
-    already stale) is left to the check that reported it.
+    retypes values its declared type accepts (`iso-text-instant`) is exempt: it is needed for
+    as long as the specification declares the type, and the declared-type check retires it
+    once that changes. A field that was not generated with its conversion (it stopped on
+    another problem, or the entry is already stale) is left to the check that reported it.
 
     Args:
         hand: The hand input.

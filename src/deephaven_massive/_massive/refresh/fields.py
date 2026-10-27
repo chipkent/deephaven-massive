@@ -49,12 +49,12 @@ from deephaven_massive._massive.spec.convert import UnconvertibleError, convert,
 from deephaven_massive._massive.spec.types import Field, WireType, WireUnit
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from deephaven_massive._massive.refresh.hand_input import HandInput
     from deephaven_massive._massive.refresh.openapi import Json, JsonObject, OpenApi
 
-__all__ = ["RawField", "SourceFields", "representation"]
+__all__ = ["RawField", "SourceFields", "openapi_field", "representation"]
 
 # The `x-polygon-go-type` names that tag an integer with a unit.
 _TAG_UNITS: Final = {
@@ -83,12 +83,37 @@ class RawField:
         timestamp: Whether the vendor documents it as a timestamp in so many words (a
             flat-file "Columns" type `timestamp - integer`), which makes it timestamp-like
             whatever its name.
+        items: The resolved schema of an array's items; `None` for any other field.
     """
 
     wire_key: str
     schema: JsonObject
     required: bool
     timestamp: bool = False
+    items: JsonObject | None = None
+
+
+def openapi_field(
+    spec: OpenApi, wire_key: str, schema: JsonObject, *, required: bool, where: str = ""
+) -> RawField:
+    """Return a field of an OpenAPI document, with an array's items resolved.
+
+    A `RefreshError` from following the items' reference propagates.
+
+    Args:
+        spec: The document the schema comes from.
+        wire_key: The field's dotted wire key.
+        schema: The field's resolved schema.
+        required: Whether the vendor marks it, and every object above it, required.
+        where: The source and key, for messages; the wire key when omitted.
+
+    Returns:
+        The field.
+    """
+    items = None
+    if schema.get("type") == "array":
+        items = spec.schema(schema.get("items", {}), where or wire_key)
+    return RawField(wire_key, schema, required, items=items)
 
 
 def representation(schema: JsonObject, last: str) -> WireType | None:
@@ -127,25 +152,21 @@ class SourceFields:
 
             from deephaven_massive._massive.refresh.fields import RawField, SourceFields
             from deephaven_massive._massive.refresh.hand_input import HandInput
-            from deephaven_massive._massive.refresh.openapi import OpenApi
 
-            rules = SourceFields(OpenApi({}), HandInput(), "stocks/T", origin="https://massive.com")
+            rules = SourceFields(HandInput(), "stocks/T", origin="https://massive.com")
             price = rules.field(RawField("price", {"type": "number"}, required=True))
             assert price is not None and price.column == "Price"
     """
 
-    def __init__(self, spec: OpenApi, hand: HandInput, source: str, *, origin: str) -> None:
+    def __init__(self, hand: HandInput, source: str, *, origin: str) -> None:
         """Prepare to generate the fields of `source`.
 
         Args:
-            spec: The specification the schemas come from, to resolve an array's items; a
-                generator that builds its schemas from tables passes an empty one.
             hand: The hand input.
             source: The source key the hand input names it by.
             origin: The documentation origin a root-relative link in a description is
                 resolved against (`plain_text`).
         """
-        self.spec = spec
         self.hand = hand
         self.origin = origin
         self.source = source
@@ -162,6 +183,7 @@ class SourceFields:
         # Each generated field's type by the representation rules, before any conversion.
         self.declared_types: dict[str, WireType] = {}
         self.needed_conversions: set[str] = set()
+        self.example_keys: set[str] = set()
 
     def use(self) -> PathUse:
         """Return what the source consumed so far, for the checks that span sources.
@@ -179,6 +201,7 @@ class SourceFields:
             columns=dict(self.columns),
             converted=frozenset(self.converted),
             needed_conversions=frozenset(self.needed_conversions),
+            example_keys=frozenset(self.example_keys),
         )
 
     def problem(self, gate: Gate, key: str, message: str, *, description: str = "") -> None:
@@ -256,7 +279,7 @@ class SourceFields:
             The field's type, or `None` (with a problem) for a schema with no usable type.
         """
         if raw.schema.get("type") == "array":
-            items = self.spec.schema(raw.schema.get("items", {}), f"{self.source} {raw.wire_key}")
+            items = raw.items or {}
             return WireType.INT_ARRAY if items.get("type") == "integer" else WireType.JSON_TEXT
         found = representation(raw.schema, raw.wire_key.rsplit(".", 1)[-1])
         if found is None:
@@ -471,6 +494,37 @@ class SourceFields:
             own = self.field_examples.get(item.wire_key)
             values = [v for v in [*found[item.wire_key], own] if v is not None]
             self.check_values(item, values)
+
+    def check_undeclared(self, example: Json, declared: Iterable[str]) -> None:
+        """Report the keys a documented example sends that the source does not declare.
+
+        Such a key is data the decoder would drop as drift on every row, so the
+        `example-type` gate stops the refresh until the source declares the field or a
+        `SAMPLE_ERRORS` entry, naming the key and its sample, says the example is wrong.
+
+        Args:
+            example: The documented example, a JSON object (anything else has no keys).
+            declared: The keys the source declares, and any key it leaves out on purpose.
+        """
+        known = set(declared)
+        for key, value in example.items() if isinstance(example, dict) else ():
+            if key in known:
+                continue
+            excused = any(
+                (error.path, error.wire_key) == (self.source, key)
+                and _json_text(error.sample) == _json_text(value)
+                for error in self.hand.sample_errors
+            )
+            if excused:
+                self.example_keys.add(key)
+            else:
+                self.problem(
+                    Gate.EXAMPLE_TYPE,
+                    key,
+                    f"the specification's example sends {key!r} ({json.dumps(value)[:80]}), "
+                    "which the source does not declare; declare it, or add a SAMPLE_ERRORS "
+                    "entry if the example is wrong",
+                )
 
     def check_values(self, item: Field, values: Sequence[Json]) -> None:
         """Convert one field's documented example values, honouring `SAMPLE_ERRORS`.

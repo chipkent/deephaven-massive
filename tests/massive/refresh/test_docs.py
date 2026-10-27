@@ -244,6 +244,16 @@ def test_example_header_reads_the_files_column_order() -> None:
     assert docs.example_header(_DATASET) == ["Ticker", "window_start", "close", "empty"]
 
 
+def test_example_rows_reads_each_row_s_cells_in_header_order() -> None:
+    assert docs.example_rows(_DATASET) == [["BCC", "1680033600000000000", "61.99", ""]]
+    assert docs.example_rows(_OVERVIEW) == []
+
+
+def test_an_example_row_of_another_width_is_rejected() -> None:
+    with pytest.raises(docs.DocsError, match="an Example Data row of 2 cells under 4"):
+        docs.example_rows(_DATASET.replace("| BCC | 1680033600000000000 | 61.99 | |", "| a | b |"))
+
+
 def test_an_example_table_without_a_separator_is_rejected() -> None:
     page = _DATASET.replace("| --- | --- | --- | --- |\n", "")
     with pytest.raises(docs.DocsError, match="unreadable Example Data header"):

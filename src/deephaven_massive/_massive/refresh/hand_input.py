@@ -63,7 +63,8 @@ class HandInput:
         sample_errors: The documented example values the `example-type` gate does not
             believe, each with its reason.
         projections: `(kind, source)` to the fields the source contributes to that kind.
-        transport_only: `(kind, column)` to why the column is on one transport only.
+        transport_only: `(kind, group, column)` to why the column is on one transport only
+            in that group.
         venues: The futures venues folded into a flat-file prefix's `{venue}` template.
     """
 
@@ -94,7 +95,7 @@ class HandInput:
     projections: Mapping[tuple[str, str], overrides.Projection] = field(
         default_factory=lambda: overrides.PROJECTIONS
     )
-    transport_only: Mapping[tuple[str, str], str] = field(
+    transport_only: Mapping[tuple[str, str, str], str] = field(
         default_factory=lambda: overrides.TRANSPORT_ONLY
     )
     venues: Mapping[str, str] = field(default_factory=lambda: overrides.VENUES)

@@ -13,7 +13,8 @@ source order. Once every transport is generated, this module:
    pair is a conflict, printed with both fields' descriptions since it is first a possible
    naming error;
 3. checks that, within a group whose sources span two or more transports, every column is on
-   at least two transports or is in `TRANSPORT_ONLY` (`transport-agreement`), which catches a
+   at least two transports or is in `TRANSPORT_ONLY` for that group (`transport-agreement`),
+   which catches a
    one-sided lexicon slip;
 4. orders every member's columns from its kind (`column-order`): within each group, the
    flat-file sources and then the WebSocket sources, in `KINDS` order, give the order, which
@@ -281,13 +282,13 @@ def transport_agreement(hand: HandInput, found: Sequence[Member]) -> Iterator[Pr
     Yields:
         One `transport-agreement` problem per column one transport alone supplies within a
         group whose sources span two or more transports, unless `TRANSPORT_ONLY` names the
-        kind and column; and a `stale-entry` problem for each `TRANSPORT_ONLY` entry no such
-        column needs.
+        kind, group, and column; and a `stale-entry` problem for each `TRANSPORT_ONLY` entry
+        no such column needs.
     """
     groups: dict[tuple[str, str], list[Member]] = {}
     for member in found:
         groups.setdefault((member.kind, member.group), []).append(member)
-    needed: set[tuple[str, str]] = set()
+    needed: set[tuple[str, str, str]] = set()
     for (kind, group), grouped in groups.items():
         if len({m.source.transport for m in grouped}) < _MULTI_TRANSPORT:
             continue
@@ -298,8 +299,8 @@ def transport_agreement(hand: HandInput, found: Sequence[Member]) -> Iterator[Pr
         for column, served in transports.items():
             if len(served) > 1:
                 continue
-            needed.add((kind, column))
-            if (kind, column) not in hand.transport_only:
+            needed.add((kind, group, column))
+            if (kind, group, column) not in hand.transport_only:
                 (only,) = served
                 yield Problem(
                     gate=Gate.TRANSPORT_AGREEMENT,
@@ -308,12 +309,13 @@ def transport_agreement(hand: HandInput, found: Sequence[Member]) -> Iterator[Pr
                     message=f"group {group!r}: only {only} supplies it; check the names of "
                     "the other transports' fields, or add a TRANSPORT_ONLY entry",
                 )
-    for kind, column in sorted(set(hand.transport_only) - needed):
+    for kind, group, column in sorted(set(hand.transport_only) - needed):
         yield Problem(
             gate=Gate.STALE_ENTRY,
             source=kind,
             key=column,
-            message="TRANSPORT_ONLY entry for a column no single transport alone supplies",
+            message=f"TRANSPORT_ONLY entry for a column no single transport alone supplies in "
+            f"group {group!r}",
         )
 
 

@@ -22,8 +22,9 @@ disappears.
 documented example value of a field that is wrong while the field's type is right (a CUSIP
 that lost its leading zero by being written as a number). The `example-type` gate skips
 exactly that value of that field; a `TYPE_FIXES` entry would instead loosen the type to
-accept the wrong form. An entry whose sample the snapshot no longer shows, or no longer
-refuses, fails the refresh as stale.
+accept the wrong form. It also excuses a key a WebSocket example sends that the message
+schema does not declare (the futures trade's `z`). An entry whose sample the snapshot no
+longer shows, or no longer refuses, fails the refresh as stale.
 """
 
 from __future__ import annotations
@@ -177,8 +178,10 @@ class SampleError:
     """One documented example value the refresh does not believe, because the sample is wrong.
 
     Attributes:
-        path: The REST path template exactly as the specification spells it.
-        wire_key: The field's dotted wire key.
+        path: The source key: a REST path template exactly as the specification spells it, or
+            a WebSocket `"<cluster>/<channel>"`.
+        wire_key: The field's dotted wire key, or a key the example sends that the source does
+            not declare.
         sample: The wrong example value, exactly as the specification gives it.
         reason: Why the sample, not the field's type, is wrong.
     """
@@ -190,6 +193,15 @@ class SampleError:
 
 
 SAMPLE_ERRORS: tuple[SampleError, ...] = (
+    SampleError(
+        path="futures/T",
+        wire_key="z",
+        sample=3,
+        reason="The futures trade example sends `z`, which the message schema does not declare "
+        "and no futures source carries (the stocks trade's `z` is its tape, which futures have "
+        "not). Taken as a leftover of the stocks example; a live `z` is dropped and reported "
+        "as drift.",
+    ),
     SampleError(
         path="/vX/reference/ipos",
         wire_key="us_code",

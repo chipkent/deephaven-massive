@@ -48,18 +48,19 @@ def test_names_hold_only_keys_massive_names_nowhere() -> None:
 
 
 def test_the_owner_s_final_names_of_the_running_figures() -> None:
+    # `a`, which Massive names elsewhere (the snapshots' `day.vwap`), is a lexicon entry.
     names = {
         key: entry.long_name
         for (source, key), entry in overrides.NAMES.items()
         if source in ("stocks/A", "indices/AM")
     }
-    assert {key: naming.column_name([names[key]]) for key in ("av", "op", "a", "z", "dav")} == {
+    assert {key: naming.column_name([names[key]]) for key in ("av", "op", "z", "dav")} == {
         "av": "AccumulatedVolume",
         "op": "OfficialOpenPrice",
-        "a": "DayVwap",
         "z": "AverageTradeSize",
         "dav": "AccumulatedDecimalVolume",
     }
+    assert ("stocks/A", "a") not in overrides.NAMES
 
 
 def test_the_indicator_timestamps_are_milliseconds_despite_their_tags() -> None:
@@ -142,5 +143,6 @@ def test_the_indices_snapshot_joins_the_values_kind_as_ticker_value_and_timestam
     }
 
 
-def test_every_transport_only_column_is_of_a_kind() -> None:
-    assert {kind for kind, _ in overrides.TRANSPORT_ONLY} <= set(overrides.KINDS)
+def test_every_transport_only_column_is_of_a_kind_s_group() -> None:
+    for kind, group, _ in overrides.TRANSPORT_ONLY:
+        assert group in overrides.KINDS[kind], (kind, group)

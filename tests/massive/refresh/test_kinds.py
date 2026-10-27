@@ -220,8 +220,27 @@ def test_gate_transport_agreement_a_column_one_transport_alone_supplies() -> Non
     assert _found(kinds.transport_agreement(dataclasses.replace(_EMPTY, kinds=_TRADES), found)) == [
         ("transport-agreement", "trades", "Id")
     ]
-    hand = dataclasses.replace(_EMPTY, kinds=_TRADES, transport_only={("trades", "Id"): "test"})
+    hand = dataclasses.replace(
+        _EMPTY, kinds=_TRADES, transport_only={("trades", "stocks", "Id"): "test"}
+    )
     assert list(kinds.transport_agreement(hand, found)) == []
+    # An entry excuses its own group only.
+    other = dataclasses.replace(
+        _EMPTY, kinds=_TRADES, transport_only={("trades", "crypto", "Id"): "test"}
+    )
+    assert _found(kinds.transport_agreement(other, found)) == [
+        ("stale-entry", "trades", "Id"),
+        ("transport-agreement", "trades", "Id"),
+    ]
+
+
+def test_gate_transport_agreement_a_group_on_two_transports() -> None:
+    # Two transports are enough for the gate: REST's `Id` is on REST alone.
+    hand = dataclasses.replace(_EMPTY, kinds={"trades": {"stocks": ["/v3/trades", "stocks/T"]}})
+    assert _found(kinds.transport_agreement(hand, _members(hand))) == [
+        ("transport-agreement", "trades", "Id"),
+        ("transport-agreement", "trades", "Ticker"),
+    ]
 
 
 def test_a_group_on_one_transport_needs_no_agreement() -> None:
@@ -234,9 +253,9 @@ def test_gate_stale_entry_a_transport_only_column_two_transports_supply() -> Non
         _EMPTY,
         kinds=_TRADES,
         transport_only={
-            ("trades", "Id"): "test",
-            ("trades", "Price"): "test",
-            ("quotes", "X"): "t",
+            ("trades", "stocks", "Id"): "test",
+            ("trades", "stocks", "Price"): "test",
+            ("quotes", "stocks", "X"): "t",
         },
     )
     assert _found(kinds.transport_agreement(hand, _members(hand))) == [

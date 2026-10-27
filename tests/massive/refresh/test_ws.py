@@ -366,7 +366,24 @@ def test_gate_example_type_a_sample_the_declared_type_refuses() -> None:
 
 def test_gate_example_type_an_example_without_the_message_s_keys() -> None:
     snapshot = _snapshot({"/stocks/T": _channel({"price": _PRICE}, example={"other": 1})})
-    assert _problems(snapshot) == [("example-type", "stocks/T", "")]
+    assert _problems(snapshot) == [
+        ("example-type", "stocks/T", ""),
+        ("example-type", "stocks/T", "other"),
+    ]
+
+
+def test_gate_example_type_a_key_the_message_does_not_declare() -> None:
+    example = {"ev": "T", "price": 1.5, "z": 3}
+    snapshot = _snapshot({"/futures/T": _channel({"price": _PRICE}, example=example)})
+    assert _problems(snapshot) == [("example-type", "futures/T", "z")]
+    excused = exclusions.SampleError(path="futures/T", wire_key="z", sample=3, reason="t")
+    hand = dataclasses.replace(_EMPTY, sample_errors=(excused,))
+    _, coverage = generate_ws(snapshot, hand)
+    assert coverage.uses["futures/T"].example_keys == {"z"}
+    # Another sample of the key is not the one the entry excuses.
+    other = exclusions.SampleError(path="futures/T", wire_key="z", sample=4, reason="t")
+    hand = dataclasses.replace(_EMPTY, sample_errors=(other,))
+    assert _problems(snapshot, hand) == [("example-type", "futures/T", "z")]
 
 
 def test_gate_docs_a_generated_channel_no_page_names() -> None:

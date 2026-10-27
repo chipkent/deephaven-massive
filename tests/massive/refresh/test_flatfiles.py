@@ -10,11 +10,12 @@ from __future__ import annotations
 import dataclasses
 import os
 from datetime import date
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._massive.refresh import docs, exclusions, overrides
+from deephaven_massive._massive.refresh import exclusions, flatfiles, overrides
 from deephaven_massive._massive.refresh.flatfiles import (
     FlatFileCoverage,
     generate_flat_files,
@@ -65,19 +66,17 @@ def test_the_futures_venues_fold_into_one_template(
 def test_the_four_venue_pages_of_each_futures_dataset_are_identical(
     real: tuple[tuple[Source, ...], FlatFileCoverage],
 ) -> None:
-    pages = Snapshot.load().flat_file_pages
+    # The venue-agreement gate itself, over each futures dataset's four real pages.
+    snapshot = Snapshot.load()
     templates = {key: names for key, names in real[1].pages.items() if "{venue}" in key}
     assert len(templates) == 4
-    for names in templates.values():
-        assert len(names) == len(overrides.VENUES)
-        shapes = {
-            (
-                tuple(sorted((c.name, c.type) for c in docs.columns(pages[name]))),
-                tuple(docs.example_header(pages[name])),
-            )
-            for name in names
-        }
-        assert len(shapes) == 1, names
+    for template, names in templates.items():
+        by_venue = {PurePosixPath(name).stem: name for name in names}
+        assert set(by_venue) == set(overrides.VENUES)
+        found = flatfiles._check_venues(
+            template, by_venue, snapshot=snapshot, venues=list(overrides.VENUES)
+        )
+        assert found == [], template
 
 
 @_requires_snapshot
@@ -86,7 +85,7 @@ def test_the_columns_take_their_documented_types_units_and_conversions(
 ) -> None:
     files = {f.key: f for f in real[0]}
     trades = files["us_stocks_sip/trades_v1"]
-    assert trades.field("Conditions").conversion is Conversion.ONE_CODE
+    assert trades.field("Conditions").conversion is Conversion.CODE_LIST_TEXT
     assert trades.field("Conditions").wire_type is WireType.INT_ARRAY
     assert trades.field("SipTimestamp").unit is WireUnit.NS
     assert (
@@ -133,13 +132,18 @@ def _overview(*rows: tuple[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _dataset(columns: Sequence[tuple[str, str, str]], header: Sequence[str] | None = None) -> str:
+def _dataset(
+    columns: Sequence[tuple[str, str, str]],
+    header: Sequence[str] | None = None,
+    rows: Sequence[Sequence[str]] = (),
+) -> str:
     lines = ["## Columns", "", "| Column | Type | Description |", "|--------|------|-------------|"]
     lines += [f"| `{name}` | {kind} | {text} |" for name, kind, text in columns]
     names = list(header if header is not None else [c[0] for c in columns])
     lines += ["", "## Example Data", "", "| " + " | ".join(names) + " |"]
-    lines += ["| " + " | ".join("---" for _ in names) + " |", ""]
-    return "\n".join(lines)
+    lines += ["| " + " | ".join("---" for _ in names) + " |"]
+    lines += ["| " + " | ".join(row) + " |" for row in rows]
+    return "\n".join([*lines, ""])
 
 
 _TRADES = [
@@ -267,6 +271,30 @@ def test_gate_venue_agreement_a_venue_page_with_other_columns() -> None:
         ),
         "futures/trades/cme.md": _dataset(_TRADES),
         "futures/trades/cbot.md": _dataset([*_TRADES, ("exchange", "integer", "The exchange.")]),
+    }
+    assert _problems(_snapshot(pages), _VENUES) == [
+        ("venue-agreement", "us_futures_{venue}/trades_v1", "cbot")
+    ]
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        _dataset(_TRADES, header=["ticker", "size", "price"]),
+        _dataset(
+            [(name, "number" if name == "size" else kind, text) for name, kind, text in _TRADES]
+        ),
+    ],
+    ids=["file order", "column type"],
+)
+def test_gate_venue_agreement_a_venue_page_with_another_order_or_type(other: str) -> None:
+    pages = {
+        "futures/overview.md": _overview(
+            ("futures/trades/cme.md", "us_futures_cme/trades_v1"),
+            ("futures/trades/cbot.md", "us_futures_cbot/trades_v1"),
+        ),
+        "futures/trades/cme.md": _dataset(_TRADES),
+        "futures/trades/cbot.md": other,
     }
     assert _problems(_snapshot(pages), _VENUES) == [
         ("venue-agreement", "us_futures_{venue}/trades_v1", "cbot")
@@ -429,7 +457,43 @@ def test_a_type_fix_turns_a_documented_code_into_a_list() -> None:
         "stocks/overview.md": _overview(("stocks/trades.md", "us_stocks_sip/trades_v1")),
         "stocks/trades.md": _dataset(columns),
     }
-    fix = overrides.TypeFix(conversion=Conversion.ONE_CODE, reason="test")
+    fix = overrides.TypeFix(conversion=Conversion.CODE_LIST_TEXT, reason="test")
     hand = dataclasses.replace(_EMPTY, type_fixes={("us_stocks_sip/trades_v1", "conditions"): fix})
     (trades,), _ = generate_flat_files(_snapshot(pages), hand)
     assert trades.field("Conditions").wire_type is WireType.INT_ARRAY
+
+
+def test_gate_example_type_reads_every_example_row() -> None:
+    # The cells are read as the file's reader reads them: a list of codes, an empty cell,
+    # numeric text in a text column, and a number in exponent form all convert.
+    columns = [
+        ("id", "string", "The ID."),
+        ("conditions", "integer", "The codes."),
+        ("volume", "number", "The volume."),
+    ]
+    rows = [["1", "12,37", "1.44E+06"], ["2", "", "55"], ["x", "12", "-3.5"]]
+    pages = {
+        "stocks/overview.md": _overview(("stocks/trades.md", "us_stocks_sip/trades_v1")),
+        "stocks/trades.md": _dataset(columns, rows=rows),
+    }
+    named = dataclasses.replace(_EMPTY, identity={"id": "test"})
+    assert _problems(_snapshot(pages), named) == [
+        ("example-type", "us_stocks_sip/trades_v1", "conditions")
+    ]
+    fix = overrides.TypeFix(conversion=Conversion.CODE_LIST_TEXT, reason="test")
+    hand = dataclasses.replace(named, type_fixes={("us_stocks_sip/trades_v1", "conditions"): fix})
+    _, coverage = generate_flat_files(_snapshot(pages), hand)
+    assert coverage.uses["us_stocks_sip/trades_v1"].needed_conversions == {"conditions"}
+    # A number column's cell that is no number is a wrong type or a wrong sample.
+    pages["stocks/trades.md"] = _dataset(columns, rows=[["1", "12", "n/a"]])
+    assert _problems(_snapshot(pages), hand) == [
+        ("example-type", "us_stocks_sip/trades_v1", "volume")
+    ]
+
+
+def test_gate_docs_an_example_row_of_another_width() -> None:
+    pages = {
+        "stocks/overview.md": _overview(("stocks/trades.md", "us_stocks_sip/trades_v1")),
+        "stocks/trades.md": _dataset(_TRADES, rows=[["BCC", "1.5"]]),
+    }
+    assert _problems(_snapshot(pages)) == [("docs", "us_stocks_sip/trades_v1", "")]

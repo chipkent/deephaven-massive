@@ -27,7 +27,9 @@ quickstart pages name none. The pages are the source's vendor URLs.
 
 **Fields** are the message's properties in specification order, after `$ref` and `allOf` are
 resolved; the event-type key `ev`, which only says which channel the message is, is dropped.
-`required` is copied where the vendor gives it. Names, types, units, conversions, and the
+`required` is copied where the vendor gives it. A key the message's example sends but its
+schema does not declare stops the refresh (`example-type`) unless a `SAMPLE_ERRORS` entry
+says the example is wrong. Names, types, units, conversions, and the
 documented example are decided by the rules every transport shares (`fields`).
 
 It imports the standard library and other `_massive` modules only.
@@ -42,7 +44,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._massive.refresh import docs
-from deephaven_massive._massive.refresh.fields import RawField, SourceFields
+from deephaven_massive._massive.refresh.fields import SourceFields, openapi_field
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required
@@ -127,6 +129,19 @@ def channel_key(path: str) -> str | None:
 class _ChannelGenerator(SourceFields):
     """Generate one channel's `Source`, collecting its problems instead of stopping."""
 
+    def __init__(self, spec: OpenApi, hand: HandInput, key: str, *, origin: str) -> None:
+        """Prepare to generate the channel `key`.
+
+        Args:
+            spec: The WebSocket specification.
+            hand: The hand input.
+            key: The source key, `"<cluster>/<channel>"`.
+            origin: The documentation origin a root-relative link in a description is
+                resolved against.
+        """
+        super().__init__(hand, key, origin=origin)
+        self.spec = spec
+
     def generate(self, item: JsonObject) -> Source | None:
         """Build the channel's source from its path item.
 
@@ -155,7 +170,13 @@ class _ChannelGenerator(SourceFields):
             return None
         needed = required(message)
         raws = [
-            RawField(name, self.spec.schema(schema, f"{self.source} {name}"), name in needed)
+            openapi_field(
+                self.spec,
+                name,
+                self.spec.schema(schema, f"{self.source} {name}"),
+                required=name in needed,
+                where=f"{self.source} {name}",
+            )
             for name, schema in found.items()
             if name != _EVENT_KEY
         ]
@@ -163,6 +184,7 @@ class _ChannelGenerator(SourceFields):
         self.check_columns(fields)
         example = media.get("example")
         self.check_examples(fields, [example], documented=example is not None, where="")
+        self.check_undeclared(example, [*found, _EVENT_KEY])
         if self.problems:
             return None
         # The message's keys are distinct, and `check_columns` has passed, so the source's

@@ -21,7 +21,7 @@ can. This module holds the rest, each entry with its reason, and nothing else:
   per column within them, and orders every member's columns from the kind's flat-file or
   WebSocket sources;
 - `PROJECTIONS`: the fields a source contributes to one kind, under the kind's names;
-- `TRANSPORT_ONLY`: the columns of a kind legitimately on one transport only;
+- `TRANSPORT_ONLY`: the columns of a kind's group legitimately on one transport only;
 - `VENUES`: the futures venues folded into a flat-file prefix's `{venue}` template.
 
 Every entry names a source by its key (a REST path template exactly as the specification
@@ -42,11 +42,9 @@ from typing import TYPE_CHECKING, TypeVar
 from deephaven_massive._massive.refresh.lexicon import (
     BAR_PATHS,
     CRYPTO_SNAPSHOTS,
-    FMV_CHANNELS,
     FOREX_SNAPSHOTS,
     RANGE_PATHS,
     STOCKS_SNAPSHOTS,
-    WS_BARS,
 )
 from deephaven_massive._massive.spec.types import Conversion, WireUnit
 
@@ -182,8 +180,25 @@ _INDICATORS = tuple(
     for ticker in ("stockTicker", "cryptoTicker")
 )
 
+# The WebSocket aggregate channels of every asset class, per minute and per second.
+_WS_BARS = (
+    "stocks/AM",
+    "stocks/A",
+    "options/AM",
+    "options/A",
+    "indices/AM",
+    "indices/A",
+    "futures/AM",
+    "futures/A",
+    "forex/CA",
+    "forex/CAS",
+    "crypto/XA",
+    "crypto/XAS",
+)
 # The WebSocket aggregates of the classes that carry each of the day's running figures.
-_WS_EQUITY_BARS = ("stocks/A", "stocks/AM", "options/A", "options/AM")
+_WS_EQUITY_BARS = ("stocks/AM", "stocks/A", "options/AM", "options/A")
+# The WebSocket fair-market-value channels.
+_FMV_CHANNELS = ("stocks/FMV", "options/FMV", "forex/FMV", "crypto/FMV")
 
 
 def _named(sources: Iterable[str], key: str, name: Name) -> dict[tuple[str, str], Name]:
@@ -217,7 +232,7 @@ NAMES: Mapping[tuple[str, str], Name] = MappingProxyType(
     {
         **_named(_WS_EQUITY_BARS, "av", _name("accumulated_volume", "Today's accumulated volume.")),
         **_named(
-            ("stocks/A", "stocks/AM"),
+            ("stocks/AM", "stocks/A"),
             "dav",
             _name(
                 "accumulated_decimal_volume",
@@ -231,18 +246,17 @@ NAMES: Mapping[tuple[str, str], Name] = MappingProxyType(
         # One concept, one column: the index bars' official opening value is the same running
         # figure as the equity bars' official opening price.
         **_named(
-            ("indices/A", "indices/AM"),
+            ("indices/AM", "indices/A"),
             "op",
             _name("official_open_price", "Today's official opening value."),
         ),
-        **_named(_WS_EQUITY_BARS, "a", _name("day_vwap", "Today's volume weighted average price.")),
         **_named(
             (*_WS_EQUITY_BARS, "crypto/XA", "crypto/XAS"),
             "z",
             _name("average_trade_size", "The average trade size for this aggregate window."),
         ),
         **_named(
-            WS_BARS,
+            _WS_BARS,
             "e",
             _name(
                 "end_timestamp",
@@ -488,7 +502,7 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
         **_for(("crypto/XT", "crypto/XQ"), ("r",), _MS_WS_SAMPLE),
         **_for(("futures/T", "futures/Q"), ("t",), _MS_WS),
         **_for(("futures/Q",), ("bt", "at"), _MS_WS_SAMPLE),
-        **_for(WS_BARS, ("s", "e"), _MS_WS),
+        **_for(_WS_BARS, ("s", "e"), _MS_WS),
         ("stocks/LULD", "t"): Unit(
             unit=WireUnit.NS,
             reason="Documented as Unix milliseconds, but the documentation sample, "
@@ -506,7 +520,7 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             "Eastern), not an epoch.",
         ),
         **_for(
-            FMV_CHANNELS,
+            _FMV_CHANNELS,
             ("t",),
             Unit(
                 unit=WireUnit.NS,
@@ -558,6 +572,23 @@ def _iso(sample: str) -> TypeFix:
     )
 
 
+# The crypto trade ID, one decision for every source that sends it.
+_CRYPTO_TRADE_ID = TypeFix(
+    conversion=Conversion.TEXT_OR_INTEGER_ID,
+    reason="The trade ID is typed as text on the snapshots, but the full-market page's example "
+    "and documentation sample send the integer 413131, while the movers page sends "
+    '"517478762"; the WebSocket trade types and samples it as the integer 14272084, and the '
+    "REST trades and the flat file keep it as text. All join one kind, so all keep text and "
+    "accept either form without loss.",
+)
+# The codes of a flat file's list columns, one decision for every file that writes them.
+_CODE_LIST = TypeFix(
+    conversion=Conversion.CODE_LIST_TEXT,
+    reason="Documented as an integer, but described as a list of codes that appears quoted "
+    'and comma-separated when there are several (stocks trades sample "12,37"): a list, as on '
+    "REST and the WebSocket.",
+)
+
 TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
     {
         ("/benzinga/v1/analysts", "last_updated"): _iso('"2025-05-19T04:31:12Z"'),
@@ -594,17 +625,7 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
             "column stays a date, as on the other open-close sources; any other clock or "
             "offset is refused loudly.",
         ),
-        **_for(
-            CRYPTO_SNAPSHOTS,
-            ("lastTrade.i",),
-            TypeFix(
-                conversion=Conversion.TEXT_OR_INTEGER_ID,
-                reason="The trade ID is typed as text, but the full-market page's example and "
-                "documentation sample send the integer 413131, while the movers page sends "
-                '"517478762". Both snapshots join one kind, so both keep text and accept '
-                "either form without loss.",
-            ),
-        ),
+        **_for(CRYPTO_SNAPSHOTS, ("lastTrade.i",), _CRYPTO_TRADE_ID),
         ("/tmx/v1/corporate-events", "tmx_company_id"): TypeFix(
             conversion=Conversion.TEXT_OR_INTEGER_ID,
             reason="The specification types the ID as an int64, but its example and the "
@@ -621,14 +642,10 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
         ("forex/C", "x"): TypeFix(
             conversion=Conversion.QUOTED_INTEGER,
             reason="The specification types the exchange ID as an integer, but its example sends "
-            'the text "44"; the forex quote stream sends the ID as decimal digits in text.',
+            'the text "44". Either form is read as the integer, until live data shows which '
+            "the stream sends; text that is not decimal digits is refused.",
         ),
-        ("crypto/XT", "i"): TypeFix(
-            conversion=Conversion.INTEGER_ID_AS_TEXT,
-            reason="The trade ID is typed and sampled as an integer (14272084), while the crypto "
-            "trade's ID is text on REST and in the flat files: an identifier is text, so one "
-            "column keeps one type.",
-        ),
+        ("crypto/XT", "i"): _CRYPTO_TRADE_ID,
         **_for(
             ("crypto/XA", "crypto/XAS"),
             ("v",),
@@ -640,7 +657,7 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
             ),
         ),
         **_for(
-            ("futures/A", "futures/AM"),
+            ("futures/AM", "futures/A"),
             ("dv",),
             TypeFix(
                 conversion=Conversion.INTEGER_AS_NUMBER,
@@ -657,19 +674,9 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
                 "global_crypto/trades_v1",
             ),
             ("conditions",),
-            TypeFix(
-                conversion=Conversion.ONE_CODE,
-                reason="Documented as an integer, but described as a list of condition codes "
-                'that appears quoted and comma-separated when there are several (sample "12,37"): '
-                "a list, as on REST and the WebSocket.",
-            ),
+            _CODE_LIST,
         ),
-        ("us_stocks_sip/quotes_v1", "indicators"): TypeFix(
-            conversion=Conversion.ONE_CODE,
-            reason="Documented as an integer, but the quote's indicators are a list of codes, as "
-            "on REST and the WebSocket; the file writes several as quoted, comma-separated "
-            "codes, like its conditions.",
-        ),
+        ("us_stocks_sip/quotes_v1", "indicators"): _CODE_LIST,
     }
 )
 """`(source, wire key)` to the named conversion of a field its declared type does not fit."""
@@ -839,43 +846,43 @@ KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType(
         "bars": {
             "stocks": [
                 *_bars("stocksTicker", grouped="us/market/stocks"),
-                "stocks/A",
                 "stocks/AM",
+                "stocks/A",
                 "us_stocks_sip/minute_aggs_v1",
                 "us_stocks_sip/day_aggs_v1",
             ],
             "options": [
                 *_bars("optionsTicker"),
-                "options/A",
                 "options/AM",
+                "options/A",
                 "us_options_opra/minute_aggs_v1",
                 "us_options_opra/day_aggs_v1",
             ],
             "futures": [
                 "/futures/v1/aggs/{ticker}",
-                "futures/A",
                 "futures/AM",
+                "futures/A",
                 "us_futures_{venue}/minute_aggs_v1",
                 "us_futures_{venue}/session_aggs_v1",
             ],
             "indices": [
                 *_bars("indicesTicker"),
-                "indices/A",
                 "indices/AM",
+                "indices/A",
                 "us_indices/minute_aggs_v1",
                 "us_indices/day_aggs_v1",
             ],
             "forex": [
                 *_bars("forexTicker", grouped="global/market/fx"),
-                "forex/CAS",
                 "forex/CA",
+                "forex/CAS",
                 "global_forex/minute_aggs_v1",
                 "global_forex/day_aggs_v1",
             ],
             "crypto": [
                 *_bars("cryptoTicker", grouped="global/market/crypto"),
-                "crypto/XAS",
                 "crypto/XA",
+                "crypto/XAS",
                 "global_crypto/minute_aggs_v1",
                 "global_crypto/day_aggs_v1",
             ],
@@ -897,7 +904,8 @@ KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType(
 
 Every dataset with a WebSocket or flat-file source has a kind, and each kind's group lists the
 REST paths that serve the same rows (history, the latest row, grouped daily bars), then the
-WebSocket channels, then the flat-file prefixes.
+WebSocket channels in the order the specification's `x-polygon-order` gives them (the minute
+aggregates before the second aggregates), then the flat-file prefixes.
 """
 
 PROJECTIONS: Mapping[tuple[str, str], Projection] = MappingProxyType(
@@ -917,54 +925,147 @@ _RUNNING = (
     "The WebSocket aggregates carry the day's running figures and the window's end; the REST "
     "and flat-file bars do not."
 )
-_LAST = (
-    "Only the REST last trade or last quote of this class carries it; the stream and the files "
-    "do not."
+_LAST_TRADE = (
+    "Only the REST options trades (the history and the last trade) carry it; the options "
+    "stream and flat file do not."
+)
+_LAST_TRADE_ONLY = (
+    "Only the REST options last trade carries it; the options trade history, stream, and flat "
+    "file do not."
 )
 
-TRANSPORT_ONLY: Mapping[tuple[str, str], str] = MappingProxyType(
+
+def _only(kind: str, column: str, reason: str, *groups: str) -> dict[tuple[str, str, str], str]:
+    """Return the `TRANSPORT_ONLY` entries of one column in several groups of a kind.
+
+    Args:
+        kind: The dataset kind.
+        column: The column.
+        reason: Why one transport alone supplies it in each group.
+        *groups: The asset-class groups.
+
+    Returns:
+        `(kind, group, column)` to `reason`, for every group.
+    """
+    return {(kind, group, column): reason for group in groups}
+
+
+TRANSPORT_ONLY: Mapping[tuple[str, str, str], str] = MappingProxyType(
     {
-        ("bars", "AccumulatedVolume"): _RUNNING,
-        ("bars", "AccumulatedDecimalVolume"): _RUNNING,
-        ("bars", "AverageTradeSize"): _RUNNING,
-        ("bars", "DayVwap"): _RUNNING,
-        ("bars", "DecimalVolume"): "The stocks WebSocket aggregates carry the fractional "
-        "volume; the stocks REST and flat-file bars do not.",
-        ("bars", "EndTimestamp"): _RUNNING,
-        ("bars", "OfficialOpenPrice"): _RUNNING,
-        ("bars", "Exchange"): "Only the futures minute-bar flat files carry the exchange.",
-        ("bars", "Vwap"): "The forex REST bars carry a volume-weighted average price; the forex "
-        "WebSocket and flat-file bars do not.",
-        ("bars", "Pair"): "The forex and crypto WebSocket aggregates name the instrument `pair`, "
-        "their own long name, where REST and the flat files say `ticker`; it is the dataset's "
-        "symbol key, which the key rename makes `Symbol` on every transport.",
-        ("trades", "Pair"): "The crypto WebSocket trade names the instrument `pair`, its own "
-        "long name; it is the dataset's symbol key, which the key rename makes `Symbol`.",
-        ("trades", "Ticker"): "Of the crypto trades, only the flat file carries the instrument "
-        "as `ticker` (REST takes it from the path or names it `symbol`, the WebSocket `pair`); "
-        "it is the dataset's symbol key, which the key rename makes `Symbol`.",
-        ("trades", "Timestamp"): "The crypto REST last trade names its time `timestamp`, its own "
-        "long name; it is that source's time key, which the key rename makes `Timestamp`.",
-        ("trades", "Id"): _LAST,
-        ("trades", "ParticipantTimestamp"): _LAST,
-        ("trades", "Tape"): _LAST,
-        ("trades", "TrfId"): _LAST,
-        ("trades", "TrfTimestamp"): _LAST,
-        ("trades", "Channel"): "Only the futures REST trades carry the feed channel.",
-        ("trades", "Correction"): "Only the futures trade flat files carry the correction "
-        "indicator.",
-        ("trades", "Exchange"): "Only the futures trade flat files carry the exchange.",
-        ("quotes", "Ask"): "The forex REST last quote names its ask `ask`, its own long name, "
-        "where the stream and the files say `ask_price`.",
-        ("quotes", "Bid"): "The forex REST last quote names its bid `bid`, its own long name, "
-        "where the stream and the files say `bid_price`.",
-        ("quotes", "Timestamp"): "The forex REST last quote names its time `timestamp`, its own "
-        "long name; it is that source's time key, which the key rename makes `Timestamp`.",
-        ("quotes", "Channel"): "Only the futures REST quotes carry the feed channel.",
-        ("quotes", "Exchange"): "Only the futures quote flat files carry the exchange.",
+        **_only("bars", "AccumulatedVolume", _RUNNING, "stocks", "options"),
+        **_only("bars", "AccumulatedDecimalVolume", _RUNNING, "stocks"),
+        **_only("bars", "AverageTradeSize", _RUNNING, "stocks", "options", "crypto"),
+        **_only("bars", "DayVwap", _RUNNING, "stocks", "options"),
+        **_only(
+            "bars",
+            "DecimalVolume",
+            "The stocks WebSocket aggregates carry the fractional volume; the stocks REST and "
+            "flat-file bars do not.",
+            "stocks",
+        ),
+        **_only(
+            "bars",
+            "EndTimestamp",
+            _RUNNING,
+            "stocks",
+            "options",
+            "indices",
+            "futures",
+            "forex",
+            "crypto",
+        ),
+        **_only("bars", "OfficialOpenPrice", _RUNNING, "stocks", "options", "indices"),
+        **_only(
+            "bars",
+            "Exchange",
+            "Only the futures minute-bar flat files carry the exchange.",
+            "futures",
+        ),
+        **_only(
+            "bars",
+            "Vwap",
+            "The forex REST bars carry a volume-weighted average price; the forex WebSocket and "
+            "flat-file bars do not.",
+            "forex",
+        ),
+        **_only(
+            "bars",
+            "Pair",
+            "The forex and crypto WebSocket aggregates name the instrument `pair`, their own long "
+            "name, where REST and the flat files say `ticker`; it is the dataset's symbol key, "
+            "which the key rename makes `Symbol` on every transport.",
+            "forex",
+            "crypto",
+        ),
+        **_only(
+            "trades",
+            "Pair",
+            "The crypto WebSocket trade names the instrument `pair`, its own long name; it is the "
+            "dataset's symbol key, which the key rename makes `Symbol`.",
+            "crypto",
+        ),
+        **_only(
+            "trades",
+            "Ticker",
+            "Of the crypto trades, only the flat file carries the instrument as `ticker` (REST "
+            "takes it from the path or names it `symbol`, the WebSocket `pair`); it is the "
+            "dataset's symbol key, which the key rename makes `Symbol`.",
+            "crypto",
+        ),
+        **_only(
+            "trades",
+            "Timestamp",
+            "The crypto REST last trade names its time `timestamp`, its own long name; it is that "
+            "source's time key, which the key rename makes `Timestamp`.",
+            "crypto",
+        ),
+        **_only("trades", "Id", _LAST_TRADE, "options"),
+        **_only("trades", "ParticipantTimestamp", _LAST_TRADE, "options"),
+        **_only("trades", "Tape", _LAST_TRADE_ONLY, "options"),
+        **_only("trades", "TrfId", _LAST_TRADE_ONLY, "options"),
+        **_only("trades", "TrfTimestamp", _LAST_TRADE_ONLY, "options"),
+        **_only(
+            "trades", "Channel", "Only the futures REST trades carry the feed channel.", "futures"
+        ),
+        **_only(
+            "trades",
+            "Correction",
+            "Only the futures trade flat files carry the correction indicator.",
+            "futures",
+        ),
+        **_only(
+            "trades", "Exchange", "Only the futures trade flat files carry the exchange.", "futures"
+        ),
+        **_only(
+            "quotes",
+            "Ask",
+            "The forex REST last quote names its ask `ask`, its own long name, where the stream "
+            "and the files say `ask_price`.",
+            "forex",
+        ),
+        **_only(
+            "quotes",
+            "Bid",
+            "The forex REST last quote names its bid `bid`, its own long name, where the stream "
+            "and the files say `bid_price`.",
+            "forex",
+        ),
+        **_only(
+            "quotes",
+            "Timestamp",
+            "The forex REST last quote names its time `timestamp`, its own long name; it is that "
+            "source's time key, which the key rename makes `Timestamp`.",
+            "forex",
+        ),
+        **_only(
+            "quotes", "Channel", "Only the futures REST quotes carry the feed channel.", "futures"
+        ),
+        **_only(
+            "quotes", "Exchange", "Only the futures quote flat files carry the exchange.", "futures"
+        ),
     }
 )
-"""`(kind, column)` to why the column is legitimately on one transport only."""
+"""`(kind, group, column)` to why the column is on one transport only in that group."""
 
 VENUES: Mapping[str, str] = MappingProxyType(
     {

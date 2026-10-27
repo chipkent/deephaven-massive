@@ -27,8 +27,8 @@ short key that neither covers stops the refresh (the `short-key` gate). A lexico
 identity entry never takes a name from a description. A `SHAPES` or `IDENTITY` entry that
 no generated object uses is stale and stops the refresh too (the `stale-entry` gate).
 
-The source tuples at the end (`BAR_PATHS`, the snapshot paths, and the WebSocket channels)
-are shared with `overrides`.
+The REST path tuples at the end (`BAR_PATHS` and the snapshot paths) are shared with
+`overrides`.
 
 The tables are plain read-only data, built once at import.
 """
@@ -45,14 +45,14 @@ if TYPE_CHECKING:
 __all__ = [
     "BAR_PATHS",
     "CRYPTO_SNAPSHOTS",
-    "FMV_CHANNELS",
     "FOREX_SNAPSHOTS",
     "IDENTITY",
+    "LAST_QUOTE_ASK",
+    "LAST_QUOTE_BID",
     "LEXICONS",
     "RANGE_PATHS",
     "SHAPES",
     "STOCKS_SNAPSHOTS",
-    "WS_BARS",
     "Lexicon",
     "LongName",
 ]
@@ -116,12 +116,25 @@ def _from(source: str, **names: str) -> dict[str, LongName]:
 
 
 _UNIFIED_BAR = "/v3/snapshot `last_minute` and `session` (the unified snapshot)"
+# Crypto's one REST quote: the unified snapshot's last quote, documented for crypto.
+_CRYPTO_LAST_QUOTE = "/v3/snapshot `last_quote` (the crypto unified snapshot)"
+
+LAST_QUOTE_ASK = "ask"
+"""How Massive's last-quote objects spell a quote's ask price (`/v3/snapshot` `last_quote.ask`,
+`/v1/last_quote/currencies` `ask`); the crypto quote, whose only REST quote is that object,
+follows it. Its quotes data spells the same field `ask_price`."""
+
+LAST_QUOTE_BID = "bid"
+"""How Massive's last-quote objects spell a quote's bid price; see `LAST_QUOTE_ASK`."""
 # Every flat file names its instrument `ticker`, as does the unified snapshot.
 _TICKER = "/v3/snapshot `ticker`, and the `ticker` column of every flat file"
 _AGGREGATE = {
     **_from(_TICKER, T="ticker", sym="ticker"),
     **_from(_UNIFIED_BAR, o="open", h="high", l="low", c="close", v="volume", vw="vwap"),
     **_from("/v3/snapshot `last_minute.transactions`", n="transactions"),
+    # The day's volume-weighted average price: the `vwap` of the snapshots' `day` bar
+    # (`/v3/snapshot/options/{underlyingAsset}` `day.vwap`, the v2 snapshots' `day.vw`).
+    **_from("/v3/snapshot/options/{underlyingAsset} `day.vwap`", a="day_vwap"),
     **_from(
         "/futures/v1/aggs and every `*_aggs_v1` flat file `window_start`",
         t="window_start",
@@ -236,10 +249,9 @@ _LEXICONS = (
     ),
     Lexicon(
         name="crypto_quote",
-        reason="A crypto quote. Crypto has no quotes outside the WebSocket, so each name is "
-        "the one Massive gives the same field of its nearest relative: the crypto trade for "
-        "the times and the exchange, the forex quote for the prices, the stocks quote for "
-        "the sizes.",
+        reason="A crypto quote from the WebSocket. Crypto's own REST data has one quote, the "
+        "unified snapshot's `last_quote`, which names the prices and sizes; the times and "
+        "the exchange take the crypto trade's names.",
         entries={
             **_from(
                 "/v3/trades/{cryptoTicker}",
@@ -247,8 +259,8 @@ _LEXICONS = (
                 x="exchange",
                 r="received_timestamp",
             ),
-            **_from("/v3/quotes/{fxTicker}", ap="ask_price", bp="bid_price"),
-            **_from("/v3/quotes/{stockTicker}", as_="ask_size", bs="bid_size"),
+            **_from(_CRYPTO_LAST_QUOTE, ap=LAST_QUOTE_ASK, bp=LAST_QUOTE_BID),
+            **_from(_CRYPTO_LAST_QUOTE, as_="ask_size", bs="bid_size"),
         },
     ),
     Lexicon(
@@ -407,25 +419,6 @@ CRYPTO_SNAPSHOTS: tuple[str, ...] = (
 )
 """The crypto full-market and movers snapshots."""
 
-WS_BARS: tuple[str, ...] = (
-    "stocks/A",
-    "stocks/AM",
-    "options/A",
-    "options/AM",
-    "indices/A",
-    "indices/AM",
-    "futures/A",
-    "futures/AM",
-    "forex/CAS",
-    "forex/CA",
-    "crypto/XAS",
-    "crypto/XA",
-)
-"""The WebSocket aggregate channels, per second and per minute, of every asset class."""
-
-FMV_CHANNELS: tuple[str, ...] = ("stocks/FMV", "options/FMV", "forex/FMV", "crypto/FMV")
-"""The WebSocket fair-market-value channels."""
-
 SHAPES: Mapping[tuple[str, str], str] = MappingProxyType(
     {
         **_shapes(BAR_PATHS, {"": "aggregate"}),
@@ -464,10 +457,20 @@ SHAPES: Mapping[tuple[str, str], str] = MappingProxyType(
                 "lastTrade": "crypto_trade",
             },
         ),
-        **_shapes(("stocks/A", "stocks/AM"), {"": "stocks_bar"}),
-        **_shapes(("futures/A", "futures/AM"), {"": "futures_bar"}),
+        **_shapes(("stocks/AM", "stocks/A"), {"": "stocks_bar"}),
+        **_shapes(("futures/AM", "futures/A"), {"": "futures_bar"}),
         **_shapes(
-            (c for c in WS_BARS if not c.startswith(("stocks/", "futures/"))), {"": "aggregate"}
+            (
+                "options/AM",
+                "options/A",
+                "indices/AM",
+                "indices/A",
+                "forex/CA",
+                "forex/CAS",
+                "crypto/XA",
+                "crypto/XAS",
+            ),
+            {"": "aggregate"},
         ),
         **_shapes(("stocks/T", "options/T"), {"": "trade"}),
         **_shapes(("stocks/Q", "options/Q"), {"": "quote"}),
@@ -477,7 +480,9 @@ SHAPES: Mapping[tuple[str, str], str] = MappingProxyType(
         **_shapes(("futures/T",), {"": "futures_trade"}),
         **_shapes(("futures/Q",), {"": "futures_quote"}),
         **_shapes(("indices/V",), {"": "index_value"}),
-        **_shapes(FMV_CHANNELS, {"": "fair_market_value"}),
+        **_shapes(
+            ("stocks/FMV", "options/FMV", "forex/FMV", "crypto/FMV"), {"": "fair_market_value"}
+        ),
         **_shapes(("stocks/LULD",), {"": "luld"}),
         **_shapes(("stocks/NOI",), {"": "imbalance"}),
     }

@@ -87,14 +87,28 @@ def test_a_lexicon_copies_and_freezes_its_entries() -> None:
         cast("dict[str, lexicon.LongName]", lex.entries)["s"] = price
 
 
-def test_the_websocket_channels_have_their_shapes() -> None:
-    assert len(lexicon.WS_BARS) == 12
-    assert {lexicon.SHAPES[c, ""] for c in lexicon.WS_BARS} == {
-        "aggregate",
-        "stocks_bar",
-        "futures_bar",
-    }
-    assert {lexicon.SHAPES[c, ""] for c in lexicon.FMV_CHANNELS} == {"fair_market_value"}
+def test_every_websocket_channel_has_one_message_shape() -> None:
+    channels = {source for source, _ in lexicon.SHAPES if not source.startswith("/")}
+    assert len(channels) == 28
+    assert all(lexicon.SHAPES.get((c, "")) for c in channels)
+    bars = {c for c in channels if lexicon.SHAPES[c, ""].endswith(("aggregate", "_bar"))}
+    assert len(bars) == 12
+
+
+def test_the_day_vwap_is_named_from_the_snapshots_day_bar() -> None:
+    entry = lexicon.LEXICONS["aggregate"].entries["a"]
+    assert entry.long_name == "day_vwap"
+    assert "`day.vwap`" in entry.source
+
+
+def test_the_crypto_quote_takes_crypto_s_own_last_quote_names() -> None:
+    entries = lexicon.LEXICONS["crypto_quote"].entries
+    assert (entries["ap"].long_name, entries["bp"].long_name) == (
+        lexicon.LAST_QUOTE_ASK,
+        lexicon.LAST_QUOTE_BID,
+    )
+    assert (entries["as"].long_name, entries["bs"].long_name) == ("ask_size", "bid_size")
+    assert all("crypto" in e.source for e in entries.values())
 
 
 def test_the_range_paths_are_the_aggregate_range_templates() -> None:

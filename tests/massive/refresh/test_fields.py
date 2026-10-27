@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from deephaven_massive._massive.refresh import overrides
-from deephaven_massive._massive.refresh.fields import RawField, SourceFields, representation
+from deephaven_massive._massive.refresh.fields import (
+    RawField,
+    SourceFields,
+    openapi_field,
+    representation,
+)
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi
 from deephaven_massive._massive.spec.types import WireType, WireUnit
@@ -42,7 +47,7 @@ _EMPTY = HandInput(
 
 
 def _rules(hand: HandInput = _EMPTY) -> SourceFields:
-    return SourceFields(OpenApi({}), hand, "us_x/trades_v1", origin="https://massive.com")
+    return SourceFields(hand, "us_x/trades_v1", origin="https://massive.com")
 
 
 @pytest.mark.parametrize(
@@ -106,16 +111,20 @@ def test_a_field_of_no_usable_type_is_reported() -> None:
 
 
 def test_an_array_s_items_decide_its_type() -> None:
+    # An OpenAPI field's items are resolved where it is read; the rules only look at them.
     spec = OpenApi({"components": {"schemas": {"Code": {"type": "integer"}}}})
-    rules = SourceFields(spec, _EMPTY, "stocks/T", origin="https://massive.com")
+    rules = SourceFields(_EMPTY, "stocks/T", origin="https://massive.com")
     codes: JsonObject = {"type": "array", "items": {"$ref": "#/components/schemas/Code"}}
-    item = rules.field(RawField("conditions", codes, required=False))
+    raw = openapi_field(spec, "conditions", codes, required=False)
+    assert raw.items == {"type": "integer"}
+    item = rules.field(raw)
     assert item is not None
     assert item.wire_type is WireType.INT_ARRAY
     texts: JsonObject = {"type": "array", "items": {"type": "string"}}
-    names = rules.field(RawField("names", texts, required=False))
+    names = rules.field(openapi_field(spec, "names", texts, required=False))
     assert names is not None
     assert names.wire_type is WireType.JSON_TEXT
+    assert openapi_field(spec, "price", {"type": "number"}, required=True).items is None
 
 
 def test_examples_are_checked_by_the_generated_field() -> None:

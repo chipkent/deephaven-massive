@@ -275,7 +275,7 @@ def test_gate_example_type_finds_the_samples_the_vendor_types_contradict() -> No
         real_hand,
         type_fixes={k: v for k, v in real_hand.type_fixes.items() if k not in {*fixed, movers}},
         units={k: v for k, v in real_hand.units.items() if k not in fixed},
-        sample_errors=(),
+        sample_errors=tuple(e for e in real_hand.sample_errors if not e.path.startswith("/")),
     )
     assert sorted(_problems(Snapshot.load(), hand)) == sorted(
         [
@@ -301,7 +301,12 @@ def test_gate_stale_entry_a_shared_type_fix_is_needed_while_any_member_needs_it(
         type_fixes={k: v for k, v in real_hand.type_fixes.items() if k != tickers},
         sample_errors=(*real_hand.sample_errors, excused),
     )
-    assert sorted(_problems(Snapshot.load(), hand)) == [("stale-entry", *movers)]
+    # The WebSocket trade, whose integer sample its declared type accepts, shares the
+    # decision too.
+    assert sorted(_problems(Snapshot.load(), hand)) == [
+        ("stale-entry", *movers),
+        ("stale-entry", "crypto/XT", "i"),
+    ]
     # Without either, the full-market sample stops its generator first.
     hand = dataclasses.replace(hand, sample_errors=real_hand.sample_errors)
     assert sorted(_problems(Snapshot.load(), hand)) == [("example-type", *tickers)]
@@ -872,7 +877,7 @@ def test_a_type_fix_to_an_epoch_takes_its_unit_from_units() -> None:
 
 
 def test_gate_stale_entry_a_unit_on_a_field_a_type_fix_keeps_from_an_epoch() -> None:
-    fix = overrides.TypeFix(conversion=Conversion.INTEGER_ID_AS_TEXT, reason="test")
+    fix = overrides.TypeFix(conversion=Conversion.TEXT_OR_INTEGER_ID, reason="test")
     hand = _hand(
         type_fixes={(_PATH, "ref"): fix}, units={(_PATH, "ref"): _MS}, identity={"ref": ""}
     )
@@ -948,14 +953,6 @@ def test_a_sample_error_matches_its_sample_as_json_text() -> None:
         ("example-type", _PATH, "label"),
         ("stale-entry", _PATH, "label"),
     ]
-
-
-def test_an_integer_id_kept_as_text_is_not_stale_for_its_integer_sample() -> None:
-    # The conversion only retypes integers, so an integer sample never makes it stale.
-    fix = overrides.TypeFix(conversion=Conversion.INTEGER_ID_AS_TEXT, reason="t")
-    row = _row(trade_id={"type": "integer", "example": 413131})
-    (field,) = _one(row, _hand(type_fixes={(_PATH, "trade_id"): fix})).fields
-    assert (field.wire_type, field.conversion) == (WireType.STRING, Conversion.INTEGER_ID_AS_TEXT)
 
 
 def test_gate_stale_entry_a_sample_error_for_a_field_that_is_gone() -> None:
@@ -1131,7 +1128,7 @@ def test_gate_stale_entry_hand_entries_naming_nothing() -> None:
         tag_conflicts={(_PATH, "gone"): "test"},
         type_fixes={
             (_PATH, "gone"): overrides.TypeFix(
-                conversion=Conversion.INTEGER_ID_AS_TEXT, reason="test"
+                conversion=Conversion.TEXT_OR_INTEGER_ID, reason="test"
             )
         },
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},

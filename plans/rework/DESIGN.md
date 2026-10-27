@@ -1430,7 +1430,8 @@ beside the table, and the indicator `timestamp` fields are its first entries.
 
 | Transport and fields | Unit |
 |---|---|
-| WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); options `T`/`Q`; futures `T`/`Q` (`t`; `Q` `bt`, `at`); indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` (`t`; `XT`/`XQ` received time `r`) | ms (verified on each documentation page) |
+| WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); options `T`/`Q`; futures `T`/`Q` (`t`); indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` (`t`) | ms (documented as Unix ms on each documentation page; 13-digit samples) |
+| WebSocket futures `Q` `bt`, `at`; crypto `XT`/`XQ` received time `r` | ms (the descriptions name no unit; the samples have 13 digits, as do the other times of the same message) |
 | WebSocket `NOI` `t` | ns (documented as Unix ns; the sample has 19 digits) |
 | WebSocket `LULD` `t` | **UNVERIFIED**: documented as Unix ms, but the sample (`1764086430905642800`) has 19 digits, which as ms would overflow; registered as ns. The overflow check and the bound fail loudly on a mismatch. |
 | WebSocket `FMV` `t` | Documented as ns; the documentation sample is `1678220098130` (13 digits, ms). Rule, FMV only: `t >= 10**17` means ns, otherwise ms. Every ns value after 1973-03-03 is at least 10^17, and an ms value reaches 10^17 only in the year 3,170,000, so the rule cannot misclassify. Logged once; tested. |
@@ -2660,10 +2661,13 @@ verification, never a column list.
   keyed by `{venue}` requires its four venue pages to list identical columns. Fields are the
   page's "Columns" table (name, type, description), in the order of the page's "Example Data"
   header row, which must name exactly the table's columns (case aside: some pages write
-  `Ticker`): the vendor's tables list the columns alphabetically, while the example header is
-  the files' own column order (the stocks aggregates' `ticker, volume, open, close, high,
-  low, window_start, transactions`). The example rows themselves are ignored. A dataset page
-  with no overview row is reported as unaccounted by `--check`.
+  `Ticker`): the vendor's tables list the columns in an order of their own (alphabetical on
+  most pages), while the example header is the files' own column order (the stocks
+  aggregates' `ticker, volume, open, close, high, low, window_start, transactions`). The
+  example rows go through the `example-type` gate, each cell read as the file's reader reads
+  it (an empty cell is null; a cell of a text or date column is text; any other cell is a
+  number when it reads as one, else text). A dataset page with no overview row is reported as
+  unaccounted by `--check`.
 - **Representation rules** (generator rules, not hand entries): an array of strings or objects,
   a free-form object, and `oneOf`/`anyOf` become `json-text`; an array of integers becomes
   `int-array`; the WebSocket envelope key `ev` is dropped; a field with a `UNITS` entry becomes
@@ -2716,8 +2720,8 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
-| `SAMPLE_ERRORS` | `exclusions.py` | `(path, wire key, sample, reason)`: a documented example value that is wrong while the type is right, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
-| `TRANSPORT_ONLY` | `overrides.py` | `{(kind, column): reason}`: columns legitimately on one transport | `AccumulatedVolume` (WebSocket only) |
+| `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
+| `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
 | `PARAM_UNITS` | `overrides.py` | `{(path, base parameter): (unit, reason)}`: the unit of every timestamp-like string parameter, and of any other string parameter documented as taking an epoch, or "not an epoch" (sent as date or date-time text) | `/v3/trades` `timestamp` → ns; indicators `timestamp` → ms; aggregate range `{from}`/`{to}` → ms; benzinga `last_updated` → not an epoch |
 | `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, the executable rows of section 8.12 | `/v1/summaries` |
@@ -2919,7 +2923,8 @@ type the field gets, whether it widens (accepts a form the declared type refuses
 retypes values the declared type accepts (`widens`), and exactly the forms it accepts, so no entry silently inherits a meaning nobody chose
 for it. The plain converter of each `WireType` is never loosened, and no conversion is a
 no-op. The decoder applies it deliberately: the WebSocket forex `x` is declared an integer
-but arrives as a quoted decimal string (`"44"`), and `quoted-integer` parses it to `long`; a value it cannot read (`"4.8"`, `"x"`) is
+but sampled as a quoted decimal string (`"44"`), and `quoted-integer` reads either form as
+the `long`; a value it cannot read (`"4.8"`, `"x"`) is
 an unconvertible value and fails loudly like any other ([section 19.5](#195-runtime-drift)).
 Every entry has a fixture test of both the conversion and the failure; a conversion that no
 entry declares is coercion, which never happens. The conversions:
@@ -2928,24 +2933,26 @@ entry declares is coercion, which never happens. The conversions:
 |---|---|---|---|
 | `iso-text-instant` | `string` → `iso-instant` | ISO-8601 instant text | benzinga analysts and firms `last_updated`, futures market-status `timestamp`, `/v1/marketstatus/now` `serverTime` |
 | `iso-date-text` | `iso-instant` → `date` | `YYYY-MM-DD` | futures products `last_updated` (sample `"2025-02-22"`) |
-| `quoted-integer` | `long` → `long` | decimal digits in text; an integer fails | WebSocket forex `C` `x` (sample `"44"`) |
-| `integer-id-as-text` | `long` → `string` | an integer only; text fails | WebSocket crypto `XT` `i` |
-| `text-or-integer-id` | `long` or `string` → `string` | text or an integer | crypto full-market and movers snapshots `lastTrade.i`, declared text (samples `413131` and `"517478762"`); TMX `tmx_company_id`, declared an integer (sample `"2208"`) |
+| `quoted-integer` | `long` → `long` | an integer, or decimal digits in text | WebSocket forex `C` `x` (sample `"44"`) |
+| `text-or-integer-id` | `long` or `string` → `string` | text or an integer | the crypto trade ID, one decision: the full-market and movers snapshots `lastTrade.i`, declared text (samples `413131` and `"517478762"`), and WebSocket `XT` `i`, declared an integer (sample `14272084`); TMX `tmx_company_id`, declared an integer (sample `"2208"`) |
 | `number-label` | `double` → `string` | text, or a finite number as float text (`1` gives `"1.0"`) | risk-factor `taxonomy` (sample `"1.0"`) |
-| `one-code` | `long` → `int-array` | one integer | flat-file `conditions` |
+| `code-list-text` | `long` → `int-array` | one integer, or integers separated by commas in text | flat-file `conditions` and stocks quotes `indicators`, one decision (sample `"12,37"`) |
 | `midnight-utc-date` | `date` → `date` | `YYYY-MM-DD`, or midnight with offset `Z` or `+00:00`, giving the written date; any other clock or offset fails | indices open-close `from`, crypto open-close `day` (samples `"…T00:00:00.000Z"`); the column stays a date so the open-close sources agree |
 | `date-as-epoch` | `date` → `epoch` | an integer count; its unit comes from `UNITS` | futures snapshot `details.settlement_date` (sample `1753851600000000000`, an instant in ns; `/futures/v1/contracts` sends the field as a date) |
 | `integer-as-number` | `long` → `double` | any number | WebSocket crypto `XA`/`XAS` `v` (sample `951.6112`), futures `A`/`AM` `dv` (sample `1353.1`) |
 
 The `example-type` gate converts every documented example value through its generated field:
 the specification's response example (106 of the 109 generated REST paths carry one), each
-WebSocket channel's message example, and each field's own `example`; flat-file example rows
-are not read. A type the vendor's samples contradict stops the refresh instead of
+WebSocket channel's message example, each flat-file page's example rows, and each field's own
+`example`. A key a WebSocket example sends that its message does not declare stops the
+refresh too, until the message declares it or a `SAMPLE_ERRORS` entry says the example is
+wrong (the futures trade example's `z`). A type the vendor's samples contradict stops the
+refresh instead of
 failing at run time. It also retires fixes: a `TYPE_FIXES` entry is stale once no example
 value of the fields it names (all entries sharing one decision, such as the two crypto
 snapshots, one decision from one `TypeFix` object) is a value the declared type refuses. A
-conversion that only retypes values its declared type accepts (`iso-text-instant`,
-`integer-id-as-text`, `one-code`) is exempt: the declared-type check retires
+conversion that only retypes values its declared type accepts (`iso-text-instant`) is
+exempt: the declared-type check retires
 it once the specification changes the type. A `SAMPLE_ERRORS` entry is stale once the specification no
 longer shows its sample, the field accepts it, or the field is gone; samples compare as JSON
 text, so `1`, `1.0`, and `true` are three samples.
@@ -3552,7 +3559,7 @@ document already reflects them.
 Each item is handled conservatively now, covered by a fixture test in its unit-test module, and
 retired by a live integration test (`*_integration.py`, skipped without `MASSIVE_API_KEY`) in the
 later live-testing planned PR. Each item that a live test refutes becomes an owner decision
-before 1.0. The last two items concern Deephaven, not Massive: the work that adds column
+before 1.0. Items 16 and 17 concern Deephaven, not Massive: the work that adds column
 descriptions settles them in the embedded test JVM and the web UI, and they need no live test.
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
@@ -3574,3 +3581,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 15 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): request a weekend key and record the status |
 | 16 | Whether the described copy of a keyed `input_table` (a `poll()` result in `REPLACE` or `UPSERT` mode) keeps the input-table attribute, which the web UI reads to offer editing ([section 7.4](#74-column-descriptions)) | The poller writes only through the `input_table` it holds, never through the returned copy, so either outcome keeps the rows correct; the copy carries the descriptions either way | `tests/tables/test_columns.py`: the copy of a keyed `input_table` ticks with its parent, carries `ColumnDescriptions`, and pins whichever input-table attribute behaviour 42.7 shows | None: the embedded JVM settles it |
 | 17 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
+| 18 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/namespaces/test_forex_integration.py`: one `C` frame; record the form of `x` |
+| 19 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/namespaces/test_crypto_integration.py`: one `XT` frame; record the form of `i` |
+| 20 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); the overflow check and the [1990, 2100] bound fail loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
+| 21 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |

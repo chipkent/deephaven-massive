@@ -22,18 +22,20 @@ dataset must have a page for every venue.
 **Fields** come from the dataset page's "Columns" table: each row's name is the CSV header and
 wire key, its type is `integer` (`long`), `number` (`double`), `string`, or
 `timestamp - integer` (an integer the vendor documents as a timestamp, which then needs its
-`UNITS` entry), and its description is the field's. The table lists the columns
-alphabetically; the files carry them in the order the page's "Example Data" header shows, so
-that header gives the fields' order, and it must name exactly the table's columns (ignoring
-case: some pages capitalize `Ticker`). The sample rows are not read. A flat file marks
-nothing required. Names, types, and units are decided by the rules every transport shares
-(`fields`).
+`UNITS` entry), and its description is the field's. The table lists the columns in an order
+of its own (alphabetical on most pages); the files carry them in the order the page's
+"Example Data" header shows, so that header gives the fields' order, and it must name exactly
+the table's columns (ignoring case: some pages capitalize `Ticker`). The sample rows below the
+header go through the `example-type` gate, each cell read as the file's reader reads it. A
+flat file marks nothing required. Names, types, and units are decided by the rules every
+transport shares (`fields`).
 
 It imports the standard library and other `_massive` modules only.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -41,14 +43,14 @@ from deephaven_massive._massive.refresh import docs
 from deephaven_massive._massive.refresh.fields import RawField, SourceFields
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
-from deephaven_massive._massive.refresh.openapi import OpenApi
-from deephaven_massive._massive.spec.types import Source, Transport
+from deephaven_massive._massive.spec.types import Source, Transport, WireType
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from deephaven_massive._massive.refresh.openapi import JsonObject
+    from deephaven_massive._massive.refresh.openapi import Json, JsonObject
     from deephaven_massive._massive.refresh.snapshot import Snapshot
+    from deephaven_massive._massive.spec.types import Field
 
 __all__ = ["FlatFileCoverage", "generate_flat_files", "venue_template"]
 
@@ -62,6 +64,9 @@ _COLUMN_TYPES: Final[Mapping[str, tuple[str, bool]]] = {
 }
 # The placeholder a venue's name is folded into.
 _VENUE: Final = "{venue}"
+# An example cell that is a whole number, or any decimal number (`276.16`, `1.44E+06`).
+_INTEGER: Final = re.compile(r"-?\d+")
+_DECIMAL: Final = re.compile(r"-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -118,6 +123,7 @@ class _FileGenerator(SourceFields):
         try:
             table = docs.columns(page)
             header = docs.example_header(page)
+            samples = docs.example_rows(page)
         except docs.DocsError as error:
             self.problem(Gate.DOCS, "", str(error))
             return None
@@ -137,6 +143,16 @@ class _FileGenerator(SourceFields):
             if raw is not None and (item := self.field(raw)) is not None:
                 fields.append(item)
         self.check_columns(fields)
+        by_key = {f.wire_key.lower(): f for f in fields}
+        rows: list[Json] = [
+            {
+                by_key[name.lower()].wire_key: _cell_value(by_key[name.lower()], cell)
+                for name, cell in zip(header, sample, strict=True)
+                if name.lower() in by_key
+            }
+            for sample in samples
+        ]
+        self.check_examples(fields, rows, documented=bool(rows), where="in the example rows")
         if self.problems:
             return None
         return Source(key=self.source, transport=Transport.FLAT_FILES, fields=tuple(fields))
@@ -157,6 +173,32 @@ class _FileGenerator(SourceFields):
         kind, timestamp = found
         schema: JsonObject = {"type": kind, "description": column.description}
         return RawField(column.name, schema, required=False, timestamp=timestamp)
+
+
+def _cell_value(item: Field, cell: str) -> Json:
+    """Return an example cell as the value a file's reader decodes it to.
+
+    A CSV cell is text. An empty cell is null, as the reader reads it; a text or date column
+    keeps the text; any other column's cell is a JSON number when it reads as one (`"55"` is
+    `55`, `"276.16"` is `276.16`) and text otherwise (`"12,37"`), so its field converts it
+    exactly as it would a decoded value.
+
+    Args:
+        item: The generated field of the cell's column.
+        cell: The cell's text.
+
+    Returns:
+        `None`, the text, or the number.
+    """
+    if not cell:
+        return None
+    if item.conversion is None and item.wire_type in {WireType.STRING, WireType.DATE}:
+        return cell
+    if _INTEGER.fullmatch(cell):
+        return int(cell)
+    if _DECIMAL.fullmatch(cell):
+        return float(cell)
+    return cell
 
 
 def _documented_prefixes(
@@ -321,7 +363,7 @@ def generate_flat_files(
         if _VENUE in template:
             problems += _check_venues(template, pages, snapshot=snapshot, venues=venues)
         first = next(iter(pages.values()))
-        generator = _FileGenerator(OpenApi({}), hand, template, origin=snapshot.origin)
+        generator = _FileGenerator(hand, template, origin=snapshot.origin)
         value = generator.generate(snapshot.flat_file_pages[first])
         uses[template] = generator.use()
         problems += generator.problems

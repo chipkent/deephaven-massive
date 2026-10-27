@@ -51,7 +51,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._massive.refresh import docs, gates, naming
-from deephaven_massive._massive.refresh.fields import RawField, SourceFields
+from deephaven_massive._massive.refresh.fields import RawField, SourceFields, openapi_field
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required, text
@@ -163,7 +163,8 @@ class _PathGenerator(SourceFields):
             origin: The documentation origin a root-relative link in a description is
                 resolved against (`plain_text`).
         """
-        super().__init__(spec, hand, path, origin=origin)
+        super().__init__(hand, path, origin=origin)
+        self.spec = spec
         self.path = path
         self.timestamp_bases: set[str] = set()
         # The specification's example of the HTTP 200 response, once `body` has read it.
@@ -316,7 +317,15 @@ class _PathGenerator(SourceFields):
                 )
             else:
                 self.wire_keys.add(wire_key)
-                out.append(RawField(wire_key, schema, child_required))
+                out.append(
+                    openapi_field(
+                        self.spec,
+                        wire_key,
+                        schema,
+                        required=child_required,
+                        where=f"{self.path} {wire_key}",
+                    )
+                )
 
     def check_envelope(self, name: str, schema: JsonObject) -> None:
         """Check that an envelope key of a single-object body has the envelope's type.

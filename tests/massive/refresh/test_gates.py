@@ -210,7 +210,7 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
         tag_conflicts={(_PATH, "gone"): "test"},
         type_fixes={
             (_PATH, "gone"): overrides.TypeFix(
-                conversion=Conversion.INTEGER_ID_AS_TEXT, reason="test"
+                conversion=Conversion.TEXT_OR_INTEGER_ID, reason="test"
             )
         },
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},

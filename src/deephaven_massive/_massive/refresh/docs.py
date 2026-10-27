@@ -22,8 +22,8 @@ This module turns those documents into plain values and nothing else:
 - `page_urls(index, area)` lists the pages of one area (`REST`, `WEBSOCKET`, `FLAT_FILES`)
   that `fetch` downloads, after checking each URL;
 - `page_file(url, area)` maps a page URL to its file below the area's snapshot directory;
-- `endpoint(page)`, `feed(page)`, `datasets(page)`, `columns(page)`, and
-  `example_header(page)` read what one page documents.
+- `endpoint(page)`, `feed(page)`, `datasets(page)`, `columns(page)`,
+  `example_header(page)`, and `example_rows(page)` read what one page documents.
 
 `fetch` and `snapshot` use them to store and find the pages; `rest`, `ws`, and `flatfiles` to
 decide what is documented. Every input is untrusted vendor text: it is parsed with anchored
@@ -52,6 +52,7 @@ __all__ = [
     "datasets",
     "endpoint",
     "example_header",
+    "example_rows",
     "feed",
     "links",
     "page_file",
@@ -335,8 +336,8 @@ def columns(page: str) -> list[DocColumn]:
 def example_header(page: str) -> list[str]:
     """Return the header row of a flat-file dataset page's "Example Data" table.
 
-    The sample rows themselves are not read: only the header, which lists the columns in the
-    order the vendor's files carry them (the "Columns" table above it is alphabetical). A
+    The header lists the columns in the order the vendor's files carry them; the "Columns"
+    table above it lists them in an order of its own (alphabetical on most pages). A
     `DocsError` propagates when the table's second line is not a header separator.
 
     Args:
@@ -349,7 +350,44 @@ def example_header(page: str) -> list[str]:
     if not table:
         return []
     _rows(table, "Example Data")
-    return [cell.strip() for cell in table[0].strip().strip("|").split("|")]
+    return _cells(table[0])
+
+
+def example_rows(page: str) -> list[list[str]]:
+    """Return the sample rows of a flat-file dataset page's "Example Data" table.
+
+    Args:
+        page: The Markdown text of a flat-file page.
+
+    Returns:
+        Each row's cells as the page writes them, stripped, in header order (`""` for an
+        empty cell); empty for a page with no "Example Data" table.
+
+    Raises:
+        DocsError: If the table's second line is not a header separator, or a row has
+            another number of cells than the header.
+    """
+    table = _table(page, "Example Data")
+    if not table:
+        return []
+    width = len(_cells(table[0]))
+    rows = [_cells(line) for line in _rows(table, "Example Data")]
+    for row in rows:
+        if len(row) != width:
+            raise DocsError(f"an Example Data row of {len(row)} cells under {width}: {row}")
+    return rows
+
+
+def _cells(line: str) -> list[str]:
+    """Return the cells of a Markdown table line, stripped.
+
+    Args:
+        line: The line, `| a | b |`.
+
+    Returns:
+        `["a", "b"]`.
+    """
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
 def _rows(table: list[str], heading: str) -> list[str]:

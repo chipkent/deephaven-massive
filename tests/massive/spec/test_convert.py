@@ -145,7 +145,7 @@ _CONVERSIONS = [
     (Conversion.ISO_TEXT_INSTANT, "1970-01-01T00:00:01Z", 1_000_000_000),
     (Conversion.ISO_DATE_TEXT, "2025-02-22", date(2025, 2, 22)),
     (Conversion.QUOTED_INTEGER, "48", 48),
-    (Conversion.INTEGER_ID_AS_TEXT, 7, "7"),
+    (Conversion.QUOTED_INTEGER, 48, 48),  # the declared form, which the stream may send
     (Conversion.TEXT_OR_INTEGER_ID, "2208", "2208"),
     (Conversion.TEXT_OR_INTEGER_ID, 2208, "2208"),
     (Conversion.TEXT_OR_INTEGER_ID, "517478762", "517478762"),
@@ -154,7 +154,9 @@ _CONVERSIONS = [
     (Conversion.NUMBER_LABEL, 1.0, "1.0"),
     (Conversion.NUMBER_LABEL, 2, "2.0"),  # one spelling for a whole-number version
     (Conversion.NUMBER_LABEL, 1e20, "1e+20"),
-    (Conversion.ONE_CODE, 12, [12]),
+    (Conversion.CODE_LIST_TEXT, 12, [12]),
+    (Conversion.CODE_LIST_TEXT, "12", [12]),
+    (Conversion.CODE_LIST_TEXT, "12,37", [12, 37]),  # a flat file's list
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10", date(2023, 3, 10)),
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00.000Z", date(2023, 3, 10)),
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00+00:00", date(2023, 3, 10)),
@@ -179,12 +181,11 @@ def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> No
         (Conversion.QUOTED_INTEGER, "4.8"),
         (Conversion.QUOTED_INTEGER, "-1"),
         (Conversion.QUOTED_INTEGER, " 48"),
-        (Conversion.QUOTED_INTEGER, 48),  # the form sent is text
+        (Conversion.QUOTED_INTEGER, 48.5),
+        (Conversion.QUOTED_INTEGER, True),
         (Conversion.INTEGER_AS_NUMBER, "1.5"),
         (Conversion.INTEGER_AS_NUMBER, True),
         (Conversion.QUOTED_INTEGER, str(2**63)),
-        (Conversion.INTEGER_ID_AS_TEXT, "7"),  # integer only: text fails loudly
-        (Conversion.INTEGER_ID_AS_TEXT, True),
         (Conversion.TEXT_OR_INTEGER_ID, 7.5),
         (Conversion.TEXT_OR_INTEGER_ID, True),
         (Conversion.NUMBER_LABEL, float("nan")),
@@ -204,8 +205,12 @@ def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> No
         (Conversion.MIDNIGHT_UTC_DATE, 1_678_406_400),
         (Conversion.DATE_AS_EPOCH, "2025-07-30"),
         (Conversion.DATE_AS_EPOCH, 2**63),
-        (Conversion.ONE_CODE, 2**31),
-        (Conversion.ONE_CODE, [12]),
+        (Conversion.CODE_LIST_TEXT, 2**31),
+        (Conversion.CODE_LIST_TEXT, [12]),
+        (Conversion.CODE_LIST_TEXT, "12, 37"),
+        (Conversion.CODE_LIST_TEXT, "12,"),
+        (Conversion.CODE_LIST_TEXT, "12;37"),
+        (Conversion.CODE_LIST_TEXT, f"1,{2**31}"),
     ],
 )
 def test_a_value_the_conversion_cannot_read_fails(conversion: Conversion, value: object) -> None:
@@ -220,11 +225,10 @@ _SAMPLES = {
     (Conversion.ISO_TEXT_INSTANT, WireType.STRING): "1970-01-01T00:00:01Z",
     (Conversion.ISO_DATE_TEXT, WireType.ISO_INSTANT): "2025-02-22",
     (Conversion.QUOTED_INTEGER, WireType.LONG): "48",
-    (Conversion.INTEGER_ID_AS_TEXT, WireType.LONG): 7,
     (Conversion.TEXT_OR_INTEGER_ID, WireType.STRING): 413131,
     (Conversion.TEXT_OR_INTEGER_ID, WireType.LONG): "2208",
     (Conversion.NUMBER_LABEL, WireType.DOUBLE): "1.0",
-    (Conversion.ONE_CODE, WireType.LONG): 12,
+    (Conversion.CODE_LIST_TEXT, WireType.LONG): "12,37",
     (Conversion.MIDNIGHT_UTC_DATE, WireType.DATE): "2023-03-10T00:00:00Z",
     (Conversion.DATE_AS_EPOCH, WireType.DATE): 1,
     (Conversion.INTEGER_AS_NUMBER, WireType.LONG): 951.6112,
