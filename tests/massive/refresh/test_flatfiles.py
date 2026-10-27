@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._massive.refresh import exclusions, overrides
+from deephaven_massive._massive.refresh import docs, exclusions, overrides
 from deephaven_massive._massive.refresh.flatfiles import (
     FlatFileCoverage,
     generate_flat_files,
@@ -59,6 +59,25 @@ def test_the_futures_venues_fold_into_one_template(
         "futures/trades/nymex.md",
     )
     assert coverage.pages["us_stocks_sip/trades_v1"] == ("stocks/trades.md",)
+
+
+@_requires_snapshot
+def test_the_four_venue_pages_of_each_futures_dataset_are_identical(
+    real: tuple[tuple[Source, ...], FlatFileCoverage],
+) -> None:
+    pages = Snapshot.load().flat_file_pages
+    templates = {key: names for key, names in real[1].pages.items() if "{venue}" in key}
+    assert len(templates) == 4
+    for names in templates.values():
+        assert len(names) == len(overrides.VENUES)
+        shapes = {
+            (
+                tuple(sorted((c.name, c.type) for c in docs.columns(pages[name]))),
+                tuple(docs.example_header(pages[name])),
+            )
+            for name in names
+        }
+        assert len(shapes) == 1, names
 
 
 @_requires_snapshot
