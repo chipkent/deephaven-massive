@@ -7,7 +7,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.table import Table
@@ -18,7 +17,6 @@ from deephaven_massive._datasets.symbols import (
     CRYPTO_QUOTES,
     SymbolTable,
     canonical,
-    canonical_view,
     normalize,
     symbol_canonicalizer,
     underlying,
@@ -27,7 +25,7 @@ from deephaven_massive._datasets.symbols import (
 from deephaven_massive._enums import AssetClass
 
 if TYPE_CHECKING:
-    from deephaven_massive._types import Symbols
+    from collections.abc import Iterable
 
 STK, OPT, FUT, IDX, FX, CRY = (
     AssetClass.STOCKS,
@@ -137,14 +135,14 @@ def test_normalize_lists_sorts_and_deduplicates() -> None:
 
 
 def test_normalize_materializes_generators() -> None:
-    assert normalize(STK, cast("Symbols", (s for s in ["B", "A"]))) == ("A", "B")
+    assert normalize(STK, cast("Iterable[str]", (s for s in ["B", "A"]))) == ("A", "B")
 
 
 def test_exhausted_generator_raises() -> None:
     symbols = (s for s in ["A"])
     list(symbols)
     with pytest.raises(ValueError, match=r"^no symbols$"):
-        normalize(STK, cast("Symbols", symbols))
+        normalize(STK, cast("Iterable[str]", symbols))
     with pytest.raises(ValueError, match=r"^no symbols$"):
         normalize(STK, [])
 
@@ -153,28 +151,24 @@ def test_normalize_all_passes_through() -> None:
     assert normalize(STK, dm.ALL) is dm.ALL
 
 
-def test_normalize_rejects_non_iterables_and_non_strings() -> None:
-    with pytest.raises(TypeError, match="symbols must be"):
-        normalize(STK, cast("Symbols", 5))
-    with pytest.raises(TypeError, match="must be a str"):
-        normalize(STK, cast("Symbols", ["AAPL", 5]))
-
-
-def test_normalize_tables(dh_exec_ctx: object) -> None:
+def test_symbol_tables_compare_by_wrapper(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["AAPL"])])
-    boxed = normalize(STK, table)
-    assert isinstance(boxed, SymbolTable)
+    boxed = SymbolTable(table)
     assert boxed.table is table
     # Boxes of one wrapper are equal; boxes of two wrappers of one Java table are not.
-    again = normalize(STK, table)
+    again = SymbolTable(table)
     assert boxed == again
     assert hash(boxed) == hash(again)
     twin = Table(j_table=table.j_table)
     assert twin == table
-    other = normalize(STK, twin)
-    assert other != boxed
-    with pytest.raises(ValueError, match="Symbol column"):
-        normalize(STK, new_table([string_col("Ticker", ["AAPL"])]))
+    assert SymbolTable(twin) != boxed
+
+
+def test_normalize_rejects_non_iterables_and_non_strings() -> None:
+    with pytest.raises(TypeError, match="symbols must be"):
+        normalize(STK, cast("Iterable[str]", 5))
+    with pytest.raises(TypeError, match="must be a str"):
+        normalize(STK, cast("Iterable[str]", ["AAPL", 5]))
 
 
 def test_ambiguous_crypto_pairs_are_rejected() -> None:
@@ -253,9 +247,3 @@ def test_symbol_canonicalizer(
         assert to_canonical("EURUSDX") is None
     assert len(caplog.records) == 1
     assert "'not a pair', which is not a valid forex symbol" in caplog.text
-
-
-def test_canonical_view(dh_exec_ctx: object) -> None:
-    table = new_table([string_col("Symbol", ["btc-usd", "X:ETHUSD", "??"])])
-    view = canonical_view(CRY, table)
-    assert dh_arrow.to_arrow(view).column("Symbol").to_pylist() == ["X:BTCUSD", "X:ETHUSD", None]

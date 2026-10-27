@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from deephaven.stream.table_publisher import TablePublisher, table_publisher
 
+from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.liveness import StreamHandle, new_scope
 
 if TYPE_CHECKING:
@@ -57,7 +58,7 @@ class FakeStreamTransport:
         with scope.open():
             blink, publisher = table_publisher(
                 f"massive.{spec.name}#{stream_id}",
-                spec.schema.col_defs(),
+                col_defs(spec.schema),
                 on_shutdown_callback=lambda: self._on_shutdown(stream_id),
             )
         with self._lock:

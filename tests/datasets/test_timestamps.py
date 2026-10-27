@@ -8,7 +8,7 @@ import pyarrow as pa
 import pytest
 
 from deephaven_massive import _errors
-from deephaven_massive._datasets.catalog import datasets, time_units, unit_rules
+from deephaven_massive._datasets.catalog import unit_rules
 from deephaven_massive._datasets.timestamps import (
     FMV_NS_THRESHOLD,
     TimeField,
@@ -18,6 +18,7 @@ from deephaven_massive._datasets.timestamps import (
 )
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._session import CATALOG
 
 # Field names that hold an epoch timestamp and so need a declared unit. The single-letter bar
 # bounds `s` and `e` are ambiguous across models, so datasets register those explicitly.
@@ -147,13 +148,13 @@ def test_not_timestamp_like(name: str) -> None:
 
 
 def test_every_declared_timestamp_field_of_every_dataset_has_a_unit() -> None:
-    table = time_units()
-    for spec in datasets().values():
+    table = TimeUnitTable(unit_rules(CATALOG.by_name))
+    for spec in CATALOG.by_name.values():
         for key_map_transport, key_map in spec.key_maps.items():
             for key in key_map:
                 if is_timestamp_like(key):
                     assert TimeField(spec.name, key_map_transport, key) in table
-    for field in unit_rules(datasets()):
+    for field in unit_rules(CATALOG.by_name):
         assert field in table
 
 

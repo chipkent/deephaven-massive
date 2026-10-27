@@ -10,7 +10,6 @@ from typing import Protocol, cast
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes
 from massive.rest.models import Agg, LastTrade, Quote, Ticker, TickerSnapshot, Trade
 from massive.rest.models.contracts import OptionsContract, Underlying
 from massive.rest.models.snapshot import OptionContractSnapshot
@@ -32,6 +31,7 @@ from deephaven_massive._datasets.schema import (
 )
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._tables.columns import col_defs
 
 ALL_TYPES = Schema("all", tuple(Column(t.name.title().replace("_", ""), t) for t in ColumnType))
 
@@ -52,10 +52,7 @@ def test_pascal_case(path: str, expected: str) -> None:
     assert pascal_case(path) == expected
 
 
-def test_column_types_map_to_deephaven_and_arrow() -> None:
-    assert ColumnType.INSTANT.dh_type == dtypes.Instant
-    assert ColumnType.LOCAL_DATE.dh_type == dtypes.LocalDate
-    assert ColumnType.INT_ARRAY.dh_type == dtypes.int32_array
+def test_column_types_map_to_arrow() -> None:
     assert ColumnType.INSTANT.arrow_type == pa.timestamp("ns", tz="UTC")
     assert ColumnType.INT.arrow_type == pa.int32()
     assert {t.value for t in ColumnType} == {
@@ -93,7 +90,7 @@ def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
     batch = ALL_TYPES.to_arrow(rows)
     assert batch.schema == ALL_TYPES.arrow_schema()
     table = dh_arrow.to_table(batch)
-    assert {c.name: c.data_type for c in table.columns} == ALL_TYPES.col_defs()
+    assert {c.name: c.data_type for c in table.columns} == col_defs(ALL_TYPES)
     values = dh_arrow.to_arrow(table).to_pylist()
     assert values[0]["String"] == '{"a": [2], "b": 1}'
     assert values[0]["IntArray"] == [7]
@@ -372,7 +369,7 @@ def test_tick_rows_fill_the_schema(dh_exec_ctx: object) -> None:
     row = {key_map[k]: v for k, v in frame.items() if k in key_map}
     row["Timestamp"] = cast("int", row["Timestamp"]) * 1_000_000
     table = dh_arrow.to_table(TRADES.schema.to_arrow([row]))
-    assert {c.name: c.data_type for c in table.columns} == TRADES.schema.col_defs()
+    assert {c.name: c.data_type for c in table.columns} == col_defs(TRADES.schema)
 
 
 def test_iso_timestamps_become_instants(dh_exec_ctx: object) -> None:

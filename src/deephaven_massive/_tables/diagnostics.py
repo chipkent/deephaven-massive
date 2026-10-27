@@ -34,6 +34,7 @@ from deephaven import input_table
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema, pascal_case
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.liveness import QueueWorker, new_scope
 from deephaven_massive._types import _All
 
@@ -354,10 +355,10 @@ class Diagnostics:
         try:
             with self._scope.open():
                 self._connections: InputTable = input_table(
-                    CONNECTIONS.col_defs(), key_cols=list(CONNECTION_KEYS)
+                    col_defs(CONNECTIONS), key_cols=list(CONNECTION_KEYS)
                 )
                 self._streams: InputTable = input_table(
-                    STREAMS.col_defs(), key_cols=list(STREAM_KEYS)
+                    col_defs(STREAMS), key_cols=list(STREAM_KEYS)
                 )
             self._writer: QueueWorker[_Item] = QueueWorker(
                 exec_ctx, name, handle=self._apply, on_exit=self._scope.release

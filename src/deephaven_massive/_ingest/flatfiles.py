@@ -338,8 +338,9 @@ class _CancelledError(Exception):
 class FlatFileHistory:
     """The flat-file transport of one `history()` call: reads and the table.
 
-    `SessionCore.flat_file_transport()` creates one per call, so it may hold the session's core
-    strongly; the long-lived state, the S3 client, lives in the session's `FlatFileClient`.
+    `SessionClients.flat_files()` creates one per call, so it may hold the session's core
+    strongly; the long-lived state, the S3 client, lives in the session's `FlatFileClient`,
+    which `SessionClients` owns.
     `history()` runs on the caller thread and starts at most `max_concurrency` reader threads
     of its own, which enter the session's execution context and end before it returns.
     """

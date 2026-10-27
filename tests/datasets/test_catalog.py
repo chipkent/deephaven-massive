@@ -4,49 +4,31 @@ This file is also where the catalog's Massive coverage assertions will live.
 """
 
 import dataclasses
-import importlib
-import pkgutil
-from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from deephaven_massive import _namespaces
 from deephaven_massive._datasets import catalog
 from deephaven_massive._datasets.catalog import (
-    NAMESPACE_MODULES,
     SCHEMA_FROM_MODEL,
     SDK_PARAMS,
+    Catalog,
     DatasetSpec,
     ParamKind,
     SymbolParam,
     check_filters,
-    datasets,
     filter_params,
     sdk_params,
-    time_units,
     unit_rules,
 )
 from deephaven_massive._datasets.schema import TRADES, ColumnOverride, ColumnType
 from deephaven_massive._datasets.timestamps import TimeField, TimeUnit, UnitRule
 from deephaven_massive._enums import AssetClass, Timespan, Transport
-from deephaven_massive._query import Query, StreamHistoryLatestQuery
-
-
-@pytest.fixture
-def fresh_catalog() -> Iterator[None]:
-    datasets.cache_clear()
-    time_units.cache_clear()
-    yield
-    datasets.cache_clear()
-    time_units.cache_clear()
-
 
 BASE = DatasetSpec(
     name="test.trades",
-    query_class=StreamHistoryLatestQuery,
     asset_class=AssetClass.STOCKS,
     schema=TRADES.schema,
     channels={None: "T"},
@@ -62,49 +44,18 @@ def _trades(**changes: object) -> DatasetSpec:
     return dataclasses.replace(BASE, **cast("dict[str, Any]", changes))
 
 
-def test_fixed_module_list_equals_the_namespace_package() -> None:
-    package = Path(_namespaces.__file__).parent
-    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {"base"}
-    assert set(NAMESPACE_MODULES) == found
-    assert len(NAMESPACE_MODULES) == len(set(NAMESPACE_MODULES))
+def test_the_catalog_holds_the_specs_by_name() -> None:
+    first, second = _trades(), _trades(name="test.quotes")
+    catalog = Catalog((first, second))
+    assert list(catalog.by_name) == ["test.trades", "test.quotes"]
+    assert catalog.by_name["test.quotes"] is second
+    with pytest.raises(TypeError):
+        cast("dict[str, DatasetSpec]", catalog.by_name)["test.other"] = first
 
 
-def test_every_namespace_module_exports_datasets() -> None:
-    for name in NAMESPACE_MODULES:
-        module = importlib.import_module(f"deephaven_massive._namespaces.{name}")
-        assert isinstance(module.DATASETS, tuple)
-        assert all(isinstance(spec, DatasetSpec) for spec in module.DATASETS)
-
-
-def test_datasets_aggregate_every_module() -> None:
-    specs = datasets()
-    expected = sum(
-        len(importlib.import_module(f"deephaven_massive._namespaces.{n}").DATASETS)
-        for n in NAMESPACE_MODULES
-    )
-    assert len(specs) == expected
-    assert all(name == spec.name for name, spec in specs.items())
-
-
-def test_datasets_reject_duplicates(fresh_catalog: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    spec = _trades()
-    stocks = importlib.import_module("deephaven_massive._namespaces.stocks")
-    options = importlib.import_module("deephaven_massive._namespaces.options")
-    monkeypatch.setattr(stocks, "DATASETS", (spec,))
-    monkeypatch.setattr(options, "DATASETS", (spec,))
-    with pytest.raises(ValueError, match=r"test\.trades is declared twice"):
-        datasets()
-
-
-def test_time_units_compose_the_specs(fresh_catalog: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    stocks = importlib.import_module("deephaven_massive._namespaces.stocks")
-    monkeypatch.setattr(stocks, "DATASETS", (_trades(),))
-    table = time_units()
-    assert TimeField("test.trades", Transport.WS, "t") in table
-    assert table.rule(TimeField("test.trades", Transport.WS, "t")) == UnitRule(
-        TimeUnit.MILLISECONDS
-    )
-    assert table.rule(TimeField("test.trades", Transport.REST, "timestamp")).unverified
+def test_the_catalog_rejects_a_name_declared_twice() -> None:
+    with pytest.raises(ValueError, match=r"dataset test\.trades is declared twice"):
+        Catalog((_trades(), _trades()))
 
 
 def test_unit_rules() -> None:
@@ -112,6 +63,34 @@ def test_unit_rules() -> None:
     assert rules[TimeField("test.trades", Transport.REST, "timestamp")] == UnitRule(
         TimeUnit.MILLISECONDS, unverified=True
     )
+
+
+def test_a_spec_must_match_a_query_class() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^test\.trades: a dataset needs channels, a history source, or a fetch method$",
+    ):
+        _trades(channels={})
+    with pytest.raises(
+        ValueError, match=r"^test\.trades: a dataset with channels and a fetch method needs"
+    ):
+        _trades(fetch_method="get_last_trade")
+    with pytest.raises(ValueError, match=r"^test\.trades: only bars combine a history source"):
+        _trades(channels={}, fetch_method="get_last_trade", history_method="list_trades")
+    with pytest.raises(ValueError, match=r"^test\.trades: a bars dataset needs a history source$"):
+        _trades(is_bars=True, channels={Timespan.MINUTE: "AM"}, fetch_method="get_prev")
+    # Flat files are a history source too.
+    flat = _trades(
+        is_bars=True,
+        channels={},
+        flat_file_prefixes={Timespan.MINUTE: "us_stocks_sip/minute_aggs_v1"},
+        key_maps={Transport.FLAT_FILES: {"ticker": "Symbol", "sip_timestamp": "Timestamp"}},
+        time_units={(Transport.FLAT_FILES, "sip_timestamp"): TimeUnit.NANOSECONDS},
+        unverified_time_units=frozenset(),
+    )
+    assert flat.has_history
+    assert not flat.has_channels
+    assert not flat.has_fetch
 
 
 def test_spec_validation() -> None:
@@ -146,9 +125,9 @@ class _Dividend:
 def _dividends(**changes: object) -> DatasetSpec:
     spec = DatasetSpec(
         name="stocks.dividends",
-        query_class=Query,
         asset_class=AssetClass.STOCKS,
         rest_model=_Dividend,
+        fetch_method="list_stocks_dividends",
         overrides={"ticker": ColumnOverride(name="Symbol")},
         time_units={(Transport.REST, "last_updated"): TimeUnit.NANOSECONDS},
         symbol_param=SymbolParam.TICKER,
@@ -234,7 +213,7 @@ def test_filter_params_merge_methods_and_extras(monkeypatch: pytest.MonkeyPatch)
         "timestamp_gte": ParamKind.DATETIME,
         "precision": ParamKind.INTEGER,
     }
-    assert filter_params(_trades(query_class=Query)) == {}
+    assert filter_params(_trades()) == {}
 
 
 def test_bar_channels_and_prefixes_are_keyed_by_timespan() -> None:

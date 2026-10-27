@@ -50,13 +50,14 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
-from deephaven_massive._datasets.symbols import SymbolTable, canonical_view, symbol_canonicalizer
+from deephaven_massive._datasets.symbols import SymbolTable, symbol_canonicalizer
 from deephaven_massive._enums import (
     HistorySource,
     PollMode,
     _require_enum,
 )
 from deephaven_massive._tables.liveness import entered
+from deephaven_massive._tables.watchlist import canonical_view
 from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
@@ -330,7 +331,7 @@ class StreamQuery(QueryBase):
         row is the latest from a symbol that was watched when it arrived; a group keeps that
         row after the symbol is removed, until a watched symbol ticks in the group. The table
         may hold any accepted spelling (`EUR/USD` for `C:EURUSD`): it is matched through
-        `canonical_view` in `_datasets/symbols.py`. `last_by()` never seeds
+        `canonical_view` in `_tables/watchlist.py`. `last_by()` never seeds
         from REST: use `snapshots(symbols).poll(n)` for current state on every plan. A `by`
         that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
         unknown column raises `ValueError`.

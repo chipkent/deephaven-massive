@@ -1,9 +1,12 @@
-"""Tests for the `_namespaces` package itself, which is deliberately empty."""
+"""Tests for the `_namespaces` package itself, whose `__init__.py` holds only a docstring."""
 
+import ast
 from pathlib import Path
 
 from deephaven_massive import _namespaces
 
 
-def test_package_init_is_empty() -> None:
-    assert Path(_namespaces.__file__).read_text() == ""
+def test_package_init_holds_only_a_docstring() -> None:
+    module = ast.parse(Path(_namespaces.__file__).read_text())
+    assert ast.get_docstring(module)
+    assert len(module.body) == 1

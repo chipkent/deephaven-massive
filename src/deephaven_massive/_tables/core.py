@@ -4,8 +4,8 @@
 one `SessionCore`, which queries and namespaces share. The core owns:
 
 - the session's label (`MassiveSession #1`), used in error messages and log records;
-- the configuration and the captured Deephaven `ExecutionContext`, entered on every library
-  thread;
+- the configuration, the process's dataset `Catalog`, and the captured Deephaven
+  `ExecutionContext`, entered on every library thread;
 - `registry_lock`, the one leaf lock that guards every session registry: no Deephaven call, network
   call, or blocking wait happens while it is held;
 - the stream registry: every stream from just before it opens until its holds are released
@@ -20,12 +20,14 @@ one `SessionCore`, which queries and namespaces share. The core owns:
 - one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`),
   each returning one of the ports defined here: `RestTransport` (`fetch`, `poll`, REST
   `history`, and the WebSocket host decision), `StreamTransport` (opening a WebSocket stream),
-  and `FlatFileTransport` (flat-file `history`). The flat-file transport is implemented: the
-  core creates the session's `_massive.FlatFileClient` (the S3 client, closed with the
-  session) on the first flat-file read, so a session that reads no flat file never imports
-  boto3, and hands each `history()` call a `FlatFileHistory`. The REST and WebSocket hooks are
-  not implemented yet, so they raise `NotImplementedError`, and so do the verbs that need
-  them.
+  and `FlatFileTransport` (flat-file `history`).
+
+The core holds no wire client and imports no ingest code. The session's ingest side
+(`SessionClients` in `_ingest/clients.py`) owns every wire client and connection and provides
+the ports through the `IngestPorts` protocol defined here; `MassiveSession` builds the core,
+then the clients, and attaches them once (`attach`), and each hook asks the attached ports.
+So the core and everything else on the Deephaven side are tested without a fake server, and a
+dependency never points from the tables up to the code that does the I/O.
 
 The module also holds the process-wide stream-id allocator and three context checks.
 `on_update_graph` runs at every entry point: `MassiveSession()`, every verb (through
@@ -52,10 +54,8 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
-from deephaven_massive import _massive
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
-from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
     StreamRow,
@@ -74,16 +74,16 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._config import MassiveConfig
-    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
     from deephaven_massive._datasets.request import HostDecision, Request, StreamKey
     from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode
-    from deephaven_massive._massive import FlatFileClient
     from deephaven_massive._tables.liveness import StreamHandle
 
 __all__ = [
     "ON_UPDATE_GRAPH",
     "FlatFileTransport",
+    "IngestPorts",
     "RestTransport",
     "SessionCore",
     "StreamTransport",
@@ -180,7 +180,7 @@ def _next_stream_id() -> int:
 
 
 class RestTransport(Protocol):
-    """The REST transport, provided by `SessionCore.rest_transport()`.
+    """The REST transport, from `SessionCore.rest_transport()` (`IngestPorts.rest`).
 
     Every method runs synchronously on the calling thread and raises `EntitlementError` on
     HTTP 403 and `MassiveError` on other failures; `poll()` instead fails its live table.
@@ -237,7 +237,7 @@ class RestTransport(Protocol):
 
 
 class StreamTransport(Protocol):
-    """The WebSocket transport, provided by `SessionCore.stream_transport()`."""
+    """The WebSocket transport, from `SessionCore.stream_transport()` (`IngestPorts.streams`)."""
 
     def open_stream(
         self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
@@ -263,7 +263,7 @@ class StreamTransport(Protocol):
 
 
 class FlatFileTransport(Protocol):
-    """The flat-file transport, provided by `SessionCore.flat_file_transport()`.
+    """The flat-file transport, from `SessionCore.flat_file_transport()` (`IngestPorts.flat_files`).
 
     It only reads files: `HistoryQuery.history()` has already chosen flat files as the source
     (`choose_source` in `_datasets/history_source.py`).
@@ -286,6 +286,44 @@ class FlatFileTransport(Protocol):
             window: The bounds under the class's day rules: a half-open `TimeRange`, or the
                 `FuturesSessions` of date-bounded futures.
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
+        """
+        ...
+
+
+class IngestPorts(Protocol):
+    """The session's ingest side as the core sees it: one factory per transport.
+
+    Implemented by `SessionClients` in `_ingest/clients.py`, which owns the session's wire
+    clients and connections, and attached to the core once by `MassiveSession` (`attach`). The
+    core's hooks (`rest_transport`, `stream_transport`, `flat_file_transport`) call these
+    methods; verbs call the hooks. Each method runs on the calling thread, makes no network
+    request, and may be called from any thread.
+    """
+
+    def rest(self) -> RestTransport:
+        """Return the session's REST transport, the same one for the life of the session.
+
+        Raises:
+            NotImplementedError: Until the REST transport is implemented.
+        """
+        ...
+
+    def streams(self) -> StreamTransport:
+        """Return the session's WebSocket transport, the same one for the life of the session.
+
+        Raises:
+            NotImplementedError: Until the WebSocket transport is implemented.
+        """
+        ...
+
+    def flat_files(self) -> FlatFileTransport:
+        """Return a new flat-file transport for one `history()` call.
+
+        The first call creates the session's S3 client and registers its close with the core
+        (`SessionCore.on_close`); later calls share it.
+
+        Raises:
+            ValueError: If the configuration has no S3 credentials.
         """
         ...
 
@@ -378,20 +416,26 @@ class SessionCore:
     """The internal engine of one `MassiveSession`, shared by its namespaces and queries.
 
     Created by `MassiveSession.__init__` on the caller thread, with an execution context
-    active. Thread-safe: every mutable registry is guarded by `registry_lock`.
+    active, which then attaches the session's ingest ports (`attach`) before any verb can
+    run. Thread-safe: every mutable registry is guarded by `registry_lock`.
     """
 
-    def __init__(self, config: MassiveConfig, exec_ctx: ExecutionContext, label: str) -> None:
+    def __init__(
+        self, config: MassiveConfig, exec_ctx: ExecutionContext, label: str, *, catalog: Catalog
+    ) -> None:
         """Create the core, its reaper thread, and the diagnostics tables and writer.
 
         Args:
             config: The validated configuration.
             exec_ctx: The caller's execution context, captured for library threads.
             label: The session's label, such as `"MassiveSession #1"`.
+            catalog: Every declared dataset (`CATALOG` in `_session.py`), read by the
+                transports.
         """
         self.config: Final = config
         self.exec_ctx: Final = exec_ctx
         self.label: Final = label
+        self.catalog: Final = catalog
         self.registry_lock: Final = threading.RLock()
         # The diagnostics come first: creating their tables is the step most likely to fail,
         # and nothing has started a thread yet if it does.
@@ -404,8 +448,8 @@ class SessionCore:
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamState] = {}
-        # Created by the first flat-file read (`flat_file_transport`), under `registry_lock`.
-        self._flat_files: FlatFileClient | None = None
+        # Set once by `attach`, right after construction and before any verb can run.
+        self._ports: IngestPorts | None = None
         # Shared with the finalizer, which runs the closers of a session collected unclosed.
         self._closers: list[Callable[[], None]] = []
         self._closed = False
@@ -452,64 +496,76 @@ class SessionCore:
         if self.closed:
             raise MassiveError(f"{self.label} is closed")
 
-    # --- Transport factory hooks: one per transport, filled by the transport packages. -------
+    # --- Transport factory hooks: one per transport, served by the attached ingest ports. ---
+
+    def attach(self, ports: IngestPorts) -> None:
+        """Attach the session's ingest side, which serves the transport hooks.
+
+        `MassiveSession.__init__` calls it exactly once, on the caller thread, right after it
+        creates the core and the session's `SessionClients` and before the session is
+        returned, so every verb finds the ports attached. Nothing else attaches ports.
+
+        Args:
+            ports: The session's ingest side.
+
+        Raises:
+            RuntimeError: If ports are already attached.
+        """
+        if self._ports is not None:
+            raise RuntimeError(f"{self.label} already has its transports attached")
+        self._ports = ports
+
+    def _attached_ports(self) -> IngestPorts:
+        """Return the attached ingest ports.
+
+        Returns:
+            The ports `attach` stored.
+
+        Raises:
+            RuntimeError: If no ports were attached: the core was built outside a
+                `MassiveSession`.
+        """
+        if self._ports is None:
+            raise RuntimeError(f"{self.label} has no transports attached")
+        return self._ports
 
     def rest_transport(self) -> RestTransport:
-        """Return the session's REST transport.
+        """Return the session's REST transport (`IngestPorts.rest`).
 
-        Raises:
-            NotImplementedError: Always, until the REST transport is implemented.
-        """
-        raise NotImplementedError("the REST transport is not implemented yet")
-
-    def stream_transport(self) -> StreamTransport:
-        """Return the session's WebSocket transport.
-
-        Raises:
-            NotImplementedError: Always, until the WebSocket transport is implemented.
-        """
-        raise NotImplementedError("the WebSocket transport is not implemented yet")
-
-    def flat_file_transport(self) -> FlatFileTransport:
-        """Return a flat-file transport for one `history()` call.
-
-        Each call gets a new, lightweight `FlatFileHistory` bound to this core and to the
-        session's `FlatFileClient`. The first call creates that client: it reads
-        `_massive.FlatFileClient` outside every lock (the first read imports boto3), creates the
-        client under `registry_lock` (the constructor only stores settings), and registers its
-        close with `on_close` after releasing the lock, so the client closes with the session,
-        or at once if the session closed meanwhile. No call makes a network request: the boto3
-        client is created by the first read.
+        No request is made. Without attached ports this raises the `RuntimeError` of
+        `_attached_ports`; until the REST transport is implemented the ports raise
+        `NotImplementedError`.
 
         Returns:
             The transport.
-
-        Raises:
-            ValueError: If the configuration has no S3 credentials. `history()` never gets
-                here then: its source choice has already required them.
         """
-        config = self.config
-        access_key_id, secret_access_key = config.s3_access_key_id, config.s3_secret_access_key
-        if access_key_id is None or secret_access_key is None:
-            raise ValueError(
-                "flat files need MassiveConfig s3_access_key_id and s3_secret_access_key"
-            )
-        factory = _massive.FlatFileClient
-        with self.registry_lock:
-            client = self._flat_files
-            created = client is None
-            if client is None:
-                # The client holds no reference to the core, so its closer may outlive it.
-                client = self._flat_files = factory(
-                    access_key_id=access_key_id,
-                    secret_access_key=secret_access_key,
-                    endpoint_url=config.s3_endpoint_url,
-                    bucket=config.s3_bucket,
-                    max_pool=config.max_concurrency,
-                )
-        if created:
-            self.on_close(client.close)
-        return FlatFileHistory(self, client)
+        return self._attached_ports().rest()
+
+    def stream_transport(self) -> StreamTransport:
+        """Return the session's WebSocket transport (`IngestPorts.streams`).
+
+        No connection is opened. Without attached ports this raises the `RuntimeError` of
+        `_attached_ports`; until the WebSocket transport is implemented the ports raise
+        `NotImplementedError`.
+
+        Returns:
+            The transport.
+        """
+        return self._attached_ports().streams()
+
+    def flat_file_transport(self) -> FlatFileTransport:
+        """Return a flat-file transport for one `history()` call (`IngestPorts.flat_files`).
+
+        The first call creates the session's S3 client, which closes with the session; no
+        request is made. Without attached ports this raises the `RuntimeError` of
+        `_attached_ports`; without S3 credentials in the configuration the ports raise
+        `ValueError` (`history()` never gets here then: its source choice has already required
+        them).
+
+        Returns:
+            The transport.
+        """
+        return self._attached_ports().flat_files()
 
     # --- Streams --------------------------------------------------------------------------
 

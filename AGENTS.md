@@ -128,6 +128,20 @@ nothing is kept or shimmed for compatibility.
     A PR that delivers only part of an issue says `Refs #<issue>` instead, and its description
     names what remains. Never close an issue by hand to make up for a missing link.
 
+## Layers
+
+The library has six layers, lowest first: wire (`_massive/`), vocabulary (the root `_config`,
+`_enums`, `_errors`, `_types`), datasets (`_datasets/`), tables (`_tables/`), ingest
+(`_ingest/`), and API (the root `__init__`, `_session`, `_query`, and `_namespaces/`). A module
+imports only its own layer or lower ones, and an import under `if TYPE_CHECKING:` counts, so
+never hide an upward import there; pass the object down instead, as `_session.py` does with the
+catalog and the session's `SessionClients`. `_datasets` makes no Deephaven call and imports
+`deephaven` only for type checking; the vocabulary and `_datasets` do no I/O and start no
+threads; only `_ingest` uses the wire clients; only `_session.py` imports `_ingest`, and only
+`_ingest.clients`; nothing imports by a computed module name outside the two lazy
+`__init__.py` files. A new root module or package belongs to no layer until `DESIGN.md` § 4.3
+and `tests/test_layout.py` place it. The tests are outside the layers.
+
 ## Documentation standard
 
 Docstrings are read by people in an IDE or the Deephaven console and by agents that know nothing
@@ -207,7 +221,7 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 | Task | Read first |
 |---|---|
 | Public API, exports, enums | `DESIGN.md` § 3, § 7, § 11 |
-| Package and test layout | `DESIGN.md` § 4 |
+| Package and test layout, layers | `DESIGN.md` § 4, § 4.3 |
 | Session lifecycle and liveness | `DESIGN.md` § 6 |
 | Datasets per namespace | `DESIGN.md` § 8 |
 | Hosts, connections, subscriptions | `DESIGN.md` § 13 |
