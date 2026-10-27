@@ -2450,7 +2450,11 @@ returns.
   those of [section 16](#16-historysourceauto). Credentials are never logged, and a message
   names a proxy by its URL without the user and password (`net.http.proxy_credentials`), never
   by botocore's masked form, which leaves a password in clear text when it also appears earlier
-  in the URL.
+  in the URL. One documented exception, for a third-party logger at DEBUG only: botocore's own
+  DEBUG records, emitted only when someone explicitly enables DEBUG on the `botocore` logger,
+  may show the S3 access key id and the request signature (its `Authorization` header). They
+  never show the secret access key or the proxy password, and a test checks both, the
+  password's base64 form included, across every record.
 - **TLS and proxies.** The client is built as `session.client("s3", verify=<the net.http CA
   bundle>, config=Config(proxies=<from net.http>, proxies_config={"proxy_ca_bundle": <the same
   bundle>}, retries={"total_max_attempts": 1, "mode": "standard"}, connect_timeout=60,

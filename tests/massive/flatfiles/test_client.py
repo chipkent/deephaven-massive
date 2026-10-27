@@ -873,12 +873,21 @@ def test_the_proxy_carries_its_credentials_and_no_secret_is_logged(
     assert len(tls_server.requests) == 2
     assert all("proxy-authorization" not in r.headers for r in tls_server.requests)
     assert any(r.name == client_module.__name__ for r in caplog.records)  # the retry
+    # botocore's own DEBUG records are among those checked: the signed request is logged.
+    assert any(
+        r.name.startswith("botocore") and r.levelno == logging.DEBUG and "Authorization" in text
+        for r in caplog.records
+        for text in [r.getMessage()]
+    )
     for record in caplog.records:
         text = record.getMessage()
+        # The secret and the proxy password never appear, botocore's DEBUG records included.
         assert PRIVATE_KEY not in text
         assert "s%40cret" not in text
         assert "s@cret" not in text
         assert "YWxpY2U6c0BjcmV0" not in text  # base64 of "alice:s@cret"
+        # The documented exception: botocore's DEBUG records, enabled only on request, may show
+        # the access key id and the request signature. The library's own records never do.
         if record.name.startswith("deephaven_massive"):
             assert ACCESS_KEY not in text
 
