@@ -1,0 +1,3 @@
+conditions,exchange,id,participant_timestamp,price,size,ticker
+1,1,a1,1740830400000000000,86000.5,0.015,X:BTCUSD
+2,23,a2,1740830400000000000,2210.0,1.5,X:ETHUSD

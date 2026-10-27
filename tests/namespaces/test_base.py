@@ -7,7 +7,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._catalog import DatasetSpec, ParamKind
-from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan
+from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, Transport
 from deephaven_massive._namespaces.base import Namespace, bar_query_class, build_query, list_params
 from deephaven_massive._query import (
     HistoryLatestQuery,
@@ -18,6 +18,7 @@ from deephaven_massive._query import (
     StreamQuery,
 )
 from deephaven_massive._schema import BARS, TRADES, Column, ColumnType, Schema
+from deephaven_massive._timeunits import TimeUnit
 
 S, LD = ColumnType.STRING, ColumnType.LOCAL_DATE
 
@@ -40,6 +41,14 @@ FUTURES_BARS = DatasetSpec(
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
     history_method="list_futures_aggregates",
     flat_file_prefixes={Timespan.SESSION: "us_futures_{venue}/session_aggs_v1"},
+    key_maps={
+        Transport.FLAT_FILES: {
+            "ticker": "Symbol",
+            "window_start": "Timestamp",
+            "session_end_date": "SessionEndDate",
+        }
+    },
+    time_units={(Transport.FLAT_FILES, "window_start"): TimeUnit.NANOSECONDS},
 )
 INDEX_BARS = DatasetSpec(
     name="indices.bars",
@@ -48,6 +57,8 @@ INDEX_BARS = DatasetSpec(
     asset_class=AssetClass.INDICES,
     schema=BARS.schema,
     flat_file_prefixes={Timespan.MINUTE: "us_indices/minute_aggs_v1"},
+    key_maps={Transport.FLAT_FILES: {"ticker": "Symbol", "window_start": "Timestamp"}},
+    time_units={(Transport.FLAT_FILES, "window_start"): TimeUnit.NANOSECONDS},
 )
 TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
@@ -306,3 +317,15 @@ def test_a_time_axis_must_not_end_before_it_starts(massive_session: dm.MassiveSe
     assert build(massive_session, DIVIDENDS, start="2025-01-02")._request.end is None
     same_day = datetime(2025, 1, 2, 9, tzinfo=UTC)
     assert build(massive_session, DIVIDENDS, start="2025-01-02", end=same_day)._request.start
+
+
+def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
+    spec = STOCK_BARS
+    q = build_query(massive_session._core, spec, symbols=["AAPL"], adjusted=False)
+    assert q._request.adjusted is False
+    assert build_query(massive_session._core, spec, symbols=["AAPL"])._request.adjusted is None
+    with pytest.raises(TypeError, match="adjusted must be a bool, not str"):
+        build_query(massive_session._core, spec, symbols=["AAPL"], adjusted=cast("bool", "false"))
+    # One channel only: adjusted never travels in params, where a transport could drop it.
+    with pytest.raises(ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\)"):
+        build_query(massive_session._core, spec, symbols=["AAPL"], params={"adjusted": False})

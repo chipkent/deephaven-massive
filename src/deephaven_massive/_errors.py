@@ -4,7 +4,8 @@ Every error that Massive or the library itself reports derives from `MassiveErro
 `except dm.MassiveError` catches all of them. Two subclasses name the failures a user can act
 on:
 
-- `AuthenticationError`: the API key is missing or Massive rejected it.
+- `AuthenticationError`: the API key is missing or Massive rejected it, or Massive's S3
+  endpoint rejected the flat-file credentials.
 - `EntitlementError`: the key is valid, but the plan lacks the dataset, the WebSocket host, or
   the timeframe that was requested.
 
@@ -89,11 +90,13 @@ class MassiveError(Exception):
 
 
 class AuthenticationError(MassiveError):
-    """The API key is missing, or Massive rejected it.
+    """The API key is missing or Massive rejected it, or the S3 credentials were rejected.
 
     Raised by `MassiveConfig()` when neither `MASSIVE_API_KEY` nor `POLYGON_API_KEY` is set and
     no `api_key` was passed. A live table fails with this error when the WebSocket server
-    answers `auth_failed`; every stream on that connection fails with it.
+    answers `auth_failed`; every stream on that connection fails with it. `history()` raises it
+    when Massive's S3 endpoint rejects the flat-file credentials (`InvalidAccessKeyId`,
+    `SignatureDoesNotMatch`); the message names `s3_access_key_id` and `s3_secret_access_key`.
 
     Example:
         ::

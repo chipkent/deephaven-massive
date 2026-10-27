@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive import MassiveSession
+    from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
 
 _DATA_DIR = Path(__file__).parent / "data"
@@ -246,3 +247,21 @@ def stream_rows(
         return sorted(dh_to_pylist(massive_session.streams()), key=lambda r: r["StreamId"])
 
     return rows
+
+
+@pytest.fixture
+def fake_s3(monkeypatch: pytest.MonkeyPatch) -> FakeS3:
+    """Answer every flat-file S3 client the library creates from a `FakeS3` (`tests/_fakes/s3.py`).
+
+    The library's own client factory still runs (credentials, endpoint, signing configuration);
+    the fake then answers the client's requests inside botocore, so nothing leaves the process.
+
+    Returns:
+        The fake, for storing objects and inspecting requests.
+    """
+    s3 = importlib.import_module("tests._fakes.s3")
+    flatfiles = importlib.import_module("deephaven_massive._flat_files")
+    fake: FakeS3 = s3.FakeS3()
+    create = flatfiles._s3_client
+    monkeypatch.setattr(flatfiles, "_s3_client", lambda config: fake.attach(create(config)))
+    return fake

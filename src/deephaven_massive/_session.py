@@ -19,9 +19,11 @@ owns:
   the order the registry changed;
 - the result registry and the reaper thread (`_liveness.py`);
 - the diagnostics tables and their writer thread (`_diagnostics.py`);
-- one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`). No
-  transport is implemented yet, so each raises `NotImplementedError`, and so do the verbs that need
-  it.
+- one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`).
+  The flat-file transport is implemented: the core owns the session's `FlatFileBucket` (the S3
+  client, closed with the session) and hands each `history()` call a `FlatFileHistory`. The REST
+  and WebSocket hooks are not implemented yet, so they raise `NotImplementedError`, and so do the
+  verbs that need them.
 
 Lock order: the update-graph (UG) lock, then `registry_lock`. A stream is registered under
 `registry_lock` before it opens (with a session-minted id), then opened with no lock held; a
@@ -54,6 +56,7 @@ from deephaven_massive._diagnostics import (
 )
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._flat_files import FlatFileBucket, FlatFileHistory
 from deephaven_massive._liveness import Reaper, ResultRegistry, entered, make_result
 from deephaven_massive._namespaces.base import list_params
 from deephaven_massive._namespaces.crypto import _Crypto
@@ -333,8 +336,10 @@ class SessionCore:
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamState] = {}
+        # The bucket holds no reference to the core, so its closer may outlive it.
+        self._flat_files = FlatFileBucket(config, label)
         # Shared with the finalizer, which runs the closers of a session collected unclosed.
-        self._closers: list[Callable[[], None]] = []
+        self._closers: list[Callable[[], None]] = [self._flat_files.close]
         self._closed = False
         # Not at interpreter exit: stopping the threads then would call into a JVM that may
         # already be shutting down.
@@ -398,12 +403,17 @@ class SessionCore:
         raise NotImplementedError("the WebSocket transport is not implemented yet")
 
     def flat_file_transport(self) -> FlatFileTransport:
-        """Return the session's flat-file transport.
+        """Return a flat-file transport for one `history()` call.
 
-        Raises:
-            NotImplementedError: Always, until the flat-file transport is implemented.
+        Each call gets a new, lightweight `FlatFileHistory` bound to this core and to the
+        session's `FlatFileBucket`, whose one S3 client is created on first use and closed when
+        the session closes (or is collected unclosed). Creating the transport makes no network
+        call and takes no lock.
+
+        Returns:
+            The transport.
         """
-        raise NotImplementedError("the flat-file transport is not implemented yet")
+        return FlatFileHistory(self, self._flat_files)
 
     # --- Streams --------------------------------------------------------------------------
 

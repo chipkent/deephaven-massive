@@ -219,6 +219,7 @@ def build_query(
     timespan: Timespan | None = None,
     multiplier: int = 1,
     venue: FuturesVenue | None = None,
+    adjusted: bool | None = None,
     start: DateLike | None = None,
     end: DateLike | None = None,
     params: Mapping[str, object] | None = None,
@@ -237,6 +238,8 @@ def build_query(
             the query class through `bar_query_class`.
         multiplier: The bar multiplier.
         venue: The futures venue, or None for every venue.
+        adjusted: Whether bars are adjusted for splits, for a dataset with an `adjusted`
+            parameter; None for a dataset without one (`Request.adjusted`).
         start: The lower bound of the dataset's time axis, or None.
         end: The upper bound of the dataset's time axis, or None.
         params: The dataset's other typed parameters by SDK name; None values are dropped.
@@ -248,7 +251,9 @@ def build_query(
         An instance of the spec's query class (or of the class `bar_query_class` picks).
 
     Raises:
-        ValueError: If `dm.ALL` is passed where `all_alternative` is set.
+        ValueError: If `dm.ALL` is passed where `all_alternative` is set, or `params` holds
+            `adjusted`, which has its own typed argument.
+        TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
     or `ValueError` of the helper that checks them (`_symbols.normalize`, `_require_enum`,
@@ -259,6 +264,10 @@ def build_query(
         raise ValueError(f"{spec.name} does not accept dm.ALL; use {all_alternative}")
     if venue is not None:
         _require_enum(venue, FuturesVenue, "venue")
+    if adjusted is not None and not isinstance(adjusted, bool):
+        raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
+    if params is not None and "adjusted" in params:
+        raise ValueError("adjusted is set through build_query(adjusted=...), not params")
     query_class = spec.query_class
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")
@@ -273,6 +282,7 @@ def build_query(
         timespan=timespan,
         multiplier=multiplier,
         venue=venue,
+        adjusted=adjusted,
         start=first,
         end=last,
         params=tuple(sorted((k, _value(k, v)) for k, v in (params or {}).items() if v is not None)),
