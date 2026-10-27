@@ -500,8 +500,6 @@ class FlatFileHistory:
                 `EntitlementError`. A closed session raises the `MassiveError` of
                 `_check_open`, and a cancelled call `_CancelledError`.
         """
-        config = self._core.config
-        location = f"s3://{config.s3_bucket}/{key.key} at {config.s3_endpoint_url}"
         self._check(cancel)
         try:
             file = self._client.open(key.key)
@@ -510,14 +508,15 @@ class FlatFileHistory:
             plan = transform.plan_for(key)
             with file, contextlib.closing(file.batches(plan)) as batches:
                 self._check(cancel)
-                return self._gather(
-                    batches, transform, limit=_TABLE_BLOCKS * plan.block_size, cancel=cancel
-                )
+                try:
+                    return self._gather(
+                        batches, transform, limit=_TABLE_BLOCKS * plan.block_size, cancel=cancel
+                    )
+                except pa.ArrowException as error:
+                    raise MassiveError(f"cannot read {file.location}: {error}") from error
         except WireError as error:
             public = _public(error, key)
             raise public from error
-        except pa.ArrowException as error:
-            raise MassiveError(f"cannot read {location}: {error}") from error
 
     def _gather(
         self,

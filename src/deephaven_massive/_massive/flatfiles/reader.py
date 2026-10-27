@@ -147,6 +147,11 @@ class FlatFile:
         """The object key, such as `"us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"`."""
         return self._key
 
+    @property
+    def location(self) -> str:
+        """Where the object is, for messages: `"s3://<bucket>/<key> at <endpoint>"`."""
+        return self._location
+
     def __enter__(self) -> Self:
         """Return the file itself.
 

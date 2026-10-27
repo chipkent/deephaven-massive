@@ -20,7 +20,8 @@ the imports of every module with `ast`:
 - Inside `_massive`, a module imports only the standard library, the wire libraries
   (`urllib3`, `websockets`, `certifi`, `orjson`, `boto3`, `botocore`, `pyarrow`), and other
   `_massive` modules; never Deephaven, `jpy`, or the rest of the library. The exceptions are
-  `typing_extensions` and `types_boto3_s3` inside `if TYPE_CHECKING:`, which never runs.
+  `typing_extensions` anywhere and `types_boto3_s3` in `flatfiles`, inside
+  `if TYPE_CHECKING:`, which never runs.
 - Its subpackages are layered: `net` and `spec` import nothing else in `_massive`; `rest`,
   `ws`, and `flatfiles` import only `net` and `spec`; `refresh` may import anything, and only
   `refresh` and its tests import `refresh`.
@@ -454,9 +455,13 @@ _LAYERS = {
     "flatfiles": frozenset({"flatfiles", "net", "spec"}),
 }
 _REFRESH = "refresh"
-# The libraries `_massive` may import for type checking only: `override` on Python 3.11, and
-# the boto3 stubs' `S3Client`.
-_TYPE_ONLY_LIBRARIES = frozenset({"typing_extensions", "types_boto3_s3"})
+# The libraries `_massive` may import for type checking only, and the layers that may: any
+# layer for `typing_extensions` (`override` on Python 3.11), only `flatfiles` for the boto3
+# stubs' `S3Client`.
+_TYPE_ONLY_LIBRARIES: dict[str, frozenset[str] | None] = {
+    "typing_extensions": None,
+    "types_boto3_s3": frozenset({"flatfiles"}),
+}
 
 # The vendor files of the spec snapshot, and its directory.
 _SNAPSHOT_FILES = frozenset({"openapi.json", "websocket.json", "llms.txt", "manifest.json"})
@@ -793,7 +798,9 @@ def _wire_rules(where: str, tree: ast.Module, *, module: str, package: str) -> l
     for line, name in [*_imports(tree, package), *_module_strings(tree)]:
         top = name.split(".")[0]
         if top in _TYPE_ONLY_LIBRARIES and line in type_only:
-            continue
+            layers = _TYPE_ONLY_LIBRARIES[top]
+            if layers is None or layer in layers:
+                continue
         if _inside(name, _WIRE):
             target = _wire_layer(name)
             if target == _REFRESH and layer != _REFRESH:
@@ -969,7 +976,6 @@ def test_the_wire_package_may_import_the_type_only_libraries_for_type_checking_o
         "from typing import TYPE_CHECKING\n"
         "if TYPE_CHECKING:\n"
         "    from typing_extensions import override\n"
-        "    from types_boto3_s3.client import S3Client\n"
         "else:\n"
         "    import ssl\n"
     )
@@ -977,13 +983,27 @@ def test_the_wire_package_may_import_the_type_only_libraries_for_type_checking_o
     for source, line in [
         ("from typing_extensions import override\n", 1),
         ("if TYPE_CHECKING:\n    pass\nelse:\n    import typing_extensions\n", 4),
-        ("from types_boto3_s3.client import S3Client\n", 1),
-        ("if TYPE_CHECKING:\n    pass\nelse:\n    import types_boto3_s3\n", 4),
         ("if TYPE_CHECKING:\n    import deephaven.table\n", 2),
-        ("if TYPE_CHECKING:\n    import types_boto3_ec2\n", 2),
     ]:
         [message] = _check(_WIRE_FILE, source)
         assert message.startswith(f"{_WIRE_FILE}:{line}: the wire package must not import")
+
+
+_FLAT_FILE_CLIENT = "src/deephaven_massive/_massive/flatfiles/client.py"
+
+
+def test_only_flatfiles_may_import_the_boto3_s3_stubs_for_type_checking_only() -> None:
+    stubs = "if TYPE_CHECKING:\n    from types_boto3_s3.client import S3Client\n"
+    assert _check(_FLAT_FILE_CLIENT, stubs) == []
+    for path, source, line in [
+        (_WIRE_FILE, stubs, 2),  # another subpackage
+        ("src/deephaven_massive/_massive/net/http.py", stubs, 2),
+        (_FLAT_FILE_CLIENT, "from types_boto3_s3.client import S3Client\n", 1),
+        (_FLAT_FILE_CLIENT, "if TYPE_CHECKING:\n    pass\nelse:\n    import types_boto3_s3\n", 4),
+        (_FLAT_FILE_CLIENT, "if TYPE_CHECKING:\n    import types_boto3_ec2\n", 2),
+    ]:
+        [message] = _check(path, source)
+        assert message.startswith(f"{path}:{line}: the wire package must not import")
 
 
 # Inside the wire package: the layers.

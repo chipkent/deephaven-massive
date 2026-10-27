@@ -65,6 +65,7 @@ def test_an_existing_object_opens_and_a_missing_one_is_none(
     assert isinstance(file, FlatFile)
     with file:
         assert file.key == KEY
+        assert file.location == f"s3://flatfiles/{KEY} at https://files.massive.com"
     assert fake_s3.closed_bodies == [KEY]
     assert client.open(KEY.replace("03-03", "03-04")) is None
     assert fake_s3.requests == [("flatfiles", KEY), ("flatfiles", KEY.replace("03-03", "03-04"))]

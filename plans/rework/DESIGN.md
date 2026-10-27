@@ -1916,8 +1916,9 @@ negative test per rule:
 - Inside `_massive`, a module imports only the standard library, `urllib3`, `websockets`,
   `certifi`, the optional `orjson`, `boto3`, `botocore`, `pyarrow`, and other `_massive`
   modules. It never imports `deephaven`, `deephaven_server`, `jpy`, or any module outside
-  `_massive`. The exceptions are `typing_extensions` (for `override` on Python 3.11) and
-  `types_boto3_s3` (for `S3Client`), inside `if TYPE_CHECKING:` only, which never runs.
+  `_massive`. The exceptions are `typing_extensions` (for `override` on Python 3.11) and, in
+  `flatfiles` only, `types_boto3_s3` (for `S3Client`), inside `if TYPE_CHECKING:` only, which
+  never runs.
 - **Layers.** `net` and `spec` import nothing else in `_massive`. `rest`, `ws`, and `flatfiles`
   import only `net` and `spec`. `refresh` may import any of them, and only `refresh` and its
   tests import `refresh`.
@@ -2125,8 +2126,8 @@ ReadColumn(header, column, read_type: pyarrow.DataType, list_type)
 
 `session` is the futures session check: the header that holds each row's session date and the
 file's date, so `_flat_files.py` builds one plan per call and adds the session per futures
-file. `block_size` is the reader's block of decompressed text, the library's `BLOCK_SIZE`
-(1 MiB) by default.
+file. `block_size` is the reader's block of decompressed text, a required field with no default;
+`_flat_files.py` always passes its `BLOCK_SIZE` (1 MiB).
 
 `_flat_files.py` builds the plan from `source(Transport.FLAT_FILES, prefix)`. `to_ns` is the
 `_timeunits` converter, so a wrongly declared unit still raises; the window is never converted
