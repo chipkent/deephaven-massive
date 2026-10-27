@@ -274,6 +274,21 @@ def test_the_generated_period_end_filters_take_dates(key: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("key", "name"), [("/benzinga/v2/news", "published"), ("/v2/reference/news", "published_utc")]
+)
+def test_the_generated_news_publication_bounds_send_an_instant_or_a_date(
+    key: str, name: str
+) -> None:
+    # Both news paths filter on the publication instant: an aware datetime is sent as an
+    # ISO-8601 instant, never cut to its day, and a date as the day.
+    rest_path = spec.source(Transport.REST, key)
+    start = datetime(2024, 5, 28, 20, 27, 41, tzinfo=UTC)
+    query_params = {f"{name}.gte": start, f"{name}.lt": date(2024, 5, 29)}
+    target = query.request_target(rest_path, {}, query_params)
+    assert target == f"{key}?{name}.gte=2024-05-28T20%3A27%3A41%2B00%3A00&{name}.lt=2024-05-29"
+
+
+@pytest.mark.parametrize(
     "path_params",
     [
         {"stockTicker": "AAPL"},
