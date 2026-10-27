@@ -136,6 +136,14 @@ nothing is kept or shimmed for compatibility.
     issue. Check it with `gh pr view <n> --json closingIssuesReferences` before asking for review.
     A PR that delivers only part of an issue says `Refs #<issue>` instead, and its description
     names what remains. Never close an issue by hand to make up for a missing link.
+15. **Push deliberately; every push costs money.** Each push to a branch with an open PR runs
+    the full CI matrix and the review bots. Commit locally as often as you like, but push only
+    when the branch is ready for that run: once when the PR opens, then once per finished batch
+    of fixes (all review findings, a merge of `main`, and description edits together). Prove a
+    change locally with `./scripts/check.sh`; never push work in progress or to see whether CI
+    passes. Merge `main` into a PR branch only when there is a conflict or a change you need,
+    and push it with the other pending fixes. A branch with no PR runs no CI, so pushing it to
+    keep work safe is fine; open its PR only when it is ready.
 
 ## Layers
 
