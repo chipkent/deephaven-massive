@@ -15,6 +15,7 @@ from deephaven_massive._massive.net.errors import WireError
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
 FUTURES_KEY = "us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz"
 OWNER = "massive/flatfiles"
+PRIVATE_KEY = "flat-file-secret"
 TRADE_HEADER = (
     "conditions,correction,exchange,id,participant_timestamp,price,sequence_number,"
     "sip_timestamp,size,tape,ticker,trf_id,trf_timestamp\n"
@@ -73,8 +74,8 @@ def plan(
 @pytest.fixture
 def client(fake_s3: FakeS3) -> Iterator[FlatFileClient]:
     flat_files = FlatFileClient(
-        access_key_id=None,
-        secret_access_key=None,
+        access_key_id="AKIDFLATFILES",
+        secret_access_key=PRIVATE_KEY,
         endpoint_url="https://files.massive.com",
         bucket="flatfiles",
         max_pool=1,
