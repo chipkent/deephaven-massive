@@ -54,6 +54,7 @@ else:
 
 __all__ = [
     "ENVELOPE_KEYS",
+    "Conversion",
     "DriftReport",
     "Field",
     "Membership",
@@ -93,7 +94,7 @@ class Transport(StrEnum):
 
 
 class WireType(StrEnum):
-    """The type of a field's values on the wire, after any declared conversion.
+    """The type of a field's values on the wire, after any named conversion.
 
     The refresh assigns each field one of these. Two sources that share a column within a
     dataset kind may differ only by a widening (`LONG` with `DOUBLE` gives `DOUBLE`, `LONG`
@@ -163,6 +164,72 @@ class ParamKind(StrEnum):
     """A sequence of strings, sent joined with commas (the `.any_of` parameters)."""
 
 
+class Conversion(StrEnum):
+    """A named, deliberate conversion of a field whose values the vendor's type does not describe.
+
+    The vendor's specification gives each field a type. Where the documented samples show the
+    wire differs, the refresh records one of these on the field (`Field.conversion`) instead of
+    loosening the plain converter of any type. Each conversion has one meaning, fixed here: the
+    type the specification declares (`declared`), the type the field gets (`wire_type`), and
+    the forms it accepts (the converters live in `spec.convert`). No conversion is a no-op:
+    each accepts some value the plain converter of its declared type refuses, or retypes it.
+    """
+
+    ISO_TEXT_INSTANT = "iso-text-instant"
+    """Text the specification leaves untyped that is an ISO-8601 instant (`string` to
+    `iso-instant`)."""
+    ISO_DATE_TEXT = "iso-date-text"
+    """Text declared a date-time that is a date, `YYYY-MM-DD` (`iso-instant` to `date`)."""
+    QUOTED_INTEGER = "quoted-integer"
+    """An integer sent as decimal digits in text, such as `"48"` (`string` to `long`)."""
+    INTEGER_ID_AS_TEXT = "integer-id-as-text"
+    """An identifier declared an integer and sent as one, kept as text; text is refused
+    (`long` to `string`)."""
+    INTEGER_OR_TEXT_ID = "integer-or-text-id"
+    """An identifier declared an integer but documented as text, such as `"2208"`; either form
+    is kept as text (`long` to `string`)."""
+    TEXT_OR_INTEGER_ID = "text-or-integer-id"
+    """An identifier declared text but also sent as an integer; either form is kept as text
+    (`string` to `string`)."""
+    NUMBER_LABEL = "number-label"
+    """A label declared a number but sent as text, such as the version `"1.0"`; text is kept,
+    and a number becomes its decimal text with a fractional part (`double` to `string`)."""
+    ONE_CODE = "one-code"
+    """One integer where a list of condition codes is meant (`long` to `int-array`)."""
+    MIDNIGHT_UTC_DATE = "midnight-utc-date"
+    """A date also sent as an ISO-8601 instant at exactly midnight with offset `Z` or `+00:00`
+    (`date` to `date`)."""
+    DATE_AS_EPOCH = "date-as-epoch"
+    """A date sent as an integer epoch count in the field's unit (`date` to `epoch`)."""
+
+    @property
+    def declared(self) -> WireType:
+        """The type the vendor's specification gives a field that takes this conversion."""
+        return _CONVERSION_TYPES[self][0]
+
+    @property
+    def wire_type(self) -> WireType:
+        """The type a field that takes this conversion has."""
+        return _CONVERSION_TYPES[self][1]
+
+
+# Each conversion's declared type and resulting wire type.
+_CONVERSION_TYPES: Mapping[Conversion, tuple[WireType, WireType]] = MappingProxyType(
+    {
+        Conversion.ISO_TEXT_INSTANT: (WireType.STRING, WireType.ISO_INSTANT),
+        Conversion.ISO_DATE_TEXT: (WireType.ISO_INSTANT, WireType.DATE),
+        Conversion.QUOTED_INTEGER: (WireType.STRING, WireType.LONG),
+        Conversion.INTEGER_ID_AS_TEXT: (WireType.LONG, WireType.STRING),
+        Conversion.INTEGER_OR_TEXT_ID: (WireType.LONG, WireType.STRING),
+        Conversion.TEXT_OR_INTEGER_ID: (WireType.STRING, WireType.STRING),
+        Conversion.NUMBER_LABEL: (WireType.DOUBLE, WireType.STRING),
+        Conversion.ONE_CODE: (WireType.LONG, WireType.INT_ARRAY),
+        Conversion.MIDNIGHT_UTC_DATE: (WireType.DATE, WireType.DATE),
+        Conversion.DATE_AS_EPOCH: (WireType.DATE, WireType.EPOCH),
+    }
+)
+
+
 @dataclass(frozen=True, kw_only=True)
 class Field:
     """One field of a source: a key on the wire and the column the library names it.
@@ -175,12 +242,12 @@ class Field:
         unit: The timestamp unit; set exactly when `wire_type` is `WireType.EPOCH`.
         required: Whether the vendor marks the field required, so its absence is reported as
             drift. False by default, as for almost every field Massive documents.
-        declared_type: The type the vendor's specification declares, set only when it is wrong
-            or missing and the refresh corrects it to `wire_type` through a declared conversion
-            (for example a timestamp the specification leaves as plain text whose samples are
-            ISO-8601 date-times). The decoder converts each value from this type to `wire_type`
-            deliberately (`spec.convert`), and a value that does not convert fails like any
-            other bad value. `None`, the default, means the vendor's type is right.
+        conversion: The named conversion the decoder applies to each value, set only where the
+            vendor's documented samples show values its declared type does not describe (a
+            timestamp left as plain text whose samples are ISO-8601 date-times, an identifier
+            sent both as text and as an integer). Its `wire_type` is the field's. `None`, the
+            default, means each value is converted by `wire_type` alone; a value that does not
+            convert fails like any other bad value either way.
 
     Example:
         ::
@@ -197,22 +264,24 @@ class Field:
     wire_type: WireType
     unit: WireUnit | None = None
     required: bool = False
-    declared_type: WireType | None = None
+    conversion: Conversion | None = None
 
     def __post_init__(self) -> None:
-        """Check that the unit is set exactly for an epoch.
-
-        Which `(declared_type, wire_type)` pairs exist is `spec.convert`'s to say; the loader
-        checks every generated field against them. A pair of one type twice is one of them: it
-        keeps the type and accepts a second form the vendor documents for it.
+        """Check that the unit is set exactly for an epoch, and that a conversion fits.
 
         Raises:
-            ValueError: If `wire_type` is `EPOCH` and `unit` is `None`, or the reverse.
+            ValueError: If `wire_type` is `EPOCH` and `unit` is `None`, or the reverse; or if
+                `conversion` produces another type than `wire_type`.
         """
         if (self.wire_type is WireType.EPOCH) != (self.unit is not None):
             raise ValueError(
                 f"field {self.wire_key!r}: an epoch needs a unit and any other type has none "
                 f"(type {self.wire_type}, unit {self.unit})"
+            )
+        if self.conversion is not None and self.conversion.wire_type is not self.wire_type:
+            raise ValueError(
+                f"field {self.wire_key!r}: the conversion {self.conversion} gives "
+                f"{self.conversion.wire_type}, not {self.wire_type}"
             )
 
 

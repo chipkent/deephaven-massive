@@ -6,6 +6,7 @@ leaves it out).
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,8 +18,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = pytest.mark.skipif(
-    not DIRECTORY.is_dir(),
-    reason="the vendored snapshot (vendor/massive/) is in a source checkout only",
+    not DIRECTORY.is_dir() and "CI" not in os.environ,
+    reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",
 )
 
 

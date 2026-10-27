@@ -281,7 +281,7 @@ def _download(get: Callable[[str], bytes]) -> list[snapshot.VendorFile]:
         raise FetchError(f"{LLMS_URL}: {error}") from None
     for url in urls:
         page = get(url)
-        name = f"{snapshot.REST_PAGES}/{docs.page_file(url)}"
+        name = snapshot.page_file(url)
         files.append(
             snapshot.VendorFile(name=name, url=url, raw=page, stored=canonical_text(page, url))
         )

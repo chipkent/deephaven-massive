@@ -47,6 +47,7 @@ __all__ = [
     "REST_PAGES",
     "Snapshot",
     "VendorFile",
+    "page_file",
     "store",
 ]
 
@@ -64,6 +65,26 @@ REST_PAGES: Final = "rest"
 
 MANIFEST: Final = "manifest.json"
 """The snapshot file that records where every other file came from."""
+
+
+# The files an operating system's file browser leaves in a folder it shows.
+_OS_LITTER: Final = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def page_file(url: str) -> str:
+    """Return where the snapshot stores a REST documentation page.
+
+    `fetch` writes each page here and `Snapshot.load` reads it back, so the layout has one
+    owner. A URL that is not a REST documentation page raises `docs.DocsError`
+    (`docs.page_file` checks it).
+
+    Args:
+        url: A page URL the documentation index links.
+
+    Returns:
+        The page's name relative to the snapshot directory, `rest/<area>/.../<page>.md`.
+    """
+    return f"{REST_PAGES}/{docs.page_file(url)}"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -125,9 +146,10 @@ def store(directory: Path, files: Sequence[VendorFile], *, fetched: dt.date) -> 
 
     The new snapshot is written to a sibling directory (`<name>-incoming`); the old one is
     renamed aside (`<name>-previous`), the new one is renamed into place, and only then is the
-    old one removed. At no point is the snapshot directory half written, and a staging or
-    backup directory an interrupted run left behind is removed first. Files of the old snapshot
-    that `files` lacks (a page Massive removed) are gone afterwards.
+    old one removed. At no point is the snapshot directory half written. A staging directory an
+    interrupted run left behind is removed first, and so is its backup, unless the run stopped
+    mid-swap with no snapshot in place: then the backup is restored first. Files of the old
+    snapshot that `files` lacks (a page Massive removed) are gone afterwards.
 
     Args:
         directory: The snapshot directory, normally `DIRECTORY`. It need not exist yet.
@@ -139,6 +161,10 @@ def store(directory: Path, files: Sequence[VendorFile], *, fetched: dt.date) -> 
     """
     staging = directory.with_name(f"{directory.name}-incoming")
     backup = directory.with_name(f"{directory.name}-previous")
+    if backup.exists() and not directory.exists():
+        # An earlier run stopped between moving the old snapshot aside and moving the new one
+        # in: the backup is the only copy, so it goes back before anything is cleaned up.
+        backup.rename(directory)
     shutil.rmtree(staging, ignore_errors=True)
     shutil.rmtree(backup, ignore_errors=True)
     for file in files:
@@ -227,8 +253,9 @@ class Snapshot:
         llms = (directory / LLMS).read_text(encoding="utf-8")
         pages: dict[str, str] = {}
         for url in docs.rest_page_urls(llms):
-            name = str(docs.page_file(url))
-            path = directory / REST_PAGES / name
+            stored = page_file(url)
+            name = stored.removeprefix(f"{REST_PAGES}/")
+            path = directory / stored
             if path.is_file():
                 pages[name] = path.read_text(encoding="utf-8")
             else:
@@ -246,8 +273,25 @@ class Snapshot:
         return cls(openapi=openapi, llms=llms, pages=pages, openapi_sha256=digest)
 
 
+def _os_litter(name: str) -> bool:
+    """Return whether a file name is one an operating system's file browser leaves behind.
+
+    Finder writes `.DS_Store` and `._*` (AppleDouble) files, and Windows Explorer `Thumbs.db`
+    and `desktop.ini`, merely when a person views a folder. No vendor file can have such a
+    name (every stored name is fixed or a lower-case `.md` page below `rest/`), so ignoring
+    them hides no edit; any other stray file still stops the refresh.
+
+    Args:
+        name: A file's name, without its directory.
+
+    Returns:
+        True for those names.
+    """
+    return name in _OS_LITTER or name.startswith("._")
+
+
 def _verify(directory: Path, files: Mapping[str, Json]) -> Iterator[Problem]:
-    """Compare a snapshot's files with its manifest.
+    """Compare a snapshot's files with its manifest, ignoring operating-system litter.
 
     Args:
         directory: The snapshot directory.
@@ -260,7 +304,7 @@ def _verify(directory: Path, files: Mapping[str, Json]) -> Iterator[Problem]:
     on_disk = {
         path.relative_to(directory).as_posix()
         for path in directory.rglob("*")
-        if path.is_file() and path.name != MANIFEST
+        if path.is_file() and path.name != MANIFEST and not _os_litter(path.name)
     }
     for name in sorted(on_disk - set(files)):
         yield Problem(gate=Gate.SNAPSHOT, source="", key=name, message="not in the manifest")

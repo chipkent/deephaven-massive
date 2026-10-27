@@ -5,8 +5,8 @@ one `## <section>` heading per product area (`Flat Files`, `REST API`, `WebSocke
 followed by a bullet list of `- [<title>](<page url>): <summary>` links. The index names pages,
 not endpoints. Each REST page names its endpoint on one line, `**Endpoint:**` followed by
 `GET <path>` in backticks, in the template syntax the OpenAPI specification uses, so the pages
-are what connects
-the index to the specification's paths. Overview and quickstart pages have no endpoint line.
+are what connects the index to the specification's paths. Overview and quickstart pages have
+no endpoint line.
 
 This module turns those documents into plain values and nothing else:
 

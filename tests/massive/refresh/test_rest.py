@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 from datetime import date
 from typing import TYPE_CHECKING
@@ -19,12 +20,13 @@ import pytest
 from deephaven_massive._massive.refresh import exclusions, lexicon, overrides, rest
 from deephaven_massive._massive.refresh import exclusions as exclusions_module
 from deephaven_massive._massive.refresh.gates import RefreshError
-from deephaven_massive._massive.refresh.hand import HandInput
+from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.rest import Coverage, generate_rest
 from deephaven_massive._massive.refresh.snapshot import DIRECTORY, Snapshot
 from deephaven_massive._massive.spec.convert import convert_field
 from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
+    Conversion,
     ParamKind,
     RestPath,
     Transport,
@@ -38,8 +40,8 @@ if TYPE_CHECKING:
 # --- The vendored snapshot -------------------------------------------------------------------
 
 _requires_snapshot = pytest.mark.skipif(
-    not DIRECTORY.is_dir(),
-    reason="the vendored snapshot (vendor/massive/) is in a source checkout only",
+    not DIRECTORY.is_dir() and "CI" not in os.environ,
+    reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",
 )
 
 
@@ -191,13 +193,13 @@ def test_the_type_fixes_follow_their_samples(
     pages = Snapshot.load().pages
     for (path, wire_key), fix in overrides.TYPE_FIXES.items():
         typed = next(f for f in paths[path].fields if f.wire_key == wire_key)
-        assert (typed.wire_type, typed.declared_type) == (fix.wire_type, fix.declared)
+        assert (typed.wire_type, typed.conversion) == (fix.conversion.wire_type, fix.conversion)
         page = pages[coverage_page(real[1], path)]
         key = wire_key.rsplit(".", 1)[-1]
         cited = re.findall(r'"[^"]+"|\b\d{6,}\b', fix.reason)
         shown = [sample for sample in cited if f'"{key}": {sample}' in page]
         assert shown, (path, wire_key)
-        # The sample must decode through the declared conversion the decoder applies.
+        # The sample must decode through the conversion the decoder applies.
         assert convert_field(typed, json.loads(shown[0])) is not None
 
 
@@ -260,15 +262,37 @@ def test_gate_example_type_finds_the_samples_the_vendor_types_contradict() -> No
         ("/tmx/v1/corporate-events", "tmx_company_id"),
         ("/stocks/taxonomies/vX/risk-factors", "taxonomy"),
     }
+    # The movers snapshot shares the trade-ID decision but documents only text.
+    movers = ("/v2/snapshot/locale/global/markets/crypto/{direction}", "lastTrade.i")
     real_hand = HandInput()
     hand = dataclasses.replace(
         real_hand,
-        type_fixes={k: v for k, v in real_hand.type_fixes.items() if k not in fixed},
+        type_fixes={k: v for k, v in real_hand.type_fixes.items() if k not in {*fixed, movers}},
         units={k: v for k, v in real_hand.units.items() if k not in fixed},
+        sample_errors=(),
     )
     assert sorted(_problems(Snapshot.load(), hand)) == sorted(
-        ("example-type", path, wire_key) for path, wire_key in fixed
+        [
+            *(("example-type", path, wire_key) for path, wire_key in fixed),
+            ("example-type", "/vX/reference/ipos", "us_code"),  # a wrong sample
+        ]
     )
+
+
+@_requires_snapshot
+def test_gate_stale_entry_a_shared_type_fix_is_needed_while_any_member_needs_it() -> None:
+    # Without the full-market snapshot, whose sample is an integer, the trade-ID fix the movers
+    # snapshot shares is needed by no sample, so it is stale.
+    tickers = ("/v2/snapshot/locale/global/markets/crypto/tickers", "lastTrade.i")
+    movers = ("/v2/snapshot/locale/global/markets/crypto/{direction}", "lastTrade.i")
+    real_hand = HandInput()
+    hand = dataclasses.replace(
+        real_hand, type_fixes={k: v for k, v in real_hand.type_fixes.items() if k != tickers}
+    )
+    assert sorted(_problems(Snapshot.load(), hand)) == [
+        ("example-type", *tickers),
+        ("stale-entry", *movers),
+    ]
 
 
 def coverage_page(coverage: Coverage, path: str) -> str:
@@ -356,6 +380,7 @@ def _hand(
     param_units: Mapping[tuple[str, str], overrides.Unit] | None = None,
     exclusions: Sequence[exclusions_module.Exclusion] = (),
     kinds: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    sample_errors: Sequence[exclusions_module.SampleError] = (),
 ) -> HandInput:
     """Return hand input with every table empty except those given."""
     return HandInput(
@@ -370,6 +395,7 @@ def _hand(
         param_units=param_units or {},
         exclusions=exclusions,
         kinds=kinds or {},
+        sample_errors=sample_errors,
     )
 
 
@@ -728,15 +754,15 @@ def test_gate_stale_entry_units_on_a_field_that_is_not_an_integer() -> None:
 # Declared conversions.
 
 
-def test_a_type_fix_records_the_declared_type() -> None:
-    fix = overrides.TypeFix(declared=WireType.STRING, wire_type=WireType.LONG, reason="test")
+def test_a_type_fix_records_its_conversion() -> None:
+    fix = overrides.TypeFix(conversion=Conversion.QUOTED_INTEGER, reason="test")
     path = _one(_row(size={"type": "string"}), _hand(type_fixes={(_PATH, "size"): fix}))
     (field,) = path.fields
-    assert (field.wire_type, field.declared_type) == (WireType.LONG, WireType.STRING)
+    assert (field.wire_type, field.conversion) == (WireType.LONG, Conversion.QUOTED_INTEGER)
 
 
 def test_gate_stale_entry_a_type_fix_the_specification_no_longer_needs() -> None:
-    fix = overrides.TypeFix(declared=WireType.STRING, wire_type=WireType.LONG, reason="test")
+    fix = overrides.TypeFix(conversion=Conversion.QUOTED_INTEGER, reason="test")
     snapshot = _snapshot({_PATH: _item(_row(size={"type": "integer"}))})
     assert _problems(snapshot, _hand(type_fixes={(_PATH, "size"): fix})) == [
         ("stale-entry", _PATH, "size")
@@ -744,17 +770,18 @@ def test_gate_stale_entry_a_type_fix_the_specification_no_longer_needs() -> None
 
 
 def test_a_type_fix_to_an_epoch_takes_its_unit_from_units() -> None:
-    fix = overrides.TypeFix(declared=WireType.DATE, wire_type=WireType.EPOCH, reason="test")
-    row = _row(settles_on={"type": "string", "format": "date"})
+    fix = overrides.TypeFix(conversion=Conversion.DATE_AS_EPOCH, reason="test")
+    # The field's own example is the integer that makes the conversion necessary.
+    row = _row(settles_on={"type": "string", "format": "date", "example": 1_753_851_600})
     hand = _hand(
         type_fixes={(_PATH, "settles_on"): fix},
         units={(_PATH, "settles_on"): overrides.Unit(unit=WireUnit.NS, reason="test")},
     )
     (field,) = _one(row, hand).fields
-    assert (field.wire_type, field.unit, field.declared_type) == (
+    assert (field.wire_type, field.unit, field.conversion) == (
         WireType.EPOCH,
         WireUnit.NS,
-        WireType.DATE,
+        Conversion.DATE_AS_EPOCH,
     )
     without_unit = dataclasses.replace(hand, units={})
     snapshot = _snapshot({_PATH: _item(row)})
@@ -762,7 +789,7 @@ def test_a_type_fix_to_an_epoch_takes_its_unit_from_units() -> None:
 
 
 def test_gate_stale_entry_a_unit_on_a_field_a_type_fix_keeps_from_an_epoch() -> None:
-    fix = overrides.TypeFix(declared=WireType.LONG, wire_type=WireType.STRING, reason="test")
+    fix = overrides.TypeFix(conversion=Conversion.INTEGER_ID_AS_TEXT, reason="test")
     hand = _hand(
         type_fixes={(_PATH, "ref"): fix}, units={(_PATH, "ref"): _MS}, identity={"ref": ""}
     )
@@ -789,7 +816,7 @@ def test_gate_example_type_a_documented_value_the_type_refuses() -> None:
         ("example-type", _PATH, "bar.close"),
         ("example-type", _PATH, "code"),
     ]
-    fix = overrides.TypeFix(declared=WireType.LONG, wire_type=WireType.STRING, reason="test")
+    fix = overrides.TypeFix(conversion=Conversion.INTEGER_OR_TEXT_ID, reason="test")
     fixed = _snapshot({_PATH: _item(_row(code={"type": "integer"}), example=example)})
     (field,) = _one_of(fixed, _hand(type_fixes={(_PATH, "code"): fix})).fields
     assert field.wire_type is WireType.STRING
@@ -818,6 +845,60 @@ def test_gate_example_type_skips_what_the_example_leaves_out() -> None:
         "price",
         "size",
         "last.p",
+    ]
+
+
+def test_gate_example_type_checks_a_field_s_own_example() -> None:
+    row = _row(
+        cusip={"type": "string", "example": 37833100}, size={"type": "integer", "example": 3}
+    )
+    snapshot = _snapshot({_PATH: _item(row)})
+    assert _problems(snapshot) == [("example-type", _PATH, "cusip")]
+
+
+def test_a_sample_error_skips_exactly_its_wrong_sample() -> None:
+    row = _row(cusip={"type": "string", "example": 37833100})
+    error = exclusions.SampleError(path=_PATH, wire_key="cusip", sample=37833100, reason="t")
+    assert [f.column for f in _one(row, _hand(sample_errors=(error,))).fields] == ["Cusip"]
+    # Another wrong sample of the same field is still reported.
+    example = {"results": [{"cusip": 12}]}
+    snapshot = _snapshot({_PATH: _item(row, example=example)})
+    assert _problems(snapshot, _hand(sample_errors=(error,))) == [("example-type", _PATH, "cusip")]
+
+
+@pytest.mark.parametrize("sample", ["037833100", 99])
+def test_gate_stale_entry_a_sample_error_the_specification_no_longer_shows(
+    sample: str | int,
+) -> None:
+    # The sample is now accepted, or another value is documented: the entry is stale.
+    row = _row(cusip={"type": "string", "example": "037833100"})
+    error = exclusions.SampleError(path=_PATH, wire_key="cusip", sample=sample, reason="t")
+    snapshot = _snapshot({_PATH: _item(row)})
+    assert _problems(snapshot, _hand(sample_errors=(error,))) == [("stale-entry", _PATH, "cusip")]
+
+
+def test_gate_example_type_an_example_with_no_rows_where_the_result_key_points() -> None:
+    row = _row(price={"type": "number"})
+    snapshot = _snapshot({_PATH: _item(row, example={"status": "OK", "data": [{"price": 1}]})})
+    assert _problems(snapshot) == [("example-type", _PATH, "")]
+
+
+def test_a_type_fix_from_untyped_text_is_needed_while_the_text_is_untyped() -> None:
+    # Plain text accepts an ISO instant, so no sample "needs" the fix; it stays until the
+    # specification types the field.
+    fix = overrides.TypeFix(conversion=Conversion.ISO_TEXT_INSTANT, reason="t")
+    row = _row(serverTime={"type": "string", "example": "2020-11-10T17:37:37-05:00"})
+    (field,) = _one(row, _hand(type_fixes={(_PATH, "serverTime"): fix})).fields
+    assert field.conversion is Conversion.ISO_TEXT_INSTANT
+
+
+def test_gate_stale_entry_a_type_fix_no_sample_needs() -> None:
+    # A corrected sample makes the identifier fix unnecessary.
+    fix = overrides.TypeFix(conversion=Conversion.INTEGER_OR_TEXT_ID, reason="t")
+    row = _row(company={"type": "integer", "example": 2208})
+    snapshot = _snapshot({_PATH: _item(row)})
+    assert _problems(snapshot, _hand(type_fixes={(_PATH, "company"): fix})) == [
+        ("stale-entry", _PATH, "company")
     ]
 
 
@@ -942,7 +1023,7 @@ def test_gate_stale_entry_hand_entries_naming_nothing() -> None:
         tag_conflicts={(_PATH, "gone"): "test"},
         type_fixes={
             (_PATH, "gone"): overrides.TypeFix(
-                declared=WireType.LONG, wire_type=WireType.STRING, reason="test"
+                conversion=Conversion.INTEGER_ID_AS_TEXT, reason="test"
             )
         },
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},
@@ -1102,7 +1183,7 @@ def test_gate_timestamp_unit_covers_text_with_no_format() -> None:
 
 def test_timestamp_like_text_is_decided_by_a_type_fix_or_a_units_entry() -> None:
     row = _row(serverTime={"type": "string"})
-    fix = overrides.TypeFix(declared=WireType.STRING, wire_type=WireType.ISO_INSTANT, reason="t")
+    fix = overrides.TypeFix(conversion=Conversion.ISO_TEXT_INSTANT, reason="t")
     fixed = _one(row, _hand(type_fixes={(_PATH, "serverTime"): fix}))
     assert _types(fixed) == {"serverTime": (WireType.ISO_INSTANT, None)}
     text = overrides.Unit(unit=None, reason="free text, not a time")

@@ -19,36 +19,39 @@ builds its own columns from it.
 A value that does not fit raises `UnconvertibleError`; nothing is coerced. An epoch stays a raw
 count in its field's unit: the library converts it to nanoseconds and checks its bounds.
 
-**Declared conversions.** Where the vendor's specification gives a field the wrong type, the
-refresh records the declared type on the field (`Field.declared_type`) and the real one as its
-`wire_type`. `convert_field` then converts deliberately from the one to the other, and only for
-the pairs in `DECLARED_CONVERSIONS`:
+**Named conversions.** Where the vendor's documented samples show values a field's declared
+type does not describe, the refresh records a `Conversion` on the field (`Field.conversion`),
+and `convert_field` applies exactly that conversion instead of the plain converter of the
+field's `wire_type`. Each conversion has one meaning, whatever field takes it; the plain
+converters above are never loosened:
 
-| Declared | Wire type | Accepts |
+| `Conversion` | Accepts | Returns |
 |---|---|---|
-| `string` | `iso-instant` | untyped text that is an ISO instant; returns `int` ns |
-| `iso-instant` | `date` | text declared a date-time that is a date; returns `datetime.date` |
-| `string` | `long` | a quoted decimal integer such as `"48"` (digits only); returns `int` |
-| `long` | `string` | an identifier typed as an integer: an integer or text; returns `str` |
-| `string` | `string` | an identifier typed as text, also sent as an integer; returns `str` |
-| `double` | `string` | a label typed as a number (`"1.0"`): text, or a number's JSON text |
-| `long` | `int-array` | one integer where a list is meant (a condition code); returns `list[int]` |
-| `date` | `date` | a date, or an ISO instant at exactly midnight UTC; returns `datetime.date` |
-| `date` | `epoch` | a date sent as an integer epoch count in the field's unit; returns `int` |
+| `iso-text-instant` | ISO-8601 instant text the specification leaves untyped | `int` ns |
+| `iso-date-text` | `YYYY-MM-DD` text declared a date-time | `datetime.date` |
+| `quoted-integer` | decimal digits in text, such as `"48"` | `int` |
+| `integer-id-as-text` | an integer in the signed 64-bit range; text is refused | `str` |
+| `integer-or-text-id` | text, or an integer in the signed 64-bit range | `str` |
+| `text-or-integer-id` | text, or an integer in the signed 64-bit range | `str` |
+| `number-label` | text as sent, or a number as a decimal with a fraction (`1.0`) | `str` |
+| `one-code` | one integer in the signed 32-bit range | `list[int]` |
+| `midnight-utc-date` | `YYYY-MM-DD`, or ISO-8601 midnight at offset `Z` or `+00:00` | `date` |
+| `date-as-epoch` | an integer in the signed 64-bit range (a count in the field's unit) | `int` |
 
-A pair of one type twice keeps the type and accepts the second form the vendor documents for
-it, so no value is lost and nothing else is loosened. A value the declared conversion cannot
-read (`"4.8"` for a `long`, a date-time not at midnight UTC for a `date`) raises
-`UnconvertibleError` like any other bad value; no other conversion exists.
+`integer-or-text-id` and `text-or-integer-id` accept the same forms; they differ in the type
+the specification declares (an integer or text), so each field's entry stays stale-checkable
+against its specification. A value the conversion cannot read (`"4.8"` for `quoted-integer`,
+`"7"` for `integer-id-as-text`, a non-zero clock or another offset for `midnight-utc-date`)
+raises `UnconvertibleError` like any other bad value.
 
 An `iso-instant` is computed as exact integer nanoseconds since the Unix epoch (UTC) from its
 date, time, up to nine fractional digits, and offset, with integer arithmetic only, so no
 digit is lost to a float or to `datetime`'s microsecond precision. Text without an offset is
 refused, not assumed to be UTC: a field that Massive really sends offset-less would need a
-declared conversion in the spec, so the assumption is never silent.
+named conversion, so the assumption is never silent.
 
-The function is pure and safe from any thread. This module imports only the standard library
-and `spec.types`.
+The functions are pure and safe from any thread. This module imports only the standard
+library and `spec.types`.
 """
 
 from __future__ import annotations
@@ -56,16 +59,17 @@ from __future__ import annotations
 import json
 import re
 from datetime import date
+from types import MappingProxyType
 from typing import TYPE_CHECKING, TypeVar
 
-from deephaven_massive._massive.spec.types import WireType
+from deephaven_massive._massive.spec.types import Conversion, WireType
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from deephaven_massive._massive.spec.types import Field
 
-__all__ = ["DECLARED_CONVERSIONS", "UnconvertibleError", "convert", "convert_field"]
+__all__ = ["UnconvertibleError", "convert", "convert_field"]
 
 _T = TypeVar("_T")
 
@@ -304,44 +308,66 @@ def _identifier(value: object) -> str:
     return value if isinstance(value, str) else str(_long(value))
 
 
+def _integer_id(value: object) -> str:
+    """Return an integer identifier as text; text is refused.
+
+    Args:
+        value: A decoded JSON value.
+
+    Returns:
+        The integer's decimal text.
+    """
+    return str(_long(value))
+
+
 def _number_label(value: object) -> str:
     """Return a label the specification types as a number (a version such as `"1.0"`) as text.
 
+    Text is kept as sent. A number is written as a decimal with a fractional part, so `1`
+    and `1.0` both give `"1.0"`, the form the vendor's samples use; anything else (a `bool`,
+    a number too large for a double) raises `UnconvertibleError`.
+
     Args:
         value: A decoded JSON value.
 
     Returns:
-        Text unchanged, or a number's JSON text (`1.0` gives `"1.0"`).
-
-    Raises:
-        UnconvertibleError: If `value` is neither text nor a number (a `bool` is not one).
+        The label's text.
     """
     if isinstance(value, str):
         return value
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise UnconvertibleError
-    return json.dumps(value)
+    return json.dumps(_double(value))
 
 
 def _midnight_date(value: object) -> date:
-    """Return a date the vendor sends as `YYYY-MM-DD` or as an ISO instant at midnight UTC.
+    """Return a date the vendor sends as `YYYY-MM-DD` or as ISO-8601 midnight in UTC.
+
+    Only the written date is used, and only when nothing else is written: the clock must be
+    `00:00:00` (any fraction all zeros) and the offset `Z` or `+00:00`. Any other clock or
+    offset would carry information a date drops, so it is refused rather than shifted.
 
     Args:
         value: A decoded JSON value.
 
     Returns:
-        The calendar date.
+        The calendar date as written.
 
     Raises:
-        UnconvertibleError: If `value` is neither a date nor an ISO instant at exactly
-            midnight UTC: any other time would be lost, so it is refused.
+        UnconvertibleError: If `value` is neither form, or names no real date.
     """
     if isinstance(value, str) and _DATE.fullmatch(value):
         return _date(value)
-    days, rest = divmod(_instant(value), _SECONDS_PER_DAY * _NANOS_PER_SECOND)
-    if rest:
+    match = _INSTANT.fullmatch(value) if isinstance(value, str) else None
+    if (
+        match is None
+        or (match["h"], match["m"], match["s"]) != ("00", "00", "00")
+        or (match["fraction"] or "0").strip("0")
+        or (
+            match["sign"] is not None
+            and (match["sign"], match["oh"], match["om"]) != ("+", "00", "00")
+        )
+    ):
         raise UnconvertibleError
-    return date.fromordinal(_EPOCH_ORDINAL + days)
+    return _date(match["date"])
 
 
 def _one_code(value: object) -> list[int]:
@@ -356,30 +382,30 @@ def _one_code(value: object) -> list[int]:
     return [_integer(value, _INT32)]
 
 
-# Each declared conversion: (declared type, wire type) to its converter.
-_DECLARED: dict[tuple[WireType, WireType], Callable[[object], object]] = {
-    (WireType.STRING, WireType.ISO_INSTANT): _instant,
-    (WireType.ISO_INSTANT, WireType.DATE): _date,
-    (WireType.STRING, WireType.LONG): _quoted_integer,
-    (WireType.LONG, WireType.STRING): _identifier,
-    (WireType.STRING, WireType.STRING): _identifier,
-    (WireType.DOUBLE, WireType.STRING): _number_label,
-    (WireType.LONG, WireType.INT_ARRAY): _one_code,
-    (WireType.DATE, WireType.DATE): _midnight_date,
-    (WireType.DATE, WireType.EPOCH): _long,
-}
-
-DECLARED_CONVERSIONS: frozenset[tuple[WireType, WireType]] = frozenset(_DECLARED)
-"""The `(declared type, wire type)` pairs a field's declared conversion may name."""
+# The converter of each named conversion.
+_NAMED: Mapping[Conversion, Callable[[object], object]] = MappingProxyType(
+    {
+        Conversion.ISO_TEXT_INSTANT: _instant,
+        Conversion.ISO_DATE_TEXT: _date,
+        Conversion.QUOTED_INTEGER: _quoted_integer,
+        Conversion.INTEGER_ID_AS_TEXT: _integer_id,
+        Conversion.INTEGER_OR_TEXT_ID: _identifier,
+        Conversion.TEXT_OR_INTEGER_ID: _identifier,
+        Conversion.NUMBER_LABEL: _number_label,
+        Conversion.ONE_CODE: _one_code,
+        Conversion.MIDNIGHT_UTC_DATE: _midnight_date,
+        Conversion.DATE_AS_EPOCH: _long,
+    }
+)
 
 
 def convert_field(field: Field, value: object) -> object:
     """Check a decoded JSON value against its field and return its converted form.
 
-    For a field the vendor types correctly this is `convert(field.wire_type, value)`. For a
-    field with a `declared_type`, the value arrives in the vendor's actual form and is
-    converted deliberately to `field.wire_type` by the pair's declared conversion (see the
-    module's table). Call it once per non-null value.
+    For a field with no `conversion` this is `convert(field.wire_type, value)`. For a field
+    with one, the value arrives in the vendor's documented form and that named conversion
+    (see the module's table) turns it into the form `convert` gives for `field.wire_type`.
+    Call it once per non-null value; a value that does not fit raises `UnconvertibleError`.
 
     Args:
         field: The field the value belongs to.
@@ -387,17 +413,7 @@ def convert_field(field: Field, value: object) -> object:
 
     Returns:
         The value in the form `convert` gives for `field.wire_type`.
-
-    Raises:
-        ValueError: If the field names a declared conversion that does not exist; the
-            refresh never generates one, so this means the generated file was edited.
     """
-    if field.declared_type is None:
+    if field.conversion is None:
         return convert(field.wire_type, value)
-    converter = _DECLARED.get((field.declared_type, field.wire_type))
-    if converter is None:
-        raise ValueError(
-            f"field {field.wire_key!r}: no declared conversion from {field.declared_type} "
-            f"to {field.wire_type}"
-        )
-    return converter(value)
+    return _NAMED[field.conversion](value)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import runpy
 import sys
 from typing import TYPE_CHECKING
@@ -15,8 +16,8 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.skipif(
-    not snapshot.DIRECTORY.is_dir(),
-    reason="the vendored snapshot (vendor/massive/) is in a source checkout only",
+    not snapshot.DIRECTORY.is_dir() and "CI" not in os.environ,
+    reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",
 )
 def test_the_plain_run_reports_an_up_to_date_schema(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]

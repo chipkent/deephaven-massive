@@ -30,11 +30,12 @@ when `overrides.UNITS` gives it a unit; a number is `double`; a boolean is `bool
 integers is `int-array`; an array of anything else, a free-form object, and a choice of two or
 more shapes are `json-text`; a string with `format: date-time`, or no format and a name ending
 in `_utc`, is an `iso-instant`; a string with `format: date`, or named `date` or `*_date`, is a
-`date`; any other string is `string`. A `TYPE_FIXES` entry then replaces the type and records
-the vendor's declared type on the field, so the decoder converts it deliberately (a fix to an
-`epoch` takes its unit from `UNITS`). Every value of the specification's own response example
-must then convert through its field, or the `example-type` gate stops the refresh: a type the
-vendor's sample contradicts is decided by a person, never found at run time.
+`date`; any other string is `string`. A `TYPE_FIXES` entry then gives the field its named
+`Conversion`, whose type replaces the rule's, so the decoder converts it deliberately (a
+conversion to an `epoch` takes its unit from `UNITS`). Every documented example value (the
+response's example and each field's own `example`) must then convert through its field, or
+the `example-type` gate stops the refresh: a type the vendor's sample contradicts is decided
+by a person, never found at run time.
 
 **Names.** Each segment of a wire key is translated to Massive's long form: the vendor's own
 long key as it is; a short key through the lexicon of the object it sits in, whose entries
@@ -61,13 +62,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._massive.refresh import docs, gates, naming
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
-from deephaven_massive._massive.refresh.hand import HandInput
+from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required, text
-from deephaven_massive._massive.spec.convert import UnconvertibleError, convert_field
+from deephaven_massive._massive.spec.convert import UnconvertibleError, convert, convert_field
 from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
     Field,
@@ -93,22 +95,36 @@ _TAG_UNITS: Final = {
     "IMicroseconds": WireUnit.US,
     "IMilliseconds": WireUnit.MS,
 }
-# The vendor extensions a path item and its GET operation may carry. Any other `x-polygon-*`
-# key is a change at Massive the refresh stops on rather than ignores.
-_PATH_EXTENSIONS: Final = frozenset({"x-polygon-draft", "x-polygon-ignore"})
-_OPERATION_EXTENSIONS: Final = frozenset(
+# The vendor extensions a path item and its GET operation may carry, each with what the
+# generator does about it. Any other `x-polygon-*` key is a change at Massive the refresh stops
+# on rather than ignores.
+_PATH_EXTENSIONS: Final = MappingProxyType(
     {
-        "x-polygon-deprecation",
-        "x-polygon-entitlement-allowed-limited-tickers",
-        "x-polygon-entitlement-allowed-timeframes",
-        "x-polygon-entitlement-data-type",
-        "x-polygon-entitlement-market-type",
-        "x-polygon-experimental",
-        "x-polygon-paginate",
-        "x-polygon-replaces",
+        "x-polygon-draft": "The vendor has not published the path: never generated.",
+        "x-polygon-ignore": "A hint to the vendor's own SDK generator not to emit a second "
+        "client method for one URL; it says nothing about the data, so it changes nothing.",
     }
 )
-# The documentation pages that describe an area rather than one endpoint.
+_OPERATION_EXTENSIONS: Final = MappingProxyType(
+    {
+        "x-polygon-deprecation": "The vendor is retiring the path: never generated.",
+        "x-polygon-entitlement-allowed-limited-tickers": "Which plans see which tickers; the "
+        "library learns entitlements from the responses, not from the specification.",
+        "x-polygon-entitlement-allowed-timeframes": "Which plans see real-time or delayed "
+        "data; learned from the responses, like every entitlement.",
+        "x-polygon-entitlement-data-type": "The plan family the path belongs to; learned from "
+        "the responses, like every entitlement.",
+        "x-polygon-entitlement-market-type": "The market the plan covers; learned from the "
+        "responses, like every entitlement.",
+        "x-polygon-experimental": "The vendor marks the endpoint experimental but documents "
+        "it; documented endpoints are generated, so it is generated like any other.",
+        "x-polygon-paginate": "How the vendor's SDK pages; the REST client follows `next_url` "
+        "on every path instead.",
+        "x-polygon-replaces": "Names the older path a new one replaces; the older path's own "
+        "deprecation flag accounts for it.",
+    }
+)
+# The documentation pages that describe an area rather than one endpoint: they name none.
 _OVERVIEW_PAGES: Final = frozenset({"overview", "quickstart"})
 # The range and set suffixes of a filter parameter's wire name (`timestamp.gte`).
 _FILTER_SUFFIXES: Final = frozenset({"gt", "gte", "lt", "lte", "any_of"})
@@ -189,14 +205,19 @@ class _PathGenerator:
         self.unit_bases: set[str] = set()
         self.identities: set[str] = set()
         self.concepts: dict[str, str] = {}
-        # The specification's example of the HTTP 200 response, once `body` has read it.
+        # The specification's example of the HTTP 200 response, once `body` has read it, and
+        # each field's own `example`, by wire key.
         self.example: Json = None
+        self.field_examples: dict[str, Json] = {}
+        self.converted: set[str] = set()
+        self.needed_conversions: set[str] = set()
 
     def use(self) -> PathUse:
         """Return what the path consumed so far, for the checks that span paths.
 
         Returns:
-            The wire keys, objects, `PARAM_UNITS` bases, identity keys, and concepts met.
+            The wire keys, objects, `PARAM_UNITS` bases, identity keys, concepts, and the
+            fields whose conversion a documented example needs.
         """
         return PathUse(
             wire_keys=frozenset(self.wire_keys),
@@ -204,6 +225,8 @@ class _PathGenerator:
             unit_bases=frozenset(self.unit_bases),
             identities=frozenset(self.identities),
             concepts=dict(self.concepts),
+            converted=frozenset(self.converted),
+            needed_conversions=frozenset(self.needed_conversions),
         )
 
     def problem(self, gate: Gate, key: str, message: str, *, description: str = "") -> None:
@@ -272,14 +295,19 @@ class _PathGenerator:
             return None
 
     def check_example(self, result_key: str | None, fields: Sequence[Field]) -> None:
-        """Convert every value of the response's documented example by its generated field.
+        """Convert every documented example value of the path by its generated field.
 
-        The specification's example of the HTTP 200 response is the vendor's own sample of the
-        wire. A value of it that the field's conversion refuses means the generated type and
+        The specification documents the wire twice: the example of the HTTP 200 response and
+        a field's own `example`. A value that the field refuses means the generated type and
         the documented wire disagree, and real data shaped like the sample would fail at run
-        time; the `example-type` gate stops the refresh instead, so a person decides the type
-        with a `TYPE_FIXES` entry. A response with no example, a missing field, and a null
-        value are not checked. Each field is reported once.
+        time, so the `example-type` gate stops the refresh instead. A person then decides: a
+        `TYPE_FIXES` entry when the type is wrong, or a `SAMPLE_ERRORS` entry when the sample
+        is. A missing field and a null value are not checked; each field is reported once.
+
+        It also records which fields' conversions some example value needs (a value the
+        field's declared type alone refuses), for the stale-entry check of `TYPE_FIXES`; and
+        it reports a response example in which no value sits where the result key points,
+        since the gate would otherwise check nothing there without saying so.
 
         Args:
             result_key: Where the example's rows sit, as for the response itself.
@@ -289,22 +317,55 @@ class _PathGenerator:
         for step in result_key.split(".") if result_key is not None else ():
             node = node.get(step) if isinstance(node, dict) else None
         rows = node if isinstance(node, list) else [node]
-        reported: set[str] = set()
-        for row in rows:
-            for item in fields:
-                value = _example_value(row, item.wire_key)
-                if value is None or item.wire_key in reported:
-                    continue
-                try:
-                    convert_field(item, value)
-                except UnconvertibleError:
-                    reported.add(item.wire_key)
-                    self.problem(
-                        Gate.EXAMPLE_TYPE,
-                        item.wire_key,
-                        f"the specification's example value {json.dumps(value)[:80]} does not "
-                        f"convert to {item.wire_type}; add a TYPE_FIXES entry citing it",
-                    )
+        found = {
+            item.wire_key: [_example_value(row, item.wire_key) for row in rows] for item in fields
+        }
+        if self.example is not None and not any(v is not None for vs in found.values() for v in vs):
+            self.problem(
+                Gate.EXAMPLE_TYPE,
+                "",
+                f"the specification's response example has no field values under result key "
+                f"{result_key!r}, so none could be checked",
+            )
+        for item in fields:
+            own = self.field_examples.get(item.wire_key)
+            values = [v for v in [*found[item.wire_key], own] if v is not None]
+            self.check_values(item, values)
+
+    def check_values(self, item: Field, values: Sequence[Json]) -> None:
+        """Convert one field's documented example values, honouring `SAMPLE_ERRORS`.
+
+        Args:
+            item: The generated field.
+            values: Its non-null example values, response first, then its own `example`.
+        """
+        if item.conversion is not None:
+            self.converted.add(item.wire_key)
+        if item.conversion is not None and any(
+            not _converts(item.conversion.declared, v) for v in values
+        ):
+            self.needed_conversions.add(item.wire_key)
+        refused = [v for v in values if not _converts_field(item, v)]
+        for error in self.hand.sample_errors:
+            if (error.path, error.wire_key) != (self.path, item.wire_key):
+                continue
+            if error.sample in refused:
+                refused = [v for v in refused if v != error.sample]
+            else:
+                self.problem(
+                    Gate.STALE_ENTRY,
+                    item.wire_key,
+                    f"SAMPLE_ERRORS entry for the sample {json.dumps(error.sample)[:80]}, which "
+                    "the specification no longer gives or the field now accepts",
+                )
+        if refused:
+            self.problem(
+                Gate.EXAMPLE_TYPE,
+                item.wire_key,
+                f"the specification's example value {json.dumps(refused[0])[:80]} does not "
+                f"convert to {item.wire_type}; add a TYPE_FIXES entry citing it, or a "
+                "SAMPLE_ERRORS entry if the sample is wrong",
+            )
 
     def rows(self, operation: JsonObject) -> tuple[str | None, list[_Raw] | None]:
         """Find the rows of the response and flatten them.
@@ -482,7 +543,10 @@ class _PathGenerator:
         if spec_type is None:
             return None
         description = text(raw.schema, "description")
-        fix = self.hand.type_fixes.get((self.path, raw.wire_key))
+        if "example" in raw.schema:
+            self.field_examples[raw.wire_key] = raw.schema["example"]
+        entry = self.hand.type_fixes.get((self.path, raw.wire_key))
+        fix = entry.conversion if entry is not None else None
         if fix is not None and fix.declared is not spec_type:
             self.problem(
                 Gate.STALE_ENTRY,
@@ -517,7 +581,6 @@ class _PathGenerator:
                 description=description,
             )
             return None
-        declared = spec_type if fix is not None else None
         if unit is not None:
             wire_type = WireType.EPOCH
         else:
@@ -530,7 +593,7 @@ class _PathGenerator:
             wire_type=wire_type,
             unit=unit,
             required=raw.required,
-            declared_type=declared,
+            conversion=fix,
         )
 
     def unit(
@@ -718,6 +781,40 @@ class _PathGenerator:
         return ParamKind.TIMESTAMP, (), entry.unit
 
 
+def _converts(wire_type: WireType, value: Json) -> bool:
+    """Return whether the plain converter of a type accepts a value.
+
+    Args:
+        wire_type: The type.
+        value: A documented example value, not `None`.
+
+    Returns:
+        True when `spec.convert.convert` accepts it.
+    """
+    try:
+        convert(wire_type, value)
+    except UnconvertibleError:
+        return False
+    return True
+
+
+def _converts_field(item: Field, value: Json) -> bool:
+    """Return whether a field, with its conversion if it has one, accepts a value.
+
+    Args:
+        item: The generated field.
+        value: A documented example value, not `None`.
+
+    Returns:
+        True when `spec.convert.convert_field` accepts it.
+    """
+    try:
+        convert_field(item, value)
+    except UnconvertibleError:
+        return False
+    return True
+
+
 def _example_value(row: Json, wire_key: str) -> Json:
     """Return the value at a dotted wire key of an example row.
 
@@ -859,10 +956,10 @@ def _check_extensions(spec: OpenApi, paths: JsonObject) -> Iterator[Problem]:
     for path, node in paths.items():
         item = spec.deref(node, path)
         operation = item.get("get")
-        found = {key for key in item if key.startswith("x-polygon-")} - _PATH_EXTENSIONS
+        found = {key for key in item if key.startswith("x-polygon-")} - _PATH_EXTENSIONS.keys()
         if isinstance(operation, dict):
             found |= {key for key in operation if key.startswith("x-polygon-")} - (
-                _OPERATION_EXTENSIONS
+                _OPERATION_EXTENSIONS.keys()
             )
         for key in sorted(found):
             yield Problem(gate=Gate.SHAPE, source=path, key=key, message="unknown vendor extension")
@@ -930,6 +1027,7 @@ def generate_rest(
                 )
             )
     problems += gates.stale_entries(hand, uses)
+    problems += gates.unneeded_type_fixes(hand, uses)
     problems += gates.concept_collisions(hand, uses)
     if problems:
         raise RefreshError(problems)

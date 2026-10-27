@@ -21,7 +21,7 @@ Modules:
     - `naming`: the naming policy shared by every transport.
     - `gates`: the refresh gates, the problems they report, and the checks that span paths.
     - `render`: writes `spec/rest.json` in its canonical text.
-    - `hand`: bundles the hand input for the generators.
+    - `hand_input`: bundles the hand input for the generators.
     - `lexicon`, `overrides`, `exclusions`: every piece of hand input, each entry with its
       reason. Nothing else in the refresh is written by hand.
 

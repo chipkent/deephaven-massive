@@ -41,7 +41,7 @@ def test_render_writes_one_line_per_field_and_parameter() -> None:
     assert document["generated_by"] == "python -m deephaven_massive._massive.refresh"
     assert document["sources"][1]["fields"][0] == {
         "column": "Price",
-        "declared_type": None,
+        "conversion": None,
         "required": False,
         "type": "double",
         "unit": None,
@@ -55,7 +55,7 @@ def test_render_writes_one_line_per_field_and_parameter() -> None:
         "values": [],
     }
     lines = text.splitlines()
-    assert '    {"column": "Price", "declared_type": null, "required": false, ' in text
+    assert '    {"column": "Price", "conversion": null, "required": false, ' in text
     assert sum('"wire_key"' in line for line in lines) == 4
     assert sum('"in_path"' in line for line in lines) == 4
     assert text.endswith("}\n")

@@ -8,6 +8,7 @@ import pytest
 from deephaven_massive import _enums
 from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
+    Conversion,
     DriftReport,
     Field,
     Membership,
@@ -95,20 +96,39 @@ def test_a_unit_on_anything_but_an_epoch_is_rejected(wire_type: WireType) -> Non
         Field(wire_key="x", column="X", wire_type=wire_type, unit=WireUnit.NS)
 
 
-def test_a_field_records_a_declared_conversion() -> None:
+def test_a_field_records_its_conversion() -> None:
     size = Field(
-        wire_key="x", column="Size", wire_type=WireType.LONG, declared_type=WireType.STRING
+        wire_key="x", column="Size", wire_type=WireType.LONG, conversion=Conversion.QUOTED_INTEGER
     )
-    assert (size.wire_type, size.declared_type) == (WireType.LONG, WireType.STRING)
-    assert _price().declared_type is None
+    assert size.conversion is Conversion.QUOTED_INTEGER
+    assert _price().conversion is None
 
 
-def test_a_declared_conversion_may_keep_the_type() -> None:
-    # An identifier typed as text that the vendor also sends as an integer stays text.
-    trade_id = Field(
-        wire_key="i", column="Id", wire_type=WireType.STRING, declared_type=WireType.STRING
-    )
-    assert trade_id.declared_type is trade_id.wire_type
+def test_a_conversion_must_give_the_field_s_type() -> None:
+    with pytest.raises(
+        ValueError, match="'x': the conversion quoted-integer gives long, not string"
+    ):
+        Field(
+            wire_key="x",
+            column="X",
+            wire_type=WireType.STRING,
+            conversion=Conversion.QUOTED_INTEGER,
+        )
+
+
+def test_every_conversion_has_its_two_types() -> None:
+    assert {c: (c.declared, c.wire_type) for c in Conversion} == {
+        Conversion.ISO_TEXT_INSTANT: (WireType.STRING, WireType.ISO_INSTANT),
+        Conversion.ISO_DATE_TEXT: (WireType.ISO_INSTANT, WireType.DATE),
+        Conversion.QUOTED_INTEGER: (WireType.STRING, WireType.LONG),
+        Conversion.INTEGER_ID_AS_TEXT: (WireType.LONG, WireType.STRING),
+        Conversion.INTEGER_OR_TEXT_ID: (WireType.LONG, WireType.STRING),
+        Conversion.TEXT_OR_INTEGER_ID: (WireType.STRING, WireType.STRING),
+        Conversion.NUMBER_LABEL: (WireType.DOUBLE, WireType.STRING),
+        Conversion.ONE_CODE: (WireType.LONG, WireType.INT_ARRAY),
+        Conversion.MIDNIGHT_UTC_DATE: (WireType.DATE, WireType.DATE),
+        Conversion.DATE_AS_EPOCH: (WireType.DATE, WireType.EPOCH),
+    }
 
 
 # Membership.

@@ -8,12 +8,13 @@ person choose a name; it never chooses one. `Gate` lists every gate and what it 
 
 This module owns the vocabulary every other refresh module reports in (`Gate`, `Problem`,
 `RefreshError`) and the checks that span paths or read the hand input as a whole: stale hand
-entries (`stale_entries`, `check_exclusions`) and one concept per column within a dataset kind
-(`concept_collisions`). The checks that need one field or parameter at a time run inside the
-generator that meets it (`rest`); they read what each path consumed through `PathUse`, so this
-module depends on no generator.
+entries (`stale_entries`, `unneeded_type_fixes`, `check_exclusions`) and one concept per
+column within a dataset kind (`concept_collisions`). The checks that need one field or
+parameter at a time run inside the generator that meets it (`rest`); the checks here read what
+each path consumed through `PathUse`, so this module depends on no generator.
 
-It imports the standard library and the other refresh modules' plain data only.
+It imports the standard library and `spec.types` at run time, and the hand-input types for
+type checking only.
 """
 
 from __future__ import annotations
@@ -22,12 +23,13 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from deephaven_massive._massive.spec.types import Transport
+from deephaven_massive._massive.spec.types import Transport, WireType
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
 
-    from deephaven_massive._massive.refresh.hand import HandInput
+    from deephaven_massive._massive.refresh.hand_input import HandInput
+    from deephaven_massive._massive.refresh.overrides import TypeFix
 
 __all__ = [
     "Gate",
@@ -37,6 +39,7 @@ __all__ = [
     "check_exclusions",
     "concept_collisions",
     "stale_entries",
+    "unneeded_type_fixes",
 ]
 
 
@@ -57,16 +60,19 @@ class Gate(StrEnum):
     `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or `*_time`."""
     STALE_ENTRY = "stale-entry"
     """A hand entry (a lexicon shape, identity, `NAMES`, `UNITS`, tag-conflict, `TYPE_FIXES`,
-    `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry) naming a path, field, or parameter the
-    snapshot no longer generates, or claiming what the snapshot contradicts."""
+    `RESULT_KEYS`, `PARAM_UNITS`, `EXCLUSIONS`, or `SAMPLE_ERRORS` entry) naming a path, field,
+    parameter, or sample the snapshot no longer has, or claiming what the snapshot contradicts
+    (a `TYPE_FIXES` entry no documented sample needs any more among them)."""
     CONCEPT_COLLISION = "concept-collision"
     """Within one of `overrides.KINDS`, one column holding two concepts (a concept is a field's
     full long-name path, in snake case)."""
     EXAMPLE_TYPE = "example-type"
-    """A value of the specification's documented response example that the generated field's
-    conversion refuses: the generated type and the documented wire disagree, so real data
-    shaped like the sample would fail at run time. A `TYPE_FIXES` entry citing the sample
-    decides the type."""
+    """A documented example value (of the response's example, or of a field's own `example`)
+    that the generated field refuses: the generated type and the documented wire disagree, so
+    real data shaped like the sample would fail at run time. A `TYPE_FIXES` entry citing the
+    sample decides the type, or a `SAMPLE_ERRORS` entry records that the sample is wrong. A
+    response example with no value where the result key points fails it too, since nothing
+    would be checked."""
     UNITS = "units"
     """A `UNITS` unit that differs from the specification's `x-polygon-go-type` tag without a
     tag-conflict entry."""
@@ -153,6 +159,9 @@ class PathUse:
         identities: The `IDENTITY` keys the path used.
         concepts: Each generated column to its concept: the field's full long-name path, each
             segment in snake case (`last_trade.price`).
+        converted: The wire keys of the generated fields that have a conversion.
+        needed_conversions: The wire keys of the fields with a conversion that some
+            documented example value needs (a value the declared type alone refuses).
     """
 
     wire_keys: frozenset[str] = frozenset()
@@ -160,6 +169,8 @@ class PathUse:
     unit_bases: frozenset[str] = frozenset()
     identities: frozenset[str] = frozenset()
     concepts: Mapping[str, str] = field(default_factory=dict)
+    converted: frozenset[str] = frozenset()
+    needed_conversions: frozenset[str] = frozenset()
 
 
 def concept_collisions(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
@@ -262,6 +273,47 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
                 source=path,
                 key="",
                 message="RESULT_KEYS entry for a path the snapshot does not generate",
+            )
+
+
+def unneeded_type_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
+    """Report the `TYPE_FIXES` entries no documented example needs any more.
+
+    A fix exists because a documented sample is a value the declared type refuses. Once no
+    example value of any field the fix names is such a value (Massive corrected its sample),
+    the fix is stale: the entries that share one fix (`_for` over a group of paths) are one
+    decision, needed while any of them is. A conversion from untyped text to a typed value
+    (`iso-text-instant`, `quoted-integer`) is exempt: plain text accepts its samples, so it is
+    needed for as long as the specification leaves the field untyped, and the declared-type
+    check retires it once the specification types the field.
+
+    Args:
+        hand: The hand input.
+        uses: What each generated path consumed.
+
+    A field that was not generated with its conversion (it stopped on another problem, or
+    the entry is already stale) is left to the check that reported it.
+
+    Yields:
+        One `stale-entry` problem per generated field of each unneeded fix.
+    """
+    decisions: dict[TypeFix, list[tuple[str, str]]] = {}
+    for key, fix in hand.type_fixes.items():
+        decisions.setdefault(fix, []).append(key)
+    for fix, keys in decisions.items():
+        conversion = fix.conversion
+        if conversion.declared is WireType.STRING and conversion.wire_type is not WireType.STRING:
+            continue
+        generated = [(p, k) for p, k in keys if p in uses and k in uses[p].converted]
+        if any(k in uses[p].needed_conversions for p, k in generated):
+            continue
+        for path, wire_key in generated:
+            yield Problem(
+                gate=Gate.STALE_ENTRY,
+                source=path,
+                key=wire_key,
+                message=f"TYPE_FIXES entry ({conversion}) that no documented example needs: "
+                "the declared type now accepts every sample",
             )
 
 

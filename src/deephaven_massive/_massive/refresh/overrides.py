@@ -10,8 +10,8 @@ rest, each entry with its reason, and nothing else:
   generator makes the field an `epoch` in that unit;
 - `TAG_CONFLICTS`: the `UNITS` entries that contradict the specification's own unit tag
   (`x-polygon-go-type`), each with the reason the tag is wrong;
-- `TYPE_FIXES`: declared conversions for fields whose vendor type is wrong or missing,
-  each with the documentation sample that shows the real type;
+- `TYPE_FIXES`: the named conversion of each field whose documented samples its declared
+  type does not fit (a wrong type, or a second form the vendor sends), each with the sample;
 - `RESULT_KEYS`: the paths whose rows do not sit under `results`;
 - `PARAM_UNITS`: the unit of every timestamp-like string parameter, and of any other string
   parameter that takes an epoch (or "sent as date or date-time text");
@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from deephaven_massive._massive.refresh.lexicon import (
     BAR_PATHS,
@@ -40,11 +40,12 @@ from deephaven_massive._massive.refresh.lexicon import (
     RANGE_PATHS,
     STOCKS_SNAPSHOTS,
 )
-from deephaven_massive._massive.spec.convert import DECLARED_CONVERSIONS
-from deephaven_massive._massive.spec.types import WireType, WireUnit
+from deephaven_massive._massive.spec.types import Conversion, WireUnit
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
+
+_V = TypeVar("_V")
 
 
 __all__ = [
@@ -99,37 +100,22 @@ class Unit:
 
 @dataclass(frozen=True, kw_only=True)
 class TypeFix:
-    """A declared conversion for a field whose vendor type is wrong or not the only form sent.
+    """The named conversion of a field whose documented samples its declared type does not fit.
 
-    The same type twice keeps the type and accepts a second form the vendor documents for it
-    (an identifier typed as text but also sent as an integer). An `EPOCH` takes its unit from
-    the field's `UNITS` entry, which it then requires.
+    The conversion (`spec.types.Conversion`) fixes both ends: the type the specification must
+    still declare (`conversion.declared`; if the specification changes it, the entry is stale)
+    and the type the field gets (`conversion.wire_type`). A conversion to an `epoch` takes its
+    unit from the field's `UNITS` entry, which it then requires.
 
     Attributes:
-        declared: The type the specification gives the field, by the representation rules.
-            If the specification changes it, the entry is stale and the refresh stops.
-        wire_type: The type the field really has; the decoder converts every value from
-            `declared` to it, and a value that does not convert fails loudly.
-        reason: The evidence that the vendor's type is wrong: the path, the field, and the
-            documented sample.
+        conversion: The conversion the decoder applies to every value of the field; a value it
+            cannot read fails loudly.
+        reason: The evidence: the path, the field, and the documented sample the declared type
+            does not fit.
     """
 
-    declared: WireType
-    wire_type: WireType
+    conversion: Conversion
     reason: str
-
-    def __post_init__(self) -> None:
-        """Check that the decoder has a declared conversion for the pair.
-
-        Raises:
-            ValueError: If `spec.convert.DECLARED_CONVERSIONS` has no conversion from
-                `declared` to `wire_type`: a pair no decoder converts.
-        """
-        if (self.declared, self.wire_type) not in DECLARED_CONVERSIONS:
-            raise ValueError(
-                f"a type fix from {self.declared} to {self.wire_type} is not a declared "
-                "conversion the decoder knows"
-            )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -146,7 +132,7 @@ class ResultKey:
     reason: str
 
 
-def _for(paths: Iterable[str], keys: Iterable[str], value: Unit) -> dict[tuple[str, str], Unit]:
+def _for(paths: Iterable[str], keys: Iterable[str], value: _V) -> dict[tuple[str, str], _V]:
     """Return one entry per path and key, all with the same value.
 
     Args:
@@ -348,11 +334,10 @@ def _iso(sample: str) -> TypeFix:
         sample: The documentation sample that shows ISO-8601 date-time text.
 
     Returns:
-        A conversion from `string` to `iso-instant`.
+        The `iso-text-instant` conversion, citing the sample.
     """
     return TypeFix(
-        declared=WireType.STRING,
-        wire_type=WireType.ISO_INSTANT,
+        conversion=Conversion.ISO_TEXT_INSTANT,
         reason=f"{_ISO_TEXT}ISO-8601 date-time text, {sample}.",
     )
 
@@ -364,61 +349,61 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
         ("/futures/v1/market-status", "timestamp"): _iso('"2025-12-04T23:00:00+00:00"'),
         ("/v1/marketstatus/now", "serverTime"): _iso('"2020-11-10T17:37:37-05:00"'),
         ("/futures/v1/products", "last_updated"): TypeFix(
-            declared=WireType.ISO_INSTANT,
-            wire_type=WireType.DATE,
+            conversion=Conversion.ISO_DATE_TEXT,
             reason="The specification declares format date-time, but the documentation sample "
             'is the date "2025-02-22", which no date-time parser accepts.',
         ),
         ("/futures/v1/snapshot", "details.settlement_date"): TypeFix(
-            declared=WireType.DATE,
-            wire_type=WireType.EPOCH,
+            conversion=Conversion.DATE_AS_EPOCH,
             reason="The specification declares format date, but its example and the "
             "documentation sample are the integer 1753851600000000000 (2025-07-30 05:00 UTC, "
-            "midnight in Chicago): an epoch in nanoseconds, whose unit `UNITS` gives. "
-            '`/futures/v1/contracts` sends the same field as "2026-12-18", which this '
-            "path's conversion refuses rather than guess a time zone.",
+            "midnight in Chicago): an epoch in nanoseconds, whose unit `UNITS` gives. Kept "
+            "lossless as an instant. `/futures/v1/contracts` sends the same field as the date "
+            '"2026-12-18" (a `date` column there), which this path\'s conversion refuses '
+            "rather than guess a time zone.",
         ),
         ("/v1/open-close/{indicesTicker}/{date}", "from"): TypeFix(
-            declared=WireType.DATE,
-            wire_type=WireType.DATE,
+            conversion=Conversion.MIDNIGHT_UTC_DATE,
             reason='The documentation sample is "2023-03-10T00:00:00.000Z", the requested '
-            "date as an instant at midnight UTC, where the specification declares a date and "
-            'the stocks and options open-close pages send "2023-01-09". The column stays a '
-            "date, so the open-close sources agree and no time is invented; any other time "
-            "of day is refused.",
+            "date written as midnight UTC, where the specification declares a date and the "
+            'stocks and options open-close pages send "2023-01-09". The column stays a date, '
+            "so the open-close sources agree and no time is invented. Any other clock or "
+            "offset is refused loudly: an indices day anchored elsewhere (the custom-bars "
+            "sample starts at 06:00 UTC) would fail rather than shift a day.",
         ),
         ("/v1/open-close/crypto/{from}/{to}/{date}", "day"): TypeFix(
-            declared=WireType.DATE,
-            wire_type=WireType.DATE,
+            conversion=Conversion.MIDNIGHT_UTC_DATE,
             reason='The documentation sample is "2020-10-09T00:00:00.000Z", the requested '
-            "date as an instant at midnight UTC, where the specification declares a date. "
-            "The column stays a date, as on the other open-close sources; any other time of "
-            "day is refused.",
+            "date written as midnight UTC, where the specification declares a date. The "
+            "column stays a date, as on the other open-close sources; any other clock or "
+            "offset is refused loudly.",
         ),
-        ("/v2/snapshot/locale/global/markets/crypto/tickers", "lastTrade.i"): TypeFix(
-            declared=WireType.STRING,
-            wire_type=WireType.STRING,
-            reason="The trade ID is typed as text, but this page's example and documentation "
-            "sample send the integer 413131, while the single-ticker and movers pages send "
-            '"464569520". It stays text, which holds either form without loss.',
+        **_for(
+            CRYPTO_SNAPSHOTS,
+            ("lastTrade.i",),
+            TypeFix(
+                conversion=Conversion.TEXT_OR_INTEGER_ID,
+                reason="The trade ID is typed as text, but the full-market page's example and "
+                "documentation sample send the integer 413131, while the movers page sends "
+                '"517478762". Both snapshots join one kind, so both keep text and accept '
+                "either form without loss.",
+            ),
         ),
         ("/tmx/v1/corporate-events", "tmx_company_id"): TypeFix(
-            declared=WireType.LONG,
-            wire_type=WireType.STRING,
+            conversion=Conversion.INTEGER_OR_TEXT_ID,
             reason="The specification types the ID as an int64, but its example and the "
             'documentation sample are the text "2208". An identifier is text: either form is '
             "kept as its digits.",
         ),
         ("/stocks/taxonomies/vX/risk-factors", "taxonomy"): TypeFix(
-            declared=WireType.DOUBLE,
-            wire_type=WireType.STRING,
+            conversion=Conversion.NUMBER_LABEL,
             reason="The specification types the taxonomy version as a number, but its example "
             'and both documentation sample rows are the text "1.0". A version is a label, so '
-            "it is text; a number is kept as its JSON text.",
+            "it is text; a number becomes its decimal text with a fraction.",
         ),
     }
 )
-"""`(path, wire key)` to the declared conversion of a mistyped field."""
+"""`(path, wire key)` to the named conversion of a field its declared type does not fit."""
 
 
 def _result_keys() -> dict[str, ResultKey]:

@@ -16,15 +16,26 @@ or deprecated-or-draft, and the refresh checks that it is.
 snapshot in both directions, so an exclusion whose reason is "not documented" fails once
 Massive documents the path, and one whose reason relies on documentation fails if the page
 disappears.
+
+`SAMPLE_ERRORS` lists the vendor samples the refresh deliberately does not believe: a
+documented example value of a field that is wrong while the field's type is right (a CUSIP
+that lost its leading zero by being written as a number). The `example-type` gate skips
+exactly that value of that field; a `TYPE_FIXES` entry would instead loosen the type to
+accept the wrong form. An entry whose sample the snapshot no longer shows, or no longer
+refuses, fails the refresh as stale.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from deephaven_massive._massive.spec.types import Transport
 
-__all__ = ["EXCLUSIONS", "Exclusion"]
+if TYPE_CHECKING:
+    from deephaven_massive._massive.refresh.openapi import Json
+
+__all__ = ["EXCLUSIONS", "SAMPLE_ERRORS", "Exclusion", "SampleError"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -132,3 +143,34 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
     *_indicator_variants(),
 )
 """Every excluded vendor item."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class SampleError:
+    """One documented example value the refresh does not believe, because the sample is wrong.
+
+    Attributes:
+        path: The REST path template exactly as the specification spells it.
+        wire_key: The field's dotted wire key.
+        sample: The wrong example value, exactly as the specification gives it.
+        reason: Why the sample, not the field's type, is wrong.
+    """
+
+    path: str
+    wire_key: str
+    sample: Json
+    reason: str
+
+
+SAMPLE_ERRORS: tuple[SampleError, ...] = (
+    SampleError(
+        path="/vX/reference/ipos",
+        wire_key="us_code",
+        sample=37833100,
+        reason="The field is a CUSIP, nine characters of text, and the page's own sample is "
+        '"75383L102". The property example 37833100 is Apple\'s CUSIP 037833100 written as a '
+        "number, which lost its leading zero; the type stays text, so a real CUSIP keeps "
+        "every character.",
+    ),
+)
+"""Every documented example value the `example-type` gate skips."""

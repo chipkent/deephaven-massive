@@ -25,7 +25,7 @@ from deephaven_massive._massive.refresh.snapshot import Snapshot
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from deephaven_massive._massive.refresh.hand import HandInput
+    from deephaven_massive._massive.refresh.hand_input import HandInput
 
 __all__ = ["refresh"]
 

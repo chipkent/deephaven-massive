@@ -9,16 +9,14 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-from typing import TYPE_CHECKING
+import os
+from pathlib import Path
 
 import pytest
 
 from deephaven_massive._massive.refresh import snapshot
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.snapshot import Snapshot, VendorFile
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _sha(data: bytes) -> str:
@@ -30,14 +28,13 @@ def _sha(data: bytes) -> str:
 
 def test_the_snapshot_lives_outside_the_package() -> None:
     # `vendor/massive/` at the top of the checkout, beside `src/`: no distribution reaches it.
-    root = snapshot.DIRECTORY.parent.parent
-    assert snapshot.DIRECTORY.relative_to(root).as_posix() == "vendor/massive"
-    assert (root / "src" / "deephaven_massive" / "_massive" / "refresh").is_dir()
+    root = Path(__file__).resolve().parents[3]  # this file is tests/massive/refresh/...
+    assert snapshot.DIRECTORY.resolve() == root / "vendor" / "massive"
 
 
 @pytest.mark.skipif(
-    not snapshot.DIRECTORY.is_dir(),
-    reason="the vendored snapshot (vendor/massive/) is in a source checkout only",
+    not snapshot.DIRECTORY.is_dir() and "CI" not in os.environ,
+    reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",
 )
 def test_the_real_snapshot_matches_its_manifest() -> None:
     manifest = json.loads((snapshot.DIRECTORY / "manifest.json").read_text("utf-8"))
@@ -96,6 +93,23 @@ def test_store_replaces_the_old_snapshot_entirely(tmp_path: Path) -> None:
     assert sorted(p.name for p in target.iterdir()) == ["manifest.json", "openapi.json"]
     assert not (tmp_path / "massive-incoming").exists()
     assert not (tmp_path / "massive-previous").exists()
+
+
+def test_store_restores_a_snapshot_an_interrupted_swap_left_aside(tmp_path: Path) -> None:
+    # A run stopped between moving the old snapshot aside and moving the new one in: the
+    # backup is the only copy, and a failing next run must not delete it.
+    target = tmp_path / "massive"
+    (tmp_path / "massive-previous").mkdir()
+    (tmp_path / "massive-previous" / "openapi.json").write_text("old\n", encoding="utf-8")
+    clash = [_file("x", b"1"), _file("x/y", b"2")]  # a file where a directory must go
+    with pytest.raises(FileExistsError):
+        snapshot.store(target, clash, fetched=dt.date(2026, 1, 1))
+    assert (target / "openapi.json").read_text(encoding="utf-8") == "old\n"
+
+
+def test_a_rest_page_is_stored_below_rest() -> None:
+    url = "https://massive.com/docs/rest/stocks/trades-quotes/trades.md"
+    assert snapshot.page_file(url) == "rest/stocks/trades-quotes/trades.md"
 
 
 # --- Loading --------------------------------------------------------------------------------

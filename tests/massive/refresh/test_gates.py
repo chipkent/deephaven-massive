@@ -21,9 +21,10 @@ from deephaven_massive._massive.refresh.gates import (
     check_exclusions,
     concept_collisions,
     stale_entries,
+    unneeded_type_fixes,
 )
-from deephaven_massive._massive.refresh.hand import HandInput
-from deephaven_massive._massive.spec.types import Transport, WireType, WireUnit
+from deephaven_massive._massive.refresh.hand_input import HandInput
+from deephaven_massive._massive.spec.types import Conversion, Transport, WireUnit
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -44,6 +45,7 @@ _EMPTY = HandInput(
     param_units={},
     exclusions=(),
     kinds={},
+    sample_errors=(),
 )
 
 
@@ -137,7 +139,7 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
         tag_conflicts={(_PATH, "gone"): "test"},
         type_fixes={
             (_PATH, "gone"): overrides.TypeFix(
-                declared=WireType.LONG, wire_type=WireType.STRING, reason="test"
+                conversion=Conversion.INTEGER_ID_AS_TEXT, reason="test"
             )
         },
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},
@@ -176,6 +178,35 @@ def test_stale_entry_none_for_entries_the_paths_use() -> None:
         identities=frozenset({"id"}),
     )
     assert list(stale_entries(hand, {_PATH: use})) == []
+
+
+# --- Type fixes no sample needs ---------------------------------------------------------
+
+_SHARED = overrides.TypeFix(conversion=Conversion.TEXT_OR_INTEGER_ID, reason="test")
+
+
+def test_a_shared_type_fix_is_needed_while_any_member_needs_it() -> None:
+    hand = dataclasses.replace(_EMPTY, type_fixes={("/a", "i"): _SHARED, ("/b", "i"): _SHARED})
+    needed = PathUse(converted=frozenset({"i"}), needed_conversions=frozenset({"i"}))
+    unneeded = PathUse(converted=frozenset({"i"}))
+    assert list(unneeded_type_fixes(hand, {"/a": needed, "/b": unneeded})) == []
+    assert _found(unneeded_type_fixes(hand, {"/a": unneeded, "/b": unneeded})) == [
+        ("stale-entry", "/a", "i"),
+        ("stale-entry", "/b", "i"),
+    ]
+
+
+def test_a_type_fix_whose_field_was_not_generated_is_left_to_other_checks() -> None:
+    hand = dataclasses.replace(_EMPTY, type_fixes={("/a", "i"): _SHARED})
+    assert list(unneeded_type_fixes(hand, {})) == []
+    assert list(unneeded_type_fixes(hand, {"/a": PathUse(wire_keys=frozenset({"i"}))})) == []
+
+
+def test_a_type_fix_from_untyped_text_is_never_unneeded() -> None:
+    fix = overrides.TypeFix(conversion=Conversion.QUOTED_INTEGER, reason="test")
+    hand = dataclasses.replace(_EMPTY, type_fixes={("/a", "x"): fix})
+    use = PathUse(converted=frozenset({"x"}))
+    assert list(unneeded_type_fixes(hand, {"/a": use})) == []
 
 
 # --- Exclusions -----------------------------------------------------------------------------

@@ -12,6 +12,7 @@ import pytest
 
 from deephaven_massive._massive import spec
 from deephaven_massive._massive.spec.types import (
+    Conversion,
     Field,
     Membership,
     Param,
@@ -126,7 +127,7 @@ _FIELD = {
     "type": "string",
     "unit": None,
     "required": False,
-    "declared_type": "long",
+    "conversion": "text-or-integer-id",
 }
 
 
@@ -142,7 +143,7 @@ def test_parse_reads_memberships_and_other_transports() -> None:
     (value,) = spec.parse(Transport.WS, _file(entry)).values()
     assert type(value) is Source
     assert value.transport is Transport.WS
-    assert value.fields[0].declared_type is WireType.LONG
+    assert value.fields[0].conversion is Conversion.TEXT_OR_INTEGER_ID
     assert value.memberships == (
         Membership(kind="trades", group="stocks", position=2),
         Membership(kind="values", group="indices", position=0, projection={"x": "Value"}),
@@ -183,7 +184,7 @@ def test_parse_rejects_a_position_that_is_not_an_integer() -> None:
 
 
 def test_parse_rejects_values_that_break_the_invariants() -> None:
-    field = {**_FIELD, "type": "epoch", "declared_type": None}  # an epoch without a unit
+    field = {**_FIELD, "type": "epoch", "conversion": None}  # an epoch without a unit
     with pytest.raises(ValueError, match="an epoch needs a unit"):
         spec.parse(Transport.WS, _file({"key": "s", "fields": [field], "memberships": []}))
 
@@ -243,7 +244,16 @@ def test_parse_rejects_a_projection_that_is_not_of_strings() -> None:
         spec.parse(Transport.WS, _file(entry))
 
 
-def test_parse_rejects_a_declared_conversion_the_decoder_lacks() -> None:
-    field = {**_FIELD, "type": "string", "declared_type": "bool"}
-    with pytest.raises(ValueError, match="no declared conversion from bool to string"):
+@pytest.mark.parametrize(
+    ("conversion", "message"),
+    [
+        ("bool-as-text", "'bool-as-text' is not a valid Conversion"),
+        ("quoted-integer", "the conversion quoted-integer gives long, not string"),
+    ],
+)
+def test_parse_rejects_a_conversion_the_decoder_lacks_or_that_does_not_fit(
+    conversion: str, message: str
+) -> None:
+    field = {**_FIELD, "type": "string", "conversion": conversion}
+    with pytest.raises(ValueError, match=message):
         spec.parse(Transport.WS, _file({"key": "s", "fields": [field], "memberships": []}))

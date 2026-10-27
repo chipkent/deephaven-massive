@@ -6,8 +6,8 @@ with no row object or model class between them. Each column is one `Field` of th
 through the field's dotted wire key (`"day.c"` is the `c` of the row's `day` object).
 
 Each value is checked and converted by `spec.convert`, the converter every JSON decoder
-shares (a field with a `declared_type` through its declared conversion, from the vendor's
-actual form to its `wire_type`), and stored as:
+shares (a field with a `conversion` through that named conversion, from the vendor's documented
+form to its `wire_type`), and stored as:
 
 | `WireType` | Arrow type |
 |---|---|
@@ -220,8 +220,8 @@ def to_batch(
                 column.append(convert_field(f, value))
             except UnconvertibleError:
                 expected = str(f.wire_type)
-                if f.declared_type is not None:
-                    expected += f" (declared {f.declared_type})"
+                if f.conversion is not None:
+                    expected += f" (by the conversion {f.conversion})"
                 message = _unconvertible(rest_path, f.wire_key, expected=expected, value=value)
                 raise WireError(message, path=rest_path.template) from None
     types = [_ARROW[f.wire_type] for f in fields]

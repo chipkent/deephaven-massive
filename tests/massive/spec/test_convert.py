@@ -6,12 +6,11 @@ import pytest
 
 from deephaven_massive._massive.spec import convert as convert_module
 from deephaven_massive._massive.spec.convert import (
-    DECLARED_CONVERSIONS,
     UnconvertibleError,
     convert,
     convert_field,
 )
-from deephaven_massive._massive.spec.types import Field, WireType, WireUnit
+from deephaven_massive._massive.spec.types import Conversion, Field, WireType, WireUnit
 
 
 def _refused(wire_type: WireType, value: object) -> None:
@@ -124,15 +123,16 @@ def test_json_text_is_compact_and_keeps_order_and_unicode() -> None:
     )
 
 
-# Declared conversions.
+# Named conversions.
 
 
-def _declared(declared: WireType, wire_type: WireType) -> Field:
+def _with(conversion: Conversion) -> Field:
+    wire_type = conversion.wire_type
     unit = WireUnit.NS if wire_type is WireType.EPOCH else None
-    return Field(wire_key="x", column="X", wire_type=wire_type, unit=unit, declared_type=declared)
+    return Field(wire_key="x", column="X", wire_type=wire_type, unit=unit, conversion=conversion)
 
 
-def test_a_field_without_a_declared_type_converts_by_its_wire_type() -> None:
+def test_a_field_without_a_conversion_converts_by_its_wire_type() -> None:
     plain = Field(wire_key="x", column="X", wire_type=WireType.DATE)
     assert convert_field(plain, "2025-02-22") == date(2025, 2, 22)
     with pytest.raises(UnconvertibleError):
@@ -140,80 +140,94 @@ def test_a_field_without_a_declared_type_converts_by_its_wire_type() -> None:
 
 
 _CONVERSIONS = [
-    (WireType.STRING, WireType.ISO_INSTANT, "1970-01-01T00:00:01Z", 1_000_000_000),
-    (WireType.ISO_INSTANT, WireType.DATE, "2025-02-22", date(2025, 2, 22)),
-    (WireType.STRING, WireType.LONG, "48", 48),
-    (WireType.LONG, WireType.STRING, 7, "7"),
-    (WireType.LONG, WireType.STRING, "2208", "2208"),  # a quoted identifier
-    (WireType.STRING, WireType.STRING, "464569520", "464569520"),
-    (WireType.STRING, WireType.STRING, 413131, "413131"),  # an identifier sent as an integer
-    (WireType.DOUBLE, WireType.STRING, "1.0", "1.0"),
-    (WireType.DOUBLE, WireType.STRING, 1.0, "1.0"),
-    (WireType.DOUBLE, WireType.STRING, 2, "2"),
-    (WireType.LONG, WireType.INT_ARRAY, 12, [12]),
-    (WireType.DATE, WireType.DATE, "2023-03-10", date(2023, 3, 10)),
-    (WireType.DATE, WireType.DATE, "2023-03-10T00:00:00.000Z", date(2023, 3, 10)),
-    (WireType.DATE, WireType.DATE, "2023-03-10T01:00:00+01:00", date(2023, 3, 10)),
-    (WireType.DATE, WireType.DATE, "1969-12-31T00:00:00Z", date(1969, 12, 31)),
-    (WireType.DATE, WireType.EPOCH, 1_753_851_600_000_000_000, 1_753_851_600_000_000_000),
+    (Conversion.ISO_TEXT_INSTANT, "1970-01-01T00:00:01Z", 1_000_000_000),
+    (Conversion.ISO_DATE_TEXT, "2025-02-22", date(2025, 2, 22)),
+    (Conversion.QUOTED_INTEGER, "48", 48),
+    (Conversion.INTEGER_ID_AS_TEXT, 7, "7"),
+    (Conversion.INTEGER_OR_TEXT_ID, "2208", "2208"),  # the documented form
+    (Conversion.INTEGER_OR_TEXT_ID, 2208, "2208"),  # the declared form
+    (Conversion.TEXT_OR_INTEGER_ID, "517478762", "517478762"),
+    (Conversion.TEXT_OR_INTEGER_ID, 413131, "413131"),  # an identifier sent as an integer
+    (Conversion.NUMBER_LABEL, "1.0", "1.0"),
+    (Conversion.NUMBER_LABEL, 1.0, "1.0"),
+    (Conversion.NUMBER_LABEL, 2, "2.0"),  # one spelling for a whole-number version
+    (Conversion.ONE_CODE, 12, [12]),
+    (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10", date(2023, 3, 10)),
+    (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00.000Z", date(2023, 3, 10)),
+    (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00+00:00", date(2023, 3, 10)),
+    (Conversion.MIDNIGHT_UTC_DATE, "1969-12-31T00:00:00z", date(1969, 12, 31)),
+    (Conversion.DATE_AS_EPOCH, 1_753_851_600_000_000_000, 1_753_851_600_000_000_000),
 ]
 
 
-@pytest.mark.parametrize("case", _CONVERSIONS, ids=lambda case: f"{case[0]}-{case[1]}-{case[2]!r}")
-def test_each_declared_conversion_converts(
-    case: tuple[WireType, WireType, object, object],
-) -> None:
-    declared, wire_type, value, expected = case
-    assert convert_field(_declared(declared, wire_type), value) == expected
+@pytest.mark.parametrize("case", _CONVERSIONS, ids=lambda case: f"{case[0]}-{case[1]!r}")
+def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> None:
+    conversion, value, expected = case
+    assert convert_field(_with(conversion), value) == expected
 
 
 @pytest.mark.parametrize(
-    ("declared", "wire_type", "value"),
+    ("conversion", "value"),
     [
-        (WireType.STRING, WireType.ISO_INSTANT, "2025-02-22"),  # a date is not an instant
-        (WireType.ISO_INSTANT, WireType.DATE, "2025-02-22T00:00:00Z"),  # nor an instant a date
-        (WireType.STRING, WireType.LONG, "4.8"),
-        (WireType.STRING, WireType.LONG, "-1"),
-        (WireType.STRING, WireType.LONG, " 48"),
-        (WireType.STRING, WireType.LONG, 48),  # the declared form is text
-        (WireType.STRING, WireType.LONG, str(2**63)),
-        (WireType.LONG, WireType.STRING, True),
-        (WireType.LONG, WireType.STRING, 7.5),
-        (WireType.STRING, WireType.STRING, False),
-        (WireType.STRING, WireType.STRING, 2**63),
-        (WireType.DOUBLE, WireType.STRING, True),
-        (WireType.DOUBLE, WireType.STRING, None),
-        (WireType.DATE, WireType.DATE, "2023-03-10T05:00:00Z"),  # a time that would be lost
-        (WireType.DATE, WireType.DATE, "2023-03-10T00:00:00"),  # no offset
-        (WireType.DATE, WireType.DATE, 1_678_406_400),
-        (WireType.DATE, WireType.EPOCH, "2025-07-30"),
-        (WireType.DATE, WireType.EPOCH, 2**63),
-        (WireType.LONG, WireType.INT_ARRAY, 2**31),
-        (WireType.LONG, WireType.INT_ARRAY, [12]),
+        (Conversion.ISO_TEXT_INSTANT, "2025-02-22"),  # a date is not an instant
+        (Conversion.ISO_DATE_TEXT, "2025-02-22T00:00:00Z"),  # nor an instant a date
+        (Conversion.QUOTED_INTEGER, "4.8"),
+        (Conversion.QUOTED_INTEGER, "-1"),
+        (Conversion.QUOTED_INTEGER, " 48"),
+        (Conversion.QUOTED_INTEGER, 48),  # the declared form is text
+        (Conversion.QUOTED_INTEGER, str(2**63)),
+        (Conversion.INTEGER_ID_AS_TEXT, "7"),  # integer only: text fails loudly
+        (Conversion.INTEGER_ID_AS_TEXT, True),
+        (Conversion.INTEGER_OR_TEXT_ID, 7.5),
+        (Conversion.INTEGER_OR_TEXT_ID, True),
+        (Conversion.TEXT_OR_INTEGER_ID, False),
+        (Conversion.TEXT_OR_INTEGER_ID, 2**63),
+        (Conversion.NUMBER_LABEL, True),
+        (Conversion.NUMBER_LABEL, None),
+        (Conversion.NUMBER_LABEL, 10**400),  # too large for a double
+        (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T05:00:00Z"),  # a time that would be lost
+        (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00.001Z"),
+        (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00"),  # no offset
+        (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00-05:00"),  # midnight elsewhere
+        (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T01:00:00+01:00"),  # the same instant
+        (Conversion.MIDNIGHT_UTC_DATE, "2023-03-09T19:00:00-05:00"),  # written on the 9th
+        (Conversion.MIDNIGHT_UTC_DATE, "2023-02-30T00:00:00Z"),  # no such date
+        (Conversion.MIDNIGHT_UTC_DATE, 1_678_406_400),
+        (Conversion.DATE_AS_EPOCH, "2025-07-30"),
+        (Conversion.DATE_AS_EPOCH, 2**63),
+        (Conversion.ONE_CODE, 2**31),
+        (Conversion.ONE_CODE, [12]),
     ],
 )
-def test_a_value_the_declared_conversion_cannot_read_fails(
-    declared: WireType, wire_type: WireType, value: object
-) -> None:
+def test_a_value_the_conversion_cannot_read_fails(conversion: Conversion, value: object) -> None:
     with pytest.raises(UnconvertibleError):
-        convert_field(_declared(declared, wire_type), value)
+        convert_field(_with(conversion), value)
 
 
-def test_a_declared_conversion_that_does_not_exist_is_refused() -> None:
-    odd = _declared(WireType.BOOL, WireType.STRING)
-    with pytest.raises(ValueError, match="no declared conversion from bool to string"):
-        convert_field(odd, value=True)
+# A value the plain converter of each conversion's declared type refuses, and the conversion
+# accepts, or (for a conversion from untyped text) the value the conversion retypes.
+_NOT_A_NO_OP = {
+    Conversion.ISO_TEXT_INSTANT: "1970-01-01T00:00:01Z",
+    Conversion.ISO_DATE_TEXT: "2025-02-22",
+    Conversion.QUOTED_INTEGER: "48",
+    Conversion.INTEGER_ID_AS_TEXT: 7,
+    Conversion.INTEGER_OR_TEXT_ID: "2208",
+    Conversion.TEXT_OR_INTEGER_ID: 413131,
+    Conversion.NUMBER_LABEL: "1.0",
+    Conversion.ONE_CODE: 12,
+    Conversion.MIDNIGHT_UTC_DATE: "2023-03-10T00:00:00Z",
+    Conversion.DATE_AS_EPOCH: 1,
+}
 
 
-def test_the_declared_pairs_are_the_table() -> None:
-    assert {
-        (WireType.STRING, WireType.ISO_INSTANT),
-        (WireType.ISO_INSTANT, WireType.DATE),
-        (WireType.STRING, WireType.LONG),
-        (WireType.LONG, WireType.STRING),
-        (WireType.STRING, WireType.STRING),
-        (WireType.DOUBLE, WireType.STRING),
-        (WireType.LONG, WireType.INT_ARRAY),
-        (WireType.DATE, WireType.DATE),
-        (WireType.DATE, WireType.EPOCH),
-    } == DECLARED_CONVERSIONS
+@pytest.mark.parametrize("conversion", list(Conversion))
+def test_no_conversion_is_a_no_op(conversion: Conversion) -> None:
+    # Each conversion changes what is accepted or what comes out, so no field ever declares
+    # a conversion that leaves its values as the plain converter would.
+    value = _NOT_A_NO_OP[conversion]
+    converted = convert_field(_with(conversion), value)
+    try:
+        plain = convert(conversion.declared, value)
+    except UnconvertibleError:
+        return
+    assert (plain, conversion.declared) != (converted, conversion.wire_type)

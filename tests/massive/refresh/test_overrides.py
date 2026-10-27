@@ -1,7 +1,6 @@
-import pytest
-
 from deephaven_massive._massive.refresh import overrides
-from deephaven_massive._massive.spec.types import WireType, WireUnit
+from deephaven_massive._massive.refresh.lexicon import CRYPTO_SNAPSHOTS
+from deephaven_massive._massive.spec.types import Conversion, WireType, WireUnit
 
 
 def test_every_entry_has_a_reason() -> None:
@@ -41,38 +40,17 @@ def test_the_unverified_units_are_the_open_verification_item() -> None:
     assert {overrides.UNITS[key].unit for key in unverified} == {WireUnit.MS}
 
 
-def test_the_type_fixes_cover_times_dates_and_identifiers() -> None:
-    assert {fix.wire_type for fix in overrides.TYPE_FIXES.values()} == {
-        WireType.ISO_INSTANT,
-        WireType.DATE,
-        WireType.EPOCH,
-        WireType.STRING,
-    }
-    # The epoch's unit is a UNITS entry, as for every other epoch.
-    assert ("/futures/v1/snapshot", "details.settlement_date") in overrides.UNITS
-    products = overrides.TYPE_FIXES["/futures/v1/products", "last_updated"]
-    assert (products.declared, products.wire_type) == (WireType.ISO_INSTANT, WireType.DATE)
+def test_every_epoch_type_fix_has_its_unit() -> None:
+    # A conversion to an epoch takes its unit from UNITS, like every other epoch.
+    for key, fix in overrides.TYPE_FIXES.items():
+        if fix.conversion.wire_type is WireType.EPOCH:
+            assert overrides.UNITS[key].unit is not None, key
 
 
-def test_a_type_fix_converts() -> None:
-    fix = overrides.TypeFix(declared=WireType.STRING, wire_type=WireType.LONG, reason="test")
-    assert (fix.declared, fix.wire_type) == (WireType.STRING, WireType.LONG)
-
-
-@pytest.mark.parametrize(
-    ("declared", "wire_type"),
-    [
-        (WireType.LONG, WireType.LONG),
-        (WireType.LONG, WireType.EPOCH),
-        (WireType.EPOCH, WireType.LONG),
-        (WireType.BOOL, WireType.STRING),
-    ],
-)
-def test_a_type_fix_the_decoder_cannot_convert_is_rejected(
-    declared: WireType, wire_type: WireType
-) -> None:
-    with pytest.raises(ValueError, match="is not a declared conversion"):
-        overrides.TypeFix(declared=declared, wire_type=wire_type, reason="test")
+def test_the_crypto_snapshot_trade_id_is_one_decision_for_its_group() -> None:
+    # Both crypto snapshots join one kind, so their trade IDs must convert alike.
+    fixes = {overrides.TYPE_FIXES[path, "lastTrade.i"] for path in CRYPTO_SNAPSHOTS}
+    assert [fix.conversion for fix in fixes] == [Conversion.TEXT_OR_INTEGER_ID]
 
 
 def test_result_keys_may_be_nested_or_the_body() -> None:

@@ -13,7 +13,7 @@ against the same description and no schema is written by hand:
   It ships in the wheel as package data, while the refresh that writes it does not.
 - `spec.convert` checks one decoded JSON value against its `WireType` and converts it
   exactly (an ISO instant to integer nanoseconds, for example), for every JSON decoder,
-  including a field's declared conversion from the vendor's wrong type.
+  including a field's named conversion where the vendor's samples differ from its type.
 - `source(transport, key)` and `sources(transport)` read a transport's generated file into
   those types the first time either is called, and return the same values ever after.
 
@@ -42,8 +42,8 @@ from importlib import resources
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, overload
 
-from deephaven_massive._massive.spec.convert import DECLARED_CONVERSIONS
 from deephaven_massive._massive.spec.types import (
+    Conversion,
     Field,
     Membership,
     Param,
@@ -58,7 +58,7 @@ from deephaven_massive._massive.spec.types import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["source", "sources"]
+__all__ = ["Conversion", "source", "sources"]
 
 # The generated file of each transport that has one, beside this module.
 _FILES: Mapping[Transport, str] = MappingProxyType({Transport.REST: "rest.json"})
@@ -250,32 +250,25 @@ def _flag(item: dict[str, object], key: str) -> bool:
 def _field(item: dict[str, object]) -> Field:
     """Build a field from its JSON object.
 
+    A conversion `spec.types.Conversion` does not name, or one that gives another type than
+    the field's, raises `ValueError` here, so the problem shows when the file is loaded rather
+    than when a value is decoded.
+
     Args:
-        item: `{"wire_key", "column", "type", "unit", "required", "declared_type"}`.
+        item: `{"wire_key", "column", "type", "unit", "required", "conversion"}`.
 
     Returns:
         The field.
-
-    Raises:
-        ValueError: If the field names a declared conversion `spec.convert` does not have, so
-            the problem shows when the file is loaded rather than when a value is decoded.
     """
     unit = _optional(item, "unit")
-    declared = _optional(item, "declared_type")
-    wire_type = WireType(_text(item, "type"))
-    declared_type = None if declared is None else WireType(declared)
-    if declared_type is not None and (declared_type, wire_type) not in DECLARED_CONVERSIONS:
-        raise ValueError(
-            f"field {item['wire_key']!r}: no declared conversion from {declared_type} to "
-            f"{wire_type}"
-        )
+    conversion = _optional(item, "conversion")
     return Field(
         wire_key=_text(item, "wire_key"),
         column=_text(item, "column"),
-        wire_type=wire_type,
+        wire_type=WireType(_text(item, "type")),
         unit=None if unit is None else WireUnit(unit),
         required=_flag(item, "required"),
-        declared_type=declared_type,
+        conversion=None if conversion is None else Conversion(conversion),
     )
 
 

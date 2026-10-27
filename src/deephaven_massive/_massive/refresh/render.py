@@ -1,7 +1,8 @@
-"""Write the generated REST schema, `spec/rest.json`, in its canonical text.
+"""Render the generated REST schema, `spec/rest.json`, as its canonical text.
 
-The generators produce `RestPath` values; this module turns them into the committed file the
-runtime loads (`spec.sources()`), and nothing else. The text is deterministic, so a refresh
+The generators produce `RestPath` values; this module turns them into the text of the
+committed file the runtime loads (`spec.sources()`), and nothing else; `generate` writes it.
+The text is deterministic, so a refresh
 that changes nothing leaves the file byte for byte as it was, and the parity test can compare
 the committed file with a fresh rendering. It is JSON with one line per field and per
 parameter, so a refresh diff shows each changed field or parameter as one changed line.
@@ -57,7 +58,7 @@ def _field_json(item: Field) -> dict[str, Json]:
         "type": item.wire_type.value,
         "unit": item.unit.value if item.unit else None,
         "required": item.required,
-        "declared_type": item.declared_type.value if item.declared_type else None,
+        "conversion": item.conversion.value if item.conversion else None,
     }
 
 

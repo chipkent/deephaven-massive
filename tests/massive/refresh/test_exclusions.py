@@ -24,3 +24,12 @@ def test_the_repeating_indicator_templates_are_excluded_and_crypto_is_not() -> N
 def test_undocumented_exclusions_say_so() -> None:
     for entry in exclusions.EXCLUSIONS:
         assert entry.undocumented == ("no page of the documentation index" in entry.reason)
+
+
+def test_every_sample_error_names_one_field_with_a_reason() -> None:
+    keys = [(e.path, e.wire_key) for e in exclusions.SAMPLE_ERRORS]
+    assert len(keys) == len(set(keys))
+    assert all(e.path.startswith("/") and e.reason for e in exclusions.SAMPLE_ERRORS)
+    # The one known wrong sample: a CUSIP written as a number, its leading zero lost.
+    (cusip,) = exclusions.SAMPLE_ERRORS
+    assert (cusip.path, cusip.wire_key, cusip.sample) == ("/vX/reference/ipos", "us_code", 37833100)
