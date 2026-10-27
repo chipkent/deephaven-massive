@@ -1,13 +1,9 @@
-from types import ModuleType
-
 from deephaven_massive._massive import rest
+from deephaven_massive._massive.rest import batch, client, response
 
 
-def test_the_package_defines_no_names_yet() -> None:
-    # Submodules imported elsewhere in the process are bound on the package; they do not count.
-    defined = [
-        name
-        for name, value in vars(rest).items()
-        if not name.startswith("__") and not isinstance(value, ModuleType)
-    ]
-    assert defined == []
+def test_the_package_exports_the_client_the_page_and_to_batch() -> None:
+    assert sorted(rest.__all__) == ["Page", "RestClient", "to_batch"]
+    assert rest.RestClient is client.RestClient
+    assert rest.Page is response.Page
+    assert rest.to_batch is batch.to_batch
