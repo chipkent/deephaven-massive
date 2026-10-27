@@ -117,3 +117,20 @@ def test_no_proxy_configured_means_a_direct_connection(clean_env: pytest.MonkeyP
     # Windows; pin it to the (empty) environment so the test does not depend on the host.
     clean_env.setattr(urllib.request, "getproxies", urllib.request.getproxies_environment)
     assert http.https_proxy("api.massive.com") is None
+
+
+def test_a_proxy_without_credentials_is_kept_as_is() -> None:
+    assert http.proxy_credentials("http://proxy.corp:3128") == ("http://proxy.corp:3128", {})
+
+
+def test_proxy_credentials_move_from_the_url_to_a_basic_header() -> None:
+    url, headers = http.proxy_credentials("http://al%40ice:p%3Ass@proxy.corp:3128/")
+    assert url == "http://proxy.corp:3128/"
+    # base64 of "al@ice:p:ss"
+    assert headers == {"Proxy-Authorization": "Basic YWxAaWNlOnA6c3M="}
+
+
+def test_a_proxy_user_without_a_password_sends_an_empty_password() -> None:
+    url, headers = http.proxy_credentials("http://alice@proxy.corp:3128")
+    assert url == "http://proxy.corp:3128"
+    assert headers == {"Proxy-Authorization": "Basic YWxpY2U6"}
