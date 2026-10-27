@@ -73,26 +73,28 @@ if TYPE_CHECKING:
     from deephaven_massive._query import Query
     from deephaven_massive._types import FilterValue, Symbols
 
-__all__ = ["CATALOG", "MassiveSession"]
+__all__ = ["CATALOG", "NAMESPACE_MODULES", "MassiveSession"]
 
 logger = logging.getLogger(__name__)
 
-CATALOG: Final = Catalog(
-    (
-        *stocks.DATASETS,
-        *options.DATASETS,
-        *futures.DATASETS,
-        *indices.DATASETS,
-        *forex.DATASETS,
-        *crypto.DATASETS,
-        *reference.DATASETS,
-        *indicators.DATASETS,
-        *economy.DATASETS,
-        *partners.DATASETS,
-    )
+NAMESPACE_MODULES: Final = (
+    stocks,
+    options,
+    futures,
+    indices,
+    forex,
+    crypto,
+    reference,
+    indicators,
+    economy,
+    partners,
 )
+"""Every namespace module, each exporting `DATASETS`, imported statically. A test asserts that
+this tuple names every module of `_namespaces/` except `base`."""
+
+CATALOG: Final = Catalog(spec for module in NAMESPACE_MODULES for spec in module.DATASETS)
 """Every dataset of every namespace module, built once, at import, and held by every session
-core. A test checks that every namespace module contributes."""
+core."""
 
 _keys_lock = threading.Lock()
 _session_numbers = itertools.count(1)

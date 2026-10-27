@@ -20,6 +20,7 @@ import weakref
 from typing import TYPE_CHECKING
 
 from deephaven_massive import _massive
+from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 
 if TYPE_CHECKING:
@@ -42,13 +43,15 @@ class SessionClients:
     Created once per session by `MassiveSession.__init__`, right after the session's core, and
     attached to that core, whose transport hooks call `rest()`, `streams()`, and
     `flat_files()` (the `IngestPorts` protocol of `_tables/core.py`). The core holds this
-    object, so this object holds the core only through a weak proxy: a strong reference back
-    would make a cycle, and a session dropped without `close()` would then wait for the cyclic
-    garbage collector before its connections are closed. Thread-safe: each client is created
-    under the core's `registry_lock`, and the clients themselves are thread-safe.
+    object, so this object holds the core only through a weak reference: a strong reference
+    back would make a cycle, and a session dropped without `close()` would then wait for the
+    cyclic garbage collector before its connections are closed. Each method takes a strong
+    reference for the length of its call (`_live_core`) and hands the transports it builds
+    the core itself, never the weak reference. Thread-safe: each client is created under the
+    core's `registry_lock`, and the clients themselves are thread-safe.
     """
 
-    __slots__ = ("_core", "_flat_files")
+    __slots__ = ("_core", "_flat_files", "_label")
 
     def __init__(self, core: SessionCore) -> None:
         """Bind the clients to their session; no client is created yet.
@@ -57,9 +60,25 @@ class SessionClients:
             core: The session's core, for its configuration, its `registry_lock`, and its
                 closers.
         """
-        self._core: SessionCore = weakref.proxy(core)
+        self._core = weakref.ref(core)
+        self._label = core.label
         # Created by the first flat-file read (`flat_files`), under the core's `registry_lock`.
         self._flat_files: FlatFileClient | None = None
+
+    def _live_core(self) -> SessionCore:
+        """Return the session's core, which a caller of these methods normally keeps alive.
+
+        Returns:
+            The core.
+
+        Raises:
+            MassiveError: If the core has been garbage-collected: the session is gone, as if
+                closed (`"MassiveSession #1 is closed"`).
+        """
+        core = self._core()
+        if core is None:
+            raise MassiveError(f"{self._label} is closed")
+        return core
 
     def rest(self) -> RestTransport:
         """Return the session's REST transport.
@@ -95,8 +114,10 @@ class SessionClients:
         Raises:
             ValueError: If the configuration has no S3 credentials. `history()` never gets
                 here then: its source choice has already required them.
+
+        A garbage-collected core raises the `MassiveError` of `_live_core`.
         """
-        core = self._core
+        core = self._live_core()
         config = core.config
         access_key_id, secret_access_key = config.s3_access_key_id, config.s3_secret_access_key
         if access_key_id is None or secret_access_key is None:

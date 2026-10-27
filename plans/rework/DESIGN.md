@@ -380,42 +380,55 @@ under `if TYPE_CHECKING:` counts: moving an upward import under it does not make
 | 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
 | 5 | API | the root `__init__`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. |
 
-**Composition.** `_session.py` is the one module that sees every layer. At import it builds
-`CATALOG = Catalog((*stocks.DATASETS, …))` from static imports of every namespace module, so the
-dataset layer never finds the namespaces itself. `MassiveSession.__init__` builds the
+**Composition.** `_session.py` is the one module that sees every layer. It imports every
+namespace module statically and names each once, in `NAMESPACE_MODULES` (a test compares the
+tuple with the modules of `_namespaces/`); at import it builds `CATALOG` from their `DATASETS`,
+so the dataset layer never finds the namespaces itself. `MassiveSession.__init__` builds the
 `SessionCore` with that catalog, then `SessionClients(core)`, then calls `core.attach(clients)`
 once. The core defines the transport ports (`RestTransport`, `StreamTransport`,
 `FlatFileTransport`) and `IngestPorts`, the protocol `SessionClients` implements
 (`rest()`, `streams()`, `flat_files()`); the core's transport hooks call the attached ports, and
 the transports read the catalog as `core.catalog`. A dependency therefore never points from the
-tables up to the code that does the I/O. `SessionClients` holds the core through a weak proxy,
-so the core and its clients form no reference cycle and an unclosed session is still collected
-as soon as its last reference goes.
+tables up to the code that does the I/O. `SessionClients` holds the core through a
+`weakref.ref`, so the core and its clients form no reference cycle and an unclosed session is
+still collected as soon as its last reference goes. Each of its methods takes a strong
+reference for its call and raises `MassiveError("MassiveSession #1 is closed")` if the core is
+gone; the transports it builds hold the core itself, never the weak reference.
 
 **The rules**, each enforced by `tests/test_layout.py` with a negative test:
 
 - every module under `src/` is in a known layer; any other root module or package is reported
   as "not in a known layer", so a new one needs a rule change;
-- every import, relative import, literal `import_module`/`__import__`, and module-name string,
-  type-only or not, targets a layer no higher than its own;
-- outside the two lazy `__init__.py` files, a dynamic import whose module name is computed is a
-  violation;
+- every import, relative import, dynamic import with a resolvable literal name (an absolute
+  name, or a relative one with a literal package), and module-name string, type-only or not,
+  targets a layer no higher than its own;
+- outside the two lazy `__init__.py` files, every import the rules cannot resolve from the
+  source is a violation: an `import_module` or `__import__` whose name is not a literal, a
+  relative name without a literal package, an `__import__` whose `level` is not a literal 0,
+  any use of `import_module` or `__import__` other than a direct call (an alias made by
+  assignment, a `getattr`), and a `sys.modules` lookup by a key that is not a literal;
 - Deephaven: none in the wire; only `deephaven.table` in the vocabulary; `_datasets` imports
-  `deephaven` only under `TYPE_CHECKING`; nothing imports `deephaven_server`;
+  `deephaven`, and the vocabulary's run-time `_types.Table`, only under `TYPE_CHECKING`
+  (`if TYPE_CHECKING:` or `if typing.TYPE_CHECKING:`); nothing imports `deephaven_server`;
 - the vocabulary and `_datasets` import none of `queue`, `asyncio`, `concurrent`, `socket`,
-  `ssl`, `http`, `urllib`, or `subprocess`, and read neither `threading.Thread` nor
-  `threading.Timer` (`threading` itself stays allowed, for leaf locks);
+  `ssl`, `http`, `urllib`, `subprocess`, `_thread`, `multiprocessing`, `select`, or
+  `selectors`, and read neither `threading.Thread` nor `threading.Timer`, by attribute, import,
+  or literal `getattr` (`threading` itself stays allowed, for leaf locks);
 - `_massive.__all__` splits into vocabulary names (the three errors and the spec names) and
   client names (`RestClient`, `Page`, `to_batch`, `WsClient`, `WsState`, `Status`,
   `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`,
-  `object_key`); under `src/`, only `_ingest` uses a client name, and a test asserts that the
-  two sets partition `__all__`, so a new name must be classified;
+  `object_key`); under `src/`, only `_ingest` uses a client name (by import, attribute,
+  literal `getattr`, or string), nor anything that can reach one (a star import of `_massive`,
+  a `getattr` on it by a computed name), and a test asserts that the two sets partition
+  `__all__`, so a new name must be classified;
 - in the API, only `_session.py` imports `_ingest`, and only `_ingest.clients`;
 - the `__init__.py` of `_namespaces`, `_datasets`, `_tables`, and `_ingest` holds a docstring
   and nothing else.
 
 Tests are outside the layers: they may import any module and keep only the wire interface rule
-of [section 19](#19-wire-clients-and-the-spec-snapshot).
+of [section 19](#19-wire-clients-and-the-spec-snapshot). The rules read source, so they cannot
+see an import built by `exec`, `importlib.util.find_spec`, or an attribute read through the
+root package (`deephaven_massive._ingest`); review keeps those out.
 
 ## 5. `MassiveConfig`
 

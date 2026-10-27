@@ -424,6 +424,9 @@ def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
 
 # Datasets served by a method of the session itself rather than of a namespace.
 _SESSION_FACTORIES = {"reference.snapshots": "snapshots"}
+# Session factories whose dataset is not declared yet: the method raises `NotImplementedError`.
+# A test fails once the dataset is in the catalog, so the exemption goes with it.
+_PENDING = frozenset({"snapshots"})
 
 
 def _hints(function: Callable[..., object]) -> dict[str, Any]:
@@ -505,12 +508,15 @@ def _bar_problems(name: str, spec: DatasetSpec, factory: Callable[..., object]) 
     return problems
 
 
-def annotation_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list[str]:
+def annotation_problems(
+    session: type, specs: Mapping[str, DatasetSpec], *, pending: frozenset[str] = _PENDING
+) -> list[str]:
     """Return every break of the annotation rule.
 
     Args:
         session: The session class whose namespaces hold the factories.
         specs: The catalog's specs by name.
+        pending: The session methods whose dataset is not declared yet, left out of the rule.
 
     Returns:
         One message per factory without a spec, spec without a factory, or factory whose return
@@ -518,7 +524,7 @@ def annotation_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list
     """
     factories = dict(_factories(session, ""))
     for dataset, method in _SESSION_FACTORIES.items():
-        if dataset in specs:
+        if hasattr(session, method) and method not in pending:
             factories[dataset] = getattr(session, method)
     problems = [f"{name}: a factory with no dataset" for name in sorted(factories - specs.keys())]
     for name, spec in specs.items():
@@ -534,6 +540,12 @@ def annotation_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list
 
 def test_every_factory_returns_the_class_of_its_dataset() -> None:
     assert annotation_problems(dm.MassiveSession, CATALOG.by_name) == []
+
+
+def test_a_pending_session_factory_has_no_dataset_yet() -> None:
+    pending = {d for d, method in _SESSION_FACTORIES.items() if method in _PENDING}
+    assert pending
+    assert pending.isdisjoint(CATALOG.by_name)
 
 
 class _Good(Namespace):
@@ -596,6 +608,9 @@ class _BadSession:
     def options(self) -> _Bad:
         raise NotImplementedError
 
+    def snapshots(self) -> Query:  # no reference.snapshots dataset
+        raise NotImplementedError
+
 
 def _renamed(spec: DatasetSpec, name: str) -> DatasetSpec:
     return DatasetSpec(
@@ -619,7 +634,7 @@ def test_the_annotation_rule_passes_matching_factories() -> None:
         (DIVIDENDS, "stocks.dividends"),
         (DIVIDENDS, "reference.snapshots"),  # served by the session's own `snapshots()`
     )
-    assert annotation_problems(_GoodSession, specs) == []
+    assert annotation_problems(_GoodSession, specs, pending=frozenset()) == []
 
 
 def test_the_annotation_rule_reports_every_mismatch() -> None:
@@ -629,8 +644,9 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
         (STOCK_BARS, "options.minute_bars"),
         (DIVIDENDS, "options.splits"),
     )
-    assert annotation_problems(_BadSession, specs) == [
+    assert annotation_problems(_BadSession, specs, pending=frozenset()) == [
         "options.news: a factory with no dataset",
+        "reference.snapshots: a factory with no dataset",
         "options.bars: the bars implementation must return HistoryQuery",
         (
             "options.bars: an overload returns StreamHistoryQuery, but its timespans give "

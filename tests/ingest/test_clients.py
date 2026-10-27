@@ -1,6 +1,7 @@
 """Tests for `SessionClients`, the one holder of a session's wire clients."""
 
 import gc
+import threading
 import weakref
 from collections.abc import Iterator
 from typing import Any, cast
@@ -8,8 +9,10 @@ from typing import Any, cast
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive import _massive
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._tables.core import SessionCore
 from tests._fakes.s3 import FakeS3
 
 
@@ -104,3 +107,51 @@ def test_the_clients_do_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
         assert core() is None  # freed by reference counting alone
     finally:
         gc.enable()
+
+
+def test_a_transport_holds_the_core_itself(session: dm.MassiveSession) -> None:
+    # A transport outlives the call that made it, so it must never hold a weak reference.
+    transport = session._core.flat_file_transport()
+    assert isinstance(transport, flatfiles.FlatFileHistory)
+    assert type(transport._core) is SessionCore
+    assert transport._core is session._core
+
+
+def test_clients_whose_session_is_gone_report_it_closed(fake_s3: FakeS3) -> None:
+    m = dm.MassiveSession(config())
+    clients = clients_of(m)
+    label = m._core.label
+    m.close()
+    del m
+    gc.collect()
+    with pytest.raises(dm.MassiveError, match=rf"^{label} is closed$"):
+        clients.flat_files()
+
+
+def test_the_client_is_created_under_the_registry_lock(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two racing first reads must build one client: the creation holds `registry_lock`, which
+    # another thread then cannot take.
+    lock = session._core.registry_lock
+    taken_elsewhere: list[bool] = []
+
+    def try_lock() -> None:
+        acquired = lock.acquire(blocking=False)
+        taken_elsewhere.append(acquired)
+        if acquired:
+            lock.release()
+
+    real = _massive.FlatFileClient
+
+    def factory(**settings: object) -> _massive.FlatFileClient:
+        probe = threading.Thread(target=try_lock)
+        probe.start()
+        probe.join()
+        return real(**cast("dict[str, Any]", settings))
+
+    # `setitem`, as the flat-file tests do: teardown removes the entry again.
+    monkeypatch.setitem(vars(_massive), "FlatFileClient", factory)
+    session._core.flat_file_transport()
+    session._core.flat_file_transport()
+    assert taken_elsewhere == [False]

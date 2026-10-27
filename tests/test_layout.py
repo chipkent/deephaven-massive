@@ -51,17 +51,20 @@ layers, lowest first: wire (`_massive/`), vocabulary (the root `_config`, `_enum
 `__init__`, `_session`, `_query`, and `_namespaces/`); a module in no known layer is itself a
 violation. Then:
 
-- every import, relative import, literal dynamic import, and module-name string, inside
-  `if TYPE_CHECKING:` or not, targets the module's own layer or a lower one;
-- outside the two lazy `__init__.py` files (the package's and `_massive`'s), no dynamic import
-  computes its module name;
+- every import, relative import, resolvable literal dynamic import, and module-name string,
+  inside `if TYPE_CHECKING:` or not, targets the module's own layer or a lower one;
+- outside the two lazy `__init__.py` files (the package's and `_massive`'s), every import the
+  rules cannot resolve is a violation: a computed name, a relative literal without a literal
+  package, an `__import__` level other than 0, an import function used other than by a direct
+  call, and a `sys.modules` lookup by a computed key;
 - Deephaven: the vocabulary imports only `deephaven.table` (the `Table` of `Symbols`), the
-  datasets import `deephaven` only for type checking, and nothing imports `deephaven_server`
+  datasets import `deephaven` (and the vocabulary's run-time `Table`) only for type checking,
+  and nothing imports `deephaven_server`
   (the wire boundary above already keeps Deephaven out of `_massive`);
 - the vocabulary and the datasets import no I/O or thread module and read neither
   `threading.Thread` nor `threading.Timer`;
 - `_massive.__all__` splits into vocabulary names and client names, and only the ingest layer
-  uses a client name;
+  uses a client name, star-imports `_massive`, or reads it by a computed `getattr`;
 - in the API, only `_session.py` imports the ingest layer, and only `_ingest.clients`;
 - the `__init__.py` of `_namespaces`, `_datasets`, `_tables`, and `_ingest` holds a docstring
   and nothing else.
@@ -473,7 +476,7 @@ _WIRE_LIBRARIES = frozenset(
 _NETWORK_LIBRARIES = frozenset({"urllib3", "websockets", "certifi", "boto3", "botocore"})
 
 # Each layer of `_massive`, and the layers it may import (`refresh` may import any).
-_LAYERS = {
+_WIRE_SUBPACKAGES = {
     "net": frozenset({"net"}),
     "spec": frozenset({"spec"}),
     "rest": frozenset({"rest", "net", "spec"}),
@@ -779,7 +782,8 @@ def _type_checking_lines(tree: ast.Module) -> set[int]:
     return {
         statement.lineno
         for node in ast.walk(tree)
-        if isinstance(node, ast.If) and ast.unparse(node.test) == "TYPE_CHECKING"
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) in {"TYPE_CHECKING", "typing.TYPE_CHECKING"}
         for statement in node.body
         if isinstance(statement, ast.Import | ast.ImportFrom)
     }
@@ -796,7 +800,7 @@ def _wire_layer(name: str) -> str | None:
         the package itself and the names of its interface.
     """
     parts = name.removeprefix(f"{_WIRE}.").split(".") if name != _WIRE else []
-    return parts[0] if parts and parts[0] in {*_LAYERS, _REFRESH} else None
+    return parts[0] if parts and parts[0] in {*_WIRE_SUBPACKAGES, _REFRESH} else None
 
 
 def _inside(name: str, package: str) -> bool:
@@ -832,7 +836,7 @@ def _wire_rules(where: str, tree: ast.Module, *, module: str, package: str) -> l
             target = _wire_layer(name)
             if target == _REFRESH and layer != _REFRESH:
                 found.append(f"{where}:{line}: only refresh imports refresh: {name}")
-            elif layer in _LAYERS and target not in _LAYERS[layer]:
+            elif layer in _WIRE_SUBPACKAGES and target not in _WIRE_SUBPACKAGES[layer]:
                 found.append(f"{where}:{line}: {layer} must not import {name}")
         elif top not in sys.stdlib_module_names and top not in _WIRE_LIBRARIES:
             found.append(f"{where}:{line}: the wire package must not import {name}")
@@ -1347,11 +1351,24 @@ _DOCSTRING_ONLY_INITS = frozenset(
 )
 # What the vocabulary and the datasets never import: they do no I/O and start no threads.
 _IO_AND_THREAD_MODULES = frozenset(
-    {"queue", "asyncio", "concurrent", "socket", "ssl", "http", "urllib", "subprocess"}
+    {
+        "queue",
+        "asyncio",
+        "concurrent",
+        "socket",
+        "ssl",
+        "http",
+        "urllib",
+        "subprocess",
+        "_thread",
+        "multiprocessing",
+        "select",
+        "selectors",
+    }
 )
 _THREAD_CLASSES = frozenset({"Thread", "Timer"})
 # `_massive.__all__`, split: the names every layer may use, and the clients only ingest uses.
-WIRE_VOCABULARY = frozenset(
+_WIRE_VOCABULARY = frozenset(
     {
         "WireError",
         "WireAuthError",
@@ -1370,7 +1387,7 @@ WIRE_VOCABULARY = frozenset(
         "sources",
     }
 )
-WIRE_CLIENTS = frozenset(
+_WIRE_CLIENTS = frozenset(
     {
         "RestClient",
         "Page",
@@ -1388,6 +1405,7 @@ WIRE_CLIENTS = frozenset(
     }
 )
 _INGEST = f"{_PACKAGE}._ingest"
+_TYPES_TABLE = f"{_PACKAGE}._types.Table"
 _SESSION = f"{_PACKAGE}._session"
 
 
@@ -1498,20 +1516,126 @@ def _literal_imports(tree: ast.Module) -> list[tuple[int, str]]:
     ]
 
 
-def _computed_imports(tree: ast.Module) -> list[tuple[int, str]]:
-    """Return the dynamic imports whose module name is computed rather than a literal.
+_IMPORT_FUNCTIONS = frozenset({"import_module", "__import__"})
+
+
+def _import_level(call: ast.Call) -> ast.expr | None:
+    """Return the `level` argument of an `__import__` call, if it has one.
+
+    Args:
+        call: A dynamic import call.
+
+    Returns:
+        The fifth positional argument or the `level=` keyword; None for `import_module`.
+    """
+    function = call.func
+    name = function.attr if isinstance(function, ast.Attribute) else ast.unparse(function)
+    if name != "__import__":
+        return None
+    keyword = next((k.value for k in call.keywords if k.arg == "level"), None)
+    return (
+        call.args[4] if len(call.args) > 4 else keyword
+    )  # __import__(name, g, l, fromlist, level)
+
+
+def _is_resolved_name(call: ast.Call, argument: ast.expr | None) -> bool:
+    """Tell whether a dynamic import names its module so that the rules can resolve it.
+
+    Args:
+        call: The dynamic import call.
+        argument: Its module argument.
+
+    Returns:
+        True for a literal absolute name with no `level` other than a literal 0, and for a
+        literal relative name passed to `import_module` with a literal package.
+    """
+    if not (isinstance(argument, ast.Constant) and isinstance(argument.value, str)):
+        return False
+    if argument.value.startswith("."):
+        return _relative_import(call) is not None
+    level = _import_level(call)
+    return level is None or (isinstance(level, ast.Constant) and level.value == 0)
+
+
+def _modules_lookups(tree: ast.Module) -> list[tuple[int, str]]:
+    """Return every `sys.modules` lookup whose key is not a literal.
 
     Args:
         tree: The file's syntax tree.
 
     Returns:
-        `(line, source text of the module argument)` pairs; `?` for a call without one.
+        `(line, source text)` for `<x>.modules[key]` and `<x>.modules.get(key)` with a key that
+        is not a string literal.
     """
-    return [
-        (line, "?" if argument is None else ast.unparse(argument))
-        for line, argument in _dynamic_imports(tree)
-        if not (isinstance(argument, ast.Constant) and isinstance(argument.value, str))
-    ]
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and ast.unparse(node.value).endswith("sys.modules"):
+            key: ast.expr = node.slice
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and ast.unparse(node.func.value).endswith("sys.modules")
+            and node.args
+        ):
+            key = node.args[0]
+        else:
+            continue
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            found.append((node.lineno, ast.unparse(node)))
+    return found
+
+
+def _names_import_function(node: ast.expr, functions: set[str]) -> bool:
+    """Tell whether an expression refers to `import_module` or `__import__` by name.
+
+    Args:
+        node: An expression that is not the function of a direct call.
+        functions: The bare names of the import functions, from `_import_functions`.
+
+    Returns:
+        True for an attribute or name that is an import function, or a string naming one (the
+        argument of a `getattr`).
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr in _IMPORT_FUNCTIONS
+    if isinstance(node, ast.Name):
+        return node.id in functions
+    return isinstance(node, ast.Constant) and node.value in _IMPORT_FUNCTIONS
+
+
+def _computed_imports(tree: ast.Module) -> list[tuple[int, str]]:
+    """Return every import whose module the rules cannot read from the source.
+
+    That is a dynamic import whose name is not a literal; a literal relative name without a
+    literal package; an `__import__` with a `level` other than a literal 0; any use of
+    `import_module` or `__import__` other than a direct call (an alias by assignment, a
+    `getattr`); and a `sys.modules` lookup by a key that is not a literal.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        `(line, source text)` pairs.
+    """
+    functions = _import_functions(tree)
+    found: list[tuple[int, str]] = []
+    called: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_import_call(node, functions):
+            called.add(id(node.func))
+            keyword = next((k.value for k in node.keywords if k.arg == "name"), None)
+            argument = node.args[0] if node.args else keyword
+            if not _is_resolved_name(node, argument):
+                found.append((node.lineno, ast.unparse(node)))
+    skipped = called | _docstrings(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.expr) or id(node) in skipped:
+            continue
+        if _names_import_function(node, functions):
+            found.append((node.lineno, ast.unparse(node)))
+    found.extend(_modules_lookups(tree))
+    return sorted(found)
 
 
 def _thread_reads(tree: ast.Module) -> list[tuple[int, str]]:
@@ -1521,8 +1645,8 @@ def _thread_reads(tree: ast.Module) -> list[tuple[int, str]]:
         tree: The file's syntax tree.
 
     Returns:
-        `(line, "threading.<name>")` for an attribute read on a name bound to `threading`
-        and for `from threading import Thread` or `Timer`.
+        `(line, "threading.<name>")` for an attribute read on a name bound to `threading`,
+        a literal `getattr` on it, and `from threading import Thread` or `Timer`.
     """
     aliases = {
         alias.asname or alias.name
@@ -1540,6 +1664,8 @@ def _thread_reads(tree: ast.Module) -> list[tuple[int, str]]:
             and node.attr in _THREAD_CLASSES
         ):
             found.append((node.lineno, f"threading.{node.attr}"))
+        elif isinstance(node, ast.Call) and _getattr_name(node, aliases) in _THREAD_CLASSES:
+            found.append((node.lineno, f"threading.{_getattr_name(node, aliases)}"))
         elif isinstance(node, ast.ImportFrom) and node.module == "threading":
             found.extend(
                 (node.lineno, f"threading.{alias.name}")
@@ -1560,19 +1686,35 @@ def _client_reads(
         references: The file's imports and module-name strings.
 
     Returns:
-        `(line, name)` for each client name of `_massive.__all__` the file uses.
+        `(line, name)` for each client name of `_massive.__all__` the file uses; `*` for a star
+        import of `_massive`, and the source text of a `getattr` on it whose name is not a
+        literal, since either may reach any client.
     """
+    aliases = _wire_aliases(tree, package)
     members = [
         (line, name.removeprefix(f"{_WIRE}.").split(".")[0])
         for line, name in references
         if _inside(name, _WIRE) and name != _WIRE
     ]
-    found = [(line, member) for line, member in members if member in WIRE_CLIENTS]
+    found = [(line, member) for line, member in members if member in _WIRE_CLIENTS]
     found.extend(
         (line, attribute)
-        for line, attribute in _wire_reads(tree, _wire_aliases(tree, package))
-        if attribute in WIRE_CLIENTS
+        for line, attribute in _wire_reads(tree, aliases)
+        if attribute in _WIRE_CLIENTS
     )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
+            base = _absolute(package, node.level, node.module) if node.level else node.module
+            if base == _WIRE:
+                found.append((node.lineno, "*"))
+        elif (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func) == "getattr"
+            and node.args
+            and ast.unparse(node.args[0]) in aliases
+            and _getattr_name(node, aliases) is None
+        ):
+            found.append((node.lineno, ast.unparse(node)))
     return found
 
 
@@ -1590,6 +1732,8 @@ def _deephaven_rule(layer: str, name: str, *, type_only: bool) -> str | None:
     top = name.split(".", maxsplit=1)[0]
     if top == "deephaven_server":
         return f"nothing imports deephaven_server: {name}"
+    if name == _TYPES_TABLE:  # the vocabulary binds Deephaven's `Table` at run time
+        top = "deephaven"
     if top != "deephaven":
         return None
     if layer == "vocabulary" and not _inside(name, "deephaven.table"):
@@ -1669,8 +1813,8 @@ def test_the_tree_keeps_the_layers() -> None:
 
 
 def test_the_wire_interface_splits_into_vocabulary_and_clients() -> None:
-    assert WIRE_VOCABULARY.isdisjoint(WIRE_CLIENTS)
-    assert _interface() == WIRE_VOCABULARY | WIRE_CLIENTS
+    assert _WIRE_VOCABULARY.isdisjoint(_WIRE_CLIENTS)
+    assert _interface() == _WIRE_VOCABULARY | _WIRE_CLIENTS
 
 
 def _layer_check(module: str, source: str) -> list[str]:
@@ -1785,6 +1929,19 @@ def test_an_import_must_not_point_up(module: str, source: str, message: str) -> 
         "__import__(name)\n",
         "importlib.import_module(name='x' + y)\n",
         "importlib.import_module()\n",
+        # Literal names that only resolve at run time.
+        "importlib.import_module('.._session', __package__)\n",
+        "__import__('_session', globals(), None, ['MassiveSession'], 2)\n",
+        "__import__('orjson', level=level)\n",
+        # An import function reached other than by a direct call.
+        "im = importlib.import_module\n",
+        "from importlib import import_module as im\nloaders = [im]\n",
+        "getattr(importlib, 'import_module')\n",
+        "getattr(builtins, '__import__')\n",
+        # A module looked up by a computed key.
+        "sys.modules['deephaven_massive.' + name]\n",
+        "sys.modules[f'deephaven_massive.{name}']\n",
+        "sys.modules.get(name)\n",
     ],
 )
 def test_a_computed_import_is_reported(source: str) -> None:
@@ -1798,8 +1955,19 @@ def test_the_lazy_inits_may_import_by_a_computed_name(module: str) -> None:
     assert _layer_check(module, source) == []
 
 
-def test_a_literal_import_is_not_computed() -> None:
-    assert _layer_check("_massive/net/codec.py", "importlib.import_module('orjson')\n") == []
+@pytest.mark.parametrize(
+    "source",
+    [
+        "importlib.import_module('orjson')\n",
+        "importlib.import_module('.codec', 'deephaven_massive._massive.net')\n",
+        "__import__('orjson', globals(), None, [], 0)\n",
+        "sys.modules['orjson']\n",
+        "sys.modules.get('orjson')\n",
+        '"""Loaded with importlib.import_module, never __import__."""\n',
+    ],
+)
+def test_a_literal_import_is_not_computed(source: str) -> None:
+    assert _layer_check("_massive/net/codec.py", source) == []
 
 
 # Deephaven by layer.
@@ -1812,6 +1980,13 @@ def test_a_literal_import_is_not_computed() -> None:
         ("_datasets/symbols.py", "if TYPE_CHECKING:\n    from deephaven.table import Table\n"),
         ("_tables/columns.py", "from deephaven import dtypes\n"),
         ("_namespaces/base.py", "from deephaven.table import Table\n"),
+        ("_datasets/symbols.py", "import typing\nif typing.TYPE_CHECKING:\n    import deephaven\n"),
+        (
+            "_datasets/symbols.py",
+            "if TYPE_CHECKING:\n    from deephaven_massive._types import Table\n",
+        ),
+        ("_datasets/symbols.py", "from deephaven_massive._types import Symbols, _All\n"),
+        ("_tables/watchlist.py", "from deephaven_massive._types import Table\n"),
     ],
 )
 def test_deephaven_where_the_layer_allows_it(module: str, source: str) -> None:
@@ -1854,6 +2029,15 @@ def test_deephaven_where_the_layer_allows_it(module: str, source: str) -> None:
             "if TYPE_CHECKING:\n    import deephaven_server\n",
             "2: nothing imports deephaven_server: deephaven_server",
         ),
+        (
+            # The vocabulary binds Deephaven's Table at run time: the same import, by proxy.
+            "_datasets/catalog.py",
+            "from deephaven_massive._types import Table\n",
+            (
+                "1: the datasets layer imports deephaven only for type checking: "
+                "deephaven_massive._types.Table"
+            ),
+        ),
     ],
 )
 def test_deephaven_where_the_layer_forbids_it(module: str, source: str, message: str) -> None:
@@ -1879,6 +2063,10 @@ def test_deephaven_where_the_layer_forbids_it(module: str, source: str, message:
         ("import urllib.parse\n", "urllib.parse"),
         ("import subprocess\n", "subprocess"),
         ("importlib.import_module('socket')\n", "socket"),
+        ("import _thread\n", "_thread"),
+        ("import multiprocessing.pool\n", "multiprocessing.pool"),
+        ("import select\n", "select"),
+        ("import selectors\n", "selectors"),
     ],
 )
 def test_the_lower_layers_import_no_io_or_thread_module(
@@ -1895,6 +2083,7 @@ def test_the_lower_layers_import_no_io_or_thread_module(
         ("import threading\nthreading.Thread(target=f)\n", "threading.Thread"),
         ("import threading as t\nt.Timer(1, f)\n", "threading.Timer"),
         ("from threading import Thread\n", "threading.Thread"),
+        ("import threading\ngetattr(threading, 'Thread')(target=f)\n", "threading.Thread"),
     ],
 )
 def test_the_lower_layers_start_no_threads(module: str, source: str, name: str) -> None:
@@ -1923,12 +2112,19 @@ def test_the_upper_layers_may_do_io_and_start_threads() -> None:
         "if TYPE_CHECKING:\n    from deephaven_massive._massive import WsClient\n",
         "import deephaven_massive._massive as wire\nx = getattr(wire, 'ReadPlan')\n",
         "x = 'deephaven_massive._massive.Page'\n",
+        "from deephaven_massive._massive import *\n",
+        "from deephaven_massive import _massive\nx = getattr(_massive, 'Flat' + 'FileClient')\n",
     ],
 )
 @pytest.mark.parametrize("module", ["_tables/core.py", "_query.py", "_datasets/request.py"])
 def test_only_ingest_uses_a_wire_client(module: str, source: str) -> None:
     [found] = _layer_check(module, source)
     assert "only the ingest layer uses the wire client" in found
+
+
+def test_a_relative_star_import_of_the_wire_package_counts() -> None:
+    [found] = _layer_check("_query.py", "from ._massive import *\n")
+    assert found.endswith("only the ingest layer uses the wire client *")
 
 
 def test_ingest_uses_the_wire_clients_and_everyone_the_vocabulary() -> None:
