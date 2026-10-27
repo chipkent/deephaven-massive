@@ -46,6 +46,10 @@ environment, and the Claude Code hook blocks them.
 uses the newest versions. Offline, a local run warns and keeps what is installed; CI fails
 instead.
 
+The column reference command (`uv run python scripts/render_reference.py`, which regenerates
+all of `docs/datasets/`) arrives with the `PLAN.md` package column-reference-pages, which adds it
+here.
+
 The library is moving off Massive's Python SDK (`massive`) to its own REST, WebSocket, and S3
 flat-file clients, with every schema generated from vendored, pinned vendor specs
 (`DESIGN.md` § 19). Until the `PLAN.md` package PC4 lands, the old dependency is still
