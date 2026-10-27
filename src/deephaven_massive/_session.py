@@ -358,8 +358,10 @@ class MassiveSession:
         """Return the live diagnostics table of connections and host decisions.
 
         One row per WebSocket connection plus one `Transport=REST` row per resolved (asset
-        class, channel family), with the host, recency, evidence, state, topic counts, and the
-        last error. The table is the session's; do not edit it. After `close()` this raises
+        class, channel family), with the host, recency, evidence, state, topic counts, the
+        last error, and `SchemaDrift`: the fields a connection's frames had beyond the
+        documented schema (`channel:field+`) or lacked (`channel:field-`). The table is the
+        session's; do not edit it. After `close()` this raises
         `MassiveError` (see `SessionCore.require_open`).
 
         Returns:
@@ -373,8 +375,10 @@ class MassiveSession:
         """Return the live diagnostics table of streams and `poll()` tables.
 
         One row per stream: dataset, symbols, `HeldResults`, deferred option contracts,
-        host, rows published, requests per poll cycle, state, and error. After `close()` this
-        raises `MassiveError`.
+        host, rows published, requests per poll cycle, state, error, and `SchemaDrift`: the
+        fields the stream's payloads had beyond the documented schema (`transport:field+`) or
+        lacked (`transport:field-`), shown apart from the error because drift is not a
+        failure. After `close()` this raises `MassiveError`.
 
         Returns:
             The `streams` table, keyed by `StreamId`; its columns are

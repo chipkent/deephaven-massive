@@ -1,14 +1,16 @@
 """Tests for flat-file history: source choice, partition dates, and streaming S3 reads."""
 
+import csv
 import functools
 import gc
 import gzip
+import io
 import logging
 import re
 import threading
 import tracemalloc
 from array import array
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -71,6 +73,9 @@ class FakeS3(Protocol):
     before_answer: Callable[[str], object] | None
 
     def put(self, key: str, data: bytes) -> None: ...
+    def put_csv(
+        self, key: str, header: Sequence[str], rows: Iterable[Mapping[str, object]]
+    ) -> None: ...
     def put_dropped(self, key: str, data: bytes) -> None: ...
     def refuse(self, prefix: str, *, status: int, code: str, message: str) -> None: ...
     def fail(self, key: str, failure: str) -> None: ...
@@ -172,6 +177,7 @@ TRADES_KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-{:02d}.csv.gz"
 TRADES_0303 = TRADES_KEY.format(3)
 TRADES_0304 = TRADES_KEY.format(4)
 TRADES_0305 = TRADES_KEY.format(5)
+LOCATION = "s3://flatfiles/{} at https://files.massive.com"
 FUTURES_KEY = "us_futures_{}/trades_v1/{:%Y/%m/%Y-%m-%d}.csv.gz"
 FUTURES_0304 = "us_futures_{}/trades_v1/2025/03/2025-03-04.csv.gz"
 VENUES = ("cme", "cbot", "nymex", "comex")
@@ -446,13 +452,35 @@ def test_instant_columns_convert_by_their_declared_unit(
     ]
 
 
-def test_an_unverified_unit_out_of_range_is_a_massive_error(
+def test_milliseconds_declared_as_nanoseconds_fail_the_bound(
     *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:
-    spec = replace(STOCK_TRADES, unverified_time_units=frozenset({(FF, "participant_timestamp")}))
-    row = trade(1, 1741012200000000000, participant=1741012200)  # seconds, not nanoseconds
+    # Milliseconds in a column declared in nanoseconds land in January 1970.
+    row = trade(1, 1741012200000000000, participant=1741012200000)
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row))
-    with pytest.raises(dm.MassiveError, match="timestamp unit mismatch"):
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^timestamp unit mismatch for stocks\.trades\.participant_timestamp: "
+        r"1741012200000 ns is outside 1990 to 2100 "
+        rf"\(in {re.escape(LOCATION.format(TRADES_0303))}\)$",
+    ):
+        q.history("2025-03-03", "2025-03-03")
+
+
+def test_nanoseconds_declared_as_milliseconds_overflow(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # The time column too: the window filter converts it, so the overflow fails the read there.
+    units = {**STOCK_TRADES.time_units, (FF, "sip_timestamp"): TimeUnit.MILLISECONDS}
+    spec = replace(STOCK_TRADES, time_units=units)
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^timestamp unit mismatch for stocks\.trades\.sip_timestamp: "
+        r"1741012200000000000 ms overflows 64-bit nanoseconds "
+        rf"\(in {re.escape(LOCATION.format(TRADES_0303))}\)$",
+    ):
         query(session, spec, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
 
 
@@ -466,13 +494,18 @@ def test_epoch_zero_is_null_except_in_timestamp(
     assert pick(t, "Timestamp", "ParticipantTimestamp", "TrfTimestamp", "Price", "Size") == [
         (1741012200000000000, None, None, 0.0, 0.0)
     ]
-    # Futures sessions are not filtered on Timestamp, so a 0 there shows that it is kept.
+    # Futures sessions are not filtered on Timestamp, so a 0 there reaches the routine, which
+    # keeps it in the time column and so fails the bound.
     fake_s3.put(
         FUTURES_0304.format("cme"),
         make_csv_gz(FUTURES_HEADER + ",0,0,1,1,1,2025-03-04,ESH5,0\n"),
     )
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
-    assert pick(q.history("2025-03-04", "2025-03-04"), "Timestamp", "Price") == [(0, 0.0)]
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"futures\.trades\.timestamp: 0 ns is outside 1990 to 2100 \(in s3://flatfiles/us_futures_cme/",
+    ):
+        q.history("2025-03-04", "2025-03-04")
 
 
 def test_quote_lists_are_parsed(
@@ -1679,3 +1712,195 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
     ) as info:
         q.history("2025-03-03", "2025-03-03")
     assert isinstance(info.value.__cause__, pa.ArrowMemoryError)
+
+
+# Schema drift: headers are matched by name; extra and missing headers warn once.
+
+DRIFT_LOGGER = "deephaven_massive._tables.diagnostics"
+
+
+def csv_rows(
+    load_fixture: Callable[[str, str], bytes], name: str
+) -> tuple[list[str], list[dict[str, str]]]:
+    # A fixture's header and its rows keyed by header, to store under another header.
+    reader = csv.DictReader(io.StringIO(load_fixture("ingest/flatfiles", name).decode()))
+    data = list(reader)
+    assert reader.fieldnames is not None
+    return list(reader.fieldnames), data
+
+
+def extra_header(name: str) -> str:
+    dropped = "it is dropped (schema drift)"
+    return f"stocks.trades: FLAT_FILES field {name!r} is not in the schema; {dropped}"
+
+
+def missing_header(name: str) -> str:
+    return f"stocks.trades: FLAT_FILES field {name!r} is missing; it reads as null (schema drift)"
+
+
+def drift_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == DRIFT_LOGGER and r.levelno == logging.WARNING
+    ]
+
+
+def test_reordered_headers_give_identical_results(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    fake_s3.put_csv(TRADES_0303, names, data)
+    expected = rows(q.history("2025-03-03", "2025-03-03"))
+    assert len(expected) == 4
+    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+        for order in (list(reversed(names)), sorted(names, key=lambda n: n[::-1])):
+            fake_s3.put_csv(TRADES_0303, order, data)
+            assert rows(q.history("2025-03-03", "2025-03-03")) == expected
+    assert drift_warnings(caplog) == []
+
+
+def test_an_extra_header_is_dropped_and_warned_once_per_session(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    names, first = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    _, second = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-05.csv")
+    wider = [*names[:4], "halted", *names[4:]]
+    fake_s3.put_csv(TRADES_0303, wider, [{**row, "halted": "true"} for row in first])
+    fake_s3.put_csv(TRADES_0305, wider, [{**row, "halted": "false"} for row in second])
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
+    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+        t = q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)
+        assert pick(t, "Id") == [("1",), ("3",), ("9",)]
+        assert "Halted" not in {c.name for c in t.columns}
+        # Two files, then a second call: still one warning for the session.
+        q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)
+    assert drift_warnings(caplog) == [extra_header("halted")]
+
+
+def test_a_missing_header_is_null_and_warned_once(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    narrower = [name for name in names if name not in {"trf_id", "participant_timestamp"}]
+    fake_s3.put_csv(TRADES_0303, narrower, data)
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+        t = q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03")
+    assert {c.name: c.data_type for c in t.columns} == col_defs(TRADES.schema)
+    assert pick(t, "Id", "TrfId", "ParticipantTimestamp", "TrfTimestamp") == [
+        ("1", None, None, None),
+        ("2", None, None, None),
+        ("3", None, None, 1741013999999999000),
+        ("4", None, None, None),
+    ]
+    assert drift_warnings(caplog) == [
+        missing_header("participant_timestamp"),
+        missing_header("trf_id"),
+    ]
+
+
+@pytest.mark.parametrize("key_header", ["ticker", "sip_timestamp"])
+def test_a_missing_key_header_is_a_massive_error(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    key_header: str,
+) -> None:
+    names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.put_csv(TRADES_0303, [name for name in names if name != key_header], data)
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(dm.MassiveError) as info:
+        q.history("2025-03-03", "2025-03-03")
+    assert type(info.value) is dm.MassiveError
+    assert str(info.value) == (
+        f"cannot read s3://flatfiles/{TRADES_0303} at https://files.massive.com: the header "
+        f"lacks the key column {key_header}"
+    )
+
+
+def test_a_futures_file_without_its_session_header_is_a_massive_error(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    names, data = csv_rows(load_fixture, "us_futures_trades_v1_2025-03-04.csv")
+    lacking = [name for name in names if name != "session_end_date"]
+    fake_s3.put_csv(FUTURES_0304.format("cme"), lacking, data)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    with pytest.raises(dm.MassiveError, match=r"the header lacks the key column session_end_date$"):
+        q.history("2025-03-04", "2025-03-04")
+
+
+def test_an_unconvertible_value_is_a_massive_error(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.put_csv(TRADES_0303, names, [*data[:2], {**data[2], "size": "lots"}])
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^cannot read s3://\S+ at https://files\.massive\.com: size is not double: .*'lots'",
+    ):
+        q.history("2025-03-03", "2025-03-03")
+
+
+def test_an_unconvertible_list_element_names_its_header(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.put_csv(TRADES_0303, names, [{**data[0], "conditions": "12,abc"}, *data[1:]])
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(dm.MassiveError) as info:
+        q.history("2025-03-03", "2025-03-03")
+    assert str(info.value).startswith(
+        f"cannot read {LOCATION.format(TRADES_0303)}: conditions is not list<item: int32>: "
+    )
+
+
+def test_a_file_with_a_header_and_no_rows_still_reports_its_drift(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    names, _ = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.put_csv(TRADES_0303, [*names, "halted"], [])
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+        t = q.history("2025-03-03", "2025-03-03")
+    assert rows(t) == []
+    assert drift_warnings(caplog) == [extra_header("halted")]
+
+
+def test_an_empty_file_is_a_massive_error(*, session: dm.MassiveSession, fake_s3: FakeS3) -> None:
+    fake_s3.put(TRADES_0303, b"")
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(dm.MassiveError) as info:
+        q.history("2025-03-03", "2025-03-03")
+    assert str(info.value) == (
+        f"cannot read {LOCATION.format(TRADES_0303)}: the file is empty: no header line"
+    )

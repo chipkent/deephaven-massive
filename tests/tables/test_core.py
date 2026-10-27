@@ -32,6 +32,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import TRADES
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass
+from deephaven_massive._massive import DriftReport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._tables import core as _core
@@ -1286,3 +1287,76 @@ def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContex
         assert ports.asked == ["rest", "streams", "flat_files", "rest"]
     finally:
         core.close()
+
+
+# Schema drift of streams.
+
+HALTED = DriftReport(extra=frozenset({"halted"}))
+
+
+def test_stream_drift_reaches_the_row_and_is_forgotten_when_the_stream_leaves(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    drain: Callable[[], None],
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    core = massive_session._core
+    result = stream_query(massive_session).append_only()
+    core.record_stream_drift(1, "WS", HALTED)
+    core.record_stream_drift(1, "WS", HALTED)  # nothing new: the row is not rewritten
+    core.record_stream_drift(1, "WS", DriftReport(missing=frozenset({"trfi"})))
+    core.record_stream_drift(99, "WS", HALTED)  # not in the registry: ignored, not kept
+    assert [(r["StreamId"], r["SchemaDrift"], r["Error"]) for r in stream_rows()] == [
+        (1, "WS:halted+, WS:trfi-", None)
+    ]
+    assert core.drift.record(99, "WS", HALTED) == "WS:halted+"  # nothing was kept for 99
+    # Released, then shut down: the record leaves the registry at the shutdown.
+    massive_session.release(result)
+    drain()
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    assert core._streams == {}
+    assert core.drift.record(1, "WS", HALTED) == "WS:halted+"  # forgotten, so new again
+    assert [r["SchemaDrift"] for r in stream_rows()] == ["WS:halted+, WS:trfi-"]  # last row
+
+
+def test_stream_drift_is_forgotten_when_the_last_hold_of_a_shut_down_stream_goes(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    drain: Callable[[], None],
+) -> None:
+    core = massive_session._core
+    result = stream_query(massive_session).append_only()
+    core.record_stream_drift(1, "WS", HALTED)
+    # Shut down while held: the record stays until the hold is released.
+    fake_streams.publishers[1].publish_failure(RuntimeError("gone"))
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    assert core.drift.record(1, "WS", HALTED) is None  # still remembered
+    massive_session.release(result)
+    drain()
+    assert core._streams == {}
+    assert core.drift.record(1, "WS", HALTED) == "WS:halted+"
+
+
+def test_stream_drift_recorded_during_the_open_is_kept(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    core = massive_session._core
+
+    class DriftingDuringOpen:
+        def open_stream(
+            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+        ) -> StreamHandle:
+            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+            core.record_stream_drift(stream_id, "WS", HALTED)  # the row is not written yet
+            return handle
+
+    monkeypatch.setattr(core, "stream_transport", DriftingDuringOpen)
+    result = stream_query(massive_session).append_only()
+    assert [(r["StreamId"], r["SchemaDrift"]) for r in stream_rows()] == [(1, "WS:halted+")]
+    massive_session.release(result)

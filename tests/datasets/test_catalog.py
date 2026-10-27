@@ -19,12 +19,12 @@ from deephaven_massive._datasets.catalog import (
     ParamKind,
     SymbolParam,
     check_filters,
+    declared_units,
     filter_params,
     sdk_params,
-    unit_rules,
 )
 from deephaven_massive._datasets.schema import TRADES, ColumnOverride, ColumnType
-from deephaven_massive._datasets.timestamps import TimeField, TimeUnit, UnitRule
+from deephaven_massive._datasets.timestamps import TimeField, TimeUnit
 from deephaven_massive._enums import AssetClass, Timespan, Transport
 
 BASE = DatasetSpec(
@@ -36,7 +36,6 @@ BASE = DatasetSpec(
         (Transport.WS, "t"): TimeUnit.MILLISECONDS,
         (Transport.REST, "timestamp"): TimeUnit.MILLISECONDS,
     },
-    unverified_time_units=frozenset({(Transport.REST, "timestamp")}),
 )
 
 
@@ -58,11 +57,12 @@ def test_the_catalog_rejects_a_name_declared_twice() -> None:
         Catalog((_trades(), _trades()))
 
 
-def test_unit_rules() -> None:
-    rules = unit_rules({"test.trades": _trades()})
-    assert rules[TimeField("test.trades", Transport.REST, "timestamp")] == UnitRule(
-        TimeUnit.MILLISECONDS, unverified=True
-    )
+def test_declared_units() -> None:
+    units = declared_units({"test.trades": _trades()})
+    assert units == {
+        TimeField("test.trades", Transport.WS, "t"): TimeUnit.MILLISECONDS,
+        TimeField("test.trades", Transport.REST, "timestamp"): TimeUnit.MILLISECONDS,
+    }
 
 
 def test_a_spec_must_match_a_query_class() -> None:
@@ -86,7 +86,6 @@ def test_a_spec_must_match_a_query_class() -> None:
         flat_file_prefixes={Timespan.MINUTE: "us_stocks_sip/minute_aggs_v1"},
         key_maps={Transport.FLAT_FILES: {"ticker": "Symbol", "sip_timestamp": "Timestamp"}},
         time_units={(Transport.FLAT_FILES, "sip_timestamp"): TimeUnit.NANOSECONDS},
-        unverified_time_units=frozenset(),
     )
     assert flat.has_history
     assert not flat.has_channels
@@ -96,8 +95,6 @@ def test_a_spec_must_match_a_query_class() -> None:
 def test_spec_validation() -> None:
     with pytest.raises(ValueError, match=r"must be '<namespace>\.<dataset>'"):
         _trades(name="trades")
-    with pytest.raises(ValueError, match=r"unverified units \['WS:q'\]"):
-        _trades(unverified_time_units=frozenset({(Transport.WS, "q")}))
     with pytest.raises(ValueError, match=r"poll_keys \['Ticker'\]"):
         _trades(poll_keys=("Ticker",))
     with pytest.raises(ValueError, match="give exactly one of schema and rest_model"):

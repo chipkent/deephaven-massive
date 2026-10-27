@@ -6,6 +6,14 @@ bytes of decompressed text. Python's `gzip` decompresses on the reader's own rea
 asks for one block per call and reads about 32 blocks ahead of the consumer on its own I/O
 thread, so a reader holds about 32 blocks of text whatever the file's length.
 
+Columns are matched by name, never by position. The reader first reads the header line itself
+and parses it with the `csv` module, then hands Arrow those names and asks for the documented
+headers (`ReadPlan.columns`) by name: a reordered file reads identically, a header the plan
+does not document is dropped and reported as extra, a documented header the file lacks becomes
+a null column of its type and is reported as missing, and a file that lacks one of the plan's
+key headers (`ReadPlan.required`) fails before its first block. The extra and missing headers
+travel with every batch as a `DriftReport`; what to log and show is the library's decision.
+
 Each block goes through pure Arrow operations, in this order:
 
 1. the futures session check on the whole block (every row's session date must be the file's);
@@ -27,16 +35,19 @@ module that uses it is `_ingest/flatfiles.py`.
 
 from __future__ import annotations
 
+import csv
 import gzip
+import re
 import zlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, BinaryIO, Protocol, Self, cast
+from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, Self, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.csv as pacsv
 
 from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.spec.types import DriftReport
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -44,6 +55,42 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 __all__ = ["FlatFile", "ReadColumn", "ReadPlan"]
+
+_CSV_COLUMN: Final = re.compile(r"In CSV column #(\d+): ")
+"""How Arrow's message about a value it cannot convert starts: the column's position in the
+file. Matched only at the start, so a quoted value can never supply the position."""
+
+
+def _describe(error: Exception, names: list[str], read_types: dict[str, pa.DataType]) -> str:
+    """Return the text of a read failure, naming the header of a value that did not convert.
+
+    Args:
+        error: The failure.
+        names: The file's header names, in file order (empty if the header was not read).
+        read_types: The type each documented header is read as.
+
+    Returns:
+        The failure's own text, preceded, for a conversion failure, by the header and the type
+        it was read as (`"size is not double: In CSV column #8: ..."`).
+    """
+    found = _CSV_COLUMN.match(str(error))
+    if found is None:
+        return str(error)
+    header = names[int(found[1])]
+    return f"{header} is not {read_types[header]}: {error}"
+
+
+def _empty(plan: ReadPlan) -> pa.RecordBatch:
+    """Return a batch with the plan's columns and no rows.
+
+    Args:
+        plan: The plan whose columns the batch has.
+
+    Returns:
+        The empty batch, each column of its `list_type` or `read_type`.
+    """
+    arrays = [pa.array([], column.list_type or column.read_type) for column in plan.columns]
+    return pa.RecordBatch.from_arrays(arrays, names=[column.column for column in plan.columns])
 
 
 class _Stream(Protocol):
@@ -97,7 +144,9 @@ class ReadPlan:
             unit; it may raise for a value outside that unit's range.
         session: For a futures file, the header that holds each row's trading session date
             and the session every row must belong to (the file's date); None otherwise.
-        block_size: Bytes of decompressed CSV per block.
+        block_size: Bytes of decompressed CSV per block, and the longest header line read.
+        required: The key headers every file must have, such as the symbol and time headers;
+            a file that lacks one fails before its first block.
     """
 
     columns: tuple[ReadColumn, ...]
@@ -108,6 +157,7 @@ class ReadPlan:
     to_ns: Callable[[pa.Array], pa.Array]
     session: tuple[str, date] | None
     block_size: int
+    required: frozenset[str]
 
 
 class FlatFile:
@@ -122,7 +172,7 @@ class FlatFile:
         ::
 
             with client.open("us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz") as file:
-                for batch in file.batches(plan):
+                for batch, drift in file.batches(plan):
                     ...
     """
 
@@ -183,40 +233,65 @@ class FlatFile:
         """
         self._body.close()
 
-    def batches(self, plan: ReadPlan) -> Generator[pa.RecordBatch, None, None]:
+    def batches(self, plan: ReadPlan) -> Generator[tuple[pa.RecordBatch, DriftReport], None, None]:
         """Decode the file block by block, keeping the rows the plan asks for.
 
-        Yields one batch per block, possibly empty, so the consumer can check for cancellation
-        after every block. Each batch has one column per `plan.columns`, named by
-        `ReadColumn.column`, typed by `read_type` (or `list_type`). Blocks are read on the
-        calling thread as it iterates; Arrow reads ahead on its own I/O thread.
+        Reads the header line first and matches columns by name. Yields one batch per block,
+        possibly empty, so the consumer can check for cancellation after every block; a file
+        with a header and no rows yields one empty batch, so its drift is still reported.
+        Each batch has one column per `plan.columns`, named by `ReadColumn.column`, typed by
+        `read_type` (or `list_type`); a documented header the file lacks is a column of nulls.
+        Blocks are read on the calling thread as it iterates; Arrow reads ahead on its own I/O
+        thread.
 
         Args:
             plan: What to read and which rows to keep.
 
         Yields:
-            The surviving rows of each block.
+            The surviving rows of each block, and the file's `DriftReport`: `extra` holds the
+            headers the plan does not document (dropped), `missing` the documented headers
+            the file lacks (null). The report is the same for every block of a file.
 
         Raises:
             WireError: If the body is not gzip, is truncated or corrupt, or the connection
-                drops; if a documented header is missing or a value does not parse as its
-                type (the message quotes Arrow's); or if a futures block holds a session
-                date other than the plan's session, or none. Every message names the file. An
-                error that `plan.to_ns` raises propagates unchanged, unless it is an Arrow
-                error, which becomes `WireError` like any other.
+                drops; if the file is empty (no header line); if the header line is longer
+                than `plan.block_size`, not UTF-8, or not valid CSV; if the header names a
+                column twice or lacks a key header of `plan.required` (before the first block,
+                naming the headers); if a value, or an element of a list, does not parse as
+                its type (naming the header and the type, and quoting Arrow's message); or if
+                a futures block holds a session date other than the plan's session, or none.
+                Every message names the file. An error that `plan.to_ns` raises propagates
+                unchanged, unless it is an Arrow error, which becomes `WireError` like any
+                other.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
+        names: list[str] = []
         try:
             # gzip only reads its file object; its stub also asks for `seek`, which a response
             # body has no use for.
-            body = cast("BinaryIO", self._body)
-            stream = pa.PythonFile(gzip.GzipFile(fileobj=body, mode="rb"), mode="r")
+            text = gzip.GzipFile(fileobj=cast("BinaryIO", self._body), mode="rb")
+            names = self._header(text, plan)
+            drift = DriftReport(
+                extra=frozenset(names).difference(read_types),
+                missing=frozenset(read_types).difference(names),
+            )
+            if not text.peek(1):
+                # A header and no rows. Arrow refuses an empty body, and the drift still has
+                # to reach the library, so the file is one empty batch.
+                yield _empty(plan), drift
+                return
             reader = pacsv.open_csv(
-                stream,
-                read_options=pacsv.ReadOptions(block_size=plan.block_size, use_threads=False),
+                pa.PythonFile(text, mode="r"),
+                read_options=pacsv.ReadOptions(
+                    # The header line is already read: every line Arrow sees is a row.
+                    column_names=names,
+                    block_size=plan.block_size,
+                    use_threads=False,
+                ),
                 convert_options=pacsv.ConvertOptions(
                     column_types=read_types,
                     include_columns=list(read_types),
+                    include_missing_columns=True,
                     # Massive writes a missing value as an empty field and nothing else. Arrow's
                     # default null markers include `NA` and `NULL`, which are real tickers.
                     null_values=[""],
@@ -224,11 +299,63 @@ class FlatFile:
                 ),
             )
             for block in reader:
-                yield self._apply(block, plan)
-        except (pa.ArrowException, OSError, EOFError, zlib.error) as error:
+                yield self._apply(block, plan), drift
+        except (
+            pa.ArrowException,
+            OSError,
+            EOFError,
+            zlib.error,
+            UnicodeDecodeError,
+            csv.Error,
+        ) as error:
             raise WireError(
-                f"cannot read {self._location}: {error}", host=self._host, path=self._key
+                f"cannot read {self._location}: {_describe(error, names, read_types)}",
+                host=self._host,
+                path=self._key,
             ) from error
+
+    def _header(self, text: gzip.GzipFile, plan: ReadPlan) -> list[str]:
+        """Read and parse the file's header line, and require the plan's key headers.
+
+        Args:
+            text: The decompressed file, positioned at its start; left at the first row.
+            plan: The plan, for its key headers and the longest line read.
+
+        Returns:
+            The header names, in file order.
+
+        Raises the `WireError` of `_error` if the file is empty, the line is longer than
+        `plan.block_size`, the header names a column twice, or the header lacks a key header
+        of `plan.required`; the message names the headers.
+        """
+        line = text.readline(plan.block_size)
+        if not line:
+            # Massive publishes no empty partitions: an empty object is a broken upload.
+            raise self._error("the file is empty: no header line")
+        if len(line) == plan.block_size and not line.endswith(b"\n"):
+            raise self._error(f"the header line is longer than {plan.block_size} bytes")
+        # The csv module parses quoted names and drops the line end, `\r\n` included;
+        # `utf-8-sig` drops a byte-order mark, as Arrow's own header parsing does.
+        names = next(csv.reader([line.decode("utf-8-sig")]), [])
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            # Matching by name cannot tell which of two equal names holds the column.
+            raise self._error(f"the header names {', '.join(repeated)} more than once")
+        lacking = sorted(plan.required - set(names))
+        if lacking:
+            raise self._error(f"the header lacks the key column {', '.join(lacking)}")
+        return names
+
+    def _error(self, reason: str) -> WireError:
+        """Return the error of a file that cannot be read, naming the file.
+
+        Args:
+            reason: What is wrong with the file.
+
+        Returns:
+            `WireError("cannot read <location>: <reason>")`, for the caller to raise.
+        """
+        return WireError(f"cannot read {self._location}: {reason}", host=self._host, path=self._key)
 
     def _apply(self, block: pa.RecordBatch, plan: ReadPlan) -> pa.RecordBatch:
         """Filter one block and turn its surviving rows into the plan's columns.
@@ -242,7 +369,8 @@ class FlatFile:
 
         Raises:
             WireError: If a futures block holds a session date other than the plan's session,
-                or none; the message names the first such row's date.
+                or none; the message names the first such row's date. A list element that does
+                not parse raises `WireError` too, naming the header and the type.
         """
         if plan.session is not None:
             header, day = plan.session
@@ -271,6 +399,10 @@ class FlatFile:
         for column in plan.columns:
             values = block[column.header]
             if column.list_type is not None:
-                values = pc.cast(pc.split_pattern(values, ","), column.list_type)
+                try:
+                    values = pc.cast(pc.split_pattern(values, ","), column.list_type)
+                except pa.ArrowInvalid as error:
+                    reason = f"{column.header} is not {column.list_type}: {error}"
+                    raise self._error(reason) from error
             arrays.append(values)
         return pa.RecordBatch.from_arrays(arrays, names=[c.column for c in plan.columns])

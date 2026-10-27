@@ -33,8 +33,18 @@ a day after its publication time (`within_publication_grace` in
 `_datasets/history_source.py`) it raises `MassiveError` naming both causes, and after that it is
 skipped with a WARNING like any other weekday.
 
-Massive writes `0` where a timestamp has no value (`trf_timestamp` of a trade without a TRF), so
-in every `Instant` column except `Timestamp` a `0` becomes null before unit conversion.
+Columns are matched by header name, never by position, so a file whose columns are reordered
+reads identically. Every `Instant` column goes through the timestamp routine of
+`_datasets/timestamps.py`: Massive writes `0` where a timestamp has no value (`trf_timestamp` of
+a trade without a TRF), so in every `Instant` column except `Timestamp` a `0` becomes null; each
+value is then scaled to nanoseconds by its declared unit, with an overflow check, and must lie in
+1990 to 2100, so a wrongly declared unit fails the read instead of returning wrong instants.
+
+Schema drift is reported, not raised: a header the dataset does not document is dropped, and a
+documented header the file lacks becomes a column of nulls; each logs one WARNING per
+(dataset, transport, header) through the session's `DriftRegistry`. A file that lacks the symbol
+or time header (or, for futures, the session header), a value that does not parse as its type,
+and a timestamp out of bounds fail the call with `MassiveError`.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix
 holds the placeholder `{venue}`, `venue=None` reads all four venues, and HTTP 403 on any venue
@@ -70,11 +80,11 @@ import pyarrow.compute as pc
 from deephaven import merge
 from deephaven.arrow import to_table
 
-from deephaven_massive._datasets.catalog import unit_rules
+from deephaven_massive._datasets.catalog import declared_units
 from deephaven_massive._datasets.dates import TimeRange
 from deephaven_massive._datasets.history_source import within_publication_grace
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._datasets.timestamps import TimeField, TimeUnitTable
+from deephaven_massive._datasets.timestamps import TimeField, TimeUnitTable, UnitMismatchError
 from deephaven_massive._enums import AssetClass, FuturesVenue, Transport
 from deephaven_massive._errors import (
     AuthenticationError,
@@ -103,7 +113,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import FuturesSessions
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.symbols import NormalizedSymbols
-    from deephaven_massive._massive import FlatFileClient
+    from deephaven_massive._massive import DriftReport, FlatFileClient
     from deephaven_massive._tables.core import SessionCore
 
 __all__ = ["BLOCK_SIZE", "FlatFileHistory"]
@@ -230,8 +240,10 @@ class _Transform:
         header_of = {column: header for header, column in key_map.items()}
         types = {column.name: column.type for column in spec.schema.columns}
         futures = spec.asset_class is AssetClass.FUTURES
-        units = TimeUnitTable(unit_rules({spec.name: spec}))
+        units = TimeUnitTable(declared_units({spec.name: spec}))
         timestamp_header = header_of["Timestamp"]
+        session_header = header_of["SessionEndDate"] if futures else None
+        keys = {header_of["Symbol"], timestamp_header}
         to_ns = functools.partial(
             units.to_epoch_ns_array, TimeField(spec.name, Transport.FLAT_FILES, timestamp_header)
         )
@@ -252,6 +264,7 @@ class _Transform:
             to_ns=to_ns,
             session=None,
             block_size=BLOCK_SIZE,
+            required=frozenset(keys if session_header is None else {*keys, session_header}),
         )
         return cls(
             dataset=spec.name,
@@ -259,7 +272,7 @@ class _Transform:
             columns=tuple((c.type, c.name, header_of.get(c.name)) for c in spec.schema.columns),
             arrow_schema=spec.schema.arrow_schema(),
             units=units,
-            session_header=header_of["SessionEndDate"] if futures else None,
+            session_header=session_header,
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
@@ -278,8 +291,10 @@ class _Transform:
     def apply(self, batch: pa.RecordBatch) -> pa.RecordBatch:
         """Turn one batch of surviving rows into a block of the dataset's schema.
 
-        Pure Arrow: unit conversion of every `Instant`, and nulls for the columns the files
-        lack. The lists are already parsed, and the rows already filtered, by the reader.
+        Pure Arrow: the timestamp routine on every `Instant`, and nulls for the schema columns
+        the dataset reads from no header. The lists are already parsed, the rows already
+        filtered, and a documented header the file lacks already a column of nulls, by the
+        reader.
 
         Args:
             batch: One block's surviving rows, with the plan's columns.
@@ -287,8 +302,8 @@ class _Transform:
         Returns:
             The block in the dataset's schema.
 
-        A timestamp outside the declared unit's range raises the `MassiveError` of
-        `TimeUnitTable.to_epoch_ns_array`.
+        A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
+        `TimeUnitTable.instants`.
         """
         arrays = [self._column(batch, column) for column in self.columns]
         return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
@@ -311,24 +326,11 @@ class _Transform:
             return pa.nulls(batch.num_rows, column_type.arrow_type)
         values = batch[name]
         if column_type is ColumnType.INSTANT:
-            if header != self.plan.time_header:
-                # Massive writes 0 where a timestamp has no value; WebSocket and REST omit it.
-                values = pc.if_else(pc.equal(values, 0), pa.scalar(None, pa.int64()), values)
-            return pc.cast(self._nanos(header, values), column_type.arrow_type)
+            field_id = TimeField(self.dataset, Transport.FLAT_FILES, header)
+            time_column = header == self.plan.time_header
+            nanos = self.units.instants(field_id, values, time_column=time_column)
+            return pc.cast(nanos, column_type.arrow_type)
         return values
-
-    def _nanos(self, header: str, values: pa.Array) -> pa.Array:
-        """Convert a timestamp header's epoch integers to nanoseconds by its declared unit.
-
-        Args:
-            header: The CSV header, such as `"sip_timestamp"`.
-            values: Its `int64` values.
-
-        Returns:
-            Epoch nanoseconds, `int64`.
-        """
-        field_id = TimeField(self.dataset, Transport.FLAT_FILES, header)
-        return self.units.to_epoch_ns_array(field_id, values)
 
 
 class _CancelledError(Exception):
@@ -393,9 +395,13 @@ class FlatFileHistory:
         last requested date is missing on a trading day within a day after its publication time
         (`"... is not yet published (flat files land ~11:00 ET next day), or was a market
         holiday"`), when the S3 client cannot be created, the bucket is unreachable or answers
-        another error, a file is not the expected gzip CSV (for example, a documented header is
-        missing), a futures file holds another session, or the session is closed during the
-        call. Errors that come from S3 carry its `x-amz-request-id` as `request_id`.
+        another error, a file is not the expected gzip CSV (for example, it lacks the symbol or
+        time header, or a value does not parse as its type), a timestamp overflows or lies
+        outside 1990 to 2100 (`"timestamp unit mismatch for <dataset>.<header>: ..."`, then
+        the file), a futures file holds another session, or the session is closed during the
+        call. Errors that come from S3 carry its `x-amz-request-id` as `request_id`. An extra
+        or missing documented header is not an error: it logs a WARNING once per header and
+        session.
         """
         prefix = spec.flat_file_prefixes[request.timespan]
         transform = _Transform.build(spec, request.symbols, window)
@@ -496,7 +502,8 @@ class FlatFileHistory:
 
         Raises:
             MassiveError: If converting or gathering the file's rows fails in Arrow (out of
-                memory, say): `"cannot read <location>: <Arrow's message>"`. A failed request
+                memory, say): `"cannot read <location>: <Arrow's message>"`; if a timestamp
+                fails the timestamp routine: its text, then `"(in <location>)"`. A failed request
                 or read (for example, a file that is not the expected gzip CSV) raises the
                 public error of `_public`: `MassiveError`, `AuthenticationError`, or
                 `EntitlementError`. A closed session raises the `MassiveError` of
@@ -516,13 +523,16 @@ class FlatFileHistory:
                     )
                 except pa.ArrowException as error:
                     raise MassiveError(f"cannot read {file.location}: {error}") from error
+                except UnitMismatchError as error:
+                    # The routine knows the field, not the file: name the file too.
+                    raise MassiveError(f"{error} (in {file.location})") from error
         except WireError as error:
             public = _public(error, key)
             raise public from error
 
     def _gather(
         self,
-        batches: Iterator[pa.RecordBatch],
+        batches: Iterator[tuple[pa.RecordBatch, DriftReport]],
         transform: _Transform,
         *,
         limit: int,
@@ -530,8 +540,12 @@ class FlatFileHistory:
     ) -> list[Table]:
         """Convert a file's batches to the schema and gather them into static tables.
 
+        Reports the file's drift, which its first batch carries, to the session's
+        `DriftRegistry`, which logs a WARNING the first time the dataset's flat files show each
+        extra or missing header.
+
         Args:
-            batches: The file's batches, one per block.
+            batches: The file's batches, one per block, each with the file's drift.
             transform: The request's block transform.
             limit: The bytes of surviving rows that make one table.
             cancel: The call's cancel event, checked after each block.
@@ -542,8 +556,12 @@ class FlatFileHistory:
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
         size = 0
+        reported = False
         with entered(self._core.exec_ctx):
-            for batch in batches:
+            for batch, drift in batches:
+                if not reported:  # every batch of a file carries the same report
+                    self._core.drift.report(transform.dataset, Transport.FLAT_FILES, drift)
+                    reported = True
                 rows = transform.apply(batch)
                 if rows.num_rows:
                     pending.append(rows)

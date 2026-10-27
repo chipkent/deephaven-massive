@@ -15,7 +15,8 @@ one `SessionCore`, which queries and namespaces share. The core owns:
   every diagnostics row is queued while `registry_lock` is held, so rows reach the tables in
   the order the registry changed;
 - the result registry and the reaper thread (`liveness.py`);
-- the diagnostics tables and their writer thread (`diagnostics.py`);
+- the diagnostics tables and their writer thread, and the drift registry that every transport
+  reports schema drift to (`diagnostics.py`);
 - the closers that run when the session closes, or when it is collected without `close()`;
 - one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`),
   each returning one of the ports defined here: `RestTransport` (`fetch`, `poll`, REST
@@ -58,6 +59,7 @@ from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
+    DriftRegistry,
     StreamRow,
     StreamState,
     StreamUpdate,
@@ -78,6 +80,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
     from deephaven_massive._datasets.request import HostDecision, Request, StreamKey
     from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode
+    from deephaven_massive._massive import DriftReport
     from deephaven_massive._tables.liveness import StreamHandle
 
 __all__ = [
@@ -423,7 +426,7 @@ class SessionCore:
     def __init__(
         self, config: MassiveConfig, exec_ctx: ExecutionContext, label: str, *, catalog: Catalog
     ) -> None:
-        """Create the core, its reaper thread, and the diagnostics tables and writer.
+        """Create the core, its reaper, the diagnostics tables and writer, and the drift registry.
 
         Args:
             config: The validated configuration.
@@ -446,6 +449,7 @@ class SessionCore:
             self.diagnostics.stop()
             raise
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
+        self.drift: Final = DriftRegistry()
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamState] = {}
         # Set once by `attach`, right after construction and before any verb can run.
@@ -830,11 +834,11 @@ class SessionCore:
         building a result or opening the stream failed. At zero holds a running stream's row
         becomes `RELEASED` (a failed or closed one keeps its state). The record stays in the
         registry until the blink table shuts down; if it already has (`stream_shut_down` ran
-        while holds were outstanding) or the stream never opened, the record is deleted now.
-        Releasing the stream scope drops the library's reference to the blink table; the table
-        dies, and its shutdown callback releases the topics, when nothing else (a derived table,
-        an open panel) refers to it. Releasing the scope of a stream that has already shut down
-        is a harmless decrement.
+        while holds were outstanding) or the stream never opened, the record is deleted now,
+        and the drift registry forgets the stream. Releasing the stream scope drops the
+        library's reference to the blink table; the table dies, and its shutdown callback
+        releases the topics, when nothing else (a derived table, an open panel) refers to it.
+        Releasing the scope of a stream that has already shut down is a harmless decrement.
 
         Args:
             stream_id: The stream whose hold is dropped.
@@ -855,6 +859,7 @@ class SessionCore:
                 del self._stream_ids[state.key]
             if not held and (state.shut_down or not opened):
                 del self._streams[stream_id]
+                self.drift.forget(stream_id)
             else:
                 self._streams[stream_id] = replace(state, row=row)
             if opened:
@@ -936,6 +941,34 @@ class SessionCore:
                 if state.handle is not None:  # an opening stream's row is written by _open
                     self.diagnostics.write(row)
 
+    def record_stream_drift(self, stream_id: int, prefix: str, drift: DriftReport) -> None:
+        """Add a payload's drift to a stream's `SchemaDrift` and write its row if it changed.
+
+        The REST poller and the WebSocket flush thread call this for each payload a stream
+        receives, after reporting the drift's WARNINGs with `DriftRegistry.report` outside every
+        lock. Recording the drift and writing the row happen in one `registry_lock` section, so
+        the row always shows the latest text however many threads report for the stream. An
+        opening stream's row is first written when its open returns; an id that has left the
+        registry is ignored, so no drift is kept for a stream that is gone. No Deephaven call,
+        no wait.
+
+        Args:
+            stream_id: The stream whose payload drifted.
+            prefix: The transport's value (`"WS"`, `"REST"`), the entries' prefix.
+            drift: The payload's drift.
+        """
+        with self.registry_lock:
+            state = self._streams.get(stream_id)
+            if state is None:
+                return
+            text = self.drift.record(stream_id, prefix, drift)
+            if text is None:
+                return
+            row = replace(state.row, schema_drift=text)
+            self._streams[stream_id] = replace(state, row=row)
+            if state.handle is not None:  # an opening stream's row is written by _open
+                self.diagnostics.write(row)
+
     def stream_shut_down(self, stream_id: int) -> None:
         """Record that a stream's blink table has shut down.
 
@@ -943,11 +976,12 @@ class SessionCore:
         before it releases the stream's topics. That callback runs on whichever thread drops
         the last reference to the table: the reaper, an update-graph thread (`publish_failure`
         shuts the table down at once), or a gRPC thread. The stream's key is unmapped, so no
-        new verb reuses the dead table. With no holds left the record is deleted; with holds
-        outstanding (a failure shut the table down while results are still held) the record is
-        marked shut down and deleted when the last hold is released. It takes only
-        `registry_lock`, makes no Deephaven call, and writes no row: the stream's last row stays
-        in `m.streams()`. An unknown id is ignored.
+        new verb reuses the dead table. With no holds left the record is deleted and the drift
+        registry forgets the stream; with holds outstanding (a failure shut the table down while
+        results are still held) the record is marked shut down and deleted when the last hold
+        is released. It takes only `registry_lock` (and the drift registry's leaf lock),
+        makes no Deephaven call, and writes no row: the stream's last row stays in
+        `m.streams()`. An unknown id is ignored.
 
         Args:
             stream_id: The stream whose blink table shut down.
@@ -962,6 +996,7 @@ class SessionCore:
                 self._streams[stream_id] = replace(state, shut_down=True)
             else:
                 del self._streams[stream_id]
+                self.drift.forget(stream_id)
 
     def close(self) -> None:
         """Close the session: run the closers, mark streams closed, release the diagnostics.
