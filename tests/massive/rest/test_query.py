@@ -6,8 +6,9 @@ from enum import Enum, IntEnum, StrEnum
 import numpy as np
 import pytest
 
+from deephaven_massive._massive import spec
 from deephaven_massive._massive.rest import query
-from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, WireUnit
+from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, Transport, WireUnit
 
 
 class _Order(StrEnum):
@@ -253,6 +254,23 @@ def test_the_arguments_are_not_modified() -> None:
     query.request_target(_PATH, path_params, query_params)
     assert path_params == {"stockTicker": "AAPL", "date": date(2026, 1, 2)}
     assert query_params == {"ticker.any_of": ["A"], "limit": None}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "/stocks/financials/v1/balance-sheets",
+        "/stocks/financials/v1/cash-flow-statements",
+        "/stocks/financials/v1/income-statements",
+        "/stocks/filings/10-K/vX/sections",
+    ],
+)
+def test_the_generated_period_end_filters_take_dates(key: str) -> None:
+    # The vendor types these filters as bare strings; their descriptions give the date format.
+    rest_path = spec.source(Transport.REST, key)
+    query_params = {"period_end.gte": date(2024, 1, 1), "period_end.lt": date(2025, 1, 1)}
+    target = query.request_target(rest_path, {}, query_params)
+    assert target == f"{key}?period_end.gte=2024-01-01&period_end.lt=2025-01-01"
 
 
 @pytest.mark.parametrize(
