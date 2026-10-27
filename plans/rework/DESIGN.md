@@ -252,6 +252,7 @@ Supporting files outside the package:
 |---|---|
 | `scripts/check.sh [fast\|full] [--no-fix]` | The single verification entry point (lint, format, type check; `full` adds the test suite with coverage). |
 | `python -m deephaven_massive._massive.refresh [--check \| --fetch]` | The refresh command, run from a source checkout ([section 19.6](#196-refresh-and-drift)). |
+| `vendor/massive/` | The vendored spec snapshot the refresh reads ([section 19](#19-wire-clients-and-the-spec-snapshot)). It is Massive's published content, vendored as generation input: not covered by the repository's license, and in neither the wheel nor the sdist. `vendor/README.md` says so beside it. |
 | `.github/workflows/spec-drift.yml` | The advisory weekly drift job ([section 20](#20-quality-gates)). |
 | `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag; created only when the owner turns publishing on ([section 20.1](#201-tooling-configuration)). |
 | `tests/data/` | Payload fixtures. |
@@ -288,6 +289,7 @@ directory starts with `_`. Examples:
 | `_massive/rest/client.py` | `tests/massive/rest/test_client.py` | |
 | `_massive/refresh/__main__.py` | `tests/massive/refresh/test_main.py` | |
 | `_massive/refresh/generate.py` | `tests/massive/refresh/test_generate.py` (also the parity test) | |
+| `_massive/refresh/rest.py` | `tests/massive/refresh/test_rest.py` | |
 
 **Import roots.** `[tool.pytest] pythonpath = ["."]` and `[tool.mypy] mypy_path = ["src"]`;
 test code imports helpers as `tests._fakes…`. So `tests/massive/` can never shadow a top-level
@@ -899,10 +901,10 @@ Excluded items fall into two lists.
   flat-file prefixes. Each names an item present in a vendor source at the pinned snapshot
   (the OpenAPI spec, `websocket.json`, `llms.txt` and the REST pages it links, or the
   flat-file pages). An entry that names an item the snapshot lacks fails the refresh as stale
-  (G4, [section 19.4](#194-generated-schemas)). A path the OpenAPI spec itself marks
-  deprecated (`x-polygon-deprecation`) or draft (`x-polygon-draft`) is accounted for by the
-  spec and is never an entry; the rows below that name such paths record why nothing uses
-  them. An entry whose reason is that no documentation page names the item is marked
+  (the `stale-entry` gate, [section 19.4](#194-generated-schemas)). A path the OpenAPI spec
+  itself marks deprecated (`x-polygon-deprecation`) or draft (`x-polygon-draft`) is accounted
+  for by the spec and is never an entry; the rows below that name such paths record why
+  nothing uses them. An entry whose reason is that no documentation page names the item is marked
   `undocumented`, and the refresh checks that claim against the snapshot both ways: a page
   whose `**Endpoint:**` line names the item fails it, as does a documented entry no page
   names.
@@ -1107,8 +1109,8 @@ Sizes come out as `double` wherever any source says `number`; condition codes co
 The unit of every timestamp-like wire field is a fact about Massive's wire format. It is the
 hand-verified `UNITS` table in `_massive/refresh/overrides.py`, and the generator writes it onto
 each generated field, so callers read it as `source(...).field(column).unit`. A timestamp-like
-field without a `UNITS` entry fails the refresh (gate G3, [section 19.4](#194-generated-schemas)).
-The table is complete for every generated source, so no dataset package edits it.
+field without a `UNITS` entry fails the refresh (the `timestamp-unit` gate,
+[section 19.4](#194-generated-schemas)). The table is complete for every generated source, so no dataset package edits it.
 
 The OpenAPI spec tags some integer fields with a unit type in `x-polygon-go-type`
 (`INanoseconds`, `IMicroseconds`, `IMilliseconds`, `IDaysPolygonDateString`), but the tags are
@@ -1839,8 +1841,12 @@ implements Massive's documented protocol or a requirement of this design.
 
 **One package.** `deephaven_massive._massive` owns all Massive wire access: REST, WebSocket,
 and S3 flat files (the bucket client, the key layout, CSV decoding, the S3 error mapping), the
-vendored spec snapshot, the generated wire schemas, the units, and the long-form names. What
-stays outside is the library's: Deephaven tables, sessions and liveness, dataset semantics
+generated wire schemas, the units, and the long-form names, and its `refresh/` subpackage
+generates those schemas from the vendored spec snapshot. The snapshot itself lives outside the
+package, in `vendor/massive/` at the top of the source checkout: it is Massive's published
+content, vendored as generation input, not covered by the repository's license, and not
+distributed in the packages (`vendor/README.md` says the same beside it). What stays outside
+is the library's: Deephaven tables, sessions and liveness, dataset semantics
 (`Symbol`, `Timestamp`, `Underlying`, the merged dataset schemas, conversion to nanoseconds,
 the timestamp bound), the source choice, the missing-file policy, reader pools, cancellation,
 public error text, and drift reporting. The clients take plain arguments, never
@@ -1890,17 +1896,33 @@ flatfiles/           imports net, spec
 refresh/             build time only; excluded from the wheel; may import any of the above
   __init__.py        empty
   __main__.py        [--check | --fetch]; the plain run regenerates spec/*.json
+  generate.py        the refresh: snapshot -> generators -> spec/*.json, written only when every
+                     gate passes and the text changes
+  snapshot.py        the snapshot's location (vendor/massive/), layout, and manifest; store
+                     (staged write, atomic swap) and verified load
+  fetch.py           download and put each file in canonical form; stores through snapshot.py
+  docs.py            flat-file "Columns" tables, overview prefix tables, llms.txt and the
+                     endpoint line of each REST page it links
+  openapi.py         OpenAPI reading: $ref, allOf merge, one-branch choices, checked accessors
+  naming.py          the naming policy shared by every transport: PascalCase columns, snake
+                     case concepts, short and timestamp-like names, the dataset key columns
+  rest.py            REST paths -> RestPath: flattening, representation rules, names,
+                     parameters, path coverage, and the gates met per field or parameter
+  ws.py, flatfiles.py  the WebSocket and flat-file generators (with the type lattice)
+  gates.py           Gate (the named gates of section 19.4), Problem, RefreshError, and the
+                     checks that span paths: stale entries, exclusions, concept collisions
+  render.py          spec/*.json in canonical text
+  hand.py            HandInput: the hand tables bundled for the generators
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
   overrides.py       NAMES, KINDS, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
                      TRANSPORT_ONLY, RESULT_KEYS, PARAM_UNITS, VENUES
   exclusions.py      EXCLUSIONS (kind, item, reason), the executable rows of section 8.12
-  docs.py            flat-file "Columns" tables, overview prefix tables, llms.txt and the
-                     endpoint line of each REST page it links
-  generate.py        snapshot -> spec/*.json: flatten, representation rules, type lattice, names, gates
-  fetch.py           download and store canonically, manifest.json
   drift.py           live-against-snapshot comparison, unaccounted items, deprecations
-  snapshot/          openapi.json, websocket.json, llms.txt, rest/ (the REST pages llms.txt
-                     links), flat-file pages, manifest.json
+
+vendor/massive/      outside the package; Massive's published content, vendored as generation
+                     input, not covered by the repository's license, in no distribution
+  openapi.json  websocket.json  llms.txt  rest/ (the REST pages llms.txt links)
+  flat-file pages  manifest.json
 ```
 
 The package is spelled `flatfiles` because PEP 8 forbids the underscore in a package name; the
@@ -1948,8 +1970,10 @@ negative test per rule:
   names only a member of `_massive.__all__`; and no module names a snapshot file.
 - A subprocess import of `deephaven_massive._massive` leaves `deephaven` out of `sys.modules`.
 
-**Not shipped.** The wheel excludes all of `refresh/`, the snapshot included. `spec/*.json` ship
-as package data.
+**Not shipped.** The wheel excludes all of `refresh/`, and neither the wheel nor the sdist
+contains `vendor/` (the CI build job checks both archives). `spec/*.json` ship as package data.
+The tests that read the snapshot (the parity test among them) skip with a stated reason where
+`vendor/massive/` is absent, as in an unpacked sdist; in the repository they always run.
 
 ### 19.1 The REST client
 
@@ -2219,8 +2243,8 @@ verification, never a column list.
 - **REST parameters.** A name ending in `.any_of`, or an array, is `LIST` (sent comma-joined,
   even when its values come from an `enum`); any other `enum` is `ENUM`; booleans, integers, and numbers are `BOOLEAN`, `INTEGER`, and `NUMBER`; a
   timestamp-like string parameter (base name `timestamp`, `*_timestamp`, `updated`,
-  `*_updated`, `window_start`, `window_end`, or `*_time`, the names of gate G3) takes its
-  `PARAM_UNITS` entry: a unit makes it `TIMESTAMP` in that unit (`Param.unit`), and "not an
+  `*_updated`, `window_start`, `window_end`, or `*_time`, the names of the `timestamp-unit`
+  gate) takes its `PARAM_UNITS` entry: a unit makes it `TIMESTAMP` in that unit (`Param.unit`), and "not an
   epoch" makes it `DATE`; a string with `format: date` or `date-time`, a choice of formats, or
   a base name `date`, `*_date`, `*_utc`, or `as_of` is `DATE`; any other string is `STRING`.
   The `.gt`, `.gte`, `.lt`, and `.lte` variants share their base name's entry.
@@ -2264,8 +2288,8 @@ verification, never a column list.
 `epoch` (with its `UNITS` entry). Two types meet for one column name within one kind by these
 joins: `long ⊔ double = double`; `long ⊔ int-array = int-array` (a scalar becomes a
 one-element list); `epoch ⊔ epoch = epoch`, each source keeping its own unit. Any other pair is a
-**type conflict** (gate G5). `_schema` maps `long` to `long`, `double` to `double`, `bool` to
-`boolean`, `string` and `json-text` to `String`, `date` to `LocalDate`, `epoch` and
+**type conflict** (the `type-agreement` gate). `_schema` maps `long` to `long`, `double` to
+`double`, `bool` to `boolean`, `string` and `json-text` to `String`, `date` to `LocalDate`, `epoch` and
 `iso-instant` to `Instant`, and `int-array` to `int[]`. An `iso-instant` is ISO-8601
 date-time text with seconds and an offset (`Z` or `±HH:MM`), decoded to exact integer
 nanoseconds since the epoch; text without an offset, or an instant outside the signed
@@ -2274,12 +2298,12 @@ clamped. An `int-array` element outside the
 `int32` range is an unconvertible value.
 
 **Hand input.** All of it lives in `refresh/`, every entry carries a reason, and an entry that
-names a source or field the snapshot lacks fails the refresh as stale (G4).
+names a source or field the snapshot lacks fails the refresh as stale (`stale-entry`).
 
 | Kind | Where | What | Example |
 |---|---|---|---|
 | Lexicon | `lexicon.py` | `SHAPES` maps each object shape (aggregate row; snapshot `day`, `min`, `prevDay`, `lastTrade`, `lastQuote`; each WebSocket channel; each futures object) to its lexicon. A lexicon translates a short key to the long name Massive uses for the same field elsewhere in that asset class's REST or flat-file data, and **every entry cites that endpoint or file**; identity entries cover short real words (`id`, `cik`, `url`, `low`, `fmv`, `mic`). | trade lexicon `p` → `price`, `t` → `sip_timestamp` (`/v3/trades/{stockTicker}`); crypto trade `t` → `participant_timestamp` (`/v3/trades/{cryptoTicker}`); forex quote `a` → `ask_price` (`/v3/quotes/{fxTicker}`); segment `min` → `last_minute` (`/v3/snapshot`) |
-| `NAMES` | `overrides.py` | `{(source, wire key): (long name, description)}` only for a short key Massive gives no long name anywhere: the name is derived from Massive's own description of the field, which the entry quotes exactly; a changed description makes the entry stale (G4). `NAMES` never renames something the vendor already names, and never coins a dataset key column. | snapshot `min.av` → `accumulated_volume` ("The accumulated volume."), `min.dav` → `accumulated_decimal_volume`; WebSocket `av`, `dav`, `op` |
+| `NAMES` | `overrides.py` | `{(source, wire key): (long name, description)}` only for a short key Massive gives no long name anywhere: the name is derived from Massive's own description of the field, which the entry quotes exactly; a changed description makes the entry stale (`stale-entry`). `NAMES` never renames something the vendor already names, and never coins a dataset key column. | snapshot `min.av` → `accumulated_volume` ("The accumulated volume."), `min.dav` → `accumulated_decimal_volume`; WebSocket `av`, `dav`, `op` |
 | `KINDS` | `overrides.py` | `{kind: {group: [sources]}}`: the sources of one dataset kind, grouped per asset class, in source order. Every dataset with a stream or flat-file source has a kind, WebSocket-only `luld`, `imbalances`, and `fmv` included. | `trades: {stocks: [/v3/trades/{stockTicker}, /v2/last/trade/{stocksTicker}, (stocks, T), us_stocks_sip/trades_v1], crypto: […]}` |
 | `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values, `last_updated` → `timestamp` |
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
@@ -2313,7 +2337,7 @@ per-column exceptions:
    columns, `Symbol`, `Timestamp`, and `Underlying`, made by the run-time key rename. A vendor
    field literally named `symbol` (the open-close and conversion paths) is generated as
    `Symbol`, its own name, and the key rename uses it as is; `NAMES` may never coin a key column
-   (gate G2). There are no `Ticker` or `Pair` stand-ins.
+   (the `column-collision` gate). There are no `Ticker` or `Pair` stand-ins.
 6. **Order.** Columns keep the vendor's natural order, recorded explicitly in each generated
    file's field lists. Massive's REST documentation lists every object's fields
    alphabetically (the specification's keys, its pages' response-attribute tables, and their
@@ -2324,20 +2348,21 @@ per-column exceptions:
    window_start, transactions`); the WebSocket and flat-file generators apply it. The snapshot stores every document in the order served, never re-sorted. The
    dataset's key columns come first at run time.
 7. **Consistency.** Within one dataset kind, one column for two concepts fails the refresh
-   (gate G8); one concept always gets one column, by rules 1–4.
+   (the `concept-collision` gate); one concept always gets one column, by rules 1–4.
 
 Names are never derived from descriptions except under rule 3, and the generator emits
 `Timestamp` only where the vendor's long name is `timestamp`.
 
-**Refresh gates.** The refresh fails, printing the source, the key, and its description for the
-reviewer, on:
+**Refresh gates.** The refresh fails, printing the gate, the source, the key, and its
+description for the reviewer. Every gate has a descriptive name, which is how the code
+(`refresh/gates.py`, `Gate`), its messages, and its tests refer to it. It fails on:
 
-- **G1:** a short key (three characters or fewer, no underscore) with no lexicon, identity, or
-  `NAMES` entry;
-- **G2:** two keys of one source producing one column, or a `NAMES` entry coining a dataset
-  key column (`Symbol`, `Timestamp`, `Underlying`);
-- **G3:** a timestamp-like field left to a default. G3 runs on the snake case of the long
-  name, after the lexicon and `NAMES` (so `serverTime` is `server_time`): a field is
+- **`short-key`:** a short key (three characters or fewer, no underscore) with no lexicon,
+  identity, or `NAMES` entry;
+- **`column-collision`:** two keys of one source producing one column, or a `NAMES` entry
+  coining a dataset key column (`Symbol`, `Timestamp`, `Underlying`);
+- **`timestamp-unit`:** a timestamp-like field left to a default. It runs on the snake case of
+  the long name, after the lexicon and `NAMES` (so `serverTime` is `server_time`): a field is
   timestamp-like when it has a unit tag, a doc type of `timestamp - integer`, or a long name
   matching `timestamp`, `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or
   `*_time` (the bar lexicon gives `s` and `e` as `window_start` and `end_timestamp`, while a
@@ -2346,22 +2371,22 @@ reviewer, on:
   needs a `UNITS` "not a timestamp" entry or a `TYPE_FIXES` entry; text with a `format` is
   decided by the representation rules. A timestamp-like string REST parameter (by its base
   name) with no `PARAM_UNITS` entry fails the same gate;
-- **G4:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict, `TYPE_FIXES`,
-  `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry naming a source,
-  field, or parameter the snapshot lacks, or claiming what the snapshot contradicts (a type fix
+- **`stale-entry`:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict,
+  `TYPE_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry
+  naming a source, field, or parameter the snapshot lacks, or claiming what the snapshot contradicts (a type fix
   whose declared type the spec no longer gives, a tag conflict the tag no longer contradicts,
   a `NAMES` quote the description no longer matches, an exclusion of a path the spec already
   marks deprecated or draft); an identity entry no generated object uses is stale too;
-- **G5 (type agreement):** within one kind, one column name joins to one `WireType`, unless a
+- **`type-agreement`:** within one kind, one column name joins to one `WireType`, unless a
   `TYPE_FIXES` entry resolves it; the message prints both keys' descriptions, because a
   conflict is first treated as a possible naming error (stocks and futures `dv` are exactly
   that);
-- **G6 (transport agreement):** within one `KINDS` group whose sources span two or more
+- **`transport-agreement`:** within one `KINDS` group whose sources span two or more
   transports, every column appears on at least two transports or is in `TRANSPORT_ONLY`,
   which catches a one-sided lexicon slip (`s` becoming `Shares` while REST says `size`);
-- **G7:** a futures kind whose venue pages differ;
-- **G8 (one concept, one column):** within one kind, one column name holding two concepts. A
-  concept is a field's full long-name path, each segment in snake case, so `DayClose` and
+- **`venue-agreement`:** a futures kind whose venue pages differ;
+- **`concept-collision` (one concept, one column):** within one kind, one column name holding
+  two concepts. A concept is a field's full long-name path, each segment in snake case, so `DayClose` and
   `PrevDayClose` are two concepts, while the v2 snapshot's `lastTrade.p` and the unified
   snapshot's `last_trade.price` are one; two paths that PascalCase alike (`last.trade_price`,
   `last_trade.price`) fail. The reverse, one concept under two column names, cannot arise
@@ -2377,8 +2402,9 @@ not a choice of date and date-time strings, or a response it cannot read (`shape
 unit that differs from the spec's unit tag without a tag-conflict entry (`units`); and an
 envelope key of a single-object body with a type not the envelope's (`envelope`).
 
-Descriptions differ across transports and change about twenty times as often as keys, so G5 and
-G6, not description matching, are the mechanical checks.
+Descriptions differ across transports and change about twenty times as often as keys, so
+`type-agreement` and `transport-agreement`, not description matching, are the mechanical
+checks.
 
 **Dataset schemas** are merged at run time, after the rename, never inferred from data:
 
@@ -2504,21 +2530,25 @@ The command runs from a source checkout; `refresh/` is not in the wheel. The par
 requires it byte for byte, and checks documented = generated ⊎ excluded ⊎ (deprecated ∪
 draft).
 
-**The snapshot is stored canonically.** `fetch.py` writes JSON with `indent=1` and a final
-newline, keeping the order in which the vendor served each object's keys (the documented
+**The snapshot is stored canonically**, in `vendor/massive/`, and `refresh/snapshot.py` is the
+one owner of its format: the layout names, the manifest, the staged write and atomic swap, and
+the verified load. `fetch.py` puts each download in canonical form: JSON with `indent=1` and a
+final newline, keeping the order in which the vendor served each object's keys (the documented
 column order, never re-sorted), and text with trailing whitespace stripped and a final newline,
 so refresh diffs read line by line and no hook exception is needed. `manifest.json` records the
 fetch date and, per file, its URL and the SHA-256 of the fetched bytes and of the stored file.
 Every refresh re-hashes every file against the manifest and requires the files on disk to be
 exactly the manifest's, so a hand-edited vendor file stops it; the generated file records the
 specification's verified hash. Besides the
-specs, `--fetch` stores every REST page `llms.txt` links, under `snapshot/rest/`, because
+specs, `--fetch` stores every REST page `llms.txt` links, under `vendor/massive/rest/`, because
 `llms.txt` names pages, not paths: each page's `**Endpoint:**` line is what ties the
 documentation to an OpenAPI path. The documentation host rate-limits a burst of page requests
 with HTTP 429, which the fetch waits out (`Retry-After`, capped at 60 s, else 2 to 32 s, five
 times); any other failure stops it and leaves the old snapshot in place, and the new snapshot
-is swapped in through a backup directory. The snapshot (about 3 MB, 164 files, fetched
-2026-10-27 UTC) ships in the sdist and never in the wheel.
+is swapped in through a backup directory (`vendor/massive-incoming/` and
+`vendor/massive-previous/`, both gitignored). The snapshot (about 3 MB, 164 files, fetched
+2026-10-27 UTC) is Massive's published content, vendored as generation input and not covered
+by the repository's license, so it ships in neither the sdist nor the wheel.
 
 **`--check`** downloads the live `openapi.json`, `websocket.json`, `llms.txt`, and flat-file
 pages and overviews, compares them semantically with the snapshot (`refresh/drift.py`), prints a
@@ -2537,15 +2567,15 @@ with its action; with no drift it does nothing. It has `issues: write` only, nev
 pull request, and is never a gate.
 
 **Closing the loop.** A person runs `--fetch` and the plain refresh, then reviews one PR holding
-the snapshot diff, the `spec/*.json` diff, and any hand-input lines, and `check.sh` runs G1–G7
-and C1–C7. What each change does:
+the snapshot diff, the `spec/*.json` diff, and any hand-input lines, and `check.sh` runs every
+refresh gate and C1–C7. What each change does:
 
 | Change at Massive | At run time | In the refresh |
 |---|---|---|
-| Field added | Dropped, one WARNING, `SchemaDrift`. | It gets a name (G1 asks for a lexicon or `NAMES` line for a short key) and joins its kind (G5 checks the type, G6 the transports). |
+| Field added | Dropped, one WARNING, `SchemaDrift`. | It gets a name (`short-key` asks for a lexicon or `NAMES` line for a short key) and joins its kind (`type-agreement` checks the type, `transport-agreement` the transports). |
 | Field removed | Null; a required field or CSV header warns; a required key fails loudly. | It leaves its source; C1 fails if it was a declared key. |
-| Field renamed | A removal plus an addition. | The column is renamed in the diff, or stays the same if the long form is unchanged; G6 catches a one-sided rename. |
-| Type changed | A value that no longer converts fails loudly. | G5 or C3 fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
+| Field renamed | A removal plus an addition. | The column is renamed in the diff, or stays the same if the long form is unchanged; `transport-agreement` catches a one-sided rename. |
+| Type changed | A value that no longer converts fails loudly. | `type-agreement` or C3 fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
 | Unit changed | The overflow check or the bound fails loudly. | `--check` reports the changed tag, and the `UNITS` entry is re-verified. |
 | New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and C7 fails until a `DatasetSpec` or an `EXCLUSIONS` entry is added. |
 | Endpoint deprecated or removed | `MassiveError` with the HTTP status. | It leaves the generated set, and C6 names every dataset that uses it. |
@@ -2567,9 +2597,8 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   [section 4.2](#42-test-layout), and the `_massive` boundary and layers of
   [section 19](#19-wire-clients-and-the-spec-snapshot).
 - **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
-  byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and refresh gates
-  G1–G7), and `tests/test_catalog.py` passes (catalog gates C1–C7, generated ⊆ used ∪
-  undeclared) ([section 19.4](#194-generated-schemas)). They read only vendored files, never
+  byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
+  and `tests/test_catalog.py` passes (catalog gates C1–C7, generated ⊆ used ∪ undeclared) ([section 19.4](#194-generated-schemas)). They read only vendored files, never
   the network.
 - **Negative tests:** every gate has a negative test that fails when the gate is deleted.
 - **Process:** conventional-commit titles; every change lands through a pull request; only the
@@ -2866,8 +2895,8 @@ document already reflects them.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
     its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares the key
     columns its sources carry, and `_schema.rename` maps them to `Symbol`, `Timestamp`, and
-    `Underlying`. Names are never derived from descriptions, and gates G1–G7 and C1–C7 fail on a
-    wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The final names:
+    `Underlying`. Names are never derived from descriptions, and the refresh gates and C1–C7
+    fail on a wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The final names:
     `av` → `AccumulatedVolume`, `op` → `OfficialOpenPrice`, aggregate `a` → `DayVwap`,
     aggregate `z` → `AverageTradeSize`, `dav` → `AccumulatedDecimalVolume`, stocks `dv` →
     `DecimalVolume`, futures `dv` → `DollarVolume`, and the snapshot object `min` → `LastMinute…`.
