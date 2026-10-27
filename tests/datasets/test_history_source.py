@@ -55,6 +55,7 @@ def bars(
 
 STOCK_TRADES = DatasetSpec(
     name="stocks.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/trades/{stockTicker}",
     flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
@@ -66,6 +67,7 @@ STOCK_BAR_FILES: dict[Timespan | None, str] = {
 }
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     is_bars=True,
     history_path="/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}",
@@ -96,12 +98,14 @@ FOREX_BARS = bars(
 )
 INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
     flat_file_prefixes={None: "us_indices/values_v1"},
     keys=files({None: "us_indices/values_v1"}, "Timestamp"),
 )
 FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
     history_path="/futures/v1/trades/{ticker}",
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
@@ -113,6 +117,7 @@ FUTURES_BAR_FILES: dict[Timespan | None, str] = {
 }
 FUTURES_BARS = DatasetSpec(
     name="futures.bars",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
     is_bars=True,
     history_path="/futures/v1/aggs/{ticker}",
@@ -120,7 +125,10 @@ FUTURES_BARS = DatasetSpec(
     keys=files(FUTURES_BAR_FILES, "WindowStart", session=True),
 )
 YIELDS = DatasetSpec(
-    name="economy.yields", poll_keys=("Date",), history_path="/fed/v1/treasury-yields"
+    name="economy.yields",
+    summary="A dataset for the tests.",
+    poll_keys=("Date",),
+    history_path="/fed/v1/treasury-yields",
 )
 # Served by fetch() alone, so it has no history source at all.
 NOWHERE = replace(YIELDS, name="economy.nowhere", history_path=None, fetch_path="/fed/v1/inflation")

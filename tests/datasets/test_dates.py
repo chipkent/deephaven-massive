@@ -203,6 +203,7 @@ def test_flat_file_day_zone_is_the_class_zone() -> None:
 def _spec(asset_class: AssetClass | None) -> DatasetSpec:
     return DatasetSpec(
         name="x.history",
+        summary="A dataset for the tests.",
         asset_class=asset_class,
         history_path="/v3/trades/{stockTicker}",
     )

@@ -185,6 +185,7 @@ class DatasetSpec:
             # Channels, history, and a fetch path: a StreamHistoryLatestQuery.
             STOCK_TRADES = DatasetSpec(
                 name="stocks.trades",
+                summary="Trades of US-listed stocks, tick by tick.",
                 asset_class=AssetClass.STOCKS,
                 kind="trades",
                 fetch_path="/v2/last/trade/{stocksTicker}",
@@ -211,6 +212,10 @@ class DatasetSpec:
 
     Attributes:
         name: The dataset's dotted name, `"<namespace>.<dataset>"`, such as `"stocks.trades"`.
+        summary: What the dataset holds, in one sentence ending in a period, such as
+            `"Trades of US-listed stocks, tick by tick."`. The dataset method's docstring
+            starts with the same sentence; the library keeps it here so it never reads
+            `__doc__` at run time, where `python -OO` would have removed it.
         asset_class: The instruments' asset class, or None for datasets that span classes or
             have no instruments (reference data, economy, most partner datasets). Its value is
             the WebSocket cluster of the channels and the group of the dataset's kind.
@@ -252,6 +257,7 @@ class DatasetSpec:
     """
 
     name: str
+    summary: str
     asset_class: AssetClass | None = None
     is_bars: bool = False
     kind: str | None = None
@@ -274,7 +280,8 @@ class DatasetSpec:
         """Check the spec's internal consistency; nothing here reads the generated files.
 
         Raises:
-            ValueError: If the name is not `"<namespace>.<dataset>"`; the keys of `channels`
+            ValueError: If the name is not `"<namespace>.<dataset>"`; the summary is not one
+                line of text ending in a period (`_check_summary`); the keys of `channels`
                 or `flat_file_prefixes` do not match `is_bars`; a dataset with channels or a
                 kind has no `asset_class`; `keys` names a source the dataset does not use,
                 fills a `time` or `session` key from the request, marks a key other than
@@ -287,6 +294,7 @@ class DatasetSpec:
         namespace, _, dataset = self.name.partition(".")
         if not namespace or not dataset:
             raise ValueError(f"dataset name {self.name!r} must be '<namespace>.<dataset>'")
+        self._check_summary()
         keys = {*self.channels, *self.flat_file_prefixes}
         if any((key is None) == self.is_bars for key in keys):
             kind = "Timespan" if self.is_bars else "None"
@@ -300,6 +308,20 @@ class DatasetSpec:
         self._check_keys()
         self._check_flat_files()
         self._check_verbs()
+
+    def _check_summary(self) -> None:
+        """Check that the summary is one sentence: one line of text that ends in a period.
+
+        Raises:
+            ValueError: If the summary is empty, has leading or trailing whitespace, spans
+                more than one line, or does not end in a period; the message names the
+                dataset.
+        """
+        text = self.summary
+        if not text or text != text.strip() or "\n" in text or not text.endswith("."):
+            raise ValueError(
+                f"{self.name}: the summary must be one sentence ending in a period, got {text!r}"
+            )
 
     @property
     def group(self) -> str | None:
@@ -550,6 +572,7 @@ class Catalog:
 
             trades = DatasetSpec(
                 name="stocks.trades",
+                summary="Trades of US-listed stocks, tick by tick.",
                 asset_class=AssetClass.STOCKS,
                 channels={None: "T"},
                 keys={
