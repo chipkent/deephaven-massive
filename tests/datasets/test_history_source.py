@@ -30,7 +30,6 @@ from deephaven_massive._datasets.schema import (
 )
 from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan, Transport
-from deephaven_massive._query import HistoryQuery
 
 NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
@@ -44,7 +43,6 @@ def _ns(*fields: str) -> dict[tuple[Transport, str], TimeUnit]:
 
 STOCK_TRADES = DatasetSpec(
     name="stocks.trades",
-    query_class=HistoryQuery,
     asset_class=AssetClass.STOCKS,
     schema=TRADES.schema,
     key_maps={FF: TRADES.key_maps[FF]},
@@ -54,7 +52,6 @@ STOCK_TRADES = DatasetSpec(
 )
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
-    query_class=HistoryQuery,
     asset_class=AssetClass.STOCKS,
     schema=BARS.schema,
     is_bars=True,
@@ -88,7 +85,6 @@ FOREX_BARS = replace(
 )
 INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
-    query_class=HistoryQuery,
     asset_class=AssetClass.INDICES,
     schema=INDEX_VALUES.schema,
     key_maps={FF: INDEX_VALUES.key_maps[FF]},
@@ -97,7 +93,6 @@ INDEX_VALUES_SPEC = DatasetSpec(
 )
 FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
-    query_class=HistoryQuery,
     asset_class=AssetClass.FUTURES,
     schema=TRADES.schema,
     key_maps={
@@ -109,7 +104,6 @@ FUTURES_TRADES = DatasetSpec(
 )
 FUTURES_BARS = DatasetSpec(
     name="futures.bars",
-    query_class=HistoryQuery,
     asset_class=AssetClass.FUTURES,
     schema=BARS.schema,
     is_bars=True,
@@ -125,12 +119,14 @@ FUTURES_BARS = DatasetSpec(
 )
 YIELDS = DatasetSpec(
     name="economy.yields",
-    query_class=HistoryQuery,
     schema=Schema("economy.yields", (Column("Date", ColumnType.LOCAL_DATE),)),
     poll_keys=("Date",),
     history_method="list_treasury_yields",
 )
-NOWHERE = replace(YIELDS, name="economy.nowhere", history_method=None)
+# Served by fetch() alone, so it has no history source at all.
+NOWHERE = replace(
+    YIELDS, name="economy.nowhere", history_method=None, fetch_method="list_inflation"
+)
 
 
 def config(**overrides: object) -> dm.MassiveConfig:

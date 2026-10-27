@@ -5,9 +5,13 @@ module does the work they share when a dataset method is called:
 
 - `Namespace` is the base class of the namespace classes; it holds the session core, which
   each factory method passes to `build_query`.
-- `build_query` normalizes symbols (`normalize` in `_datasets/symbols.py`), rejects `dm.ALL`
-  where the dataset cannot serve it (naming the alternative), parses the time-axis bounds,
-  and normalizes the typed parameters and the `filters` mapping into a hashable `Request`.
+- `build_query` normalizes symbols (`normalize` in `_datasets/symbols.py`; a reactive
+  `Table` is checked for its `Symbol` column and boxed in a `SymbolTable` here), rejects
+  `dm.ALL` where the dataset cannot serve it (naming the alternative), parses the time-axis
+  bounds, and normalizes the typed parameters and the `filters` mapping into a hashable
+  `Request`.
+- `query_class` derives a dataset's query class from the transports its spec declares, so no
+  spec names a class and the dataset layer never refers to the query classes.
 - `bar_query_class` is the run-time half of the `bars()` overloads: it picks the most specific query
   class for the actual timespan and multiplier and rejects the timespans the asset class's endpoint
   does not accept.
@@ -29,27 +33,33 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar
 
+from deephaven.table import Table
+
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import check_filters
 from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.symbols import normalize
+from deephaven_massive._datasets.symbols import SymbolTable, normalize
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
+    Query,
     QueryBase,
+    StreamHistoryLatestQuery,
     StreamHistoryQuery,
+    StreamQuery,
 )
 from deephaven_massive._types import _All, override
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import ParamValue
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
-__all__ = ["Namespace", "bar_query_class", "build_query", "list_params"]
+__all__ = ["Namespace", "bar_query_class", "build_query", "list_params", "query_class"]
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +93,41 @@ class Namespace:
             For example `<MassiveSession #1 stocks>` or `<MassiveSession #1 partners.tmx>`.
         """
         return f"<{self._core.label} {self._path}>"
+
+
+def query_class(spec: DatasetSpec) -> type[QueryBase]:
+    """Return the query class of a dataset, derived from the transports its spec declares.
+
+    A dataset's verbs are exactly what its transports can serve, so the class follows from the
+    spec: channels give the stream verbs, a history source (a REST history or grouped-daily
+    method, or flat-file prefixes) gives `history()`, and a fetch method gives `fetch()`. Each
+    namespace factory's return annotation is this class, which the namespace tests check.
+
+    | Channels | History | Fetch | Class                      |
+    |----------|---------|-------|----------------------------|
+    | no       | no      | yes   | `Query`                    |
+    | yes      | no      | no    | `StreamQuery`              |
+    | no       | yes     | no    | `HistoryQuery`             |
+    | yes      | yes     | no    | `StreamHistoryQuery`       |
+    | yes      | yes     | yes   | `StreamHistoryLatestQuery` |
+
+    `DatasetSpec` rejects every other combination when it is created. A `bars` dataset gives
+    `HistoryQuery`, the class of its most general overload: `bar_query_class` picks the class
+    of each call from its timespan and multiplier.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        The query class its factory returns.
+    """
+    if spec.is_bars:
+        return HistoryQuery
+    if not spec.has_channels:
+        return Query if spec.has_fetch else HistoryQuery
+    if not spec.has_history:
+        return StreamQuery
+    return StreamHistoryLatestQuery if spec.has_fetch else StreamHistoryQuery
 
 
 def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[QueryBase]:
@@ -236,7 +281,9 @@ def build_query(
     Args:
         core: The session core the query will run on.
         spec: The dataset.
-        symbols: The instruments, or None for datasets without them.
+        symbols: The instruments, or None for datasets without them. A Deephaven `Table`
+            must have a `Symbol` column; it is boxed by identity in a `SymbolTable` and read
+            when a verb runs.
         all_alternative: None when the dataset accepts `dm.ALL`; otherwise the alternative to
             name in the `ValueError`, such as `"m.stocks.snapshots(dm.ALL)"`.
         timespan: The bar timespan; for a bars dataset (`DatasetSpec.is_bars`) it also selects
@@ -253,11 +300,13 @@ def build_query(
             a positive `int`.
 
     Returns:
-        An instance of the spec's query class (or of the class `bar_query_class` picks).
+        An instance of the spec's query class (`query_class`, or the class `bar_query_class`
+        picks for a bars dataset).
 
     Raises:
-        ValueError: If `dm.ALL` is passed where `all_alternative` is set, or `params` or
-            `filters` holds `adjusted`, which has its own typed argument.
+        ValueError: If `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
+            `Symbol` column, or `params` or `filters` holds `adjusted`, which has its own typed
+            argument.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
@@ -265,7 +314,13 @@ def build_query(
     `_require_enum`, `parse_date_like` in `_datasets/dates.py`, `bar_query_class`,
     `require_positive_int` for `limit`).
     """
-    normalized = None if symbols is None else normalize(spec.asset_class, symbols)
+    normalized: NormalizedSymbols | None = None
+    if isinstance(symbols, Table):
+        if "Symbol" not in symbols.column_names:
+            raise ValueError("a symbol table must have a Symbol column")
+        normalized = SymbolTable(symbols)
+    elif symbols is not None:
+        normalized = normalize(spec.asset_class, symbols)
     if isinstance(normalized, _All) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; use {all_alternative}")
     if venue is not None:
@@ -274,11 +329,11 @@ def build_query(
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     if params is not None and "adjusted" in params:
         raise ValueError("adjusted is set through build_query(adjusted=...), not params")
-    query_class = spec.query_class
+    cls = query_class(spec)
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")
     if timespan is not None and spec.is_bars:
-        query_class = bar_query_class(spec, timespan, multiplier)
+        cls = bar_query_class(spec, timespan, multiplier)
     first = None if start is None else parse_date_like(start, "start")
     last = None if end is None else parse_date_like(end, "end")
     if first is not None and last is not None:
@@ -296,4 +351,4 @@ def build_query(
         limit=None if limit is None else require_positive_int("limit", limit),
     )
     check_filters(spec, dict(request.filters))
-    return query_class(core, spec, request)
+    return cls(core, spec, request)

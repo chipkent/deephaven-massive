@@ -13,7 +13,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, ClassVar, Protocol, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -45,8 +45,12 @@ from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Ti
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery
+from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
+
+if TYPE_CHECKING:
+    from deephaven_massive._ingest.clients import SessionClients
 
 TIMEOUT = 30.0
 NEW_YORK = ZoneInfo("America/New_York")
@@ -79,7 +83,6 @@ def _ns(*fields: str) -> dict[tuple[Transport, str], TimeUnit]:
 
 STOCK_TRADES = DatasetSpec(
     name="stocks.trades",
-    query_class=HistoryQuery,
     asset_class=AssetClass.STOCKS,
     schema=TRADES.schema,
     key_maps={FF: TRADES.key_maps[FF]},
@@ -89,7 +92,6 @@ STOCK_TRADES = DatasetSpec(
 )
 STOCK_QUOTES = DatasetSpec(
     name="stocks.quotes",
-    query_class=HistoryQuery,
     asset_class=AssetClass.STOCKS,
     schema=QUOTES.schema,
     key_maps={FF: QUOTES.key_maps[FF]},
@@ -99,7 +101,6 @@ STOCK_QUOTES = DatasetSpec(
 )
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
-    query_class=HistoryQuery,
     asset_class=AssetClass.STOCKS,
     schema=BARS.schema,
     is_bars=True,
@@ -114,7 +115,6 @@ STOCK_BARS = DatasetSpec(
 )
 INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
-    query_class=HistoryQuery,
     asset_class=AssetClass.INDICES,
     schema=INDEX_VALUES.schema,
     key_maps={FF: INDEX_VALUES.key_maps[FF]},
@@ -123,7 +123,6 @@ INDEX_VALUES_SPEC = DatasetSpec(
 )
 FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
-    query_class=HistoryQuery,
     asset_class=AssetClass.FUTURES,
     schema=TRADES.schema,
     key_maps={
@@ -145,7 +144,6 @@ FUTURES_TRADES = DatasetSpec(
 )
 CRYPTO_TRADES = DatasetSpec(
     name="crypto.trades",
-    query_class=HistoryQuery,
     asset_class=AssetClass.CRYPTO,
     schema=TRADES.schema,
     key_maps={
@@ -165,7 +163,6 @@ CRYPTO_TRADES = DatasetSpec(
 )
 YIELDS = DatasetSpec(
     name="economy.yields",
-    query_class=HistoryQuery,
     schema=Schema("economy.yields", (Column("Date", ColumnType.LOCAL_DATE),)),
     poll_keys=("Date",),
     history_method="list_treasury_yields",
@@ -320,7 +317,7 @@ def applied(monkeypatch: pytest.MonkeyPatch) -> Applied:
 
 def flat_file_client(m: dm.MassiveSession) -> _massive.FlatFileClient:
     # The session's flat-file client, which its first flat-file read created.
-    client = m._core._flat_files
+    client = cast("SessionClients", m._core._ports)._flat_files
     assert client is not None
     return client
 
@@ -406,7 +403,7 @@ def test_trades_are_renamed_typed_and_converted(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    assert {c.name: c.data_type for c in t.columns} == TRADES.schema.col_defs()
+    assert {c.name: c.data_type for c in t.columns} == col_defs(TRADES.schema)
     first, msft, second, spy = rows(t)
     assert first == {
         "Symbol": "AAPL",
@@ -532,7 +529,7 @@ def test_no_matching_rows_gives_an_empty_table_with_every_column(
     q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert t.size == 0
-    assert {c.name: c.data_type for c in t.columns} == TRADES.schema.col_defs()
+    assert {c.name: c.data_type for c in t.columns} == col_defs(TRADES.schema)
     assert converted == [0]  # only the empty schema table: no table of an empty block
 
 
@@ -761,7 +758,7 @@ def test_a_weekend_only_range_is_an_empty_table(
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
     assert t.size == 0
-    assert {c.name: c.data_type for c in t.columns} == TRADES.schema.col_defs()
+    assert {c.name: c.data_type for c in t.columns} == col_defs(TRADES.schema)
     assert caplog.messages == [
         "stocks.trades history: source=S3 files=0 skipped=2025-03-01,2025-03-02"
     ]
@@ -1658,37 +1655,8 @@ def test_a_session_without_a_flat_file_read_creates_no_client(
     query(m, STOCK_TRADES, symbols=["AAPL"]).history("2025-03-03", "2025-03-03")
     assert len(rest.calls) == 1  # AUTO chose REST for one symbol
     m.close()
-    assert m._core._flat_files is None
+    assert cast("SessionClients", m._core._ports)._flat_files is None
     assert (fake_s3.clients, fake_s3.closes) == ([], 0)
-
-
-def test_every_read_of_a_session_shares_one_client(session: dm.MassiveSession) -> None:
-    first = session._core.flat_file_transport()
-    second = session._core.flat_file_transport()
-    assert isinstance(first, flatfiles.FlatFileHistory)
-    assert isinstance(second, flatfiles.FlatFileHistory)
-    assert first._client is second._client is flat_file_client(session)
-
-
-def test_a_client_created_after_close_is_closed_at_once(
-    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
-) -> None:
-    m = dm.MassiveSession(config())
-    m.close()
-    m._core.flat_file_transport()
-    assert flat_file_client(m).closed
-
-
-def test_the_flat_file_transport_needs_s3_credentials(
-    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
-) -> None:
-    m = dm.MassiveSession(NO_S3)
-    try:
-        with pytest.raises(ValueError, match="flat files need MassiveConfig s3_access_key_id"):
-            m._core.flat_file_transport()
-    finally:
-        m.close()
-    assert m._core._flat_files is None
 
 
 def test_an_arrow_error_while_gathering_rows_is_a_massive_error(

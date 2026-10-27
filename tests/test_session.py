@@ -5,10 +5,12 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import pkgutil
 import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -19,10 +21,11 @@ from deephaven.execution_context import make_user_exec_ctx
 from deephaven.table_listener import listen
 
 import deephaven_massive as dm
-from deephaven_massive import _session
+from deephaven_massive import _namespaces, _session
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import TRADES
 from deephaven_massive._enums import AssetClass
+from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
@@ -54,7 +57,6 @@ TIMEOUT = 30.0
 
 SPEC = DatasetSpec(
     name="test.trades",
-    query_class=StreamQuery,
     asset_class=AssetClass.STOCKS,
     schema=TRADES.schema,
     channels={None: "T"},
@@ -485,3 +487,23 @@ def test_a_session_that_reads_no_flat_file_never_imports_boto3() -> None:
     )
     [line] = [line for line in result.stdout.splitlines() if line.startswith("LOADED ")]
     assert json.loads(line.removeprefix("LOADED ")) == []
+
+
+# --- The composition of a session ------------------------------------------------------------
+
+
+def test_every_namespace_module_feeds_the_catalog() -> None:
+    package = Path(_namespaces.__file__).parent
+    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {"base"}
+    named = [module.__name__ for module in _session.NAMESPACE_MODULES]
+    assert len(named) == len(set(named))
+    assert set(named) == {f"deephaven_massive._namespaces.{name}" for name in found}
+    declared = [spec for module in _session.NAMESPACE_MODULES for spec in module.DATASETS]
+    assert all(isinstance(spec, DatasetSpec) for spec in declared)
+    assert list(_session.CATALOG.by_name.values()) == declared
+
+
+def test_a_session_holds_the_catalog_and_its_clients(massive_session: dm.MassiveSession) -> None:
+    core = massive_session._core
+    assert core.catalog is _session.CATALOG
+    assert isinstance(core._ports, SessionClients)

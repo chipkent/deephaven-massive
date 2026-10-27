@@ -45,8 +45,35 @@ naming a network library outside `_massive` (a logger name such as `"urllib3"` p
 `caplog.at_level`, say) is flagged on purpose: details of those libraries belong inside the
 wire package.
 
-Each rule is a pure function over relative paths (and, for the boundary, source text), so it is
-checked both against the real tree and against a synthetic tree that breaks it.
+Last, the file enforces the library's layers. Every module under `src/` is in one of six
+layers, lowest first: wire (`_massive/`), vocabulary (the root `_config`, `_enums`, `_errors`,
+`_types`), datasets (`_datasets/`), tables (`_tables/`), ingest (`_ingest/`), and API (the root
+`__init__`, `_session`, `_query`, and `_namespaces/`); a module in no known layer is itself a
+violation. Then:
+
+- every import, relative import, resolvable literal dynamic import, and module-name string,
+  inside `if TYPE_CHECKING:` or not, targets the module's own layer or a lower one;
+- outside the two lazy `__init__.py` files (the package's and `_massive`'s), every import the
+  rules cannot resolve is a violation: a computed name, a relative literal without a literal
+  package, an `__import__` level other than 0, an import function used other than by a direct
+  call, and a `sys.modules` lookup by a computed key;
+- Deephaven: the vocabulary imports only `deephaven.table` (the `Table` of `Symbols`), the
+  datasets import `deephaven` (and the vocabulary's run-time `Table`) only for type checking,
+  and nothing imports `deephaven_server`
+  (the wire boundary above already keeps Deephaven out of `_massive`);
+- the vocabulary and the datasets import no I/O or thread module and read neither
+  `threading.Thread` nor `threading.Timer`;
+- `_massive.__all__` splits into vocabulary names and client names, and only the ingest layer
+  uses a client name, star-imports `_massive`, or reads it by a computed `getattr`;
+- in the API, only `_session.py` imports the ingest layer, and only `_ingest.clients`;
+- the `__init__.py` of `_namespaces`, `_datasets`, `_tables`, and `_ingest` holds a docstring
+  and nothing else.
+
+The tests are outside the layers: they may import any module and keep only the wire interface
+rule.
+
+Each rule is a pure function over relative paths (and, for the boundary and the layers, source
+text), so it is checked both against the real tree and against a synthetic tree that breaks it.
 """
 
 import ast
@@ -449,7 +476,7 @@ _WIRE_LIBRARIES = frozenset(
 _NETWORK_LIBRARIES = frozenset({"urllib3", "websockets", "certifi", "boto3", "botocore"})
 
 # Each layer of `_massive`, and the layers it may import (`refresh` may import any).
-_LAYERS = {
+_WIRE_SUBPACKAGES = {
     "net": frozenset({"net"}),
     "spec": frozenset({"spec"}),
     "rest": frozenset({"rest", "net", "spec"}),
@@ -755,7 +782,8 @@ def _type_checking_lines(tree: ast.Module) -> set[int]:
     return {
         statement.lineno
         for node in ast.walk(tree)
-        if isinstance(node, ast.If) and ast.unparse(node.test) == "TYPE_CHECKING"
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) in {"TYPE_CHECKING", "typing.TYPE_CHECKING"}
         for statement in node.body
         if isinstance(statement, ast.Import | ast.ImportFrom)
     }
@@ -772,7 +800,7 @@ def _wire_layer(name: str) -> str | None:
         the package itself and the names of its interface.
     """
     parts = name.removeprefix(f"{_WIRE}.").split(".") if name != _WIRE else []
-    return parts[0] if parts and parts[0] in {*_LAYERS, _REFRESH} else None
+    return parts[0] if parts and parts[0] in {*_WIRE_SUBPACKAGES, _REFRESH} else None
 
 
 def _inside(name: str, package: str) -> bool:
@@ -808,7 +836,7 @@ def _wire_rules(where: str, tree: ast.Module, *, module: str, package: str) -> l
             target = _wire_layer(name)
             if target == _REFRESH and layer != _REFRESH:
                 found.append(f"{where}:{line}: only refresh imports refresh: {name}")
-            elif layer in _LAYERS and target not in _LAYERS[layer]:
+            elif layer in _WIRE_SUBPACKAGES and target not in _WIRE_SUBPACKAGES[layer]:
                 found.append(f"{where}:{line}: {layer} must not import {name}")
         elif top not in sys.stdlib_module_names and top not in _WIRE_LIBRARIES:
             found.append(f"{where}:{line}: the wire package must not import {name}")
@@ -1097,7 +1125,7 @@ def test_the_refresh_rule_covers_names_in_strings() -> None:
 
 # Everywhere else: only the interface.
 
-_LIBRARY_FILE = "src/deephaven_massive/_rest.py"
+_LIBRARY_FILE = "src/deephaven_massive/_query.py"  # any library module outside the wire
 
 
 @pytest.mark.parametrize("path", [_LIBRARY_FILE, "src/deephaven_massive/_namespaces/stocks.py"])
@@ -1290,3 +1318,887 @@ def test_prose_and_other_names_are_not_snapshot_files(source: str) -> None:
 
 def test_only_this_file_may_name_the_snapshot_files() -> None:
     assert _check("tests/test_layout.py", "x = 'openapi.json'\n") == []
+
+
+# ---------------------------------------------------------------------------------------------
+# The library's layers.
+# ---------------------------------------------------------------------------------------------
+
+# The six layers, lowest first. A module imports only its own layer or lower ones.
+_RANKS = {"wire": 0, "vocabulary": 1, "datasets": 2, "tables": 3, "ingest": 4, "api": 5}
+# The root modules of the vocabulary and of the API; every other root module is in no layer.
+_VOCABULARY_MODULES = frozenset({"_config", "_enums", "_errors", "_types"})
+_API_MODULES = frozenset({"__init__", "_session", "_query"})
+# The packages that are each one layer.
+_LAYER_PACKAGES = {
+    "_massive": "wire",
+    "_datasets": "datasets",
+    "_tables": "tables",
+    "_ingest": "ingest",
+    "_namespaces": "api",
+}
+# The two lazy `__init__.py` files, the only modules that import by a computed name.
+_LAZY_INITS = frozenset(
+    {
+        PurePosixPath("src/deephaven_massive/__init__.py"),
+        PurePosixPath("src/deephaven_massive/_massive/__init__.py"),
+    }
+)
+# The package `__init__.py` files that hold a docstring and nothing else.
+_DOCSTRING_ONLY_INITS = frozenset(
+    PurePosixPath(f"src/deephaven_massive/{package}/__init__.py")
+    for package in ("_namespaces", "_datasets", "_tables", "_ingest")
+)
+# What the vocabulary and the datasets never import: they do no I/O and start no threads.
+_IO_AND_THREAD_MODULES = frozenset(
+    {
+        "queue",
+        "asyncio",
+        "concurrent",
+        "socket",
+        "ssl",
+        "http",
+        "urllib",
+        "subprocess",
+        "_thread",
+        "multiprocessing",
+        "select",
+        "selectors",
+    }
+)
+_THREAD_CLASSES = frozenset({"Thread", "Timer"})
+# `_massive.__all__`, split: the names every layer may use, and the clients only ingest uses.
+_WIRE_VOCABULARY = frozenset(
+    {
+        "WireError",
+        "WireAuthError",
+        "WireEntitlementError",
+        "DriftReport",
+        "Field",
+        "ParamKind",
+        "Provenance",
+        "RestPath",
+        "Source",
+        "Transport",
+        "WireType",
+        "WireUnit",
+        "provenance",
+        "source",
+        "sources",
+    }
+)
+_WIRE_CLIENTS = frozenset(
+    {
+        "RestClient",
+        "Page",
+        "to_batch",
+        "WsClient",
+        "WsState",
+        "Status",
+        "StatusKind",
+        "Reject",
+        "FlatFileClient",
+        "FlatFile",
+        "ReadPlan",
+        "ReadColumn",
+        "object_key",
+    }
+)
+_INGEST = f"{_PACKAGE}._ingest"
+_TYPES_TABLE = f"{_PACKAGE}._types.Table"
+_SESSION = f"{_PACKAGE}._session"
+
+
+def layer_of_file(path: PurePosixPath) -> str | None:
+    """Return the layer of a library module.
+
+    Args:
+        path: The module's path relative to `src/deephaven_massive/`.
+
+    Returns:
+        `wire`, `vocabulary`, `datasets`, `tables`, `ingest`, or `api`; None for a module in no
+        known layer (a new root module, or a new package).
+    """
+    if len(path.parts) > 1:
+        return _LAYER_PACKAGES.get(path.parts[0])
+    if path.stem in _VOCABULARY_MODULES:
+        return "vocabulary"
+    return "api" if path.stem in _API_MODULES else None
+
+
+def layer_of_name(name: str) -> str | None:
+    """Return the layer an imported name falls in.
+
+    Args:
+        name: An absolute module or attribute name, such as `deephaven_massive._enums.Timespan`.
+
+    Returns:
+        The layer of the library module the name is in; `api` for the root package and the
+        names it defines; None for a name outside the library.
+    """
+    parts = name.split(".")
+    if parts[0] != _PACKAGE:
+        return None
+    if len(parts) == 1:
+        return "api"
+    if parts[1] in _VOCABULARY_MODULES:
+        return "vocabulary"
+    return _LAYER_PACKAGES.get(parts[1], "api")
+
+
+def _import_functions(tree: ast.Module) -> set[str]:
+    """Return the bare names under which a file can call a dynamic import.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        `__import__`, `import_module`, and every alias a `from importlib import import_module
+        as <alias>` binds. A call through an attribute (`importlib.import_module`,
+        `il.import_module`) is recognized by `_is_import_call` without an alias.
+    """
+    names = {"__import__", "import_module"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "importlib":
+            names.update(a.asname or a.name for a in node.names if a.name == "import_module")
+    return names
+
+
+def _is_import_call(call: ast.Call, functions: set[str]) -> bool:
+    """Tell whether a call is a dynamic import.
+
+    Args:
+        call: A call expression.
+        functions: The bare names of the import functions, from `_import_functions`.
+
+    Returns:
+        True for `<anything>.import_module(...)`, `<anything>.__import__(...)`, and a call of
+        one of `functions`.
+    """
+    function = call.func
+    if isinstance(function, ast.Attribute):
+        return function.attr in {"import_module", "__import__"}
+    return isinstance(function, ast.Name) and function.id in functions
+
+
+def _dynamic_imports(tree: ast.Module) -> list[tuple[int, ast.expr | None]]:
+    """Return every dynamic import in a file with the expression that names its module.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        `(line, module argument)` for each call of `importlib.import_module` or `__import__`
+        under any alias; the argument is the first positional one or the `name=` keyword.
+    """
+    functions = _import_functions(tree)
+    found: list[tuple[int, ast.expr | None]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_import_call(node, functions):
+            keyword = next((k.value for k in node.keywords if k.arg == "name"), None)
+            found.append((node.lineno, node.args[0] if node.args else keyword))
+    return found
+
+
+def _literal_imports(tree: ast.Module) -> list[tuple[int, str]]:
+    """Return the modules a file imports dynamically by a literal name.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        `(line, module name)` pairs.
+    """
+    return [
+        (line, argument.value)
+        for line, argument in _dynamic_imports(tree)
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+    ]
+
+
+_IMPORT_FUNCTIONS = frozenset({"import_module", "__import__"})
+
+
+def _import_level(call: ast.Call) -> ast.expr | None:
+    """Return the `level` argument of an `__import__` call, if it has one.
+
+    Args:
+        call: A dynamic import call.
+
+    Returns:
+        The fifth positional argument or the `level=` keyword; None for `import_module`.
+    """
+    function = call.func
+    name = function.attr if isinstance(function, ast.Attribute) else ast.unparse(function)
+    if name != "__import__":
+        return None
+    keyword = next((k.value for k in call.keywords if k.arg == "level"), None)
+    return (
+        call.args[4] if len(call.args) > 4 else keyword
+    )  # __import__(name, g, l, fromlist, level)
+
+
+def _is_resolved_name(call: ast.Call, argument: ast.expr | None) -> bool:
+    """Tell whether a dynamic import names its module so that the rules can resolve it.
+
+    Args:
+        call: The dynamic import call.
+        argument: Its module argument.
+
+    Returns:
+        True for a literal absolute name with no `level` other than a literal 0, and for a
+        literal relative name passed to `import_module` with a literal package.
+    """
+    if not (isinstance(argument, ast.Constant) and isinstance(argument.value, str)):
+        return False
+    if argument.value.startswith("."):
+        return _relative_import(call) is not None
+    level = _import_level(call)
+    return level is None or (isinstance(level, ast.Constant) and level.value == 0)
+
+
+def _modules_lookups(tree: ast.Module) -> list[tuple[int, str]]:
+    """Return every `sys.modules` lookup whose key is not a literal.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        `(line, source text)` for `<x>.modules[key]` and `<x>.modules.get(key)` with a key that
+        is not a string literal.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and ast.unparse(node.value).endswith("sys.modules"):
+            key: ast.expr = node.slice
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and ast.unparse(node.func.value).endswith("sys.modules")
+            and node.args
+        ):
+            key = node.args[0]
+        else:
+            continue
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            found.append((node.lineno, ast.unparse(node)))
+    return found
+
+
+def _names_import_function(node: ast.expr, functions: set[str]) -> bool:
+    """Tell whether an expression refers to `import_module` or `__import__` by name.
+
+    Args:
+        node: An expression that is not the function of a direct call.
+        functions: The bare names of the import functions, from `_import_functions`.
+
+    Returns:
+        True for an attribute or name that is an import function, or a string naming one (the
+        argument of a `getattr`).
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr in _IMPORT_FUNCTIONS
+    if isinstance(node, ast.Name):
+        return node.id in functions
+    return isinstance(node, ast.Constant) and node.value in _IMPORT_FUNCTIONS
+
+
+def _computed_imports(tree: ast.Module) -> list[tuple[int, str]]:
+    """Return every import whose module the rules cannot read from the source.
+
+    That is a dynamic import whose name is not a literal; a literal relative name without a
+    literal package; an `__import__` with a `level` other than a literal 0; any use of
+    `import_module` or `__import__` other than a direct call (an alias by assignment, a
+    `getattr`); and a `sys.modules` lookup by a key that is not a literal.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        `(line, source text)` pairs.
+    """
+    functions = _import_functions(tree)
+    found: list[tuple[int, str]] = []
+    called: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_import_call(node, functions):
+            called.add(id(node.func))
+            keyword = next((k.value for k in node.keywords if k.arg == "name"), None)
+            argument = node.args[0] if node.args else keyword
+            if not _is_resolved_name(node, argument):
+                found.append((node.lineno, ast.unparse(node)))
+    skipped = called | _docstrings(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.expr) or id(node) in skipped:
+            continue
+        if _names_import_function(node, functions):
+            found.append((node.lineno, ast.unparse(node)))
+    found.extend(_modules_lookups(tree))
+    return sorted(found)
+
+
+def _thread_reads(tree: ast.Module) -> list[tuple[int, str]]:
+    """Return every read of `threading.Thread` or `threading.Timer`, through any alias.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        `(line, "threading.<name>")` for an attribute read on a name bound to `threading`,
+        a literal `getattr` on it, and `from threading import Thread` or `Timer`.
+    """
+    aliases = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "threading"
+    }
+    found = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in aliases
+            and node.attr in _THREAD_CLASSES
+        ):
+            found.append((node.lineno, f"threading.{node.attr}"))
+        elif isinstance(node, ast.Call) and _getattr_name(node, aliases) in _THREAD_CLASSES:
+            found.append((node.lineno, f"threading.{_getattr_name(node, aliases)}"))
+        elif isinstance(node, ast.ImportFrom) and node.module == "threading":
+            found.extend(
+                (node.lineno, f"threading.{alias.name}")
+                for alias in node.names
+                if alias.name in _THREAD_CLASSES
+            )
+    return found
+
+
+def _client_reads(
+    tree: ast.Module, package: str, references: list[tuple[int, str]]
+) -> list[tuple[int, str]]:
+    """Return every use of a wire client name: by import, string, or attribute read.
+
+    Args:
+        tree: The file's syntax tree.
+        package: The file's package, to resolve relative imports.
+        references: The file's imports and module-name strings.
+
+    Returns:
+        `(line, name)` for each client name of `_massive.__all__` the file uses; `*` for a star
+        import of `_massive`, and the source text of a `getattr` on it whose name is not a
+        literal, since either may reach any client.
+    """
+    aliases = _wire_aliases(tree, package)
+    members = [
+        (line, name.removeprefix(f"{_WIRE}.").split(".")[0])
+        for line, name in references
+        if _inside(name, _WIRE) and name != _WIRE
+    ]
+    found = [(line, member) for line, member in members if member in _WIRE_CLIENTS]
+    found.extend(
+        (line, attribute)
+        for line, attribute in _wire_reads(tree, aliases)
+        if attribute in _WIRE_CLIENTS
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
+            base = _absolute(package, node.level, node.module) if node.level else node.module
+            if base == _WIRE:
+                found.append((node.lineno, "*"))
+        elif (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func) == "getattr"
+            and node.args
+            and ast.unparse(node.args[0]) in aliases
+            and _getattr_name(node, aliases) is None
+        ):
+            found.append((node.lineno, ast.unparse(node)))
+    return found
+
+
+def _deephaven_rule(layer: str, name: str, *, type_only: bool) -> str | None:
+    """Return the Deephaven rule a reference breaks, if any.
+
+    Args:
+        layer: The importing module's layer.
+        name: The imported or named module.
+        type_only: Whether the import sits in an `if TYPE_CHECKING:` block.
+
+    Returns:
+        The rule's text, or None when the reference is allowed.
+    """
+    # The vocabulary binds Deephaven's `Table` at run time, so importing it from there imports
+    # `deephaven.table.Table`.
+    module = "deephaven.table.Table" if name == _TYPES_TABLE else name
+    top = module.split(".", maxsplit=1)[0]
+    if top == "deephaven_server":
+        return f"nothing imports deephaven_server: {name}"
+    if top != "deephaven":
+        return None
+    if layer == "vocabulary" and not _inside(module, "deephaven.table"):
+        return f"the vocabulary imports only deephaven.table: {name}"
+    if layer == "datasets" and not type_only:
+        return f"the datasets layer imports deephaven only for type checking: {name}"
+    return None
+
+
+def layer_violations(path: PurePosixPath, source: str) -> list[str]:
+    """Return every break of the library's layer rules in one module.
+
+    Args:
+        path: The module's path relative to the repository root (`src/deephaven_massive/...`).
+        source: The module's text.
+
+    Returns:
+        One `"<path>:<line>: <rule>"` message per violation, empty for a clean module.
+    """
+    where = str(path)
+    layer = layer_of_file(PurePosixPath(*path.parts[2:]))
+    if layer is None:
+        return [f"{where}:1: not in a known layer"]
+    tree = ast.parse(source)
+    module, package = _module_of(path)
+    type_only = _type_checking_lines(tree)
+    references = [*_imports(tree, package), *_module_strings(tree)]
+    found = []
+    for line, name in references:
+        target = layer_of_name(name)
+        if target is not None and _RANKS[target] > _RANKS[layer]:
+            found.append(
+                f"{where}:{line}: the {layer} layer must not import the {target} layer: {name}"
+            )
+        rule = _deephaven_rule(layer, name, type_only=line in type_only)
+        if rule is not None:
+            found.append(f"{where}:{line}: {rule}")
+        if layer == "api" and _inside(name, _INGEST):
+            if module != _SESSION:
+                found.append(f"{where}:{line}: only _session.py imports the ingest layer: {name}")
+            elif not _inside(name, f"{_INGEST}.clients"):
+                found.append(f"{where}:{line}: _session.py imports only _ingest.clients: {name}")
+    if path not in _LAZY_INITS:
+        found.extend(
+            f"{where}:{line}: a computed import: {text}" for line, text in _computed_imports(tree)
+        )
+    if layer in {"vocabulary", "datasets"}:
+        found.extend(
+            f"{where}:{line}: the {layer} layer does no I/O and starts no threads: {name}"
+            for line, name in [*_imports(tree, package), *_literal_imports(tree)]
+            if name.split(".")[0] in _IO_AND_THREAD_MODULES
+        )
+        found.extend(
+            f"{where}:{line}: the {layer} layer starts no threads: {name}"
+            for line, name in _thread_reads(tree)
+        )
+    if layer not in {"wire", "ingest"}:
+        found.extend(
+            f"{where}:{line}: only the ingest layer uses the wire client {name}"
+            for line, name in _client_reads(tree, package, references)
+        )
+    docstring_only = len(tree.body) == 1 and ast.get_docstring(tree) is not None
+    if path in _DOCSTRING_ONLY_INITS and not docstring_only:
+        found.append(f"{where}:1: a layer package's __init__.py holds a docstring and nothing else")
+    return sorted(found, key=lambda message: int(message.split(":")[1]))
+
+
+def test_the_tree_keeps_the_layers() -> None:
+    found = [
+        message
+        for file in sorted(_SRC.rglob("*.py"))
+        for message in layer_violations(
+            PurePosixPath(file.relative_to(_ROOT).as_posix()), file.read_text()
+        )
+    ]
+    assert found == []
+
+
+def test_the_wire_interface_splits_into_vocabulary_and_clients() -> None:
+    assert _WIRE_VOCABULARY.isdisjoint(_WIRE_CLIENTS)
+    assert _interface() == _WIRE_VOCABULARY | _WIRE_CLIENTS
+
+
+def _layer_check(module: str, source: str) -> list[str]:
+    return layer_violations(PurePosixPath(f"src/deephaven_massive/{module}"), source)
+
+
+# Every module is in a known layer.
+
+
+@pytest.mark.parametrize(
+    ("module", "layer"),
+    [
+        ("_massive/rest/client.py", "wire"),
+        ("_config.py", "vocabulary"),
+        ("_types.py", "vocabulary"),
+        ("_datasets/catalog.py", "datasets"),
+        ("_tables/core.py", "tables"),
+        ("_ingest/clients.py", "ingest"),
+        ("__init__.py", "api"),
+        ("_session.py", "api"),
+        ("_query.py", "api"),
+        ("_namespaces/stocks.py", "api"),
+    ],
+)
+def test_every_library_module_has_a_layer(module: str, layer: str) -> None:
+    assert layer_of_file(PurePosixPath(module)) == layer
+
+
+@pytest.mark.parametrize("module", ["_rest.py", "_util/strings.py", "helpers.py"])
+def test_a_module_in_no_known_layer_is_reported(module: str) -> None:
+    assert _layer_check(module, "") == [f"src/deephaven_massive/{module}:1: not in a known layer"]
+
+
+# Imports point down.
+
+
+@pytest.mark.parametrize(
+    ("module", "source"),
+    [
+        ("_errors.py", "from deephaven_massive._massive import WireError\n"),
+        ("_datasets/catalog.py", "from deephaven_massive._enums import Timespan\n"),
+        ("_tables/core.py", "from deephaven_massive._datasets.catalog import DatasetSpec\n"),
+        ("_ingest/flatfiles.py", "from deephaven_massive._tables.core import SessionCore\n"),
+        ("_query.py", "from deephaven_massive._tables.liveness import entered\n"),
+        ("_namespaces/base.py", "from deephaven_massive._query import Query\n"),
+        ("_tables/liveness.py", "from . import diagnostics\n"),
+        ("__init__.py", "_EXPORTS = {'MassiveSession': 'deephaven_massive._session'}\n"),
+    ],
+)
+def test_a_module_may_import_its_own_layer_and_lower_ones(module: str, source: str) -> None:
+    assert _layer_check(module, source) == []
+
+
+@pytest.mark.parametrize(
+    ("module", "source", "message"),
+    [
+        (
+            "_datasets/catalog.py",
+            "if TYPE_CHECKING:\n    from deephaven_massive._query import QueryBase\n",
+            "2: the datasets layer must not import the api layer: deephaven_massive._query",
+        ),
+        (
+            "_tables/core.py",
+            "from deephaven_massive._ingest.flatfiles import FlatFileHistory\n",
+            "1: the tables layer must not import the ingest layer: deephaven_massive._ingest",
+        ),
+        (
+            "_enums.py",
+            "from deephaven_massive import _session\n",
+            "1: the vocabulary layer must not import the api layer: deephaven_massive._session",
+        ),
+        (
+            "_massive/net/http.py",
+            "from ... import _errors\n",
+            "1: the wire layer must not import the vocabulary layer: deephaven_massive._errors",
+        ),
+        (
+            "_datasets/schema.py",
+            "from .. import _tables\n",
+            "1: the datasets layer must not import the tables layer: deephaven_massive._tables",
+        ),
+        (
+            "_tables/diagnostics.py",
+            "import deephaven_massive\n",
+            "1: the tables layer must not import the api layer: deephaven_massive",
+        ),
+        (
+            "_datasets/dates.py",
+            "x = 'deephaven_massive._namespaces.stocks'\n",
+            "1: the datasets layer must not import the api layer",
+        ),
+        (
+            "_datasets/dates.py",
+            "importlib.import_module('deephaven_massive._tables.core')\n",
+            "1: the datasets layer must not import the tables layer",
+        ),
+    ],
+)
+def test_an_import_must_not_point_up(module: str, source: str, message: str) -> None:
+    [found] = _layer_check(module, source)
+    assert found.startswith(f"src/deephaven_massive/{module}:{message}")
+
+
+# No computed imports outside the two lazy `__init__.py` files.
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "importlib.import_module(f'deephaven_massive._namespaces.{module_name}')\n",
+        "from importlib import import_module as im\nim(name)\n",
+        "__import__(name)\n",
+        "importlib.import_module(name='x' + y)\n",
+        "importlib.import_module()\n",
+        # Literal names that only resolve at run time.
+        "importlib.import_module('.._session', __package__)\n",
+        "__import__('_session', globals(), None, ['MassiveSession'], 2)\n",
+        "__import__('orjson', level=level)\n",
+        # An import function reached other than by a direct call.
+        "im = importlib.import_module\n",
+        "from importlib import import_module as im\nloaders = [im]\n",
+        "getattr(importlib, 'import_module')\n",
+        "getattr(builtins, '__import__')\n",
+        # A module looked up by a computed key.
+        "sys.modules['deephaven_massive.' + name]\n",
+        "sys.modules[f'deephaven_massive.{name}']\n",
+        "sys.modules.get(name)\n",
+    ],
+)
+def test_a_computed_import_is_reported(source: str) -> None:
+    [found] = _layer_check("_datasets/catalog.py", source)
+    assert "a computed import" in found
+
+
+@pytest.mark.parametrize("module", ["__init__.py", "_massive/__init__.py"])
+def test_the_lazy_inits_may_import_by_a_computed_name(module: str) -> None:
+    source = "from importlib import import_module as _import_module\n_import_module(module)\n"
+    assert _layer_check(module, source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "importlib.import_module('orjson')\n",
+        "importlib.import_module('.codec', 'deephaven_massive._massive.net')\n",
+        "__import__('orjson', globals(), None, [], 0)\n",
+        "sys.modules['orjson']\n",
+        "sys.modules.get('orjson')\n",
+        '"""Loaded with importlib.import_module, never __import__."""\n',
+    ],
+)
+def test_a_literal_import_is_not_computed(source: str) -> None:
+    assert _layer_check("_massive/net/codec.py", source) == []
+
+
+# Deephaven by layer.
+
+
+@pytest.mark.parametrize(
+    ("module", "source"),
+    [
+        ("_types.py", "from deephaven.table import Table\n"),
+        ("_datasets/symbols.py", "if TYPE_CHECKING:\n    from deephaven.table import Table\n"),
+        ("_tables/columns.py", "from deephaven import dtypes\n"),
+        ("_namespaces/base.py", "from deephaven.table import Table\n"),
+        ("_datasets/symbols.py", "import typing\nif typing.TYPE_CHECKING:\n    import deephaven\n"),
+        (
+            "_datasets/symbols.py",
+            "if TYPE_CHECKING:\n    from deephaven_massive._types import Table\n",
+        ),
+        ("_datasets/symbols.py", "from deephaven_massive._types import Symbols, _All\n"),
+        ("_tables/watchlist.py", "from deephaven_massive._types import Table\n"),
+        ("_config.py", "from deephaven_massive._types import Table\n"),
+    ],
+)
+def test_deephaven_where_the_layer_allows_it(module: str, source: str) -> None:
+    assert _layer_check(module, source) == []
+
+
+@pytest.mark.parametrize(
+    ("module", "source", "message"),
+    [
+        (
+            "_datasets/symbols.py",
+            "from deephaven.table import Table\n",
+            "1: the datasets layer imports deephaven only for type checking: deephaven.table.Table",
+        ),
+        (
+            "_datasets/schema.py",
+            "if TYPE_CHECKING:\n    pass\nelse:\n    from deephaven import dtypes\n",
+            "4: the datasets layer imports deephaven only for type checking: deephaven.dtypes",
+        ),
+        (
+            "_enums.py",
+            "from deephaven import dtypes\n",
+            "1: the vocabulary imports only deephaven.table: deephaven.dtypes",
+        ),
+        (
+            "_types.py",
+            "if TYPE_CHECKING:\n    from deephaven.execution_context import ExecutionContext\n",
+            (
+                "2: the vocabulary imports only deephaven.table: "
+                "deephaven.execution_context.ExecutionContext"
+            ),
+        ),
+        (
+            "_session.py",
+            "from deephaven_server import Server\n",
+            "1: nothing imports deephaven_server: deephaven_server.Server",
+        ),
+        (
+            "_tables/core.py",
+            "if TYPE_CHECKING:\n    import deephaven_server\n",
+            "2: nothing imports deephaven_server: deephaven_server",
+        ),
+        (
+            # The vocabulary binds Deephaven's Table at run time: the same import, by proxy.
+            "_datasets/catalog.py",
+            "from deephaven_massive._types import Table\n",
+            (
+                "1: the datasets layer imports deephaven only for type checking: "
+                "deephaven_massive._types.Table"
+            ),
+        ),
+    ],
+)
+def test_deephaven_where_the_layer_forbids_it(module: str, source: str, message: str) -> None:
+    assert _layer_check(module, source) == [f"src/deephaven_massive/{module}:{message}"]
+
+
+# No I/O and no threads below the tables.
+
+
+@pytest.mark.parametrize("module", ["_config.py", "_datasets/dates.py"])
+@pytest.mark.parametrize(
+    ("source", "name"),
+    [
+        ("import queue\n", "queue"),
+        ("import asyncio\n", "asyncio"),
+        (
+            "from concurrent.futures import ThreadPoolExecutor\n",
+            "concurrent.futures.ThreadPoolExecutor",
+        ),
+        ("import socket\n", "socket"),
+        ("import ssl\n", "ssl"),
+        ("from http import HTTPStatus\n", "http.HTTPStatus"),
+        ("import urllib.parse\n", "urllib.parse"),
+        ("import subprocess\n", "subprocess"),
+        ("importlib.import_module('socket')\n", "socket"),
+        ("import _thread\n", "_thread"),
+        ("import multiprocessing.pool\n", "multiprocessing.pool"),
+        ("import select\n", "select"),
+        ("import selectors\n", "selectors"),
+    ],
+)
+def test_the_lower_layers_import_no_io_or_thread_module(
+    module: str, source: str, name: str
+) -> None:
+    [found] = _layer_check(module, source)
+    assert found.endswith(f"does no I/O and starts no threads: {name}")
+
+
+@pytest.mark.parametrize("module", ["_errors.py", "_datasets/history_source.py"])
+@pytest.mark.parametrize(
+    ("source", "name"),
+    [
+        ("import threading\nthreading.Thread(target=f)\n", "threading.Thread"),
+        ("import threading as t\nt.Timer(1, f)\n", "threading.Timer"),
+        ("from threading import Thread\n", "threading.Thread"),
+        ("import threading\ngetattr(threading, 'Thread')(target=f)\n", "threading.Thread"),
+    ],
+)
+def test_the_lower_layers_start_no_threads(module: str, source: str, name: str) -> None:
+    [found] = _layer_check(module, source)
+    assert found.endswith(f"starts no threads: {name}")
+
+
+def test_the_lower_layers_may_take_a_lock() -> None:
+    source = "import threading\n_lock = threading.Lock()\nlocal = threading.local()\n"
+    assert _layer_check("_errors.py", source) == []
+
+
+def test_the_upper_layers_may_do_io_and_start_threads() -> None:
+    source = "import queue\nimport threading\nthreading.Thread(target=f)\n"
+    assert _layer_check("_tables/liveness.py", source) == []
+
+
+# Only ingest uses the wire clients.
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from deephaven_massive import _massive\nx = _massive.FlatFileClient\n",
+        "from deephaven_massive._massive import RestClient\n",
+        "if TYPE_CHECKING:\n    from deephaven_massive._massive import WsClient\n",
+        "import deephaven_massive._massive as wire\nx = getattr(wire, 'ReadPlan')\n",
+        "x = 'deephaven_massive._massive.Page'\n",
+        "from deephaven_massive._massive import *\n",
+        "from deephaven_massive import _massive\nx = getattr(_massive, 'Flat' + 'FileClient')\n",
+    ],
+)
+@pytest.mark.parametrize("module", ["_tables/core.py", "_query.py", "_datasets/request.py"])
+def test_only_ingest_uses_a_wire_client(module: str, source: str) -> None:
+    [found] = _layer_check(module, source)
+    assert "only the ingest layer uses the wire client" in found
+
+
+def test_a_relative_star_import_of_the_wire_package_counts() -> None:
+    [found] = _layer_check("_query.py", "from ._massive import *\n")
+    assert found.endswith("only the ingest layer uses the wire client *")
+
+
+def test_ingest_uses_the_wire_clients_and_everyone_the_vocabulary() -> None:
+    clients = "from deephaven_massive._massive import FlatFileClient, RestClient\n"
+    assert _layer_check("_ingest/clients.py", clients) == []
+    vocabulary = "from deephaven_massive import _massive\nx = _massive.WireError, _massive.Source\n"
+    assert _layer_check("_errors.py", vocabulary) == []
+    assert _layer_check("_datasets/schema.py", vocabulary) == []
+
+
+# The composition root: only `_session.py` imports ingest, and only `_ingest.clients`.
+
+
+def test_the_session_imports_the_ingest_clients() -> None:
+    source = "from deephaven_massive._ingest.clients import SessionClients\n"
+    assert _layer_check("_session.py", source) == []
+
+
+@pytest.mark.parametrize(
+    ("module", "source", "message"),
+    [
+        (
+            "_query.py",
+            "from deephaven_massive._ingest.clients import SessionClients\n",
+            "only _session.py imports the ingest layer",
+        ),
+        (
+            "_namespaces/base.py",
+            "if TYPE_CHECKING:\n    from deephaven_massive._ingest import flatfiles\n",
+            "only _session.py imports the ingest layer",
+        ),
+        (
+            "__init__.py",
+            "_EXPORTS = {'X': 'deephaven_massive._ingest.clients'}\n",
+            "only _session.py imports the ingest layer",
+        ),
+        (
+            "_session.py",
+            "from deephaven_massive._ingest.flatfiles import FlatFileHistory\n",
+            "_session.py imports only _ingest.clients",
+        ),
+        (
+            "_session.py",
+            "from deephaven_massive import _ingest\n",
+            "_session.py imports only _ingest.clients",
+        ),
+    ],
+)
+def test_only_the_session_imports_ingest(module: str, source: str, message: str) -> None:
+    [found] = _layer_check(module, source)
+    assert message in found
+
+
+# The layer packages' `__init__.py` files.
+
+
+@pytest.mark.parametrize("package", ["_namespaces", "_datasets", "_tables", "_ingest"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "",
+        "from deephaven_massive._tables.core import SessionCore\n",
+        '"""The package."""\n\nfrom .core import SessionCore\n',
+        '"""The package."""\n\n__all__ = []\n',
+    ],
+)
+def test_a_layer_package_init_holds_only_a_docstring(package: str, source: str) -> None:
+    message = "a layer package's __init__.py holds a docstring and nothing else"
+    found = _layer_check(f"{package}/__init__.py", source)
+    assert f"src/deephaven_massive/{package}/__init__.py:1: {message}" in found
+
+
+@pytest.mark.parametrize("package", ["_namespaces", "_datasets", "_tables", "_ingest"])
+def test_a_docstring_alone_is_a_valid_layer_package_init(package: str) -> None:
+    assert _layer_check(f"{package}/__init__.py", '"""The package."""\n') == []

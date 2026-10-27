@@ -48,7 +48,6 @@ TIMEOUT = 30.0
 
 TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
-    query_class=StreamHistoryLatestQuery,
     asset_class=AssetClass.STOCKS,
     schema=TRADES.schema,
     channels={None: "T"},
@@ -57,7 +56,6 @@ TRADES_SPEC = DatasetSpec(
 )
 BARS_SPEC = DatasetSpec(
     name="forex.bars",
-    query_class=HistoryQuery,
     asset_class=AssetClass.FOREX,
     schema=BARS.schema,
     is_bars=True,
@@ -68,7 +66,6 @@ BARS_SPEC = DatasetSpec(
 )
 VALUES_SPEC = DatasetSpec(
     name="indices.values",
-    query_class=StreamHistoryLatestQuery,
     asset_class=AssetClass.INDICES,
     schema=INDEX_VALUES.schema,
     channels={None: "V"},
@@ -78,7 +75,6 @@ VALUES_SPEC = DatasetSpec(
 )
 NEWS_SPEC = DatasetSpec(
     name="economy.inflation",
-    query_class=Query,
     schema=Schema("economy.inflation", (Column("Date", ColumnType.LOCAL_DATE),)),
     fetch_method="list_inflation",
     poll_mode=PollMode.APPEND,
@@ -86,14 +82,12 @@ NEWS_SPEC = DatasetSpec(
 )
 HISTORY_SPEC = DatasetSpec(
     name="economy.yields",
-    query_class=HistoryQuery,
     schema=Schema("economy.yields", (Column("Date", ColumnType.LOCAL_DATE),)),
     poll_keys=("Date",),
     history_method="x",
 )
 FUTURES_SPEC = DatasetSpec(
     name="futures.trades",
-    query_class=StreamHistoryQuery,
     asset_class=AssetClass.FUTURES,
     schema=TRADES.schema,
     channels={None: "T"},
@@ -635,7 +629,6 @@ def test_the_guard_runs_before_argument_checks(massive_session: dm.MassiveSessio
 
 FOREX_SPEC = DatasetSpec(
     name="forex.quotes",
-    query_class=StreamQuery,
     asset_class=AssetClass.FOREX,
     schema=TRADES.schema,
     channels={None: "C"},

@@ -27,6 +27,7 @@ from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
+from deephaven_massive._datasets import catalog as _catalog
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import TRADES
 from deephaven_massive._datasets.symbols import SymbolTable
@@ -67,7 +68,6 @@ TIMEOUT = 30.0
 
 SPEC = DatasetSpec(
     name="test.trades",
-    query_class=StreamQuery,
     asset_class=AssetClass.STOCKS,
     schema=TRADES.schema,
     channels={None: "T"},
@@ -1239,3 +1239,50 @@ def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
     assert core.results.held() == 0
     assert core._streams == {}
     assert core._stream_ids == {}
+
+
+# --- The ingest ports and the catalog --------------------------------------------------------
+
+
+_REST = cast("_core.RestTransport", object())
+_STREAMS = cast("_core.StreamTransport", object())
+_FLAT_FILES = cast("_core.FlatFileTransport", object())
+
+
+class _Ports:
+    # Ingest ports that record which transport each hook asked for.
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def rest(self) -> _core.RestTransport:
+        self.asked.append("rest")
+        return _REST
+
+    def streams(self) -> _core.StreamTransport:
+        self.asked.append("streams")
+        return _STREAMS
+
+    def flat_files(self) -> _core.FlatFileTransport:
+        self.asked.append("flat_files")
+        return _FLAT_FILES
+
+
+def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContext) -> None:
+    catalog = _catalog.Catalog((SPEC,))
+    core = _core.SessionCore(dm.MassiveConfig(api_key="k"), dh_exec_ctx, "core", catalog=catalog)
+    try:
+        assert core.catalog is catalog
+        with pytest.raises(RuntimeError, match=r"^core has no transports attached$"):
+            core.rest_transport()
+        ports = _Ports()
+        core.attach(ports)
+        assert core.rest_transport() is _REST
+        assert core.stream_transport() is _STREAMS
+        assert core.flat_file_transport() is _FLAT_FILES
+        assert ports.asked == ["rest", "streams", "flat_files"]
+        with pytest.raises(RuntimeError, match=r"^core already has its transports attached$"):
+            core.attach(_Ports())
+        assert core.rest_transport() is _REST
+        assert ports.asked == ["rest", "streams", "flat_files", "rest"]
+    finally:
+        core.close()

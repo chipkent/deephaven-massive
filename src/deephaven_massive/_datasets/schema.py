@@ -6,9 +6,8 @@ transport does not supply is null: crypto trades have no `Tape`, and stocks have
 `SessionEndDate`. This module holds the machinery that builds and fills those schemas:
 
 - `ColumnType`, the closed set of column types (`Instant`, `LocalDate`, `double`, `long`,
-  `int`, `String`, `boolean`, `int[]`), each with its Deephaven and Arrow type.
-- `Schema`, an ordered set of typed columns that produces Deephaven column definitions for
-  `table_publisher` and `input_table`, and turns row dictionaries into an Arrow table.
+  `int`, `String`, `boolean`, `int[]`), each with its Arrow type.
+- `Schema`, an ordered set of typed columns that turns row dictionaries into an Arrow table.
 - `model_schema`, which derives a REST dataset's schema from an SDK `@modelclass`: nested models
   are flattened (`last_trade.price` becomes `LastTradePrice`), Python hints map to column
   types, and an explicit `ColumnOverride` table corrects wrong SDK hints and narrows types.
@@ -19,6 +18,10 @@ transport does not supply is null: crypto trades have no `Tape`, and stocks have
   options WebSocket frames, the SDK REST models, and the documented flat-file headers. Other
   asset classes declare their own key maps, and the units of their timestamp fields (crypto
   `r` is milliseconds), in their `DatasetSpec`.
+
+The Deephaven types of these columns, and the column definitions `table_publisher` and
+`input_table` take, come from `_tables/columns.py`: this module makes no Deephaven call and
+imports Deephaven for type checking only.
 
 Timestamp *units* are not decided here: a field becomes an `Instant` column because its dataset
 declares a unit for it (`timestamps.py`), and the transports convert values to nanoseconds
@@ -39,7 +42,6 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
-from deephaven import dtypes
 
 from deephaven_massive._enums import Transport
 from deephaven_massive._errors import MassiveError
@@ -80,10 +82,10 @@ _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 class ColumnType(StrEnum):
     """The type of a column, named by its Deephaven type.
 
-    Each member knows its Deephaven `DType` (`dh_type`) and its Arrow type (`arrow_type`). Column
-    types follow fixed conventions: timestamps are `Instant`, calendar dates `LocalDate`, sequence
-    numbers `long`, sizes `double` (fractional sizes exist), exchange ids `int`, and condition codes
-    `int[]`.
+    Each member knows its Arrow type (`arrow_type`); its Deephaven type is `dh_type` in
+    `_tables/columns.py`. Column types follow fixed conventions: timestamps are `Instant`,
+    calendar dates `LocalDate`, sequence numbers `long`, sizes `double` (fractional sizes
+    exist), exchange ids `int`, and condition codes `int[]`.
     """
 
     INSTANT = "Instant"
@@ -96,28 +98,10 @@ class ColumnType(StrEnum):
     INT_ARRAY = "int[]"
 
     @property
-    def dh_type(self) -> dtypes.DType:
-        """The Deephaven column type, for `table_publisher` and `input_table` definitions."""
-        return typing.cast("dtypes.DType", _DH_TYPES[self])
-
-    @property
     def arrow_type(self) -> pa.DataType:
         """The Arrow type that `deephaven.arrow.to_table` converts to this column type."""
         return _ARROW_TYPES[self]
 
-
-# `dtypes.Instant` and `dtypes.LocalDate` are annotated as `type` by deephaven-core although
-# they are `DType` instances, so the table is typed by value and narrowed on lookup.
-_DH_TYPES: Final[Mapping[ColumnType, object]] = {
-    ColumnType.INSTANT: dtypes.Instant,
-    ColumnType.LOCAL_DATE: dtypes.LocalDate,
-    ColumnType.DOUBLE: dtypes.double,
-    ColumnType.LONG: dtypes.long,
-    ColumnType.INT: dtypes.int32,
-    ColumnType.STRING: dtypes.string,
-    ColumnType.BOOLEAN: dtypes.bool_,
-    ColumnType.INT_ARRAY: dtypes.int32_array,
-}
 
 _ARROW_TYPES: Final[Mapping[ColumnType, pa.DataType]] = {
     ColumnType.INSTANT: pa.timestamp("ns", tz="UTC"),
@@ -247,7 +231,6 @@ class Schema:
                 "example",
                 (Column("Symbol", ColumnType.STRING), Column("Price", ColumnType.DOUBLE)),
             )
-            schema.col_defs()  # {"Symbol": dtypes.string, "Price": dtypes.double}
             schema.to_arrow([{"Symbol": "AAPL", "Price": 1.5}])  # one-row pyarrow.Table
 
     Attributes:
@@ -273,15 +256,6 @@ class Schema:
     def column_names(self) -> tuple[str, ...]:
         """The column names, in table order."""
         return tuple(column.name for column in self.columns)
-
-    def col_defs(self) -> dict[str, dtypes.DType]:
-        """Return the Deephaven column definitions of this schema.
-
-        Returns:
-            A `{name: DType}` mapping in table order, as `table_publisher(col_defs=...)` and
-            `input_table(col_defs=...)` take it.
-        """
-        return {column.name: column.type.dh_type for column in self.columns}
 
     def arrow_schema(self) -> pa.Schema:
         """Return the Arrow schema whose tables `deephaven.arrow.to_table` converts to this one.

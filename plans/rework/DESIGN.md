@@ -251,7 +251,7 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
 _tables/                 the Deephaven side: tables, liveness, library threads
   __init__.py            docstring only
   core.py                SessionCore, registry_lock, registries, closers, stream ids, the
-                         transport ports (section 6)
+                         transport ports, IngestPorts, attach (sections 4.3, 6)
   liveness.py            result and stream scopes, records, reaper queue (section 6.1)
   diagnostics.py         connections() and streams() with SchemaDrift; DriftRegistry (section 17)
   columns.py             ColumnType -> Deephaven type, column definitions; describe() (section 7.4)
@@ -279,8 +279,9 @@ The root holds the vocabulary every layer names (`_config`, `_enums`, `_errors`,
 the API users touch (`__init__`, `_session`, `_query`, `_namespaces/`). The rest of the library
 is grouped into three packages: `_datasets/` describes datasets (and renders their column
 reference from a catalog it is given), `_tables/` is the Deephaven side, and `_ingest/` is the
-only code that holds wire clients. The `__init__.py` of
-each of the three holds only a docstring.
+only code that holds wire clients. The `__init__.py` of each of the three, and of
+`_namespaces/`, holds only a docstring. [Section 4.3](#43-layers) orders these groups into
+layers.
 
 `_namespaces/` holds plain modules, one namespace class each; it is not a PEP 420 namespace
 package. Each namespace module also declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`).
@@ -355,15 +356,79 @@ others:
 - `tests/test_layout.py`: walks `src/deephaven_massive/**/*.py` and asserts every module has its
   mirrored test file and that every test file maps to a module or is one of these exceptions.
   It also holds the import-boundary and layer tests of `_massive`
-  ([section 19](#19-wire-clients-and-the-spec-snapshot)), with a negative test per rule:
-  `tests/massive/` may import any `_massive` module, and the rest of `tests/` only the
-  interface.
+  ([section 19](#19-wire-clients-and-the-spec-snapshot)) and the library's layer rules
+  ([section 4.3](#43-layers)), with a negative test per rule: `tests/massive/` may import any
+  `_massive` module, and the rest of `tests/` only the interface.
 - `tests/test_readme.py`: runs every example of [section 21](#21-examples) in the embedded JVM
   against the fakes. It mirrors `README.md`, not a source module.
 - `_` helper directories, of which there is one: `tests/_fakes/` (`__init__.py`, `rest.py`,
   `ws.py`, `s3.py`, `stream.py`), protocol-faithful fakes. Only `tests/conftest.py` imports it;
   test modules receive fakes through fixtures, and import a fake directly only when a fixture
   cannot provide it, saying why in a comment.
+
+### 4.3 Layers
+
+The library has six layers. A module imports only its own layer or lower ones, and an import
+under `if TYPE_CHECKING:` counts: moving an upward import under it does not make it legal.
+
+| Rank | Layer | Home | What justifies the boundary |
+|---|---|---|---|
+| 0 | wire | `_massive/` | The only network I/O, and no Deephaven ([section 19](#19-wire-clients-and-the-spec-snapshot)). |
+| 1 | vocabulary | the root `_config`, `_enums`, `_errors`, `_types` | The public value types every layer names. No I/O and no threads; Deephaven appears only as the `Table` in `Symbols`. |
+| 2 | datasets | `_datasets/` | Dataset semantics: no I/O, no threads, no Deephaven calls, and `deephaven` imported only for type checking. So any of it is safe to call under `registry_lock` and on any thread. |
+| 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers, library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
+| 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
+| 5 | API | the root `__init__`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. |
+
+**Composition.** `_session.py` is the one module that sees every layer. It imports every
+namespace module statically and names each once, in `NAMESPACE_MODULES` (a test compares the
+tuple with the modules of `_namespaces/`); at import it builds `CATALOG` from their `DATASETS`,
+so the dataset layer never finds the namespaces itself. `MassiveSession.__init__` builds the
+`SessionCore` with that catalog, then `SessionClients(core)`, then calls `core.attach(clients)`
+once. The core defines the transport ports (`RestTransport`, `StreamTransport`,
+`FlatFileTransport`) and `IngestPorts`, the protocol `SessionClients` implements
+(`rest()`, `streams()`, `flat_files()`); the core's transport hooks call the attached ports, and
+the transports read the catalog as `core.catalog`. A dependency therefore never points from the
+tables up to the code that does the I/O. `SessionClients` holds the core through a
+`weakref.ref`, so the core and its clients form no reference cycle and an unclosed session is
+still collected as soon as its last reference goes. Each of its methods takes a strong
+reference for its call and raises `MassiveError("MassiveSession #1 is closed")` if the core is
+gone; the transports it builds hold the core itself, never the weak reference.
+
+**The rules**, each enforced by `tests/test_layout.py` with a negative test:
+
+- every module under `src/` is in a known layer; any other root module or package is reported
+  as "not in a known layer", so a new one needs a rule change;
+- every import, relative import, dynamic import with a resolvable literal name (an absolute
+  name, or a relative one with a literal package), and module-name string, type-only or not,
+  targets a layer no higher than its own;
+- outside the two lazy `__init__.py` files, every import the rules cannot resolve from the
+  source is a violation: an `import_module` or `__import__` whose name is not a literal, a
+  relative name without a literal package, an `__import__` whose `level` is not a literal 0,
+  any use of `import_module` or `__import__` other than a direct call (an alias made by
+  assignment, a `getattr`), and a `sys.modules` lookup by a key that is not a literal;
+- Deephaven: none in the wire; only `deephaven.table` in the vocabulary; `_datasets` imports
+  `deephaven`, and the vocabulary's run-time `_types.Table`, only under `TYPE_CHECKING`
+  (`if TYPE_CHECKING:` or `if typing.TYPE_CHECKING:`); nothing imports `deephaven_server`;
+- the vocabulary and `_datasets` import none of `queue`, `asyncio`, `concurrent`, `socket`,
+  `ssl`, `http`, `urllib`, `subprocess`, `_thread`, `multiprocessing`, `select`, or
+  `selectors`, and read neither `threading.Thread` nor `threading.Timer`, by attribute, import,
+  or literal `getattr` (`threading` itself stays allowed, for leaf locks);
+- `_massive.__all__` splits into vocabulary names (the three errors and the spec names) and
+  client names (`RestClient`, `Page`, `to_batch`, `WsClient`, `WsState`, `Status`,
+  `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`,
+  `object_key`); under `src/`, only `_ingest` uses a client name (by import, attribute,
+  literal `getattr`, or string), nor anything that can reach one (a star import of `_massive`,
+  a `getattr` on it by a computed name), and a test asserts that the two sets partition
+  `__all__`, so a new name must be classified;
+- in the API, only `_session.py` imports `_ingest`, and only `_ingest.clients`;
+- the `__init__.py` of `_namespaces`, `_datasets`, `_tables`, and `_ingest` holds a docstring
+  and nothing else.
+
+Tests are outside the layers: they may import any module and keep only the wire interface rule
+of [section 19](#19-wire-clients-and-the-spec-snapshot). The rules read source, so they cannot
+see an import built by `exec`, `importlib.util.find_spec`, or an attribute read through the
+root package (`deephaven_massive._ingest`); review keeps those out.
 
 ## 5. `MassiveConfig`
 
@@ -650,6 +715,30 @@ class HistoryLatestQuery(HistoryQuery):   # daily bars only
     def fetch(self) -> Table: ...          # static; one row per symbol: the previous completed session's bar
 ```
 
+**The query class of a dataset** is derived from its `DatasetSpec`, never declared on it, so
+the dataset layer never names the query classes. With S meaning the spec has channels, H that it
+has a history source (a history path, a grouped-daily path, or a flat-file prefix), and F that
+it has a fetch path, `query_class(spec)` in `_namespaces/base.py` gives:
+
+| S | H | F | Class (not `bars`) |
+|---|---|---|---|
+| no | no | yes | `Query` |
+| yes | no | no | `StreamQuery` |
+| no | yes | no | `HistoryQuery` |
+| yes | yes | no | `StreamHistoryQuery` |
+| yes | yes | yes | `StreamHistoryLatestQuery` |
+| no | no | no | rejected: no verb |
+| yes | no | yes | rejected: no class streams and fetches without history, and no streamed dataset has `poll()` |
+| no | yes | yes | rejected outside `bars`: `HistoryLatestQuery` is kept for daily bars |
+
+`DatasetSpec.__post_init__` raises `ValueError`, naming the dataset, for the rejected rows. A
+`bars` spec must have H; `query_class` gives it `HistoryQuery`, the class of its general
+overload, and `bar_query_class(spec, timespan, multiplier)` picks the class of each call
+([section 7.1](#71-bars-overloads)). A test in `tests/namespaces/test_base.py` checks that every
+factory's return annotation is `query_class(spec)` for its catalog spec, that each `bars`
+overload returns `bar_query_class` on a timespan of its `Literal` set and the implementation
+returns `HistoryQuery`, and that every public factory method maps to exactly one spec.
+
 **`columns()`.** Lists the columns every verb of the dataset returns, without touching the
 network, so a console or notebook user can read what each column means without the web UI or
 GitHub. The docstring contract, which the implementation copies:
@@ -930,6 +1019,11 @@ Notation:
   A range that ends before it starts raises `ValueError` at construction, as `history()` does
   (two dates may be equal: whole days; two datetimes are half-open; a date and a datetime
   compare by day).
+- Each namespace module declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`), and
+  `_session.py` composes them, once, at import, into `CATALOG`, the process's `Catalog` (every
+  `DatasetSpec` by name); a test asserts that every namespace module contributes. The query
+  class in each table below follows from the dataset's transports
+  ([section 7](#7-query-classes-and-verbs)).
 - `limit` is a total-row cap. Page size is internal. Every docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`.
@@ -1099,7 +1193,8 @@ All return `Query`.
 snapshot. `ALL` is not accepted here (the endpoint requires tickers). Its catalog record is
 named `reference.snapshots` and is declared in `_namespaces/reference.py` with
 `asset_class=None` (each ticker's prefix selects its class,
-§ 10), so `datasets()` in `_datasets/catalog.py` finds it; `m.streams()` and messages show that name.
+§ 10), so it is in the catalog (`CATALOG` in `_session.py`); `m.streams()` and messages show
+that name.
 
 ### 8.12 Excluded endpoints
 
@@ -2004,13 +2099,13 @@ without the GIL.
   - `FlatFileClient`'s lock, one per session, which guards the creation and the close of the
     boto3 S3 client (creation reads local AWS configuration but makes no request, since the
     credentials are given); its closed flag is a `threading.Event`, read without the lock by
-    the reader threads. The session creates the `FlatFileClient` itself on its first flat-file
-    read, under `registry_lock` (the constructor only stores settings), and registers its close
-    after releasing the lock;
+    the reader threads. The session's `SessionClients` creates the `FlatFileClient` on the
+    session's first flat-file read, under `registry_lock` (the constructor only stores
+    settings), and registers its close after releasing the lock;
   - the `_massive.spec` loaders, which load each generated file once;
   - `RestClient`'s not-before instant (section 19.1);
   - the session's `DriftRegistry`, whose WARNINGs are logged after the lock is released;
-  - the `dataset_schema` cache.
+  - the `dataset_schema` cache of the `Catalog`.
 - Per-connection mutable state (desired, acknowledged, and pending sets; the in-flight step;
   watchdogs; the `WsClient` and its socket) is **loop-confined**: only the connection's client
   thread touches it. Other threads reach it through `loop.call_soon_threadsafe` with plain data
@@ -2793,7 +2888,11 @@ that users can read what each column means ([section 7.4](#74-column-description
   file gives URLs for. Each file is read once under the lock, whichever of `sources` and
   `provenance` comes first. No other name is added to the interface.
 
-**Dataset schemas** are merged at run time, after the rename, never inferred from data:
+**Dataset schemas** are merged at run time, after the rename, never inferred from data.
+`dataset_schema` is a method of the `Catalog` (`_datasets/catalog.py`), and its cache lives on
+the catalog object: `_session.py` builds the one `CATALOG` and hands it to every core, and the
+transports call `core.catalog.dataset_schema(spec)`. The merge reads the members of a kind
+through `Catalog.members(kind)`, so the dataset layer needs no import of the namespace modules:
 
 ```
 dataset_schema(spec):                       # cached per dataset; computed outside the lock,
@@ -3043,8 +3142,8 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
 - **Pytest 9:** `strict = true`, `filterwarnings = ["error"]`, `--import-mode=importlib`,
   deadlock detection through `faulthandler_timeout` and `pytest-timeout`.
 - **Layout:** `tests/test_layout.py` passes: the mirror rule and naming of
-  [section 4.2](#42-test-layout), and the `_massive` boundary and layers of
-  [section 19](#19-wire-clients-and-the-spec-snapshot).
+  [section 4.2](#42-test-layout), the library's layers of [section 4.3](#43-layers), and the
+  `_massive` boundary and layers of [section 19](#19-wire-clients-and-the-spec-snapshot).
 - **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
   and `tests/datasets/test_catalog.py` passes (the catalog gates, generated ⊆ used ∪ undeclared) ([section
