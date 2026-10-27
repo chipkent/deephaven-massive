@@ -2679,8 +2679,12 @@ verification, never a column list.
   timestamp-like string parameter (base name `timestamp`, `*_timestamp`, `updated`,
   `*_updated`, `window_start`, `window_end`, or `*_time`, the names of the `timestamp-unit`
   gate) takes its `PARAM_UNITS` entry: a unit makes it `TIMESTAMP` in that unit (`Param.unit`), and "not an
-  epoch" makes it `DATE`; a string with `format: date` or `date-time`, a choice of formats, or
-  a base name `date`, `*_date`, `*_utc`, or `as_of` is `DATE`; any other string is `STRING`.
+  epoch" makes it `DATE`; a string with `format: date` or `date-time`, a choice of formats, a
+  base name `date`, `*_date`, `*_utc`, or `as_of`, or a description that gives the date format
+  `yyyy-mm-dd` (any letter case) is `DATE`; any other string is `STRING`. The description is
+  the vendor's evidence where the schema is a bare string: Massive types its date filters
+  `{"type": "string"}` and states the format only in prose ("Value must be formatted
+  'yyyy-mm-dd'"), whatever the parameter's name (`period_end`, `active_from`, `published`).
   The `.gt`, `.gte`, `.lt`, and `.lte` variants share their base name's entry.
 - **WebSocket.** Every `websocket.json` channel not in `EXCLUSIONS`, keyed `(cluster,
   channel)` and spelled `"<cluster>/<channel>"` as its `Source.key` (`"stocks/T"`,
