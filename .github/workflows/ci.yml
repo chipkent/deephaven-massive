@@ -30,8 +30,7 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
       - name: Sync dependencies
-        # uv.lock is not committed, so this resolves the newest versions, including the latest
-        # deephaven-fixes commit of the SDK fork.
+        # uv.lock is not committed, so this resolves the newest versions.
         run: uv sync --python 3.11
       - name: Ruff and mypy (scripts/check.sh fast --no-fix)
         # GitHub sets CI=true, so ruff reports in GitHub annotation format.
@@ -71,16 +70,11 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
       - name: Sync dependencies
-        # uv.lock is not committed, so this resolves the newest versions, including the latest
-        # deephaven-fixes commit of the SDK fork. The orjson extra is tested on 3.14; orjson
-        # publishes no free-threaded wheels.
+        # uv.lock is not committed, so this resolves the newest versions. The orjson extra is
+        # tested on 3.14; orjson publishes no free-threaded wheels.
         run: >-
           uv sync --python ${{ matrix.python-version }}
           ${{ matrix.python-version == '3.14' && '--extra orjson' || '' }}
-      - name: Show the installed massive commit (the deephaven-fixes head)
-        run: >-
-          uv run --no-sync python -c "import json, importlib.metadata as m;
-          print(json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
       - name: Pytest with 100% statement and branch coverage
         run: uv run pytest --cov --cov-report=xml
       - name: Upload coverage XML
@@ -118,13 +112,12 @@ jobs:
       - name: Sync dependencies at their floors
         # lowest-direct pins every direct dependency, the dev group and the orjson extra
         # included, to the lowest version its specifier allows; transitive dependencies
-        # resolve to their newest compatible versions, as they would for a user. massive
-        # comes from the deephaven-fixes branch of the SDK fork, so it has no floor to test.
+        # resolve to their newest compatible versions, as they would for a user.
         run: uv sync --python 3.11 --resolution lowest-direct --extra orjson
       - name: Show the resolved floor versions
         run: >-
           uv pip list | grep -iE
-          '^(massive|deephaven-core|deephaven-server|pyarrow|numpy|pandas|boto3|botocore|urllib3|certifi|websockets|orjson|pytest) '
+          '^(deephaven-core|deephaven-server|pyarrow|numpy|pandas|boto3|botocore|urllib3|certifi|websockets|orjson|pytest) '
       - name: Pytest
         # Coverage is the newest-versions jobs' gate; this job checks only that the floors work.
         run: uv run --no-sync pytest
@@ -177,17 +170,12 @@ jobs:
           java-version: "17"
       - name: Import the built wheel in a clean environment, inside a Deephaven server
         # The library imports deephaven at module level, so importing it needs a running
-        # Deephaven JVM, exactly as it does for users. The wheel is installed in a fresh
-        # virtual environment next to deephaven-server and the latest deephaven-fixes. The fork
-        # builds as version 0.0.0, which cannot satisfy the wheel's massive>=2.9.0, so an
-        # override supplies it. A server is started, and only then is the package imported.
+        # Deephaven JVM, exactly as it does for users. The wheel is installed, with
+        # its dependencies from PyPI, in a fresh virtual environment next to deephaven-server. A
+        # server is started, and only then is the package imported.
         run: |
-          echo "massive @ git+https://github.com/chipkent/massive-client-python@deephaven-fixes" > "$RUNNER_TEMP/overrides.txt"
           uv venv --python 3.11 "$RUNNER_TEMP/smoke"
-          uv pip install --python "$RUNNER_TEMP/smoke/bin/python" \
-            --override "$RUNNER_TEMP/overrides.txt" dist/*.whl deephaven-server
-          "$RUNNER_TEMP/smoke/bin/python" -c "import json, importlib.metadata as m;
-          print('massive', json.loads(m.distribution('massive').read_text('direct_url.json'))['vcs_info']['commit_id'])"
+          uv pip install --python "$RUNNER_TEMP/smoke/bin/python" dist/*.whl deephaven-server
           "$RUNNER_TEMP/smoke/bin/python" -c "from deephaven_server import Server; Server(port=0).start();
           import deephaven_massive; print(deephaven_massive.__version__)"
       - name: Upload distributions

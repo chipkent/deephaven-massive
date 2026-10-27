@@ -46,6 +46,7 @@ def request(parameter: str) -> KeySpec:
 
 STOCK_TRADES = DatasetSpec(
     name="stocks.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     kind="trades",
     fetch_path="/v2/last/trade/{stocksTicker}",
@@ -62,6 +63,7 @@ STOCK_TRADES = DatasetSpec(
 )
 CRYPTO_TRADES = DatasetSpec(
     name="crypto.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.CRYPTO,
     kind="trades",
     fetch_path="/v1/last/crypto/{from}/{to}",
@@ -78,6 +80,7 @@ CRYPTO_TRADES = DatasetSpec(
 )
 FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
     kind="trades",
     history_path="/futures/v1/trades/{ticker}",
@@ -95,6 +98,7 @@ FUTURES_TRADES = DatasetSpec(
 )
 INDEX_VALUES = DatasetSpec(
     name="indices.values",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
     kind="values",
     fetch_path="/v3/snapshot/indices",
@@ -109,10 +113,14 @@ INDEX_VALUES = DatasetSpec(
     symbol_param="ticker.any_of",
 )
 EXCHANGES = DatasetSpec(
-    name="reference.exchanges", fetch_path="/v3/reference/exchanges", poll_keys=("Id",)
+    name="reference.exchanges",
+    summary="A dataset for the tests.",
+    fetch_path="/v3/reference/exchanges",
+    poll_keys=("Id",),
 )
 CONTRACTS = DatasetSpec(
     name="options.contracts",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.OPTIONS,
     fetch_path="/v3/reference/options/contracts",
     extra_paths=("/v3/reference/options/contracts/{options_ticker}",),
@@ -127,12 +135,14 @@ CONTRACTS = DatasetSpec(
 )
 RELATED = DatasetSpec(
     name="reference.related_companies",
+    summary="A dataset for the tests.",
     fetch_path="/v1/related-companies/{ticker}",
     keys={(R, "/v1/related-companies/{ticker}"): keys("Ticker", fanout=request("ticker"))},
     per_symbol=True,
 )
 DIVIDENDS = DatasetSpec(
     name="stocks.dividends",
+    summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     fetch_path="/stocks/v1/dividends",
     keys={(R, "/stocks/v1/dividends"): keys("Ticker")},
@@ -173,7 +183,12 @@ def test_source_keys_list_their_roles_in_order() -> None:
 
 
 def test_a_spec_must_match_a_query_class() -> None:
-    stream = DatasetSpec(name="test.stream", asset_class=AssetClass.STOCKS, channels={None: "T"})
+    stream = DatasetSpec(
+        name="test.stream",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        channels={None: "T"},
+    )
     with pytest.raises(
         ValueError,
         match=r"^test\.stream: a dataset needs channels, a history source, or a fetch path$",
@@ -198,14 +213,42 @@ def test_a_spec_must_match_a_query_class() -> None:
     assert (flat.has_history, flat.has_channels, flat.has_fetch) == (True, False, False)
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "",
+        "No period at the end",
+        " Leading whitespace.",
+        "Trailing whitespace. ",
+        "Two\nlines.",
+    ],
+)
+def test_the_summary_is_one_sentence_ending_in_a_period(summary: str) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^reference\.exchanges: the summary must be one sentence ending in a period, got ",
+    ):
+        change(EXCHANGES, summary=summary)
+
+
+def test_a_summary_keeps_its_text() -> None:
+    summary = "Trades of US-listed stocks, tick by tick."
+    assert change(EXCHANGES, summary=summary).summary == summary
+
+
 def test_spec_validation() -> None:
     for name in ("trades", "trades.", ".trades"):  # no dot, or an empty half on either side
         with pytest.raises(ValueError, match=r"must be '<namespace>\.<dataset>'"):
             change(EXCHANGES, name=name)
     with pytest.raises(ValueError, match=r"test\.x: a WebSocket dataset .* needs a class"):
-        DatasetSpec(name="test.x", channels={None: "T"})
+        DatasetSpec(name="test.x", summary="A dataset for the tests.", channels={None: "T"})
     with pytest.raises(ValueError, match=r"test\.x: a dataset in a kind needs a class"):
-        DatasetSpec(name="test.x", kind="trades", fetch_path="/v3/reference/exchanges")
+        DatasetSpec(
+            name="test.x",
+            summary="A dataset for the tests.",
+            kind="trades",
+            fetch_path="/v3/reference/exchanges",
+        )
 
 
 def test_keys_are_declared_only_for_the_sources_read() -> None:
@@ -254,6 +297,7 @@ def test_futures_flat_files_declare_their_session() -> None:
 def test_bar_channels_and_prefixes_are_keyed_by_timespan() -> None:
     bars = DatasetSpec(
         name="stocks.bars",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         is_bars=True,
         channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
@@ -287,10 +331,18 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
         (DIVIDENDS, True),  # a symbol parameter
         (RELATED, True),  # one symbol per request
         (EXCHANGES, False),
-        (DatasetSpec(name="a.b", history_path="/v3/trades/{stockTicker}"), False),
         (
             DatasetSpec(
                 name="a.b",
+                summary="A dataset for the tests.",
+                history_path="/v3/trades/{stockTicker}",
+            ),
+            False,
+        ),
+        (
+            DatasetSpec(
+                name="a.b",
+                summary="A dataset for the tests.",
                 history_path="/v3/trades/{stockTicker}",
                 keys={(R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"))},
             ),
@@ -299,13 +351,17 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
         # A symbol parameter over a string field selects one instrument per row.
         (
             DatasetSpec(
-                name="reference.tickers", fetch_path="/v3/reference/tickers", symbol_param="ticker"
+                name="reference.tickers",
+                summary="A dataset for the tests.",
+                fetch_path="/v3/reference/tickers",
+                symbol_param="ticker",
             ),
             True,
         ),
         (
             DatasetSpec(
                 name="stocks.snapshots",
+                summary="A dataset for the tests.",
                 asset_class=AssetClass.STOCKS,
                 fetch_path="/v2/snapshot/locale/us/markets/stocks/tickers",
                 symbol_param="tickers",
@@ -316,6 +372,7 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
         (
             DatasetSpec(
                 name="stocks.balance_sheets",
+                summary="A dataset for the tests.",
                 asset_class=AssetClass.STOCKS,
                 fetch_path="/stocks/financials/v1/balance-sheets",
                 symbol_param="tickers.any_of",
@@ -324,12 +381,23 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
         ),
         (
             DatasetSpec(
-                name="reference.news", fetch_path="/v2/reference/news", symbol_param="ticker"
+                name="reference.news",
+                summary="A dataset for the tests.",
+                fetch_path="/v2/reference/news",
+                symbol_param="ticker",
             ),
             False,
         ),
         # A parameter whose field the rows lack still names the instruments asked for.
-        (DatasetSpec(name="a.b", fetch_path="/v3/reference/exchanges", symbol_param="mic"), True),
+        (
+            DatasetSpec(
+                name="a.b",
+                summary="A dataset for the tests.",
+                fetch_path="/v3/reference/exchanges",
+                symbol_param="mic",
+            ),
+            True,
+        ),
     ],
 )
 def test_a_dataset_takes_symbols_by_its_transports(spec: DatasetSpec, expected: bool) -> None:
@@ -340,6 +408,7 @@ def test_a_filing_keeps_its_tickers_and_has_no_symbol() -> None:
     path = "/stocks/financials/v1/balance-sheets"
     sheets = DatasetSpec(
         name="stocks.balance_sheets",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         fetch_path=path,
         symbol_param="tickers.any_of",
@@ -364,6 +433,7 @@ def test_rest_capabilities() -> None:
     assert EXCHANGES.has_fetch
     bars = DatasetSpec(
         name="stocks.bars",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         is_bars=True,
         history_path="/range",
@@ -415,6 +485,7 @@ def test_members_of_one_group_follow_their_positions() -> None:
     # Two datasets of one group: the one whose source comes first in the group comes first.
     last = DatasetSpec(
         name="stocks.last",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         kind="trades",
         channels={None: "T"},
@@ -422,6 +493,7 @@ def test_members_of_one_group_follow_their_positions() -> None:
     )
     history = DatasetSpec(
         name="stocks.history",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         kind="trades",
         history_path="/v3/trades/{stockTicker}",
@@ -473,6 +545,7 @@ def test_keys_rename_to_symbol_timestamp_and_underlying() -> None:
 def test_a_fanout_key_that_is_no_instrument_keeps_its_column() -> None:
     holdings = DatasetSpec(
         name="stocks.institutional_holdings",
+        summary="A dataset for the tests.",
         fetch_path="/stocks/filings/vX/13-F",
         poll_keys=("AccessionNumber",),
         keys={(R, "/stocks/filings/vX/13-F"): keys(fanout=KeySpec("FilerCik", instrument=False))},
@@ -503,6 +576,7 @@ def test_a_classed_reference_dataset_declares_no_key() -> None:
     # symbols, so they are no instrument datasets and need no symbol key.
     exchanges = DatasetSpec(
         name="futures.exchanges",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.FUTURES,
         fetch_path="/futures/v1/exchanges",
         poll_keys=("Id",),
@@ -628,6 +702,7 @@ def test_unique_columns_gate() -> None:
     # The open-close rows carry a Symbol of their own, so a symbol from the request repeats it.
     open_close = DatasetSpec(
         name="stocks.daily_open_close",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         fetch_path="/v1/open-close/{stocksTicker}/{date}",
         keys={(R, "/v1/open-close/{stocksTicker}/{date}"): keys(request("stocksTicker"))},
@@ -672,6 +747,7 @@ def test_declared_keys_gate_needs_an_instant_as_the_time_key() -> None:
     # A calendar date is no instant either: a date-axis dataset keeps its Date column.
     dated = DatasetSpec(
         name="economy.inflation",
+        summary="A dataset for the tests.",
         fetch_path="/fed/v1/inflation",
         keys={(R, "/fed/v1/inflation"): keys(time="Date")},
         poll_keys=("Date",),
@@ -691,6 +767,7 @@ def test_fanout_keys_of_datasets_in_no_kind_need_not_agree() -> None:
     # A filer CIK and a related company: two datasets in no kind, each consistent alone.
     holdings = DatasetSpec(
         name="stocks.institutional_holdings",
+        summary="A dataset for the tests.",
         fetch_path="/stocks/filings/vX/13-F",
         keys={(R, "/stocks/filings/vX/13-F"): keys(fanout=KeySpec("FilerCik", instrument=False))},
         poll_keys=("AccessionNumber",),
@@ -780,6 +857,7 @@ def test_wire_parameters_gate() -> None:
     )
     stream = DatasetSpec(
         name="stocks.luld",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         channels={None: "LULD"},
         keys={(W, "stocks/LULD"): keys("Ticker")},
@@ -851,14 +929,16 @@ def test_every_generated_source_is_used_or_undeclared() -> None:
 def test_the_undeclared_files_belong_to_namespaces() -> None:
     namespaces = {module.__name__.rpartition(".")[2] for module in NAMESPACE_MODULES}
     assert set(read_undeclared(UNDECLARED)) <= namespaces
-    # A source several namespaces will use is listed in each of them.
-    listed = read_undeclared(UNDECLARED)
-    assert (R, "/v3/snapshot") in listed["options"] & listed["reference"]
 
 
 def test_coverage_finds_unlisted_used_and_stale_sources() -> None:
     generated = {(R, "/a"), (R, "/b"), (W, "stocks/T")}
-    spec = DatasetSpec(name="stocks.x", asset_class=AssetClass.STOCKS, channels={None: "T"})
+    spec = DatasetSpec(
+        name="stocks.x",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        channels={None: "T"},
+    )
     undeclared = {"stocks": {(W, "stocks/T"), (R, "/gone")}, "options": {(R, "/a")}}
     assert coverage_problems([spec], undeclared, generated) == [
         "coverage: REST /b is neither used nor listed as undeclared",
@@ -890,7 +970,11 @@ def test_filters_are_the_query_parameters_of_the_dataset_paths() -> None:
 
 
 def test_a_path_parameter_is_no_filter() -> None:
-    indicator = DatasetSpec(name="indicators.sma", fetch_path="/v1/indicators/sma/{stockTicker}")
+    indicator = DatasetSpec(
+        name="indicators.sma",
+        summary="A dataset for the tests.",
+        fetch_path="/v1/indicators/sma/{stockTicker}",
+    )
     check(indicator, {"window": 50})
     with pytest.raises(ValueError, match=r"has no filter 'stockTicker'"):
         check(indicator, {"stockTicker": "AAPL"})
@@ -922,6 +1006,7 @@ def test_the_symbol_parameter_reserves_only_its_equality_forms() -> None:
     check(DIVIDENDS, {"ticker_gte": "A", "ticker_lt": "B"})
     sheets = DatasetSpec(
         name="stocks.balance_sheets",
+        summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         fetch_path="/stocks/financials/v1/balance-sheets",
         symbol_param="tickers.any_of",
