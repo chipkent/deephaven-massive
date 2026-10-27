@@ -211,17 +211,20 @@ def test_the_quote_prices_are_generated_names(real: generate.Generated) -> None:
     # The examples join trades to quotes on `BidPrice` and `AskPrice`: every quotes source of
     # every transport generates both.
     members = [
-        source
+        (source, membership)
         for source in (*real.rest, *real.ws, *real.flat_files)
-        if any(m.kind == "quotes" and m.projection is None for m in source.memberships)
+        for membership in source.memberships
+        if membership.kind == "quotes"
     ]
-    assert {s.transport for s in members} == set(Transport)
-    for source in members:
-        columns = {f.column for f in source.fields}
-        # The forex last quote and the crypto stream, which follows crypto's own last
-        # quote, spell them `ask` and `bid`.
-        if source.key not in {"/v1/last_quote/currencies/{from}/{to}", "crypto/XQ"}:
-            assert {"BidPrice", "AskPrice"} <= columns, source.key
+    assert {s.transport for s, _ in members} == set(Transport)
+    for source, membership in members:
+        if membership.projection is None:
+            columns = {f.column for f in source.fields}
+        else:
+            # The forex last quote and the crypto stream spell them `ask` and `bid`, as
+            # Massive's last-quote objects do; their projections give the quotes spelling.
+            columns = set(membership.projection.values())
+        assert {"BidPrice", "AskPrice"} <= columns, source.key
 
 
 def test_memberships_follow_kinds_and_projections(real: generate.Generated) -> None:

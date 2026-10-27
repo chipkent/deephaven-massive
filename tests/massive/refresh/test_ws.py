@@ -81,7 +81,7 @@ def test_the_messages_take_the_lexicons_and_names(
         "dv": "DecimalVolume",
         "av": "AccumulatedVolume",
         "dav": "AccumulatedDecimalVolume",
-        "op": "OfficialOpenPrice",
+        "op": "OfficialOpen",
         "a": "DayVwap",
         "z": "AverageTradeSize",
         "s": "WindowStart",

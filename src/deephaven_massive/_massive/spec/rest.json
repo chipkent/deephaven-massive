@@ -2770,13 +2770,13 @@
     {"in_path": true, "kind": "string", "name": "to", "unit": null, "values": []}
    ],
    "fields": [
-    {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "Ask", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "ask"},
     {"column": "Bid", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "bid"},
+    {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "Timestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "timestamp"}
    ],
    "memberships": [
-    {"group": "forex", "kind": "quotes", "position": 1, "projection": null}
+    {"group": "forex", "kind": "quotes", "position": 1, "projection": {"ask": "AskPrice", "bid": "BidPrice", "exchange": "Exchange", "timestamp": "Timestamp"}}
    ]
   },
   {

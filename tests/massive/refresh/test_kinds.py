@@ -272,16 +272,16 @@ def test_the_flat_file_then_the_stream_orders_every_member() -> None:
     orders, problems = kinds.column_orders(found)
     assert problems == []
     assert orders == {
-        "us_stocks_sip/trades_v1": ("Ticker", "Size", "Price"),
-        "stocks/T": ("Ticker", "Size", "Price"),
-        "/v3/trades": ("Size", "Price", "Id"),
+        "us_stocks_sip/trades_v1": ("ticker", "size", "price"),
+        "stocks/T": ("sym", "s", "p"),
+        "/v3/trades": ("size", "price", "id"),
     }
 
 
 def test_the_stream_orders_a_group_without_a_flat_file() -> None:
     hand = dataclasses.replace(_EMPTY, kinds={"trades": {"stocks": ["/v3/trades", "stocks/T"]}})
     orders, _ = kinds.column_orders(_members(hand))
-    assert orders["/v3/trades"] == ("Price", "Size", "Id")
+    assert orders["/v3/trades"] == ("price", "size", "id")
 
 
 def test_gate_column_order_a_group_with_no_stream_or_file() -> None:
@@ -327,6 +327,22 @@ def test_a_projected_member_is_neither_ordered_nor_an_order_reference() -> None:
     orders, problems = kinds.column_orders(_members(hand, _SOURCES))
     assert orders == {}
     assert [(p.gate, p.source) for p in problems] == [("column-order", "/v3/trades")]
+
+
+def test_a_projection_that_only_renames_is_ordered_and_gives_the_order() -> None:
+    # The stream spells its fields its own way; renamed into the kind's names, it gives the
+    # order (`Ticker`, `Price`, `Size`) and takes it.
+    renames = overrides.Projection(fields={"sym": "ticker", "p": "price", "s": "size"}, reason="t")
+    reversed_channel = dataclasses.replace(_CHANNEL, fields=tuple(reversed(_CHANNEL.fields)))
+    sources = {**_SOURCES, "stocks/T": reversed_channel}
+    hand = dataclasses.replace(
+        _EMPTY,
+        kinds={"trades": {"stocks": ["/v3/trades", "stocks/T"]}},
+        projections={("trades", "stocks/T"): renames},
+    )
+    orders, problems = kinds.column_orders(_members(hand, sources))
+    assert problems == []
+    assert orders == {"stocks/T": ("s", "p", "sym"), "/v3/trades": ("size", "price", "id")}
 
 
 def test_apply_writes_memberships_and_the_order_and_keeps_the_type() -> None:

@@ -26,9 +26,11 @@ source order. Once every transport is generated, this module:
 5. writes each source's memberships (`spec.types.Membership`), which the generated files
    record, so the run-time merge never reads `refresh/`.
 
-A projected membership contributes only its projection's fields, under the kind's names; it
-is neither reordered nor an order reference, and the source keeps its full fields everywhere
-else. It imports the standard library and other `_massive` modules only.
+A projected membership contributes only its projection's fields, under the kind's names, and
+the source keeps its full fields everywhere else. A projection that keeps every field only
+renames (the forex last quote's `ask` as `AskPrice`), so its member is ordered, and gives the
+order, like an unprojected one; a projection to a few fields does neither. It imports the
+standard library and other `_massive` modules only.
 """
 
 from __future__ import annotations
@@ -320,20 +322,21 @@ def transport_agreement(hand: HandInput, found: Sequence[Member]) -> Iterator[Pr
 
 
 def column_orders(found: Sequence[Member]) -> tuple[dict[str, tuple[str, ...]], list[Problem]]:
-    """Order the columns of every unprojected member from its group.
+    """Order the fields of every member that keeps all its fields from its group.
 
     Within each `(kind, group)`, the group's order is the columns of its flat-file sources,
     then of its WebSocket sources, then of its other sources, each in `KINDS` order and each
-    column at its first appearance. Every unprojected member takes that order for its own
-    columns.
+    column at its first appearance. A member that keeps all its fields (unprojected, or
+    projected only to rename them) takes that order and may give it; a member projected to a
+    few of its fields does neither, and its source keeps its own order.
 
     Args:
         found: The members.
 
     Returns:
-        Each reordered source's key mapped to its columns in order, and a `column-order`
+        Each reordered source's key mapped to its wire keys in order, and a `column-order`
         problem for each source whose group has no flat-file or WebSocket source to give the
-        order, or whose groups order its columns differently.
+        order, or whose groups order its fields differently.
     """
     groups: dict[tuple[str, str], list[Member]] = {}
     for member in found:
@@ -341,12 +344,8 @@ def column_orders(found: Sequence[Member]) -> tuple[dict[str, tuple[str, ...]], 
     orders: dict[str, tuple[str, ...]] = {}
     problems: list[Problem] = []
     for (kind, group), grouped in groups.items():
-        ordered = [
-            m
-            for t in _ORDER_TRANSPORTS
-            for m in grouped
-            if m.source.transport is t and m.projection is None
-        ]
+        whole = [m for m in grouped if _keeps_every_field(m)]
+        ordered = [m for t in _ORDER_TRANSPORTS for m in whole if m.source.transport is t]
         if not ordered:
             problems += [
                 Problem(
@@ -356,30 +355,41 @@ def column_orders(found: Sequence[Member]) -> tuple[dict[str, tuple[str, ...]], 
                     message=f"group {group!r} has no flat-file or WebSocket source to give its "
                     "column order",
                 )
-                for m in grouped
-                if m.projection is None
+                for m in whole
             ]
             continue
         rank: dict[str, int] = {}
         for member in [*ordered, *(m for m in grouped if all(m is not o for o in ordered))]:
             for column, _ in member.columns():
                 rank.setdefault(column, len(rank))
-        for member in grouped:
-            if member.projection is not None:
-                continue
-            columns = tuple(sorted((f.column for f in member.source.fields), key=rank.__getitem__))
-            previous = orders.setdefault(member.source.key, columns)
-            if previous != columns:
+        for member in whole:
+            wire_keys = tuple(
+                f.wire_key for column, f in sorted(member.columns(), key=lambda c: rank[c[0]])
+            )
+            previous = orders.setdefault(member.source.key, wire_keys)
+            if previous != wire_keys:
                 problems.append(
                     Problem(
                         gate=Gate.COLUMN_ORDER,
                         source=member.source.key,
                         key=kind,
-                        message=f"group {group!r} orders its columns {list(columns)}, another "
+                        message=f"group {group!r} orders its fields {list(wire_keys)}, another "
                         f"group {list(previous)}",
                     )
                 )
     return orders, problems
+
+
+def _keeps_every_field(member: Member) -> bool:
+    """Return whether a member contributes every field of its source to its kind.
+
+    Args:
+        member: The member.
+
+    Returns:
+        True for an unprojected member, and for one whose projection only renames.
+    """
+    return member.projection is None or len(member.projection) == len(member.source.fields)
 
 
 def apply(
@@ -390,7 +400,7 @@ def apply(
     Args:
         sources: The generated sources of one transport, in their generated order.
         found: Every member, of every transport.
-        orders: Each reordered source's columns in order (`column_orders`).
+        orders: Each reordered source's wire keys in order (`column_orders`).
 
     Returns:
         Each source, its fields reordered when `orders` names it, with one `Membership` per
@@ -410,8 +420,8 @@ def apply(
     for source in sources:
         fields = source.fields
         if source.key in orders:
-            rank = {column: index for index, column in enumerate(orders[source.key])}
-            fields = tuple(sorted(fields, key=lambda f: rank[f.column]))
+            rank = {wire_key: index for index, wire_key in enumerate(orders[source.key])}
+            fields = tuple(sorted(fields, key=lambda f: rank[f.wire_key]))
         out.append(
             dataclasses.replace(
                 source, fields=fields, memberships=tuple(memberships.get(source.key, ()))

@@ -240,15 +240,13 @@ NAMES: Mapping[tuple[str, str], Name] = MappingProxyType(
                 "string decimal number",
             ),
         ),
-        **_named(
-            _WS_EQUITY_BARS, "op", _name("official_open_price", "Today's official opening price.")
-        ),
-        # One concept, one column: the index bars' official opening value is the same running
-        # figure as the equity bars' official opening price.
+        # A neutral name for the day's official open: the stocks and options opening price and
+        # the indices opening level (an index value, not a price), as `Open` is for every bar.
+        **_named(_WS_EQUITY_BARS, "op", _name("official_open", "Today's official opening price.")),
         **_named(
             ("indices/AM", "indices/A"),
             "op",
-            _name("official_open_price", "Today's official opening value."),
+            _name("official_open", "Today's official opening value."),
         ),
         **_named(
             (*_WS_EQUITY_BARS, "crypto/XA", "crypto/XAS"),
@@ -908,8 +906,41 @@ WebSocket channels in the order the specification's `x-polygon-order` gives them
 aggregates before the second aggregates), then the flat-file prefixes.
 """
 
+# Why a quote source that spells its prices as Massive's last-quote objects do (`ask`, `bid`)
+# joins the quotes kind under the quotes data's spelling (`ask_price`, `bid_price`).
+_QUOTE_PRICES = (
+    "{source} spells the quote's prices `ask` and `bid`, as Massive's last-quote objects do, "
+    "while the quotes data of every transport spells them `ask_price` and `bid_price`; in the "
+    "quotes kind they take that spelling, so the merged table has one column per field. Every "
+    "other field keeps its own name."
+)
+
 PROJECTIONS: Mapping[tuple[str, str], Projection] = MappingProxyType(
     {
+        ("quotes", "/v1/last_quote/currencies/{from}/{to}"): Projection(
+            fields={
+                "ask": "ask_price",
+                "bid": "bid_price",
+                "exchange": "exchange",
+                "timestamp": "timestamp",
+            },
+            reason=_QUOTE_PRICES.format(source="The forex REST last quote"),
+        ),
+        ("quotes", "crypto/XQ"): Projection(
+            fields={
+                "pair": "pair",
+                "bp": "bid_price",
+                "bs": "bid_size",
+                "ap": "ask_price",
+                "as": "ask_size",
+                "t": "participant_timestamp",
+                "x": "exchange",
+                "r": "received_timestamp",
+            },
+            reason=_QUOTE_PRICES.format(
+                source="The crypto quote stream, named after crypto's own last quote,"
+            ),
+        ),
         ("values", "/v3/snapshot/indices"): Projection(
             fields={"ticker": "ticker", "value": "value", "last_updated": "timestamp"},
             reason="The indices snapshot answers the latest value of an index: its ticker, its "
@@ -974,7 +1005,7 @@ TRANSPORT_ONLY: Mapping[tuple[str, str, str], str] = MappingProxyType(
             "forex",
             "crypto",
         ),
-        **_only("bars", "OfficialOpenPrice", _RUNNING, "stocks", "options", "indices"),
+        **_only("bars", "OfficialOpen", _RUNNING, "stocks", "options", "indices"),
         **_only(
             "bars",
             "Exchange",
@@ -1035,20 +1066,6 @@ TRANSPORT_ONLY: Mapping[tuple[str, str, str], str] = MappingProxyType(
         ),
         **_only(
             "trades", "Exchange", "Only the futures trade flat files carry the exchange.", "futures"
-        ),
-        **_only(
-            "quotes",
-            "Ask",
-            "The forex REST last quote names its ask `ask`, its own long name, where the stream "
-            "and the files say `ask_price`.",
-            "forex",
-        ),
-        **_only(
-            "quotes",
-            "Bid",
-            "The forex REST last quote names its bid `bid`, its own long name, where the stream "
-            "and the files say `bid_price`.",
-            "forex",
         ),
         **_only(
             "quotes",

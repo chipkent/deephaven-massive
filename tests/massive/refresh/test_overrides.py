@@ -56,7 +56,7 @@ def test_the_owner_s_final_names_of_the_running_figures() -> None:
     }
     assert {key: naming.column_name([names[key]]) for key in ("av", "op", "z", "dav")} == {
         "av": "AccumulatedVolume",
-        "op": "OfficialOpenPrice",
+        "op": "OfficialOpen",
         "z": "AverageTradeSize",
         "dav": "AccumulatedDecimalVolume",
     }

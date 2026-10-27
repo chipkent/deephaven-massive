@@ -1492,9 +1492,9 @@
     "timestamp": "The Unix millisecond timestamp."
    },
    "/v1/last_quote/currencies/{from}/{to}": {
-    "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs.",
     "ask": "The ask price.",
     "bid": "The bid price.",
+    "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs.",
     "timestamp": "The Unix millisecond timestamp."
    },
    "/v1/marketstatus/now": {
