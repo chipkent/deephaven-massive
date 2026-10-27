@@ -1,0 +1,67 @@
+name: Spec drift
+
+# Compares Massive's live published API (the OpenAPI and WebSocket specifications, the
+# documentation index, and the pages it links) with the vendored snapshot, weekly and on
+# demand. With drift it keeps one standing "Massive API drift" issue up to date, commenting
+# once when an open issue's report changed; without drift it does nothing. It is advisory: it never pushes, never opens a pull request, and is never a
+# required check, so a change at Massive cannot block unrelated pull requests. It runs without
+# S3 credentials, so flat-file coverage comes from the documentation pages and overviews.
+
+on:
+  schedule:
+    # Mondays at 06:17 UTC, off the hour to avoid the scheduler's busiest minutes.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  # One run at a time, so two runs never race to open the standing issue.
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  # Read the repository for the checkout (it is private), write the label and the issue.
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.13
+      - name: Sync dependencies
+        run: uv sync --python 3.13 --no-dev
+      - name: Compare the live Massive API with the vendored snapshot
+        id: check
+        # Status 0 is no drift and 1 is drift; anything else means the check could not be
+        # made, which fails the job instead of touching the issue. An uncaught error also
+        # exits 1, so drift additionally needs the report's own title as its first line.
+        run: |
+          status=0
+          uv run --no-sync python -m deephaven_massive._massive.refresh --check > drift.md || status=$?
+          cat drift.md
+          if [ "$status" -eq 0 ]; then
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+          elif [ "$status" -eq 1 ] && [ "$(head -n 1 drift.md)" = "# Massive API drift" ]; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "the drift check could not be made (status $status)" >&2
+            exit 2
+          fi
+      - name: Update the standing drift issue
+        if: steps.check.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/spec-drift-issue.sh < drift.md

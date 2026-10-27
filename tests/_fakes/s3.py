@@ -2,19 +2,22 @@
 
 The library builds a real boto3 S3 client from its configuration. `FakeS3.install` wraps
 boto3's client factory for the length of a test, so every S3 client created meanwhile is passed
-to `FakeS3.attach`, which registers two botocore event handlers on it: every `GetObject` is then
-answered in process, after the SDK has validated and serialized the call and before anything is
-signed or sent. Answers have the shape S3 itself gives: a `StreamingBody` for an object, and for
-an error an HTTP status with S3's error code and message and an `x-amz-request-id` header,
-which botocore raises as `ClientError`. Nothing leaves the process.
+to `FakeS3.attach`, which registers botocore event handlers on it: every `GetObject` and
+`ListObjectsV2` is then answered in process, after the SDK has validated and serialized the call
+and before anything is signed or sent. Answers have the shape S3 itself gives: a
+`StreamingBody` for an object; for a listing with the delimiter `/`, the top-level prefixes of
+the stored keys as `CommonPrefixes`, `page_size` at a time, with a continuation token while
+more remain; and for an error an HTTP status with S3's error code and message and an
+`x-amz-request-id` header, which botocore raises as `ClientError`. Nothing leaves the process.
 
 Objects are stored by key, as bytes or, through `put_csv`, as a flat file with any header (to
 reorder, add, or drop columns by name). A key can also be refused with any status (403
 `AccessDenied` for a plan without the dataset, 500 for a server error), fail before any response
 by name (`"unreachable"`: the endpoint cannot be reached), or fail part-way through its body (a
 dropped connection while streaming). Every request, every client close, and every body close is
-recorded. Built by the `fake_s3` fixture in `tests/conftest.py`; thread-safe, since the library
-reads several keys at once.
+recorded. A listing is recorded in `listings` by the continuation token it sent, and `refuse`,
+`fail`, and `before_answer` treat it as a request for the key `""`. Built by the `fake_s3`
+fixture in `tests/conftest.py`; thread-safe, since the library reads several keys at once.
 """
 
 from __future__ import annotations
@@ -86,6 +89,14 @@ class FakeS3:
         self.closes = 0
         self.closed_bodies: list[str] = []
         self.request_id = REQUEST_ID
+        # The continuation token of each listing, None for a first page, in request order.
+        self.listings: list[str | None] = []
+        # The most prefixes one listing page holds; S3's own pages hold 1000.
+        self.page_size = 1000
+        # How listing pages bend S3's pagination fields, as a server other than S3 might:
+        # "missing" sends no token on a truncated page, "repeat" sends back the token it was
+        # asked with (after a first page), and "bare" leaves both fields out of a last page.
+        self.pagination: str | None = None
         # Called with the key on the requesting thread before each answer, so a test can hold a
         # read in flight or act at that moment; set it before the library's first read.
         self.before_answer: Callable[[str], object] | None = None
@@ -175,6 +186,10 @@ class FakeS3:
         events.register("before-parameter-build.s3.GetObject", self._remember)
         # A `before-call` handler that returns a response replaces the HTTP request.
         events.register("before-call.s3.GetObject", cast("Callable[..., None]", self._answer))
+        events.register("before-parameter-build.s3.ListObjectsV2", self._remember_listing)
+        events.register(
+            "before-call.s3.ListObjectsV2", cast("Callable[..., None]", self._answer_listing)
+        )
         close = client.close
 
         def recorded_close() -> None:
@@ -201,6 +216,48 @@ class FakeS3:
 
     def _remember(self, params: dict[str, Any], context: dict[str, Any], **_: object) -> None:
         context[_CONTEXT_KEY] = (params["Bucket"], params["Key"])
+
+    def _remember_listing(
+        self, params: dict[str, Any], context: dict[str, Any], **_: object
+    ) -> None:
+        context[_CONTEXT_KEY] = (params.get("Delimiter"), params.get("ContinuationToken"))
+
+    def _answer_listing(
+        self, context: dict[str, Any], **_: object
+    ) -> tuple[AWSResponse, dict[str, Any]]:
+        delimiter, token = context[_CONTEXT_KEY]
+        if delimiter != "/":
+            raise AssertionError("the fake lists only top-level prefixes (Delimiter='/')")
+        if self.before_answer is not None:
+            self.before_answer("")
+        with self._lock:
+            self.listings.append(token)
+            failure = self._failures.get("")
+            refusal = self._refusals.get("")
+            stored = {*self._objects, *self._dropped}
+            size = self.page_size
+            pagination = self.pagination
+        if failure is not None:
+            raise EndpointConnectionError(endpoint_url="https://files.massive.com")
+        if refusal is not None:
+            return _error(*refusal)
+        prefixes = sorted({key.partition("/")[0] + "/" for key in stored if "/" in key})
+        start = 0 if token is None else int(token.removeprefix("after-"))
+        more = start + size < len(prefixes)
+        answer: dict[str, Any] = {
+            "IsTruncated": more,
+            "CommonPrefixes": [{"Prefix": prefix} for prefix in prefixes[start : start + size]],
+            "ResponseMetadata": {"HTTPStatusCode": 200},
+        }
+        if more and pagination != "missing":
+            answer["NextContinuationToken"] = (
+                (token or f"after-{start + size}")
+                if pagination == "repeat"
+                else f"after-{start + size}"
+            )
+        if not more and pagination == "bare":
+            del answer["IsTruncated"]
+        return AWSResponse("", 200, HTTPHeaders(), None), answer
 
     def _answer(self, context: dict[str, Any], **_: object) -> tuple[AWSResponse, dict[str, Any]]:
         bucket, key = context[_CONTEXT_KEY]
