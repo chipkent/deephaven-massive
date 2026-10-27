@@ -1,0 +1,820 @@
+{
+ "fetched": "2026-10-27",
+ "files": {
+  "llms.txt": {
+   "fetched_sha256": "6d9c5b59ae05c731b5a8ee2b805b691de829e948181caf8b72186da8577b2ea6",
+   "stored_sha256": "6d9c5b59ae05c731b5a8ee2b805b691de829e948181caf8b72186da8577b2ea6",
+   "url": "https://massive.com/docs/llms.txt"
+  },
+  "openapi.json": {
+   "fetched_sha256": "6a8e4bdf74470fe3bb0b9717789fc8067a05dbe50987f035650785595e57471c",
+   "stored_sha256": "aa890c3342ea587fe915aded87acf88c254a6989927c9fcb1ce28cf2765d5b11",
+   "url": "https://api.massive.com/openapi"
+  },
+  "rest/alternative/consumer-spending/merchant-aggregates.md": {
+   "fetched_sha256": "c05472cd54eb25e46a752d05d810739bfe13139a17be1f000815e9cfc927c792",
+   "stored_sha256": "c05472cd54eb25e46a752d05d810739bfe13139a17be1f000815e9cfc927c792",
+   "url": "https://massive.com/docs/rest/alternative/consumer-spending/merchant-aggregates.md"
+  },
+  "rest/alternative/consumer-spending/merchant-hierarchy.md": {
+   "fetched_sha256": "f44aca2533e71fdf5418cebe78298650bb7b87ea2633e59d934392573aade2cb",
+   "stored_sha256": "f44aca2533e71fdf5418cebe78298650bb7b87ea2633e59d934392573aade2cb",
+   "url": "https://massive.com/docs/rest/alternative/consumer-spending/merchant-hierarchy.md"
+  },
+  "rest/alternative/overview.md": {
+   "fetched_sha256": "c19915ac8c325f271c4754517a67d4cd4e61ea88187f2a9a3cb49188e1d77047",
+   "stored_sha256": "c19915ac8c325f271c4754517a67d4cd4e61ea88187f2a9a3cb49188e1d77047",
+   "url": "https://massive.com/docs/rest/alternative/overview.md"
+  },
+  "rest/crypto/aggregates/custom-bars.md": {
+   "fetched_sha256": "a1614e1cad89cbf08bfb53750a9e30c90de89d20a3a6ddb6426b9da211a8c06b",
+   "stored_sha256": "a1614e1cad89cbf08bfb53750a9e30c90de89d20a3a6ddb6426b9da211a8c06b",
+   "url": "https://massive.com/docs/rest/crypto/aggregates/custom-bars.md"
+  },
+  "rest/crypto/aggregates/daily-market-summary.md": {
+   "fetched_sha256": "6f5b6fcef7cc63e5047953f4576f82f438b6a78882bc3d4b22ec2381350df613",
+   "stored_sha256": "6f5b6fcef7cc63e5047953f4576f82f438b6a78882bc3d4b22ec2381350df613",
+   "url": "https://massive.com/docs/rest/crypto/aggregates/daily-market-summary.md"
+  },
+  "rest/crypto/aggregates/daily-ticker-summary.md": {
+   "fetched_sha256": "6d8da11e5cadc7ea0a4c68f733b8234a8d3a825329b94b4cd57db653b63e7eb6",
+   "stored_sha256": "6d8da11e5cadc7ea0a4c68f733b8234a8d3a825329b94b4cd57db653b63e7eb6",
+   "url": "https://massive.com/docs/rest/crypto/aggregates/daily-ticker-summary.md"
+  },
+  "rest/crypto/aggregates/previous-day-bar.md": {
+   "fetched_sha256": "d2bdbad4b6d94b17a343412d1e9f3e502da145f6d08336b3308a2709d3043ab2",
+   "stored_sha256": "d2bdbad4b6d94b17a343412d1e9f3e502da145f6d08336b3308a2709d3043ab2",
+   "url": "https://massive.com/docs/rest/crypto/aggregates/previous-day-bar.md"
+  },
+  "rest/crypto/market-operations/condition-codes.md": {
+   "fetched_sha256": "d47233a2a45d0ae5e8de1aeca1472176a47de2b1cdf64952b66046aef540da42",
+   "stored_sha256": "d47233a2a45d0ae5e8de1aeca1472176a47de2b1cdf64952b66046aef540da42",
+   "url": "https://massive.com/docs/rest/crypto/market-operations/condition-codes.md"
+  },
+  "rest/crypto/market-operations/exchanges.md": {
+   "fetched_sha256": "0c4e7b48b46b6078bd9a9829757e2bb253f5c0ecf78ff7ef5985829b64cf6687",
+   "stored_sha256": "0c4e7b48b46b6078bd9a9829757e2bb253f5c0ecf78ff7ef5985829b64cf6687",
+   "url": "https://massive.com/docs/rest/crypto/market-operations/exchanges.md"
+  },
+  "rest/crypto/market-operations/market-holidays.md": {
+   "fetched_sha256": "d67ccdf71ec0ba5ed10a2f5364918210d62c214f8ff5ded27d272367fd7f80a5",
+   "stored_sha256": "d67ccdf71ec0ba5ed10a2f5364918210d62c214f8ff5ded27d272367fd7f80a5",
+   "url": "https://massive.com/docs/rest/crypto/market-operations/market-holidays.md"
+  },
+  "rest/crypto/market-operations/market-status.md": {
+   "fetched_sha256": "416c6d8706da619d07d2397cf4a2a809e56742e0f5281e7ae816595b5b0caaae",
+   "stored_sha256": "416c6d8706da619d07d2397cf4a2a809e56742e0f5281e7ae816595b5b0caaae",
+   "url": "https://massive.com/docs/rest/crypto/market-operations/market-status.md"
+  },
+  "rest/crypto/overview.md": {
+   "fetched_sha256": "6c5a6949611d59e567b2ba84ec3a07c27dc9086a8455afaeef9113ea7b92015d",
+   "stored_sha256": "849b4268407db297985b816cdc55d0863a6cb828cf1cab3d2891406dfbf0474b",
+   "url": "https://massive.com/docs/rest/crypto/overview.md"
+  },
+  "rest/crypto/snapshots/full-market-snapshot.md": {
+   "fetched_sha256": "72b8197a42c6425c669529e3246b18bc4336b9fabed5e2eb7c65eb6457172fa0",
+   "stored_sha256": "72b8197a42c6425c669529e3246b18bc4336b9fabed5e2eb7c65eb6457172fa0",
+   "url": "https://massive.com/docs/rest/crypto/snapshots/full-market-snapshot.md"
+  },
+  "rest/crypto/snapshots/single-ticker-snapshot.md": {
+   "fetched_sha256": "ab44949b1a11f9b58ca3d72218ca91dc466d1a120932fd4e719fca3f162a6c53",
+   "stored_sha256": "ab44949b1a11f9b58ca3d72218ca91dc466d1a120932fd4e719fca3f162a6c53",
+   "url": "https://massive.com/docs/rest/crypto/snapshots/single-ticker-snapshot.md"
+  },
+  "rest/crypto/snapshots/top-market-movers.md": {
+   "fetched_sha256": "04e2171caafb82eb8f5dad27334e3a65c14e9f025df8a3d6a7abbe4c7e2782e0",
+   "stored_sha256": "04e2171caafb82eb8f5dad27334e3a65c14e9f025df8a3d6a7abbe4c7e2782e0",
+   "url": "https://massive.com/docs/rest/crypto/snapshots/top-market-movers.md"
+  },
+  "rest/crypto/snapshots/unified-snapshot.md": {
+   "fetched_sha256": "7a72d7fb721221d4b68c1b1587859e2405d9865889d56f1f7bc7586553dc9a98",
+   "stored_sha256": "7a72d7fb721221d4b68c1b1587859e2405d9865889d56f1f7bc7586553dc9a98",
+   "url": "https://massive.com/docs/rest/crypto/snapshots/unified-snapshot.md"
+  },
+  "rest/crypto/technical-indicators/exponential-moving-average.md": {
+   "fetched_sha256": "70abc1fe2fe3360077f03c5c3bb5bacc6567a00530bc650324ce77610ed41cf9",
+   "stored_sha256": "70abc1fe2fe3360077f03c5c3bb5bacc6567a00530bc650324ce77610ed41cf9",
+   "url": "https://massive.com/docs/rest/crypto/technical-indicators/exponential-moving-average.md"
+  },
+  "rest/crypto/technical-indicators/moving-average-convergence-divergence.md": {
+   "fetched_sha256": "1694e0b07d806ace5f273ad12d65dc809c216d3cdab176d74d0c14fad01eda19",
+   "stored_sha256": "1694e0b07d806ace5f273ad12d65dc809c216d3cdab176d74d0c14fad01eda19",
+   "url": "https://massive.com/docs/rest/crypto/technical-indicators/moving-average-convergence-divergence.md"
+  },
+  "rest/crypto/technical-indicators/relative-strength-index.md": {
+   "fetched_sha256": "773ad562cf2ed0059e40762fbd94e99b7d6ab158b9cfa8d9a954e0f23102f9da",
+   "stored_sha256": "773ad562cf2ed0059e40762fbd94e99b7d6ab158b9cfa8d9a954e0f23102f9da",
+   "url": "https://massive.com/docs/rest/crypto/technical-indicators/relative-strength-index.md"
+  },
+  "rest/crypto/technical-indicators/simple-moving-average.md": {
+   "fetched_sha256": "0711398d8d253a20f892367b23f8f2d10a765e8fe0e642f43e844044477ead81",
+   "stored_sha256": "0711398d8d253a20f892367b23f8f2d10a765e8fe0e642f43e844044477ead81",
+   "url": "https://massive.com/docs/rest/crypto/technical-indicators/simple-moving-average.md"
+  },
+  "rest/crypto/tickers/all-tickers.md": {
+   "fetched_sha256": "9c3e72692ef05e8f67f76c55ca112c6bccf5d07188cd0407eec161c27f85120b",
+   "stored_sha256": "9c3e72692ef05e8f67f76c55ca112c6bccf5d07188cd0407eec161c27f85120b",
+   "url": "https://massive.com/docs/rest/crypto/tickers/all-tickers.md"
+  },
+  "rest/crypto/tickers/ticker-overview.md": {
+   "fetched_sha256": "d3e6d5dc4b3b30ee00636bb3eae5e51407f6bb983072fc6f5f7b02f7e0fdfca9",
+   "stored_sha256": "d3e6d5dc4b3b30ee00636bb3eae5e51407f6bb983072fc6f5f7b02f7e0fdfca9",
+   "url": "https://massive.com/docs/rest/crypto/tickers/ticker-overview.md"
+  },
+  "rest/crypto/trades/last-trade.md": {
+   "fetched_sha256": "26c3107263e7fe5f209446cd0e2354ce1d47435f0c7ccef1af4f8e8fc67dd3ba",
+   "stored_sha256": "26c3107263e7fe5f209446cd0e2354ce1d47435f0c7ccef1af4f8e8fc67dd3ba",
+   "url": "https://massive.com/docs/rest/crypto/trades/last-trade.md"
+  },
+  "rest/crypto/trades/trades.md": {
+   "fetched_sha256": "d10c5a2ff98b30bce55348e8fe3564cf9e2327bbc6a5a6295d0225589695a0d3",
+   "stored_sha256": "d10c5a2ff98b30bce55348e8fe3564cf9e2327bbc6a5a6295d0225589695a0d3",
+   "url": "https://massive.com/docs/rest/crypto/trades/trades.md"
+  },
+  "rest/economy/funding-conditions.md": {
+   "fetched_sha256": "8e3da6f195304583db2aed14adecd369d216e65c36417c353d6d11597c4a2ff2",
+   "stored_sha256": "8e3da6f195304583db2aed14adecd369d216e65c36417c353d6d11597c4a2ff2",
+   "url": "https://massive.com/docs/rest/economy/funding-conditions.md"
+  },
+  "rest/economy/inflation-expectations.md": {
+   "fetched_sha256": "3b268355ac79174dec6154d43cf25eb8e97a5de21516165756d1c9fc513e9ed7",
+   "stored_sha256": "3b268355ac79174dec6154d43cf25eb8e97a5de21516165756d1c9fc513e9ed7",
+   "url": "https://massive.com/docs/rest/economy/inflation-expectations.md"
+  },
+  "rest/economy/inflation.md": {
+   "fetched_sha256": "85c92ea9087afffbe1e805a2f412bf4683fcef20b4f96253f662a4ff1e8437e5",
+   "stored_sha256": "85c92ea9087afffbe1e805a2f412bf4683fcef20b4f96253f662a4ff1e8437e5",
+   "url": "https://massive.com/docs/rest/economy/inflation.md"
+  },
+  "rest/economy/labor-market.md": {
+   "fetched_sha256": "8d3df5d6fbc85309623a1d4eb2925aebbbf6800c33177ce355d217bfd87062c0",
+   "stored_sha256": "8d3df5d6fbc85309623a1d4eb2925aebbbf6800c33177ce355d217bfd87062c0",
+   "url": "https://massive.com/docs/rest/economy/labor-market.md"
+  },
+  "rest/economy/overview.md": {
+   "fetched_sha256": "e6bf43b3a00b0c531ea4f0565c2ab8043ad857c3bb6c0852b11103a56d308d83",
+   "stored_sha256": "e6bf43b3a00b0c531ea4f0565c2ab8043ad857c3bb6c0852b11103a56d308d83",
+   "url": "https://massive.com/docs/rest/economy/overview.md"
+  },
+  "rest/economy/treasury-yields.md": {
+   "fetched_sha256": "2566962edc89f27fabe045150370d9e581bef95f5c1897a49cd6bc0764f4a883",
+   "stored_sha256": "2566962edc89f27fabe045150370d9e581bef95f5c1897a49cd6bc0764f4a883",
+   "url": "https://massive.com/docs/rest/economy/treasury-yields.md"
+  },
+  "rest/forex/aggregates/custom-bars.md": {
+   "fetched_sha256": "765724fae55871061a3b06d024c66966eb32186ebdd1f4bf187a90f0340b3589",
+   "stored_sha256": "765724fae55871061a3b06d024c66966eb32186ebdd1f4bf187a90f0340b3589",
+   "url": "https://massive.com/docs/rest/forex/aggregates/custom-bars.md"
+  },
+  "rest/forex/aggregates/daily-market-summary.md": {
+   "fetched_sha256": "18786f67f63bdf2b2474755a7ab131a1a65be2fe39f1d90d828ae26a57d59296",
+   "stored_sha256": "18786f67f63bdf2b2474755a7ab131a1a65be2fe39f1d90d828ae26a57d59296",
+   "url": "https://massive.com/docs/rest/forex/aggregates/daily-market-summary.md"
+  },
+  "rest/forex/aggregates/previous-day-bar.md": {
+   "fetched_sha256": "71a5f853f35af2c7b45984b616201ba7d5f2f313683d11c2443ee2ba3e5965c7",
+   "stored_sha256": "71a5f853f35af2c7b45984b616201ba7d5f2f313683d11c2443ee2ba3e5965c7",
+   "url": "https://massive.com/docs/rest/forex/aggregates/previous-day-bar.md"
+  },
+  "rest/forex/currency-conversion.md": {
+   "fetched_sha256": "34b4a4f03016e0c0e0f8105780b2440fbf1ce695c0847bc3b2586c583b0bed46",
+   "stored_sha256": "34b4a4f03016e0c0e0f8105780b2440fbf1ce695c0847bc3b2586c583b0bed46",
+   "url": "https://massive.com/docs/rest/forex/currency-conversion.md"
+  },
+  "rest/forex/market-operations/exchanges.md": {
+   "fetched_sha256": "971a2a79d0659e678a7635fd558ac0d1e47a8263450018cb7c4f708567d46178",
+   "stored_sha256": "971a2a79d0659e678a7635fd558ac0d1e47a8263450018cb7c4f708567d46178",
+   "url": "https://massive.com/docs/rest/forex/market-operations/exchanges.md"
+  },
+  "rest/forex/market-operations/market-holidays.md": {
+   "fetched_sha256": "644cc0567c739d56abe9f597784461ce1722b63e0be7d3b82c9f4e7439302dd5",
+   "stored_sha256": "644cc0567c739d56abe9f597784461ce1722b63e0be7d3b82c9f4e7439302dd5",
+   "url": "https://massive.com/docs/rest/forex/market-operations/market-holidays.md"
+  },
+  "rest/forex/market-operations/market-status.md": {
+   "fetched_sha256": "11641320e697151713acf4e8fc5804576ae578f7fb57ba99563338b42dadb86e",
+   "stored_sha256": "11641320e697151713acf4e8fc5804576ae578f7fb57ba99563338b42dadb86e",
+   "url": "https://massive.com/docs/rest/forex/market-operations/market-status.md"
+  },
+  "rest/forex/overview.md": {
+   "fetched_sha256": "ed0747c7b927cf6e66d094b995a1ae23dabd7ca2a94ae349bab99ebf65c883ce",
+   "stored_sha256": "059889373098089ef8fad79076eaa08e321bcf5982a4c96d6ec7752bf2440a35",
+   "url": "https://massive.com/docs/rest/forex/overview.md"
+  },
+  "rest/forex/quotes/last-quote.md": {
+   "fetched_sha256": "9a5d13380bb0dc3bbb4b653e62eb01f5e270d299009892be636cc7e0fd7894a9",
+   "stored_sha256": "9a5d13380bb0dc3bbb4b653e62eb01f5e270d299009892be636cc7e0fd7894a9",
+   "url": "https://massive.com/docs/rest/forex/quotes/last-quote.md"
+  },
+  "rest/forex/quotes/quotes.md": {
+   "fetched_sha256": "f9b52f4fb1d8335130ca0e45067280cbdb8b8fd1ced09c1a266d264893dbb67e",
+   "stored_sha256": "f9b52f4fb1d8335130ca0e45067280cbdb8b8fd1ced09c1a266d264893dbb67e",
+   "url": "https://massive.com/docs/rest/forex/quotes/quotes.md"
+  },
+  "rest/forex/snapshots/full-market-snapshot.md": {
+   "fetched_sha256": "0f8607322d9a5fa090dc57a430f22d1ef58e348ebd5336b0df45a8313c351634",
+   "stored_sha256": "0f8607322d9a5fa090dc57a430f22d1ef58e348ebd5336b0df45a8313c351634",
+   "url": "https://massive.com/docs/rest/forex/snapshots/full-market-snapshot.md"
+  },
+  "rest/forex/snapshots/single-ticker-snapshot.md": {
+   "fetched_sha256": "14f1e274977db27e41196ad2f4ea5f74fc724c6060e94b2dcf9a951920772f68",
+   "stored_sha256": "14f1e274977db27e41196ad2f4ea5f74fc724c6060e94b2dcf9a951920772f68",
+   "url": "https://massive.com/docs/rest/forex/snapshots/single-ticker-snapshot.md"
+  },
+  "rest/forex/snapshots/top-market-movers.md": {
+   "fetched_sha256": "044c0f0f2d32e38bef7e61bb2fdaaf6c0ab48d868d051ac581a4be9e0bcbec2b",
+   "stored_sha256": "044c0f0f2d32e38bef7e61bb2fdaaf6c0ab48d868d051ac581a4be9e0bcbec2b",
+   "url": "https://massive.com/docs/rest/forex/snapshots/top-market-movers.md"
+  },
+  "rest/forex/snapshots/unified-snapshot.md": {
+   "fetched_sha256": "5e1752a5aea90e408fb88867dc2350541b951d1a4f14016883bfee9b5fbbe579",
+   "stored_sha256": "5e1752a5aea90e408fb88867dc2350541b951d1a4f14016883bfee9b5fbbe579",
+   "url": "https://massive.com/docs/rest/forex/snapshots/unified-snapshot.md"
+  },
+  "rest/forex/technical-indicators/exponential-moving-average.md": {
+   "fetched_sha256": "3bcd29528abda1cac8c3e9ed68d92515af594c6911b860416e7d117d1a5efdf4",
+   "stored_sha256": "3bcd29528abda1cac8c3e9ed68d92515af594c6911b860416e7d117d1a5efdf4",
+   "url": "https://massive.com/docs/rest/forex/technical-indicators/exponential-moving-average.md"
+  },
+  "rest/forex/technical-indicators/moving-average-convergence-divergence.md": {
+   "fetched_sha256": "48ad8a5118ca7bbaffa64561cd509119cf8439f36330a64e1307124354e1f4c0",
+   "stored_sha256": "48ad8a5118ca7bbaffa64561cd509119cf8439f36330a64e1307124354e1f4c0",
+   "url": "https://massive.com/docs/rest/forex/technical-indicators/moving-average-convergence-divergence.md"
+  },
+  "rest/forex/technical-indicators/relative-strength-index.md": {
+   "fetched_sha256": "c565adfc6e5e516e0310934cf06c99b4692146f36268215e7ceeed5d9d9e20ac",
+   "stored_sha256": "c565adfc6e5e516e0310934cf06c99b4692146f36268215e7ceeed5d9d9e20ac",
+   "url": "https://massive.com/docs/rest/forex/technical-indicators/relative-strength-index.md"
+  },
+  "rest/forex/technical-indicators/simple-moving-average.md": {
+   "fetched_sha256": "5a9b8b7abfa5bd462c2e3beadd0ab7b15aac8af85dbfdcec217af89ff029ec2a",
+   "stored_sha256": "5a9b8b7abfa5bd462c2e3beadd0ab7b15aac8af85dbfdcec217af89ff029ec2a",
+   "url": "https://massive.com/docs/rest/forex/technical-indicators/simple-moving-average.md"
+  },
+  "rest/forex/tickers/all-tickers.md": {
+   "fetched_sha256": "78c0609023135a6e9530020b6ecf33d9421ba8322fdce1f35bd5e52309b9dcbe",
+   "stored_sha256": "78c0609023135a6e9530020b6ecf33d9421ba8322fdce1f35bd5e52309b9dcbe",
+   "url": "https://massive.com/docs/rest/forex/tickers/all-tickers.md"
+  },
+  "rest/forex/tickers/ticker-overview.md": {
+   "fetched_sha256": "18137ba55575c97615f1bb3ae48d628b82aab3d83485e518ec5e3d6911c08307",
+   "stored_sha256": "18137ba55575c97615f1bb3ae48d628b82aab3d83485e518ec5e3d6911c08307",
+   "url": "https://massive.com/docs/rest/forex/tickers/ticker-overview.md"
+  },
+  "rest/forex/tickers/ticker-types.md": {
+   "fetched_sha256": "4ddaa87907ec41eb02037b9ee3726db977fb285fa036225195ad422eb3a7e74b",
+   "stored_sha256": "4ddaa87907ec41eb02037b9ee3726db977fb285fa036225195ad422eb3a7e74b",
+   "url": "https://massive.com/docs/rest/forex/tickers/ticker-types.md"
+  },
+  "rest/futures/aggregates.md": {
+   "fetched_sha256": "d7f852a3e2574672d90f98a50f48da582dbcadb14700122e050af661c0c6980e",
+   "stored_sha256": "d7f852a3e2574672d90f98a50f48da582dbcadb14700122e050af661c0c6980e",
+   "url": "https://massive.com/docs/rest/futures/aggregates.md"
+  },
+  "rest/futures/contracts.md": {
+   "fetched_sha256": "83c9c253599443eed9fd2f540e14817aa30efd40ac3b705ea18a9bc67df35057",
+   "stored_sha256": "83c9c253599443eed9fd2f540e14817aa30efd40ac3b705ea18a9bc67df35057",
+   "url": "https://massive.com/docs/rest/futures/contracts.md"
+  },
+  "rest/futures/market-operations/exchanges.md": {
+   "fetched_sha256": "4a9a4e95063565fab2e162dc1413db8e20df0153e5668aa1397b54b497bc5e9c",
+   "stored_sha256": "4a9a4e95063565fab2e162dc1413db8e20df0153e5668aa1397b54b497bc5e9c",
+   "url": "https://massive.com/docs/rest/futures/market-operations/exchanges.md"
+  },
+  "rest/futures/market-operations/market-status.md": {
+   "fetched_sha256": "50d41effcc6124c4fb391c1a5b1d832c376459ff7f6b4a87da8b68795b63c001",
+   "stored_sha256": "50d41effcc6124c4fb391c1a5b1d832c376459ff7f6b4a87da8b68795b63c001",
+   "url": "https://massive.com/docs/rest/futures/market-operations/market-status.md"
+  },
+  "rest/futures/overview.md": {
+   "fetched_sha256": "3c55f8bfb5c89e2727ec9f91decd3cd895a47bc1f8264ac7ec837137a278aaaa",
+   "stored_sha256": "4794dbc16fbf4087c92cc08b6569c2716ba7c04846300144e65aa58289477213",
+   "url": "https://massive.com/docs/rest/futures/overview.md"
+  },
+  "rest/futures/products.md": {
+   "fetched_sha256": "43d71e4040e2a7ecaf2af3df61b6c06f12ed33f26cd90685088a3109bfbd4382",
+   "stored_sha256": "43d71e4040e2a7ecaf2af3df61b6c06f12ed33f26cd90685088a3109bfbd4382",
+   "url": "https://massive.com/docs/rest/futures/products.md"
+  },
+  "rest/futures/schedules.md": {
+   "fetched_sha256": "440bae43f1475aa0cd014e1fdbf882b1b83320d60a451a551f5e356745101968",
+   "stored_sha256": "440bae43f1475aa0cd014e1fdbf882b1b83320d60a451a551f5e356745101968",
+   "url": "https://massive.com/docs/rest/futures/schedules.md"
+  },
+  "rest/futures/snapshots/contracts-snapshot.md": {
+   "fetched_sha256": "2dfe8a694cd67eb51091be169c785fab64d34269806f49b760844442eaafc6fd",
+   "stored_sha256": "2dfe8a694cd67eb51091be169c785fab64d34269806f49b760844442eaafc6fd",
+   "url": "https://massive.com/docs/rest/futures/snapshots/contracts-snapshot.md"
+  },
+  "rest/futures/trades-quotes/quotes.md": {
+   "fetched_sha256": "e3300178013944d32ef878ef01bc9f3775f7ca11f65646c132b983c5b5231749",
+   "stored_sha256": "e3300178013944d32ef878ef01bc9f3775f7ca11f65646c132b983c5b5231749",
+   "url": "https://massive.com/docs/rest/futures/trades-quotes/quotes.md"
+  },
+  "rest/futures/trades-quotes/trades.md": {
+   "fetched_sha256": "5090f974bf22ac5819099cbbf3ef47d236f158b11885ef60ffcbab0edbff4e76",
+   "stored_sha256": "5090f974bf22ac5819099cbbf3ef47d236f158b11885ef60ffcbab0edbff4e76",
+   "url": "https://massive.com/docs/rest/futures/trades-quotes/trades.md"
+  },
+  "rest/indices/aggregates/custom-bars.md": {
+   "fetched_sha256": "7f310fc337ceb0b3e83c23c19d5d883fc7ce19c345bac20b953860dcd27081d4",
+   "stored_sha256": "7f310fc337ceb0b3e83c23c19d5d883fc7ce19c345bac20b953860dcd27081d4",
+   "url": "https://massive.com/docs/rest/indices/aggregates/custom-bars.md"
+  },
+  "rest/indices/aggregates/daily-ticker-summary.md": {
+   "fetched_sha256": "27d5ef45950f092f199b9273399ce1af707572f140e3a79e16ec875d1820396f",
+   "stored_sha256": "27d5ef45950f092f199b9273399ce1af707572f140e3a79e16ec875d1820396f",
+   "url": "https://massive.com/docs/rest/indices/aggregates/daily-ticker-summary.md"
+  },
+  "rest/indices/aggregates/previous-day-bar.md": {
+   "fetched_sha256": "11c940c3f0540cd8e1725c4476934c234813106a626c0ea8c08bfb1edf11751b",
+   "stored_sha256": "11c940c3f0540cd8e1725c4476934c234813106a626c0ea8c08bfb1edf11751b",
+   "url": "https://massive.com/docs/rest/indices/aggregates/previous-day-bar.md"
+  },
+  "rest/indices/market-operations/market-holidays.md": {
+   "fetched_sha256": "9b079fb8b63e80270d5f900c3264a71933bdd32c0416f26771748c9f153016f3",
+   "stored_sha256": "9b079fb8b63e80270d5f900c3264a71933bdd32c0416f26771748c9f153016f3",
+   "url": "https://massive.com/docs/rest/indices/market-operations/market-holidays.md"
+  },
+  "rest/indices/market-operations/market-status.md": {
+   "fetched_sha256": "d0c5117d3f3b0bff63c92225d1c2a5a091f718f85c3bf9a0bef72b5c6ec9407a",
+   "stored_sha256": "d0c5117d3f3b0bff63c92225d1c2a5a091f718f85c3bf9a0bef72b5c6ec9407a",
+   "url": "https://massive.com/docs/rest/indices/market-operations/market-status.md"
+  },
+  "rest/indices/overview.md": {
+   "fetched_sha256": "a355206a10a743afc1e759b8d82eebb778398eff8871a49c9b1170c575f85532",
+   "stored_sha256": "dcb2bf47b4188a030fef03edc95d612f0ecb35d6729e6374f6569e03e7b8f9af",
+   "url": "https://massive.com/docs/rest/indices/overview.md"
+  },
+  "rest/indices/snapshots/indices-snapshot.md": {
+   "fetched_sha256": "be60e3efbd32dead98d6e9ab10c2c773e297297a872be31ad92ce993a010d977",
+   "stored_sha256": "be60e3efbd32dead98d6e9ab10c2c773e297297a872be31ad92ce993a010d977",
+   "url": "https://massive.com/docs/rest/indices/snapshots/indices-snapshot.md"
+  },
+  "rest/indices/snapshots/unified-snapshot.md": {
+   "fetched_sha256": "93d98841abcef91a8da4038368d0dc2a066b6af5da360a616c84fee185bfe02d",
+   "stored_sha256": "93d98841abcef91a8da4038368d0dc2a066b6af5da360a616c84fee185bfe02d",
+   "url": "https://massive.com/docs/rest/indices/snapshots/unified-snapshot.md"
+  },
+  "rest/indices/technical-indicators/exponential-moving-average.md": {
+   "fetched_sha256": "f638ad16b277af32ac9914e27b8ac03e15b94d6e9ff494c948616f331ee30952",
+   "stored_sha256": "f638ad16b277af32ac9914e27b8ac03e15b94d6e9ff494c948616f331ee30952",
+   "url": "https://massive.com/docs/rest/indices/technical-indicators/exponential-moving-average.md"
+  },
+  "rest/indices/technical-indicators/moving-average-convergence-divergence.md": {
+   "fetched_sha256": "f6f87bee5f80b4aa79e08761ed0a187d8fe2ef4568749bb676725eaa04e152d0",
+   "stored_sha256": "f6f87bee5f80b4aa79e08761ed0a187d8fe2ef4568749bb676725eaa04e152d0",
+   "url": "https://massive.com/docs/rest/indices/technical-indicators/moving-average-convergence-divergence.md"
+  },
+  "rest/indices/technical-indicators/relative-strength-index.md": {
+   "fetched_sha256": "97e1c9df9c05560fc7fd04de3e1e9d4a44a9b6743ed8b4b1b1ced64969e265b6",
+   "stored_sha256": "97e1c9df9c05560fc7fd04de3e1e9d4a44a9b6743ed8b4b1b1ced64969e265b6",
+   "url": "https://massive.com/docs/rest/indices/technical-indicators/relative-strength-index.md"
+  },
+  "rest/indices/technical-indicators/simple-moving-average.md": {
+   "fetched_sha256": "48683579266d5e1cb62589936ad318886576f0d81b140b247fa7707d0e330758",
+   "stored_sha256": "48683579266d5e1cb62589936ad318886576f0d81b140b247fa7707d0e330758",
+   "url": "https://massive.com/docs/rest/indices/technical-indicators/simple-moving-average.md"
+  },
+  "rest/indices/tickers/all-tickers.md": {
+   "fetched_sha256": "86b71d4e051216869e873a597c4102d8024ec02e51ba290f07f2a46652a7a082",
+   "stored_sha256": "86b71d4e051216869e873a597c4102d8024ec02e51ba290f07f2a46652a7a082",
+   "url": "https://massive.com/docs/rest/indices/tickers/all-tickers.md"
+  },
+  "rest/indices/tickers/ticker-overview.md": {
+   "fetched_sha256": "22939a19c39a1cbac0f05589c2e68d029600acf0d4424999bc8ee8662a989c4c",
+   "stored_sha256": "22939a19c39a1cbac0f05589c2e68d029600acf0d4424999bc8ee8662a989c4c",
+   "url": "https://massive.com/docs/rest/indices/tickers/ticker-overview.md"
+  },
+  "rest/options/aggregates/custom-bars.md": {
+   "fetched_sha256": "da2ab0e14fd2aefef870104c7c233a3906afcccae138b6b58b4705b89a8b2711",
+   "stored_sha256": "da2ab0e14fd2aefef870104c7c233a3906afcccae138b6b58b4705b89a8b2711",
+   "url": "https://massive.com/docs/rest/options/aggregates/custom-bars.md"
+  },
+  "rest/options/aggregates/daily-ticker-summary.md": {
+   "fetched_sha256": "83582d38e13a7c712896f4bb049abbeb8f824507657dcff0a06b35d70db2640c",
+   "stored_sha256": "83582d38e13a7c712896f4bb049abbeb8f824507657dcff0a06b35d70db2640c",
+   "url": "https://massive.com/docs/rest/options/aggregates/daily-ticker-summary.md"
+  },
+  "rest/options/aggregates/previous-day-bar.md": {
+   "fetched_sha256": "556c233dbf4e1e45ef73852ec23e97a52758b4bbdd45e1a88fdc98d893738ada",
+   "stored_sha256": "556c233dbf4e1e45ef73852ec23e97a52758b4bbdd45e1a88fdc98d893738ada",
+   "url": "https://massive.com/docs/rest/options/aggregates/previous-day-bar.md"
+  },
+  "rest/options/contracts/all-contracts.md": {
+   "fetched_sha256": "c087ba7f1a8949af74c9209d5241ad15324815bdc2e31e2c5786e3a30c6263e9",
+   "stored_sha256": "c087ba7f1a8949af74c9209d5241ad15324815bdc2e31e2c5786e3a30c6263e9",
+   "url": "https://massive.com/docs/rest/options/contracts/all-contracts.md"
+  },
+  "rest/options/contracts/contract-overview.md": {
+   "fetched_sha256": "9cc12f6d61dd18f36d18d8bc7647b004cf70b43d21fbc68106af7a7af115a6e7",
+   "stored_sha256": "9cc12f6d61dd18f36d18d8bc7647b004cf70b43d21fbc68106af7a7af115a6e7",
+   "url": "https://massive.com/docs/rest/options/contracts/contract-overview.md"
+  },
+  "rest/options/market-operations/condition-codes.md": {
+   "fetched_sha256": "46b91b51aa949573b4c9eef949e664195db70f759d71a2cf632047125fc594b2",
+   "stored_sha256": "46b91b51aa949573b4c9eef949e664195db70f759d71a2cf632047125fc594b2",
+   "url": "https://massive.com/docs/rest/options/market-operations/condition-codes.md"
+  },
+  "rest/options/market-operations/exchanges.md": {
+   "fetched_sha256": "3e6adc0865f698a550d6e8de50ddd428b85936ebac01963f34673a52e80fdfa5",
+   "stored_sha256": "3e6adc0865f698a550d6e8de50ddd428b85936ebac01963f34673a52e80fdfa5",
+   "url": "https://massive.com/docs/rest/options/market-operations/exchanges.md"
+  },
+  "rest/options/market-operations/market-holidays.md": {
+   "fetched_sha256": "ec7682dd36a1cb03567966d364c352c88e42051381a50ea7b42c32e17d815cc1",
+   "stored_sha256": "ec7682dd36a1cb03567966d364c352c88e42051381a50ea7b42c32e17d815cc1",
+   "url": "https://massive.com/docs/rest/options/market-operations/market-holidays.md"
+  },
+  "rest/options/market-operations/market-status.md": {
+   "fetched_sha256": "3a7c0d20be715e28a416dabc22aebf573d1fb25cba7126e3e8b2e0cca8376578",
+   "stored_sha256": "3a7c0d20be715e28a416dabc22aebf573d1fb25cba7126e3e8b2e0cca8376578",
+   "url": "https://massive.com/docs/rest/options/market-operations/market-status.md"
+  },
+  "rest/options/overview.md": {
+   "fetched_sha256": "b41c29e333e229fe9b5cec84daa12947ed54d6058b1c008d83bf83c399fb53aa",
+   "stored_sha256": "e4653b3ab632e17d1ef4a30e8ceaf7cc903bc59e1d02ea8f72678b7eb1b74a67",
+   "url": "https://massive.com/docs/rest/options/overview.md"
+  },
+  "rest/options/snapshots/option-chain-snapshot.md": {
+   "fetched_sha256": "23634900d8b459d544a289eca1db13f800a1f22e8b4292959cd873fe76d77bc0",
+   "stored_sha256": "23634900d8b459d544a289eca1db13f800a1f22e8b4292959cd873fe76d77bc0",
+   "url": "https://massive.com/docs/rest/options/snapshots/option-chain-snapshot.md"
+  },
+  "rest/options/snapshots/option-contract-snapshot.md": {
+   "fetched_sha256": "048c42082847c34262d25424b5ed27e70f424689fa6bd56bbedd68325cd1c2b8",
+   "stored_sha256": "048c42082847c34262d25424b5ed27e70f424689fa6bd56bbedd68325cd1c2b8",
+   "url": "https://massive.com/docs/rest/options/snapshots/option-contract-snapshot.md"
+  },
+  "rest/options/snapshots/unified-snapshot.md": {
+   "fetched_sha256": "2023857ebb7bcfcac85b6a9c9cb819c14a9804b777ef43623a790ae53b24c03f",
+   "stored_sha256": "2023857ebb7bcfcac85b6a9c9cb819c14a9804b777ef43623a790ae53b24c03f",
+   "url": "https://massive.com/docs/rest/options/snapshots/unified-snapshot.md"
+  },
+  "rest/options/technical-indicators/exponential-moving-average.md": {
+   "fetched_sha256": "7b2833b5117d2e1d7ce176bd5be87ae6c350f1df7282d27aa26193723e7d609d",
+   "stored_sha256": "7b2833b5117d2e1d7ce176bd5be87ae6c350f1df7282d27aa26193723e7d609d",
+   "url": "https://massive.com/docs/rest/options/technical-indicators/exponential-moving-average.md"
+  },
+  "rest/options/technical-indicators/moving-average-convergence-divergence.md": {
+   "fetched_sha256": "17b96cdc12e5658f45aea02473de9287c9a3fc01c02662c253cbcdeeecf1d15e",
+   "stored_sha256": "17b96cdc12e5658f45aea02473de9287c9a3fc01c02662c253cbcdeeecf1d15e",
+   "url": "https://massive.com/docs/rest/options/technical-indicators/moving-average-convergence-divergence.md"
+  },
+  "rest/options/technical-indicators/relative-strength-index.md": {
+   "fetched_sha256": "534e9133dd6d86fbfe89f8979020439463366b82d556ac05d9514562b6240a7a",
+   "stored_sha256": "534e9133dd6d86fbfe89f8979020439463366b82d556ac05d9514562b6240a7a",
+   "url": "https://massive.com/docs/rest/options/technical-indicators/relative-strength-index.md"
+  },
+  "rest/options/technical-indicators/simple-moving-average.md": {
+   "fetched_sha256": "e97513d993cc4333352fe7e01a0837d69b04e970175eac5cadaae1c90ede74a5",
+   "stored_sha256": "e97513d993cc4333352fe7e01a0837d69b04e970175eac5cadaae1c90ede74a5",
+   "url": "https://massive.com/docs/rest/options/technical-indicators/simple-moving-average.md"
+  },
+  "rest/options/trades-quotes/last-trade.md": {
+   "fetched_sha256": "42091e331e16cf54824ac90ab5b8cfbe1af1dd9e5b30eb09f1ada1f1e2cae17a",
+   "stored_sha256": "42091e331e16cf54824ac90ab5b8cfbe1af1dd9e5b30eb09f1ada1f1e2cae17a",
+   "url": "https://massive.com/docs/rest/options/trades-quotes/last-trade.md"
+  },
+  "rest/options/trades-quotes/quotes.md": {
+   "fetched_sha256": "ed6e1f7ce5cc2680415e44af727ffa9c5daac7a96ae9924da8c6a636531c0620",
+   "stored_sha256": "ed6e1f7ce5cc2680415e44af727ffa9c5daac7a96ae9924da8c6a636531c0620",
+   "url": "https://massive.com/docs/rest/options/trades-quotes/quotes.md"
+  },
+  "rest/options/trades-quotes/trades.md": {
+   "fetched_sha256": "a6b82ed785e95be21c0be2f9f7113434ce5240b4f0bac250d06e47623cdb67c4",
+   "stored_sha256": "a6b82ed785e95be21c0be2f9f7113434ce5240b4f0bac250d06e47623cdb67c4",
+   "url": "https://massive.com/docs/rest/options/trades-quotes/trades.md"
+  },
+  "rest/partners/benzinga/analyst-details.md": {
+   "fetched_sha256": "f44c471dc5a1b489e5228622f93ad9220aef1369a9e29ffeade7096a34abee02",
+   "stored_sha256": "f44c471dc5a1b489e5228622f93ad9220aef1369a9e29ffeade7096a34abee02",
+   "url": "https://massive.com/docs/rest/partners/benzinga/analyst-details.md"
+  },
+  "rest/partners/benzinga/analyst-insights.md": {
+   "fetched_sha256": "a0b9fd2b5a78b81de9d5cfe3ecf11a71a5cd06c4635401a21c099feac9e687e2",
+   "stored_sha256": "a0b9fd2b5a78b81de9d5cfe3ecf11a71a5cd06c4635401a21c099feac9e687e2",
+   "url": "https://massive.com/docs/rest/partners/benzinga/analyst-insights.md"
+  },
+  "rest/partners/benzinga/analyst-ratings.md": {
+   "fetched_sha256": "55a279ef79a015c4d211d38e372290d9cf45ffead93d8e71e8f8c97e15f21b09",
+   "stored_sha256": "55a279ef79a015c4d211d38e372290d9cf45ffead93d8e71e8f8c97e15f21b09",
+   "url": "https://massive.com/docs/rest/partners/benzinga/analyst-ratings.md"
+  },
+  "rest/partners/benzinga/bulls-bears-say.md": {
+   "fetched_sha256": "f56aecac2158ce4826da25a940e5df82e8cb7ed14830619e110ec336e140469c",
+   "stored_sha256": "f56aecac2158ce4826da25a940e5df82e8cb7ed14830619e110ec336e140469c",
+   "url": "https://massive.com/docs/rest/partners/benzinga/bulls-bears-say.md"
+  },
+  "rest/partners/benzinga/consensus-ratings.md": {
+   "fetched_sha256": "a94a54cb7840a0c56d13f9156f91cfc6fcb76a9a05117260bc818cfc0726c59d",
+   "stored_sha256": "a94a54cb7840a0c56d13f9156f91cfc6fcb76a9a05117260bc818cfc0726c59d",
+   "url": "https://massive.com/docs/rest/partners/benzinga/consensus-ratings.md"
+  },
+  "rest/partners/benzinga/corporate-guidance.md": {
+   "fetched_sha256": "7909ebcc4fb2b25bcc61e122d65c612bfebc89708cda586b89237a3f2eee8ea1",
+   "stored_sha256": "7909ebcc4fb2b25bcc61e122d65c612bfebc89708cda586b89237a3f2eee8ea1",
+   "url": "https://massive.com/docs/rest/partners/benzinga/corporate-guidance.md"
+  },
+  "rest/partners/benzinga/earnings.md": {
+   "fetched_sha256": "3ac1b744d28c13bf011ab2f5b8028f99100b0db279ef8080b0958870235eb33e",
+   "stored_sha256": "3ac1b744d28c13bf011ab2f5b8028f99100b0db279ef8080b0958870235eb33e",
+   "url": "https://massive.com/docs/rest/partners/benzinga/earnings.md"
+  },
+  "rest/partners/benzinga/firm-details.md": {
+   "fetched_sha256": "b08f157b762c170e6a8fed9bcdfe2064e7fb82f631d5c1f4d605c7d9b2da5e40",
+   "stored_sha256": "b08f157b762c170e6a8fed9bcdfe2064e7fb82f631d5c1f4d605c7d9b2da5e40",
+   "url": "https://massive.com/docs/rest/partners/benzinga/firm-details.md"
+  },
+  "rest/partners/benzinga/news.md": {
+   "fetched_sha256": "a8029d6cf015a4d49f10087fa58ef15f86750af190523fa2a025007c895b8574",
+   "stored_sha256": "a8029d6cf015a4d49f10087fa58ef15f86750af190523fa2a025007c895b8574",
+   "url": "https://massive.com/docs/rest/partners/benzinga/news.md"
+  },
+  "rest/partners/etf-global/analytics.md": {
+   "fetched_sha256": "0b10669787dff5a2c4e23559f566debc06e0d980971b3a36ada462e05692fabc",
+   "stored_sha256": "ba854d9617584ce0063ee65f64e3b8ae215f6bd78b67c88e564e227bae1c5e83",
+   "url": "https://massive.com/docs/rest/partners/etf-global/analytics.md"
+  },
+  "rest/partners/etf-global/constituents.md": {
+   "fetched_sha256": "9532b92ba2577559e39aa1d7e3c1b44a38494deae7db51dba14e1b7e63af921e",
+   "stored_sha256": "9532b92ba2577559e39aa1d7e3c1b44a38494deae7db51dba14e1b7e63af921e",
+   "url": "https://massive.com/docs/rest/partners/etf-global/constituents.md"
+  },
+  "rest/partners/etf-global/fundflows.md": {
+   "fetched_sha256": "b26e549eb9f77157f5286420d086193baf64733e49dec29e16948f85b848b2f8",
+   "stored_sha256": "b26e549eb9f77157f5286420d086193baf64733e49dec29e16948f85b848b2f8",
+   "url": "https://massive.com/docs/rest/partners/etf-global/fundflows.md"
+  },
+  "rest/partners/etf-global/profiles.md": {
+   "fetched_sha256": "2f83d145748b4d93e9fd8caf1c8d09af164903f46a9793cfe20ee6079e09377d",
+   "stored_sha256": "2f83d145748b4d93e9fd8caf1c8d09af164903f46a9793cfe20ee6079e09377d",
+   "url": "https://massive.com/docs/rest/partners/etf-global/profiles.md"
+  },
+  "rest/partners/etf-global/taxonomies.md": {
+   "fetched_sha256": "2b77c244eac105772044a485d65e2beaa1953684624e18c7dc2062cbe0cfa50d",
+   "stored_sha256": "2b77c244eac105772044a485d65e2beaa1953684624e18c7dc2062cbe0cfa50d",
+   "url": "https://massive.com/docs/rest/partners/etf-global/taxonomies.md"
+  },
+  "rest/partners/overview.md": {
+   "fetched_sha256": "b35973912d684d8579554fd79cb03b538a505ce417f1e3a069adb4eb1192528c",
+   "stored_sha256": "b35973912d684d8579554fd79cb03b538a505ce417f1e3a069adb4eb1192528c",
+   "url": "https://massive.com/docs/rest/partners/overview.md"
+  },
+  "rest/partners/tmx/corporate-events.md": {
+   "fetched_sha256": "94826b4ee0e8a47f59af5cdbee1f7805564e4628d8acf53531d0cf5aa46fc6b2",
+   "stored_sha256": "94826b4ee0e8a47f59af5cdbee1f7805564e4628d8acf53531d0cf5aa46fc6b2",
+   "url": "https://massive.com/docs/rest/partners/tmx/corporate-events.md"
+  },
+  "rest/quickstart.md": {
+   "fetched_sha256": "6158c1ecc6aff431b1e3fb510d29008574faad009a67e84018fd238551dea2de",
+   "stored_sha256": "10c690d84b32d0ae9bafe8a9aa1deec06ef914d1448f4856f2f70bd02f12d697",
+   "url": "https://massive.com/docs/rest/quickstart.md"
+  },
+  "rest/stocks/aggregates/custom-bars.md": {
+   "fetched_sha256": "9d1780d60fdc395300ffba3e7b33d3fff2cfa01e06375d31c91f0d709e9abd75",
+   "stored_sha256": "9d1780d60fdc395300ffba3e7b33d3fff2cfa01e06375d31c91f0d709e9abd75",
+   "url": "https://massive.com/docs/rest/stocks/aggregates/custom-bars.md"
+  },
+  "rest/stocks/aggregates/daily-market-summary.md": {
+   "fetched_sha256": "b9a955f03edbf795f23d16009cacfaa9a050728c457d600a20ab34d2e1755387",
+   "stored_sha256": "b9a955f03edbf795f23d16009cacfaa9a050728c457d600a20ab34d2e1755387",
+   "url": "https://massive.com/docs/rest/stocks/aggregates/daily-market-summary.md"
+  },
+  "rest/stocks/aggregates/daily-ticker-summary.md": {
+   "fetched_sha256": "6a6d4ccc6477771a6e2892361450509326e77dcffcc32a6b7cba88dff3be7760",
+   "stored_sha256": "6a6d4ccc6477771a6e2892361450509326e77dcffcc32a6b7cba88dff3be7760",
+   "url": "https://massive.com/docs/rest/stocks/aggregates/daily-ticker-summary.md"
+  },
+  "rest/stocks/aggregates/previous-day-bar.md": {
+   "fetched_sha256": "1a86a27fd177f8e6015751e405ad361d49a9e5ca6d2deb0597153ea56aa075fe",
+   "stored_sha256": "1a86a27fd177f8e6015751e405ad361d49a9e5ca6d2deb0597153ea56aa075fe",
+   "url": "https://massive.com/docs/rest/stocks/aggregates/previous-day-bar.md"
+  },
+  "rest/stocks/corporate-actions/dividends.md": {
+   "fetched_sha256": "69c68b8a988f17c4cfa5a5d8b981e31f265be6496ac2b10f47d2cb6cd051be8c",
+   "stored_sha256": "69c68b8a988f17c4cfa5a5d8b981e31f265be6496ac2b10f47d2cb6cd051be8c",
+   "url": "https://massive.com/docs/rest/stocks/corporate-actions/dividends.md"
+  },
+  "rest/stocks/corporate-actions/ipos.md": {
+   "fetched_sha256": "f7c0753844e4f0ff53b59bea8d5f104d07bfd370e9b1dd3c274ef838c5262483",
+   "stored_sha256": "f7c0753844e4f0ff53b59bea8d5f104d07bfd370e9b1dd3c274ef838c5262483",
+   "url": "https://massive.com/docs/rest/stocks/corporate-actions/ipos.md"
+  },
+  "rest/stocks/corporate-actions/reference-dividends.md": {
+   "fetched_sha256": "4ba93f2f24ccddfc25053e9a028aa7043c13c9a0cffd190703b4a636ef5e8d16",
+   "stored_sha256": "4ba93f2f24ccddfc25053e9a028aa7043c13c9a0cffd190703b4a636ef5e8d16",
+   "url": "https://massive.com/docs/rest/stocks/corporate-actions/reference-dividends.md"
+  },
+  "rest/stocks/corporate-actions/reference-splits.md": {
+   "fetched_sha256": "dc21a5fa5677eecb5465b99d22d34149e9c0f01856b12527ff1972b8f5481aad",
+   "stored_sha256": "dc21a5fa5677eecb5465b99d22d34149e9c0f01856b12527ff1972b8f5481aad",
+   "url": "https://massive.com/docs/rest/stocks/corporate-actions/reference-splits.md"
+  },
+  "rest/stocks/corporate-actions/splits.md": {
+   "fetched_sha256": "aafb053580285f29595d28286f1202f2871409feaca75a8093e353b57a1a0b45",
+   "stored_sha256": "aafb053580285f29595d28286f1202f2871409feaca75a8093e353b57a1a0b45",
+   "url": "https://massive.com/docs/rest/stocks/corporate-actions/splits.md"
+  },
+  "rest/stocks/corporate-actions/ticker-events.md": {
+   "fetched_sha256": "d6d345d87821b4bc0e7437a9088e08970d614d34a4d9e75b4ede61c38e65ffee",
+   "stored_sha256": "d6d345d87821b4bc0e7437a9088e08970d614d34a4d9e75b4ede61c38e65ffee",
+   "url": "https://massive.com/docs/rest/stocks/corporate-actions/ticker-events.md"
+  },
+  "rest/stocks/filings/10-k-sections.md": {
+   "fetched_sha256": "8df87d70dfa0d6a255191ebccfd55cfc0f49fcd0cff90f5d0b5a67f6b143a6e7",
+   "stored_sha256": "8df87d70dfa0d6a255191ebccfd55cfc0f49fcd0cff90f5d0b5a67f6b143a6e7",
+   "url": "https://massive.com/docs/rest/stocks/filings/10-k-sections.md"
+  },
+  "rest/stocks/filings/13-f-filings.md": {
+   "fetched_sha256": "41f00b054bfe4f160a2a70d5d673ed0cedbbc2967c231aba9623462b479eee83",
+   "stored_sha256": "41f00b054bfe4f160a2a70d5d673ed0cedbbc2967c231aba9623462b479eee83",
+   "url": "https://massive.com/docs/rest/stocks/filings/13-f-filings.md"
+  },
+  "rest/stocks/filings/8-k-disclosures.md": {
+   "fetched_sha256": "1a5becf400b935d97e201068a6d9e2fb1ff046076109808c77aaff58435422ce",
+   "stored_sha256": "1a5becf400b935d97e201068a6d9e2fb1ff046076109808c77aaff58435422ce",
+   "url": "https://massive.com/docs/rest/stocks/filings/8-k-disclosures.md"
+  },
+  "rest/stocks/filings/8-k-text.md": {
+   "fetched_sha256": "64a1a8d3030e1ef7b3a3788b4ac88e5ba308233dbc93b7574cde44d719fdf903",
+   "stored_sha256": "64a1a8d3030e1ef7b3a3788b4ac88e5ba308233dbc93b7574cde44d719fdf903",
+   "url": "https://massive.com/docs/rest/stocks/filings/8-k-text.md"
+  },
+  "rest/stocks/filings/disclosure-categories.md": {
+   "fetched_sha256": "21d8224159411d6a4b0775d0169430b4e599202f87285f51d0bc0e2ebe43b937",
+   "stored_sha256": "21d8224159411d6a4b0775d0169430b4e599202f87285f51d0bc0e2ebe43b937",
+   "url": "https://massive.com/docs/rest/stocks/filings/disclosure-categories.md"
+  },
+  "rest/stocks/filings/form-3.md": {
+   "fetched_sha256": "d92ae65438511b27a5b9c30d67dcc09a3c13922fcad668c3a1bd7e45fb461c60",
+   "stored_sha256": "d92ae65438511b27a5b9c30d67dcc09a3c13922fcad668c3a1bd7e45fb461c60",
+   "url": "https://massive.com/docs/rest/stocks/filings/form-3.md"
+  },
+  "rest/stocks/filings/form-4.md": {
+   "fetched_sha256": "62cab5750c619be0aac2798acdea481b7028f09d0217969cc55e97692b939799",
+   "stored_sha256": "62cab5750c619be0aac2798acdea481b7028f09d0217969cc55e97692b939799",
+   "url": "https://massive.com/docs/rest/stocks/filings/form-4.md"
+  },
+  "rest/stocks/filings/index.md": {
+   "fetched_sha256": "e5cc7b4e9d579e42eb39a39be412321ba672f8273fa86c4a0aae1583647b9ebe",
+   "stored_sha256": "e5cc7b4e9d579e42eb39a39be412321ba672f8273fa86c4a0aae1583647b9ebe",
+   "url": "https://massive.com/docs/rest/stocks/filings/index.md"
+  },
+  "rest/stocks/filings/risk-categories.md": {
+   "fetched_sha256": "d233b7ecd57ba8d454b58a56599dffb1f406bdc161da6de223bf6210ff307d8b",
+   "stored_sha256": "d233b7ecd57ba8d454b58a56599dffb1f406bdc161da6de223bf6210ff307d8b",
+   "url": "https://massive.com/docs/rest/stocks/filings/risk-categories.md"
+  },
+  "rest/stocks/filings/risk-factors.md": {
+   "fetched_sha256": "90f5422135a94d1794c8747ea9aecf457ef5e6269716d17fed6b3553ae47f5cb",
+   "stored_sha256": "90f5422135a94d1794c8747ea9aecf457ef5e6269716d17fed6b3553ae47f5cb",
+   "url": "https://massive.com/docs/rest/stocks/filings/risk-factors.md"
+  },
+  "rest/stocks/fundamentals/balance-sheets.md": {
+   "fetched_sha256": "a6abbc9819ee1fa2781881c26715a773d1a57ecaa8b398eb2225c9b00dcd0605",
+   "stored_sha256": "a6abbc9819ee1fa2781881c26715a773d1a57ecaa8b398eb2225c9b00dcd0605",
+   "url": "https://massive.com/docs/rest/stocks/fundamentals/balance-sheets.md"
+  },
+  "rest/stocks/fundamentals/cash-flow-statements.md": {
+   "fetched_sha256": "eba1f60782b6c035acdcbde519c7228199c7c93e47f816adf80e45f761f1e859",
+   "stored_sha256": "eba1f60782b6c035acdcbde519c7228199c7c93e47f816adf80e45f761f1e859",
+   "url": "https://massive.com/docs/rest/stocks/fundamentals/cash-flow-statements.md"
+  },
+  "rest/stocks/fundamentals/float.md": {
+   "fetched_sha256": "f8ef142535ae9092e2997a901539ab8366122021d5a052fa1c9cc09529c96532",
+   "stored_sha256": "f8ef142535ae9092e2997a901539ab8366122021d5a052fa1c9cc09529c96532",
+   "url": "https://massive.com/docs/rest/stocks/fundamentals/float.md"
+  },
+  "rest/stocks/fundamentals/income-statements.md": {
+   "fetched_sha256": "9006ae12563712d72a87628946cc547dc046b70c3b47bb4bd445dc1299bef865",
+   "stored_sha256": "9006ae12563712d72a87628946cc547dc046b70c3b47bb4bd445dc1299bef865",
+   "url": "https://massive.com/docs/rest/stocks/fundamentals/income-statements.md"
+  },
+  "rest/stocks/fundamentals/ratios.md": {
+   "fetched_sha256": "fce86f787cbb62c6102d9438e6953879c9fbf37e41f3110b78afd1eed4b39bfd",
+   "stored_sha256": "fce86f787cbb62c6102d9438e6953879c9fbf37e41f3110b78afd1eed4b39bfd",
+   "url": "https://massive.com/docs/rest/stocks/fundamentals/ratios.md"
+  },
+  "rest/stocks/fundamentals/short-interest.md": {
+   "fetched_sha256": "c86f70fe48bbfa9043132b57a8a6735b944b2929672e553e18635d91740a235e",
+   "stored_sha256": "c86f70fe48bbfa9043132b57a8a6735b944b2929672e553e18635d91740a235e",
+   "url": "https://massive.com/docs/rest/stocks/fundamentals/short-interest.md"
+  },
+  "rest/stocks/fundamentals/short-volume.md": {
+   "fetched_sha256": "e41cb2a1af32f0bca04cae82221b516a795221a027c130403b85a487af08c5f9",
+   "stored_sha256": "e41cb2a1af32f0bca04cae82221b516a795221a027c130403b85a487af08c5f9",
+   "url": "https://massive.com/docs/rest/stocks/fundamentals/short-volume.md"
+  },
+  "rest/stocks/market-operations/condition-codes.md": {
+   "fetched_sha256": "9644a924010fc61f26a5f35f88574b4529d98101b7846906d8efe808275fbebe",
+   "stored_sha256": "9644a924010fc61f26a5f35f88574b4529d98101b7846906d8efe808275fbebe",
+   "url": "https://massive.com/docs/rest/stocks/market-operations/condition-codes.md"
+  },
+  "rest/stocks/market-operations/exchanges.md": {
+   "fetched_sha256": "8ed478a585349a81044282019c059449ef72a4dd884b94e5334559b062ad5c56",
+   "stored_sha256": "8ed478a585349a81044282019c059449ef72a4dd884b94e5334559b062ad5c56",
+   "url": "https://massive.com/docs/rest/stocks/market-operations/exchanges.md"
+  },
+  "rest/stocks/market-operations/market-holidays.md": {
+   "fetched_sha256": "8ad9814a3bad89d0170b8f63b71f9f67a273712fea1d46b2ebd1a9720981cdd9",
+   "stored_sha256": "8ad9814a3bad89d0170b8f63b71f9f67a273712fea1d46b2ebd1a9720981cdd9",
+   "url": "https://massive.com/docs/rest/stocks/market-operations/market-holidays.md"
+  },
+  "rest/stocks/market-operations/market-status.md": {
+   "fetched_sha256": "453b0e26606f1ca81984a1bf980b8fa066347c052a95714141b65470d29cbeaa",
+   "stored_sha256": "453b0e26606f1ca81984a1bf980b8fa066347c052a95714141b65470d29cbeaa",
+   "url": "https://massive.com/docs/rest/stocks/market-operations/market-status.md"
+  },
+  "rest/stocks/news.md": {
+   "fetched_sha256": "f27d38b2db497e97cb2d15912ad8e85dd8971f93b9668f4008714728514d1a11",
+   "stored_sha256": "f27d38b2db497e97cb2d15912ad8e85dd8971f93b9668f4008714728514d1a11",
+   "url": "https://massive.com/docs/rest/stocks/news.md"
+  },
+  "rest/stocks/overview.md": {
+   "fetched_sha256": "ff61ddca5e6ad92f93f2e464450105c19eb0ea1aaefa25555d70efe268314ce1",
+   "stored_sha256": "ff61ddca5e6ad92f93f2e464450105c19eb0ea1aaefa25555d70efe268314ce1",
+   "url": "https://massive.com/docs/rest/stocks/overview.md"
+  },
+  "rest/stocks/snapshots/full-market-snapshot.md": {
+   "fetched_sha256": "14452fcac53a9b00a66f551490839666fe508ac09c0731d5c0179fd64d4f59a7",
+   "stored_sha256": "14452fcac53a9b00a66f551490839666fe508ac09c0731d5c0179fd64d4f59a7",
+   "url": "https://massive.com/docs/rest/stocks/snapshots/full-market-snapshot.md"
+  },
+  "rest/stocks/snapshots/single-ticker-snapshot.md": {
+   "fetched_sha256": "54603022ace7c14f32470684f1701dc9bfc75ea0956eecb85714b7b40a04f178",
+   "stored_sha256": "54603022ace7c14f32470684f1701dc9bfc75ea0956eecb85714b7b40a04f178",
+   "url": "https://massive.com/docs/rest/stocks/snapshots/single-ticker-snapshot.md"
+  },
+  "rest/stocks/snapshots/top-market-movers.md": {
+   "fetched_sha256": "ee4ca8b14dc2d0649a996e9ea1519b2d974d0b2f6157065712d30397039990b8",
+   "stored_sha256": "ee4ca8b14dc2d0649a996e9ea1519b2d974d0b2f6157065712d30397039990b8",
+   "url": "https://massive.com/docs/rest/stocks/snapshots/top-market-movers.md"
+  },
+  "rest/stocks/snapshots/unified-snapshot.md": {
+   "fetched_sha256": "af3c698050e69205573235ead5acb2f0fc66a99d48ecaeb229a51ce28d99abeb",
+   "stored_sha256": "af3c698050e69205573235ead5acb2f0fc66a99d48ecaeb229a51ce28d99abeb",
+   "url": "https://massive.com/docs/rest/stocks/snapshots/unified-snapshot.md"
+  },
+  "rest/stocks/technical-indicators/exponential-moving-average.md": {
+   "fetched_sha256": "0e78f717ddd10183246690580de1ddce104065c340f11d797c237cb1e098eaed",
+   "stored_sha256": "0e78f717ddd10183246690580de1ddce104065c340f11d797c237cb1e098eaed",
+   "url": "https://massive.com/docs/rest/stocks/technical-indicators/exponential-moving-average.md"
+  },
+  "rest/stocks/technical-indicators/moving-average-convergence-divergence.md": {
+   "fetched_sha256": "87377d66c4227d1af4969d402eb7d2acdeedd2485da5522545baf6c86861197c",
+   "stored_sha256": "87377d66c4227d1af4969d402eb7d2acdeedd2485da5522545baf6c86861197c",
+   "url": "https://massive.com/docs/rest/stocks/technical-indicators/moving-average-convergence-divergence.md"
+  },
+  "rest/stocks/technical-indicators/relative-strength-index.md": {
+   "fetched_sha256": "34d82380225cf2e7cecbd287ea57289ca14941f0f1d9b413b524a2e5003a4f20",
+   "stored_sha256": "34d82380225cf2e7cecbd287ea57289ca14941f0f1d9b413b524a2e5003a4f20",
+   "url": "https://massive.com/docs/rest/stocks/technical-indicators/relative-strength-index.md"
+  },
+  "rest/stocks/technical-indicators/simple-moving-average.md": {
+   "fetched_sha256": "24c71459c7ab8d982b6d8a3532d94cfa060a0576c48f31747b984bcc52827390",
+   "stored_sha256": "24c71459c7ab8d982b6d8a3532d94cfa060a0576c48f31747b984bcc52827390",
+   "url": "https://massive.com/docs/rest/stocks/technical-indicators/simple-moving-average.md"
+  },
+  "rest/stocks/tickers/all-tickers.md": {
+   "fetched_sha256": "34df1b08ac11669c3ce50681a1d22c93c224c7848e24e6dd293336a074f4b75a",
+   "stored_sha256": "34df1b08ac11669c3ce50681a1d22c93c224c7848e24e6dd293336a074f4b75a",
+   "url": "https://massive.com/docs/rest/stocks/tickers/all-tickers.md"
+  },
+  "rest/stocks/tickers/related-tickers.md": {
+   "fetched_sha256": "30a7299ae9e144e916be88a577c0319a303ef0736bb39eeac0cca62a5c8a56a2",
+   "stored_sha256": "30a7299ae9e144e916be88a577c0319a303ef0736bb39eeac0cca62a5c8a56a2",
+   "url": "https://massive.com/docs/rest/stocks/tickers/related-tickers.md"
+  },
+  "rest/stocks/tickers/ticker-overview.md": {
+   "fetched_sha256": "d3575259a763dcbf4e23518d2985528f3fe0a926ab3faa3329376741c5872269",
+   "stored_sha256": "d3575259a763dcbf4e23518d2985528f3fe0a926ab3faa3329376741c5872269",
+   "url": "https://massive.com/docs/rest/stocks/tickers/ticker-overview.md"
+  },
+  "rest/stocks/tickers/ticker-types.md": {
+   "fetched_sha256": "bdc3b7ecc7d9567551e837bda1c0c7c86cfdc333228eaa2695f7721074181418",
+   "stored_sha256": "bdc3b7ecc7d9567551e837bda1c0c7c86cfdc333228eaa2695f7721074181418",
+   "url": "https://massive.com/docs/rest/stocks/tickers/ticker-types.md"
+  },
+  "rest/stocks/trades-quotes/last-quote.md": {
+   "fetched_sha256": "2f4323a52cc20bf0d4e8006e9e9946f06fc4596bf674adbdd53494d1aaf8c1d5",
+   "stored_sha256": "2f4323a52cc20bf0d4e8006e9e9946f06fc4596bf674adbdd53494d1aaf8c1d5",
+   "url": "https://massive.com/docs/rest/stocks/trades-quotes/last-quote.md"
+  },
+  "rest/stocks/trades-quotes/last-trade.md": {
+   "fetched_sha256": "dea96c9bb5e8cd93f9d96421fd911fe9eafc6dda829a8cef5d45e1432fbaae98",
+   "stored_sha256": "dea96c9bb5e8cd93f9d96421fd911fe9eafc6dda829a8cef5d45e1432fbaae98",
+   "url": "https://massive.com/docs/rest/stocks/trades-quotes/last-trade.md"
+  },
+  "rest/stocks/trades-quotes/quotes.md": {
+   "fetched_sha256": "66386261f643c9ddb926c5625aa27db57699e76a75253ef73aa8d8b163bd33ae",
+   "stored_sha256": "66386261f643c9ddb926c5625aa27db57699e76a75253ef73aa8d8b163bd33ae",
+   "url": "https://massive.com/docs/rest/stocks/trades-quotes/quotes.md"
+  },
+  "rest/stocks/trades-quotes/trades.md": {
+   "fetched_sha256": "9e494b1aa220e10b1b2f88881a5e1a09a11f2380d5317bbc9a3f2c6933f4202b",
+   "stored_sha256": "9e494b1aa220e10b1b2f88881a5e1a09a11f2380d5317bbc9a3f2c6933f4202b",
+   "url": "https://massive.com/docs/rest/stocks/trades-quotes/trades.md"
+  }
+ }
+}
