@@ -939,6 +939,10 @@ Documentation only:
 emit a second client method for one URL (the per-asset-class templates of `/v3/trades`,
 `/v3/quotes`, `/v2/last/trade`, and the indicators); each such template has its own
 documentation page, with its own documented fields, so it is generated like any other path.
+Likewise `x-polygon-experimental` excludes nothing: the one path that carries it
+(`/vX/reference/tickers/{id}/events`) is documented, and documented endpoints are generated.
+The generator knows every vendor extension it accepts, each with the reason in `refresh/rest.py`;
+an unknown one stops the refresh (`shape`).
 
 **Coverage.** Everything documented is generated or excluded, and everything generated is
 used or listed as still to be declared:
@@ -1872,11 +1876,12 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
   types.py           Transport, Source(key, transport, fields, memberships),
                      Membership(kind, group, position, projection), RestPath(Source + template,
                      result key, params), Field(wire key, column, WireType, unit, required,
-                     declared type), Param(+ unit), ParamKind, WireType, WireUnit,
+                     conversion), Conversion (named conversions, each with its declared and
+                     resulting WireType), Param(+ unit), ParamKind, WireType, WireUnit,
                      ENVELOPE_KEYS, DriftReport(extra, missing, statuses)
   convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
                      every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError;
-                     a field's declared conversion (declared type to WireType)
+                     convert_field applies a field's named conversion
   rest.json  ws.json  flatfiles.json        generated, committed
 rest/                imports net, spec
   __init__.py        RestClient, Page, to_batch
@@ -1918,11 +1923,12 @@ refresh/             build time only; excluded from the wheel; may import any of
   gates.py           Gate (the named gates of section 19.4), Problem, RefreshError, and the
                      checks that span paths: stale entries, exclusions, concept collisions
   render.py          spec/*.json in canonical text
-  hand.py            HandInput: the hand tables bundled for the generators
+  hand_input.py      HandInput: the hand tables bundled for the generators
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
   overrides.py       NAMES, KINDS, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
                      TRANSPORT_ONLY, RESULT_KEYS, PARAM_UNITS, VENUES
-  exclusions.py      EXCLUSIONS (kind, item, reason), the executable rows of section 8.12
+  exclusions.py      EXCLUSIONS (kind, item, reason), the executable rows of section 8.12;
+                     SAMPLE_ERRORS (path, wire key, sample, reason), the wrong vendor samples
   drift.py           live-against-snapshot comparison, unaccounted items, deprecations
 
 vendor/massive/      outside the package; Massive's published content, vendored as generation
@@ -1980,7 +1986,8 @@ negative test per rule:
 **Not shipped.** The wheel excludes all of `refresh/`, and neither the wheel nor the sdist
 contains `vendor/` (the CI build job checks both archives). `spec/*.json` ship as package data.
 The tests that read the snapshot (the parity test among them) skip with a stated reason where
-`vendor/massive/` is absent, as in an unpacked sdist; in the repository they always run.
+`vendor/massive/` is absent and the `CI` environment variable is unset, as in an unpacked
+sdist. With `CI` set they never skip, so a CI checkout without the snapshot fails them.
 
 ### 19.1 The REST client
 
@@ -2328,7 +2335,8 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `PROJECTIONS` | `overrides.py` | see above | indices snapshot → values, `last_updated` → `timestamp` |
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
-| `TYPE_FIXES` | `overrides.py` | vendor type **errors or omissions** only: a declared, field-scoped conversion that the decoder applies deliberately (see **Declared conversions** below), each citing the documentation sample that shows the real type; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | REST timestamps typed as plain text whose samples are ISO date-times (benzinga analysts and firms `last_updated`, futures market-status `timestamp`, `/v1/marketstatus/now` `serverTime`) → `iso-instant`; futures products `last_updated` (declared date-time, sample `"2025-02-22"`) → `date`; flat-file `conditions` `integer` → `int-array`; forex `x` (documented as a quoted decimal string) → `long`; crypto `XT` `i` (`integer`) → `string` |
+| `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
+| `SAMPLE_ERRORS` | `exclusions.py` | `(path, wire key, sample, reason)`: a documented example value that is wrong while the type is right, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, column): reason}`: columns legitimately on one transport | `AccumulatedVolume` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
 | `PARAM_UNITS` | `overrides.py` | `{(path, base parameter): (unit, reason)}`: the unit of every timestamp-like string parameter, and of any other string parameter documented as taking an epoch, or "not an epoch" (sent as date or date-time text) | `/v3/trades` `timestamp` → ns; indicators `timestamp` → ms; aggregate range `{from}`/`{to}` → ms; benzinga `last_updated` → not an epoch |
@@ -2420,9 +2428,12 @@ names no endpoint, or an `undocumented` exclusion claim the pages contradict (`d
 unknown `x-polygon-*` extension on a path or operation, a parameter `oneOf`/`anyOf` that is
 not a choice of date and date-time strings, or a response it cannot read (`shape`); a `UNITS`
 unit that differs from the spec's unit tag without a tag-conflict entry (`units`); an
-envelope key of a single-object body with a type not the envelope's (`envelope`); and a value
-of the spec's documented response example that its generated field's conversion refuses
-(`example-type`), which a `TYPE_FIXES` entry citing the sample resolves.
+envelope key of a single-object body with a type not the envelope's (`envelope`); and a
+documented example value (of the response's example, or a field's own `example`) that its
+generated field refuses, or a response example with no value where the result key points
+(`example-type`). A `TYPE_FIXES` entry citing the sample resolves a wrong type; a
+`SAMPLE_ERRORS` entry (`exclusions.py`) records a wrong sample, such as the IPO `us_code`
+example `37833100`, a CUSIP that lost its leading zero.
 
 Descriptions differ across transports and change about twenty times as often as keys, so
 `type-agreement` and `transport-agreement`, not description matching, are the mechanical
@@ -2447,24 +2458,40 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
   each column's WireType = the lattice join over every contribution
 ```
 
-**Declared conversions.** A `TYPE_FIXES` entry names one field of one source, the wire form,
-and the generated type, and it is recorded on the generated `Field` as `declared_type`. The decoder applies that
-conversion deliberately: forex `x` arrives as a quoted decimal string (`"48"`) and is parsed to
-`long`. A value that does not parse (`"4.8"`, `"x"`) is an unconvertible value and fails loudly
-like any other ([section 19.5](#195-runtime-drift)). Every entry has a fixture test of both the
-conversion and the failure. A conversion that no entry declares is coercion, which never
-happens. A pair of one type twice keeps the type and accepts a second form the vendor
-documents for it: crypto snapshot `lastTrade.i` stays `string` but is also sent as an integer
-(`413131`), and the indices and crypto open-close `from`/`day` stay `date` but are sent as an
-instant at exactly midnight UTC (`"2023-03-10T00:00:00.000Z"`; any other time is refused, and
-the column stays a date so the open-close sources agree). A conversion to `epoch` (futures
-snapshot `details.settlement_date`, declared a date, sample `1753851600000000000`) takes its
-unit from `UNITS`. TMX `tmx_company_id` (`"2208"`) and the risk-factor `taxonomy` version
-(`"1.0"`) become `string`. The pairs are `spec.convert.DECLARED_CONVERSIONS`.
+**Named conversions.** A `TYPE_FIXES` entry names one field of one source and one
+`spec.types.Conversion`, and the generated `Field` records it as `conversion` (`rest.json`
+writes its name). Each conversion has one meaning wherever it is used: the type the
+specification must declare (a changed declaration makes the entry stale), the type the field
+gets, and exactly the forms it accepts, so no entry silently inherits a meaning nobody chose
+for it. The plain converter of each `WireType` is never loosened, and no conversion is a
+no-op. The decoder applies it deliberately: forex `x` arrives as a quoted decimal string
+(`"48"`) and `quoted-integer` parses it to `long`; a value it cannot read (`"4.8"`, `"x"`) is
+an unconvertible value and fails loudly like any other ([section 19.5](#195-runtime-drift)).
+Every entry has a fixture test of both the conversion and the failure; a conversion that no
+entry declares is coercion, which never happens. The conversions:
 
-The `example-type` gate checks every value of the specification's own response example (106 of
-the 109 generated REST paths carry one) against its generated field's conversion, so a type
-the vendor's samples contradict stops the refresh instead of failing at run time.
+| `Conversion` | Declared → wire type | Accepts | Used by |
+|---|---|---|---|
+| `iso-text-instant` | `string` → `iso-instant` | ISO-8601 instant text | benzinga analysts and firms `last_updated`, futures market-status `timestamp`, `/v1/marketstatus/now` `serverTime` |
+| `iso-date-text` | `iso-instant` → `date` | `YYYY-MM-DD` | futures products `last_updated` (sample `"2025-02-22"`) |
+| `quoted-integer` | `string` → `long` | decimal digits in text | forex `x` |
+| `integer-id-as-text` | `long` → `string` | an integer only; text fails | WebSocket crypto `XT` `i` |
+| `integer-or-text-id` | `long` → `string` | an integer or text | TMX `tmx_company_id` (sample `"2208"`) |
+| `text-or-integer-id` | `string` → `string` | text or an integer | crypto full-market and movers snapshots `lastTrade.i` (samples `413131` and `"517478762"`) |
+| `number-label` | `double` → `string` | text, or a number written with a fraction | risk-factor `taxonomy` (sample `"1.0"`) |
+| `one-code` | `long` → `int-array` | one integer | flat-file `conditions` |
+| `midnight-utc-date` | `date` → `date` | `YYYY-MM-DD`, or midnight with offset `Z` or `+00:00`, giving the written date; any other clock or offset fails | indices open-close `from`, crypto open-close `day` (samples `"…T00:00:00.000Z"`); the column stays a date so the open-close sources agree |
+| `date-as-epoch` | `date` → `epoch` | an integer count; its unit comes from `UNITS` | futures snapshot `details.settlement_date` (sample `1753851600000000000`, an instant in ns; `/futures/v1/contracts` sends the field as a date) |
+
+The `example-type` gate converts every documented example value through its generated field:
+the specification's response example (106 of the 109 generated REST paths carry one) and each
+field's own `example`. A type the vendor's samples contradict stops the refresh instead of
+failing at run time. It also retires fixes: a `TYPE_FIXES` entry is stale once no example
+value of the fields it names (all entries sharing one decision, such as the two crypto
+snapshots) is a value the declared type refuses, except a conversion from untyped text
+(`iso-text-instant`, `quoted-integer`), which the declared-type check retires once the
+specification types the field. A `SAMPLE_ERRORS` entry is stale once the specification no
+longer shows its sample, or the field accepts it.
 
 **Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
 columns as `KeySpec(column, from_request)`, one optional declaration per role (`symbol`,

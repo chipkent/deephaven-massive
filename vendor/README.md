@@ -11,7 +11,9 @@ sdist. The library reads none of them at run time; it loads the schemas generate
 (`src/deephaven_massive/_massive/spec/*.json`).
 
 Never edit the files by hand: the generator verifies every file against the manifest and stops
-on any difference. To take a vendor change, from the repository root:
+on any difference, and on any file the manifest does not list. The only exceptions are the
+files an operating system's file browser leaves in a folder it shows (`.DS_Store`, `._*`,
+`Thumbs.db`, `desktop.ini`): no vendor file can have such a name, so they are ignored. To take a vendor change, from the repository root:
 
 ```bash
 uv run python -m deephaven_massive._massive.refresh --fetch   # replace the snapshot with the live sources

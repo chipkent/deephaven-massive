@@ -1148,7 +1148,7 @@ timestamp-like integers (68 of them untagged) and about 50 short keys.
 - Create: `_massive/refresh/__main__.py`, `generate.py` (the refresh, composing the rest),
   `snapshot.py` (the snapshot format), `fetch.py`, `docs.py` (the `llms.txt` reader only),
   `openapi.py`, `naming.py`, `rest.py` (the REST generator), `gates.py`, `render.py`,
-  `hand.py`, `lexicon.py` (REST shapes), `overrides.py` (`NAMES`, REST `UNITS`, REST
+  `hand_input.py`, `lexicon.py` (REST shapes), `overrides.py` (`NAMES`, REST `UNITS`, REST
   `TYPE_FIXES`, `RESULT_KEYS`), `exclusions.py` (the executable REST rows of DESIGN § 8.12),
   `vendor/massive/` (every source, in one snapshot, with `manifest.json`, outside the package)
   and `vendor/README.md`, `_massive/spec/rest.json`; their mirrors under
