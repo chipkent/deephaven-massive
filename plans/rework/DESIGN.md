@@ -1149,33 +1149,44 @@ All return `Query`.
 | `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
 | `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
 | `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(*, symbols=None, …T)`, axis `published_utc` | `/v2/reference/news` |
+| `news(*, symbols=None, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` is one symbol: a list of several raises `ValueError` (build one query per symbol) and a `Table` raises `TypeError` |
 | `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
 | `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions` |
 | `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
 | `market_holidays()` | `/v1/marketstatus/upcoming` |
 
-`AssetClass.FOREX` is sent as `fx` on these endpoints. `AssetClass.FUTURES` has no value on
-these endpoints and raises `ValueError`.
+`AssetClass.FOREX` is sent as `fx` on these endpoints. Each endpoint accepts the classes its
+generated `asset_class` enum lists, and any other class raises `ValueError` naming those it
+accepts: `ticker_types` takes every class but futures, `exchanges` every class but indices, and
+`conditions` neither futures nor indices.
 
 ### 8.8 `m.indicators`
 
 All return `Query`. The symbol prefix selects the asset class. The axis is `timestamp`.
 
 ```python
-sma(symbols, window: int, *, timespan: Timespan = Timespan.DAY, multiplier: int = 1,
+sma(symbols, window: int, *, timespan: Timespan = Timespan.DAY,
     series_type: SeriesType = SeriesType.CLOSE, adjusted: bool = True,
-    expand_underlying: bool = False, …T)
+    start: DateLike | None = None, end: DateLike | None = None,
+    order: Order | None = None, limit: int | None = None,
+    filters: Mapping[str, FilterValue] | None = None)
 ema(...)   # same signature as sma
 rsi(...)   # same signature as sma
 macd(symbols, *, short_window: int, long_window: int, signal_window: int,
-     timespan: Timespan = Timespan.DAY, multiplier: int = 1,
+     timespan: Timespan = Timespan.DAY,
      series_type: SeriesType = SeriesType.CLOSE, adjusted: bool = True,
-     expand_underlying: bool = False, …T)
+     start: DateLike | None = None, end: DateLike | None = None,
+     order: Order | None = None, limit: int | None = None,
+     filters: Mapping[str, FilterValue] | None = None)
 ```
 
-REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol. `Timespan.SESSION` is rejected
-here.
+REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol; crypto symbols use the
+`{cryptoTicker}` template, which has no `adjusted` parameter. The axis is half-open
+(`timestamp.gte`/`.lt`). The endpoints have no `sort` (rows are in timestamp order, set by their
+own `order` parameter) and no multiplier, so neither is offered; `expand_underlying` is not
+offered either, because the underlying bars it adds are not rows of the table.
+`Timespan.SECOND` and `Timespan.SESSION` are rejected with `ValueError`: the endpoints' timespan
+enum runs from `minute` to `year`.
 
 ### 8.9 `m.economy`
 
