@@ -196,7 +196,9 @@ def _filters(spec: DatasetSpec, filters: object) -> tuple[tuple[str, ParamValue]
     Raises:
         TypeError: If `filters` is not a mapping, a key is not a `str`, or a value has an
             unsupported type.
-        ValueError: If a key is one of the dataset's `start`/`end` parameters.
+        ValueError: If a key is one of the dataset's `start`/`end` parameters, or `adjusted`,
+            which has its own typed argument: a filter would reach REST but not the flat-file
+            source choice, which reads only `Request.adjusted`.
     """
     if not isinstance(filters, Mapping):
         raise TypeError(f"filters must be a mapping, not {type(filters).__name__}")
@@ -206,6 +208,8 @@ def _filters(spec: DatasetSpec, filters: object) -> tuple[tuple[str, ParamValue]
             raise TypeError(f"filter names must be str, not {type(key).__name__}")
         if spec.time_axis is not None and key in spec.time_axis:
             raise ValueError(f"{key} is set through start= and end=, not filters")
+        if key == "adjusted":
+            raise ValueError("adjusted is set through build_query(adjusted=...), not filters")
         pairs.append((key, _value(key, value)))
     return tuple(sorted(pairs))
 
@@ -251,8 +255,8 @@ def build_query(
         An instance of the spec's query class (or of the class `bar_query_class` picks).
 
     Raises:
-        ValueError: If `dm.ALL` is passed where `all_alternative` is set, or `params` holds
-            `adjusted`, which has its own typed argument.
+        ValueError: If `dm.ALL` is passed where `all_alternative` is set, or `params` or
+            `filters` holds `adjusted`, which has its own typed argument.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`

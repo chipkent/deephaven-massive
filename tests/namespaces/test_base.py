@@ -329,3 +329,12 @@ def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
     # One channel only: adjusted never travels in params, where a transport could drop it.
     with pytest.raises(ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\)"):
         build_query(massive_session._core, spec, symbols=["AAPL"], params={"adjusted": False})
+
+
+def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> None:
+    # A filter would reach REST but not the source choice, which could then pick flat files,
+    # whose bars are unadjusted.
+    with pytest.raises(
+        ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\), not filters"
+    ):
+        build_query(massive_session._core, STOCK_BARS, symbols=["AAPL"], filters={"adjusted": True})
