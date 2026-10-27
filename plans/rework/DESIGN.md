@@ -391,12 +391,12 @@ repr(m)  # "<MassiveSession #1 open>" or "<MassiveSession #1 closed>"; the label
 repr(m.stocks)  # "<MassiveSession #1 stocks>"; vendors "<MassiveSession #1 partners.benzinga>"
 ```
 
-`MassiveSession` exposes nothing beyond the names above (§ 22, decision 21). In particular it
-has no `name` or `config` attribute: the session's label (`MassiveSession #1`, a per-process counter) appears in
-its repr, in the same-key WARNING, and in error messages, and nowhere else; the configuration is
-the `MassiveConfig` the caller passed (or `MassiveConfig()`), which the caller already holds. Not
-exposing the configuration keeps the API key one step further from console globals, which every
-user of a Deephaven worker can read.
+`MassiveSession` exposes nothing beyond the names above (§ 22, “Sessions and queries expose no
+introspection attributes”). In particular it has no `name` or `config` attribute: the session's
+label (`MassiveSession #1`, a per-process counter) appears in its repr, in the same-key WARNING,
+and in error messages, and nowhere else; the configuration is the `MassiveConfig` the caller passed
+(or `MassiveConfig()`), which the caller already holds. Not exposing the configuration keeps the
+API key one step further from console globals, which every user of a Deephaven worker can read.
 
 The session must be created inside a Deephaven worker: an `ExecutionContext` must be active.
 The library captures it at construction and enters it on every library thread before any
@@ -529,7 +529,7 @@ return result
   if the failure had arrived just after it: every shape raises Deephaven's `DHError` ("Can not
   listen to failed table") as it derives from the failed blink table, with the hold released.
   `blink()` is no exception, because its described copy listens to the blink table
-  ([section 7.4](#74-column-descriptions)). P4 wraps that error in a
+  ([section 7.4](#74-column-descriptions)). The WebSocket layer wraps that error in a
   `MassiveError` naming the stream's failure.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
@@ -581,7 +581,8 @@ are immutable, hashable, and reusable. A query's repr names its class, its datas
 arguments that differ from their defaults, for example
 `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
 reactive table as `<reactive table>`. Queries have no other attributes: the verbs and `columns()`
-are their whole API (§ 22, decisions 21 and 45).
+are their whole API (§ 22, “Sessions and queries expose no introspection attributes” and
+“`columns()` on every query”).
 
 ```python
 class QueryBase:                           # the base of all six classes below
@@ -3028,8 +3029,8 @@ document already reflects them.
     `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
     appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error
     messages, and a query's dataset and arguments only in its repr. The public surface stays
-    exactly the verbs, `columns()` (decision 45), and the namespaces, and the API key stays out
-    of objects users routinely leave in console globals.
+    exactly the verbs, `columns()` (see “`columns()` on every query” below), and the namespaces,
+    and the API key stays out of objects users routinely leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
     its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares the key
     columns its sources carry, and `_schema.rename` maps them to `Symbol`, `Timestamp`, and

@@ -20,7 +20,7 @@ uv build                                   # sdist and wheel
 ```
 
 The refresh commands (`uv run python -m deephaven_massive._massive.refresh [--check | --fetch]`)
-arrive with the `PLAN.md` package PC3a, which adds them here.
+arrive with the `PLAN.md` package rest-wire-schema, which adds them here.
 
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
@@ -35,10 +35,10 @@ here.
 
 The library is moving off Massive's Python SDK (`massive`) to its own REST, WebSocket, and S3
 flat-file clients, with every schema generated from vendored, pinned vendor specs
-(`DESIGN.md` § 19). Until the `PLAN.md` package PC4 lands, the old dependency is still
-installed; PC4 removes it and adds a ruff `banned-api` entry for it. Never add an import of
-`massive`. Once the generated `spec/*.json` files exist, never edit them by hand: they change
-only through the refresh, and hand input lives only in `_massive/refresh/lexicon.py`,
+(`DESIGN.md` § 19). Until the `PLAN.md` package massive-sdk-removal lands, the old dependency is
+still installed; massive-sdk-removal removes it and adds a ruff `banned-api` entry for it. Never
+add an import of `massive`. Once the generated `spec/*.json` files exist, never edit them by hand:
+they change only through the refresh, and hand input lives only in `_massive/refresh/lexicon.py`,
 `overrides.py`, and `exclusions.py`, every entry with a reason. The library has no users, so
 nothing is kept or shimmed for compatibility.
 
@@ -91,19 +91,19 @@ nothing is kept or shimmed for compatibility.
     `chore(deps):` PRs. `uv.lock` is not committed: CI starts with no lock and resolves the newest
     versions on every run, `scripts/check.sh` does the same locally with `uv sync --upgrade`,
     and a plain local `uv sync` keeps the existing lock.
-13. **One wire package** (from the `PLAN.md` package PC1a, which creates it and its boundary
-    tests). `src/deephaven_massive/_massive/` owns all Massive wire access
-    (REST, WebSocket, and S3 flat files), the vendored spec snapshot, the generated schemas,
-    the units, and the long-form names, in six subpackages: `net/`, `spec/`, `rest/`, `ws/`,
-    `flatfiles/`, `refresh/`. `_massive` imports nothing from `deephaven`, `deephaven_server`,
-    `jpy`, or the rest of the library. Layers: `net` and `spec` import nothing else in
-    `_massive`; `rest`, `ws`, and `flatfiles` import only `net` and `spec`; only `refresh` and
-    its tests import `refresh`. The wire package's own tests, under `tests/massive/`, may
-    import any `_massive` module. Everything else, the rest of `tests/` included, imports only
-    `deephaven_massive._massive` and uses only the names in its `__all__`: never a submodule
-    (by `import`, relative import, or `importlib`), never `urllib3`, `websockets`, `certifi`,
-    `boto3`, or `botocore`, and never a snapshot file. `tests/_fakes/` keeps its exception for
-    the network libraries. The AST tests in `tests/test_layout.py` enforce all of it.
+13. **One wire package** (from the `PLAN.md` package wire-package-scaffold, which creates it and
+    its boundary tests). `src/deephaven_massive/_massive/` owns all Massive wire access (REST,
+    WebSocket, and S3 flat files), the vendored spec snapshot, the generated schemas, the units,
+    and the long-form names, in six subpackages: `net/`, `spec/`, `rest/`, `ws/`, `flatfiles/`,
+    `refresh/`. `_massive` imports nothing from `deephaven`, `deephaven_server`, `jpy`, or the rest
+    of the library. Layers: `net` and `spec` import nothing else in `_massive`; `rest`, `ws`, and
+    `flatfiles` import only `net` and `spec`; only `refresh` and its tests import `refresh`. The
+    wire package's own tests, under `tests/massive/`, may import any `_massive` module. Everything
+    else, the rest of `tests/` included, imports only `deephaven_massive._massive` and uses only
+    the names in its `__all__`: never a submodule (by `import`, relative import, or `importlib`),
+    never `urllib3`, `websockets`, `certifi`, `boto3`, or `botocore`, and never a snapshot file.
+    `tests/_fakes/` keeps its exception for the network libraries. The AST tests in
+    `tests/test_layout.py` enforce all of it.
 
 ## Documentation standard
 
