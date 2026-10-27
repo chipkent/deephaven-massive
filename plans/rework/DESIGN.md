@@ -106,6 +106,12 @@ deprecation path, and no rule that rests on the chance of breaking someone.
     and none is inferred from data. A live table must know its full column set and types before
     its first row, the first message may omit optional fields (stocks `T` omits `pt` on OTC
     trades), and two sessions must agree on a dataset's shape.
+12. **Every column says what it means, in the vendor's own words.** The refresh records
+    Massive's description of every field beside the generated schemas, and one rule picks each
+    dataset column's description from them. The same text reaches users three ways: the
+    column-header tooltip of every result in the Deephaven web UI, `columns()` in the console,
+    and the generated pages under `docs/datasets/` ([section 7.4](#74-column-descriptions)).
+    Nobody writes a column list by hand.
 
 ### 2.2 Terms
 
@@ -113,7 +119,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 |---|---|
 | dataset | One method under a namespace, such as `m.stocks.trades`. |
 | query | The immutable object a dataset method returns. |
-| verb | A method on a query that returns a Deephaven `Table`. |
+| verb | A method on a query that returns a Deephaven `Table` of the dataset's rows. `columns()` returns a table about the columns, not rows, and is not a verb. |
 | result | A `Table` a verb returned. |
 | stream | One live subscription for one (dataset, channel, symbol set). It owns one `TablePublisher`. |
 | channel | A WebSocket event prefix: `T`, `Q`, `A`, `AM`, `FMV`, and so on. |
@@ -125,6 +131,8 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 | kind | A dataset kind: the datasets whose sources share one merged schema (trades, quotes, bars, …), defined in `KINDS` and recorded on each generated source as a `Membership`. |
 | shape | An object shape in a payload (an aggregate row, a snapshot `day` object, a WebSocket channel), which selects a lexicon. |
 | drift | A difference between a payload on the wire and its committed generated schema. |
+| column description | The plain-text meaning of one dataset column: the vendor's description of the wire field behind it, or fixed library text for a key column or a column only other members of the kind supply ([section 19.4](#194-generated-schemas)). |
+| column reference | The generated, committed pages `docs/datasets/<namespace>.md`, one section per dataset ([section 7.4](#74-column-descriptions)). |
 | UG thread | A thread of Deephaven's update graph (UG), which refreshes live tables while holding the UG lock. |
 | blink table | A Deephaven table whose rows exist for exactly one update cycle. `TablePublisher` produces one. |
 | result scope | A library-owned `LivenessScope` that holds exactly one result. |
@@ -175,7 +183,9 @@ The six query classes (`Query`, `StreamQuery`, `HistoryQuery`, `StreamHistoryQue
 `StreamHistoryLatestQuery`, `HistoryLatestQuery`) are importable from the private module
 `deephaven_massive._query` for type annotations only. Users never construct them. The type
 aliases `Symbols`, `DateLike`, and `FilterValue` are importable from `deephaven_massive._types`
-for the same purpose.
+for the same purpose. Every query also has `columns()`
+([section 7](#7-query-classes-and-verbs)), a method rather than an export, so the list above
+does not change.
 
 `MassiveError` and its two subclasses carry two read-only attributes, set when the error came
 from an HTTP response and `None` otherwise: `status`, the HTTP status (`int | None`), and
@@ -212,14 +222,16 @@ _query.py            the six query classes and their verbs; HostDecision; transp
 _enums.py            the fourteen public enums, Recency, ChannelFamily, _require_enum
 _types.py            Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py           MassiveError (.status, .request_id), AuthenticationError, EntitlementError, from_wire
-_catalog.py          DatasetSpec (role paths, kind, per-source key columns, channels, prefixes,
-                     poll defaults, page size), datasets(), members(kind), filter validation
+_catalog.py          DatasetSpec (summary, role paths, kind, per-source key columns, channels,
+                     prefixes, poll defaults, page size), datasets(), members(kind), filter
+                     validation
 _namespaces/
   __init__.py        empty
   base.py            the shared dataset factory
   stocks.py options.py futures.py indices.py forex.py crypto.py
   reference.py indicators.py economy.py partners.py      namespace class + DATASETS
-_schema.py           ColumnType, Schema, WireType -> ColumnType, rename(), dataset_schema() (section 19.4)
+_schema.py           ColumnType, Column, Schema, WireType -> ColumnType, rename(), dataset_schema()
+                     with column descriptions (section 19.4); describe() (section 7.4)
 _timeunits.py        the one timestamp routine (section 12), the FMV magnitude rule
 _symbols.py          normalization, canonical_view, the Symbol/Underlying rule (section 10)
 _dates.py            DateLike parsing, day zones, sessions, publish_time, [start, end)
@@ -236,6 +248,9 @@ _poll.py             poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> pu
 _flat_files.py       flat-file transport: read plans, reader pool, cancellation, conversion,
                      merge to tables, missing-file policy, drift routing (section 16)
 _history_source.py   partition dates, publication grace, REST capability, the AUTO choice; pure, no I/O
+_reference.py        the column reference: render() -> {file name: Markdown} from the catalog
+                     and the dataset schemas (pure); sync(directory, pages) owns docs/datasets/
+                     (section 7.4)
 _massive/            the wire package (section 19)
 py.typed
 ```
@@ -251,14 +266,18 @@ Supporting files outside the package:
 |---|---|
 | `scripts/check.sh [fast\|full] [--no-fix]` | The single verification entry point (lint, format, type check; `full` adds the test suite with coverage). |
 | `python -m deephaven_massive._massive.refresh [--check \| --fetch]` | The refresh command, run from a source checkout ([section 19.6](#196-refresh-and-drift)). |
+| `uv run python scripts/render_reference.py` | Regenerates the column reference, `docs/datasets/`, the whole directory and nothing else ([section 7.4](#74-column-descriptions)). |
+| `docs/datasets/<namespace>.md` | The generated column reference, committed, never edited by hand. |
 | `.github/workflows/spec-drift.yml` | The advisory weekly drift job ([section 20](#20-quality-gates)). |
 | `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag; created only when the owner turns publishing on ([section 20.1](#201-tooling-configuration)). |
 | `tests/data/` | Payload fixtures. |
 | `tests/_fakes/` | Fake REST server, WebSocket server, S3, and stream helpers ([section 4.2](#42-test-layout)). |
 
 Deephaven is imported at module level where it is used at runtime. Type-only imports go under
-`TYPE_CHECKING`. The library imports nothing from `deephaven_server`. Only the two lazy
-`__init__.py` files (the package's and `_massive`'s) defer imports.
+`TYPE_CHECKING`. The library imports nothing from `deephaven_server`;
+`scripts/render_reference.py` starts the embedded server itself, outside the package, before it
+imports the library. Only the two lazy `__init__.py` files (the package's and `_massive`'s)
+defer imports.
 
 ### 4.2 Test layout
 
@@ -281,6 +300,7 @@ directory starts with `_`. Examples:
 | `_config.py` | `tests/test_config.py` | |
 | `_hosts.py` | `tests/test_hosts.py` | `tests/test_hosts_integration.py` |
 | `_flat_files.py` | `tests/test_flat_files.py` | `tests/test_flat_files_integration.py` |
+| `_reference.py` | `tests/test_reference.py` (also the parity test of `docs/datasets/`) | |
 | `_namespaces/__init__.py` | `tests/namespaces/test_init.py` | |
 | `_namespaces/stocks.py` | `tests/namespaces/test_stocks.py` | `tests/namespaces/test_stocks_integration.py` |
 | `_massive/__init__.py` | `tests/massive/test_init.py` | |
@@ -441,8 +461,10 @@ These facts are verified in `deephaven-core` `main`:
 ```python
 scope = LivenessScope()                       # library-owned, one per result
 with scope.open():                            # top of the thread-local stack during creation
-    result = shape(stream.blink)              # append_only / ring / last_by; for blink(), a fresh wrapper:
-                                              #   Table(stream.blink.j_table), then scope.manage(result)
+    result = describe(shape(stream.blink), spec)
+                                              # shape: append_only / ring / last_by, or for blink()
+                                              #   the blink table itself; describe() returns a new,
+                                              #   described table (section 7.4)
 m._core.results.track(result, scope, on_released)
     # ResultRegistry.track: under registry_lock, a ResultRecord(scope, on_released,
     # finalizer=weakref.finalize(result, <enqueue release>), released=False) keyed by
@@ -451,11 +473,12 @@ return result
 ```
 
 - **Every result is a distinct Python object.** `blink()` never returns the stream's own blink
-  wrapper: each call wraps the same Java table in a new `Table(stream.blink.j_table)` and manages
-  it explicitly in the result scope (`scope.manage(result)`), because creating a wrapper creates
-  no liveness reference by itself. So `a = q.blink(); b = q.blink()` yields two records with
-  distinct `id(result)` values, and the stream never holds a wrapper it has handed out, so each
-  result's weakref can fire.
+  wrapper. The stream's blink table is never described, so `describe()` always copies it: each
+  call returns a new Java table, created while the result scope is open and therefore managed by
+  it. So `a = q.blink(); b = q.blink()` yields two records with distinct `id(result)` values,
+  and the stream never holds a wrapper it has handed out, so each result's weakref can fire.
+  The described copy depends on the blink table, as any derived table does, so the blink table
+  and its `on_shutdown_callback` live until the copy is gone.
 - Because `scope` is at the top of the stack, `result` is managed by `scope`, not by the
   session's `queryScope`. Releasing `scope` drops the last liveness reference unless a
   user-derived table (`result.where(...)`), an open UI panel, or a user liveness scope also
@@ -503,9 +526,10 @@ return result
   waiters wake and open the stream themselves. `m.close()` wakes the waiters, which raise
   `MassiveError`; the opener releases the stream when its open returns. A failure reported
   during the open leaves the stream `FAILED`, and the open returns the stream as is, exactly as
-  if the failure had arrived just after it: `blink()` returns the failed table, while
-  `append_only()`, `ring()` and `last_by()` raise Deephaven's `DHError` ("Can not listen to
-  failed table") as they derive from it, with the hold released. P4 wraps that error in a
+  if the failure had arrived just after it: every shape raises Deephaven's `DHError` ("Can not
+  listen to failed table") as it derives from the failed blink table, with the hold released.
+  `blink()` is no exception, because its described copy listens to the blink table
+  ([section 7.4](#74-column-descriptions)). P4 wraps that error in a
   `MassiveError` naming the stream's failure.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
@@ -556,8 +580,14 @@ Six classes, defined in `_query.py`. Nothing touches the network until a verb is
 are immutable, hashable, and reusable. A query's repr names its class, its dataset, and the
 arguments that differ from their defaults, for example
 `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
-reactive table as `<reactive table>`. Queries have no other attributes: the verbs are their whole
-API (§ 22, decision 21).
+reactive table as `<reactive table>`. Queries have no other attributes: the verbs and `columns()`
+are their whole API (§ 22, decisions 21 and 45).
+
+```python
+class QueryBase:                           # the base of all six classes below
+    def columns(self) -> Table: ...        # static; the dataset's columns and what they mean;
+                                           # no network, not a verb, not a result
+```
 
 ```python
 class Query:                               # REST list and snapshot datasets
@@ -584,6 +614,48 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):   # adds a REST "last" endpo
 class HistoryLatestQuery(HistoryQuery):   # daily bars only
     def fetch(self) -> Table: ...          # static; one row per symbol: the previous completed session's bar
 ```
+
+**`columns()`.** Lists the columns every verb of the dataset returns, without touching the
+network, so a console or notebook user can read what each column means without the web UI or
+GitHub. The docstring contract, which the implementation copies:
+
+```python
+def columns(self) -> Table:
+    """List this dataset's columns, their types, and what each one means.
+
+    Every verb of the dataset returns these columns in this order, whichever transport
+    serves it; a column the serving transport does not supply is null. The table is built
+    from the committed generated schemas: no request is made, no stream is opened, and it
+    works on a closed session.
+
+    Returns:
+        A static table with one row per column, in result column order:
+        `Name` (String), the column name; `Type` (String), its Deephaven type (`long`,
+        `int`, `double`, `boolean`, `String`, `Instant`, `LocalDate`, or `int[]`);
+        `Description` (String), what the column holds, empty when Massive gives no
+        description; and `SuppliedBy` (String), the transports whose sources fill the
+        column for this dataset, `REST`, `FLAT_FILES`, and `WS` in that order, joined by
+        ", " (`fetch()` and `poll()` are served by REST, the stream verbs by WS, and
+        `history()` by REST or FLAT_FILES); empty for a column that only other datasets
+        of the same kind supply, which this dataset always leaves null.
+
+    Raises:
+        ValueError: If called on an update-graph thread, for example from a table listener.
+
+    Example:
+        ::
+
+            cols = m.stocks.trades(["AAPL"]).columns()
+            stream_only = cols.where("SuppliedBy = `WS`")
+    """
+```
+
+`columns()` is not a verb and its table is not a result. It makes no session call, so it is
+not tracked, `m.release()` rejects it with `ValueError` like any other foreign table, and it is
+created in whatever liveness scope the caller has open, as any static table the caller makes
+is. The table is the same for every query of one dataset: the arguments choose the rows a verb
+fetches, never the columns. Its own four columns carry column descriptions too
+([section 7.4](#74-column-descriptions)).
 
 **`fetch()`.** Returns exactly what the dataset's REST endpoint returns for the request. On
 `Query` that is a list or snapshot endpoint. On `StreamHistoryLatestQuery` it is the dataset's
@@ -703,6 +775,101 @@ Because a `StrEnum` member is also a `str`, the check tests `isinstance(value, E
 `isinstance(value, str)`. A plain string raises
 `TypeError("timespan must be dm.Timespan, e.g. dm.Timespan.MINUTE")`. `Timespan("minute")` is
 the documented way to convert text.
+
+### 7.4 Column descriptions
+
+Each dataset column has one description, chosen by the rule of
+[section 19.4](#194-generated-schemas) from the vendor's field descriptions in
+`spec/descriptions.json`. It reaches users through three outlets, all generated from the same
+dataset schema, so they can never disagree.
+
+**1. Every result is described.** Deephaven 42.7 stores column descriptions as the table
+attribute `ColumnDescriptions` and a table description as `TableDescription`, set through
+`io.deephaven.engine.table.GridAttributes.withColumnDescriptions(Map<String, String>)` and
+`withDescription(String)`. Barrage sends the column descriptions to clients, and the web UI
+shows a column's description in the column-header tooltip; whether it shows the table
+description anywhere is **UNVERIFIED** ([section 23](#23-open-verification-items)), so it is
+set regardless, for every API client to read. The Python package has no wrapper for them, so
+`_schema.describe(table, spec)` calls them through `jpy`: it casts `table.j_table` to
+`GridAttributes`, calls `withColumnDescriptions` with a `java.util.HashMap` of every column
+whose description is not empty, then `withDescription`, casts the outcome back to
+`io.deephaven.engine.table.Table`, and wraps it in a new `deephaven.table.Table`.
+`withColumnDescriptions` checks that every named column exists, so a schema that disagrees
+with the table fails at once; `Table.with_attributes` skips that check and is not used. The
+table description is `"<dataset>: <summary>"` (`"stocks.trades: Trades of US-listed stocks,
+tick by tick."`), where `<summary>` is the one-sentence `DatasetSpec.summary`. The dataset
+method's docstring starts with the same sentence, which a test checks; the library never reads
+`__doc__` at run time, so `python -OO` changes nothing.
+
+- **Every verb describes the exact table it returns, after the shape is derived.** Deephaven
+  42.7 copies `ColumnDescriptions` through `flatten`, `sort`, filters, `reverse`,
+  `partition_by`, `coalesce`, `first_by`, `last_by`, and tree and preview operations, and
+  `select`, `view`, `rename`, and joins keep the descriptions of the columns they keep.
+  Nothing in `BlinkTableTools` or `RingTableTools` copies attributes, so an append-only or
+  ring table derived from a described blink table would lose them. The verb therefore calls
+  `describe()` last: on the blink copy for `blink()`, on the append-only or ring table, on the
+  `last_by` table after any `where_in`, on the `poll()` table (the keyed `input_table` or the
+  publisher's append-only table), and on the static table of `fetch()` and `history()`.
+- **Threading and liveness.** `describe()` makes a new table, so it runs where every result
+  table is made: on the caller thread, inside the result's `LivenessScope`
+  ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), never under
+  `registry_lock` and never in a listener. Both Java methods are `@ConcurrentMethod`, so they
+  take no update-graph lock. The described table depends on the table it copies, so the
+  undescribed parent, and for a stream the blink table that owns `on_shutdown_callback`, lives
+  exactly as long as the result does; a teardown test proves that releasing the result still
+  shuts the stream down. A `poll()` poller writes only through the `input_table` or publisher
+  it holds, never through the returned copy.
+- The diagnostics tables of [section 17](#17-diagnostics) are not dataset results and are not
+  described.
+
+**2. `columns()` lists them in the console** ([section 7](#7-query-classes-and-verbs)): the
+same descriptions, plus each column's type and the transports that supply it, as a static
+table built from the dataset schema with no network call. The tooltip only exists in the web
+UI; `columns()` serves a notebook, an IDE, or a script.
+
+**3. The column reference documents them on GitHub.** `docs/datasets/<namespace>.md` holds
+one generated page per namespace module (`stocks.md`, …, `partners.md`; `m.snapshots` is on
+`reference.md`, beside its record `reference.snapshots`), with one section per dataset in
+declaration order. Each section starts with an explicit anchor, `<a id="<dataset>"></a>`,
+where `<dataset>` is the dataset's name below its namespace with dots written as hyphens
+(`trades`, `financials-ratios`, `benzinga-news`); a heading naming the dataset
+(`m.stocks.trades`); its `DatasetSpec.summary`; and one table with one row per column, in
+result order. The table's columns are **Column**, **Deephaven type**, **Description**,
+**Supplied by** (the transports of `columns()`'s `SuppliedBy`, spelled `REST`, `flat files`,
+and `WebSocket`), and one **Wire field** column per transport the dataset uses (`REST field`,
+`Flat-file field`, `WebSocket field`). A wire-field cell lists the distinct wire keys of that
+transport's sources that feed the column, in source order and before any projection, or
+`request` for a key filled from the request. A footer names the snapshot's fetch date and the
+vendor URLs of the sources the page's datasets use, read from `_massive.provenance()`
+([section 19.4](#194-generated-schemas)). Units and nullability get no columns: every
+timestamp is an `Instant`, and **Supplied by** with the description already says when a
+column is null. Readers can see what each table holds before they install.
+
+- **The renderer** is `_reference.render() -> dict[str, str]`, a pure function from the catalog
+  and the dataset schemas to `{file name: page text}`. It escapes `|` in cells, emits no
+  trailing whitespace, and ends every page with one newline, so the pages pass the commit
+  hooks unchanged. `_reference.sync(directory, pages)` owns the directory: it deletes every
+  file and subdirectory of `directory` that `pages` does not name, writes each page whose bytes
+  differ, and returns the names it wrote and deleted. Neither touches anything outside the
+  directory.
+- **The command** `uv run python scripts/render_reference.py` regenerates the whole column
+  reference and nothing else. The script starts the embedded Deephaven server (the dataset
+  schemas need Deephaven's types, and the library never imports `deephaven_server`), calls
+  `render()` and then `sync()` on `docs/datasets/`, and prints what it wrote and deleted. A
+  renamed or removed namespace or dataset therefore never leaves an orphaned page: the one
+  command that writes the directory also empties it of everything it did not render.
+- **The parity test**, `tests/test_reference.py`, renders the pages in the test JVM and fails
+  on a stale page (bytes differ), a missing page, and any extra file or directory under
+  `docs/datasets/`, naming the command that fixes it. A catalog change or a refresh that moves
+  a description therefore lands with its regenerated pages in the same pull request.
+- **Dataset method docstrings link, never list.** A column list in a docstring is a
+  hand-written schema and goes stale. Each dataset method's docstring starts with its
+  `DatasetSpec.summary`, explains the dataset, states its transports, `limit`, and `ALL`, and
+  points to its section,
+  `https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/<namespace>.md#<dataset>`,
+  to the web UI's column tooltips, and to `columns()`. `tests/test_reference.py` checks that
+  every declared dataset's docstring names `docs/datasets/<namespace>.md#<dataset>` for its own
+  namespace and dataset.
 
 ## 8. Namespace tree
 
@@ -1895,7 +2062,7 @@ refresh/             build time only; excluded from the wheel; may import any of
 The package is spelled `flatfiles` because PEP 8 forbids the underscore in a package name; the
 library module is `_flat_files.py`. The docstrings say so.
 
-**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 26
+**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 28
 names, resolving them lazily (PEP 562), so a REST-only session never imports boto3 or
 websockets:
 
@@ -1904,7 +2071,7 @@ websockets:
 - WebSocket: `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`;
 - flat files: `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`;
 - spec: `source`, `sources`, `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`,
-  `WireType`, `WireUnit`, `DriftReport`.
+  `WireType`, `WireUnit`, `DriftReport`, `provenance`, `Provenance`.
 
 `Param` is reached as an attribute of `RestPath`. `Transport` (`REST`, `WS`, `FLAT_FILES`) is
 the library's one transport enum.
@@ -2314,6 +2481,49 @@ reviewer, on:
 Descriptions differ across transports and change about twenty times as often as keys, so G5 and
 G6, not description matching, are the mechanical checks.
 
+**Field descriptions.** The refresh also records the vendor's description of every field, so
+that users can read what each column means ([section 7.4](#74-column-descriptions)).
+
+- **Where they come from.** REST: the OpenAPI `description` of each response property, after
+  `$ref` and `allOf` are resolved; at the 2026-10-26 snapshot, 1,392 of the 1,394 leaf
+  response fields carry one (the two without are futures `/futures/v1/snapshot`
+  `details.product_code` and `details.ticker`). WebSocket: the `description` of each message
+  property in `websocket.json`. Flat files: the description cell of the page's "Columns"
+  table, where the page has one. The coverage of the last two is measured when their
+  generators land. The REST documentation pages are rendered from the same OpenAPI text and add
+  nothing to it.
+- **Normalization**, by fixed rules and no hand input, so every outlet can show plain text:
+  a Markdown link `[text](url)` becomes `text (url)`; an HTML link `<a href="url" …>text</a>`
+  becomes `text (url)`; every run of whitespace, newlines included, becomes one space, and the
+  ends are trimmed. Nothing else changes. At the 2026-10-26 snapshot 134 REST descriptions
+  contain a link.
+- **No gate.** A field without a description gets `""`, and nothing stops the refresh.
+  Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
+  changed description is an ordinary line in the refresh diff.
+- **A separate generated file**, `spec/descriptions.json`, so that a refresh that only changes
+  descriptions leaves `rest.json`, `ws.json`, and `flatfiles.json` byte for byte unchanged,
+  and a reviewer sees at once that no schema moved. It is generated, committed, and stored like
+  the other three, shipped as package data, and covered by the same parity test:
+
+  ```
+  {
+   "generated_by": "python -m deephaven_massive._massive.refresh",
+   "fetched": "<the snapshot's fetch date, from the manifest>",
+   "urls": {"<transport>": {"<source key>": "<the vendor URL the source was generated from>"}},
+   "descriptions": {"<transport>": {"<source key>": {"<wire key>": "<plain text>"}}}
+  }
+  ```
+
+  A field without a description has no entry.
+- **Joined at load.** `Field` gains `description: str = ""`, and the `spec` loader fills it
+  from `descriptions.json` when it loads the schema files, under the same once-only lock. An
+  entry that names a source or wire key the schema files lack raises at load: the files are
+  generated together, so only a hand edit can cause it. A description belongs to a
+  `(source, wire key)`, so a projected field keeps the description of its wire key.
+  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], str])` exposes
+  the fetch date and the URL of each source, for the footer of the column reference. No other
+  name is added to the interface.
+
 **Dataset schemas** are merged at run time, after the rename, never inferred from data:
 
 ```
@@ -2365,6 +2575,35 @@ column set: crypto's `ParticipantTimestamp` is renamed to `Timestamp`, while sto
 `ParticipantTimestamp` column, so crypto rows hold `ParticipantTimestamp` null. A non-tick
 dataset with several role paths (`options.contracts` list and per-contract) is the union of its
 role paths under the same join.
+
+**Column descriptions.** Each column of a dataset schema is a
+`Column(name, type, description, supplied_by, wire_keys)`: `supplied_by` is the transports of
+the dataset's own sources that fill the column (a key filled from the request counts), in the
+order `REST`, `FLAT_FILES`, `WS`; `wire_keys` maps each of those transports to the distinct wire
+keys behind the column, before any projection, in source order. `dataset_schema` picks one
+description per column of each **dataset**, never per kind: a kind's union spans asset classes,
+and the stock text for `price` ("dollar value per whole share") is wrong for crypto.
+
+1. **A column the dataset's own sources supply** takes the first non-empty description among
+   them, trying the transports in the order REST, flat files, WebSocket and, within one
+   transport, the dataset's sources in their declared order (role paths, then channels, then
+   prefixes). REST comes first because its text is the most complete.
+2. **A column that exists only through the kind's union**, which no source of the dataset
+   supplies, gets generated library text naming the members that do, in member order:
+   `` Always null for `crypto.trades`; supplied by `stocks.trades`. `` (crypto's
+   `ParticipantTimestamp` and `Tape`, for example).
+3. **`Symbol`, `Timestamp`, and `Underlying`** get a fixed library sentence ("The instrument,
+   in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
+   underlying instrument, in the library's canonical symbol form."), followed, per transport in
+   the order of rule 1, by the wire key each source renames and its quoted vendor description
+   (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``), or, for a key
+   filled from the request, the request parameter it came from
+   (`` REST: the request's `stocksTicker` parameter. ``).
+
+A column whose sources carry no description gets `""`, and nothing fails. The sentences of
+rules 2 and 3 are the library's statements about its own columns, not hand input about Massive,
+so they live in `_schema.py`, not in `refresh/`. Every outlet of
+[section 7.4](#74-column-descriptions) reads these `Column`s and nothing else.
 
 **Catalog gates** (`tests/test_catalog.py`, with negative tests on synthetic `DatasetSpec`s):
 
@@ -2494,6 +2733,10 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   G1–G7), and `tests/test_catalog.py` passes (catalog gates C1–C7, generated ⊆ used ∪
   undeclared) ([section 19.4](#194-generated-schemas)). They read only vendored files, never
   the network.
+- **Column reference:** `tests/test_reference.py` passes: `docs/datasets/` holds exactly the
+  rendered pages, byte for byte, with no stale, missing, or extra file, and every dataset
+  method's docstring starts with its `DatasetSpec.summary` and names its own section
+  ([section 7.4](#74-column-descriptions)).
 - **Negative tests:** every gate has a negative test that fails when the gate is deleted.
 - **Process:** conventional-commit titles; every change lands through a pull request; only the
   owner merges.
@@ -2626,6 +2869,7 @@ prev = m.stocks.bars(syms, dm.Timespan.DAY).fetch()         # previous completed
 divs = m.stocks.dividends(syms, start="2025-01-01",
                           filters={"pay_date_lte": "2025-12-31"}).fetch()
 conns = m.connections()                                     # Host=delayed.massive.com Recency=DELAYED
+cols = m.stocks.trades(syms).columns()                      # no network: Name, Type, Description, SuppliedBy
 ```
 
 **2. Real-time multi-asset trader (Advanced plans).** No `with`: live tables must outlive the
@@ -2784,8 +3028,8 @@ document already reflects them.
     `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
     appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error
     messages, and a query's dataset and arguments only in its repr. The public surface stays
-    exactly the verbs and namespaces, and the API key stays out of objects users routinely
-    leave in console globals.
+    exactly the verbs, `columns()` (decision 45), and the namespaces, and the API key stays out
+    of objects users routinely leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
     its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares the key
     columns its sources carry, and `_schema.rename` maps them to `Symbol`, `Timestamp`, and
@@ -2866,13 +3110,32 @@ document already reflects them.
     GitHub environment, or pending publisher exists. No rehearsal may push a tag that matches
     the project version, because a PyPI version can never be re-uploaded; the rehearsal method
     is chosen at the go-ahead ([section 20.1](#201-tooling-configuration)).
+45. **`columns()` on every query** (2026-10-26). A public method, not a verb, returning a
+    static table `Name`, `Type`, `Description`, `SuppliedBy` built from the dataset schema with
+    no network call, so console and notebook users can read what each column means without the
+    web UI or GitHub ([section 7](#7-query-classes-and-verbs)).
+46. **Every result carries column descriptions** (2026-10-26). Each verb applies
+    `ColumnDescriptions` and a `TableDescription` to the exact table it returns, after its
+    shape is derived, on the caller thread inside the result scope, through `jpy`, because
+    Deephaven 42.7 has no Python wrapper ([section 7.4](#74-column-descriptions)).
+47. **A generated column reference that cannot hold an orphaned page** (2026-10-26).
+    `docs/datasets/<namespace>.md` is generated and committed. One command,
+    `uv run python scripts/render_reference.py`, owns the whole directory: it renders every
+    page, deletes every file it did not render, and writes the rest. The parity test fails on a
+    stale page, a missing page, and any extra file. Dataset docstrings link to their section and
+    never list columns ([section 7.4](#74-column-descriptions)).
+48. **Vendor descriptions in a separate generated file** (2026-10-26). `spec/descriptions.json`
+    holds every field's vendor description, normalized to plain text by fixed rules, with no
+    gate on a missing one, and is joined into `Field.description` at load; one rule picks each
+    dataset column's description ([section 19.4](#194-generated-schemas)).
 
 ## 23. Open verification items
 
 Each item is handled conservatively now, covered by a fixture test in its unit-test module, and
 retired by a live integration test (`*_integration.py`, skipped without `MASSIVE_API_KEY`) in the
 later live-testing work package. Each item that a live test refutes becomes an owner decision
-before 1.0.
+before 1.0. Items 16 and 17 concern Deephaven, not Massive: the work that adds column
+descriptions settles them in the embedded test JVM and the web UI, and they need no live test.
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
@@ -2891,3 +3154,5 @@ before 1.0.
 | 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/test_history_source.py`: AUTO before and after the cutoff | `tests/test_flat_files_integration.py`: yesterday's key exists after the cutoff |
 | 14 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
 | 15 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/test_flat_files_integration.py` (S3 credentials): request a weekend key and record the status |
+| 16 | Whether the described copy of a keyed `input_table` (a `poll()` result in `REPLACE` or `UPSERT` mode) keeps the input-table attribute, which the web UI reads to offer editing ([section 7.4](#74-column-descriptions)) | The poller writes only through the `input_table` it holds, never through the returned copy, so either outcome keeps the rows correct; the copy carries the descriptions either way | `tests/test_schema.py`: the copy of a keyed `input_table` ticks with its parent, carries `ColumnDescriptions`, and pins whichever input-table attribute behaviour 42.7 shows | None: the embedded JVM settles it |
+| 17 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/test_schema.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |

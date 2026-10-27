@@ -39,8 +39,8 @@ records are now requirements of the library's own clients (DESIGN § 19).
    - [P0 docs: rework design and plan](#p0) (merged)
    - [P1 chore: tooling foundation](#p1) (merged)
    - [P2 refactor: core skeleton](#p2) (merged)
-   - [The remaining packages](#pkgs): PD, PC0, PL, PN, PC1a, P5, PC1, PC2, PC3a, PC3a2, PDR,
-     PS3, PC3b, PC3c, PC4, P3, P4, P6a–P6h, P7, P8, PF, REL1, REL2, REL, UP
+   - [The remaining packages](#pkgs): PD, PC0, PL, PN, PC1a, P5, PC1, PC2, PC3a, PFD, PC3a2,
+     PDR, PS3, PC3b, PC3c, PC4, P3, P4, PCD, PCR, P6a–P6h, P7, P8, PF, REL1, REL2, REL, UP
 6. [End-to-end verification](#end-to-end-verification)
 7. [Decisions recorded during planning](#decisions-recorded-during-planning)
 
@@ -58,7 +58,8 @@ flowchart LR
     PC1a --> PC1["PC1 feat: REST client"]
     PC1a --> PC2["PC2 feat: WebSocket client"]
     PC1a & PC1 --> PC3a["PC3a feat: REST wire schema"]
-    PC3a --> PC3a2["PC3a2 feat: WebSocket and flat-file wire schemas"]
+    PC3a --> PFD["PFD feat: field descriptions"]
+    PFD --> PC3a2["PC3a2 feat: WebSocket and flat-file wire schemas"]
     P5 --> PDR["PDR feat: runtime drift"]
     P5 & PC1 --> PS3["PS3 fix: S3 net rules"]
     PC3a2 & P5 & PDR --> PC3b["PC3b refactor: generated schemas"]
@@ -66,8 +67,10 @@ flowchart LR
     PC3b --> PC4["PC4 chore(deps): remove massive"]
     PC1 & PC3b --> P3["P3 feat: REST transport"]
     PC2 & PC3b --> P4["P4 feat: WebSocket layer"]
-    P3 & P4 --> P6af["P6a–P6f datasets"]
-    P3 --> P6gh["P6g, P6h datasets"]
+    P3 & P4 --> PCD["PCD feat: column descriptions on results"]
+    PCD --> PCR["PCR feat: column reference"]
+    PCR --> P6af["P6a–P6f datasets"]
+    PCR --> P6gh["P6g, P6h datasets"]
     P6af & P6gh & PC3c & PC4 --> P7["P7 chore: finish rework"]
     P6af & P6gh --> P8["P8 test: live integration"]
     P7 & P8 --> PF["PF docs: retire notes and plans"]
@@ -79,7 +82,8 @@ flowchart LR
 The release packages (dashed) start only on the owner's go-ahead; nothing else depends on
 them.
 
-**Critical path:** PD → PL → PN → PC1a → PC1 → PC3a → PC3a2 → PC3b → P4 → P6a–f → P7 → PF.
+**Critical path:** PD → PL → PN → PC1a → PC1 → PC3a → PFD → PC3a2 → PC3b → P4 → PCD → PCR →
+P6a–f → P7 → PF.
 The release (REL1, REL2, REL) follows only on the owner's go-ahead. **Chains alongside it:** PC1a → P5 → PDR → PC3b; PC1a → PC2 → P4; P5 → PS3 → PC3c. PC0
 may merge at any time.
 
@@ -106,7 +110,8 @@ These rules apply to every package. Package sections only add to them.
    `main`. Only the owner merges, always via PR.
 6. **Owner approvals.** The following are outward-facing and require explicit owner approval
    each time: opening a PR or issue in this repository (the tracking issues of PD, PC0, PL, PN,
-   PC1a, PC1, PC2, PC3a, PC3a2, PDR, PS3, PC3b, PC3c, PC4, PF, REL1, and REL2 included), filing
+   PC1a, PC1, PC2, PC3a, PFD, PC3a2, PDR, PS3, PC3b, PC3c, PC4, PCD, PCR, PF, REL1, and REL2
+   included), filing
    an issue on `massive-com/client-python` ([UP](#upstream); pull requests there are never
    opened), force-pushing #51 (P5), PyPI configuration, and any change to branch protection.
    Agents prepare the text and stop at the gate.
@@ -153,13 +158,16 @@ disjoint files:
 - **The wire package** is split by owner. PC1a owns `_massive/__init__.py`, `net/` (except
   `retry.py`), `spec/types.py`, and the boundary tests in `tests/test_layout.py`. PC1 owns
   `rest/` and `net/retry.py`; PC2 owns `ws/`; P5 owns `flatfiles/`, which PDR and PS3 then
-  edit in turn; PC3a and PC3a2 own `refresh/` and `spec/*.json` (PC3c adds `drift.py`). Each
+  edit in turn; PC3a and PC3a2 own `refresh/` and `spec/*.json` (PFD adds
+  `spec/descriptions.json` and `Field.description`; PC3c adds `drift.py`). Each
   adds its own block to `_massive/__init__.py`, so a later merge rebases that one file.
 - **The library modules.** P3 owns `_rest.py`, `_hosts.py`, `_poll.py`; P4 owns `_ws.py`,
   `_stream.py`, `_watchlist.py`; P5 owns `_flat_files.py` and `_history_source.py`; PDR owns
   `_diagnostics.py`'s drift registry; PC3b owns `_catalog.py`, `_schema.py`, and
   `_timeunits.py`. `_session.py` has one factory hook per transport, so P3, P4, and P5 edit
-  disjoint hunks.
+  disjoint hunks. PCD then adds `describe()` and the description rule to `_schema.py` and
+  `columns()` to `_query.py`; PCR owns `_reference.py`, `scripts/render_reference.py`, and
+  `tests/test_reference.py`.
 - **The fakes** follow the clients: PC1 `tests/_fakes/rest.py`, PC2 `ws.py`, P5 `s3.py`, P2
   `stream.py`; each adds one self-contained fixture block to `tests/conftest.py`.
 - **Namespace packages** (P6) edit only `_namespaces/<ns>.py`, its tests and fixtures, and delete
@@ -167,7 +175,9 @@ disjoint files:
   column maps to edit. A needed `refresh/` fix lands first in its own PR. P6g also fills
   `MassiveSession.snapshots()` in `_session.py`.
 - **Generated content** changes only through `python -m deephaven_massive._massive.refresh`; the
-  check that it is current is `uv run pytest tests/massive/refresh -q`.
+  check that it is current is `uv run pytest tests/massive/refresh -q`. The column reference,
+  `docs/datasets/`, changes only through `uv run python scripts/render_reference.py`; the check
+  is `uv run pytest tests/test_reference.py -q`.
 - **`pyproject.toml` dependency changes** happen only in `chore(deps):` PRs (PC0, PC4).
   `uv.lock` is not committed.
 - **Fixture data is per test owner:** `tests/data/<test owner path>/`, loaded through the
@@ -606,7 +616,8 @@ not repeat:
 | [PC1](#pc1) | `feat: REST client` | PC1a |
 | [PC2](#pc2) | `feat: WebSocket client` | PC1a |
 | [PC3a](#pc3a) | `feat: generate the REST wire schema from the OpenAPI snapshot` | PC1a, PC1 |
-| [PC3a2](#pc3a2) | `feat: generate the WebSocket and flat-file wire schemas` | PC3a |
+| [PFD](#pfd) | `feat: generated schemas carry vendor field descriptions` | PC3a |
+| [PC3a2](#pc3a2) | `feat: generate the WebSocket and flat-file wire schemas` | PC3a, PFD |
 | [PDR](#pdr) | `feat: runtime schema drift reporting` | P5 |
 | [PS3](#ps3) | `fix: flat-file S3 client follows the shared TLS, proxy, and retry rules` | P5, PC1 |
 | [PC3b](#pc3b) | `refactor: catalog and schemas from the generated tables` | PC3a2, P5, PDR |
@@ -614,9 +625,11 @@ not repeat:
 | [PC4](#pc4) | `chore(deps): remove massive and its fork source` | PC3b |
 | [P3](#p3) | `feat: REST transport and tier detection` | PC1, PC3b |
 | [P4](#p4) | `feat: WebSocket layer` | PC2, PC3b |
-| [P6a–P6f](#p6) | `feat: <stocks / options / futures / indices / forex / crypto> datasets` | P3, P4 |
-| [P6g](#p6) | `feat: reference, indicators, economy, and unified snapshots datasets` | P3 |
-| [P6h](#p6) | `feat: partner datasets` | P3 |
+| [PCD](#pcd) | `feat: result tables carry column descriptions` | P3, P4 |
+| [PCR](#pcr) | `feat: generated dataset column reference` | PCD |
+| [P6a–P6f](#p6) | `feat: <stocks / options / futures / indices / forex / crypto> datasets` | P3, P4, PCR |
+| [P6g](#p6) | `feat: reference, indicators, economy, and unified snapshots datasets` | P3, PCR |
+| [P6h](#p6) | `feat: partner datasets` | P3, PCR |
 | [P7](#p7) | `chore: finish rework` | P6a–h, PC3c, PC4 |
 | [P8](#p8) | `test: live integration suite` | P6a–h |
 | [PF](#pf) | `docs: retire verified notes and the rework plan` | P7, P8 |
@@ -1196,6 +1209,83 @@ Never derive a name from a description.
 
 ---
 
+<a id="pfd"></a>
+## PFD — `feat: generated schemas carry vendor field descriptions`
+
+| | |
+|---|---|
+| **Branch** | `feat/field-descriptions` |
+| **Base** | `origin/main` after `git fetch` |
+| **Issue** | TBD (owner approval to create) |
+
+**Goal.** The refresh records the vendor's description of every REST field, normalized to plain
+text, in a separate generated file, `spec/descriptions.json`, and the `spec` loader joins it
+into `Field.description`. This is the source of every column description users later see; it
+needs no declared dataset.
+
+**DESIGN sections implemented.** [§ 19.4](DESIGN.md#194-generated-schemas) (**Field
+descriptions**: sources, normalization, no gate, the file format, the join at load);
+[§ 19](DESIGN.md#19-wire-clients-and-the-spec-snapshot) (the interface's `provenance` and
+`Provenance`); [§ 2.1](DESIGN.md#21-principles) principle 12 (its source half);
+[§ 22](DESIGN.md#22-decisions) decision 48.
+
+**Depends on.** PC3a. **Parallel with.** PC2. **Before.** PC3a2, which writes the WebSocket
+and flat-file entries with the same rules.
+
+**Files.**
+- Create: `_massive/spec/descriptions.json` (generated).
+- Modify: the `refresh/` generator module that writes `spec/*.json` (the description record,
+  the normalization, the new file), `_massive/spec/types.py` (`Field.description: str = ""`,
+  `Provenance`), `_massive/spec/__init__.py` (the join under the existing once-only lock,
+  `provenance()`), `_massive/__init__.py` (`provenance`, `Provenance` in the spec block of
+  `__all__`), `.github/workflows/ci.yml` (the build job asserts the wheel holds
+  `spec/descriptions.json`), and their tests under `tests/massive/refresh/`,
+  `tests/massive/spec/`, and `tests/massive/test_init.py`.
+
+**Tasks.**
+- [ ] Record each REST response field's OpenAPI `description` after `$ref` and `allOf`
+      resolution, keyed by `(source, wire key)`.
+- [ ] Normalize by exactly the three rules of DESIGN § 19.4: Markdown links and `<a href>`
+      links become `text (url)`, whitespace collapses to one space and the ends are trimmed.
+- [ ] Write `spec/descriptions.json` with `generated_by`, `fetched` (the manifest's fetch
+      date), `urls` (each source's vendor URL, from the manifest), and `descriptions`, stored
+      canonically like the other generated files; a field without text has no entry.
+- [ ] Join the file into `Field.description` at load; an entry naming a source or wire key
+      the schema files lack raises; `provenance()` returns the fetch date and the URLs.
+
+**Acceptance criteria.**
+- [ ] The parity test covers `spec/descriptions.json` byte for byte.
+- [ ] On a synthetic snapshot whose only change is a description, the refresh changes
+      `descriptions.json` and leaves `rest.json` byte for byte unchanged.
+- [ ] Normalization tests: a Markdown link, an `<a href>` link with extra attributes, newlines
+      and runs of spaces, text with no link (unchanged), and an empty description (no entry).
+- [ ] A field with no description generates, loads as `""`, and stops nothing (the absence of
+      a gate is tested).
+- [ ] The negative load test: a description entry for an unknown source or wire key raises.
+- [ ] A 16-thread first load on 3.14t loads each file once.
+- [ ] The PR records the description coverage of the pinned snapshot (DESIGN § 19.4 gives
+      1,392 of 1,394 leaf fields).
+- [ ] The wheel holds `spec/descriptions.json`.
+
+**Verification.**
+```bash
+./scripts/check.sh
+uv run python -m deephaven_massive._massive.refresh && git diff --exit-code src/deephaven_massive/_massive/spec
+uv run pytest tests/massive/refresh tests/massive/spec tests/massive/test_init.py -q
+```
+
+**Pitfalls.** A `description` key inside `rest.json` would make a description edit look like a
+schema change in review; keep the files apart. Normalization changes nothing but the three
+rules (no HTML unescaping, no truncation). Descriptions never feed column names or gates; the
+quoted descriptions of `NAMES` entries are a separate, existing mechanism.
+
+**Out of scope.** WebSocket and flat-file descriptions (PC3a2); the per-dataset description rule
+and every user-facing outlet (PCD, PCR).
+
+**Approval gates.** Opening the PR.
+
+---
+
 <a id="pc3a2"></a>
 ## PC3a2 — `feat: generate the WebSocket and flat-file wire schemas`
 
@@ -1212,7 +1302,7 @@ names, types, and transports agree.
 flat-file sources, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, `VENUES`, the channel and
 prefix half of G4, G5–G7).
 
-**Depends on.** PC3a. **Parallel with.** P5, PC2.
+**Depends on.** PC3a, PFD. **Parallel with.** P5, PC2.
 
 **Files.**
 - Create: `_massive/spec/ws.json`, `flatfiles.json`.
@@ -1221,6 +1311,8 @@ prefix half of G4, G5–G7).
   and `dav`, `UNITS`, `TYPE_FIXES`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, `VENUES`),
   `exclusions.py` (the executable WebSocket and flat-file rows of DESIGN § 8.12; a row absent
   from `websocket.json` and the flat-file pages moves to the documentation-only list),
+  `spec/descriptions.json` (the WebSocket and flat-file entries, recorded and normalized as
+  PFD does for REST; the PR records their coverage),
   `_massive/__init__.py` and `_massive/spec/__init__.py` (the loaders for `ws.json` and `flatfiles.json`;
   `Source.memberships`), `tests/massive/spec/test_init.py`.
 
@@ -1662,6 +1754,169 @@ tearing down a whole URL on one entitlement error; prefix matching between topic
 
 ---
 
+<a id="pcd"></a>
+## PCD — `feat: result tables carry column descriptions`
+
+| | |
+|---|---|
+| **Branch** | `feat/column-descriptions` |
+| **Base** | `origin/main` after `git fetch` |
+| **Issue** | TBD (owner approval to create) |
+
+**Goal.** Every verb returns a table whose columns carry their descriptions (the web UI's
+column-header tooltip) and whose table description names the dataset; every query gains the
+public, no-network `columns()`; and `dataset_schema` picks one description per column of each
+dataset.
+
+**DESIGN sections implemented.** [§ 7](DESIGN.md#7-query-classes-and-verbs) (`columns()`);
+[§ 7.4](DESIGN.md#74-column-descriptions) (outlets 1 and 2, `describe()`,
+`DatasetSpec.summary`); [§ 19.4](DESIGN.md#194-generated-schemas) (**Column descriptions**:
+`Column`, rules 1–3); [§ 6.1](DESIGN.md#61-how-a-live-table-is-kept-alive-and-released) (the
+described `blink()` copy, a stream failed during its open);
+[§ 23](DESIGN.md#23-open-verification-items) items 16 and 17;
+[§ 22](DESIGN.md#22-decisions) decisions 45 and 46.
+
+**Depends on.** P3, P4 (and through them PFD, PC3a2, and PC3b). **Parallel with.** PC3c, PC4.
+**Before.** PCR and P6a–h, so that every declared dataset is described from its first PR.
+
+**Files.** Modify `_schema.py` (`Column` gains `description`, `supplied_by`, `wire_keys`; the
+three rules; `describe()`), `_catalog.py` (`DatasetSpec.summary`, required, one sentence),
+`_query.py` (`QueryBase.columns()`; every verb ends with `describe()`), and wherever a verb's
+returned table is built (`_rest.py`, `_poll.py`, `_stream.py`, `_flat_files.py`), with their
+tests (`test_schema`, `test_catalog`, `test_query`, `test_rest`, `test_poll`, `test_stream`,
+`test_flat_files`, `namespaces/test_base`).
+
+**Tasks.**
+- [ ] `dataset_schema` fills each `Column`'s description by rules 1–3 of DESIGN § 19.4,
+      `supplied_by` in the order `REST`, `FLAT_FILES`, `WS`, and `wire_keys` before any
+      projection.
+- [ ] `_schema.describe(table, spec)`: cast `j_table` to `GridAttributes` through `jpy`, call
+      `withColumnDescriptions` with a `java.util.HashMap` of the non-empty descriptions, then
+      `withDescription("<dataset>: <summary>")`, cast back to `Table`, and wrap.
+- [ ] Every verb calls `describe()` on the exact table it returns, after the shape is
+      derived, on the caller thread inside the result scope; never under `registry_lock`, on
+      the poller, flush, or reader threads, or in a listener.
+- [ ] `QueryBase.columns()` exactly per the DESIGN § 7 docstring contract.
+- [ ] `DatasetSpec.summary` on every synthetic and test spec.
+
+**Acceptance criteria.**
+- [ ] Every shape carries `ColumnDescriptions` equal to the schema's non-empty descriptions and
+      its `TableDescription`: `fetch()`, REST and flat-file `history()`, `blink()`,
+      `append_only()`, `ring()`, `last_by()` (with and without a reactive `where_in`), and
+      `poll()` in all three modes.
+- [ ] Teardown: releasing a described `blink()` or `append_only()` result still runs the
+      blink table's `on_shutdown_callback` and unsubscribes; a table the user derives from it
+      keeps the stream alive. Two `blink()` calls give two distinct tables and records.
+- [ ] `blink()` on a stream that failed during its open raises the wrapped `MassiveError`, as
+      the other shapes do.
+- [ ] The rule tests: REST text wins over WebSocket text, and source order breaks ties within
+      a transport (rule 1); `crypto.trades` `Tape` reads "Always null for `crypto.trades`;
+      supplied by `stocks.trades`." (rule 2); `Symbol` and `Timestamp` quote the renamed wire
+      key, and a key filled from the request names its parameter (rule 3); a column with no
+      description gets `""` and fails nothing.
+- [ ] The negative test: a description naming a column the table lacks fails in `describe()`.
+- [ ] `columns()`: the four columns and their types; the same rows for two queries of one
+      dataset with different arguments; no request reaches the fakes; it works after
+      `close()`; `m.release()` rejects it; it raises `ValueError` on a UG thread.
+- [ ] DESIGN § 23 items 16 and 17: the fixture tests, and the web UI outcome of item 17
+      recorded in the PR.
+- [ ] 16 threads calling `columns()` and `blink()` on one session at once on 3.14t.
+
+**Verification.**
+```bash
+./scripts/check.sh
+uv run pytest tests/test_schema.py tests/test_query.py tests/test_poll.py tests/test_stream.py tests/test_flat_files.py -q
+PYTHON_GIL=0 uv run --python 3.14t pytest tests/test_schema.py tests/test_query.py tests/test_stream.py -q
+```
+
+**Pitfalls.** `Table.with_attributes` skips the column check; use `GridAttributes`. Describing
+the stream's own blink table, instead of a copy, would hand two results one table and break the
+distinct-result rule. Describing before `append_only()` or `ring()` loses the descriptions,
+because neither copies attributes. Reading `__doc__` at run time breaks under `python -OO`; the
+summary lives on the `DatasetSpec`.
+
+**Out of scope.** The generated pages and docstring links (PCR); describing the diagnostics
+tables.
+
+**Approval gates.** Opening the PR.
+
+---
+
+<a id="pcr"></a>
+## PCR — `feat: generated dataset column reference`
+
+| | |
+|---|---|
+| **Branch** | `feat/column-reference` |
+| **Base** | `origin/main` after `git fetch` |
+| **Issue** | TBD (owner approval to create) |
+
+**Goal.** The column reference: committed `docs/datasets/<namespace>.md` pages generated from
+the dataset schemas, one command that owns the whole directory so that no page is ever
+orphaned, and a parity test that fails on a stale, missing, or extra file. Dataset docstrings
+link to their section instead of listing columns.
+
+**DESIGN sections implemented.** [§ 7.4](DESIGN.md#74-column-descriptions) (outlet 3: the
+renderer, `sync`, the command, the parity test, the docstring rule);
+[§ 4.1](DESIGN.md#41-source-modules) (`_reference.py`, the supporting files);
+[§ 20](DESIGN.md#20-quality-gates) (the column-reference gate);
+[§ 22](DESIGN.md#22-decisions) decision 47.
+
+**Depends on.** PCD. **Parallel with.** PC3c, PC4. **Before.** P6a–h, so each namespace
+package renders its own page and links its own docstrings.
+
+**Files.** Create `src/deephaven_massive/_reference.py`, `tests/test_reference.py`, and
+`scripts/render_reference.py`. Modify `AGENTS.md` (the command in **Commands**, and that
+`docs/datasets/` is never edited by hand). No page exists yet: no dataset is declared, so the
+rendered set is empty and `docs/datasets/` is absent until the first P6 package.
+
+**Tasks.**
+- [ ] `_reference.render()`: one page per namespace module with declared datasets, sections
+      in declaration order, the explicit `<a id="<dataset>"></a>` anchor (dots as hyphens),
+      the heading, `DatasetSpec.summary`, the column table, and the footer from
+      `_massive.provenance()`; `|` escaped, no trailing whitespace, one final newline.
+- [ ] `_reference.sync(directory, pages)`: delete every file and subdirectory not in `pages`,
+      write each page whose bytes differ, return what it wrote and deleted, touch nothing
+      outside `directory`.
+- [ ] `scripts/render_reference.py`: start the embedded server, then import the library, call
+      `render()` and `sync()` on `docs/datasets/`, and print the result. All logic stays in
+      `_reference.py`, which coverage measures.
+- [ ] `tests/test_reference.py`: the parity test, the docstring tests (the docstring starts
+      with the summary and names `docs/datasets/<namespace>.md#<dataset>`), and render and
+      sync tests on a synthetic catalog and `tmp_path`.
+
+**Acceptance criteria.**
+- [ ] On a clean checkout, the command writes and deletes nothing and `git status` stays
+      clean.
+- [ ] The negative tests: a planted `docs/datasets/stray.md`, a planted subdirectory, a
+      deleted page, and an edited page each fail the parity test, whose message names the
+      command; the command removes the planted files and restores the others.
+- [ ] Render tests on a synthetic catalog: a nested dataset's anchor (`financials-ratios`),
+      `|` escaping, a union-only column's text, a `request` wire cell, one wire-field column
+      per transport used, and the footer's date and URLs.
+- [ ] `sync` leaves a page with unchanged bytes untouched (its modification time stays).
+- [ ] A docstring without its anchor, or not starting with its summary, fails the docstring
+      test (on a synthetic namespace class).
+- [ ] No module under `src/` imports `deephaven_server` (the layout test is unchanged).
+
+**Verification.**
+```bash
+./scripts/check.sh
+uv run python scripts/render_reference.py && git status --porcelain docs/datasets    # empty
+uv run pytest tests/test_reference.py -q
+```
+
+**Pitfalls.** GitHub drops dots from heading anchors, hence the explicit `<a id>`. Generating
+column lists into hand-written modules makes them go stale; docstrings link, they never list.
+A script that imports the library before the server starts fails on the first Deephaven import.
+
+**Out of scope.** The pages themselves (each P6 package renders its namespace); `README.md`
+links (P7).
+
+**Approval gates.** Opening the PR.
+
+---
+
 <a id="p6"></a>
 ## P6a–P6h — `feat: <namespace> datasets`
 
@@ -1670,14 +1925,14 @@ All eight packages share this section; per-package specifics follow. Each branch
 
 | Id | Title | Branch | Issue | Depends on |
 |---|---|---|---|---|
-| P6a | `feat: stocks datasets` | `feat/stocks-datasets` | #17 | P3, P4 |
-| P6b | `feat: options datasets` | `feat/options-datasets` | #18 | P3, P4 |
-| P6c | `feat: futures datasets` | `feat/futures-datasets` | #19 | P3, P4 |
-| P6d | `feat: indices datasets` | `feat/indices-datasets` | #20 | P3, P4 |
-| P6e | `feat: forex datasets` | `feat/forex-datasets` | #21 | P3, P4 |
-| P6f | `feat: crypto datasets` | `feat/crypto-datasets` | #22 | P3, P4 |
-| P6g | `feat: reference, indicators, economy, and unified snapshots datasets` | `feat/reference-datasets` | #23 | P3 |
-| P6h | `feat: partner datasets` | `feat/partner-datasets` | #24 | P3 |
+| P6a | `feat: stocks datasets` | `feat/stocks-datasets` | #17 | P3, P4, PCR |
+| P6b | `feat: options datasets` | `feat/options-datasets` | #18 | P3, P4, PCR |
+| P6c | `feat: futures datasets` | `feat/futures-datasets` | #19 | P3, P4, PCR |
+| P6d | `feat: indices datasets` | `feat/indices-datasets` | #20 | P3, P4, PCR |
+| P6e | `feat: forex datasets` | `feat/forex-datasets` | #21 | P3, P4, PCR |
+| P6f | `feat: crypto datasets` | `feat/crypto-datasets` | #22 | P3, P4, PCR |
+| P6g | `feat: reference, indicators, economy, and unified snapshots datasets` | `feat/reference-datasets` | #23 | P3, PCR |
+| P6h | `feat: partner datasets` | `feat/partner-datasets` | #24 | P3, PCR |
 
 **Shared goal.** Declare every dataset of the namespace, implement the namespace class's factory
 methods with the exact DESIGN signatures, and prove each dataset with spec-shaped fixtures.
@@ -1689,16 +1944,21 @@ methods with the exact DESIGN signatures, and prove each dataset with spec-shape
 **Parallel with.** every other P6 package.
 
 **Shared files.** `_namespaces/<ns>.py` (namespace class and `DATASETS`), its tests and
-fixtures, and the deletion of `tests/data/catalog/undeclared/<ns>.txt`. No `_massive` diff: a
+fixtures, its generated column reference page `docs/datasets/<ns>.md`, and the deletion of
+`tests/data/catalog/undeclared/<ns>.txt`. No `_massive` diff: a
 needed `refresh/` fix lands first in its own PR.
 
 **Shared tasks (per dataset).**
-- [ ] A `DatasetSpec`: name, query class, kind, the per-source key columns (`KeySpec`), the
-      role paths,
+- [ ] A `DatasetSpec`: name, one-sentence summary, query class, kind, the per-source key
+      columns (`KeySpec`), the role paths,
       channels, prefixes, the `start`/`end` wire pair, poll defaults, page size. No column
       overrides and no unit declarations: those are generated.
-- [ ] The factory method with the exact DESIGN § 8 signature and a docstring stating the
-      transports, `limit`, and `ALL`.
+- [ ] The factory method with the exact DESIGN § 8 signature and a docstring that starts with
+      the summary, states the transports, `limit`, and `ALL`, and links its column reference
+      section (DESIGN § 7.4); never a column list.
+- [ ] Regenerate the namespace's page with `uv run python scripts/render_reference.py` and
+      review it: every column has the description the rule picks, or an empty one the PR
+      names.
 - [ ] A fixture shaped from the spec's example and the docs sample; the test asserts the exact
       request, the column values, each `Instant`, and `Symbol`/`Underlying`.
 - [ ] The § 7.2 `ValueError`s.
@@ -1716,7 +1976,8 @@ needed `refresh/` fix lands first in its own PR.
 **Shared verification.**
 ```bash
 ./scripts/check.sh
-uv run pytest tests/namespaces/test_<ns>.py tests/test_catalog.py -q
+uv run pytest tests/namespaces/test_<ns>.py tests/test_catalog.py tests/test_reference.py -q
+uv run python scripts/render_reference.py && git status --porcelain docs/datasets    # empty
 ```
 
 **Shared pitfalls (Appendices B, C, F).** Nine wrong REST paths (F C1); invented wire keys
@@ -1780,7 +2041,8 @@ move into `AGENTS.md`, and generated = used.
 - [ ] `tests/test_readme.py`: each DESIGN § 21 example runs in the embedded JVM against the
       fakes.
 - [ ] `README.md`: install from the repository until REL2, configuration, quickstart, verbs,
-      symbols, hosts, the namespace index, lifecycle, diagnostics, development.
+      symbols, hosts, the namespace index (linking each namespace's column reference page
+      and `columns()`), lifecycle, diagnostics, development.
 - [ ] Fold the durable rules into `AGENTS.md`.
 
 A refresh of the snapshot, when Massive has changed, is its own `chore: refresh the Massive
@@ -2005,6 +2267,8 @@ The rework is complete when all of the following hold on `main`:
 - [ ] `tests/test_layout.py`, `tests/test_catalog.py`, `tests/massive/refresh/test_generate.py`,
       and the 100% branch-coverage gate pass, with no unapproved `pragma: no cover`.
 - [ ] `uv run python -m deephaven_massive._massive.refresh` leaves `spec/*.json` unchanged.
+- [ ] `uv run python scripts/render_reference.py` leaves `docs/datasets/` unchanged, and every
+      declared dataset has a section there.
 - [ ] The DESIGN § 21 examples run in the embedded test JVM against the fakes.
 - [ ] `grep -rn "Literal\[\"" src/deephaven_massive` finds no public string categorical.
 - [ ] No dependency on `massive` and no `[tool.uv.sources]`.
@@ -2078,3 +2342,8 @@ The owner decisions of the final design (O-items), each recorded in DESIGN:
 | Q3 | P8 runs alongside P7; PF retires notes and deletes `plans/rework/` | Process decision 5 |
 | Q4 | Release 0.1.0 through trusted publishing, on the owner's go-ahead only | § 20.1; § 22, decision 44 |
 | Q5 | The fork is left to the owner | § 22, decision 25; process decisions 4 and 6 |
+| D1 | The raw vendor snapshot lives at the top-level `vendor/massive/`, in neither the wheel nor the sdist | § 19 (PC3a, #67) |
+| D2 | `columns()` on every query: a static, no-network table `Name`, `Type`, `Description`, `SuppliedBy` | § 7; § 22, decision 45 |
+| D3 | Generated, committed `docs/datasets/<namespace>.md`; one command owns the whole directory, and the parity test fails on a stale, missing, or extra file | § 7.4; § 22, decision 47 |
+| D4 | Vendor descriptions in a separate generated `spec/descriptions.json`, normalized, with no gate | § 19.4; § 22, decision 48 |
+| D5 | Every result carries `ColumnDescriptions` and a `TableDescription`, applied to the exact returned table | § 7.4; § 22, decision 46 |
