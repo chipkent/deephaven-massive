@@ -27,11 +27,12 @@ records are now requirements of the library's own clients (DESIGN § 19).
   carries the planned PR's live checklist; the checklists below are the *initial* copy.
 - Each planned PR links its issue; the parent tracking issue is #37. Live progress is tracked in
   the issues' checklists, not by ticking boxes in this file.
-- A planned PR is **done** when its PR is merged by the owner and the issue is closed with a link
-  to the merged PR. Agents never merge and never close issues on their own authority.
+- A planned PR is **done** when the owner merges its PR. The PR description carries
+  `Closes #<issue>` (AGENTS.md hard rule 14), so the merge closes the issue and links it to the
+  merged PR. Agents never merge.
 - Each planned PR has a short kebab-case name that says what it delivers (`rest-transport`,
   `rest-client`). Commit bodies and PR descriptions refer to a planned PR by that name and its
-  issue (`Refs #<issue>`), never by PR title, so a retitled PR does not break traceability.
+  issue number, never by PR title, so a retitled PR does not break traceability.
 
 ## Table of contents
 
