@@ -51,7 +51,13 @@ from urllib.parse import urlsplit
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import BotoCoreError, ClientError, HTTPClientError, SSLError
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+    ConnectionClosedError,
+    ReadTimeoutError,
+    SSLError,
+)
 from botocore.exceptions import ConnectionError as BotoConnectionError
 
 from deephaven_massive._massive.flatfiles.reader import FlatFile
@@ -86,8 +92,11 @@ _CREDENTIAL_ERRORS: Final = frozenset({"InvalidAccessKeyId", "SignatureDoesNotMa
 _TRANSIENT_CODES: Final = frozenset({"RequestTimeout"})
 """S3 error codes, answered with a status that is not transient (400), that a retry may fix."""
 
-_CONNECTION_ERRORS: Final = (BotoConnectionError, HTTPClientError)
-"""botocore's errors for a connection that cannot be made, is reset, or times out."""
+_CONNECTION_ERRORS: Final = (BotoConnectionError, ConnectionClosedError, ReadTimeoutError)
+"""botocore's errors for a connection that cannot be made, is reset, or times out.
+
+Its other `HTTPClientError`s are not among them: botocore raises the bare class for any
+unexpected exception inside the HTTP layer, which a retry would only repeat."""
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,7 @@ from botocore.exceptions import (
     ConnectionClosedError,
     ConnectTimeoutError,
     EndpointConnectionError,
+    HTTPClientError,
     ParamValidationError,
     ProxyConnectionError,
     ReadTimeoutError,
@@ -405,16 +406,25 @@ def test_an_unreachable_endpoint_is_a_wire_error_after_the_retries(
     assert clock.waits == WAITS
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ParamValidationError(report="Invalid bucket name"),
+        # botocore's wrapper for an unexpected exception inside its HTTP layer.
+        HTTPClientError(error=RuntimeError("a bug in the HTTP layer")),
+    ],
+    ids=lambda error: type(error).__name__,
+)
 def test_a_failure_no_retry_can_fix_is_not_retried(
-    *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock
+    *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock, failure: BotoCoreError
 ) -> None:
-    def invalid(_key: str) -> None:
-        raise ParamValidationError(report="Invalid bucket name")
+    def fail(_key: str) -> None:
+        raise failure
 
-    fake_s3.before_answer = invalid
-    with pytest.raises(WireError, match="Invalid bucket name") as info:
+    fake_s3.before_answer = fail
+    with pytest.raises(WireError, match=f"^cannot read s3://flatfiles/{KEY} at ") as info:
         client.open(KEY)
-    assert isinstance(info.value.__cause__, ParamValidationError)
+    assert info.value.__cause__ is failure
     assert clock.waits == []
 
 
@@ -697,6 +707,14 @@ def test_the_client_follows_the_shared_tls_and_proxy_rules_and_never_retries_its
     assert config.retries == {"total_max_attempts": 1, "mode": "standard"}
 
 
+# botocore's declared floor (1.31.62) passes urllib3 2.0 a `strict` pool argument, which urllib3
+# deprecates with a warning on every new pool. Only the tests whose requests reach botocore's
+# HTTP layer see it; newer botocore releases no longer pass the argument.
+_REAL_SOCKETS = pytest.mark.filterwarnings(
+    "ignore:The 'strict' parameter is no longer needed:DeprecationWarning"
+)
+
+
 @pytest.fixture
 def tls_server() -> Iterator[FakeRestServer]:
     server = FakeRestServer(tls=(DATA / "tls_cert.pem", DATA / "tls_key.pem"))
@@ -728,6 +746,7 @@ def _symbols(file: FlatFile | None) -> list[str]:
         return [s for batch in file.batches(stocks_plan()) for s in batch["Symbol"].to_pylist()]
 
 
+@_REAL_SOCKETS
 def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(
     *, tls_server: FakeRestServer, network_env: pytest.MonkeyPatch, no_aws_settings: None
 ) -> None:
@@ -743,6 +762,7 @@ def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(
     assert (tls_server.requests, clock.waits) == ([], [])
 
 
+@_REAL_SOCKETS
 def test_ssl_cert_file_is_trusted_and_the_shared_schedule_retries_over_the_network(
     *,
     tls_server: FakeRestServer,
@@ -767,6 +787,7 @@ def test_ssl_cert_file_is_trusted_and_the_shared_schedule_retries_over_the_netwo
     assert clock.waits == WAITS[:2]
 
 
+@_REAL_SOCKETS
 def test_the_proxy_carries_its_credentials_and_no_secret_is_logged(
     *,
     tls_server: FakeRestServer,
@@ -800,6 +821,7 @@ def test_the_proxy_carries_its_credentials_and_no_secret_is_logged(
             assert ACCESS_KEY not in text
 
 
+@_REAL_SOCKETS
 def test_an_unreachable_proxy_is_retried_and_its_password_stays_out_of_the_error(
     *, trusted: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

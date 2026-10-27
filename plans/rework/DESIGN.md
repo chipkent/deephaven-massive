@@ -2421,7 +2421,8 @@ the client again as it returns.
   jitter, waited on the client's `Clock`, which `close()` interrupts) retries the
   `TRANSIENT_STATUSES` (HTTP 500, 502, 503 `SlowDown`, 504), the S3 error code
   `RequestTimeout` (HTTP 400), and connection errors before the first byte (botocore's
-  `ConnectionError` and `HTTPClientError` families). A TLS failure (botocore's `SSLError`, or
+  `ConnectionError` family, `ConnectionClosedError`, and `ReadTimeoutError`; not the bare
+  `HTTPClientError` botocore raises for any unexpected exception in its HTTP layer). A TLS failure (botocore's `SSLError`, or
   any error `is_tls_failure` recognises) is never retried, and a certificate failure's message
   names `SSL_CERT_FILE`; neither is a failure partway through a body: rows already handed on
   cannot be taken back. The bundle and proxy are read when the first `open` creates the boto3
