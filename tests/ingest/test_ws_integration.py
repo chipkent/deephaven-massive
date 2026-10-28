@@ -1,9 +1,9 @@
 """Live checks of the session's WebSocket handling: the delayed-key verdict and the slot limit.
 
 Each test records the session's diagnostics and Massive's messages (`evidence`). Streams
-subscribe to one symbol and are released at once. The slot test is the one test that opens a
-second connection to a cluster, on purpose, and runs only with `MASSIVE_LIVE_SECOND_CONNECTION`
-set.
+subscribe to one symbol and are released at once. The slot test opens a second connection to a
+cluster on purpose: it is marked `integration_limits` and runs only with
+`-m integration_limits`.
 """
 
 from __future__ import annotations
@@ -72,18 +72,17 @@ def test_text_of_the_delayed_key_refusal_on_the_real_time_host(
         session.close()
 
 
+@pytest.mark.integration_limits
 @pytest.mark.timeout(110)
 def test_a_second_connection_with_one_key_waits_for_a_slot(
     live_session: dm.MassiveSession,
     *,
-    live_opt_in: Callable[[str], None],
     live_config: dm.MassiveConfig,
     wait_rows: WaitRows,
     table_rows: TableRows,
     stream_report: Report,
     evidence: Evidence,
 ) -> None:
-    live_opt_in("MASSIVE_LIVE_SECOND_CONNECTION")
     first = live_session.crypto.trades("X:BTCUSD").append_only()
     first_rows = wait_rows(live_session, first, _WAIT)
     evidence(f"first session: {len(first_rows)} trades before the second connects")

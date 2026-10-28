@@ -14,11 +14,15 @@ then retires each confirmed UNVERIFIED note, citing the run's log.
   is closed from Friday 17:00 to Sunday 17:00 New York time), and the publication check reads
   yesterday's flat file.
 - **Where.** A clone at the PR's head, `uv sync --upgrade` done, JDK 17 or later.
-- **Cost.** Every test names one symbol per asset class, except the opt-in wide tests below.
-  REST calls are a few hundred in all, mostly single pages. Streams are released as soon as
-  their first rows arrive, and every session is closed at the end of its test, so no cluster
-  holds more than one of the run's connections; the one deliberate exception is the opt-in
-  slot test.
+- **Cost.** Every test of `-m integration` names one symbol per asset class. REST calls are a
+  few hundred in all, mostly single pages. Streams are released as soon as their first rows
+  arrive, and every session is closed at the end of its test, so no cluster holds more than one
+  of the run's connections.
+- **The limit tests.** Four tests deliberately exceed Massive's subscription and connection
+  limits: rows 10, 11, and 15 (1,000 crypto topics, 501 options contracts on two channels, and
+  `XT.*`) and row 12 (a second session with the same key, which takes a second connection slot
+  on the crypto cluster). They carry the `integration_limits` marker as well as `integration`;
+  `-m integration` deselects them, and only `-m integration_limits` runs them (section 2).
 
 | Variable | Needed by | Without it |
 |---|---|---|
@@ -27,8 +31,6 @@ then retires each confirmed UNVERIFIED note, citing the run's log.
 | `MASSIVE_BUSINESS_API_KEY` | row 6 (a base Business key) | it skips |
 | `MASSIVE_DELAYED_API_KEY` | row 8 (a key with delayed stocks data only) | it skips |
 | `MASSIVE_LIVE_BASIC_SUBSCRIPTION` | the rate-limit tests: name a subscription your account holds on the free Basic tier (`stocks`, `options`, `indices`, `currencies`, or `futures`) | they skip |
-| `MASSIVE_LIVE_WIDE=1` | rows 10, 11, 15: 1,000 crypto topics, 501 options contracts on two channels, and `XT.*` | they skip |
-| `MASSIVE_LIVE_SECOND_CONNECTION=1` | row 12: a second session with the same key, which takes a second connection slot on the crypto cluster | it skips |
 
 Row 3 (FMV) needs a Business entitlement on `MASSIVE_API_KEY` itself; without it the test
 records the refusal and skips.
@@ -57,8 +59,15 @@ MASSIVE_API_KEY=... MASSIVE_S3_ACCESS_KEY_ID=... MASSIVE_S3_SECRET_ACCESS_KEY=..
   tests/massive/rest/test_client_integration.py 2>&1 | tee live-checks.log
 ```
 
-`uv run pytest -m integration` with no key skips every test (52 of them); `./scripts/check.sh`
-and CI deselect them all. The run's log ends with a **live evidence** section: under each
+The limit tests, on their own, after the run above (run row 12 when no other session uses the
+key):
+
+```bash
+MASSIVE_API_KEY=... uv run pytest -m integration_limits 2>&1 | tee live-limits.log
+```
+
+Without a key, `uv run pytest -m integration` skips its 48 tests and deselects the 4 limit
+tests, and `-m integration_limits` skips those 4; `./scripts/check.sh` and CI deselect all 52. The run's log ends with a **live evidence** section: under each
 test's id, the lines it recorded, whatever its outcome. A test fails when a request it needs
 fails or returns nothing, and, for the rows whose check is a plain yes or no (2, 3, 16, 21, 22,
 26), when the answer is no; a skip names what was missing. Attach `live-checks.log` (it is
@@ -231,12 +240,12 @@ decision, never part of this suite.
 | 7 | `...::test_which_timeframe_fields_the_futures_snapshot_carries` | every `timeframe` field of three ES snapshot rows | fields present: the host decision can use them | absent: retire the note (the absence path is already the conservative one) |
 | 8 | `tests/ingest/test_ws_integration.py::test_text_of_the_delayed_key_refusal_on_the_real_time_host` | the refusal text on `socket.` with a delayed key | it contains "real-time" | change the verdict substring in `_massive/ws/protocol.py` |
 | 9 | `tests/massive/ws/test_client_integration.py::test_whether_an_unsubscribe_is_acknowledged` | statuses and rows after an unsubscribe | either way: the library awaits no acknowledgement, so retire with the observed behaviour | |
-| 10 | `...::test_a_frame_of_one_thousand_topics_is_acknowledged` (wide) | acknowledgements of one 1,000-topic frame | all 1,000 acknowledged | lower `MAX_TOPICS_PER_FRAME` in `_massive/ws/protocol.py` to the largest acknowledged size |
-| 11 | `...::test_the_options_topic_cap_counts_topics_or_contracts` (wide, options) | acknowledgements and errors for 501 contracts on T and Q | refusal past 1,000 topics: retire (topics) | all acknowledged: the cap counts contracts; owner decision to relax `OPTIONS_CAP` in `_ingest/ws.py` |
-| 12 | `tests/ingest/test_ws_integration.py::test_a_second_connection_with_one_key_waits_for_a_slot` (opt-in) | the second session's state and message; the first session afterwards | second shows `WAITING_SLOT` and the first keeps running | if Massive closes the first instead, document it and revisit the slot rule |
+| 10 | `...::test_a_frame_of_one_thousand_topics_is_acknowledged` (limits) | acknowledgements of one 1,000-topic frame | all 1,000 acknowledged | lower `MAX_TOPICS_PER_FRAME` in `_massive/ws/protocol.py` to the largest acknowledged size |
+| 11 | `...::test_the_options_topic_cap_counts_topics_or_contracts` (limits, options) | acknowledgements and errors for 501 contracts on T and Q | refusal past 1,000 topics: retire (topics) | all acknowledged: the cap counts contracts; owner decision to relax `OPTIONS_CAP` in `_ingest/ws.py` |
+| 12 | `tests/ingest/test_ws_integration.py::test_a_second_connection_with_one_key_waits_for_a_slot` (limits) | the second session's state and message; the first session afterwards | second shows `WAITING_SLOT` and the first keeps running | if Massive closes the first instead, document it and revisit the slot rule |
 | 13 | none: CI runs the suite with the `orjson` extra on 3.14 | | | |
 | 14 | `tests/ingest/test_flatfiles_integration.py::test_yesterdays_file_is_published_by_the_cutoff` | New York time and whether yesterday's stock day file exists | it exists after 11:30 | move `flat_file_publish_cutoff`'s default later |
-| 15 | `tests/massive/ws/test_client_integration.py::test_a_wildcard_and_an_explicit_topic_deliver_an_event_once_or_twice` (wide) | BTC-USD trades under `XT.*` plus `XT.BTC-USD`, and how many arrived twice | either way: duplicates confirm that explicit topics must leave the wire while the wildcard is acknowledged (as implemented); none means that step is harmless | |
+| 15 | `tests/massive/ws/test_client_integration.py::test_a_wildcard_and_an_explicit_topic_deliver_an_event_once_or_twice` (limits) | BTC-USD trades under `XT.*` plus `XT.BTC-USD`, and how many arrived twice | either way: duplicates confirm that explicit topics must leave the wire while the wildcard is acknowledged (as implemented); none means that step is harmless | |
 | 16 | `...::test_a_weekend_key_is_missing_not_refused` | the answer for a Sunday stock key | missing (404) | a 403: the credentials lack `ListBucket`; owner decision (treat 403 on a weekend key as missing) |
 | 17 | retired | | | |
 | 18 | none: checked by hand in the web UI | | | |

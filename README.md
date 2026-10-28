@@ -40,10 +40,17 @@ MASSIVE_API_KEY=... uv run pytest -m integration 2>&1 | tee live-checks.log
 The flat-file tests also need `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY`.
 A few tests need more and skip without it: `MASSIVE_BUSINESS_API_KEY` (a Business key),
 `MASSIVE_DELAYED_API_KEY` (a delayed key), `MASSIVE_LIVE_BASIC_SUBSCRIPTION` (a subscription on
-the free Basic tier, such as `options`), `MASSIVE_LIVE_WIDE=1` (tests that subscribe to many
-topics or a wildcard), and `MASSIVE_LIVE_SECOND_CONNECTION=1` (a test that opens a second
-connection with the same key). Each test records what Massive sent; the "live evidence"
-section at the end of the run lists it, test by test.
+the free Basic tier, such as `options`). Each test records what Massive sent; the "live
+evidence" section at the end of the run lists it, test by test.
+
+Four live tests deliberately exceed Massive's subscription and connection limits (1,000
+topics, 501 options contracts, a wildcard, and a second connection with the same key). They
+also carry the `integration_limits` marker: `-m integration` leaves them out, and they run
+only on their own:
+
+```bash
+MASSIVE_API_KEY=... uv run pytest -m integration_limits 2>&1 | tee live-limits.log
+```
 
 ## License
 

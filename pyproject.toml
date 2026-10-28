@@ -215,6 +215,7 @@ filterwarnings = ["error"]
 addopts = ["-ra", "--import-mode=importlib", "-m", "not integration"]
 markers = [
     "integration: a live test against Massive (tests/**/test_*_integration.py); deselected by default, run with -m integration and MASSIVE_API_KEY set",
+    "integration_limits: deliberately exceeds Massive's subscription and connection limits; also marked integration, and run only with -m integration_limits",
 ]
 testpaths = ["tests"]
 # Puts the repository root on sys.path, which --import-mode=importlib does not do itself, so

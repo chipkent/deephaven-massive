@@ -353,7 +353,9 @@ test code imports helpers as `tests._fakes…`. So `tests/massive/` can never sh
 Integration tests end in `_integration` and carry the `integration` marker, which `addopts`
 deselects in every default run (CI's included); `uv run pytest -m integration` runs them, and
 each skips unless `MASSIVE_API_KEY` is set. [LIVE-CHECKS.md](LIVE-CHECKS.md) is the owner's
-runbook for them. The exceptions to the mirror rule, and no
+runbook for them. The live tests that deliberately exceed Massive's subscription and connection
+limits also carry `integration_limits`: `-m integration` deselects them, and only
+`-m integration_limits` runs them. The exceptions to the mirror rule, and no
 others:
 
 - `tests/conftest.py`: starts the embedded JVM in `pytest_configure`, before collection, and

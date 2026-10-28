@@ -3,8 +3,9 @@
 Each test opens one wire `WsClient` to one cluster on `socket.massive.com`, records every
 status and, where the form of a value is the question, every raw frame (`evidence`), and
 closes the client before the next test, so no cluster ever holds more than one of the test
-run's connections. The tests that subscribe to many topics or a wildcard run only with
-`MASSIVE_LIVE_WIDE=1`.
+run's connections. The tests that subscribe to many topics or a wildcard deliberately exceed
+Massive's limits: they are marked `integration_limits` and run only with
+`-m integration_limits`.
 """
 
 from __future__ import annotations
@@ -288,15 +289,14 @@ def test_whether_an_unsubscribe_is_acknowledged(
     assert before.rows
 
 
+@pytest.mark.integration_limits
 @pytest.mark.timeout(110)
 def test_a_frame_of_one_thousand_topics_is_acknowledged(
     probe: Callable[[str], _Probe],
     *,
-    live_opt_in: Callable[[str], None],
     live_rest: RestClient,
     evidence: Evidence,
 ) -> None:
-    live_opt_in("MASSIVE_LIVE_WIDE")
     pairs = live_rest.get(
         source(Transport.REST, "/v3/reference/tickers"),
         {},
@@ -322,15 +322,14 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
     assert topics
 
 
+@pytest.mark.integration_limits
 @pytest.mark.timeout(110)
 def test_the_options_topic_cap_counts_topics_or_contracts(
     probe: Callable[[str], _Probe],
     *,
-    live_opt_in: Callable[[str], None],
     live_rest: RestClient,
     evidence: Evidence,
 ) -> None:
-    live_opt_in("MASSIVE_LIVE_WIDE")
     contracts = live_rest.get(
         source(Transport.REST, "/v3/reference/options/contracts"),
         {},
@@ -350,11 +349,11 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
     assert tickers
 
 
+@pytest.mark.integration_limits
 @pytest.mark.timeout(110)
 def test_a_wildcard_and_an_explicit_topic_deliver_an_event_once_or_twice(
-    probe: Callable[[str], _Probe], *, live_opt_in: Callable[[str], None], evidence: Evidence
+    probe: Callable[[str], _Probe], *, evidence: Evidence
 ) -> None:
-    live_opt_in("MASSIVE_LIVE_WIDE")
     made = probe("crypto")
     made.send("subscribe", ["XT.*", "XT.BTC-USD"])
     records = made.wait(lambda _: False, 30.0)

@@ -440,6 +440,7 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
 # "live evidence" section at the end of the run, for passed, failed, and skipped tests alike.
 
 _INTEGRATION = "integration"
+_LIMITS = "integration_limits"
 _INTEGRATION_FILE_SUFFIX = "_integration.py"
 
 _EVIDENCE: Final = pytest.StashKey[list[tuple[str, str]]]()
@@ -454,19 +455,23 @@ _FLAT_FILE_BLOCK = 1 << 20
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Require the `integration` marker on exactly the tests of the live test files.
+    """Check the live markers, and keep the limit tests out of every run that does not name them.
 
-    Runs before the `-m` deselection, so the check covers every collected test, also those a
-    default run deselects. A live test without the marker would run in CI, and a marked test
-    elsewhere would never run by default.
+    Runs before the `-m` deselection, so the checks cover every collected test, also those a
+    default run deselects. A live test without the `integration` marker would run in CI, and a
+    marked test elsewhere would never run by default. A test marked `integration_limits`
+    deliberately exceeds Massive's subscription and connection limits, so it must also be a
+    live test, and it is deselected unless the `-m` expression names `integration_limits`:
+    `-m integration` runs every live test but those, `-m integration_limits` runs only them.
 
     Args:
-        config: The pytest configuration (unused; required by the hook signature).
-        items: The collected tests.
+        config: The pytest configuration, for the `-m` expression and the deselection hook.
+        items: The collected tests; the limit tests are removed from it unless selected.
 
     Raises:
-        pytest.UsageError: If a test of a `*_integration.py` file lacks the marker, or a test
-            of another file has it; the message lists them.
+        pytest.UsageError: If a test of a `*_integration.py` file lacks the `integration`
+            marker, a test of another file has it, or a test has `integration_limits` without
+            `integration`; the message lists them.
     """
     wrong = [
         item.nodeid
@@ -479,6 +484,23 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             "the integration marker must be on exactly the tests of *_integration.py files "
             "(pytestmark = pytest.mark.integration): " + ", ".join(wrong)
         )
+    unpaired = [
+        item.nodeid
+        for item in items
+        if item.get_closest_marker(_LIMITS) is not None
+        and item.get_closest_marker(_INTEGRATION) is None
+    ]
+    if unpaired:
+        raise pytest.UsageError(
+            "a test marked integration_limits must also be marked integration: "
+            + ", ".join(unpaired)
+        )
+    if _LIMITS in (config.option.markexpr or ""):
+        return
+    limits = [item for item in items if item.get_closest_marker(_LIMITS) is not None]
+    if limits:
+        config.hook.pytest_deselected(items=limits)
+        items[:] = [item for item in items if item.get_closest_marker(_LIMITS) is None]
 
 
 @pytest.fixture(autouse=True)
@@ -519,24 +541,6 @@ def live_env() -> Callable[[str], str]:
         the variable is unset or blank.
     """
     return _required_env
-
-
-@pytest.fixture
-def live_opt_in() -> Callable[[str], None]:
-    """Return a function that skips the test unless an opt-in variable is set to `1`.
-
-    The live tests that go beyond one symbol per class (`MASSIVE_LIVE_WIDE`) or one connection
-    per cluster (`MASSIVE_LIVE_SECOND_CONNECTION`) run only when the owner opts in.
-
-    Returns:
-        A function taking the variable's name; it skips the test unless the value is `1`.
-    """
-
-    def require(name: str) -> None:
-        if os.environ.get(name, "").strip() != "1":
-            pytest.skip(f"{name} is not 1")
-
-    return require
 
 
 @pytest.fixture

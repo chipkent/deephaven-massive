@@ -17,12 +17,14 @@ uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once p
 ./scripts/check.sh fast --no-fix           # report only (what CI's lint job and the commit hook run)
 uv run pytest tests/test_layout.py -q      # one file, no coverage, debugger-friendly
 uv run pytest -m integration               # live tests only (owner, with MASSIVE_API_KEY)
+uv run pytest -m integration_limits        # the live tests that exceed Massive's limits (owner)
 uv build                                   # sdist and wheel
 ```
 
 Live integration tests (`tests/**/test_*_integration.py`) carry the `integration` marker, which
 `addopts` deselects, so no default run, CI's included, runs them. They also skip without
-`MASSIVE_API_KEY`. Agents never run them with a key: only the owner does.
+`MASSIVE_API_KEY`. Those that deliberately exceed Massive's limits also carry
+`integration_limits`, which `tests/conftest.py` deselects unless `-m` names it. Agents never run them with a key: only the owner does.
 
 The wire schemas (`src/deephaven_massive/_massive/spec/*.json`) are generated from the vendored
 snapshot of Massive's published specifications (`vendor/massive/`, outside the package). The
