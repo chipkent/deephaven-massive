@@ -857,3 +857,21 @@ def test_messages_name_the_buckets_requests() -> None:
         _refuse(governor, governor.acquire("other", Cancel()), retry_after=700.0)
     with pytest.raises(WireError, match=r"^Massive has refused stocks requests with HTTP 429"):
         _refuse(governor, governor.acquire("stocks", Cancel()), retry_after=700.0)
+
+
+def test_a_request_leaving_its_lane_keeps_the_lane_and_its_turn() -> None:
+    clock = FakeClock(manual=True)
+    governor = _governor(clock, basic={"stocks"})
+    _requests(governor, "stocks", 5)
+    read = object()
+    head = _Waiting(governor, "stocks", lane=read)
+    clock.wait_for_sleepers(1)
+    behind = _Waiting(governor, "stocks", lane=read)  # the same read: the same lane
+    clock.wait_for_deadlines([60.0, 61.0])
+    behind.cancel.set()  # it leaves; the lane keeps its head, which is not woken
+    behind.join()
+    clock.wait_for_deadlines([61.0])
+    assert _state(governor).waiting == 1
+    clock.advance(61.0)
+    head.join()
+    assert head.started == 61.0
