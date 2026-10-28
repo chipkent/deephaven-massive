@@ -9,6 +9,7 @@ ticks with its parent, keeps the blink attribute, and keeps its parent, and so t
 
 import threading
 from collections.abc import Callable
+from typing import cast
 
 import pytest
 from deephaven import dtypes, new_table
@@ -236,8 +237,21 @@ def test_a_failed_blink_table_cannot_be_described(dh_exec_ctx: ExecutionContext)
 
 def test_a_description_of_a_missing_column_fails(dh_exec_ctx: ExecutionContext) -> None:
     lacking = new_table([string_col("Symbol", ["AAPL"])])  # no Price column
-    with pytest.raises(RuntimeError, match=r"Unknown column names \[Price\]"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^describing a stocks\.trades result failed: .*Unknown column names \[Price\]",
+    ) as raised:
         describe(lacking, SPEC, SCHEMA)
+    assert type(raised.value.__cause__) is RuntimeError  # jpy's form of the Java exception
+
+
+def test_a_schema_without_descriptions_sets_only_the_table_description(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    bare = Schema("stocks.trades", tuple(Column(c.name, c.type) for c in SCHEMA.columns))
+    result = describe(rows("AAPL"), SPEC, bare)
+    assert "ColumnDescriptions" not in result.attributes()
+    assert result.attributes()["TableDescription"] == TABLE_DESCRIPTION
 
 
 # --- column_table ----------------------------------------------------------------------------
@@ -272,3 +286,5 @@ def test_the_column_table_lists_every_column(
     ]
     assert column_descriptions(table) == dict(COLUMN_TABLE_DESCRIPTIONS)
     assert list(COLUMN_TABLE_DESCRIPTIONS) == ["Name", "Type", "Description", "SuppliedBy"]
+    with pytest.raises(TypeError):  # read-only: no caller can change the header text
+        cast("dict[str, str]", COLUMN_TABLE_DESCRIPTIONS)["Name"] = "changed"

@@ -948,8 +948,10 @@ never reads `__doc__` at run time, so `python -OO` changes nothing.
 - **Threading and liveness.** `describe()` makes a new table, so it runs where every result
   table is made: on the caller thread, inside the result's `LivenessScope`
   ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), never under
-  `registry_lock` and never in a listener. Both Java methods are `@ConcurrentMethod`, so they
-  take no update-graph lock. The described table depends on the table it copies, so the
+  `registry_lock` and never in a listener. Copying a table can briefly take the update-graph
+  shared lock (its initial snapshot falls back to the lock after repeated concurrent
+  attempts), like any table operation, which is one more reason it never runs under
+  `registry_lock`. The described table depends on the table it copies, so the
   undescribed parent, and for a stream the blink table that owns `on_shutdown_callback`, lives
   exactly as long as the result does; a teardown test proves that releasing the result still
   shuts the stream down. A `poll()` poller writes only through the publisher it holds, never
@@ -3211,7 +3213,8 @@ and the stock text for `price` ("dollar value per whole share") is wrong for cry
    supplies, gets generated library text naming the members that do, in member order:
    `` Always null for `crypto.trades`; supplied by `stocks.trades`. `` (crypto's
    `ParticipantTimestamp` and `Tape`, for example).
-3. **`Symbol`, `Timestamp`, and `Underlying`** get a fixed library sentence ("The instrument,
+3. **`Symbol`, `Timestamp`, and `Underlying`**, when they are declared key columns of the
+   dataset, get a fixed library sentence ("The instrument,
    in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
    underlying instrument, in the library's canonical symbol form."), followed, per transport in
    the order of rule 1, by the wire key each source renames and its quoted vendor description

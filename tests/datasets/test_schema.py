@@ -755,6 +755,23 @@ def test_an_underlying_column_takes_its_own_sentence() -> None:
     )
 
 
+def test_a_vendor_field_named_like_a_key_keeps_its_vendor_text() -> None:
+    # A `timestamp` field that is no declared time key is not the row's primary time.
+    stamped = Field(
+        wire_key="timestamp",
+        column="Timestamp",
+        wire_type=WireType.EPOCH,
+        unit=WireUnit.MS,
+        description="When the status was last updated.",
+    )
+    status = DatasetSpec(
+        name="reference.x", summary="A dataset for the tests.", fetch_path="/status"
+    )
+    made = Source(key="/status", transport=R, fields=(stamped,))
+    (column,) = dataset_schema(status, (status,), lambda *_: made).columns
+    assert (column.name, column.description) == ("Timestamp", "When the status was last updated.")
+
+
 def test_a_key_part_without_text_names_the_key_and_repeats_once() -> None:
     # Two REST paths rename the same undescribed wire key: it is named once, without a quote.
     plain = Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING)

@@ -641,7 +641,12 @@ def _key_part(transport: Transport, column: SourceColumn) -> str:
 
 
 def _description(
-    spec: DatasetSpec, name: str, *, own: Sequence[_Contribution], suppliers: Sequence[str]
+    spec: DatasetSpec,
+    name: str,
+    *,
+    own: Sequence[_Contribution],
+    suppliers: Sequence[str],
+    is_key: bool,
 ) -> str:
     """Pick one column's description for one dataset (the rules of `dataset_schema`).
 
@@ -651,6 +656,9 @@ def _description(
         own: The dataset's own contributions to the column, in description order; empty when
             only other members of the kind supply it.
         suppliers: The members of the kind that supply the column, by name, in member order.
+        is_key: True when the column is one of the dataset's declared key columns. Only then
+            does a `Symbol`, `Timestamp`, or `Underlying` column get the library's sentence;
+            a vendor field that merely carries one of those names is described as any other.
 
     Returns:
         The description; empty when no source describes the column.
@@ -658,7 +666,7 @@ def _description(
     if not own:
         named = ", ".join(f"`{member}`" for member in suppliers)
         return f"Always null for `{spec.name}`; supplied by {named}."
-    if name in _KEY_SENTENCES:
+    if is_key and name in _KEY_SENTENCES:
         parts = [_KEY_SENTENCES[name]]
         for transport, column in own:
             part = _key_part(transport, column)
@@ -678,6 +686,7 @@ def _column(
     column_type: ColumnType,
     own: Sequence[_Contribution],
     suppliers: Sequence[str],
+    is_key: bool,
 ) -> Column:
     """Build one column of a dataset schema with its description, transports, and wire keys.
 
@@ -687,6 +696,7 @@ def _column(
         column_type: Its merged type.
         own: The dataset's own contributions to the column, in description order.
         suppliers: The members of the kind that supply the column, by name, in member order.
+        is_key: True when the column is one of the dataset's declared key columns.
 
     Returns:
         The column.
@@ -700,7 +710,7 @@ def _column(
     return Column(
         name,
         column_type,
-        _description(spec, name, own=own, suppliers=suppliers),
+        _description(spec, name, own=own, suppliers=suppliers, is_key=is_key),
         tuple(wire_keys),
         MappingProxyType({transport: tuple(keys) for transport, keys in wire_keys.items()}),
     )
@@ -758,9 +768,10 @@ def dataset_schema(
     2. A column that exists only through the kind's union, which no source of the dataset
        supplies, says so and names the members that do, in member order:
        ``Always null for `crypto.trades`; supplied by `stocks.trades`.``
-    3. `Symbol`, `Timestamp`, and `Underlying` get the library's own sentence ("The row's
-       primary time, as an Instant."), followed, per source in the order of rule 1, by the
-       wire key the source renames and its quoted vendor description
+    3. `Symbol`, `Timestamp`, and `Underlying`, when they are declared key columns of the
+       dataset, get the library's own sentence ("The row's primary time, as an Instant."),
+       followed, per source in the order of rule 1, by the wire key the source renames and
+       its quoted vendor description
        (``REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp..."``), or, for a
        key filled from the request, the request parameter it came from (``REST: the
        request's `stocksTicker` parameter.``); a part two sources share appears once.
@@ -814,6 +825,7 @@ def dataset_schema(
                 column_type=COLUMN_TYPES[types[name]],
                 own=own.get(name, ()),
                 suppliers=suppliers[name],
+                is_key=name in declared,
             )
             for name in order
         ),

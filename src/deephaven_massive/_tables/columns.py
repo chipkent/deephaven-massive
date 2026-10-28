@@ -23,6 +23,7 @@ thread-safe.
 from __future__ import annotations
 
 import logging
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
 from deephaven import dtypes, new_table
@@ -118,8 +119,9 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
 
     The copy is created in the liveness scope at the top of the calling thread's stack, so
     call it on the caller thread inside the result's scope and the session's execution
-    context, never under `registry_lock` and never in a table listener. Both Java methods are
-    concurrent methods: they take no update-graph lock.
+    context, never in a table listener. Copying a table can briefly take the update-graph
+    shared lock (its initial snapshot falls back to the lock after repeated concurrent
+    attempts), like any table operation, so it never runs under `registry_lock`.
 
     Example:
         ::
@@ -150,34 +152,43 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
 
     Returns:
         A new table with the same rows, columns, and other attributes as `table`, plus
-        `ColumnDescriptions` and `TableDescription`.
+        `TableDescription` and, when the schema describes any column, `ColumnDescriptions`.
 
-    The Java methods are called directly, so a Java exception reaches the caller as the
-    `RuntimeError` jpy raises, not as Deephaven's `DHError`: if a described column is missing
-    from `table` (its `NoSuchColumnException`, "Unknown column names [...]"), or if `table` has
-    already failed, as a failed stream's blink table has (copying a table listens to it).
+    Raises:
+        RuntimeError: If a described column is missing from `table` (Deephaven's
+            `NoSuchColumnException`, "Unknown column names [...]"), or if `table` has already
+            failed, as a failed stream's blink table has (copying a table listens to it). The
+            Java methods are called directly, so the error is jpy's `RuntimeError`, not
+            Deephaven's `DHError`; its message names the dataset and the Java exception, which
+            is chained as its cause.
     """
     descriptions = {c.name: c.description for c in schema.columns if c.description}
-    described = table.j_table.withColumnDescriptions(j_hashmap(descriptions)).withDescription(
-        f"{spec.name}: {spec.summary}"
-    )
+    described = table.j_table
+    try:
+        if descriptions:  # an empty attribute would claim descriptions the table lacks
+            described = described.withColumnDescriptions(j_hashmap(descriptions))
+        described = described.withDescription(f"{spec.name}: {spec.summary}")
+    except RuntimeError as error:  # jpy's form of a Java exception
+        raise RuntimeError(f"describing a {spec.name} result failed: {error}") from error
     return Table(j_table=described)
 
 
-COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = {
-    "Name": "The column name.",
-    "Type": (
-        "The column's Deephaven type: long, int, double, boolean, String, Instant, LocalDate, "
-        "or int[]."
-    ),
-    "Description": "What the column holds; empty when Massive gives no description.",
-    "SuppliedBy": (
-        "The transports whose sources fill the column for this dataset, REST, FLAT_FILES, and "
-        'WS in that order, joined by ", "; empty for a column that only other datasets of the '
-        "same kind supply, which this dataset always leaves null."
-    ),
-}
-"""The descriptions of the four columns of a `columns()` table, in column order."""
+COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "Name": "The column name.",
+        "Type": (
+            "The column's Deephaven type: long, int, double, boolean, String, Instant, LocalDate, "
+            "or int[]."
+        ),
+        "Description": "What the column holds; empty when Massive gives no description.",
+        "SuppliedBy": (
+            "The transports whose sources fill the column for this dataset, REST, FLAT_FILES, and "
+            'WS in that order, joined by ", "; empty for a column that only other datasets of the '
+            "same kind supply, which this dataset always leaves null."
+        ),
+    }
+)
+"""The descriptions of the four columns of a `columns()` table, in column order; read-only."""
 
 
 def column_table(schema: Schema) -> Table:
