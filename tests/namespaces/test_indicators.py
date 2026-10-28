@@ -84,7 +84,7 @@ def test_a_windowed_indicator_builds_its_query(
         timespan=dm.Timespan.MINUTE,
         series_type=dm.SeriesType.HIGH,
         adjusted=False,
-        start=date(2025, 1, 2),
+        start=datetime(2025, 1, 2, tzinfo=UTC),
         end=datetime(2025, 1, 3, 15, tzinfo=UTC),
         order=dm.Order.ASC,
         limit=100,
@@ -93,7 +93,7 @@ def test_a_windowed_indicator_builds_its_query(
         symbols=("AAPL",),
         timespan=dm.Timespan.MINUTE,
         adjusted=False,
-        start=date(2025, 1, 2),
+        start=datetime(2025, 1, 2, tzinfo=UTC),
         end=datetime(2025, 1, 3, 15, tzinfo=UTC),
         params=(
             ("expand_underlying", False),

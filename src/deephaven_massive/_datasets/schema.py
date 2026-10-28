@@ -170,10 +170,10 @@ class Column:
     Attributes:
         name: The PascalCase column name.
         type: The column's type.
-        description: What the column holds, chosen per dataset from the vendor's field
-            descriptions or written by the library for the key columns and for a column only
-            other datasets of the kind supply (see `dataset_schema`); empty when nothing
-            describes it.
+        description: What the column holds, chosen per dataset from its fields' descriptions
+            (the vendor's, or the refresh's correction where the vendor's is wrong) or written
+            by the library for the key columns and for a column only other datasets of the
+            kind supply (see `dataset_schema`); empty when nothing describes it.
         supplied_by: The transports whose sources of this dataset fill the column (a key
             filled from the request counts), in the order `REST`, `FLAT_FILES`, `WS`; empty
             for a column only other datasets of the kind supply, which this dataset leaves
@@ -647,22 +647,25 @@ def _own_contributions(
     return own
 
 
-def _key_part(transport: Transport, column: SourceColumn) -> str:
+def _key_part(transport: Transport, column: SourceColumn, asset_class: str | None) -> str:
     """Say where one source's value of a renamed key column comes from.
 
     Args:
         transport: The source's transport.
         column: The source's contribution to the key column.
+        asset_class: The dataset's asset class (an `AssetClass` value), or `None`; it picks
+            the field's description (`Field.description_for`).
 
     Returns:
-        ``REST `sip_timestamp`: "<vendor description>"`` for a wire key with a description,
+        ``REST `sip_timestamp`: "<field description>"`` for a wire key with a description,
         ``REST `sip_timestamp`.`` for one without, or ``REST: the request's `stocksTicker`
         parameter.`` for a key filled from the request.
     """
     if column.field is None:
         return f"{transport.value}: the request's `{column.parameter}` parameter."
-    if column.field.description:
-        return f'{transport.value} `{column.field.wire_key}`: "{column.field.description}"'
+    described = column.field.description_for(asset_class)
+    if described:
+        return f'{transport.value} `{column.field.wire_key}`: "{described}"'
     return f"{transport.value} `{column.field.wire_key}`."
 
 
@@ -689,19 +692,21 @@ def _description(
     Returns:
         The description; empty when no source describes the column.
     """
+    asset_class = spec.asset_class.value if spec.asset_class is not None else None
     if not own:
         named = ", ".join(f"`{member}`" for member in suppliers)
         return f"Always null for `{spec.name}`; supplied by {named}."
     if is_key and name in _KEY_SENTENCES:
         parts = [_KEY_SENTENCES[name]]
         for transport, column in own:
-            part = _key_part(transport, column)
+            part = _key_part(transport, column, asset_class)
             if part not in parts:
                 parts.append(part)
         return " ".join(parts)
     for _, column in own:
-        if column.field is not None and column.field.description:
-            return column.field.description
+        described = column.field.description_for(asset_class) if column.field else ""
+        if described:
+            return described
     return ""
 
 
@@ -832,9 +837,12 @@ def dataset_schema(
     Each column also gets its transports and wire keys from the dataset's own sources
     (`Column.supplied_by`, `Column.wire_keys`), and one description chosen for this dataset,
     never one per kind: a kind spans asset classes, and the stock text for a price ("dollar
-    value per whole share") is wrong for crypto. Three rules choose it:
+    value per whole share") is wrong for crypto. A field's description is the one for the
+    dataset's asset class (`Field.description_for`): the per-class description a source that
+    serves several classes gives, else its own, which is the vendor's or the refresh's
+    correction of it. Three rules choose it:
 
-    1. A column the dataset's own sources supply takes the first non-empty vendor description
+    1. A column the dataset's own sources supply takes the first non-empty field description
        among them, trying the transports in the order REST, flat files, WebSocket and, within
        one transport, the sources in their declared order (role paths, then channels, then
        prefixes). REST comes first because its text is the most complete.
@@ -844,7 +852,7 @@ def dataset_schema(
     3. `Symbol`, `Timestamp`, and `Underlying`, when they are declared key columns of the
        dataset, get the library's own sentence ("The row's primary time, as an Instant."),
        followed, per source in the order of rule 1, by the wire key the source renames and
-       its quoted vendor description
+       its quoted field description
        (``REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp..."``), or, for a
        key filled from the request, the request parameter it came from (``REST: the
        request's `stocksTicker` parameter.``); a part two sources share appears once.

@@ -382,7 +382,7 @@ def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.Massive
         massive_session.forex.quotes(dm.ALL).history("2026-10-20", "2026-10-20", source=rest)
     with pytest.raises(ValueError, match=r"forex\.bars history over REST needs explicit symbols"):
         massive_session.forex.bars(dm.ALL, dm.Timespan.HOUR).history(
-            date(2026, 10, 20), datetime(2026, 10, 21, tzinfo=UTC), source=rest
+            date(2026, 10, 20), date(2026, 10, 20), source=rest
         )
 
 
@@ -542,8 +542,9 @@ def test_daily_bars_fetch_reads_the_previous_session(
     )
     table = rest_session.forex.bars("C:EURUSD", dm.Timespan.DAY).fetch()
     assert sent(fake_rest) == [("/v2/aggs/ticker/C:EURUSD/prev", {})]
+    # Stamped 23:59:59.999 UTC by `/prev`, at the start of its UTC day here.
     assert pick(table, *BAR_COLUMNS) == [
-        ("C:EURUSD", 1_651_708_799_999 * MS, 1.05252, 1.0631, 1.0505, 1.06206, 180300.0, 1.055)
+        ("C:EURUSD", 1_651_622_400_000 * MS, 1.05252, 1.0631, 1.0505, 1.06206, 180300.0, 1.055)
     ]
 
 
@@ -1016,3 +1017,15 @@ def test_a_conversion_poll_keeps_one_row(
     rows_when(table, changes({("C:AUDUSD", 73.14)}, "Converted"))
     next_cycle(poll_clock)
     rows_when(table, changes({("C:AUDUSD", 74.0)}, "Converted"))
+
+
+def test_the_current_state_datasets_revise_on_their_update_times() -> None:
+    # An explicit APPEND poll appends each new state of a pair, or each new conversion.
+    revised = {spec.name: spec.revision_keys for spec in forex.DATASETS if spec.revision_keys}
+    assert revised == {
+        "forex.snapshots": ("Updated",),
+        "forex.movers": ("Updated",),
+        "forex.conversion": ("LastTimestamp",),
+    }
+    for name, keys in revised.items():
+        assert set(keys) <= set(CATALOG.dataset_schema(CATALOG.by_name[name]).column_names)

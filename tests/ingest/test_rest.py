@@ -20,9 +20,10 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
-from deephaven_massive._datasets import symbols
+from deephaven_massive._datasets import history_source, symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import CHICAGO, TimeRange, bounds
+from deephaven_massive._datasets.dates import CHICAGO, DaySpan, TimeRange
+from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import (
@@ -47,7 +48,7 @@ from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
-from tests._fakes.rest import FakeRestServer, Reply, envelope
+from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 
 R = Transport.REST
 LOGGER = "deephaven_massive._ingest.rest"
@@ -198,6 +199,35 @@ FUTURES_BARS = DatasetSpec(
         )
     },
 )
+FOREX_RANGE_PATH = "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}"
+FOREX_GROUPED_PATH = "/v2/aggs/grouped/locale/global/market/fx/{date}"
+FOREX_BARS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="forex.bars",
+    asset_class=AssetClass.FOREX,
+    is_bars=True,
+    history_path=FOREX_RANGE_PATH,
+    grouped_daily_path=FOREX_GROUPED_PATH,
+    keys={
+        (R, FOREX_RANGE_PATH): SourceKeys(
+            KeySpec("forexTicker", from_request=True), KeySpec("WindowStart")
+        ),
+        (R, FOREX_GROUPED_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("WindowStart")),
+    },
+)
+CRYPTO_RANGE_PATH = "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}"
+CRYPTO_BARS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="crypto.bars",
+    asset_class=AssetClass.CRYPTO,
+    is_bars=True,
+    history_path=CRYPTO_RANGE_PATH,
+    keys={
+        (R, CRYPTO_RANGE_PATH): SourceKeys(
+            KeySpec("cryptoTicker", from_request=True), KeySpec("WindowStart")
+        ),
+    },
+)
 CONSTITUENTS_PATH = "/etf-global/v1/constituents"
 CONSTITUENTS = DatasetSpec(
     summary="A dataset for the tests.",
@@ -268,6 +298,8 @@ SPECS = (
     TRADES,
     BARS,
     FUTURES_BARS,
+    FOREX_BARS,
+    CRYPTO_BARS,
     CONSTITUENTS,
     NEWS,
     RATINGS,
@@ -1105,7 +1137,7 @@ def test_all_daily_bars_read_one_grouped_day_at_a_time(
     assert [(r["Symbol"], r["Close"]) for r in out] == [("AAPL", 2.0), ("MSFT", 3.0)]
 
 
-def test_futures_bars_widen_date_bounds_to_whole_sessions(
+def test_futures_bars_by_date_request_whole_sessions(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     inside = {
@@ -1126,18 +1158,18 @@ def test_futures_bars_widen_date_bounds_to_whole_sessions(
     )
     q = sent(fake_rest)[0][1]
     # From the session's regular open, Monday 17:00 Chicago, less the four-day holiday
-    # margin; to the next session's regular open, which is exact.
+    # margin, to 18:00 Chicago on the session's date; the rows are kept by session.
     opens = datetime(2025, 2, 27, 17, tzinfo=CHICAGO)
     assert q["window_start.gte"] == [str(epoch_ns(opens))]
-    assert q["window_start.lt"] == [str(epoch_ns(datetime(2025, 3, 4, 17, tzinfo=CHICAGO)))]
+    assert q["window_start.lt"] == [str(epoch_ns(datetime(2025, 3, 4, 18, tzinfo=CHICAGO)))]
     assert q["resolution"] == ["5min"]
     assert q["sort"] == ["window_start.asc"]  # oldest first, as flat files return rows
     assert [r["SessionEndDate"] for r in out] == [date(2025, 3, 4)]
 
 
-def futures_trade(moment: datetime, session: str) -> dict[str, object]:
+def futures_trade(moment: datetime, session: str, ticker: str = "ESH5") -> dict[str, object]:
     return {
-        "ticker": "ESH5",
+        "ticker": ticker,
         "timestamp": epoch_ns(moment),
         "sequence_number": 1,
         "report_sequence": 1,
@@ -1147,26 +1179,99 @@ def futures_trade(moment: datetime, session: str) -> dict[str, object]:
     }
 
 
-def test_futures_history_reaches_a_session_a_holiday_opened_early(
+def session_target(ticker: str, day: str) -> str:
+    return f"/futures/v1/trades/{ticker}?sort=timestamp.asc&session_end_date={day}"
+
+
+def test_futures_trades_by_date_read_each_session_by_its_date(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # CME traded Martin Luther King Day (Monday 2025-01-20) from Sunday 17:00 Chicago time
-    # under the trade date 2025-01-21, a day before that session's regular open.
+    # under the trade date 2025-01-21, a day before that session's regular open: asking for
+    # the session by its date reaches it without any time window.
     sunday = futures_trade(datetime(2025, 1, 19, 18, tzinfo=CHICAGO), "2025-01-21")
     tuesday = futures_trade(datetime(2025, 1, 21, 10, tzinfo=CHICAGO), "2025-01-21")
     friday = futures_trade(datetime(2025, 1, 17, 10, tzinfo=CHICAGO), "2025-01-17")
     fake_rest.reply(
-        FUTURES_TRADES_PATH.format(ticker="ESH5"), Reply(envelope([friday, sunday, tuesday]))
+        session_target("ESH5", "2025-01-21"), Reply(envelope([friday, sunday, tuesday]))
     )
     out = history(session, FUTURES_TRADES, start="2025-01-21", end="2025-01-21", symbols=["ESH5"])
-    q = sent(fake_rest)[0][1]
-    assert int(q["timestamp.gte"][0]) <= epoch_ns(datetime(2025, 1, 19, 17, tzinfo=CHICAGO))
-    assert q["timestamp.lt"] == [str(epoch_ns(datetime(2025, 1, 21, 17, tzinfo=CHICAGO)))]
-    assert q["sort"] == ["timestamp.asc"]  # `sort` lists no values: the time axis's field
+    path = FUTURES_TRADES_PATH.format(ticker="ESH5")
+    # `sort` lists no values: the time axis's field, ascending.
+    assert sent(fake_rest) == [
+        (path, {"sort": ["timestamp.asc"], "session_end_date": ["2025-01-21"]})
+    ]
+    # A row of another session is dropped.
     assert [r["Timestamp"] for r in out] == [sunday["timestamp"], tuesday["timestamp"]]
 
 
-def test_mixed_futures_bounds_keep_a_whole_session_on_the_date_side(
+def test_futures_sessions_skip_weekends_and_come_in_date_order(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Good Friday 2024: no session ended on Friday 03-29; Monday 04-01's opened on Thursday.
+    days = {"2024-03-28": 10, "2024-03-29": None, "2024-04-01": 9}
+    for ticker in ("ESH5", "NQH5"):
+        for day, hour in days.items():
+            trades = (
+                []
+                if hour is None
+                else [futures_trade(datetime(2024, 3, 28, hour, tzinfo=CHICAGO), day, ticker)]
+            )
+            fake_rest.reply(session_target(ticker, day), Reply(envelope(trades)))
+    with caplog.at_level(logging.INFO, LOGGER):
+        out = history(
+            session,
+            FUTURES_TRADES,
+            start="2024-03-28",
+            end="2024-04-01",
+            symbols=["NQH5", "ESH5"],
+        )
+    asked = sorted(q["session_end_date"][0] for _, q in sent(fake_rest))
+    assert asked == ["2024-03-28"] * 2 + ["2024-03-29"] * 2 + ["2024-04-01"] * 2
+    # Sessions in date order, and the symbols of one session in symbol order.
+    assert [(r["Symbol"], r["SessionEndDate"]) for r in out] == [
+        ("ESH5", date(2024, 3, 28)),
+        ("NQH5", date(2024, 3, 28)),
+        ("ESH5", date(2024, 4, 1)),
+        ("NQH5", date(2024, 4, 1)),
+    ]
+    assert (
+        "futures.trades history: at least 6 requests, one per session and symbol, more where a "
+        "session spans several pages; at a Basic key's 5 requests a minute that takes at least "
+        "1 minute"
+    ) in caplog.messages
+
+
+def test_a_short_session_download_is_not_announced(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A weekend holds no session, and five requests are not announced.
+    for day in ("2025-03-03", "2025-03-04", "2025-03-05", "2025-03-06", "2025-03-07"):
+        fake_rest.reply(session_target("ESH5", day), Reply(envelope([])))
+    with caplog.at_level(logging.INFO, LOGGER):
+        history(session, FUTURES_TRADES, start="2025-03-01", end="2025-03-09", symbols=["ESH5"])
+    assert len(sent(fake_rest)) == 5
+    assert "requests a minute that takes" not in caplog.text
+
+
+def test_a_session_end_date_filter_needs_datetimes(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    q = query(session, FUTURES_TRADES, symbols=["ESH5"], filters={"session_end_date": "2025-01-21"})
+    assert isinstance(q, HistoryQuery)
+    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
+        q.history("2025-01-21", "2025-01-21", source=HistorySource.REST)
+    assert sent(fake_rest) == []
+    # With datetimes, the filter and the time range travel together.
+    fake_rest.reply(FUTURES_TRADES_PATH.format(ticker="ESH5"), Reply(envelope([])))
+    start = datetime(2025, 1, 21, 8, tzinfo=CHICAGO)
+    q.history(start, start + timedelta(hours=1), source=HistorySource.REST)
+    sent_query = sent(fake_rest)[0][1]
+    assert sent_query["session_end_date"] == ["2025-01-21"]
+    assert sent_query["timestamp.gte"] == [str(epoch_ns(start))]
+
+
+def test_futures_trades_by_instants_take_the_exact_timestamp_range(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     evening = futures_trade(datetime(2024, 12, 16, 18, tzinfo=CHICAGO), "2024-12-17")
@@ -1177,27 +1282,42 @@ def test_mixed_futures_bounds_keep_a_whole_session_on_the_date_side(
         FUTURES_TRADES_PATH.format(ticker="ESH5"),
         Reply(envelope([before, evening, morning, after])),
     )
+    start = datetime(2024, 12, 16, 17, tzinfo=CHICAGO)
     end = datetime(2024, 12, 17, 16, tzinfo=CHICAGO)
-    out = history(session, FUTURES_TRADES, start="2024-12-17", end=end, symbols=["ESH5"])
+    out = history(session, FUTURES_TRADES, start=start, end=end, symbols=["ESH5"])
     q = sent(fake_rest)[0][1]
+    assert q["timestamp.gte"] == [str(epoch_ns(start))]
     assert q["timestamp.lt"] == [str(epoch_ns(end))]
-    # The evening before the date belongs to its session; the instant end is exact.
+    assert "session_end_date" not in q
     assert [r["Timestamp"] for r in out] == [evening["timestamp"], morning["timestamp"]]
 
 
-def test_keep_ignores_a_bound_whose_column_the_rows_lack() -> None:
-    sessions = bounds(FUTURES_BARS, "2025-03-04", "2025-03-04")
-    mixed = bounds(FUTURES_BARS, "2025-03-04", datetime(2025, 3, 4, 16, tzinfo=CHICAGO))
+def window_of(*, times: TimeRange | None = None, sessions: DaySpan | None = None) -> HistoryWindow:
+    span: TimeRange | DaySpan = times or sessions or DaySpan(date(2025, 1, 1), date(2025, 1, 1))
+    return HistoryWindow(span, times, sessions, times)
+
+
+def test_keep_bounds_times_and_sessions_where_the_rows_carry_them() -> None:
     late = epoch_ns(datetime(2025, 3, 4, 20, tzinfo=CHICAGO))
     times = pa.RecordBatch.from_pydict({"Timestamp": pa.array([late], pa.timestamp("ns", "UTC"))})
     days = pa.RecordBatch.from_pydict({"SessionEndDate": pa.array([date(2025, 3, 3)], pa.date32())})
     other = pa.RecordBatch.from_pydict({"Other": pa.array([1])})
-    assert rest._keep(times, sessions).num_rows == 1  # dates bound only SessionEndDate
-    assert rest._keep(times, mixed).num_rows == 0  # the instant side bounds Timestamp
-    assert rest._keep(days, mixed).num_rows == 0  # the date side bounds SessionEndDate
+    sessions = window_of(sessions=DaySpan(date(2025, 3, 4), date(2025, 3, 4)))
+    before_late = window_of(
+        times=TimeRange(datetime(2025, 3, 4, tzinfo=UTC), datetime(2025, 3, 5, 1, tzinfo=UTC))
+    )
+    assert rest._keep(times, sessions).num_rows == 1  # sessions bound only SessionEndDate
+    assert rest._keep(times, before_late).num_rows == 0  # 02:00 UTC on 03-05 is past the end
+    assert rest._keep(days, sessions).num_rows == 0
+    assert rest._keep(days, before_late).num_rows == 1  # no Timestamp to bound
     assert rest._keep(other, sessions).num_rows == 1
-    starts = bounds(FUTURES_BARS, datetime(2025, 3, 3, 18, tzinfo=CHICAGO), "2025-03-04")
-    assert rest._keep(days, starts).num_rows == 1  # no Timestamp to bound the instant side
+    assert rest._keep(times, None).num_rows == 1
+    upper = window_of(sessions=DaySpan(date(2025, 3, 1), date(2025, 3, 2)))
+    assert rest._keep(days, upper).num_rows == 0  # after the last session
+    lower = window_of(
+        times=TimeRange(datetime(2025, 3, 5, 3, tzinfo=UTC), datetime(2025, 3, 6, tzinfo=UTC))
+    )
+    assert rest._keep(times, lower).num_rows == 0  # before the first instant
 
 
 @pytest.mark.parametrize(
@@ -1244,13 +1364,13 @@ def test_a_caller_direction_folded_into_sort_is_not_overridden() -> None:
         params=(("order", Order.DESC), ("sort", "window_start")),
     )
     order = rest._ascending(FUTURES_BARS, rest_path, mine)
-    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, mine, symbols=("ESZ5",), order=order)
+    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, mine, symbols=("ESZ5",), extra=order)
     assert call.query["sort"] == "window_start.desc"
     assert "order" not in call.query
     # Without a caller direction, the ascending one is sent.
     plain = Request(symbols=("ESZ5",), timespan=Timespan.MINUTE)
     order = rest._ascending(FUTURES_BARS, rest_path, plain)
-    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, plain, symbols=("ESZ5",), order=order)
+    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, plain, symbols=("ESZ5",), extra=order)
     assert call.query["sort"] == "window_start.asc"
 
 
@@ -1270,39 +1390,6 @@ def test_ascending_prefers_the_axis_field_among_several_ascending_sorts() -> Non
     assert rest._ascending(spec, several, Request()) == {"sort": "window_start.asc"}
     other = dataclasses.replace(spec, time_axis=("other.gte", "other.lt"))
     assert rest._ascending(other, several, Request()) == {"sort": "ticker.asc"}
-
-
-def test_a_session_date_parameter_takes_an_instant_as_its_session() -> None:
-    # A futures session date compares sessions, so an instant names the session it is in,
-    # which an evening instant's Chicago calendar day would not.
-    fut = AssetClass.FUTURES
-    evening = datetime(2024, 6, 10, 20, tzinfo=UTC)  # 15:00 Chicago: the 2024-06-10 session
-    night = datetime(2024, 6, 10, 23, tzinfo=UTC)  # 18:00 Chicago: the 2024-06-11 session
-    gte = "session_end_date.gte"
-    assert rest._date_bound(fut, gte, evening, upper=False) == date(2024, 6, 10)
-    assert rest._date_bound(fut, gte, night, upper=False) == date(2024, 6, 11)
-    # The upper bound excludes its instant: the session open itself ends the previous one.
-    opens = datetime(2024, 6, 10, 17, tzinfo=CHICAGO)
-    assert rest._date_bound(fut, "session_end_date.lte", opens, upper=True) == date(2024, 6, 10)
-    assert rest._date_bound(fut, "session_end_date.lt", opens, upper=True) == date(2024, 6, 11)
-    assert rest._date_bound(fut, "session_end_date", night, upper=False) == date(2024, 6, 11)
-    # Any other date parameter takes the instant's calendar day in the day zone.
-    assert rest._date_bound(fut, "date.gte", night, upper=False) == date(2024, 6, 10)
-
-
-def test_futures_history_with_instant_bounds_filters_on_the_time_column() -> None:
-    window = bounds(
-        FUTURES_BARS, datetime(2025, 3, 4, 15, tzinfo=UTC), datetime(2025, 3, 4, 16, tzinfo=UTC)
-    )
-    batch = pa.RecordBatch.from_pydict(
-        {
-            "Timestamp": pa.array(
-                [epoch_ns(datetime(2025, 3, 4, 15, 30, tzinfo=UTC)), 0], pa.timestamp("ns", "UTC")
-            )
-        }
-    )
-    assert rest._keep(batch, window).num_rows == 1
-    assert rest._keep(batch, None).num_rows == 2
 
 
 # --- The time axis -------------------------------------------------------------------------------
@@ -1336,21 +1423,8 @@ def test_date_axes_are_whole_days_and_shift_for_exclusive_ends() -> None:
         "ex_dividend_date.gt": date(2025, 1, 9),
         "ex_dividend_date.lt": date(2025, 1, 21),
     }
-    # An instant names the calendar day it falls on in the day zone: 2025-01-10 03:00 UTC is
-    # still January 9 in New York. An upper instant is the first one excluded, so a range
-    # ending at a New York midnight ends with the day before.
-    early = datetime(2025, 1, 10, 3, tzinfo=UTC)
-    midnight = datetime(2025, 1, 20, 5, tzinfo=UTC)
-    assert axis(spec, early, midnight) == {
-        "ex_dividend_date.gt": date(2025, 1, 8),
-        "ex_dividend_date.lt": date(2025, 1, 20),
-    }
     inclusive = axis_spec("ex_dividend_date.gte", "ex_dividend_date.lte", DIVIDENDS_PATH)
-    noon = datetime(2025, 1, 20, 17, tzinfo=UTC)
-    assert axis(inclusive, early, noon) == {
-        "ex_dividend_date.gte": date(2025, 1, 9),
-        "ex_dividend_date.lte": date(2025, 1, 20),  # partly covered: included
-    }
+    assert axis(inclusive, date(2025, 1, 10), None) == {"ex_dividend_date.gte": date(2025, 1, 10)}
 
 
 def test_timestamp_axes_take_midnights_in_the_day_zone() -> None:
@@ -1596,12 +1670,6 @@ def test_a_failed_history_is_logged_and_raised(
     assert "HTTP 403" in caplog.text
 
 
-def test_sessions_are_kept_only_where_the_rows_name_them() -> None:
-    sessions = bounds(FUTURES_BARS, date(2025, 3, 4), date(2025, 3, 4))
-    batch = pa.RecordBatch.from_pydict({"Price": pa.array([1.0])})
-    assert rest._keep(batch, sessions).num_rows == 1
-
-
 def test_a_404_without_a_symbol_fails_the_call(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
@@ -1631,14 +1699,42 @@ def test_an_error_row_needs_only_its_symbol(
 
 
 def test_a_failed_call_cancels_the_calls_not_yet_started(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"{}", status=401))
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
     calls = rest.plan_calls(CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols)
-    with ThreadPoolExecutor(1) as pool, pytest.raises(dm.AuthenticationError):
+    # The other symbols are answered at once with HTTP 404 (no rows), so the one worker could
+    # run through every queued call before the read wakes up to cancel them. Each call after
+    # the failed one is held at the server until the last two calls are done, which only the
+    # read's cancellation can make happen while the worker is held.
+    queued: list[Future[object]] = []  # complete before any callback reads it
+    cancelled = threading.Event()
+
+    def settled(_: Future[object]) -> None:
+        if all(future.done() for future in queued[2:]):
+            cancelled.set()
+
+    def hold(received: Received) -> None:
+        if "BTC" not in received.target and not cancelled.wait(10):
+            cancelled.set()  # nothing cancelled the last calls: let them run, so the count fails
+
+    fake_rest.on_request(hold)
+    pool = ThreadPoolExecutor(1)
+    submit = pool.submit
+
+    def recorded(fn: Callable[[object], object], call: object, /) -> Future[object]:
+        future = submit(fn, call)
+        queued.append(future)
+        if len(queued) == len(calls):
+            for each in queued[2:]:
+                each.add_done_callback(settled)
+        return future
+
+    monkeypatch.setattr(pool, "submit", recorded)
+    with pool, pytest.raises(dm.AuthenticationError):
         reader.read(CRYPTO_LAST, path, calls, limit=None, executor=pool)
     # The one worker may take the next call before the read cancels it; the rest never start.
     assert len(sent(fake_rest)) <= 2
@@ -1772,3 +1868,212 @@ def test_a_server_verdict_replaces_the_cached_decision(
     fmv = HostDecision("business.massive.com", Recency.DELAYED, "server verdict: x")
     transport.record_verdict(AssetClass.OPTIONS, ChannelFamily.FMV, fmv)
     assert transport.resolve_host(AssetClass.OPTIONS, ChannelFamily.FMV) is fmv
+
+
+# --- Whole bar windows, open and empty ranges, and 1-day stamps --------------------------------
+
+
+def ny_ms(day: date) -> int:
+    return (
+        int(datetime(day.year, day.month, day.day, tzinfo=ZoneInfo("America/New_York")).timestamp())
+        * 1000
+    )
+
+
+def utc_ms(day: date) -> int:
+    return int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp()) * 1000
+
+
+def test_week_bars_request_the_first_whole_week_and_keep_whole_weeks(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Wednesday 03-05 to Friday 03-21 holds the weeks of 03-10 and 03-17 whole. The request
+    # starts on the Saturday before the first of them, so a bar stamped on its Sunday is
+    # returned whether Massive selects bars by stamp or builds them from `{from}`.
+    start, end = ny_ms(date(2025, 3, 8)), ny_ms(date(2025, 3, 22)) - 1
+    path = f"/v2/aggs/ticker/AAPL/range/1/week/{start}/{end}"
+    stamps = [ny_ms(date(2025, 3, d)) for d in (2, 9, 16, 23)]  # Sundays, as a week may be
+    fake_rest.reply(path, Reply(envelope([{"t": t, "c": 1.0} for t in stamps])))
+    out = history(
+        session,
+        BARS,
+        start="2025-03-05",
+        end="2025-03-21",
+        symbols=["AAPL"],
+        timespan=Timespan.WEEK,
+        adjusted=False,
+    )
+    assert [p for p, _ in sent(fake_rest)] == [path]
+    assert [r["Timestamp"] for r in out] == [stamps[1] * 10**6, stamps[2] * 10**6]
+
+
+def test_an_open_end_leaves_out_the_unfinished_month(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(history_source, "_now", lambda: datetime(2025, 6, 18, 15, tzinfo=UTC))
+    start, end = ny_ms(date(2025, 4, 1)), ny_ms(date(2025, 6, 19)) - 1
+    path = f"/v2/aggs/ticker/AAPL/range/1/month/{start}/{end}"
+    stamps = [ny_ms(date(2025, m, 1)) for m in (4, 5, 6)]
+    fake_rest.reply(path, Reply(envelope([{"t": t, "c": 1.0} for t in stamps])))
+    out = history(
+        session,
+        BARS,
+        start="2025-04-01",
+        end=None,
+        symbols=["AAPL"],
+        timespan=Timespan.MONTH,
+        adjusted=False,
+    )
+    assert [p for p, _ in sent(fake_rest)] == [path]
+    assert [r["Timestamp"] for r in out] == [stamps[0] * 10**6, stamps[1] * 10**6]
+
+
+@pytest.mark.parametrize("source", [HistorySource.REST, HistorySource.AUTO])
+def test_an_empty_range_returns_every_column_without_a_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, source: HistorySource
+) -> None:
+    moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
+    q = query(session, TRADES, symbols=["AAPL"])
+    assert isinstance(q, HistoryQuery)
+    table = q.history(moment, moment, source=source)
+    assert table.size == 0
+    assert "Timestamp" in table.column_names
+    # So is a range too short to hold one whole bar.
+    bars = query(session, BARS, symbols=["AAPL"], timespan=Timespan.MONTH, adjusted=False)
+    assert isinstance(bars, HistoryQuery)
+    assert bars.history("2025-03-05", "2025-03-20", source=source).size == 0
+    assert sent(fake_rest) == []
+
+
+def test_a_long_grouped_daily_download_is_announced(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    for day in range(3, 18):
+        fake_rest.reply(GROUPED_PATH.format(date=f"2025-03-{day:02d}"), Reply(envelope([])))
+    with caplog.at_level(logging.INFO, LOGGER):
+        history(
+            session,
+            BARS,
+            start="2025-03-03",
+            end="2025-03-17",
+            symbols=dm.ALL,
+            timespan=Timespan.DAY,
+            adjusted=True,
+        )
+    # Stocks have no grouped day on a Saturday or Sunday: 11 weekdays, not 15 days.
+    days = sorted(path.rsplit("/", 1)[1] for path, _ in sent(fake_rest))
+    assert len(days) == 11
+    assert all(date.fromisoformat(day).weekday() < 5 for day in days)
+    assert (
+        "stocks.bars history: 11 requests, one per day; at a Basic key's 5 requests a minute "
+        "that takes about 2 minutes"
+    ) in caplog.text
+
+
+def test_forex_day_bars_are_stamped_at_the_utc_days_start(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Any stamp of a forex 1-day bar moves to 00:00 UTC of its day, unchecked.
+    march_3, march_4 = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 4))
+    path = f"/v2/aggs/ticker/C:EURUSD/range/1/day/{march_3}/{utc_ms(date(2025, 3, 5)) - 1}"
+    bars = [{"t": march_3, "c": 1.0}, {"t": march_4 + 86_400_000 - 1, "c": 2.0}]
+    fake_rest.reply(path.replace(":", "%3A"), Reply(envelope(bars)))
+    out = history(
+        session,
+        FOREX_BARS,
+        start="2025-03-03",
+        end="2025-03-04",
+        symbols=["C:EURUSD"],
+        timespan=Timespan.DAY,
+        adjusted=True,
+    )
+    assert [(r["Timestamp"], r["Close"]) for r in out] == [
+        (march_3 * 10**6, 1.0),
+        (march_4 * 10**6, 2.0),
+    ]
+    # The grouped day of every pair, stamped anywhere in its day.
+    grouped = FOREX_GROUPED_PATH.format(date="2025-03-03")
+    new_york = ny_ms(date(2025, 3, 3))
+    fake_rest.reply(grouped, Reply(envelope([{"T": "C:EURUSD", "t": new_york, "c": 3.0}])))
+    every = history(
+        session,
+        FOREX_BARS,
+        start="2025-03-03",
+        end="2025-03-03",
+        symbols=dm.ALL,
+        timespan=Timespan.DAY,
+        adjusted=True,
+    )
+    assert [(r["Symbol"], r["Timestamp"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
+
+
+def test_a_history_by_instants_is_not_announced_however_many_symbols(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Only one-request-per-day downloads are announced; six symbols of one day are not.
+    tickers = ["A", "B", "C", "D", "E", "F"]
+    for ticker in tickers:
+        fake_rest.reply(TRADES_PATH.format(stockTicker=ticker), Reply(envelope([])))
+    with caplog.at_level(logging.INFO, LOGGER):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=tickers)
+    assert len(sent(fake_rest)) == 6
+    assert "requests a minute that takes" not in caplog.text
+
+
+def crypto_bars(
+    m: dm.MassiveSession, timespan: Timespan, *, multiplier: int, start: str, end: str
+) -> list[dict[str, Any]]:
+    return history(
+        m,
+        CRYPTO_BARS,
+        start=start,
+        end=end,
+        symbols=["X:BTCUSD"],
+        timespan=timespan,
+        multiplier=multiplier,
+    )
+
+
+def test_longer_crypto_bars_must_start_at_utc_midnight(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Two-day bars stamped at midnight New York time would hold hours of the next day.
+    start, end = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 7)) - 1
+    two_days = f"/v2/aggs/ticker/X:BTCUSD/range/2/day/{start}/{end}".replace(":", "%3A")
+    new_york = ny_ms(date(2025, 3, 3))
+    fake_rest.reply(two_days, Reply(envelope([{"t": new_york, "c": 1.0}])))
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^crypto\.bars: a bar from /v2/aggs/ticker/\{cryptoTicker\}/range/.* is stamped "
+        r"2025-03-03T05:00:00\+00:00, which is not a UTC day boundary.*source=dm\.HistorySource"
+        r"\.FLAT_FILES",
+    ):
+        crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
+    # A week bar at 00:00 UTC Monday is kept as stamped.
+    monday, after = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 10))
+    week = f"/v2/aggs/ticker/X:BTCUSD/range/1/week/{monday}/{after - 1}".replace(":", "%3A")
+    fake_rest.reply(week, Reply(envelope([{"t": monday, "c": 2.0}])))
+    out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
+    assert [(r["Timestamp"], r["Close"]) for r in out] == [(monday * 10**6, 2.0)]
+
+
+def test_forex_grouped_daily_keeps_its_weekend_days(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Forex trades from Sunday evening UTC, so its grouped days include the weekend.
+    for day in ("2025-03-07", "2025-03-08", "2025-03-09"):
+        fake_rest.reply(FOREX_GROUPED_PATH.format(date=day), Reply(envelope([])))
+    history(
+        session,
+        FOREX_BARS,
+        start="2025-03-07",
+        end="2025-03-09",
+        symbols=dm.ALL,
+        timespan=Timespan.DAY,
+        adjusted=True,
+    )
+    assert sorted(path.rsplit("/", 1)[1] for path, _ in sent(fake_rest)) == [
+        "2025-03-07",
+        "2025-03-08",
+        "2025-03-09",
+    ]

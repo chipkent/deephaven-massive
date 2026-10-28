@@ -275,8 +275,14 @@ class Field:
             convert fails like any other bad value either way.
         description: What the vendor says the field means, as plain text: its documented
             description with every link written `text (url)` and every run of whitespace
-            collapsed to one space. `""`, the default, when the vendor gives none. It is
+            collapsed to one space, or the refresh's correction where the vendor's text is
+            clearly wrong for the source. `""`, the default, when the vendor gives none. It is
             documentation only: no name, type, or check is derived from it.
+        class_descriptions: For a source that serves several asset classes (the unified
+            snapshot), the description a dataset of one asset class shows in place of
+            `description`, as `(asset class, description)` pairs sorted by asset class, each
+            asset class an `AssetClass` value such as `"options"`. Empty, the default, for
+            nearly every field. Read it through `description_for`.
 
     Example:
         ::
@@ -295,6 +301,20 @@ class Field:
     required: bool = False
     conversion: Conversion | None = None
     description: str = ""
+    class_descriptions: tuple[tuple[str, str], ...] = ()
+
+    def description_for(self, asset_class: str | None) -> str:
+        """Return what the field means for a dataset of one asset class.
+
+        Args:
+            asset_class: The dataset's asset class, as an `AssetClass` value such as
+                `"options"`, or `None` for a dataset that spans classes.
+
+        Returns:
+            The class's own description when `class_descriptions` gives one, else
+            `description`.
+        """
+        return dict(self.class_descriptions).get(asset_class or "", self.description)
 
     def __post_init__(self) -> None:
         """Check that the unit is set exactly for an epoch, and that a conversion fits.

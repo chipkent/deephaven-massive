@@ -196,7 +196,7 @@ def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) 
         DIVIDENDS,
         symbols=["MSFT", "AAPL"],
         start="2025-01-01",
-        end=datetime(2025, 6, 30, tzinfo=UTC),
+        end="2025-06-30",
         params={"sort": "ex_dividend_date", "limit": None, "tickers": ["B", "A"]},
         filters={"frequency_lte": 12, "frequency": 4, "distribution_type": "recurring"},
     )
@@ -204,7 +204,7 @@ def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) 
     request = q._request
     assert request.symbols == ("AAPL", "MSFT")
     assert request.start == date(2025, 1, 1)
-    assert request.end == datetime(2025, 6, 30, tzinfo=UTC)
+    assert request.end == date(2025, 6, 30)
     assert request.params == (("sort", "ex_dividend_date"), ("tickers", ("B", "A")))
     assert request.filters == (
         ("distribution_type", "recurring"),
@@ -341,23 +341,52 @@ def test_namespaces_repr_as_their_path(massive_session: dm.MassiveSession) -> No
         assert repr(namespace) == f"<{label} {path}>"
 
 
+NEWS = DatasetSpec(
+    name="reference.news",
+    summary="A dataset for the tests.",
+    fetch_path="/v2/reference/news",
+    keys={(Transport.REST, "/v2/reference/news"): SourceKeys()},
+    time_axis=("published_utc.gte", "published_utc.lt"),
+)
+
+
 def test_a_time_axis_must_not_end_before_it_starts(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match="must be before end"):
+    with pytest.raises(ValueError, match=r"^start \(.*\) must not be after end"):
         build(massive_session, DIVIDENDS, start="2025-02-01", end="2025-01-01")
-    with pytest.raises(ValueError, match="must be before end"):
+    with pytest.raises(ValueError, match="must not be after end"):
         build(
             massive_session,
-            DIVIDENDS,
+            NEWS,
             start=datetime(2025, 1, 2, 10, tzinfo=UTC),
             end=datetime(2025, 1, 2, 9, tzinfo=UTC),
         )
-    with pytest.raises(ValueError, match="must be before end"):
-        build(massive_session, DIVIDENDS, start="2025-01-03", end=datetime(2025, 1, 2, tzinfo=UTC))
-    # One whole day, an open-ended axis, and a datetime within the end day are all valid.
+    # One whole day, an open-ended axis, and two equal instants (no rows) are all valid.
     assert build(massive_session, DIVIDENDS, start="2025-01-02", end="2025-01-02")._request.end
     assert build(massive_session, DIVIDENDS, start="2025-01-02")._request.end is None
-    same_day = datetime(2025, 1, 2, 9, tzinfo=UTC)
-    assert build(massive_session, DIVIDENDS, start="2025-01-02", end=same_day)._request.start
+    moment = datetime(2025, 1, 2, 9, tzinfo=UTC)
+    assert build(massive_session, NEWS, start=moment, end=moment)._request.start == moment
+
+
+def test_a_time_axis_refuses_mixed_bounds(massive_session: dm.MassiveSession) -> None:
+    with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
+        build(massive_session, NEWS, start="2025-01-02", end=datetime(2025, 1, 2, 9, tzinfo=UTC))
+    with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
+        build(massive_session, NEWS, start=datetime(2025, 1, 2, 9, tzinfo=UTC), end="2025-01-03")
+
+
+def test_a_calendar_date_axis_takes_dates_only(massive_session: dm.MassiveSession) -> None:
+    moment = datetime(2025, 1, 2, 9, tzinfo=UTC)
+    message = r"^stocks\.dividends: ex_dividend_date is a calendar date; pass dates$"
+    with pytest.raises(ValueError, match=message):
+        build(massive_session, DIVIDENDS, start=moment)
+    with pytest.raises(ValueError, match=message):
+        build(massive_session, DIVIDENDS, end=moment)
+    with pytest.raises(ValueError, match=message):
+        build(massive_session, DIVIDENDS, start=moment, end=moment)
+    # An instant axis takes either kind, and so does a dataset without a declared axis.
+    assert build(massive_session, INDICATOR, start=moment)._request.start == moment
+    assert build(massive_session, NEWS, start=moment)._request.start == moment
+    assert build(massive_session, NEWS, start="2025-01-02")._request.start == date(2025, 1, 2)
 
 
 def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:

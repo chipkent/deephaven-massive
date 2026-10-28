@@ -234,10 +234,12 @@ def test_ticker_details_and_events_queries(massive_session: dm.MassiveSession) -
     details = ref.ticker_details("AAPL", date=date(2024, 1, 2))
     assert details._spec is reference.TICKER_DETAILS
     assert details._request == Request(symbols=("AAPL",), params=(("date", date(2024, 1, 2)),))
-    # An aware datetime names its New York day: 02:00 UTC on Jan 3 is still Jan 2 there.
+    # The day is a calendar date, so an aware datetime is refused.
     early = datetime(2025, 1, 3, 2, tzinfo=UTC)
-    assert ref.ticker_details("AAPL", date=early)._request.params == (("date", date(2025, 1, 2)),)
-    assert dict(ref.tickers(date=early)._request.params)["date"] == date(2025, 1, 2)
+    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+        ref.ticker_details("AAPL", date=early)
+    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+        ref.tickers(date=early)
     assert ref.ticker_details(["O:SPY251219C00600000"])._request == Request(
         symbols=("O:SPY251219C00600000",)
     )
@@ -270,7 +272,7 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
     query = ref.news(
         symbols="AAPL",
-        start=date(2025, 6, 1),
+        start=datetime(2025, 6, 1, tzinfo=UTC),
         end=datetime(2025, 6, 2, 12, tzinfo=UTC),
         sort="published_utc",
         order=dm.Order.ASC,
@@ -279,7 +281,7 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
     assert query._spec is reference.NEWS
     assert query._request == Request(
         symbols=("AAPL",),
-        start=date(2025, 6, 1),
+        start=datetime(2025, 6, 1, tzinfo=UTC),
         end=datetime(2025, 6, 2, 12, tzinfo=UTC),
         params=(("order", dm.Order.ASC), ("sort", "published_utc")),
         limit=50,
@@ -778,6 +780,8 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
 ) -> None:
     # No poll key: the table is the latest status, never one row per `ServerTime`.
     assert reference.MARKET_STATUS.poll_keys == ()
+    # An explicit APPEND poll appends one row per new server time instead.
+    assert reference.MARKET_STATUS.revision_keys == ("ServerTime",)
     clock = FakeClock(manual=True)
     pollers = Pollers(massive_session._core.label)
     table = open_poll(
@@ -797,3 +801,14 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
     clock.advance(60)
     _until(lambda: [r["Market"] for r in dh_to_pylist(table)] == ["closed"])
     massive_session.release(table)
+
+
+def test_the_current_state_datasets_revise_on_their_update_times() -> None:
+    # An explicit APPEND poll appends each new state of a ticker, or each new market status.
+    revised = {spec.name: spec.revision_keys for spec in reference.DATASETS if spec.revision_keys}
+    assert revised == {
+        "reference.market_status": ("ServerTime",),
+        "reference.snapshots": ("LastUpdated", "LastQuoteLastUpdated", "LastTradeLastUpdated"),
+    }
+    for name, keys in revised.items():
+        assert set(keys) <= set(CATALOG.dataset_schema(CATALOG.by_name[name]).column_names)

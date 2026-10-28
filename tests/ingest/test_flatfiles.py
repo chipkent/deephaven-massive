@@ -28,7 +28,8 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import CHICAGO, FuturesSessions, TimeRange, bounds
+from deephaven_massive._datasets.dates import CHICAGO, DaySpan
+from deephaven_massive._datasets.history_source import HistoryWindow, history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan
@@ -477,7 +478,7 @@ def synthetic_catalog() -> Catalog:
 
 
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
-    window = bounds(SYNTHETIC, "2025-03-03", "2025-03-03")
+    window = whole_days(SYNTHETIC, "2025-03-03")
     transform = flatfiles._Transform.build(
         synthetic_catalog(),
         SYNTHETIC,
@@ -962,11 +963,9 @@ def test_crypto_trades_every_day(
 
 class RestRecorder:
     def __init__(self) -> None:
-        self.calls: list[tuple[DatasetSpec, Request, TimeRange | FuturesSessions]] = []
+        self.calls: list[tuple[DatasetSpec, Request, HistoryWindow]] = []
 
-    def history(
-        self, spec: DatasetSpec, request: Request, window: TimeRange | FuturesSessions
-    ) -> Table:
+    def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
         self.calls.append((spec, request, window))
         # A table in the dataset's schema, as the REST transport returns.
         return dh_arrow.to_table(schema_of(spec).to_arrow([{"Symbol": "from REST"}]))
@@ -989,7 +988,7 @@ def test_auto_delegates_few_symbols_to_rest(
     assert spec is STOCK_TRADES
     assert req.symbols == ("AAPL", "MSFT")
     assert (req.start, req.end) == (date(2025, 3, 3), date(2025, 3, 4))
-    assert window == bounds(STOCK_TRADES, "2025-03-03", "2025-03-04")
+    assert window.span == DaySpan(date(2025, 3, 3), date(2025, 3, 4))
     assert caplog.messages == [
         "stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)"
     ]
@@ -1117,32 +1116,7 @@ def test_futures_instants_on_a_holiday_read_the_next_session(
     assert "for the hours a holiday moved into it" in caplog.text
 
 
-def test_a_date_start_reads_its_session_when_the_end_is_before_its_regular_open(
-    *,
-    session: dm.MassiveSession,
-    fake_s3: FakeS3,
-    clock: Callable[[datetime], None],
-    make_csv_gz: Callable[[str], bytes],
-) -> None:
-    # The 2025-01-21 session opened on Sunday for Martin Luther King Day, so a range from that
-    # session to Monday noon holds its Sunday and Monday rows.
-    clock(datetime(2025, 2, 10, tzinfo=UTC))
-    sunday = epoch_ns(datetime(2025, 1, 19, 18, tzinfo=CHICAGO))
-    tuesday = epoch_ns(datetime(2025, 1, 21, 9, tzinfo=CHICAGO))
-    rows = "".join(f",1.0,1,1,1,1,2025-01-21,ESH5,{m}\n" for m in (sunday, tuesday))
-    key = FUTURES_KEY.format("cme", date(2025, 1, 21))
-    fake_s3.put(key, make_csv_gz(FUTURES_HEADER + rows))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
-    t = q.history(
-        "2025-01-21",
-        datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
-        source=HistorySource.FLAT_FILES,
-    )
-    assert pick(t, "Timestamp") == [(sunday,)]
-    assert fake_s3.keys() == [key]
-
-
-def test_a_roll_forward_gives_up_after_the_holiday_margin(
+def test_a_roll_forward_gives_up_loudly_after_a_week(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
@@ -1150,16 +1124,66 @@ def test_a_roll_forward_gives_up_after_the_holiday_margin(
 ) -> None:
     clock(datetime(2025, 2, 10, tzinfo=UTC))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
-    t = q.history(
-        datetime(2025, 1, 17, 18, tzinfo=CHICAGO),  # the weekend sessions are missing too
-        datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
-        source=HistorySource.FLAT_FILES,
-    )
-    assert t.size == 0
+    with pytest.raises(
+        dm.MassiveError,
+        # The message names the run's first missing weekday, Monday 01-20.
+        match=r"2025-01-20\.csv\.gz does not exist and no session file follows within 7 days",
+    ):
+        q.history(
+            datetime(2025, 1, 17, 18, tzinfo=CHICAGO),  # the weekend sessions are missing too
+            datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
+            source=HistorySource.FLAT_FILES,
+        )
     # The trailing run of missing files starts on 01-18, so the roll tries the days after
-    # the range up to four days past it, and gives up.
-    days = [date(2025, 1, 18) + timedelta(days=n) for n in range(5)]
+    # the range up to a week past that day, and no further.
+    days = [date(2025, 1, 18) + timedelta(days=n) for n in range(8)]
     assert sorted(fake_s3.keys()) == [FUTURES_KEY.format("cme", day) for day in days]
+    assert timedelta(days=7) == flatfiles.ROLL_LIMIT
+
+
+def test_a_roll_forward_to_an_unpublished_session_raises(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+) -> None:
+    # Good Friday 2024, asked for on Easter Monday morning: the files of 03-29 and 03-30 count
+    # as published (and do not exist), but the next session's are not out yet.
+    clock(datetime(2024, 4, 1, 12, tzinfo=UTC))
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"the range's last hours may lie in the next session's file, "
+        r"us_futures_cme/trades_v1/2024/03/2024-03-31\.csv\.gz, which is not yet published",
+    ):
+        q.history(
+            datetime(2024, 3, 29, 8, tzinfo=CHICAGO),
+            datetime(2024, 3, 30, tzinfo=CHICAGO),
+            source=HistorySource.FLAT_FILES,
+        )
+    # No request is made for a file that cannot exist yet.
+    assert sorted(fake_s3.keys()) == [FUTURES_KEY.format("cme", date(2024, 3, d)) for d in (29, 30)]
+
+
+def test_a_roll_forward_to_a_late_session_raises(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+) -> None:
+    # Martin Luther King Day: the 01-21 file is past its publication time but within a day
+    # of it, so its absence may only mean it is late.
+    clock(datetime(2025, 1, 22, 18, tzinfo=UTC))
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"2025-01-21\.csv\.gz, does not exist either: 2025-01-21 is not yet published",
+    ):
+        q.history(
+            datetime(2025, 1, 20, 8, tzinfo=CHICAGO),
+            datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
+            source=HistorySource.FLAT_FILES,
+        )
 
 
 def test_a_holiday_before_a_weekend_end_rolls_forward(
@@ -1225,25 +1249,17 @@ def test_futures_dates_do_not_roll_forward(
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
 
-def test_mixed_futures_bounds_filter_the_instant_side(
-    *,
-    session: dm.MassiveSession,
-    fake_s3: FakeS3,
-    clock: Callable[[datetime], None],
-    make_csv_gz: Callable[[str], bytes],
+def test_mixed_futures_bounds_are_refused_before_any_read(
+    *, session: dm.MassiveSession, fake_s3: FakeS3
 ) -> None:
-    clock(datetime(2025, 1, 10, tzinfo=UTC))
-    evening = epoch_ns(datetime(2024, 12, 16, 18, tzinfo=CHICAGO))
-    after = epoch_ns(datetime(2024, 12, 17, 16, 30, tzinfo=CHICAGO))
-    rows = "".join(f",1.0,1,1,1,1,2024-12-17,ESH5,{m}\n" for m in (evening, after))
-    key = FUTURES_KEY.format("cme", date(2024, 12, 17))
-    fake_s3.put(key, make_csv_gz(FUTURES_HEADER + rows))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
-    t = q.history(
-        "2024-12-17", datetime(2024, 12, 17, 16, tzinfo=CHICAGO), source=HistorySource.FLAT_FILES
-    )
-    assert pick(t, "Timestamp") == [(evening,)]
-    assert fake_s3.keys() == [key]
+    with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
+        q.history(
+            "2024-12-17",
+            datetime(2024, 12, 17, 16, tzinfo=CHICAGO),
+            source=HistorySource.FLAT_FILES,
+        )
+    assert fake_s3.requests == []
 
 
 def test_futures_session_keys_are_checked(
@@ -1553,7 +1569,7 @@ def test_a_cancelled_or_closed_read_makes_no_request(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     transport = session._core.flat_file_transport()
     assert isinstance(transport, flatfiles.FlatFileHistory)
-    window = bounds(STOCK_TRADES, "2025-03-03", "2025-03-03")
+    window = whole_days(STOCK_TRADES, "2025-03-03")
     transform = flatfiles._Transform.build(
         CATALOG,
         STOCK_TRADES,
@@ -1587,12 +1603,18 @@ def test_a_failure_stops_the_reads_in_progress(
     # so the failure always lands while that read is in progress. The March 3 read then pauses
     # until the pool is shut down, which happens only once the failure has set the cancel event.
     first_block = threading.Event()
+    gate: list[bool] = []  # written once, by the thread answering March 4, before it fails
 
-    def pause(_key: str) -> None:
-        first_block.set()
-        pool.shut.wait(TIMEOUT)
+    def pause(key: str) -> None:
+        if key == TRADES_0303:
+            first_block.set()
+            pool.shut.wait(TIMEOUT)
 
-    fake_s3.before_answer = lambda key: first_block.wait(TIMEOUT) if key == TRADES_0304 else None
+    def hold(key: str) -> None:
+        if key == TRADES_0304 and not gate:
+            gate.append(first_block.wait(TIMEOUT))
+
+    fake_s3.before_answer = hold
     applied.hook = pause
     m = dm.MassiveSession(config(max_concurrency=2))
     try:
@@ -1601,8 +1623,9 @@ def test_a_failure_stops_the_reads_in_progress(
             query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04")
     finally:
         m.close()
+    assert gate == [True]  # the March 4 failure waited for the March 3 read's first block
     assert blocks > 10
-    assert applied.counts[TRADES_0303] == 1
+    assert applied.counts.get(TRADES_0303) == 1
 
 
 def test_an_interrupt_stops_every_read(
@@ -2154,3 +2177,40 @@ def test_an_empty_file_is_a_massive_error(*, session: dm.MassiveSession, fake_s3
     assert str(info.value) == (
         f"cannot read {LOCATION.format(TRADES_0303)}: the file is empty: no header line"
     )
+
+
+def whole_days(spec: DatasetSpec, day: str) -> HistoryWindow:
+    return history_window(spec, Request(), start=day, end=day, now=NOW)
+
+
+def test_minute_bar_files_keep_only_whole_bars_of_an_instant_range(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # 14:30:30 to 14:32:30 UTC holds only the 14:31 bar whole.
+    header = "ticker,volume,open,close,high,low,window_start,transactions\n"
+    minutes = [epoch_ns(datetime(2025, 3, 3, 14, m, tzinfo=UTC)) for m in (30, 31, 32)]
+    body = "".join(f"AAPL,1,1.0,1.0,1.0,1.0,{m},1\n" for m in minutes)
+    key = "us_stocks_sip/minute_aggs_v1/2025/03/2025-03-03.csv.gz"
+    fake_s3.put(key, make_csv_gz(header + body))
+    q = query(session, STOCK_BARS, symbols=dm.ALL, timespan=Timespan.MINUTE, adjusted=False)
+    t = q.history(
+        datetime(2025, 3, 3, 14, 30, 30, tzinfo=UTC),
+        datetime(2025, 3, 3, 14, 32, 30, tzinfo=UTC),
+        source=HistorySource.FLAT_FILES,
+    )
+    assert pick(t, "Timestamp") == [(minutes[1],)]
+
+
+def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
+    *, session: dm.MassiveSession, fake_s3: FakeS3
+) -> None:
+    q = query(
+        session,
+        FUTURES_TRADES,
+        symbols=dm.ALL,
+        venue=FuturesVenue.CME,
+        filters={"session_end_date": "2025-01-21"},
+    )
+    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
+        q.history("2025-01-21", "2025-01-21", source=HistorySource.FLAT_FILES)
+    assert fake_s3.requests == []

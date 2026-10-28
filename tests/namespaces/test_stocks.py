@@ -319,10 +319,27 @@ def test_share_float_keeps_its_effective_date_as_a_column() -> None:
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
-def test_poll_appends_for_ipos_and_filings_and_replaces_taxonomies_and_the_rest(name: str) -> None:
-    appends = name == "ipos" or (name.startswith("filings.") and "taxonomy" not in name)
-    expected = dm.PollMode.APPEND if appends else dm.PollMode.REPLACE
+def test_poll_appends_filings_upserts_ipos_and_replaces_taxonomies_and_the_rest(
+    name: str,
+) -> None:
+    expected = dm.PollMode.REPLACE
+    if name == "ipos":
+        expected = dm.PollMode.UPSERT  # an offering's record is revised in place
+    elif name.startswith("filings.") and "taxonomy" not in name:
+        expected = dm.PollMode.APPEND
     assert spec_of(name).poll_mode is expected
+
+
+def test_ipos_are_upserted_by_symbol() -> None:
+    assert spec_of("ipos").poll_keys == ("Symbol",)
+
+
+@pytest.mark.parametrize("name", ALL_NAMES)
+def test_only_the_current_state_datasets_declare_a_revision(name: str) -> None:
+    # An explicit APPEND poll of a snapshot appends each new update of a symbol.
+    revision = ("Updated",) if name in {"snapshots", "movers"} else ()
+    assert spec_of(name).revision_keys == revision
+    assert set(revision) <= set(columns(name))
 
 
 CATEGORIES = ("PrimaryCategory", "SecondaryCategory", "TertiaryCategory")
@@ -467,8 +484,6 @@ def test_movers_take_a_direction(massive_session: dm.MassiveSession) -> None:
     [
         ("2025-06-06", date(2025, 6, 6)),
         (date(2025, 6, 6), date(2025, 6, 6)),
-        # 01:00 UTC on June 7 is still June 6 in New York.
-        (datetime(2025, 6, 7, 1, tzinfo=UTC), date(2025, 6, 6)),
     ],
 )
 def test_daily_open_close_names_a_new_york_day(
@@ -487,6 +502,8 @@ def test_daily_open_close_rejects_all_and_bad_days(massive_session: dm.MassiveSe
         open_close(dm.ALL, "2025-06-06")
     with pytest.raises(ValueError, match="needs a timezone"):
         open_close("AAPL", datetime(2025, 6, 6, 9, 30))  # noqa: DTZ001 - a naive time on purpose
+    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+        open_close("AAPL", datetime(2025, 6, 7, 1, tzinfo=UTC))
     with pytest.raises(TypeError, match="date must be a str, date, or datetime"):
         open_close("AAPL", cast("Any", 20250606))
     with pytest.raises(TypeError, match="adjusted must be a bool"):
@@ -527,7 +544,7 @@ def test_start_and_end_bound_the_date_axis(
     make = factory(massive_session, name)
     query = make(start="2024-01-01", end=date(2024, 3, 31))
     assert (query._request.start, query._request.end) == (date(2024, 1, 1), date(2024, 3, 31))
-    with pytest.raises(ValueError, match="before"):
+    with pytest.raises(ValueError, match="must not be after end"):
         make(start="2024-03-31", end="2024-01-01")
     with pytest.raises(ValueError, match="through start= and end="):
         make(filters={f"{axis[0]}_gte": "2024-01-01"})
@@ -1462,6 +1479,50 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
     for index in range(len(spec.poll_keys)):
         fewer = {key[:index] + key[index + 1 :] for key in keyed}
         assert len(fewer) < len(rows), spec.poll_keys[index]
+
+
+NULLABLE_KEYS = {
+    "filings.institutional_holdings": {"PutCall", "OtherManagers"},
+    "filings.insider_holdings": {"NatureOfOwnership", "ExercisePrice", "ExerciseDate"},
+    "filings.insider_transactions": {
+        "NatureOfOwnership",
+        "ExercisePrice",
+        "ExpirationDate",
+        "TransactionDate",
+        "TransactionCode",
+        "TransactionShares",
+        "TransactionPricePerShare",
+    },
+}
+
+
+@pytest.mark.parametrize("name", ALL_NAMES)
+def test_only_the_ownership_filings_have_nullable_poll_keys(name: str) -> None:
+    nullable = spec_of(name).nullable_poll_keys
+    assert set(nullable) == NULLABLE_KEYS.get(name, set())
+    assert all(nullable.values())  # each with its reason
+
+
+@pytest.mark.parametrize("mode", list(dm.PollMode))
+@pytest.mark.parametrize("name", list(NULLABLE_KEYS))
+def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+    mode: dm.PollMode,
+) -> None:
+    # The real fixtures leave nullable key columns empty: a null there is a value, so the
+    # first cycle publishes every row instead of failing the table.
+    template = cast("str", spec_of(name).fetch_path)
+    body = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))
+    fake_rest.reply(template, Reply(body=body))
+    table = cast("Query", factory(rest_session, name)()).poll(60, mode=mode)
+    rows = _rows_when(table, len(body["results"]))
+    assert not table.j_table.isFailed()
+    assert any(row[column] is None for row in rows for column in NULLABLE_KEYS[name])
+    rest_session.release(table)
 
 
 # --- Filings without a ticker --------------------------------------------------------------------

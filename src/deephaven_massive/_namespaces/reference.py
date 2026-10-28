@@ -134,8 +134,10 @@ MARKET_STATUS: Final = DatasetSpec(
     summary="Whether the markets are open now, by exchange, currency market, and index group.",
     fetch_path="/v1/marketstatus/now",
     # One row and no key: a `poll()` table keeps the latest status, never a row per
-    # `ServerTime`, which changes on every call.
+    # `ServerTime`, which changes on every call. An explicit APPEND poll appends one row per
+    # new `ServerTime`, a history of the status.
     poll_keys=(),
+    revision_keys=("ServerTime",),
 )
 MARKET_HOLIDAYS: Final = DatasetSpec(
     name="reference.market_holidays",
@@ -151,6 +153,9 @@ SNAPSHOTS: Final = DatasetSpec(
     symbol_param="ticker.any_of",
     page_size=250,
     symbols_per_request=250,
+    # The update times that cover every asset class: an index's own, and a ticker's last quote
+    # and trade. An explicit APPEND poll appends each new state of a ticker.
+    revision_keys=("LastUpdated", "LastQuoteLastUpdated", "LastTradeLastUpdated"),
 )
 """The unified snapshot, served by `MassiveSession.snapshots()`; at most 250 tickers a page."""
 
@@ -310,8 +315,8 @@ class _Reference(Namespace):
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
-            date: The day the listing is as of: a `date`, ISO-8601 text, or an aware
-                `datetime`, read as its New York day; None for today.
+            date: The day the listing is as of: a `date` or ISO-8601 date text (a `datetime`
+                raises `ValueError`: it is a calendar date); None for today.
             active: True lists tickers traded on `date`; False lists delisted ones.
             search: Text matched against the ticker and the company name; None for no search.
             sort: The field to sort by, such as `"ticker"`; None for the endpoint's default.
@@ -327,7 +332,7 @@ class _Reference(Namespace):
         Raises:
             TypeError: If `active` is not a `bool`.
 
-        `dm.ALL`, an invalid symbol, a naive `datetime`, or an unknown filter raises
+        `dm.ALL`, an invalid symbol, a `datetime` as `date`, or an unknown filter raises
         `ValueError`; another argument of the wrong type raises `TypeError`.
         """
         if not isinstance(active, bool):
@@ -370,14 +375,13 @@ class _Reference(Namespace):
         Args:
             symbols: The tickers, of any asset classes, or a Deephaven table with a `Symbol`
                 column.
-            date: The day the details are as of: a `date`, ISO-8601 text, or an aware
-                `datetime`, read as its New York day; None for the
-                latest.
+            date: The day the details are as of: a `date` or ISO-8601 date text (a
+                `datetime` raises `ValueError`: it is a calendar date); None for the latest.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or a naive `datetime` raises `ValueError`; an argument of
+        `dm.ALL`, an invalid symbol, or a `datetime` as `date` raises `ValueError`; an argument of
         the wrong type raises `TypeError`.
         """
         query = build_query(
@@ -504,8 +508,9 @@ class _Reference(Namespace):
                 sequence; None for every article.
             start: The earliest publication: a date is its 00:00 in New York, a `datetime`
                 is used as is; None for no lower bound, which reads the whole archive.
-            end: The end of the range: a date includes that whole day, a `datetime` is
-                exclusive; None for no upper bound.
+            end: The end of the range, of the same kind as `start` (mixing a date with a
+                `datetime` raises `ValueError`): a date includes that whole day, a
+                `datetime` is exclusive; None for no upper bound.
             sort: The field to sort by (`"published_utc"`); None for the endpoint's default.
             order: The sort direction; None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The

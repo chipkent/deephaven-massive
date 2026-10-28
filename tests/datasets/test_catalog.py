@@ -308,24 +308,31 @@ def test_a_rest_symbol_can_be_optional() -> None:
     assert spec.keys_for(R, "/v3/reference/exchanges").symbol == KeySpec("Ticker", required=False)
 
 
-@pytest.mark.parametrize("mode", [PollMode.REPLACE, PollMode.UPSERT])
-def test_a_keyed_poll_cannot_key_on_an_optional_symbol(mode: PollMode) -> None:
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_no_poll_keys_on_an_optional_symbol(mode: PollMode) -> None:
+    # A row without its symbol would have a null poll key, which fails the table in every mode.
     optional = SourceKeys(symbol=KeySpec("Ticker", required=False))
-    with pytest.raises(ValueError, match=r"a keyed poll\(\) cannot key on Symbol"):
+    with pytest.raises(ValueError, match=r"poll_keys cannot hold Symbol when the symbol is"):
         change(
             EXCHANGES,
             keys={(R, "/v3/reference/exchanges"): optional},
             poll_mode=mode,
             poll_keys=("Symbol", "Id"),
         )
-    # Other keys, or an APPEND poll that keys on nothing, are fine.
+    # Other keys are fine.
     change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): optional}, poll_mode=mode)
-    change(
-        EXCHANGES,
-        keys={(R, "/v3/reference/exchanges"): optional},
-        poll_mode=PollMode.APPEND,
-        poll_keys=("Symbol",),
-    )
+
+
+def test_an_append_identity_is_never_empty_and_revisions_never_repeat_poll_keys() -> None:
+    with pytest.raises(ValueError, match=r"reference.exchanges: an APPEND dataset needs poll_keys"):
+        change(EXCHANGES, poll_keys=(), revision_keys=("Name",), poll_mode=PollMode.APPEND)
+    with pytest.raises(ValueError, match=r"an explicit APPEND poll\(\) needs a row identity"):
+        change(EXCHANGES, poll_keys=())
+    # A one-row dataset keys on nothing, and appends by its revision.
+    assert change(EXCHANGES, poll_keys=(), revision_keys=("Name",)).poll_keys == ()
+    with pytest.raises(ValueError, match=r"revision_keys repeat poll_keys \['Id'\]"):
+        change(EXCHANGES, revision_keys=("Name", "Id"))
+    assert change(EXCHANGES, revision_keys=("Name",)).revision_keys == ("Name",)
 
 
 def test_a_fanout_key_that_is_no_instrument_comes_from_the_rows() -> None:
@@ -955,6 +962,49 @@ def test_poll_keys_gate() -> None:
     assert problems(change(EXCHANGES, poll_keys=("Symbol",))) == (
         "poll keys: reference.exchanges: ['Symbol'] are not columns",
     )
+    assert problems(change(EXCHANGES, revision_keys=("Updated", "Name"))) == (
+        "poll keys: reference.exchanges: ['Updated'] are not columns",
+    )
+
+
+def test_nullable_poll_keys_are_poll_keys_with_a_reason() -> None:
+    with pytest.raises(ValueError, match=r"nullable_poll_keys \['Name'\] are not poll_keys"):
+        change(EXCHANGES, nullable_poll_keys={"Name": "a reason"})
+    with pytest.raises(ValueError, match=r"nullable_poll_keys \['Id'\] need a reason"):
+        change(EXCHANGES, poll_keys=("Id", "Name"), nullable_poll_keys={"Id": ""})
+    spec = change(EXCHANGES, poll_keys=("Id", "Name"), nullable_poll_keys={"Name": "a reason"})
+    assert spec.nullable_poll_keys == {"Name": "a reason"}
+
+
+def test_nullable_keys_gate() -> None:
+    some = change(EXCHANGES, poll_keys=("Id", "Name"), nullable_poll_keys={"Name": "a reason"})
+    assert problems(some) == ()
+    every = change(some, nullable_poll_keys={"Id": "a reason", "Name": "a reason"})
+    assert problems(every) == (
+        "nullable keys: reference.exchanges: every poll key may be null; at least one must not be",
+    )
+    # A one-row dataset has no poll key to be null.
+    assert problems(change(EXCHANGES, poll_keys=(), revision_keys=("Name",))) == ()
+
+
+def test_append_keys_gate() -> None:
+    assert problems(change(EXCHANGES, poll_mode=PollMode.APPEND)) == ()
+    defaulted = DatasetSpec(
+        name="reference.exchanges",
+        summary="A dataset for the tests.",
+        fetch_path="/v3/reference/exchanges",
+        poll_mode=PollMode.APPEND,
+    )
+    missing = "poll keys: reference.exchanges: ['Symbol'] are not columns"
+    assert problems(defaulted) == (
+        (
+            "append keys: reference.exchanges: an APPEND dataset declares its own poll_keys, "
+            "unique per row, not the default ['Symbol']"
+        ),
+        missing,
+    )
+    # A keyed mode may keep the default key.
+    assert problems(change(defaulted, poll_mode=PollMode.UPSERT)) == (missing,)
 
 
 def test_a_bad_member_is_reported_once() -> None:

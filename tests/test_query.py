@@ -19,7 +19,8 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
+from deephaven_massive._datasets.dates import DaySpan, TimeRange
+from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
 from deephaven_massive._massive import Transport
@@ -130,7 +131,7 @@ class Recorder:
         self,
         spec: DatasetSpec,
         request: Request,
-        window: TimeRange | FuturesSessions,
+        window: HistoryWindow,
         *,
         dates: Sequence[date] | None = None,
     ) -> Table:
@@ -298,10 +299,38 @@ def test_history_rest_passes_the_window(massive_session: dm.MassiveSession, rest
     verb, _, request, extra = rest.calls[0]
     window = extra["window"]
     assert verb == "history"
-    assert window.start == datetime(2025, 3, 3, 5, tzinfo=UTC)
-    assert window.end == datetime(2025, 3, 5, 5, tzinfo=UTC)
-    # Transports receive the raw bounds as well as the window.
+    assert window.span == DaySpan(date(2025, 3, 3), date(2025, 3, 4))
+    assert window.times == TimeRange(
+        datetime(2025, 3, 3, 5, tzinfo=UTC), datetime(2025, 3, 5, 5, tzinfo=UTC)
+    )
+    # Transports receive the parsed bounds as well as the window.
     assert (request.start, request.end) == (date(2025, 3, 3), date(2025, 3, 4))
+
+
+def test_history_reads_through_now_by_default(
+    massive_session: dm.MassiveSession, rest: Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2025, 3, 5, 15, tzinfo=UTC)
+    monkeypatch.setattr(history_source, "_now", lambda: now)
+    trades(massive_session).history("2025-03-03", source=HistorySource.REST)
+    _, _, request, extra = rest.calls[0]
+    assert request.end is None
+    assert extra["window"].span == DaySpan(date(2025, 3, 3), date(2025, 3, 5))
+    start = datetime(2025, 3, 5, 14, tzinfo=UTC)
+    trades(massive_session).history(start, source=HistorySource.REST)
+    assert rest.calls[1][3]["window"].times == TimeRange(start, now)
+
+
+def test_an_empty_history_range_calls_no_transport(
+    massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+) -> None:
+    moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
+    for source in (HistorySource.AUTO, HistorySource.REST):  # the session has no S3 keys
+        table = trades(massive_session).history(moment, moment, source=source)
+        assert table.size == 0
+        assert "Timestamp" in table.column_names
+    assert rest.calls == []
+    assert flat.calls == []
 
 
 def test_history_of_futures_dates_passes_sessions(
@@ -311,19 +340,19 @@ def test_history_of_futures_dates_passes_sessions(
     assert isinstance(q, HistoryQuery)
     q.history("2025-03-03", "2025-03-05", source=HistorySource.REST)
     window = rest.calls[0][3]["window"]
-    assert isinstance(window, FuturesSessions)
-    assert (window.first, window.last) == (date(2025, 3, 3), date(2025, 3, 5))
+    assert window.sessions == DaySpan(date(2025, 3, 3), date(2025, 3, 5))
+    assert window.requested is None  # requested one session at a time
 
 
 def test_history_day_zone_per_class(massive_session: dm.MassiveSession, rest: Recorder) -> None:
     q = make(massive_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.HOUR)
     assert isinstance(q, HistoryQuery)
     q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
-    assert rest.calls[0][3]["window"].start == datetime(2025, 3, 3, tzinfo=UTC)
+    assert rest.calls[0][3]["window"].times.start == datetime(2025, 3, 3, tzinfo=UTC)
     yields = make(massive_session, HISTORY_SPEC)
     assert isinstance(yields, HistoryQuery)
     yields.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
-    assert rest.calls[1][3]["window"].start == datetime(2025, 3, 3, 5, tzinfo=UTC)
+    assert rest.calls[1][3]["window"].times.start == datetime(2025, 3, 3, 5, tzinfo=UTC)
 
 
 def test_history_rest_rejects_all_except_grouped_daily(
@@ -418,8 +447,10 @@ def test_history_argument_errors(massive_session: dm.MassiveSession, flat: Recor
         q.history("2025-03-03", "2025-03-03", source=cast("HistorySource", "rest"))
     with pytest.raises(ValueError, match="needs a timezone: pass an aware datetime or a date"):
         q.history("2025-03-03T09:30", "2025-03-04")
-    with pytest.raises(ValueError, match="must be before end"):
+    with pytest.raises(ValueError, match="must not be after end"):
         q.history("2025-03-04", "2025-03-03")
+    with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
+        q.history("2025-03-03", datetime(2025, 3, 4, tzinfo=UTC))
     assert flat.calls == []
 
 
@@ -475,7 +506,7 @@ def test_history_rejects_a_symbol_table_without_symbols(
 ) -> None:
     for content in ([], [None]):
         q = trades(massive_session, new_table([string_col("Symbol", content)]))
-        for source in HistorySource:
+        for source in (HistorySource.AUTO, HistorySource.REST):  # the session has no S3 keys
             with pytest.raises(
                 ValueError, match=r"^stocks\.trades: the symbol table holds no symbols$"
             ):

@@ -165,6 +165,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOTS,
     keys={(_R, _SNAPSHOTS): _keys(KeySpec("Ticker"))},
     symbol_param="tickers",
+    revision_keys=("Updated",),
 )
 """`m.crypto.snapshots`: the full-market snapshot, narrowed by `tickers` unless `dm.ALL`."""
 
@@ -174,6 +175,7 @@ MOVERS: Final = DatasetSpec(
     asset_class=AssetClass.CRYPTO,
     fetch_path=_MOVERS,
     keys={(_R, _MOVERS): _keys(KeySpec("Ticker"))},
+    revision_keys=("Updated",),
 )
 """`m.crypto.movers`: the gainers and losers snapshots."""
 
@@ -359,13 +361,19 @@ class _Crypto(Namespace):
         base aggregates, not rows, so it cannot cap rows) and `fetch()` returns one row per
         pair.
 
-        1-day bars are stamped differently by source, as Massive documents them: the REST
-        bars of `/prev` and the range endpoint are stamped at midnight New York time in every
-        documented sample, while a `global_crypto/day_aggs_v1` bar covers the UTC day
-        and is stamped at its last millisecond (23:59:59.999 UTC). With
-        `HistorySource.AUTO` the source, and so the stamp, can change with the number of
-        symbols; pass `source=` to keep one. `history()` keeps the rows whose `Timestamp`
-        falls in the requested UTC range.
+        A 1-day bar covers one UTC day and is stamped at 00:00 UTC of that day, whatever the
+        source. The `global_crypto/day_aggs_v1` files stamp it at the day's last millisecond
+        (23:59:59.999 UTC), which is moved to 00:00 UTC. Massive's documented REST samples do
+        not sit on a UTC day boundary (the aggregates range and `/prev` at midnight New York
+        time, grouped daily at times such as 20:48 UTC), which would be another day cut, so a
+        1-day bar stamped anywhere in its UTC day but its first or last millisecond fails the
+        call with `MassiveError` naming the source, rather than being relabelled; so does a
+        REST bar of several days or longer not stamped at 00:00 UTC. The day cut of live REST
+        data is not verified yet: if it follows those samples, crypto 1-day bars come only from
+        the flat files (`source=dm.HistorySource.FLAT_FILES`). `HistorySource.AUTO` picks the
+        source as for every other dataset; the check keeps the bars of both sources the same
+        UTC days. `history()` keeps only bars whose whole window lies inside the requested
+        range and has ended; weeks run Monday to Sunday and months are whole calendar months.
 
         `dm.ALL` streams every pair. Its `history()` reads the flat files for 1-minute and
         1-day bars, and the grouped-daily endpoint, one request per day, for 1-day bars over
@@ -560,8 +568,8 @@ class _Crypto(Namespace):
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, or a Deephaven table with a `Symbol` column (read once per
                 `poll()` cycle).
-            date: The day, as `"YYYY-MM-DD"` or a `date`. A timezone-aware `datetime` (or ISO
-                text with a time and an offset) names the UTC day it falls in.
+            date: The UTC day, as `"YYYY-MM-DD"` or a `date`. It is a calendar date, so a
+                `datetime` raises `ValueError`.
 
         Returns:
             The query. No request is made until a verb is called.

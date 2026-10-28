@@ -1021,19 +1021,20 @@ class _ErrorBodyServer:
 
 @pytest.fixture
 def error_body_env(network_env: pytest.MonkeyPatch, no_aws_settings: None) -> pytest.MonkeyPatch:
-    """Shorten the read timeout to 0.2 s of real time, so a stalled body times out quickly.
+    """Clear the network and AWS settings for a test against `_ErrorBodyServer`.
+
+    The read timeout keeps its production value: a reset ends the client's read at once, so a
+    test of one must not depend on how soon the server thread answers. Only the stall test
+    shortens it.
 
     Returns:
         The monkeypatch.
     """
-    network_env.setattr(client_module, "_READ_TIMEOUT", 0.2)
     return network_env
 
 
-@pytest.mark.parametrize("behaviour", ["reset", "stall"])
-def test_an_error_response_cut_short_is_retried_over_the_network(
-    *, error_body_env: pytest.MonkeyPatch, behaviour: str
-) -> None:
+def _open_after_one_failure(behaviour: str) -> None:
+    """Open a file from a server whose first answer fails with `behaviour`, then succeeds."""
     server = _ErrorBodyServer(behaviour, b"data")
     clock = FakeClock()
     client = make_client(endpoint_url=server.url, clock=clock)
@@ -1046,6 +1047,21 @@ def test_an_error_response_cut_short_is_retried_over_the_network(
         server.close()
     assert server.connections == 2
     assert clock.waits == WAITS[:1]
+
+
+def test_an_error_response_reset_partway_is_retried_over_the_network(
+    error_body_env: pytest.MonkeyPatch,
+) -> None:
+    _open_after_one_failure("reset")
+
+
+def test_an_error_response_that_stalls_is_retried_after_the_read_timeout(
+    error_body_env: pytest.MonkeyPatch,
+) -> None:
+    # The read timeout is real time, and it also bounds the wait for each answer's head, so it
+    # leaves a busy runner a full second to schedule the server thread.
+    error_body_env.setattr(client_module, "_READ_TIMEOUT", 1.0)
+    _open_after_one_failure("stall")
 
 
 def test_an_error_response_cut_short_every_time_is_a_wire_error_after_the_retries(

@@ -188,6 +188,10 @@ FMV: Final = DatasetSpec(
     keys={(_WS, "options/FMV"): _keys("Ticker", "FmvLastUpdated")},
 )
 
+_SNAPSHOT_REVISION: Final = ("LastQuoteLastUpdated", "LastTradeSipTimestamp")
+"""The update times of a contract's snapshot: a new quote or trade is a new row of an explicit
+`poll(mode=PollMode.APPEND)`. The snapshot carries no single update time of its own."""
+
 CHAIN: Final = DatasetSpec(
     name="options.chain",
     summary="The snapshot of every contract in one underlying's option chain.",
@@ -195,6 +199,7 @@ CHAIN: Final = DatasetSpec(
     fetch_path=_CHAIN,
     keys={(_REST, _CHAIN): _keys("DetailsTicker", fanout="UnderlyingAssetTicker")},
     page_size=_SNAPSHOT_PAGE,
+    revision_keys=_SNAPSHOT_REVISION,
 )
 
 SNAPSHOTS: Final = DatasetSpec(
@@ -206,6 +211,7 @@ SNAPSHOTS: Final = DatasetSpec(
     symbol_param="ticker.any_of",
     symbols_per_request=_SNAPSHOT_PAGE,
     page_size=_SNAPSHOT_PAGE,
+    revision_keys=_SNAPSHOT_REVISION,
 )
 
 CONTRACTS: Final = DatasetSpec(
@@ -448,7 +454,8 @@ class _Options(Namespace):
         (`/v2/aggs/ticker/{optionsTicker}/range/...`, one request series per contract) or, for
         one-minute and one-day bars with `adjusted=False`, the `us_options_opra/minute_aggs_v1`
         and `us_options_opra/day_aggs_v1` flat files. There is no `limit`: `history()` pages
-        internally and returns the whole range.
+        internally and returns the whole range. It returns only the bars whose whole window
+        lies inside the range and has ended, so the current day's bar never appears.
 
         `dm.ALL` streams every contract and reads every contract of a day's flat file; `fetch()`
         and REST `history()` take explicit contracts and raise `ValueError` for `dm.ALL`. One
@@ -716,9 +723,9 @@ class _Options(Namespace):
         It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a
         symbol is not an OCC option symbol, a sequence is empty or an exhausted generator, a
         table has no `Symbol` column, `underlying` is not Massive's exact stock or index
-        ticker, `as_of` is a naive `datetime` or
-        not ISO-8601, `limit` is not positive, a filter key is not a parameter of the endpoints
-        or is set by a typed argument, or a filter value does not fit its parameter;
+        ticker, `as_of` is a `datetime` or not an ISO-8601 date, `limit` is not positive, a
+        filter key is not a parameter of the endpoints or is set by a typed argument, or a
+        filter value does not fit its parameter;
         `TypeError` if `underlying` or `sort` is not a `str`, `contract_type` is not a
         `dm.ContractType`, `expired` is not a `bool`, `order` is not a `dm.Order`, `limit` is
         not an `int`, or `filters` is not a mapping.
@@ -734,8 +741,8 @@ class _Options(Namespace):
             underlying: Only contracts linked to this exact Massive ticker, such as `"AAPL"`
                 or `"I:SPX"`; None for every underlying.
             contract_type: Only calls or only puts; None for both.
-            as_of: The day whose contracts to list, as an ISO-8601 date, a `date`, or an
-                aware `datetime` (its date in New York); None for today.
+            as_of: The day whose contracts to list, as an ISO-8601 date or a `date` (a
+                `datetime` raises `ValueError`: it is a calendar date); None for today.
             expired: True for expired contracts only, False for active ones only; None for
                 the endpoint's default, active contracts.
             sort: The field to sort by: `"ticker"`, `"underlying_ticker"`,
@@ -795,14 +802,14 @@ class _Options(Namespace):
 
         It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a symbol is
         not an OCC option symbol, a sequence is empty or an exhausted generator, a table has no
-        `Symbol` column, or `date` is a naive `datetime` or not ISO-8601; `TypeError` if `symbols`
+        `Symbol` column, or `date` is a `datetime` or not an ISO-8601 date; `TypeError` if `symbols`
         or `date` is of another type, or `adjusted` is not a `bool`.
 
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, or a Deephaven table with a `Symbol` column.
-            date: The trading day, as an ISO-8601 date, a `date`, or an aware `datetime` (its
-                date in New York).
+            date: The trading day, as an ISO-8601 date or a `date`. It is a calendar date, so a
+                `datetime` raises `ValueError`.
             adjusted: Whether the prices are adjusted for splits of the underlying; True by
                 default.
 

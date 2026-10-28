@@ -34,16 +34,22 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from deephaven.table import Table
 
 from deephaven_massive._config import require_positive_int
-from deephaven_massive._datasets.catalog import filter_key, param_family, symbol_family
+from deephaven_massive._datasets.catalog import (
+    filter_key,
+    param_family,
+    symbol_family,
+    takes_instants,
+)
 from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
+from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
@@ -59,6 +65,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import ParamValue
     from deephaven_massive._datasets.symbols import NormalizedSymbols
+    from deephaven_massive._massive import RestPath
     from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
@@ -377,6 +384,68 @@ def _filters(
     return tuple(sorted(pairs))
 
 
+def _calendar_axis(core: SessionCore, spec: DatasetSpec) -> str | None:
+    """Return the field of a dataset's time axis when it is a calendar date, or None.
+
+    An axis is a calendar date when one of the dataset's REST paths takes its lower parameter
+    as a date of a calendar-date row field (`ex_dividend_date`, `filing_date`, the futures
+    `session_end_date`), not an instant (`catalog.takes_instants`).
+
+    Args:
+        core: The session core, whose catalog holds the generated paths.
+        spec: The dataset.
+
+    Returns:
+        The axis field, such as `"ex_dividend_date"`; None for an instant axis or none.
+    """
+    if spec.time_axis is None:
+        return None
+    name = spec.time_axis[0]
+    for template in spec.rest_paths:
+        rest_path = cast("RestPath", core.catalog.source(Transport.REST, template))
+        param = next((p for p in rest_path.params if p.name == name), None)
+        if (
+            param is not None
+            and param.kind is ParamKind.DATE
+            and not takes_instants(rest_path, name, param.kind)
+        ):
+            return name.partition(".")[0]
+    return None
+
+
+def _check_axis(
+    core: SessionCore,
+    spec: DatasetSpec,
+    *,
+    start: date | datetime | None,
+    end: date | datetime | None,
+) -> None:
+    """Check the `start` and `end` of a `…T` dataset's time axis.
+
+    The rules are those of `history()`: both bounds of one kind (dates are whole days,
+    datetimes exact instants), `start` not after `end`, and equal datetimes an empty range. A
+    calendar-date axis holds whole days, so it takes dates only. A bound left None is open.
+
+    Args:
+        core: The session core.
+        spec: The dataset.
+        start: The parsed lower bound, or None.
+        end: The parsed upper bound, or None.
+
+    Raises:
+        ValueError: If a datetime is given for a calendar-date axis (`"<axis> is a calendar
+            date; pass dates"`). Mixed or reversed bounds raise the `ValueError` of
+            `dates.check_order`.
+    """
+    given = [bound for bound in (start, end) if bound is not None]
+    if any(isinstance(bound, datetime) for bound in given):
+        axis = _calendar_axis(core, spec)
+        if axis is not None:
+            raise ValueError(f"{spec.name}: {axis} is a calendar date; pass dates")
+    if start is not None and end is not None:
+        check_order(start, end)
+
+
 def build_query(
     core: SessionCore,
     spec: DatasetSpec,
@@ -418,8 +487,12 @@ def build_query(
         venue: The futures venue, or None for every venue.
         adjusted: Whether bars are adjusted for splits, for a dataset with an `adjusted`
             parameter; None for a dataset without one (`Request.adjusted`).
-        start: The lower bound of the dataset's time axis, or None.
-        end: The upper bound of the dataset's time axis, or None.
+        start: The lower bound of the dataset's time axis, or None for an open start: a date
+            (a whole day) or an aware datetime (an exact instant).
+        end: The upper bound of the dataset's time axis, of the same kind as `start`, or None
+            for an open end, which sends no upper bound, so future-dated rows (an announced
+            ex-dividend date) are returned; a date is included whole, a datetime is the first
+            instant excluded. A calendar-date axis takes dates only (`_check_axis`).
         params: The dataset's other typed parameters by wire name; None values are dropped,
             but every key, set or not, is reserved from `filters` with its suffixed forms.
         arguments: The factory's argument name of each key of `params` that the factory
@@ -450,7 +523,8 @@ def build_query(
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
     or `ValueError` of the helper that checks them (`normalize` in `_datasets/symbols.py`,
-    `_require_enum`, `parse_date_like` in `_datasets/dates.py`, `bar_query_class`,
+    `_require_enum`, `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed,
+    reversed, or calendar-date bounds, `bar_query_class`,
     `require_positive_int` for `limit`).
     """
     normalized: NormalizedSymbols | None = None
@@ -482,8 +556,7 @@ def build_query(
         cls = bar_query_class(spec, timespan, multiplier)
     first = None if start is None else parse_date_like(start, "start")
     last = None if end is None else parse_date_like(end, "end")
-    if first is not None and last is not None:
-        check_order(first, last)
+    _check_axis(core, spec, start=first, end=last)
     given = (
         ()
         if filters is None

@@ -36,9 +36,11 @@ the `spec/*.json` diff, and any hand-input lines in one pull request. When a gat
 refresh it prints each problem (gate, source, key, vendor description); fix it with an entry
 and its reason in one of the hand-input tables, never by editing the generated file: a
 lexicon, `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_CONFLICTS`,
-`TYPE_FIXES`, `KEY_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`, `PROJECTIONS`,
-`TRANSPORT_ONLY`, or `VENUES` entry (`overrides.py`); or an `EXCLUSIONS` or `SAMPLE_ERRORS` entry
-(`exclusions.py`).
+`TYPE_FIXES`, `KEY_FIXES`, `DESCRIPTION_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`,
+`PROJECTIONS`, `TRANSPORT_ONLY`, or `VENUES` entry (`overrides.py`); or an `EXCLUSIONS` or
+`SAMPLE_ERRORS` entry (`exclusions.py`). A vendor description that is clearly wrong for its
+source (another asset class's or event's text, or a statement Massive's own documentation of the
+field contradicts) is corrected the same way, by a `DESCRIPTION_FIXES` entry that quotes it.
 
 `--check` downloads the live sources into a scratch directory and prints a Markdown report of
 what differs from the snapshot and the committed schemas, each item under the action that
@@ -229,9 +231,12 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 - `pytest_configure` runs `trylast` so the JVM installs its signal handlers after pytest's
   faulthandler. The JVM raises SIGSEGV on purpose; in the other order the first one kills the
   process. A `hs_err_pid*.log` file means the JVM crashed: investigate it, do not ignore it.
-- Do not remove the `os._exit` shutdown block in `tests/conftest.py`. On macOS, normal
-  interpreter shutdown after the JVM has run can segfault (exit code 139); the block exits with
-  pytest's own status once pytest is done.
+- Do not remove the JVM shutdown block in `tests/conftest.py`. It has two parts. On macOS,
+  normal interpreter shutdown after the JVM has run can segfault (exit code 139), so an
+  `atexit` handler leaves through `os._exit` with pytest's own status. On every platform,
+  pytest's faulthandler plugin would remove the JVM's signal handlers in its
+  `pytest_unconfigure`, and the JVM's next deliberate SIGSEGV would kill the process silently,
+  so a `pytest_sessionfinish` wrapper unregisters that plugin once the session has finished.
 - Get the context, conversion helpers, and fakes from fixtures (`dh_exec_ctx`, `dh_to_pylist`,
   `load_fixture`, `make_csv_gz`), never by importing `conftest.py`.
 - To delete rows from a keyed `input_table`, pass a static key table, never a live view derived

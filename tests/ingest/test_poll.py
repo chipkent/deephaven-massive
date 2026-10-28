@@ -1,5 +1,6 @@
 """Tests for `poll()` tables: the three modes, the cycle's failures, rows, and lifetime."""
 
+import dataclasses
 import functools
 import gc
 import logging
@@ -191,7 +192,7 @@ def test_upsert_keeps_every_key(
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0), ("MSFT", 2.0)])
 
 
-def test_append_appends_every_cycle(
+def test_append_appends_only_keys_not_seen_before(
     *,
     massive_session: dm.MassiveSession,
     script: Script,
@@ -199,14 +200,15 @@ def test_append_appends_every_cycle(
     clock: FakeClock,
     dh_to_pylist: ToPylist,
 ) -> None:
+    # The test dataset's poll key is the default `Symbol`: one row per symbol is appended.
     script.rows(("AAPL", 1.0))
     table = start(
         massive_session, script=script, pollers=pollers, clock=clock, mode=PollMode.APPEND
     )
     until(lambda: len(dh_to_pylist(table)) == 1)
-    script.rows(("AAPL", 1.0), ("MSFT", 2.0))
+    script.rows(("AAPL", 5.0), ("MSFT", 2.0))
     next_cycle(clock)
-    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("AAPL", 1.0), ("MSFT", 2.0)])
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
     # The wait between cycles counts from each cycle's start.
     assert all(wait <= 60 for wait in clock.waits)
 
@@ -812,10 +814,10 @@ def test_a_failure_while_publishing_keeps_the_poller(
     publish = poll.Poller._publish
     failures = [RuntimeError("publish failed")]
 
-    def flaky(self: poll.Poller, table: pa.Table) -> None:
+    def flaky(self: poll.Poller, table: pa.Table) -> int:
         if failures:
             raise failures.pop()
-        publish(self, table)
+        return publish(self, table)
 
     monkeypatch.setattr(poll.Poller, "_publish", flaky)
     script.rows(("AAPL", 1.0))
@@ -899,3 +901,255 @@ def test_the_path_column_names_the_paths_static_symbols_read(
     (row,) = streams_of(routed_session, dh_to_pylist)
     assert row["Path"] == SMA_STOCK
     del table
+
+
+# --- APPEND end to end ---------------------------------------------------------------------------
+
+
+FEED = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="stocks.dividends",
+    asset_class=AssetClass.STOCKS,
+    fetch_path=PATH,
+    symbol_param="ticker.any_of",
+    keys={(R, PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+    poll_mode=PollMode.APPEND,
+    poll_keys=("Id",),
+)
+
+
+@pytest.fixture
+def feed_session(
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> Iterator[dm.MassiveSession]:
+    monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    monkeypatch.setitem(
+        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=FakeClock())
+    )
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+def page(*rows: tuple[str, float]) -> Reply:
+    # One cycle's reply: dividends identified by their id.
+    return Reply(envelope([{"id": i, "ticker": "AAPL", "cash_amount": a} for i, a in rows]))
+
+
+def feed(m: dm.MassiveSession) -> Table:
+    # The default mode of the feed, APPEND.
+    q = build_query(m._core, FEED, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    return q.poll(60)
+
+
+def ids(table: Table, to_pylist: ToPylist) -> list[tuple[str, float]]:
+    return sorted((row["Id"], row["CashAmount"]) for row in to_pylist(table))
+
+
+def test_append_skips_every_row_it_already_appended(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    fake_rest.reply(
+        PATH,
+        page(("a", 1.0), ("b", 2.0), ("b", 9.0)),  # a repeated key within one cycle
+        page(("b", 2.0), ("a", 8.0), ("c", 3.0)),  # a and b again, with c new
+        page(),
+        page(("a", 1.0), ("c", 3.0), ("d", 4.0)),
+    )
+    table = feed(feed_session)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
+    next_cycle(clock)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0), ("c", 3.0)])
+    next_cycle(clock)
+    next_cycle(clock)
+    expected = [("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 4.0)]
+    until(lambda: ids(table, dh_to_pylist) == expected)
+    (row,) = streams_of(feed_session, dh_to_pylist)
+    assert row["RowsPublished"] == 4  # the skipped rows are not counted
+    assert len(fake_rest.requests) == 4
+
+
+def test_append_never_appends_a_row_twice_after_an_absence(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # A symbol removed from a reactive table and added back hours later returns its rows.
+    fake_rest.reply(
+        PATH,
+        page(("b", 2.0), ("a", 1.0)),
+        *[page(("b", 2.0))] * 5,
+        page(("a", 1.0), ("b", 2.0), ("c", 3.0)),
+    )
+    table = feed(feed_session)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
+    for _ in range(6):
+        next_cycle(clock)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0), ("c", 3.0)])
+    assert len(fake_rest.requests) == 7
+
+
+def test_append_appends_each_revision_of_a_keyed_row(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Keyed by symbol with a revision column, as a snapshot is: each new state is a new row,
+    # and a null revision is a value of its own.
+    snapshot = dataclasses.replace(
+        FEED, poll_mode=PollMode.REPLACE, poll_keys=("Symbol",), revision_keys=("PayDate",)
+    )
+
+    def state(pay_date: str | None, amount: float) -> dict[str, object]:
+        return {"id": "x", "ticker": "AAPL", "cash_amount": amount, "pay_date": pay_date}
+
+    fake_rest.reply(
+        PATH,
+        Reply(envelope([state(None, 1.0)])),
+        Reply(envelope([state(None, 9.0)])),  # the same state: skipped
+        Reply(envelope([state("2026-01-02", 2.0)])),
+        Reply(envelope([state("2026-01-02", 9.0)])),
+    )
+    q = build_query(feed_session._core, snapshot, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=PollMode.APPEND)
+    until(lambda: len(dh_to_pylist(table)) == 1)
+    for _ in range(3):
+        next_cycle(clock)
+    until(lambda: sorted(row["CashAmount"] for row in dh_to_pylist(table)) == [1.0, 2.0])
+    # The keyed modes ignore the revision column.
+    assert snapshot.poll_keys == ("Symbol",)
+
+
+def test_a_failed_append_remembers_nothing(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_rest.reply(PATH, page(("a", 1.0)), page(("b", 2.0)), page(("a", 1.0), ("b", 2.0)))
+    table = feed(feed_session)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0)])
+    convert = dh_arrow.to_table
+    failures = [RuntimeError("conversion failed")]
+
+    def flaky(data: pa.Table) -> Table:
+        if failures:
+            raise failures.pop()
+        return convert(data)
+
+    monkeypatch.setattr(dh_arrow, "to_table", flaky)
+    next_cycle(clock)  # b's cycle fails to publish
+    assert ids(table, dh_to_pylist) == [("a", 1.0)]
+    next_cycle(clock)  # so the next cycle appends b, and still skips a
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
+
+
+NULL_ID = {"id": None, "ticker": "AAPL", "currency": "USD"}
+NULL_CURRENCY = {"id": "b", "ticker": "AAPL", "currency": None}
+
+
+@pytest.mark.parametrize("mode", list(PollMode))
+@pytest.mark.parametrize(
+    ("poll_keys", "bad", "message"),
+    [
+        (
+            ("Id",),
+            NULL_ID,
+            "row 1 of the cycle has a null poll key 'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}",
+        ),
+        # Every key column is checked, not only the first.
+        (
+            ("Id", "Currency"),
+            NULL_CURRENCY,
+            "row 1 of the cycle has a null poll key 'Currency': {'Symbol': 'AAPL', 'Id': 'b'}",
+        ),
+    ],
+    ids=["first column", "second column"],
+)
+def test_a_null_poll_key_fails_the_table_in_every_mode(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+    poll_keys: tuple[str, ...],
+    bad: dict[str, object],
+    message: str,
+) -> None:
+    rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, bad]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    spec = dataclasses.replace(FEED, poll_keys=poll_keys)
+    q = build_query(feed_session._core, spec, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=mode)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = streams_of(feed_session, dh_to_pylist)
+    assert (row["State"], row["Error"]) == ("FAILED", f"stocks.dividends poll(): {message}")
+    assert row["RowsPublished"] == 0  # nothing of the cycle was published
+
+
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_a_null_in_a_nullable_poll_key_is_a_value(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+) -> None:
+    # `Currency` may be null; `Id` may not, so its null still fails the table.
+    spec = dataclasses.replace(
+        FEED, poll_keys=("Id", "Currency"), nullable_poll_keys={"Currency": "for the tests"}
+    )
+    rows = [{"id": "a", "ticker": "AAPL", "currency": None}, {"id": "b", "ticker": "AAPL"}]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(feed_session._core, spec, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=mode)
+    until(lambda: sorted(row["Id"] for row in dh_to_pylist(table)) == ["a", "b"])
+    assert not table.j_table.isFailed()
+    (found,) = streams_of(feed_session, dh_to_pylist)
+    assert (found["State"], found["RowsPublished"]) == ("RUNNING", 2)
+
+
+def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # A NaN never equals itself, so as a key it would append its row again every cycle.
+    script.rows(("x" * 400, float("nan")))
+    table = open_poll(
+        massive_session._core,
+        spec=dataclasses.replace(DIVIDENDS, poll_keys=("CashAmount",)),
+        request=Request(symbols=("AAPL",)),
+        interval=timedelta(seconds=60),
+        mode=PollMode.APPEND,
+        read=script,
+        pollers=pollers,
+        host="api.massive.com",
+        path=PATH,
+        clock=clock,
+    )
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    prefix = "stocks.dividends poll(): row 0 of the cycle has a null poll key 'CashAmount': "
+    assert row["Error"].startswith(prefix + "{'Symbol': 'xxx")
+    rendered = row["Error"].removeprefix(prefix)
+    assert len(rendered) == 300
+    assert rendered.endswith("xxx...")

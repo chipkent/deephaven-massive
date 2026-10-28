@@ -147,6 +147,7 @@ SNAPSHOTS: Final = DatasetSpec(
     keys={(_REST, _SNAPSHOTS): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="tickers",
     symbols_per_request=250,
+    revision_keys=("Updated",),
 )
 """`m.forex.snapshots`: the full-market snapshot, narrowed by its `tickers` parameter."""
 
@@ -158,6 +159,7 @@ MOVERS: Final = DatasetSpec(
     asset_class=AssetClass.FOREX,
     fetch_path=_MOVERS,
     keys={(_REST, _MOVERS): SourceKeys(symbol=KeySpec("Ticker"))},
+    revision_keys=("Updated",),
 )
 """`m.forex.movers`: the top gainers or losers, the direction a path segment."""
 
@@ -170,6 +172,8 @@ CONVERSION: Final = DatasetSpec(
     fetch_path=_CONVERSION,
     # The vendor's own `symbol` field is generated as `Symbol`, so the key uses it as is.
     keys={(_REST, _CONVERSION): SourceKeys(symbol=KeySpec("Symbol"))},
+    # The quote the conversion used: an explicit APPEND poll appends each new conversion.
+    revision_keys=("LastTimestamp",),
 )
 """`m.forex.conversion`: one conversion between two currencies at the latest quote."""
 
@@ -317,6 +321,13 @@ class _Forex(Namespace):
         (`/v2/aggs/grouped/locale/global/market/fx/{date}`, one request per day) or the day
         files, and for one-minute bars through the minute files; `fetch()` with `dm.ALL`
         raises `ValueError`.
+
+        A one-day bar is the UTC day and is stamped at 00:00 UTC on every source: the range
+        already is, and the grouped daily, `/prev`, and the day files (stamped 23:59:59.999
+        UTC) are moved to the start of their day. `history()` returns only the bars whose
+        whole window lies inside the range and has ended, so the current day's bar never
+        appears. Forex trades from Sunday evening UTC, so its weeks run Monday to
+        Sunday and its months, quarters, and years are whole calendar periods.
 
         Each column is described in the web UI's column tooltips, by `columns()`, and at
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#bars.

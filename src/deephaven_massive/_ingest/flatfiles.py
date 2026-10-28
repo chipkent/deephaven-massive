@@ -13,9 +13,11 @@ to keep.
 - `FlatFileHistory` reads the files of one `history()` call in parallel, at most
   `MassiveConfig.max_concurrency` at a time, each in blocks of `BLOCK_SIZE` bytes. Each block
   is first checked (futures sessions), then filtered to the requested symbols with
-  `pyarrow.compute.is_in` (symbol pushdown) and to the half-open `[start, end)` range on
-  `Timestamp`; only the surviving rows are renamed to the dataset's columns, have their
-  condition and indicator lists parsed, and are converted to the column types here. The
+  `pyarrow.compute.is_in` (symbol pushdown) and to the window's `Timestamp` range (for bars,
+  the starts of the bars whose whole window fits the range); only the surviving rows are
+  renamed to the dataset's columns, have their condition and indicator lists parsed, and are
+  converted to the column types here. Forex and crypto 1-day bars, which `day_aggs_v1` stamps
+  at 23:59:59.999 UTC, are stamped at 00:00 UTC of their day (`timestamps.utc_day_stamps`). The
   headers, their types, and their timestamp units are the prefix's generated fields
   (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
   columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
@@ -34,13 +36,17 @@ text such as `NA` or `NULL` is data (both are valid tickers).
 A missing file is judged by its date: on a weekend (for every class but crypto, which trades
 every day) it is skipped silently; on a weekday it is skipped with a WARNING, since it is most
 likely a market holiday. A futures exchange holiday folds into the next session, so when a
-futures range ends at an instant and the run of missing files that ends it holds a weekday (a
-holiday, alone or followed by a weekend), the next existing session file within
-`FUTURES_HOLIDAY_MARGIN` of the run's first day is read too: its early-opened hours may lie
-inside the range. A missing file for the last requested date may instead be late: within
-a day after its publication time (`within_publication_grace` in
-`_datasets/history_source.py`) it raises `MassiveError` naming both causes, and after that it is
-skipped with a WARNING like any other weekday.
+futures range named by instants ends with a run of missing files that holds a weekday (a
+holiday, alone or followed by a weekend), the next existing session file within `ROLL_LIMIT`
+(7 days) of the run's first day is read too: its early-opened hours may lie inside the
+range. If that file is not published yet, may still be late, or does not exist within the
+limit, the call raises `MassiveError` rather than return a short table. A range named by
+session dates never rolls forward: a date names its own session's file exactly.
+
+A missing file for the last requested date may instead be late: within a day after its
+publication time (`within_publication_grace` in `_datasets/history_source.py`) it raises
+`MassiveError` naming both causes, and after that it is skipped with a WARNING like any other
+weekday.
 
 Columns are matched by header name, never by position, so a file whose columns are reordered
 reads identically. Every `Instant` column goes through the timestamp routine of
@@ -90,8 +96,14 @@ import pyarrow as pa
 from deephaven import merge
 from deephaven.arrow import to_table
 
-from deephaven_massive._datasets.dates import FUTURES_HOLIDAY_MARGIN, TimeRange
-from deephaven_massive._datasets.history_source import within_publication_grace
+from deephaven_massive._datasets.dates import TimeRange
+from deephaven_massive._datasets.history_source import (
+    NOT_PUBLISHED,
+    StampRule,
+    published,
+    stamp_rule,
+    within_publication_grace,
+)
 from deephaven_massive._datasets.schema import (
     OPTION_ROOT,
     RAW_SYMBOL,
@@ -109,6 +121,7 @@ from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
     to_epoch_ns_array,
+    utc_day_stamps,
 )
 from deephaven_massive._enums import AssetClass, FuturesVenue, UnknownSymbols
 from deephaven_massive._errors import (
@@ -137,7 +150,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-    from deephaven_massive._datasets.dates import FuturesSessions
+    from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
@@ -145,7 +158,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import DriftReport, Field, FlatFileClient
     from deephaven_massive._tables.core import SessionCore
 
-__all__ = ["BLOCK_SIZE", "FlatFileHistory"]
+__all__ = ["BLOCK_SIZE", "ROLL_LIMIT", "FlatFileHistory"]
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +172,12 @@ blocks of Arrow data, and at the end of the file. Fewer, larger tables cost far 
 than one per block (each table carries a fixed overhead), while memory stays bounded."""
 
 _SATURDAY: Final = 5
+
+ROLL_LIMIT: Final = timedelta(days=7)
+"""How far past the first missing day of a futures range's end the next session file is sought.
+
+A holiday folds its trading into the next session; the longest run of days without a session
+is a holiday weekend of four days, so a week always reaches the next session."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,36 +195,34 @@ class _Key:
     venue: FuturesVenue | None
 
 
-def _window_ns(window: TimeRange | FuturesSessions) -> tuple[int, int] | None:
+def _window_ns(window: HistoryWindow) -> tuple[int, int] | None:
     """Return the `Timestamp` range a read keeps, as epoch nanoseconds, or None for every time.
 
     Args:
-        window: The normalized `history()` bounds.
+        window: The call's window.
 
     Returns:
-        The range of a `TimeRange`, or of futures sessions with an instant bound (whose date
-        side is widened past every row of its sessions); None for sessions given as two dates.
+        The range of `HistoryWindow.times`; None where only sessions bound the rows (futures
+        trades, quotes, and session bars named by date, whose files hold exactly the
+        sessions read).
     """
-    if isinstance(window, TimeRange):
-        return window.start_ns, window.end_ns
-    if window.first is not None and window.last is not None:
-        return None
-    return window.window.start_ns, window.window.end_ns
+    times = window.times
+    return None if times is None else (times.start_ns, times.end_ns)
 
 
-def _ends_at_an_instant(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> bool:
+def _ends_at_an_instant(spec: DatasetSpec, window: HistoryWindow) -> bool:
     """Tell whether a futures range ends at an instant, so a holiday may hide its last rows.
 
     Args:
         spec: The dataset.
-        window: The normalized `history()` bounds.
+        window: The call's window.
 
     Returns:
-        True for futures whose `end` was an aware `datetime`.
+        True for futures named by instants (two aware datetimes).
     """
     if spec.asset_class is not AssetClass.FUTURES:
         return False
-    return isinstance(window, TimeRange) or window.last is None
+    return isinstance(window.span, TimeRange)
 
 
 def _keys(prefix: str, venue: FuturesVenue | None, dates: Sequence[date]) -> tuple[_Key, ...]:
@@ -268,6 +285,11 @@ class _Transform:
         session_header: For futures, the header that holds the session date; None otherwise.
         symbols: How the files' tickers become canonical (`WireSymbols`), and what a spelling
             the library cannot read does.
+        day_source: For forex and crypto 1-day bars, the prefix the bars come from, whose
+            stamps move to 00:00 UTC of their day (`timestamps.utc_day_stamps`); None
+            otherwise.
+        checked_days: True when a 1-day bar stamped elsewhere in its UTC day than its first
+            or last millisecond fails the read (crypto).
     """
 
     dataset: str
@@ -276,6 +298,8 @@ class _Transform:
     arrow_schema: pa.Schema
     session_header: str | None
     symbols: WireSymbols
+    day_source: str | None = None
+    checked_days: bool = False
 
     @classmethod
     def build(
@@ -285,8 +309,9 @@ class _Transform:
         *,
         prefix: str,
         symbols: NormalizedSymbols | None,
-        window: TimeRange | FuturesSessions,
+        window: HistoryWindow,
         unknown_symbols: UnknownSymbols,
+        stamps: StampRule = StampRule.KEEP,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
@@ -303,11 +328,13 @@ class _Transform:
                 None for a dataset without instruments) keeps every row. The files are
                 filtered on every spelling `symbols.canonical_from_wire` reads as one of them
                 (`wire_spellings`: a forex quotes file may write `X:EUR-USD`).
-            window: The normalized `history()` bounds. Futures sessions given as two dates
-                keep every time, since their files hold exactly the requested sessions; with
-                an instant bound, rows are kept inside the request window.
+            window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
+                the starts of the bars that fit wholly); futures sessions named by date keep
+                every time of their files, which hold exactly the requested sessions.
             unknown_symbols: The session's rule for a ticker spelling the library cannot
                 read; `WARN` also adds the `RawSymbol` column to the schema.
+            stamps: How the bars' stamps are treated (`history_source.stamp_rule`); the
+                files hold only 1-day bars of the rules other than `KEEP`.
 
         Returns:
             The transform.
@@ -358,6 +385,8 @@ class _Transform:
             arrow_schema=schema.arrow_schema(),
             session_header=session_header,
             symbols=WireSymbols(spec.name, spec.asset_class, unknown_symbols),
+            day_source=None if stamps is StampRule.KEEP else prefix,
+            checked_days=stamps is StampRule.UTC_DAY_CHECKED,
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
@@ -390,6 +419,8 @@ class _Transform:
 
         A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
         `timestamps.instants`.
+        A crypto 1-day bar stamped elsewhere in its UTC day than its first or last millisecond
+        raises the `MassiveError` of `timestamps.utc_day_stamps`.
 
         Raises:
             MassiveError: If a row's ticker is a spelling the library cannot read and the
@@ -434,7 +465,17 @@ class _Transform:
         if source.unit is not None:
             label = f"{self.dataset}.{name}"
             values = instants(label, source.unit, values, time_column=name == "Timestamp")
-        return widen(values, column_type.arrow_type)
+        values = widen(values, column_type.arrow_type)
+        if name == "Timestamp" and self.day_source is not None:
+            source_label = f"the flat files {self.day_source}"
+            values = utc_day_stamps(
+                self.dataset,
+                values,
+                source=source_label,
+                checked=self.checked_days,
+                remedy="read REST with source=dm.HistorySource.REST",
+            )
+        return values
 
 
 class _CancelledError(Exception):
@@ -467,7 +508,7 @@ class FlatFileHistory:
         self,
         spec: DatasetSpec,
         request: Request,
-        window: TimeRange | FuturesSessions,
+        window: HistoryWindow,
         *,
         dates: Sequence[date],
     ) -> Table:
@@ -485,7 +526,7 @@ class FlatFileHistory:
             spec: The dataset.
             request: The normalized arguments, with the raw `start` and `end` bounds, and
                 static symbols (the query reads a reactive symbol table before this call).
-            window: The bounds under the class's day rules (`bounds` in `_datasets/dates.py`).
+            window: The call's window (`history_window` in `_datasets/history_source.py`).
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
 
         Returns:
@@ -515,6 +556,7 @@ class FlatFileHistory:
             symbols=request.symbols,
             window=window,
             unknown_symbols=self._core.config.unknown_symbols,
+            stamps=stamp_rule(spec, request),
         )
         keys = _keys(prefix, request.venue, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None
@@ -598,13 +640,16 @@ class FlatFileHistory:
         that ends on the holiday, or on the weekend after it, finds rows in a later file. For
         each venue, the run of missing files that ends its keys is examined: a run of weekend
         days only follows an existing file and needs nothing, while a run that holds a
-        weekday is followed by the days after the range, up to `FUTURES_HOLIDAY_MARGIN` past
-        the run's first day, until a file exists. The reads run on the caller thread, one at a
-        time; the transform keeps only the rows inside the range. Each read checks the session
-        before its request and after every block, as the pool's reads do, so a close stops it
-        with `"MassiveSession #1 is closed"`; the pool's cancel event is already set when this
-        runs, so these reads take an event of their own. A failed read raises the public error
-        `_read_key` raises (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
+        weekday is followed by the days after the range, up to `ROLL_LIMIT` (7 days) past the
+        run's first day, until a file exists. A day whose file is not published yet, or a
+        missing file that may still be late (`within_publication_grace`), stops the search
+        with an error naming the run's first missing weekday, and so does a search that finds
+        no file: the range's last hours may lie in the file, so the call never returns a
+        silently short table. The reads run on the caller thread, one at a time; the transform
+        keeps only the rows inside the range. Each read checks the session before its request
+        and after every block, as the pool's reads do, so a close stops it with
+        `"MassiveSession #1 is closed"`; the pool's cancel event is already set when this runs,
+        so these reads take an event of their own.
 
         Args:
             spec: The dataset, for the log.
@@ -614,10 +659,16 @@ class FlatFileHistory:
             prefix: The futures prefix, with its `{venue}` placeholder.
 
         Returns:
-            The tables of the files found, in venue order; empty when no run needs a roll or
-            none of the days has a file.
+            The tables of the files found, in venue order; empty when no run needs a roll.
+
+        Raises:
+            MassiveError: If the next session's file is not published yet, or a missing
+                file may still be late, or no file exists within `ROLL_LIMIT` of the
+                run's first day. A failed read raises the public error `_read_key` raises
+                (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
         """
         tables: list[Table] = []
+        cutoff = self._core.config.flat_file_publish_cutoff
         for venue in dict.fromkeys(key.venue for key in keys):
             own = [key for key in keys if key.venue == venue]
             run: list[_Key] = []
@@ -628,20 +679,42 @@ class FlatFileHistory:
             if not any(key.day.weekday() < _SATURDAY for key in run):
                 continue
             name = None if venue is None else venue.value
-            day, limit = own[-1].day, run[-1].day + FUTURES_HOLIDAY_MARGIN
-            while day < limit:
+            # The run is newest first; name its first missing weekday, the likely holiday.
+            holiday = next(key for key in reversed(run) if key.day.weekday() < _SATURDAY)
+            day, limit = own[-1].day, run[-1].day + ROLL_LIMIT
+            while True:
                 day += timedelta(days=1)
+                if day > limit:
+                    raise MassiveError(
+                        f"{spec.name}: {holiday.key} does not exist and no session file follows "
+                        f"within {ROLL_LIMIT.days} days, so the hours of the range a holiday "
+                        "moved into a later session cannot be read"
+                    )
                 key = _Key(object_key(prefix, day, name), day, venue)
+                if not published(spec, day, cutoff=cutoff):
+                    raise MassiveError(
+                        f"{spec.name}: {holiday.key} does not exist, and the range's last hours "
+                        f"may lie in the next session's file, {key.key}, which is "
+                        f"{NOT_PUBLISHED}; retry once it is published, or read REST with "
+                        "source=dm.HistorySource.REST"
+                    )
                 part = self._read_key(transform, key, cancel=threading.Event())
                 if part is not None:
                     logger.info(
                         "%s: %s is missing; reading %s for the hours a holiday moved into it",
                         spec.name,
-                        run[-1].key,
+                        holiday.key,
                         key.key,
                     )
                     tables.extend(part)
                     break
+                if within_publication_grace(spec, day, cutoff=cutoff):
+                    raise MassiveError(
+                        f"{spec.name}: {holiday.key} does not exist, and the next session's file, "
+                        f"{key.key}, does not exist either: {day.isoformat()} is "
+                        f"{NOT_PUBLISHED}, or was a market holiday; retry later, or read REST "
+                        "with source=dm.HistorySource.REST"
+                    )
         return tables
 
     def _check_open(self) -> None:

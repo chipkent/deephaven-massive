@@ -81,7 +81,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-    from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
+    from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import HostDecision, Request, StreamKey
     from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode
@@ -248,16 +248,14 @@ class RestTransport(Protocol):
         """
         ...
 
-    def history(
-        self, spec: DatasetSpec, request: Request, window: TimeRange | FuturesSessions
-    ) -> Table:
+    def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
         """Return the dataset's REST history over `window`, paged internally, static.
 
         Args:
             spec: The dataset.
-            request: The normalized arguments, with the raw `start` and `end` bounds.
-            window: The bounds under the class's day rules: a half-open `TimeRange`, or the
-                `FuturesSessions` of date-bounded futures.
+            request: The normalized arguments, with the parsed `start` and `end` bounds.
+            window: What the call reads and keeps (`history_window` in
+                `_datasets/history_source.py`).
         """
         ...
 
@@ -301,7 +299,7 @@ class FlatFileTransport(Protocol):
         self,
         spec: DatasetSpec,
         request: Request,
-        window: TimeRange | FuturesSessions,
+        window: HistoryWindow,
         *,
         dates: Sequence[date],
     ) -> Table:
@@ -311,8 +309,8 @@ class FlatFileTransport(Protocol):
             spec: The dataset, with a flat-file prefix for the request.
             request: The normalized arguments, with the raw `start` and `end` bounds and static
                 symbols (never a reactive table).
-            window: The bounds under the class's day rules: a half-open `TimeRange`, or the
-                `FuturesSessions` of date-bounded futures.
+            window: What the call reads and keeps (`history_window` in
+                `_datasets/history_source.py`).
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
         """
         ...

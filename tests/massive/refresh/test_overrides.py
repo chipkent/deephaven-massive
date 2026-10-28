@@ -1,3 +1,5 @@
+import pytest
+
 from deephaven_massive._enums import AssetClass, FuturesVenue
 from deephaven_massive._massive.refresh import naming, overrides
 from deephaven_massive._massive.refresh.lexicon import CRYPTO_SNAPSHOTS
@@ -10,11 +12,73 @@ def test_every_entry_has_a_reason() -> None:
     assert all(overrides.TAG_CONFLICTS.values())
     assert all(entry.reason for entry in overrides.TYPE_FIXES.values())
     assert all(entry.reason for entry in overrides.KEY_FIXES.values())
+    assert all(entry.reason for entry in overrides.DESCRIPTION_FIXES.values())
     assert all(entry.reason for entry in overrides.RESULT_KEYS.values())
     assert all(entry.reason for entry in overrides.PARAM_UNITS.values())
     assert all(entry.reason for entry in overrides.PROJECTIONS.values())
     assert all(overrides.TRANSPORT_ONLY.values())
     assert all(overrides.VENUES.values())
+
+
+def test_every_description_fix_replaces_its_quote_with_other_single_spaced_text() -> None:
+    for entry in overrides.DESCRIPTION_FIXES.values():
+        texts = [entry.text] if entry.text is not None else [*(entry.asset_classes or {}).values()]
+        assert entry.vendor == " ".join(entry.vendor.split())
+        for text in texts:
+            assert text
+            assert text == " ".join(text.split())
+            assert text != entry.vendor
+        assert set(entry.asset_classes or {}) <= {member.value for member in AssetClass}
+
+
+@pytest.mark.parametrize(
+    ("text", "asset_classes"),
+    [
+        (None, None),
+        ("x", {"options": "y"}),
+        ("", None),
+        (None, {}),
+        (None, {"options": ""}),
+    ],
+    ids=["neither", "both", "empty text", "no asset class", "empty class text"],
+)
+def test_a_description_fix_gives_exactly_one_non_empty_form(
+    text: str | None, asset_classes: dict[str, str] | None
+) -> None:
+    with pytest.raises(ValueError, match="needs exactly one of a non-empty `text`"):
+        overrides.DescriptionFix(vendor="v", reason="r", text=text, asset_classes=asset_classes)
+
+
+def test_the_unified_snapshot_trade_texts_are_corrected_for_options_only() -> None:
+    fixes = overrides.DESCRIPTION_FIXES
+    for key in ("last_trade.price", "last_trade.id", "last_trade.exchange"):
+        entry = fixes["/v3/snapshot", key]
+        assert entry.text is None
+        assert set(entry.asset_classes or {}) == {"options"}
+    chain = fixes["/v3/snapshot/options/{underlyingAsset}", "last_trade.price"].text
+    assert (fixes["/v3/snapshot", "last_trade.price"].asset_classes or {})["options"] == chain
+
+
+def test_the_known_wrong_texts_are_corrected() -> None:
+    fixes = overrides.DESCRIPTION_FIXES
+    crypto = ("/v1/last/crypto/{from}/{to}", "/v3/trades/{cryptoTicker}", "global_crypto/trades_v1")
+    for source in crypto:
+        assert fixes[source, "price"].text == fixes[crypto[0], "price"].text
+        assert "share" not in (fixes[source, "price"].text or "share")
+    for path in CRYPTO_SNAPSHOTS:
+        assert fixes[path, "lastTrade.p"] is fixes["global_crypto/trades_v1", "price"]
+    participant = fixes["/v2/last/trade/{stocksTicker}", "y"]
+    assert "quote" in participant.vendor
+    assert "quote" not in (participant.text or "quote")
+    # A futures price is per unit of the underlying, and a bar's dollar volume applies no
+    # contract multiplier, on every transport.
+    for source in ("/futures/v1/trades/{ticker}", "us_futures_{venue}/trades_v1"):
+        assert "multiplier" in (fixes[source, "price"].text or "")
+    bars = {
+        fixes[source, "dollar_volume"].text
+        for source in ("us_futures_{venue}/session_aggs_v1", "us_futures_{venue}/minute_aggs_v1")
+    }
+    assert bars == {fixes["futures/AM", "dv"].text}
 
 
 def test_every_tag_conflict_has_a_unit() -> None:

@@ -26,7 +26,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._ingest.clients import SessionClients
-from deephaven_massive._massive import Transport
+from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
@@ -527,3 +527,22 @@ def test_a_session_holds_the_catalog_and_its_clients(massive_session: dm.Massive
     core = massive_session._core
     assert core.catalog is _session.CATALOG
     assert isinstance(core._ports, SessionClients)
+
+
+def test_every_per_class_description_is_shown_by_a_dataset_of_its_class() -> None:
+    # A source corrected for one asset class only helps if a dataset of that class shows the
+    # text: none may read the source, or an earlier source's text may win the column.
+    shown: dict[str, set[str]] = {}
+    for spec in _session.CATALOG.by_name.values():
+        if spec.asset_class is not None:
+            texts = shown.setdefault(spec.asset_class.value, set())
+            texts.update(c.description for c in _session.CATALOG.dataset_schema(spec).columns)
+    missing = [
+        (transport, key, item.wire_key, asset_class)
+        for transport in Transport
+        for key, source in sources(transport).items()
+        for item in source.fields
+        for asset_class, text in item.class_descriptions
+        if text not in shown.get(asset_class, set())
+    ]
+    assert missing == []

@@ -9,7 +9,7 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   sent and how. Path parameters come from the symbol (a key the dataset fills from the request,
   such as `{stocksTicker}`; a currency pair's `{from}/{to}`), from the typed parameters, from
   the bar `multiplier` and `timespan`, and for `history()` from the window (the aggregates'
-  `{from}/{to}` dates, the grouped-daily `{date}`). Query parameters are the typed parameters,
+  `{from}/{to}` instants, the grouped-daily `{date}`). Query parameters are the typed parameters,
   the validated `filters` (each key mapped back to its dotted wire name), the time axis
   (`DatasetSpec.time_axis`: whole days on a calendar-date axis, and on an instant axis,
   whether its parameter is a timestamp or a date typed over an instant field such as
@@ -19,6 +19,13 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   size (`DatasetSpec.page_size`, or `Request.limit` when that is smaller, so a small cap
   fetches no more than it keeps), and for `history()` the ascending direction (`_ascending`).
   `Request.limit` caps the total rows, and the client stops paging there.
+- **History.** `history()` requests the instants its window covers
+  (`HistoryWindow.requested`) and keeps the rows the window keeps (`_keep`). Futures trades
+  and quotes named by session dates are requested one session at a time
+  (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time
+  (weekdays only for the classes that do not trade at weekends). Forex and crypto 1-day bars
+  are stamped at 00:00 UTC of their day, and a crypto bar of a day or longer off the UTC day
+  cut raises (`history_source.stamp_rule`, `_stamped`).
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. HTTP 404 for one symbol drops that symbol with
   one WARNING; any other error fails the call.
@@ -65,15 +72,8 @@ import pyarrow.compute as pc
 from deephaven import arrow as dh_arrow
 
 from deephaven_massive._datasets.catalog import filter_key, takes_instants
-from deephaven_massive._datasets.dates import (
-    FuturesSessions,
-    day_class,
-    day_zone,
-    futures_session,
-    futures_session_before,
-    instant_bound,
-)
-from deephaven_massive._datasets.history_source import partition_dates
+from deephaven_massive._datasets.dates import day_class, instant_bound, trades_at_weekends
+from deephaven_massive._datasets.history_source import StampRule, partition_dates, stamp_rule
 from deephaven_massive._datasets.schema import (
     OPTION_ROOT,
     RAW_SYMBOL,
@@ -89,7 +89,12 @@ from deephaven_massive._datasets.symbols import (
     unknown_symbol_message,
     ws_symbol,
 )
-from deephaven_massive._datasets.timestamps import UnitMismatchError, instants
+from deephaven_massive._datasets.timestamps import (
+    UnitMismatchError,
+    check_utc_midnights,
+    instants,
+    utc_day_stamps,
+)
 from deephaven_massive._enums import AssetClass, Timespan, UnknownSymbols
 from deephaven_massive._errors import MassiveError, from_wire
 from deephaven_massive._ingest import hosts, poll
@@ -111,7 +116,8 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-    from deephaven_massive._datasets.dates import TimeRange
+    from deephaven_massive._datasets.dates import DaySpan, TimeRange
+    from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import HostDecision, Request
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
@@ -146,8 +152,12 @@ endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built.
 
 _ONE_DAY: Final = timedelta(days=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
+_SATURDAY: Final = 5
 _SESSION_DATE: Final = "session_end_date"
 """The futures date parameter that names a trading session, not a calendar day."""
+
+_BASIC_REQUESTS_PER_MINUTE: Final = 5
+"""How many REST requests a minute a Basic key allows."""
 
 
 _RATE_LIMIT_ADVICE: Final = (
@@ -173,22 +183,14 @@ class Call:
     symbol: str | None = None
 
 
-def _date_bound(asset_class: AssetClass | None, name: str, value: date, *, upper: bool) -> date:
+def _date_bound(name: str, value: date, *, upper: bool) -> date:
     """Return the day a date parameter of a calendar-date time axis is sent.
 
     A bound is a whole day: the day itself, the day after for an exclusive upper `.lt`, the
-    day before for an exclusive lower `.gt`. An aware `datetime` becomes the calendar day it
-    falls on in the request's day zone (`dates.day_zone`); an upper `datetime` is the first
-    instant excluded, so it names the day of the instant just before it. The rows of such an
-    axis are whole days, so a day the range covers only in part is included, as `history()`
-    includes the flat-file partition of a partly covered day. A futures `session_end_date`
-    parameter names a trading session, not a calendar day: an instant there becomes the
-    session it belongs to (`dates.futures_session`, which rolls at 17:00 Chicago time; for the
-    upper bound, `dates.futures_session_before`), before any day-zone conversion, so an
-    evening instant names the next session rather than its Chicago calendar day.
+    day before for an exclusive lower `.gt`. A datetime never reaches here: a calendar-date
+    axis refuses one when the query is built.
 
     Args:
-        asset_class: The class whose day zone applies (`dates.day_class`), or None.
         name: The parameter's wire name, such as `"ex_dividend_date.gte"`.
         value: The bound.
         upper: True for the upper bound.
@@ -196,13 +198,7 @@ def _date_bound(asset_class: AssetClass | None, name: str, value: date, *, upper
     Returns:
         The day to send.
     """
-    base, _, suffix = name.rpartition(".")
-    field = base or suffix  # the name without its comparison suffix
-    if isinstance(value, datetime) and field == _SESSION_DATE:
-        value = futures_session_before(value) if upper else futures_session(value)
-    elif isinstance(value, datetime):
-        moment = value - _ONE_MICROSECOND if upper else value
-        value = moment.astimezone(day_zone(asset_class)).date()
+    suffix = name.rpartition(".")[2]
     if upper and suffix == "lt":
         return value + _ONE_DAY
     if not upper and suffix == "gt":
@@ -215,7 +211,6 @@ def _axis_query(
     rest_path: RestPath,
     *,
     dates: tuple[date | None, date | None],
-    exact: tuple[datetime, datetime] | None = None,
     asset_class: AssetClass | None = None,
 ) -> dict[str, object]:
     """Return the time-axis parameters of a request, by wire name.
@@ -230,10 +225,10 @@ def _axis_query(
     Args:
         spec: The dataset, whose `time_axis` names the lower and upper parameters.
         rest_path: The path; a name it does not take is left out.
-        dates: The bounds as the caller gave them (a `date` or an aware `datetime`, or None
-            for an open end), or for date-bounded futures the first and last sessions.
-        exact: For `history()`, the window's exact instants, which an instant axis uses
-            instead of `dates`; None to derive instants from `dates`.
+        dates: The bounds: as the caller gave them (a `date` or an aware `datetime`, or None
+            for an open end), or the exact instants a `history()` window requests. A
+            calendar-date axis only ever receives dates (`build_query` refuses datetimes
+            there).
         asset_class: The class whose day rules apply to this request (`dates.day_class`);
             None, the default, takes the dataset's own class (New York days without one).
 
@@ -257,13 +252,12 @@ def _axis_query(
         if param is None or value is None:
             continue
         if takes_instants(rest_path, name, param.kind):
-            bound = value if exact is None else exact[index]
             try:
-                query[name] = instant_bound(zone_class, name, bound, unit=param.unit, upper=upper)
+                query[name] = instant_bound(zone_class, name, value, unit=param.unit, upper=upper)
             except ValueError as error:
                 raise ValueError(f"{spec.name}: {error}") from None
         elif param.kind is ParamKind.DATE:
-            query[name] = _date_bound(zone_class, name, value, upper=upper)
+            query[name] = _date_bound(name, value, upper=upper)
         else:
             query[name] = value.isoformat()
     return query
@@ -579,8 +573,7 @@ def plan_calls(
     symbols: NormalizedSymbols | None,
     fixed: Mapping[str, object] | None = None,
     dates: tuple[date | None, date | None] = (None, None),
-    exact: tuple[datetime, datetime] | None = None,
-    order: Mapping[str, object] | None = None,
+    extra: Mapping[str, object] | None = None,
 ) -> list[Call]:
     """Plan the requests that serve a dataset call on one REST path.
 
@@ -595,9 +588,9 @@ def plan_calls(
             table has been read into a tuple by now).
         fixed: Path parameters the caller sets.
         dates: The time-axis bounds (`_axis_query`); open by default.
-        exact: For `history()`, the window's exact instants (`_axis_query`).
-        order: For `history()`, the query parameters that ask for ascending rows
-            (`_ascending`), added to every call after the time axis; None adds none.
+        extra: For `history()`, query parameters added to every call after the time axis:
+            the ascending direction (`_ascending`) and, for one futures session, its
+            `session_end_date`; None adds none.
 
     Returns:
         The calls, in result order: per symbol, or per chunk of symbols, or one. Each call's
@@ -627,9 +620,9 @@ def plan_calls(
     parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair)
     for symbol, own_path, own_query in parts:
         zone_class = day_class(spec, map(symbol_class, _own_symbols(spec, symbol, own_query)))
-        axis = _axis_query(spec, rest_path, dates=dates, exact=exact, asset_class=zone_class)
+        axis = _axis_query(spec, rest_path, dates=dates, asset_class=zone_class)
         sent = _filter_days(rest_path, {**query, **axis}, zone_class)
-        calls.append(Call({**path, **own_path}, {**sent, **(order or {}), **own_query}, symbol))
+        calls.append(Call({**path, **own_path}, {**sent, **(extra or {}), **own_query}, symbol))
     return calls
 
 
@@ -795,14 +788,14 @@ class _Converter:
         return pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
 
 
-def _keep(batch: pa.RecordBatch, window: TimeRange | FuturesSessions | None) -> pa.RecordBatch:
-    """Keep the rows of a `history()` window: `[start, end)` on `Timestamp`, or the sessions.
+def _keep(batch: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:
+    """Keep the rows of a `history()` window: on `Timestamp`, and for sessions `SessionEndDate`.
 
-    A request can return rows outside the window: the aggregates' `{from}/{to}` take whole
-    days, and a futures range with a date bound is requested over a window widened for
-    holidays. Futures sessions keep the rows whose `SessionEndDate` lies in `[first, last]`,
-    and on a side given as an instant, whose `Timestamp` lies inside the window there. Without
-    the column a bound is about, that bound keeps every row.
+    A request can return rows outside the window: the aggregates' `{from}/{to}` reach whole
+    periods, a bar may not lie wholly inside the range, and futures bars named by date are
+    requested over a window widened for holidays. A row is kept when its `Timestamp` lies in
+    `HistoryWindow.times` and its `SessionEndDate` in `HistoryWindow.sessions`, where the
+    window sets them. Without the column a bound is about, that bound keeps every row.
 
     Args:
         batch: Rows in the dataset's schema.
@@ -811,27 +804,18 @@ def _keep(batch: pa.RecordBatch, window: TimeRange | FuturesSessions | None) -> 
     Returns:
         The rows inside the window.
     """
-    names = batch.schema.names
     if window is None:
         return batch
-    span = window.window if isinstance(window, FuturesSessions) else window
-    # A None side is an instant, bounded on `Timestamp`; a date side on `SessionEndDate`.
-    first, last = (
-        (window.first, window.last) if isinstance(window, FuturesSessions) else (None, None)
-    )
-    sessions = batch.column("SessionEndDate") if "SessionEndDate" in names else None
-    times = batch.column("Timestamp") if "Timestamp" in names else None
+    names = batch.schema.names
     masks = []
-    if first is not None:
-        if sessions is not None:
-            masks.append(pc.greater_equal(sessions, pa.scalar(first)))
-    elif times is not None:
-        masks.append(pc.greater_equal(times, pa.scalar(span.start_ns, times.type)))
-    if last is not None:
-        if sessions is not None:
-            masks.append(pc.less_equal(sessions, pa.scalar(last)))
-    elif times is not None:
-        masks.append(pc.less(times, pa.scalar(span.end_ns, times.type)))
+    if window.sessions is not None and "SessionEndDate" in names:
+        sessions = batch.column("SessionEndDate")
+        masks.append(pc.greater_equal(sessions, pa.scalar(window.sessions.first)))
+        masks.append(pc.less_equal(sessions, pa.scalar(window.sessions.last)))
+    if window.times is not None and "Timestamp" in names:
+        times = batch.column("Timestamp")
+        masks.append(pc.greater_equal(times, pa.scalar(window.times.start_ns, times.type)))
+        masks.append(pc.less(times, pa.scalar(window.times.end_ns, times.type)))
     if not masks:
         return batch
     return batch.filter(functools.reduce(pc.and_, masks))
@@ -1004,7 +988,8 @@ class RestReader:
         calls: Sequence[Call],
         *,
         limit: int | None,
-        window: TimeRange | FuturesSessions | None = None,
+        window: HistoryWindow | None = None,
+        stamps: StampRule = StampRule.KEEP,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
     ) -> tuple[pa.Table, int]:
@@ -1021,6 +1006,9 @@ class RestReader:
             calls: The planned calls, in result order.
             limit: The cap on each call's rows, or None; `read_fetch` caps the total.
             window: The `history()` window whose rows to keep, or None.
+            stamps: How the bars' stamps are treated (`history_source.stamp_rule`): forex and
+                crypto 1-day bars move to 00:00 UTC of their day, and a crypto stamp off the
+                UTC day cut raises `MassiveError`; `KEEP`, the default, for everything else.
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
                 of this read's own.
@@ -1035,7 +1023,13 @@ class RestReader:
             self.catalog, spec, rest_path, unknown_symbols=self.unknown_symbols
         )
         run = functools.partial(
-            self._call, converter, limit=limit, window=window, record=record, spec=spec
+            self._call,
+            converter,
+            limit=limit,
+            window=window,
+            stamps=stamps,
+            record=record,
+            spec=spec,
         )
         if len(calls) <= 1:
             outcomes = [run(call) for call in calls]
@@ -1083,7 +1077,8 @@ class RestReader:
         *,
         spec: DatasetSpec,
         limit: int | None,
-        window: TimeRange | FuturesSessions | None,
+        window: HistoryWindow | None,
+        stamps: StampRule,
         record: Callable[[DriftReport], None] | None,
     ) -> _Outcome:
         """Request one call's pages and convert their rows.
@@ -1094,6 +1089,7 @@ class RestReader:
             spec: The dataset.
             limit: The cap on the call's rows, or None.
             window: The `history()` window whose rows to keep, or None.
+            stamps: How the bars' stamps are treated (`_stamped`).
             record: Also given each page's drift, or None.
 
         Returns:
@@ -1101,7 +1097,8 @@ class RestReader:
             HTTP 404, which logs one WARNING per symbol and session.
 
         A failed request raises the public error of its `WireError` (`_public`), and a row
-        that breaks the schema the `RowDataError` of `_Converter.convert`.
+        that breaks the schema the `RowDataError` of `_Converter.convert`; a crypto bar
+        stamped off the UTC day cut the `MassiveError` of `_stamped`.
         """
         kept: list[pa.RecordBatch] = []
         requests = 0
@@ -1117,6 +1114,8 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol)
+                if stamps is not StampRule.KEEP:
+                    batches = [_stamped(spec, template, batch, rule=stamps) for batch in batches]
                 kept.extend(_keep(batch, window) for batch in batches)
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
@@ -1348,7 +1347,13 @@ class RestReader:
         requests = 0
         for rest_path, calls in planned:
             table, made = self.read(
-                spec, rest_path, calls, limit=request.limit, record=record, executor=executor
+                spec,
+                rest_path,
+                calls,
+                limit=request.limit,
+                stamps=stamp_rule(spec, request),
+                record=record,
+                executor=executor,
             )
             tables.append(table)
             requests += made
@@ -1549,63 +1554,60 @@ class RestEndpoints:
             raise
         return self._static(table)
 
-    def history(
-        self, spec: DatasetSpec, request: Request, window: TimeRange | FuturesSessions
-    ) -> Table:
+    def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
         """Return the dataset's REST history over `window`, paged internally, as a static table.
 
-        `dm.ALL` reads the grouped-daily path, one request per day of the window. Explicit
-        symbols read the history path: the window goes out as the dataset's time axis (exact
-        instants for a timestamp parameter, the sessions for date-bounded futures), or as the
-        aggregates' `{from}/{to}` millisecond epochs; one request per symbol where the path
-        takes one.
-        Rows outside the window (`[start, end)` on `Timestamp`, or the sessions on
-        `SessionEndDate`) are dropped. Logs `source=REST requests=<n>` at INFO.
+        `dm.ALL` reads the grouped-daily path, one request per day of the window (weekdays only
+        for the classes that do not trade at weekends, `dates.trades_at_weekends`). Futures
+        trades and quotes named by session dates read one request series per weekday session
+        and symbol (`session_end_date=<date>`), sessions in date order and the symbols of one
+        session in symbol order; Saturdays and Sundays hold no session and are skipped. Every
+        other request covers the window's instants (`HistoryWindow.requested`): on the
+        dataset's time axis, or as the aggregates' `{from}/{to}` millisecond epochs, one
+        request series per symbol where the path takes one. Rows outside the window are
+        dropped (`_keep`), and forex and crypto 1-day bars are stamped at 00:00 UTC of their
+        day. A grouped-daily or per-session download of more than five requests first logs, at
+        INFO, how many requests it makes and about how long a Basic key's 5 requests a minute
+        make it last. Logs `source=REST requests=<n>` at INFO.
 
         Args:
             spec: The dataset; `history()` has checked that REST can serve the request.
-            request: The normalized arguments, with the raw `start` and `end` bounds and static
-                symbols.
-            window: The bounds under the class's day rules.
+            request: The normalized arguments, with static symbols.
+            window: The call's window (`history_window` in `_datasets/history_source.py`).
 
         Returns:
             A static table in the dataset's schema.
 
         Raises:
-            MassiveError: As `fetch` raises it, logged at ERROR first.
+            MassiveError: As `fetch` raises it, logged at ERROR first, and for a crypto 1-day
+                bar stamped elsewhere in its UTC day than its first or last millisecond.
         """
         reader = self._reader()
-        dates = partition_dates(spec, window)
         if isinstance(request.symbols, _All):
             rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
             path, query = _base(spec, rest_path, request, fixed={})
-            calls = [Call({**path, "date": day}, query) for day in dates]
+            # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
+            days = [
+                day
+                for day in partition_dates(spec, window)
+                if day.weekday() < _SATURDAY or trades_at_weekends(spec.asset_class)
+            ]
+            calls = [Call({**path, "date": day}, query) for day in days]
+            _announce(spec, len(calls), sessions=False)
         else:
             rest_path = reader.rest_path(cast("str", spec.history_path))
-            # The aggregates take their range as `{from}/{to}` timestamp segments.
-            kinds = {p.name: p.kind for p in rest_path.params if p.in_path}
-            ranged = kinds.get("from") is ParamKind.TIMESTAMP
-            fixed = _range_segments(window) if ranged else {}
-            bounds: tuple[date | None, date | None]
-            if isinstance(window, FuturesSessions):
-                span = window.window
-                bounds = (window.first or span.start, window.last or span.end)
-                window_instants = (span.start, span.end)
-            else:
-                bounds = (request.start, request.end)
-                window_instants = (window.start, window.end)
-            calls = plan_calls(
+            calls = _history_calls(spec, rest_path, request, window=window)
+            if window.requested is None:
+                _announce(spec, len(calls), sessions=True)
+        try:
+            table, requests = reader.read(
                 spec,
                 rest_path,
-                request,
-                symbols=request.symbols,
-                fixed=fixed,
-                dates=bounds,
-                exact=window_instants,
-                order=_ascending(spec, rest_path, request),
+                calls,
+                limit=None,
+                window=window,
+                stamps=stamp_rule(spec, request),
             )
-        try:
-            table, requests = reader.read(spec, rest_path, calls, limit=None, window=window)
         except MassiveError as error:
             _report(error)
             raise
@@ -1716,23 +1718,114 @@ def _ascending(spec: DatasetSpec, rest_path: RestPath, request: Request) -> dict
     return {"sort": chosen}
 
 
-def _range_segments(window: TimeRange | FuturesSessions) -> dict[str, object]:
+def _range_segments(requested: TimeRange) -> dict[str, object]:
     """Return an aggregates path's `{from}` and `{to}` segments for a `history()` window.
 
-    The segments are millisecond epochs, both inclusive: the window's first instant and its
-    last whole millisecond before the end. Rows outside the window are dropped afterwards
-    (`_keep`).
+    The segments are millisecond epochs, both inclusive: the first instant requested (the
+    start of the first bar that fits the window, `HistoryWindow.requested`, so a request never
+    starts part way through a period) and the last whole millisecond before the end. Rows
+    outside the window are dropped afterwards (`_keep`).
 
     Args:
-        window: The window; date-bounded futures use their widened bar window.
+        requested: The instants to request.
 
     Returns:
         `{"from": ..., "to": ...}`, as instants the client counts in milliseconds.
     """
-    span = window.window if isinstance(window, FuturesSessions) else window
-    first = span.start.replace(microsecond=span.start.microsecond // 1000 * 1000)
-    last = span.end - timedelta(microseconds=1)
+    first = requested.start.replace(microsecond=requested.start.microsecond // 1000 * 1000)
+    last = requested.end - _ONE_MICROSECOND
     return {"from": first, "to": last.replace(microsecond=last.microsecond // 1000 * 1000)}
+
+
+def _history_calls(
+    spec: DatasetSpec, rest_path: RestPath, request: Request, *, window: HistoryWindow
+) -> list[Call]:
+    """Plan the requests of a `history()` call with explicit symbols on the history path.
+
+    Every call asks for ascending rows (`_ascending`). A window that requests instants
+    (`HistoryWindow.requested`) sends them on the time axis, or as the aggregates' `{from}` and
+    `{to}` (`_range_segments`). A window without them (futures trades and quotes named by
+    session dates) sends one call per weekday session and symbol with
+    `session_end_date=<date>`: a session is exact by its date even when a holiday opened it
+    days early, and no session ends on a Saturday or Sunday.
+
+    Args:
+        spec: The dataset.
+        rest_path: The history path.
+        request: The normalized arguments, with static symbols.
+        window: The call's window.
+
+    Returns:
+        The calls, in result order: for sessions, by date and then by symbol.
+    """
+    order = _ascending(spec, rest_path, request)
+    requested = window.requested
+    if requested is None:
+        sessions = cast("DaySpan", window.sessions)
+        return [
+            call
+            for day in sessions.days()
+            if day.weekday() < _SATURDAY
+            for call in plan_calls(
+                spec,
+                rest_path,
+                request,
+                symbols=request.symbols,
+                extra={**order, _SESSION_DATE: day},
+            )
+        ]
+    # The aggregates take their range as `{from}/{to}` timestamp segments.
+    kinds = {p.name: p.kind for p in rest_path.params if p.in_path}
+    ranged = kinds.get("from") is ParamKind.TIMESTAMP
+    return plan_calls(
+        spec,
+        rest_path,
+        request,
+        symbols=request.symbols,
+        fixed=_range_segments(requested) if ranged else {},
+        dates=(requested.start, requested.end),
+        extra=order,
+    )
+
+
+def _announce(spec: DatasetSpec, requests: int, *, sessions: bool) -> None:
+    """Log, before a long one-request-per-day download, how many requests it makes.
+
+    A grouped-daily download makes one request per day, and a per-session download one request
+    series per session and symbol, more where a session spans several pages. At a Basic key's 5
+    requests a minute, the first five go at once and every further five take a minute. Only a
+    download of more than five requests is announced.
+
+    Args:
+        spec: The dataset.
+        requests: The number of planned requests (for sessions, of first pages).
+        sessions: True for a per-session download, whose pages may add requests.
+    """
+    if requests <= _BASIC_REQUESTS_PER_MINUTE:
+        return
+    minutes = max(1, -(-(requests - _BASIC_REQUESTS_PER_MINUTE) // _BASIC_REQUESTS_PER_MINUTE))
+    unit = "minute" if minutes == 1 else "minutes"
+    if sessions:
+        logger.info(
+            "%s history: at least %d requests, one per session and symbol, more where a "
+            "session spans several pages; at a Basic key's %d requests a minute that takes "
+            "at least %d %s",
+            spec.name,
+            requests,
+            _BASIC_REQUESTS_PER_MINUTE,
+            minutes,
+            unit,
+        )
+    else:
+        logger.info(
+            "%s history: %d requests, one per day; at a Basic key's %d requests a minute that "
+            "takes about %d %s",
+            spec.name,
+            requests,
+            _BASIC_REQUESTS_PER_MINUTE,
+            minutes,
+            unit,
+        )
 
 
 def _waited(future: Future[HostDecision]) -> HostDecision:
@@ -1751,3 +1844,40 @@ def _waited(future: Future[HostDecision]) -> HostDecision:
         return future.result()
     except MassiveError as error:
         raise type(error)(str(error), status=error.status, request_id=error.request_id) from None
+
+
+_REST_REMEDY: Final = (
+    "read the 1-day flat files with source=dm.HistorySource.FLAT_FILES if S3 credentials are "
+    "configured"
+)
+"""What a caller can do when Massive's REST bars are not cut at UTC midnight."""
+
+
+def _stamped(
+    spec: DatasetSpec, source: str, batch: pa.RecordBatch, *, rule: StampRule
+) -> pa.RecordBatch:
+    """Apply a stamp rule to a batch of bars (`history_source.stamp_rule`).
+
+    Args:
+        spec: The dataset, for the message.
+        source: The REST path template the bars came from, for the message.
+        batch: Rows in the dataset's schema.
+        rule: `UTC_DAY` or `UTC_DAY_CHECKED` moves each stamp to 00:00 UTC of its day (the
+            latter refusing a stamp off the day's first or last millisecond);
+            `UTC_MIDNIGHT` refuses a stamp that is not 00:00 UTC and keeps the rest.
+
+    Returns:
+        The batch, with its `Timestamp` at the start of each bar's UTC day.
+
+    A refused stamp raises the `MassiveError` of `timestamps.utc_day_stamps` or
+    `timestamps.check_utc_midnights`, which names `source=dm.HistorySource.FLAT_FILES` as the
+    way around it.
+    """
+    index = batch.schema.get_field_index("Timestamp")
+    values = batch.column(index)
+    if rule is StampRule.UTC_MIDNIGHT:
+        check_utc_midnights(spec.name, values, source=source, remedy=_REST_REMEDY)
+        return batch
+    checked = rule is StampRule.UTC_DAY_CHECKED
+    moved = utc_day_stamps(spec.name, values, source=source, checked=checked, remedy=_REST_REMEDY)
+    return batch.set_column(index, "Timestamp", moved)
