@@ -4475,7 +4475,7 @@ document already reflects them.
     asset class links only that class's page of a shared source; the footer keeps the fetch
     date ([section 7.4](#74-column-descriptions)).
 
-55. **Canonical symbols only, converters for the rest** (2026-10-28). Every symbol a dataset
+56. **Canonical symbols only, converters for the rest** (2026-10-28). Every symbol a dataset
     takes and every `Symbol` column is Massive's exact REST ticker, case kept (`KIMpL`); the
     old normalization (upper-casing, `EUR/USD` to `C:EURUSD`, `SPX` to `I:SPX` on input) is
     gone, and a non-canonical symbol raises `ValueError` naming the canonical form. Conversion

@@ -1796,3 +1796,9 @@ def test_a_lookup_that_finishes_after_its_stream_ended_changes_nothing(harness: 
     assert harness.lookups == ["X:DOTUSD"]
     assert harness.connections.pairs() == {"X:DOTUSD": ("DOT", "USD")}
     assert harness.urls == []  # no connection was opened for it
+
+
+def test_closing_the_transport_stops_the_lookup_worker(harness: Harness) -> None:
+    harness.connections.close()
+    with pytest.raises(RuntimeError, match="after shutdown"):
+        harness.connections._lookups.submit(print)

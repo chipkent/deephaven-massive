@@ -1034,7 +1034,9 @@ class WsConnections:
         self._no_acked: set[tuple[str, str]] = set()
         self._plans: dict[tuple[DatasetSpec, str], ChannelPlan] = {}
         self._pairs: dict[str, tuple[str, str]] = {}
-        self._lookups: ThreadPoolExecutor | None = None
+        # One worker, started on the first crypto watchlist change: a pair is looked up off
+        # the update-graph thread, and no change of a stream overtakes another.
+        self._lookups: Final = ThreadPoolExecutor(1, f"{core.label} crypto pairs")
         self._closed = False
 
     # --- opening -------------------------------------------------------------------------------
@@ -1328,10 +1330,7 @@ class WsConnections:
         with self._lock:
             connection = self._streams.get(stream_id)
             if connection is not None and connection.asset_class is AssetClass.CRYPTO:
-                if self._lookups is None:
-                    self._lookups = ThreadPoolExecutor(1, f"{self._label} crypto pairs")
-                # One worker, in order: a pair is looked up off this thread, and no change
-                # of the stream overtakes another.
+                # A closed transport holds no stream, so nothing is submitted after shutdown.
                 self._lookups.submit(self._change_pairs, stream_id, added, removed)
                 return
         if connection is not None:
@@ -1600,9 +1599,7 @@ class WsConnections:
             connections = list(self._connections.values())
             self._connections.clear()
             self._streams.clear()
-            lookups, self._lookups = self._lookups, None
-        if lookups is not None:
-            lookups.shutdown(wait=False, cancel_futures=True)
+        self._lookups.shutdown(wait=False, cancel_futures=True)
         for connection in connections:
             connection.close()
         for connection in connections:
