@@ -24,8 +24,7 @@ the dataset's table shape:
   same columns: crypto trades carry the stocks-only `Tape`, always null. Each column also gets
   one description chosen for the dataset, the transports that fill it, and the wire keys behind
   it (`Column`); every result's column descriptions and the queries' `columns()` tables read
-  them from here. `Catalog` caches the result per dataset; this
-  module holds no state.
+  them from here. `Catalog` caches the result per dataset; this module holds no state.
 
 The merge runs from the committed generated files only, never from data. The Deephaven types of
 these columns, and the column definitions `table_publisher` and `input_table` take, come from

@@ -127,9 +127,20 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
             from deephaven import new_table
             from deephaven.column import double_col
 
-            prices = new_table([double_col("Price", [1.5])])
-            result = describe(prices, spec, catalog.dataset_schema(spec))
-            result.attributes()["TableDescription"]  # "stocks.x: ..."
+            from deephaven_massive._datasets.catalog import DatasetSpec
+            from deephaven_massive._datasets.schema import Column, ColumnType, Schema
+            from deephaven_massive._enums import AssetClass
+            from deephaven_massive._tables.columns import describe
+
+            spec = DatasetSpec(
+                name="stocks.x",
+                summary="Example prices.",
+                asset_class=AssetClass.STOCKS,
+                channels={None: "T"},
+            )
+            schema = Schema("stocks.x", (Column("Price", ColumnType.DOUBLE, "The price."),))
+            result = describe(new_table([double_col("Price", [1.5])]), spec, schema)
+            result.attributes()["TableDescription"]  # "stocks.x: Example prices."
 
     Args:
         table: The table the verb would otherwise return. It must have every column of
