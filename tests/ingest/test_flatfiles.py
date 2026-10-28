@@ -1089,6 +1089,31 @@ def test_futures_instants_on_a_holiday_read_the_next_session(
     assert "for the hours a holiday moved into it" in caplog.text
 
 
+def test_a_date_start_reads_its_session_when_the_end_is_before_its_regular_open(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    # The 2025-01-21 session opened on Sunday for Martin Luther King Day, so a range from that
+    # session to Monday noon holds its Sunday and Monday rows.
+    clock(datetime(2025, 2, 10, tzinfo=UTC))
+    sunday = epoch_ns(datetime(2025, 1, 19, 18, tzinfo=CHICAGO))
+    tuesday = epoch_ns(datetime(2025, 1, 21, 9, tzinfo=CHICAGO))
+    rows = "".join(f",1.0,1,1,1,1,2025-01-21,ESH5,{m}\n" for m in (sunday, tuesday))
+    key = FUTURES_KEY.format("cme", date(2025, 1, 21))
+    fake_s3.put(key, make_csv_gz(FUTURES_HEADER + rows))
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    t = q.history(
+        "2025-01-21",
+        datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
+        source=HistorySource.FLAT_FILES,
+    )
+    assert pick(t, "Timestamp") == [(sunday,)]
+    assert fake_s3.keys() == [key]
+
+
 def test_a_roll_forward_gives_up_after_the_holiday_margin(
     *,
     session: dm.MassiveSession,
