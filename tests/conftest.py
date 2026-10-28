@@ -79,23 +79,52 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 # --- JVM shutdown workaround -------------------------------------------------------------------
-# On macOS with Python 3.11+, normal interpreter shutdown after an embedded JVM has run can
-# segfault (exit code 139) while C++ static destructors in jpy and the JVM are finalized. The
-# workaround: once pytest has finished (after pytest-cov has applied `fail_under` to the
-# session's exit status), flush stdio and leave through `os._exit` with pytest's own exit
-# status, skipping the finalizers. `atexit` handlers run last-in, first-out, so this one,
-# registered after the server's, runs first. Do not remove it without reproducing the crash.
+# Leaving the process normally after the embedded JVM has run is not safe, for two reasons:
+#
+# 1. On macOS with Python 3.11+, interpreter shutdown can segfault (exit code 139) while C++
+#    static destructors in jpy and the JVM are finalized.
+# 2. pytest's faulthandler plugin calls `faulthandler.disable()` in its `pytest_unconfigure`.
+#    That restores the SIGSEGV, SIGBUS, SIGFPE, and SIGILL handlers faulthandler saved before
+#    the JVM started, which are the defaults, and so removes the JVM's handlers. The JVM keeps
+#    running (the update graph cycles every 25 ms), and its next deliberate SIGSEGV (an armed
+#    safepoint poll or an implicit null check) kills the process silently with exit code 139
+#    (138, SIGBUS, on macOS). The rest of pytest's teardown, which includes a full garbage
+#    collection, and interpreter shutdown all run in that window.
+#
+# The workaround: once the session has finished (sessionfinish has written the summary, and
+# pytest-cov has applied `fail_under` to the exit status), the first `pytest_unconfigure`
+# implementation, this one, flushes stdio and leaves through `os._exit` with pytest's own exit
+# status, so the JVM's handlers are never removed and the finalizers never run. If pytest
+# unconfigures without a session (`pytest --help`, or a usage error), the `atexit` handler does
+# the same at interpreter exit; `atexit` handlers run last-in, first-out, so this one,
+# registered after the server's, runs first. Do not remove either exit without reproducing
+# both crashes.
 
 _SESSIONS: list[pytest.Session] = []
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Remember the session so the exit handler can read its final exit status.
+    """Remember the session so the exit handlers can read its final exit status.
 
     Args:
         session: The pytest session that is starting.
     """
     _SESSIONS.append(session)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Exit with the session's status before pytest's faulthandler removes the JVM's handlers.
+
+    Runs before every other `pytest_unconfigure` implementation, so the remaining ones (the
+    faulthandler plugin's among them) and interpreter shutdown never run. Without a session it
+    returns, and the `atexit` handler exits later.
+
+    Args:
+        config: The pytest configuration (unused; required by the hook signature).
+    """
+    if _SESSIONS:
+        _final_jvm_exit()
 
 
 def _final_jvm_exit() -> None:

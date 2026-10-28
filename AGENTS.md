@@ -228,8 +228,10 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
   faulthandler. The JVM raises SIGSEGV on purpose; in the other order the first one kills the
   process. A `hs_err_pid*.log` file means the JVM crashed: investigate it, do not ignore it.
 - Do not remove the `os._exit` shutdown block in `tests/conftest.py`. On macOS, normal
-  interpreter shutdown after the JVM has run can segfault (exit code 139); the block exits with
-  pytest's own status once pytest is done.
+  interpreter shutdown after the JVM has run can segfault (exit code 139). On every platform,
+  pytest's faulthandler plugin removes the JVM's signal handlers in its `pytest_unconfigure`,
+  and the JVM's next deliberate SIGSEGV then kills the process silently. The block exits with
+  pytest's own status from the first `pytest_unconfigure`, before either can happen.
 - Get the context, conversion helpers, and fakes from fixtures (`dh_exec_ctx`, `dh_to_pylist`,
   `load_fixture`, `make_csv_gz`), never by importing `conftest.py`.
 - To delete rows from a keyed `input_table`, pass a static key table, never a live view derived

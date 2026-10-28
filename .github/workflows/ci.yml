@@ -82,6 +82,17 @@ jobs:
         with:
           name: coverage-py${{ matrix.python-version }}
           path: coverage.xml
+      - name: Upload JVM crash logs
+        # The JVM writes hs_err_pid<pid>.log to the working directory when it crashes, or to the
+        # temporary directory when it cannot write there.
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hs-err-py${{ matrix.python-version }}
+          path: |
+            hs_err_pid*.log
+            /tmp/hs_err_pid*.log
+          if-no-files-found: ignore
 
   test-lowest:
     # The other jobs resolve the newest versions, so a floor in pyproject.toml that is too low
@@ -121,6 +132,17 @@ jobs:
       - name: Pytest
         # Coverage is the newest-versions jobs' gate; this job checks only that the floors work.
         run: uv run --no-sync pytest
+      - name: Upload JVM crash logs
+        # The JVM writes hs_err_pid<pid>.log to the working directory when it crashes, or to the
+        # temporary directory when it cannot write there.
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hs-err-py3.11-lowest-direct
+          path: |
+            hs_err_pid*.log
+            /tmp/hs_err_pid*.log
+          if-no-files-found: ignore
 
   build:
     name: build
