@@ -18,6 +18,7 @@ from deephaven_massive._datasets.dates import (
     check_order,
     flat_file_published,
     futures_session,
+    futures_session_open,
     futures_sessions,
     history_range,
     parse_date_like,
@@ -334,3 +335,13 @@ def test_calendar_day_keeps_a_date_as_given() -> None:
     assert calendar_day(_spec(AssetClass.STOCKS), date(2025, 3, 3), "date") == date(2025, 3, 3)
     with pytest.raises(ValueError, match=r"date='2025-03-03T09:30' needs a timezone"):
         calendar_day(_spec(AssetClass.STOCKS), "2025-03-03T09:30", "date")
+
+
+@pytest.mark.parametrize("session", [date(2025, 3, 4), date(2025, 3, 10), date(2025, 11, 3)])
+def test_a_session_opens_at_17_chicago_on_the_day_before(session: date) -> None:
+    opens = futures_session_open(session)
+    eve = session - timedelta(days=1)
+    assert opens == datetime(eve.year, eve.month, eve.day, 17, tzinfo=CHICAGO)
+    # The roll agrees: the opening instant belongs to the session, the one before does not.
+    assert futures_session(opens) == session
+    assert futures_session(opens - timedelta(microseconds=1)) == eve

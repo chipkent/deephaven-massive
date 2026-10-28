@@ -32,7 +32,7 @@ __all__ = ["HostDecision", "ParamValue", "Request", "StreamKey"]
 ParamValue: TypeAlias = "str | int | float | bool | date | datetime | StrEnum | tuple[str, ...]"
 """A normalized parameter or filter value, as a `Request` stores it (sequences become tuples)."""
 
-StreamKey: TypeAlias = "tuple[str, str | None, NormalizedSymbols]"
+StreamKey: TypeAlias = "tuple[str, str, NormalizedSymbols]"
 """The identity of a stream: `(dataset name, channel, symbols)`. The symbols are the sorted
 tuple of canonical symbols, `ALL`, or a `SymbolTable` box, which compares by the identity of the
 reactive table's wrapper and holds it strongly while the key exists."""
