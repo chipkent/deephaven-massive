@@ -310,14 +310,13 @@ class FlatFile:
             WireError: If the body is not gzip, is truncated or corrupt, or the connection
                 drops (then `dropped` is True); if the file is empty (no header line); if the
                 header line is longer than `plan.block_size`, not UTF-8, or not valid CSV; if
-                the header names a
-                column twice or lacks a key header of `plan.required` (before the first block,
-                naming the headers); if a value, or an element of a list, does not parse as
-                its type (naming the header and the type, and quoting Arrow's message); or if
-                a futures block holds a session date other than the plan's session, or none.
-                Every message names the file. An error that `plan.to_ns` raises propagates
-                unchanged, unless it is an Arrow error, which becomes `WireError` like any
-                other.
+                the header names a column twice or lacks a key header of `plan.required`
+                (before the first block, naming the headers); if a value, or an element of a
+                list, does not parse as its type (naming the header and the type, and quoting
+                Arrow's message); or if a futures block holds a session date other than the
+                plan's session, or none. Every message names the file. An error that
+                `plan.to_ns` raises propagates unchanged, unless it is an Arrow error, which
+                becomes `WireError` like any other.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         names: list[str] = []

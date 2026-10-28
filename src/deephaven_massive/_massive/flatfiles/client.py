@@ -297,11 +297,11 @@ class FlatFileClient:
         S3 answers a 404 whose error code is not `NoSuchKey` (such as `NoSuchBucket`, a wrong
         bucket: `"cannot read s3://flatfile/<key> at https://files.massive.com: HTTP 404
         (NoSuchBucket: The specified bucket does not exist)"`), or S3 answers any other status
-        but 200 and 404. On HTTP 403 it is the subclass
-        `WireAuthError` when S3 rejects the credentials themselves, and otherwise
-        `WireEntitlementError`: the plan lacks the files. The message names the object and
-        quotes S3's error code and message, such as `"HTTP 403 for s3://flatfiles/<key> at
-        https://files.massive.com (AccessDenied: Access Denied)"`.
+        but 200 and 404. On HTTP 403 it is the subclass `WireAuthError` when S3 rejects the
+        credentials themselves, and otherwise `WireEntitlementError`: the plan lacks the files.
+        The message names the object and quotes S3's error code and message, such as `"HTTP
+        403 for s3://flatfiles/<key> at https://files.massive.com (AccessDenied: Access
+        Denied)"`.
 
         Args:
             key: The object key (`object_key`).
