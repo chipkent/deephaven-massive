@@ -565,7 +565,7 @@ These facts are verified in `deephaven-core` `main`:
 ```python
 scope = LivenessScope()                       # library-owned, one per result
 with scope.open():                            # top of the thread-local stack during creation
-    result = describe(shape(stream.blink), spec)
+    result = describe(shape(stream.blink), spec, schema)
                                               # shape: append_only / ring / last_by, or for blink()
                                               #   the blink table itself; describe() returns a new,
                                               #   described table (section 7.4)
@@ -921,10 +921,13 @@ attribute `ColumnDescriptions` and a table description as `TableDescription`, se
 shows a column's description in the column-header tooltip; whether it shows the table
 description anywhere is **UNVERIFIED** ([section 23](#23-open-verification-items)), so it is
 set regardless, for every API client to read. The Python package has no wrapper for them, so
-`columns.describe(table, spec)` (in `_tables/columns.py`) calls them through `jpy`: it casts `table.j_table` to
-`GridAttributes`, calls `withColumnDescriptions` with a `java.util.HashMap` of every column
-whose description is not empty, then `withDescription`, casts the outcome back to
-`io.deephaven.engine.table.Table`, and wraps it in a new `deephaven.table.Table`.
+`columns.describe(table, spec, schema)` (in `_tables/columns.py`, with `schema` the dataset's
+`Catalog.dataset_schema(spec)`) calls them on `table.j_table`, an
+`io.deephaven.engine.table.Table`, which extends `GridAttributes`, so no explicit cast and no
+direct `jpy` import (`jpy` is not a declared dependency) is needed: it calls
+`withColumnDescriptions` with a `java.util.HashMap` (`deephaven.jcompat.j_hashmap`) of every
+column whose description is not empty, then `withDescription`, and wraps the outcome in a new
+`deephaven.table.Table`, whose constructor casts it back to `Table`.
 `withColumnDescriptions` checks that every named column exists, so a schema that disagrees
 with the table fails at once; `Table.with_attributes` skips that check and is not used. The
 table description is `"<dataset>: <summary>"` (`"stocks.trades: Trades of US-listed stocks,
@@ -947,8 +950,10 @@ never reads `__doc__` at run time, so `python -OO` changes nothing.
 - **Threading and liveness.** `describe()` makes a new table, so it runs where every result
   table is made: on the caller thread, inside the result's `LivenessScope`
   ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), never under
-  `registry_lock` and never in a listener. Both Java methods are `@ConcurrentMethod`, so they
-  take no update-graph lock. The described table depends on the table it copies, so the
+  `registry_lock` and never in a listener. Copying a table can briefly take the update-graph
+  shared lock (its initial snapshot falls back to the lock after repeated concurrent
+  attempts), like any table operation, which is one more reason it never runs under
+  `registry_lock`. The described table depends on the table it copies, so the
   undescribed parent, and for a stream the blink table that owns `on_shutdown_callback`, lives
   exactly as long as the result does; a teardown test proves that releasing the result still
   shuts the stream down. A `poll()` poller writes only through the publisher it holds, never
@@ -2051,10 +2056,11 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `SessionCore.fail_stream(stream_id, ...)` as soon as the publisher exists; the callback calls
   `SessionCore.stream_shut_down(stream_id)` before it releases the topics; the returned
   `StreamHandle` carries `stream_id`. `blink()`
-  returns a new wrapper of the blink table's Java object, managed in its own result scope
+  returns a described copy of the blink table, a new table managed in its own result scope
   ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)); `append_only()` is
   `blink_to_append_only(blink)`; `ring(n)` is `ring_table(blink, n)`; `last_by()` is as in
-  [section 7](#7-query-classes-and-verbs).
+  [section 7](#7-query-classes-and-verbs); each shape is described last
+  ([section 7.4](#74-column-descriptions)).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
   row buffer once. The rows arrive keyed by long-form column; the flush renames them
   (`rename` in `_datasets/schema.py`), converts them (`_datasets/timestamps.py`), and builds one Arrow batch in the dataset
@@ -3290,7 +3296,8 @@ and the stock text for `price` ("dollar value per whole share") is wrong for cry
    supplies, gets generated library text naming the members that do, in member order:
    `` Always null for `crypto.trades`; supplied by `stocks.trades`. `` (crypto's
    `ParticipantTimestamp` and `Tape`, for example).
-3. **`Symbol`, `Timestamp`, and `Underlying`** get a fixed library sentence ("The instrument,
+3. **`Symbol`, `Timestamp`, and `Underlying`**, when they are declared key columns of the
+   dataset, get a fixed library sentence ("The instrument,
    in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
    underlying instrument, in the library's canonical symbol form."), followed, per transport in
    the order of rule 1, by the wire key each source renames and its quoted vendor description
