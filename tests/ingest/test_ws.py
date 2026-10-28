@@ -570,11 +570,12 @@ def test_a_rejected_key_fails_every_stream(
     q = harness.query(TRADES, ["AAPL"])
     result = q.blink()
     harness.subscribed("T.AAPL")  # attached: the failure below cannot race the open
+    failed = harness.connection()
     fake_ws_server.auth_replies.append("auth_failed")  # for the reconnect
     fake_ws_server.close(1011)
     harness.wait(lambda h: WsState.FAILED in h.states)
     with harness.session._core.registry_lock:
-        failed = harness.connections._streams[1]
+        assert failed.retired
         assert harness.connections._connections == {}  # retired: the next stream opens anew
     assert failed.flusher.join(TIMEOUT)  # its last flush applied the failures, unasked
     [row] = connections_of(harness, dh_to_pylist)
