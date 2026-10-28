@@ -143,6 +143,21 @@ def next_cycle(clock: FakeClock) -> None:
     until(lambda: len(clock.waits) > waits)
 
 
+def fail_one_poll_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Makes the next Arrow-to-Deephaven conversion on a poll thread fail once. The patch is
+    # process-wide and the diagnostics thread converts its batches through the same function,
+    # so a failure any thread could take would race the poller for it.
+    convert = dh_arrow.to_table
+    failures = [RuntimeError("conversion failed")]
+
+    def flaky(data: pa.Table) -> Table:
+        if failures and " poll #" in threading.current_thread().name:
+            raise failures.pop()
+        return convert(data)
+
+    monkeypatch.setattr(dh_arrow, "to_table", flaky)
+
+
 def poller_of(pollers: Pollers) -> poll.Poller:
     (one,) = tuple(pollers._live)
     return one
@@ -800,22 +815,16 @@ def test_a_failed_publish_still_evicts_the_keys_it_dropped(
     pollers: Pollers,
     clock: FakeClock,
     dh_to_pylist: ToPylist,
+    stream_rows: Callable[[], list[dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     script.rows(("AAPL", 1.0), ("MSFT", 2.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
-    convert = dh_arrow.to_table
-    failures = [RuntimeError("conversion failed")]
-
-    def flaky(data: pa.Table) -> Table:
-        if failures:
-            raise failures.pop()
-        return convert(data)
-
-    monkeypatch.setattr(dh_arrow, "to_table", flaky)
+    fail_one_poll_conversion(monkeypatch)
     script.rows(("AAPL", 3.0))  # drops MSFT, but this cycle's publish fails
     next_cycle(clock)
+    assert stream_rows()[0]["Error"] == "conversion failed"
     assert pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)]
     script.rows(("AAPL", 4.0))  # the next cycle still tombstones MSFT
     next_cycle(clock)
@@ -1006,16 +1015,10 @@ def test_a_failed_append_remembers_nothing(
     fake_rest.reply(PATH, page(("a", 1.0)), page(("b", 2.0)), page(("a", 1.0), ("b", 2.0)))
     table = feed(feed_session)
     until(lambda: ids(table, dh_to_pylist) == [("a", 1.0)])
-    convert = dh_arrow.to_table
-    failures = [RuntimeError("conversion failed")]
-
-    def flaky(data: pa.Table) -> Table:
-        if failures:
-            raise failures.pop()
-        return convert(data)
-
-    monkeypatch.setattr(dh_arrow, "to_table", flaky)
+    fail_one_poll_conversion(monkeypatch)
     next_cycle(clock)  # b's cycle fails to publish
+    assert feed_session._core.diagnostics.barrier().wait(30.0)
+    assert dh_to_pylist(feed_session.streams())[0]["Error"] == "conversion failed"
     assert ids(table, dh_to_pylist) == [("a", 1.0)]
     next_cycle(clock)  # so the next cycle appends b, and still skips a
     until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
