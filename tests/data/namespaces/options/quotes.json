@@ -1,0 +1,26 @@
+{
+  "request_id": "a47d1beb8c11b6ae897ab76cdbbf35a3",
+  "results": [
+    {
+      "ask_exchange": 323,
+      "ask_price": 282,
+      "ask_size": 10,
+      "bid_exchange": 316,
+      "bid_price": 277.5,
+      "bid_size": 1,
+      "sequence_number": 789539218,
+      "sip_timestamp": 1645119125346243600
+    },
+    {
+      "ask_exchange": 301,
+      "ask_price": 282,
+      "ask_size": 1,
+      "bid_exchange": 323,
+      "bid_price": 277.5,
+      "bid_size": 10,
+      "sequence_number": 788994206,
+      "sip_timestamp": 1645119118474271000
+    }
+  ],
+  "status": "OK"
+}

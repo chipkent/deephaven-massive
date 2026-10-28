@@ -1,0 +1,25 @@
+{
+  "request_id": "a47d1beb8c11b6ae897ab76cdbbf35a3",
+  "results": [
+    {
+      "exchange": 46,
+      "participant_timestamp": 1401715883806000000,
+      "price": 6.91,
+      "sequence_number": 1,
+      "sip_timestamp": 1401715883806000000,
+      "size": 1
+    },
+    {
+      "conditions": [
+        209
+      ],
+      "exchange": 67,
+      "participant_timestamp": 1401716547786000000,
+      "price": 7.2,
+      "sequence_number": 2,
+      "sip_timestamp": 1401716547786000000,
+      "size": 1
+    }
+  ],
+  "status": "OK"
+}
