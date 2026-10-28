@@ -134,7 +134,6 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
         "Deprecated by Massive (its page is titled 'Splits (Deprecated)'); replaced by "
         "/stocks/v1/splits.",
     ),
-    _rest("/v1/summaries", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/filings/vX/form-5", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/v1/exchanges", _UNDOCUMENTED, undocumented=True),
     _rest("/options/v1/exchanges", _UNDOCUMENTED, undocumented=True),
