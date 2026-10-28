@@ -1,0 +1,27 @@
+{
+  "count": 1,
+  "request_id": "poll-keys",
+  "results": [
+    {
+      "acronym": "CME",
+      "id": "4",
+      "locale": "US",
+      "mic": "XCME",
+      "name": "Chicago Mercantile Exchange",
+      "operating_mic": "XCME",
+      "type": "exchange",
+      "url": "https://cmegroup.com"
+    },
+    {
+      "acronym": "CME",
+      "id": "5",
+      "locale": "US",
+      "mic": "XCME",
+      "name": "Chicago Mercantile Exchange",
+      "operating_mic": "XCME",
+      "type": "exchange",
+      "url": "https://cmegroup.com"
+    }
+  ],
+  "status": "OK"
+}
