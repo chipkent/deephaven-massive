@@ -24,7 +24,7 @@ from deephaven_massive._massive.refresh.openapi import OpenApi
 from deephaven_massive._massive.spec.types import WireType, WireUnit
 
 if TYPE_CHECKING:
-    from deephaven_massive._massive.refresh.openapi import JsonObject
+    from deephaven_massive._massive.refresh.openapi import Json, JsonObject
 
 # Hand input with every table empty; each test replaces the tables it needs.
 _EMPTY = HandInput(
@@ -35,6 +35,7 @@ _EMPTY = HandInput(
     units={},
     tag_conflicts={},
     type_fixes={},
+    key_fixes={},
     result_keys={},
     param_units={},
     exclusions=(),
@@ -135,3 +136,33 @@ def test_examples_are_checked_by_the_generated_field() -> None:
     assert rules.problems == []
     rules.check_examples([price], [{"price": "1.5"}], documented=True, where="in the message")
     assert [(p.gate, p.key) for p in rules.problems] == [("example-type", "price")]
+
+
+def test_a_key_fix_reads_a_field_under_the_key_the_samples_send() -> None:
+    fix = overrides.KeyFix(wire_key="type", reason="test")
+    rules = _rules(dataclasses.replace(_EMPTY, key_fixes={("us_x/trades_v1", "event_type"): fix}))
+    described = {"type": "string", "description": "The event's type."}
+    item = rules.field(RawField("event_type", described, required=True))
+    assert item is not None
+    assert (item.wire_key, item.column, item.description) == ("type", "Type", "The event's type.")
+    # The declared key keeps the entry from going stale; the wire key serves the other entries.
+    assert rules.use().wire_keys == {"event_type", "type"}
+    rules.check_examples([item], [{"type": "ticker_change"}], documented=True, where="here")
+    assert rules.problems == []
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [{"event_type": "ticker_change"}],
+        [{"type": "ticker_change"}, {"event_type": "ticker_change"}],
+        [None],
+    ],
+)
+def test_a_key_fix_is_stale_once_the_example_stops_sending_its_key(rows: list[Json]) -> None:
+    fix = overrides.KeyFix(wire_key="type", reason="test")
+    rules = _rules(dataclasses.replace(_EMPTY, key_fixes={("us_x/trades_v1", "event_type"): fix}))
+    item = rules.field(RawField("event_type", {"type": "string"}, required=True))
+    assert item is not None
+    rules.check_examples([item], rows, documented=True, where="here")
+    assert ("stale-entry", "event_type") in [(p.gate, p.key) for p in rules.problems]

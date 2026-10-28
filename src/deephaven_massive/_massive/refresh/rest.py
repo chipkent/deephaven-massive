@@ -34,8 +34,12 @@ same kind of mechanical rules: a name ending in `.any_of`, or an array, is `LIST
 comma-joined, even when its values come from an `enum`); any other `enum` is `ENUM`;
 booleans, integers, and numbers are themselves; a timestamp-like string parameter takes its
 `PARAM_UNITS` entry, `TIMESTAMP` in its unit or `DATE` when it is "not an epoch"; a string
-with `format: date` or `format: date-time`, a choice of string formats, or a base name
-`date`, `*_date`, `*_utc`, or `as_of` is `DATE`; any other string is `STRING`.
+with `format: date` or `format: date-time`, a choice of string formats, a base name `date`,
+`*_date`, `*_utc`, or `as_of`, or a description that gives the date format `yyyy-mm-dd` (in
+any letter case) is `DATE`; any other string is `STRING`. The description is the vendor's
+evidence where the schema is a bare string: Massive types its date filters `{"type":
+"string"}` and states the format only in prose ("Value must be formatted 'yyyy-mm-dd'"), on
+every date-valued filter whatever the parameter's name.
 
 The checks on one field or parameter run as the generator meets it; the checks that span
 sources run afterwards, over every transport, in `generate`. It imports the standard library
@@ -45,6 +49,7 @@ and other `_massive` modules only.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from types import MappingProxyType
@@ -106,6 +111,9 @@ _OPERATION_EXTENSIONS: Final = MappingProxyType(
 _OVERVIEW_PAGES: Final = frozenset({"overview", "quickstart"})
 # The range and set suffixes of a filter parameter's wire name (`timestamp.gte`).
 _FILTER_SUFFIXES: Final = frozenset({"gt", "gte", "lt", "lte", "any_of"})
+# The date format a parameter's description gives when its values are dates. Massive states it
+# in prose ("Value must be formatted 'yyyy-mm-dd'") where the schema is a bare string.
+_DATE_FORMAT: Final = re.compile(r"\byyyy-mm-dd\b", re.IGNORECASE)
 # The kinds of the scalar schema types of a parameter.
 _SCALAR_KINDS: Final = {
     "integer": ParamKind.INTEGER,
@@ -417,7 +425,7 @@ class _PathGenerator(SourceFields):
                 self.problem(
                     Gate.SHAPE, name, f"a {choice} parameter that is not a choice of date formats"
                 )
-        kind, values = _parameter_rule(name, base, schema)
+        kind, values = _parameter_rule(name, base, schema, description=description)
         entry = self.hand.param_units.get((self.path, base))
         if schema.get("type") != "string" or kind is ParamKind.LIST:
             return kind, values, None
@@ -437,13 +445,17 @@ class _PathGenerator(SourceFields):
         return ParamKind.TIMESTAMP, (), entry.unit
 
 
-def _parameter_rule(name: str, base: str, schema: JsonObject) -> tuple[ParamKind, tuple[str, ...]]:
+def _parameter_rule(
+    name: str, base: str, schema: JsonObject, *, description: str
+) -> tuple[ParamKind, tuple[str, ...]]:
     """Apply the mechanical parameter rules.
 
     Args:
         name: The wire name.
         base: The name without a filter suffix.
         schema: The resolved schema.
+        description: The vendor's description; a string whose description gives the date
+            format `yyyy-mm-dd` is a date.
 
     Returns:
         The kind and the enum values (empty unless `ENUM`). A timestamp-like string comes out
@@ -457,7 +469,11 @@ def _parameter_rule(name: str, base: str, schema: JsonObject) -> tuple[ParamKind
         return ParamKind.ENUM, tuple(_enum_text(value) for value in enum)
     if isinstance(kind, str) and kind in _SCALAR_KINDS:
         return _SCALAR_KINDS[kind], ()
-    dated = base in {"date", "as_of"} or base.endswith(("_date", "_utc"))
+    dated = (
+        base in {"date", "as_of"}
+        or base.endswith(("_date", "_utc"))
+        or _DATE_FORMAT.search(description) is not None
+    )
     choice = "oneOf" in schema or "anyOf" in schema
     if schema.get("format") in {"date", "date-time"} or choice or dated:
         return ParamKind.DATE, ()

@@ -20,9 +20,9 @@ to keep.
   (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
   columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
   do not carry is null and a column a kind widens (an integer size in a `double` column) is
-  widened. A
-  file's surviving rows become one static Deephaven table per `_TABLE_BLOCKS` blocks of data
-  (usually one table per file), and the tables are merged at the end. No block is ever
+  widened (`schema.widen`). A file's surviving rows become one static Deephaven table per
+  `_TABLE_BLOCKS` blocks of data (usually one table per file), and the tables are merged at
+  the end. No block is ever
   converted to Python objects. Arrow reads about 32 blocks ahead of the consumer on its own
   I/O threads, so a reader holds about 32 blocks of decompressed text plus at most
   `_TABLE_BLOCKS` blocks of surviving rows, whatever the file's length.
@@ -82,13 +82,12 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
-import pyarrow.compute as pc
 from deephaven import merge
 from deephaven.arrow import to_table
 
 from deephaven_massive._datasets.dates import TimeRange
 from deephaven_massive._datasets.history_source import within_publication_grace
-from deephaven_massive._datasets.schema import rename, required_fields
+from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
@@ -200,28 +199,6 @@ _READ_TYPES: Final[Mapping[WireType, pa.DataType]] = {
 and every other type as its column's own Arrow type."""
 
 _INT_LIST: Final = pa.list_(pa.int32())
-
-
-def _conform(values: pa.Array, target: pa.DataType) -> pa.Array:
-    """Widen one source column to its dataset column's type, by the merge's lattice joins.
-
-    A source joins its kind with its own wire type, which the merged column may widen: a
-    `long` in a `double` column is cast, and a `long` in an `int[]` column becomes a
-    one-element list (a null stays null). A column already of its type is cast to itself, at
-    no cost.
-
-    Args:
-        values: The column as read, in its wire type's Arrow type.
-        target: The dataset column's Arrow type.
-
-    Returns:
-        The column in `target`.
-    """
-    if pa.types.is_list(target) and not pa.types.is_list(values.type):
-        offsets = pa.array(range(len(values) + 1), pa.int32())
-        items = pc.cast(values, target.value_type)
-        return pa.ListArray.from_arrays(offsets, items, mask=values.is_null())
-    return pc.cast(values, target)
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -371,7 +348,7 @@ class _Transform:
         if source.unit is not None:
             label = f"{self.dataset}.{name}"
             values = instants(label, source.unit, values, time_column=name == "Timestamp")
-        return _conform(values, column_type.arrow_type)
+        return widen(values, column_type.arrow_type)
 
 
 class _CancelledError(Exception):
