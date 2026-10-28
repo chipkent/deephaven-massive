@@ -733,6 +733,43 @@ def test_a_close_leaves_the_event_of_a_finished_wait_alone(
     assert not finished.is_set()  # the ended wait no longer holds its event
 
 
+class _CloseDuringCheck(threading.Event):
+    """A cancel event whose first `is_set()` runs `close()` on another thread meanwhile.
+
+    The close gets `_CLOSE_RACE` seconds to finish before the check goes on. Under the client's
+    lock it cannot finish, and runs as soon as the wait has registered the event; a check made
+    without the lock would let it finish first and miss the wait.
+    """
+
+    def __init__(self, client: FlatFileClient) -> None:
+        super().__init__()
+        self.client = client
+        self.fired = False
+
+    @override
+    def is_set(self) -> bool:
+        if not self.fired:
+            self.fired = True
+            closer = threading.Thread(target=self.client.close)
+            closer.start()
+            closer.join(_CLOSE_RACE)
+        return super().is_set()
+
+
+_CLOSE_RACE = 0.2
+"""Seconds a racing `close()` gets to finish inside the wait's check."""
+
+
+def test_a_close_racing_the_check_of_a_reread_wait_still_ends_it(
+    waiting: tuple[FakeClock, FlatFileClient, Start],
+) -> None:
+    clock, client, start = waiting
+    cancel = _CloseDuringCheck(client)
+    assert _ended(start(cancel))
+    assert cancel.fired
+    assert clock.monotonic() == 0.0  # the close ended the wait; no time passed
+
+
 class _TlsDrop(io.BytesIO):
     # A raw HTTP stream that serves its bytes, then fails as a TLS record that cannot be
     # decrypted does: urllib3 raises its own `SSLError`, which botocore lets through.

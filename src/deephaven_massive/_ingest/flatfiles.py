@@ -895,12 +895,15 @@ class FlatFileHistory:
 
 
 def _released(error: WireError) -> WireError:
-    """Clear the local variables of every finished frame an error's tracebacks hold.
+    """Clear the local variables of the finished frames a dropped read's traceback holds.
 
-    The error, its cause, and its context keep their messages and their tracebacks' file and
-    line entries, so a final failure still reads the same; only the values the frames held
-    (a failed read's tables and Arrow batches) are released. A frame that is still running
-    is left alone.
+    The reader raises the error in the batch generator's frame, and it passes through
+    `_gather`'s frame on its way to `_read_once`, so this one traceback holds both: the
+    gathered tables and pending batches in `_gather`'s locals, and the Arrow reader and its
+    current block in the generator's. Clearing those frames releases the values; the error
+    keeps its message and its traceback's file and line entries, so a final failure reads the
+    same. Its cause, the stream's `OSError`, was raised below the generator and holds none of
+    the file's rows. A frame that is still running (`_read_once`'s own) is left alone.
 
     Args:
         error: The error of a failed read.
@@ -908,12 +911,7 @@ def _released(error: WireError) -> WireError:
     Returns:
         The same error.
     """
-    seen: set[int] = set()
-    link: BaseException | None = error
-    while link is not None and id(link) not in seen:
-        seen.add(id(link))
-        traceback.clear_frames(link.__traceback__)
-        link = link.__cause__ or link.__context__
+    traceback.clear_frames(error.__traceback__)
     return error
 
 
