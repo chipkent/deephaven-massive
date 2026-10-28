@@ -22,9 +22,10 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`_keep`). Futures trades
   and quotes named by session dates are requested one session at a time
-  (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time.
-  Forex and crypto 1-day bars are stamped at 00:00 UTC of their day
-  (`timestamps.utc_day_stamps`).
+  (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time
+  (weekdays only for the classes that do not trade at weekends). Forex and crypto 1-day bars
+  are stamped at 00:00 UTC of their day, and a crypto bar of a day or longer off the UTC day
+  cut raises (`history_source.stamp_rule`, `_stamped`).
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. HTTP 404 for one symbol drops that symbol with
   one WARNING; any other error fails the call.
@@ -71,8 +72,8 @@ import pyarrow.compute as pc
 from deephaven import arrow as dh_arrow
 
 from deephaven_massive._datasets.catalog import filter_key, takes_instants
-from deephaven_massive._datasets.dates import day_class, instant_bound
-from deephaven_massive._datasets.history_source import partition_dates, utc_day_bars
+from deephaven_massive._datasets.dates import day_class, instant_bound, trades_at_weekends
+from deephaven_massive._datasets.history_source import StampRule, partition_dates, stamp_rule
 from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
@@ -80,7 +81,12 @@ from deephaven_massive._datasets.symbols import (
     symbol_class,
     ws_symbol,
 )
-from deephaven_massive._datasets.timestamps import UnitMismatchError, instants, utc_day_stamps
+from deephaven_massive._datasets.timestamps import (
+    UnitMismatchError,
+    check_utc_midnights,
+    instants,
+    utc_day_stamps,
+)
 from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._errors import MassiveError, from_wire, log_once
 from deephaven_massive._ingest import hosts, poll
@@ -978,7 +984,7 @@ class RestReader:
         *,
         limit: int | None,
         window: HistoryWindow | None = None,
-        day_stamps: bool = False,
+        stamps: StampRule = StampRule.KEEP,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
     ) -> tuple[pa.Table, int]:
@@ -995,9 +1001,9 @@ class RestReader:
             calls: The planned calls, in result order.
             limit: The cap on each call's rows, or None; `read_fetch` caps the total.
             window: The `history()` window whose rows to keep, or None.
-            day_stamps: True for forex and crypto 1-day bars, whose stamps move to 00:00 UTC
-                of their day (`timestamps.utc_day_stamps`; for crypto a stamp elsewhere in
-                its day raises `MassiveError`).
+            stamps: How the bars' stamps are treated (`history_source.stamp_rule`): forex and
+                crypto 1-day bars move to 00:00 UTC of their day, and a crypto stamp off the
+                UTC day cut raises `MassiveError`; `KEEP`, the default, for everything else.
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
                 of this read's own.
@@ -1014,7 +1020,7 @@ class RestReader:
             converter,
             limit=limit,
             window=window,
-            day_stamps=day_stamps,
+            stamps=stamps,
             record=record,
             spec=spec,
         )
@@ -1065,7 +1071,7 @@ class RestReader:
         spec: DatasetSpec,
         limit: int | None,
         window: HistoryWindow | None,
-        day_stamps: bool,
+        stamps: StampRule,
         record: Callable[[DriftReport], None] | None,
     ) -> _Outcome:
         """Request one call's pages and convert their rows.
@@ -1076,7 +1082,7 @@ class RestReader:
             spec: The dataset.
             limit: The cap on the call's rows, or None.
             window: The `history()` window whose rows to keep, or None.
-            day_stamps: True to move 1-day bar stamps to 00:00 UTC (`_utc_days`).
+            stamps: How the bars' stamps are treated (`_stamped`).
             record: Also given each page's drift, or None.
 
         Returns:
@@ -1084,8 +1090,8 @@ class RestReader:
             HTTP 404, which logs one WARNING per symbol and session.
 
         A failed request raises the public error of its `WireError` (`_public`), and a row
-        that breaks the schema the `RowDataError` of `_Converter.convert`; a crypto 1-day bar
-        stamped elsewhere in its UTC day the `MassiveError` of `timestamps.utc_day_stamps`.
+        that breaks the schema the `RowDataError` of `_Converter.convert`; a crypto bar
+        stamped off the UTC day cut the `MassiveError` of `_stamped`.
         """
         kept: list[pa.RecordBatch] = []
         requests = 0
@@ -1101,8 +1107,8 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol)
-                if day_stamps:
-                    batches = [_utc_days(spec, template, batch) for batch in batches]
+                if stamps is not StampRule.KEEP:
+                    batches = [_stamped(spec, template, batch, rule=stamps) for batch in batches]
                 kept.extend(_keep(batch, window) for batch in batches)
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
@@ -1338,7 +1344,7 @@ class RestReader:
                 rest_path,
                 calls,
                 limit=request.limit,
-                day_stamps=utc_day_bars(spec, request),
+                stamps=stamp_rule(spec, request),
                 record=record,
                 executor=executor,
             )
@@ -1535,7 +1541,8 @@ class RestEndpoints:
     def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
         """Return the dataset's REST history over `window`, paged internally, as a static table.
 
-        `dm.ALL` reads the grouped-daily path, one request per day of the window. Futures
+        `dm.ALL` reads the grouped-daily path, one request per day of the window (weekdays only
+        for the classes that do not trade at weekends, `dates.trades_at_weekends`). Futures
         trades and quotes named by session dates read one request series per weekday session
         and symbol (`session_end_date=<date>`), sessions in date order and the symbols of one
         session in symbol order; Saturdays and Sundays hold no session and are skipped. Every
@@ -1558,21 +1565,24 @@ class RestEndpoints:
         Raises:
             MassiveError: As `fetch` raises it, logged at ERROR first, and for a crypto 1-day
                 bar stamped elsewhere in its UTC day than its first or last millisecond.
-
-        Futures trades or quotes named by session dates on a query that also filters
-        `session_end_date` raise the `ValueError` of `_history_calls` before any request.
         """
         reader = self._reader()
         if isinstance(request.symbols, _All):
             rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
             path, query = _base(spec, rest_path, request, fixed={})
-            calls = [Call({**path, "date": day}, query) for day in partition_dates(spec, window)]
-            _announce(spec, len(calls))
+            # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
+            days = [
+                day
+                for day in partition_dates(spec, window)
+                if day.weekday() < _SATURDAY or trades_at_weekends(spec.asset_class)
+            ]
+            calls = [Call({**path, "date": day}, query) for day in days]
+            _announce(spec, len(calls), sessions=False)
         else:
             rest_path = reader.rest_path(cast("str", spec.history_path))
             calls = _history_calls(spec, rest_path, request, window=window)
             if window.requested is None:
-                _announce(spec, len(calls))
+                _announce(spec, len(calls), sessions=True)
         try:
             table, requests = reader.read(
                 spec,
@@ -1580,7 +1590,7 @@ class RestEndpoints:
                 calls,
                 limit=None,
                 window=window,
-                day_stamps=utc_day_bars(spec, request),
+                stamps=stamp_rule(spec, request),
             )
         except MassiveError as error:
             _report(error)
@@ -1731,19 +1741,10 @@ def _history_calls(
 
     Returns:
         The calls, in result order: for sessions, by date and then by symbol.
-
-    Raises:
-        ValueError: For sessions on a query that also filters `session_end_date`, which the
-            dates already set; the message says to pass datetimes or drop the filter.
     """
     order = _ascending(spec, rest_path, request)
     requested = window.requested
     if requested is None:
-        if any(key == _SESSION_DATE for key, _ in request.filters):
-            raise ValueError(
-                f"{spec.name}: history() dates set session_end_date themselves; drop the "
-                "session_end_date filter, or pass datetimes to combine it with a time range"
-            )
         sessions = cast("DaySpan", window.sessions)
         return [
             call
@@ -1771,26 +1772,43 @@ def _history_calls(
     )
 
 
-def _announce(spec: DatasetSpec, requests: int) -> None:
+def _announce(spec: DatasetSpec, requests: int, *, sessions: bool) -> None:
     """Log, before a long one-request-per-day download, how many requests it makes.
 
-    A grouped-daily or per-session download makes one request per day or session (and
-    symbol); at a Basic key's 5 requests a minute, a long range takes minutes. Only a download
-    of more than five requests is announced.
+    A grouped-daily download makes one request per day, and a per-session download one request
+    series per session and symbol, more where a session spans several pages. At a Basic key's 5
+    requests a minute, the first five go at once and every further five take a minute. Only a
+    download of more than five requests is announced.
 
     Args:
         spec: The dataset.
-        requests: The number of planned requests.
+        requests: The number of planned requests (for sessions, of first pages).
+        sessions: True for a per-session download, whose pages may add requests.
     """
-    if requests > _BASIC_REQUESTS_PER_MINUTE:
-        minutes = -(-requests // _BASIC_REQUESTS_PER_MINUTE)
+    if requests <= _BASIC_REQUESTS_PER_MINUTE:
+        return
+    minutes = max(1, -(-(requests - _BASIC_REQUESTS_PER_MINUTE) // _BASIC_REQUESTS_PER_MINUTE))
+    unit = "minute" if minutes == 1 else "minutes"
+    if sessions:
         logger.info(
-            "%s history: %d requests, one per day or session; at a Basic key's %d requests a "
-            "minute that takes about %d minutes",
+            "%s history: at least %d requests, one per session and symbol, more where a "
+            "session spans several pages; at a Basic key's %d requests a minute that takes "
+            "at least %d %s",
             spec.name,
             requests,
             _BASIC_REQUESTS_PER_MINUTE,
             minutes,
+            unit,
+        )
+    else:
+        logger.info(
+            "%s history: %d requests, one per day; at a Basic key's %d requests a minute that "
+            "takes about %d %s",
+            spec.name,
+            requests,
+            _BASIC_REQUESTS_PER_MINUTE,
+            minutes,
+            unit,
         )
 
 
@@ -1812,25 +1830,38 @@ def _waited(future: Future[HostDecision]) -> HostDecision:
         raise type(error)(str(error), status=error.status, request_id=error.request_id) from None
 
 
-def _utc_days(spec: DatasetSpec, source: str, batch: pa.RecordBatch) -> pa.RecordBatch:
-    """Move the stamps of a batch of forex or crypto 1-day bars to 00:00 UTC of their day.
+_REST_REMEDY: Final = (
+    "read the 1-day flat files with source=dm.HistorySource.FLAT_FILES if S3 credentials are "
+    "configured"
+)
+"""What a caller can do when Massive's REST bars are not cut at UTC midnight."""
+
+
+def _stamped(
+    spec: DatasetSpec, source: str, batch: pa.RecordBatch, *, rule: StampRule
+) -> pa.RecordBatch:
+    """Apply a stamp rule to a batch of bars (`history_source.stamp_rule`).
 
     Args:
-        spec: The dataset; crypto stamps are checked (`timestamps.utc_day_stamps`).
+        spec: The dataset, for the message.
         source: The REST path template the bars came from, for the message.
         batch: Rows in the dataset's schema.
+        rule: `UTC_DAY` or `UTC_DAY_CHECKED` moves each stamp to 00:00 UTC of its day (the
+            latter refusing a stamp off the day's first or last millisecond);
+            `UTC_MIDNIGHT` refuses a stamp that is not 00:00 UTC and keeps the rest.
 
     Returns:
-        The batch with its `Timestamp` at the start of each bar's UTC day.
+        The batch, with its `Timestamp` at the start of each bar's UTC day.
 
-    A crypto stamp elsewhere in its UTC day than its first or last millisecond raises the
-    `MassiveError` of `timestamps.utc_day_stamps`.
+    A refused stamp raises the `MassiveError` of `timestamps.utc_day_stamps` or
+    `timestamps.check_utc_midnights`, which names `source=dm.HistorySource.FLAT_FILES` as the
+    way around it.
     """
     index = batch.schema.get_field_index("Timestamp")
-    stamps = utc_day_stamps(
-        spec.name,
-        batch.column(index),
-        source=source,
-        checked=spec.asset_class is AssetClass.CRYPTO,
-    )
-    return batch.set_column(index, "Timestamp", stamps)
+    values = batch.column(index)
+    if rule is StampRule.UTC_MIDNIGHT:
+        check_utc_midnights(spec.name, values, source=source, remedy=_REST_REMEDY)
+        return batch
+    checked = rule is StampRule.UTC_DAY_CHECKED
+    moved = utc_day_stamps(spec.name, values, source=source, checked=checked, remedy=_REST_REMEDY)
+    return batch.set_column(index, "Timestamp", moved)

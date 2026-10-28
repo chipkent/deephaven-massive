@@ -367,14 +367,17 @@ def test_daily_open_close(massive_session: dm.MassiveSession) -> None:
 @pytest.mark.parametrize(
     "moment",
     [
-        datetime(2026, 1, 2, 23, 30, tzinfo=timezone(timedelta(hours=-5))),  # 04:30 UTC, Jan 3
+        datetime(2026, 1, 2, 23, 30, tzinfo=timezone(timedelta(hours=-5))),
         "2026-01-02T23:30:00-05:00",
     ],
 )
-def test_daily_open_close_reads_a_time_as_its_utc_day(
+def test_daily_open_close_refuses_a_time(
     massive_session: dm.MassiveSession, moment: datetime | str
 ) -> None:
-    q = massive_session.crypto.daily_open_close("BTC-USD", moment)
+    # The day is a calendar date: which UTC day an instant names is left to no guess.
+    with pytest.raises(ValueError, match=r"^crypto\.daily_open_close: date is a calendar date"):
+        massive_session.crypto.daily_open_close("BTC-USD", moment)
+    q = massive_session.crypto.daily_open_close("BTC-USD", "2026-01-03")
     assert request_of(q).params == (("date", date(2026, 1, 3)),)
 
 

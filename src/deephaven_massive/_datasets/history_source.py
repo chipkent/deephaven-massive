@@ -19,9 +19,9 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   bars only 1-minute and 1-day bars, and 1-session bars for futures, and only unadjusted where
   the dataset has an `adjusted` parameter), and every file the range needs is already
   published. When both sources can, many symbols (`MassiveConfig.flat_file_symbol_threshold`
-  or more, or `dm.ALL`) read flat files and fewer use REST. Crypto 1-day bars are the
-  exception: `AUTO` reads them from flat files whenever S3 credentials are configured and from
-  REST otherwise, so the number of symbols never changes which source's bars a call returns.
+  or more, or `dm.ALL`) read flat files and fewer use REST. Forex and crypto 1-day bars are
+  stamped alike by every source (`stamp_rule`), and a crypto stamp off the UTC day boundary
+  fails loudly, so the choice never changes which day a bar covers.
 
 A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
 after the next day starts in the class's day zone (`dates.publish_time`); futures use their
@@ -33,8 +33,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Final, NamedTuple
 
+from deephaven_massive._datasets.catalog import filter_key, param_family
 from deephaven_massive._datasets.dates import (
     CHICAGO,
     DAY_ZONES,
@@ -70,13 +72,14 @@ __all__ = [
     "PUBLICATION_GRACE",
     "HistoryWindow",
     "SourceChoice",
+    "StampRule",
     "choose_source",
     "flat_file_prefix",
     "history_window",
     "partition_dates",
     "published",
     "rest_history_problem",
-    "utc_day_bars",
+    "stamp_rule",
     "within_publication_grace",
 ]
 
@@ -89,6 +92,8 @@ PUBLICATION_GRACE: Final = timedelta(days=1)
 """How long after its publication time a missing file may still just be late."""
 
 _ONE_DAY: Final = timedelta(days=1)
+_SESSION_DATE: Final = "session_end_date"
+"""The futures parameter that names a session; `history()` sets it for sessions named by date."""
 
 _PARTITION_ZONES: Final[Mapping[AssetClass | None, tzinfo]] = dict(
     [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (None, NEW_YORK)]
@@ -122,8 +127,9 @@ class HistoryWindow:
             window fits), or None where only `sessions` bounds the rows.
         sessions: The `SessionEndDate`s a row must have, for futures named by date; else None.
         requested: The instants a REST request covers: a time axis's range, or the
-            aggregates' `{from}` (the first fitting bar's start) and `{to}`; None for futures
-            trades and quotes named by date, which are requested one session at a time.
+            aggregates' `{from}` (where the first fitting bar's period begins) and `{to}`;
+            None for futures trades and quotes named by date, which are requested one
+            session at a time.
     """
 
     span: TimeRange | DaySpan
@@ -169,7 +175,9 @@ def history_window(
         The window.
 
     An unparseable or naive bound, a date mixed with a datetime, or a reversed range raises
-    the `ValueError` of `dates.bounds`.
+    the `ValueError` of `dates.bounds`. Futures named by session dates raise the `ValueError`
+    of `_futures_sessions` for a `session_end_date` filter on trades or quotes, and for bars
+    of a session or longer with a `multiplier` above 1.
     """
     moment = _now() if now is None else now
     asset_class = day_class(spec, classes)
@@ -182,10 +190,11 @@ def history_window(
     if not spec.is_bars or timespan is None:
         return HistoryWindow(span, instants, None, instants)
     ended = TimeRange(instants.start, min(instants.end, moment))
-    keep, first = bar_starts(asset_class, ended, timespan=timespan, multiplier=request.multiplier)
-    # Futures bars named by instants take `window_start` exactly; the aggregates' `{from}`
-    # starts at the first whole bar, so a request is never aligned to a part of a period.
-    requested = instants if futures else TimeRange(first, instants.end)
+    keep = bar_starts(asset_class, ended, timespan=timespan, multiplier=request.multiplier)
+    # Futures bars named by instants take `window_start` exactly. The aggregates' `{from}`
+    # starts where the first whole period's days begin, so the bar of that period is returned
+    # whether Massive selects bars by their stamp or builds them from `{from}`.
+    requested = instants if futures else TimeRange(keep.start, instants.end)
     return HistoryWindow(span, keep, None, requested)
 
 
@@ -204,14 +213,33 @@ def _futures_sessions(
         Trades and quotes: every row of the sessions, requested one session at a time. Bars:
         the bars requested from `dates.futures_bar_request`, kept by the session rules of
         `history_window`.
+
+    Raises:
+        ValueError: For trades or quotes on a query that also filters `session_end_date` (in
+            any of its forms), which the dates set themselves; or for bars of a session or
+            longer that span several units (`multiplier` above 1), whose session label
+            Massive does not document, so the bars that lie in the sessions cannot be told
+            apart. Each message names what to pass instead.
     """
     timespan = request.timespan
     if not spec.is_bars or timespan is None:
+        reserved = {filter_key(name) for name in param_family(_SESSION_DATE)}
+        if any(key in reserved for key, _ in request.filters):
+            raise ValueError(
+                f"{spec.name}: history() dates set session_end_date themselves; drop the "
+                "session_end_date filter, or pass datetimes to combine it with a time range"
+            )
         return HistoryWindow(span, None, span, None)
+    if not intraday(timespan) and request.multiplier > 1:
+        raise ValueError(
+            f"{spec.name}: bars of {request.multiplier} {timespan.value}s cannot be selected by "
+            "session dates, since the session Massive labels such a bar with is not verified; "
+            "pass datetimes, or multiplier=1"
+        )
     requested = futures_bar_request(span)
     if intraday(timespan):
         ended = TimeRange(requested.start, min(requested.end, now))
-        keep, _ = bar_starts(
+        keep = bar_starts(
             AssetClass.FUTURES, ended, timespan=timespan, multiplier=request.multiplier
         )
         return HistoryWindow(span, keep, span, requested)
@@ -267,26 +295,57 @@ def published(spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | Non
     return flat_file_published(day, now=moment, zone=zone, cutoff=cutoff)
 
 
-def utc_day_bars(spec: DatasetSpec, request: Request) -> bool:
-    """Tell whether a request reads forex or crypto 1-day bars, which mean the UTC day.
+class StampRule(Enum):
+    """How a transport treats the `Timestamp` of a request's bars (`stamp_rule`)."""
 
-    Massive stamps such a bar differently by source (00:00 UTC on the aggregates range,
-    23:59:59.999 UTC in the `day_aggs_v1` flat files), so every transport moves the stamp to
-    00:00 UTC of its day (`timestamps.utc_day_stamps`).
+    KEEP = auto()
+    """Every other request: the stamps are kept as the source sends them."""
+    UTC_DAY = auto()
+    """Forex 1-day bars: each stamp moves to 00:00 UTC of the day it falls in."""
+    UTC_DAY_CHECKED = auto()
+    """Crypto 1-day bars: each stamp moves to 00:00 UTC of its day, and a stamp elsewhere than
+    the day's first or last millisecond fails, since the day cut is not verified."""
+    UTC_MIDNIGHT = auto()
+    """Crypto bars of several days or of a week or longer, from REST: each stamp must be
+    00:00 UTC, or the bar would cover other days than its label."""
+
+
+_UTC_DAY_RULES: Final[Mapping[AssetClass | None, StampRule]] = {
+    AssetClass.FOREX: StampRule.UTC_DAY,
+    AssetClass.CRYPTO: StampRule.UTC_DAY_CHECKED,
+}
+"""The rule of the 1-day bars of each class whose 1-day bars mean the UTC day."""
+
+_DAYS_OR_LONGER: Final = frozenset(
+    {Timespan.DAY, Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR}
+)
+
+
+def stamp_rule(spec: DatasetSpec, request: Request) -> StampRule:
+    """Return how the transports treat the stamps of a request's bars.
+
+    Forex and crypto 1-day bars mean the UTC day on every source, but Massive stamps them
+    differently by source (00:00 UTC on the aggregates range, 23:59:59.999 UTC in the
+    `day_aggs_v1` flat files), so each stamp moves to 00:00 UTC of its day
+    (`timestamps.utc_day_stamps`). Crypto's day cut is not verified (the documented REST
+    samples sit at midnight New York time), so a crypto 1-day stamp elsewhere than a UTC day
+    boundary fails, and so does a crypto bar of several days or longer whose stamp is not
+    00:00 UTC (`timestamps.check_utc_midnights`).
 
     Args:
         spec: The dataset.
         request: The normalized arguments.
 
     Returns:
-        True for 1-day bars, multiplier 1, of a forex or crypto bars dataset.
+        The rule; `StampRule.KEEP` for everything else.
     """
-    return (
-        spec.is_bars
-        and spec.asset_class in (AssetClass.FOREX, AssetClass.CRYPTO)
-        and request.timespan is Timespan.DAY
-        and request.multiplier == 1
-    )
+    if not spec.is_bars or request.timespan not in _DAYS_OR_LONGER:
+        return StampRule.KEEP
+    if request.timespan is Timespan.DAY and request.multiplier == 1:
+        return _UTC_DAY_RULES.get(spec.asset_class, StampRule.KEEP)
+    if spec.asset_class is AssetClass.CRYPTO:
+        return StampRule.UTC_MIDNIGHT
+    return StampRule.KEEP
 
 
 def within_publication_grace(
@@ -430,10 +489,7 @@ def choose_source(
     possible when `rest_history_problem` finds nothing. Under `AUTO`, when both are possible,
     flat files win for `dm.ALL` (and for datasets without instruments) or for at least
     `config.flat_file_symbol_threshold` symbols, and REST wins for fewer. The choice covers the
-    whole range: one unpublished date sends all of it to REST. Crypto 1-day bars take one
-    fixed source under `AUTO`, so the number of symbols never changes the data: flat files
-    whenever S3 credentials are configured (raising when they cannot serve the request), and
-    REST otherwise. Pure: no I/O.
+    whole range: one unpublished date sends all of it to REST. Pure: no I/O.
 
     Args:
         spec: The dataset.
@@ -450,27 +506,14 @@ def choose_source(
 
     Raises:
         ValueError: Under `FLAT_FILES`, if flat files cannot serve the request; under `AUTO`, if
-            neither source can, or for crypto 1-day bars with S3 credentials configured, if
-            flat files cannot (the message names `source=dm.HistorySource.REST`). The
-            message lists every violated constraint, per source.
+            neither source can. The message lists every violated constraint, per source.
     """
     moment = _now() if now is None else now
     flat = _flat_file_problems(spec, request, dates, config=config, now=moment)
-    # Crypto 1-day bars keep one source whatever the symbol count: flat files when S3 is set up.
-    fixed = requested is HistorySource.AUTO and _one_day_crypto(spec, request)
-    fixed = fixed and config.s3_access_key_id is not None
-    if requested is HistorySource.FLAT_FILES or fixed:
-        if flat and fixed:
-            raise ValueError(
-                f"{spec.name} 1-day bars read flat files whenever S3 credentials are configured, "
-                "so the number of symbols never changes the data, but flat files cannot serve "
-                f"this request: {'; '.join(flat)}; pass source=dm.HistorySource.REST to read "
-                "REST"
-            )
+    if requested is HistorySource.FLAT_FILES:
         if flat:
             raise ValueError(f"{spec.name} cannot be read from flat files: {'; '.join(flat)}")
-        reason = "crypto 1-day bars read flat files when S3 is configured" if fixed else "requested"
-        return SourceChoice(HistorySource.FLAT_FILES, reason)
+        return SourceChoice(HistorySource.FLAT_FILES, "requested")
     rest = rest_history_problem(spec, request)
     if flat and rest is not None:
         raise ValueError(
@@ -491,16 +534,3 @@ def choose_source(
     return SourceChoice(
         HistorySource.REST, f"{count} symbols < flat_file_symbol_threshold {threshold}"
     )
-
-
-def _one_day_crypto(spec: DatasetSpec, request: Request) -> bool:
-    """Tell whether a request reads crypto 1-day bars, whose `AUTO` source is fixed.
-
-    Args:
-        spec: The dataset.
-        request: The normalized arguments.
-
-    Returns:
-        True for 1-day bars, multiplier 1, of a crypto bars dataset.
-    """
-    return utc_day_bars(spec, request) and spec.asset_class is AssetClass.CRYPTO

@@ -908,10 +908,10 @@ class _Benzinga(Namespace):
             start: The earliest publication time: an ISO date (`"2025-06-02"`) or `date`,
                 meaning 00:00 America/New_York that day, or a timezone-aware `datetime` or
                 ISO text with an offset. None, the default, sets no lower bound.
-            end: The end of the publication range, of the same kind as `start` (mixing a
-                date with a `datetime` raises `ValueError`): a date includes that whole day,
-                and an aware `datetime` is the first instant excluded. None, the default,
-                sets no upper bound.
+            end: The end of the publication range, of the same kind as `start` (mixing a date with a
+                `datetime` raises `ValueError`): a date includes that whole day, and an aware
+                `datetime` is the first instant excluded. None (the default) sends no upper bound,
+                so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The column to sort by, by its wire name (`"published"`); None keeps the
                 endpoint's default order.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
@@ -1346,8 +1346,9 @@ class _Tmx(Namespace):
             start: The first event date to return, inclusive: an ISO date
                 (`"2025-07-01"`) or a `date`; the axis is a calendar date, so a `datetime` raises
                 `ValueError`. None, the default, sets no lower bound.
-            end: The last event date to return, inclusive, in the same forms. None, the
-                default, sets no upper bound.
+            end: The last event date to return, inclusive, in the same forms. None (the default)
+                sends no upper bound, so rows dated in the future are returned too; pass `end=` to
+                stop at a date.
             sort: The column to sort by, by its wire name (`"date"`); None keeps the
                 endpoint's default order.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
@@ -1450,8 +1451,9 @@ class _Fable(Namespace):
             start: The first transaction date to return, inclusive: an ISO date
                 (`"2025-06-01"`) or a `date`; the axis is a calendar date, so a `datetime` raises
                 `ValueError`. None, the default, sets no lower bound.
-            end: The last transaction date to return, inclusive, in the same forms. None, the
-                default, sets no upper bound.
+            end: The last transaction date to return, inclusive, in the same forms. None (the
+                default) sends no upper bound, so rows dated in the future are returned too; pass
+                `end=` to stop at a date.
             sort: The column to sort by, by its wire name (`"transaction_date"`); None keeps the
                 endpoint's default order.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix

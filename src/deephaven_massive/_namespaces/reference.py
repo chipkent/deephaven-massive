@@ -310,8 +310,8 @@ class _Reference(Namespace):
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
-            date: The day the listing is as of: a `date`, ISO-8601 text, or an aware
-                `datetime`, read as its New York day; None for today.
+            date: The day the listing is as of: a `date` or ISO-8601 date text (a `datetime`
+                raises `ValueError`: it is a calendar date); None for today.
             active: True lists tickers traded on `date`; False lists delisted ones.
             search: Text matched against the ticker and the company name; None for no search.
             sort: The field to sort by, such as `"ticker"`; None for the endpoint's default.
@@ -327,7 +327,7 @@ class _Reference(Namespace):
         Raises:
             TypeError: If `active` is not a `bool`.
 
-        `dm.ALL`, an invalid symbol, a naive `datetime`, or an unknown filter raises
+        `dm.ALL`, an invalid symbol, a `datetime` as `date`, or an unknown filter raises
         `ValueError`; another argument of the wrong type raises `TypeError`.
         """
         if not isinstance(active, bool):
@@ -370,14 +370,13 @@ class _Reference(Namespace):
         Args:
             symbols: The tickers, of any asset classes, or a Deephaven table with a `Symbol`
                 column.
-            date: The day the details are as of: a `date`, ISO-8601 text, or an aware
-                `datetime`, read as its New York day; None for the
-                latest.
+            date: The day the details are as of: a `date` or ISO-8601 date text (a
+                `datetime` raises `ValueError`: it is a calendar date); None for the latest.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or a naive `datetime` raises `ValueError`; an argument of
+        `dm.ALL`, an invalid symbol, or a `datetime` as `date` raises `ValueError`; an argument of
         the wrong type raises `TypeError`.
         """
         query = build_query(

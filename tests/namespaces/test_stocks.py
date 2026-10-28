@@ -467,8 +467,6 @@ def test_movers_take_a_direction(massive_session: dm.MassiveSession) -> None:
     [
         ("2025-06-06", date(2025, 6, 6)),
         (date(2025, 6, 6), date(2025, 6, 6)),
-        # 01:00 UTC on June 7 is still June 6 in New York.
-        (datetime(2025, 6, 7, 1, tzinfo=UTC), date(2025, 6, 6)),
     ],
 )
 def test_daily_open_close_names_a_new_york_day(
@@ -487,6 +485,8 @@ def test_daily_open_close_rejects_all_and_bad_days(massive_session: dm.MassiveSe
         open_close(dm.ALL, "2025-06-06")
     with pytest.raises(ValueError, match="needs a timezone"):
         open_close("AAPL", datetime(2025, 6, 6, 9, 30))  # noqa: DTZ001 - a naive time on purpose
+    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+        open_close("AAPL", datetime(2025, 6, 7, 1, tzinfo=UTC))
     with pytest.raises(TypeError, match="date must be a str, date, or datetime"):
         open_close("AAPL", cast("Any", 20250606))
     with pytest.raises(TypeError, match="adjusted must be a bool"):

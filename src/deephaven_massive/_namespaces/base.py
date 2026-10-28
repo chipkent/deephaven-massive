@@ -489,8 +489,9 @@ def build_query(
         start: The lower bound of the dataset's time axis, or None for an open start: a date
             (a whole day) or an aware datetime (an exact instant).
         end: The upper bound of the dataset's time axis, of the same kind as `start`, or None
-            for an open end; a date is included whole, a datetime is the first instant
-            excluded. A calendar-date axis takes dates only (`_check_axis`).
+            for an open end, which sends no upper bound, so future-dated rows (an announced
+            ex-dividend date) are returned; a date is included whole, a datetime is the first
+            instant excluded. A calendar-date axis takes dates only (`_check_axis`).
         params: The dataset's other typed parameters by wire name; None values are dropped,
             but every key, set or not, is reserved from `filters` with its suffixed forms.
         arguments: The factory's argument name of each key of `params` that the factory

@@ -32,7 +32,7 @@ from deephaven_massive._enums import Recency
 from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Transport, object_key, source
 from deephaven_massive._namespaces import futures
-from deephaven_massive._namespaces.base import Namespace, query_class
+from deephaven_massive._namespaces.base import Namespace, build_query, query_class
 from deephaven_massive._query import HistoryQuery, Query, QueryBase, StreamHistoryQuery
 from deephaven_massive._session import CATALOG
 
@@ -327,8 +327,16 @@ def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:
     assert request(q).start == date(2025, 12, 22)
     assert request(q).end == date(2025, 12, 26)
     assert request(massive_session.futures.schedules()).start is None
-    with pytest.raises(ValueError, match="must be before end"):
+    with pytest.raises(ValueError, match="must not be after end"):
         massive_session.futures.schedules(start="2025-12-26", end="2025-12-22")
+    # The axis is a calendar date of sessions, so a datetime bound is refused.
+    evening = datetime(2025, 12, 22, 18, tzinfo=CHICAGO)
+    for bounds in ({"start": evening}, {"end": evening}):
+        with pytest.raises(
+            ValueError,
+            match=r"^futures\.schedules: session_end_date is a calendar date; pass dates$",
+        ):
+            massive_session.futures.schedules(**cast("dict[str, Any]", bounds))
     for key in ("session_end_date", "session_end_date_gt"):
         with pytest.raises(ValueError, match=rf"^{key} is set through start= and end="):
             massive_session.futures.schedules(filters={key: "2025-12-22"})
@@ -533,7 +541,7 @@ def serve(fake_rest: FakeRestServer, load_fixture: Loader) -> Callable[[str, str
         ("quotes", "/futures/v1/quotes/GCJ5", "quotes.json"),
     ],
 )
-def test_tick_history_over_rest_covers_whole_chicago_sessions(
+def test_tick_history_over_rest_reads_each_session_by_its_date(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -547,17 +555,15 @@ def test_tick_history_over_rest_covers_whole_chicago_sessions(
     symbol = path.rsplit("/", 1)[1]
     factory = getattr(rest_session.futures, dataset)
     out = rows(factory(symbol).history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST))
-    # The session of 2024-12-17 opens at 17:00 CT on 12-16; the window starts four days
-    # earlier, so trading a holiday folds into the session is covered, and ends exactly at
-    # the session's close. The rows are then kept by their SessionEndDate, oldest first.
+    # A date names its session, which is requested by that date with no time window, so the
+    # hours a holiday adds to a session are covered. Rows are kept by SessionEndDate.
     assert sent(fake_rest) == [
         (
             path,
             {
                 "limit": ["50000"],
-                "timestamp.gte": [str(chicago_open(date(2024, 12, 12)))],
-                "timestamp.lt": [str(chicago_open(date(2024, 12, 17)))],
                 "sort": ["timestamp.asc"],
+                "session_end_date": ["2024-12-17"],
             },
         )
     ]
@@ -625,7 +631,8 @@ def test_session_bars_over_rest(
                 "resolution": ["1session"],
                 "limit": ["50000"],
                 "window_start.gte": [str(chicago_open(date(2025, 1, 30)))],
-                "window_start.lt": [str(chicago_open(date(2025, 2, 5)))],
+                # 18:00 Chicago on the last session date.
+                "window_start.lt": [str(chicago_open(date(2025, 2, 5)) + 3600 * NS)],
                 "sort": ["window_start.asc"],
             },
         )
@@ -1027,3 +1034,31 @@ def test_one_block_round_trips_through_the_flat_files(
         assert (row["Close"], row["Volume"]) == (float(wire["close"]), float(wire["volume"]))
     else:
         assert row["SequenceNumber"] == int(wire["sequence_number"])
+
+
+def test_bars_of_several_sessions_by_date_are_refused(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    q = rest_session.futures.bars("GCJ5", dm.Timespan.SESSION, multiplier=2)
+    with pytest.raises(
+        ValueError, match=r"^futures\.bars: bars of 2 sessions cannot be selected by session dates"
+    ):
+        q.history("2025-02-04", "2025-02-07")
+    assert sent(fake_rest) == []
+
+
+def test_history_with_dates_refuses_a_session_end_date_filter(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The factories take no filters; a query built with one (as the shared layers allow) is
+    # refused, since the dates set session_end_date themselves.
+    q = build_query(
+        rest_session._core,
+        futures.TRADES,
+        symbols=["ESZ4"],
+        filters={"session_end_date": "2024-12-17"},
+    )
+    assert isinstance(q, HistoryQuery)
+    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
+        q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST)
+    assert sent(fake_rest) == []

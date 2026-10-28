@@ -381,15 +381,14 @@ def test_futures_session_rolls_at_17_chicago(moment: datetime, session: date) ->
     assert futures_session(moment) == session
 
 
-def test_calendar_day_is_the_day_in_the_class_zone() -> None:
-    late = datetime(2025, 3, 4, 2, 0, tzinfo=UTC)  # 21:00 on 3 March in New York and Chicago
-    assert calendar_day(_spec(AssetClass.STOCKS), late, "date") == date(2025, 3, 3)
-    assert calendar_day(_spec(None), late, "date") == date(2025, 3, 3)
-    assert calendar_day(_spec(AssetClass.CRYPTO), late, "date") == date(2025, 3, 4)
-    assert calendar_day(_spec(AssetClass.FUTURES), late, "date") == date(2025, 3, 3)
-    early = datetime(2025, 3, 4, 5, 30, tzinfo=UTC)  # 23:30 in Chicago, 00:30 in New York
-    assert calendar_day(_spec(AssetClass.FUTURES), early, "date") == date(2025, 3, 3)
-    assert calendar_day(_spec(AssetClass.STOCKS), early, "date") == date(2025, 3, 4)
+def test_calendar_day_refuses_a_datetime() -> None:
+    # A calendar date is a whole day: which day an instant names would depend on a zone.
+    late = datetime(2025, 3, 4, 2, 0, tzinfo=UTC)
+    for asset_class in (AssetClass.STOCKS, AssetClass.CRYPTO, AssetClass.FUTURES, None):
+        with pytest.raises(ValueError, match=r"^x\.history: date is a calendar date; pass a date$"):
+            calendar_day(_spec(asset_class), late, "date")
+    with pytest.raises(ValueError, match="is a calendar date"):
+        calendar_day(_spec(AssetClass.STOCKS), "2025-03-03T09:30:00Z", "date")
 
 
 def test_calendar_day_keeps_a_date_as_given() -> None:
@@ -491,9 +490,7 @@ def utc(day: date) -> datetime:
     return datetime(day.year, day.month, day.day, tzinfo=UTC)
 
 
-def stock_bars(
-    first: date, last: date, timespan: Timespan, *, multiplier: int = 1
-) -> tuple[TimeRange, datetime]:
+def stock_bars(first: date, last: date, timespan: Timespan, *, multiplier: int = 1) -> TimeRange:
     span = DaySpan(first, last).instants(NEW_YORK)
     return bar_starts(AssetClass.STOCKS, span, timespan=timespan, multiplier=multiplier)
 
@@ -507,30 +504,30 @@ def test_intraday_bars_must_end_inside_the_range() -> None:
     assert not intraday(Timespan.DAY)
     start = datetime(2025, 3, 3, 14, 30, 20, tzinfo=UTC)
     end = datetime(2025, 3, 3, 14, 45, 30, tzinfo=UTC)
-    starts, first = bar_starts(
+    starts = bar_starts(
         AssetClass.STOCKS, TimeRange(start, end), timespan=Timespan.MINUTE, multiplier=1
     )
     # The 14:30 bar starts before the range and the 14:45 bar ends after it.
     assert starts == TimeRange(
         datetime(2025, 3, 3, 14, 31, tzinfo=UTC), datetime(2025, 3, 3, 14, 45, tzinfo=UTC)
     )
-    assert first == datetime(2025, 3, 3, 14, 31, tzinfo=UTC)
+    assert starts.start == datetime(2025, 3, 3, 14, 31, tzinfo=UTC)
     # Five-minute bars: the last one to fit starts at 14:40.
-    five, _ = bar_starts(
+    five = bar_starts(
         AssetClass.STOCKS, TimeRange(start, end), timespan=Timespan.MINUTE, multiplier=5
     )
     assert five.end == datetime(2025, 3, 3, 14, 41, tzinfo=UTC)
     # A range shorter than one bar keeps none.
     short = TimeRange(start, start + timedelta(seconds=30))
-    none, _ = bar_starts(AssetClass.STOCKS, short, timespan=Timespan.MINUTE, multiplier=1)
+    none = bar_starts(AssetClass.STOCKS, short, timespan=Timespan.MINUTE, multiplier=1)
     assert none.empty
-    seconds, _ = bar_starts(AssetClass.STOCKS, short, timespan=Timespan.SECOND, multiplier=1)
+    seconds = bar_starts(AssetClass.STOCKS, short, timespan=Timespan.SECOND, multiplier=1)
     assert seconds == short
 
 
 def test_hour_bars_across_the_spring_dst_change() -> None:
     # 2025-03-09 is 23 hours long in New York: its bars of one hour are 23.
-    starts, _ = stock_bars(date(2025, 3, 9), date(2025, 3, 9), Timespan.HOUR)
+    starts = stock_bars(date(2025, 3, 9), date(2025, 3, 9), Timespan.HOUR)
     assert starts.end - starts.start == timedelta(hours=23)
 
 
@@ -538,10 +535,10 @@ def test_hour_bars_across_the_spring_dst_change() -> None:
     ("day", "hours"), [(date(2025, 3, 9), 23), (date(2025, 11, 2), 25), (date(2025, 3, 3), 24)]
 )
 def test_day_bars_are_new_york_days_on_dst_days(day: date, hours: int) -> None:
-    starts, first = stock_bars(day, day, Timespan.DAY)
+    starts = stock_bars(day, day, Timespan.DAY)
     assert starts == TimeRange(ny(day), ny(day + timedelta(days=1)))
     assert starts.end - starts.start == timedelta(hours=hours)
-    assert first == ny(day)
+    assert starts.start == ny(day)
 
 
 def test_day_bars_of_a_range_of_instants_must_be_whole_days() -> None:
@@ -549,32 +546,34 @@ def test_day_bars_of_a_range_of_instants_must_be_whole_days() -> None:
     span = TimeRange(
         datetime(2025, 3, 3, 9, 30, tzinfo=NEW_YORK), datetime(2025, 3, 5, 9, 30, tzinfo=NEW_YORK)
     )
-    starts, first = bar_starts(AssetClass.STOCKS, span, timespan=Timespan.DAY, multiplier=1)
+    starts = bar_starts(AssetClass.STOCKS, span, timespan=Timespan.DAY, multiplier=1)
     assert starts == TimeRange(ny(date(2025, 3, 4)), ny(date(2025, 3, 5)))
-    assert first == ny(date(2025, 3, 4))
+    assert starts.start == ny(date(2025, 3, 4))
     # Crypto days are UTC days.
-    crypto, _ = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.DAY, multiplier=1)
+    crypto = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.DAY, multiplier=1)
     assert crypto == TimeRange(utc(date(2025, 3, 4)), utc(date(2025, 3, 5)))
 
 
 def test_week_bars_run_monday_to_friday_and_skip_weekends() -> None:
     # The week of 2025-03-03 (Monday) to 03-07 (Friday).
-    week = stock_bars(date(2025, 3, 3), date(2025, 3, 7), Timespan.WEEK)[0]
+    week = stock_bars(date(2025, 3, 3), date(2025, 3, 7), Timespan.WEEK)
     assert kept(week, ny(date(2025, 3, 3)))
     # A bar Massive stamps on the Sunday before its week names that week.
     assert kept(week, ny(date(2025, 3, 2)))
     assert not kept(week, ny(date(2025, 3, 10)))
     # A range from a Saturday to a Sunday holds the whole week between; the weekend days
     # around it hold no bar of their own.
-    weekend = stock_bars(date(2025, 3, 1), date(2025, 3, 9), Timespan.WEEK)[0]
+    weekend = stock_bars(date(2025, 3, 1), date(2025, 3, 9), Timespan.WEEK)
     assert weekend == week
     # A range from Tuesday holds no whole week of the 3rd, nor a week ending on Thursday.
-    assert stock_bars(date(2025, 3, 4), date(2025, 3, 7), Timespan.WEEK)[0].empty
-    assert stock_bars(date(2025, 3, 3), date(2025, 3, 6), Timespan.WEEK)[0].empty
-    # The request starts at the Monday of the first whole week.
-    assert stock_bars(date(2025, 3, 1), date(2025, 3, 21), Timespan.WEEK)[1] == ny(date(2025, 3, 3))
+    assert stock_bars(date(2025, 3, 4), date(2025, 3, 7), Timespan.WEEK).empty
+    assert stock_bars(date(2025, 3, 3), date(2025, 3, 6), Timespan.WEEK).empty
+    # The kept starts, and the request, begin on the Saturday before the first whole week.
+    assert stock_bars(date(2025, 3, 1), date(2025, 3, 21), Timespan.WEEK).start == ny(
+        date(2025, 3, 1)
+    )
     # Two-week bars: the last one to fit starts a week before the range's last week.
-    two = stock_bars(date(2025, 3, 3), date(2025, 3, 21), Timespan.WEEK, multiplier=2)[0]
+    two = stock_bars(date(2025, 3, 3), date(2025, 3, 21), Timespan.WEEK, multiplier=2)
     assert kept(two, ny(date(2025, 3, 10)))
     assert not kept(two, ny(date(2025, 3, 17)))
 
@@ -583,31 +582,31 @@ def test_mlk_week_is_still_monday_to_friday() -> None:
     # Martin Luther King Day (Monday 2025-01-20) closed the market; with no holiday calendar
     # the week's bar still covers Monday to Friday, so a range from Tuesday excludes it.
     assert kept(
-        stock_bars(date(2025, 1, 20), date(2025, 1, 24), Timespan.WEEK)[0], ny(date(2025, 1, 21))
+        stock_bars(date(2025, 1, 20), date(2025, 1, 24), Timespan.WEEK), ny(date(2025, 1, 21))
     )
-    assert stock_bars(date(2025, 1, 21), date(2025, 1, 24), Timespan.WEEK)[0].empty
+    assert stock_bars(date(2025, 1, 21), date(2025, 1, 24), Timespan.WEEK).empty
 
 
 def test_good_friday_2024_months_and_weeks() -> None:
     # Good Friday (2024-03-29) closed the stock market; March still ends on the 31st.
     march = date(2024, 3, 1)
-    assert stock_bars(march, date(2024, 3, 28), Timespan.MONTH)[0].empty
-    assert kept(stock_bars(march, date(2024, 3, 29), Timespan.MONTH)[0], ny(march))
-    assert kept(stock_bars(march, date(2024, 3, 31), Timespan.MONTH)[0], ny(march))
+    assert stock_bars(march, date(2024, 3, 28), Timespan.MONTH).empty
+    assert kept(stock_bars(march, date(2024, 3, 29), Timespan.MONTH), ny(march))
+    assert kept(stock_bars(march, date(2024, 3, 31), Timespan.MONTH), ny(march))
     # Its week is still Monday 03-25 to Friday 03-29.
-    week = stock_bars(date(2024, 3, 25), date(2024, 3, 29), Timespan.WEEK)[0]
+    week = stock_bars(date(2024, 3, 25), date(2024, 3, 29), Timespan.WEEK)
     assert kept(week, ny(date(2024, 3, 25)))
-    assert stock_bars(date(2024, 3, 25), date(2024, 3, 28), Timespan.WEEK)[0].empty
+    assert stock_bars(date(2024, 3, 25), date(2024, 3, 28), Timespan.WEEK).empty
 
 
 def test_crypto_weeks_run_monday_to_sunday() -> None:
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 8)).instants(UTC)  # Monday to Saturday
-    short, _ = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.WEEK, multiplier=1)
+    short = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.WEEK, multiplier=1)
     assert short.empty
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 9)).instants(UTC)
-    week, first = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.WEEK, multiplier=1)
+    week = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.WEEK, multiplier=1)
     assert week == TimeRange(utc(date(2025, 3, 3)), utc(date(2025, 3, 10)))
-    assert first == utc(date(2025, 3, 3))
+    assert week.start == utc(date(2025, 3, 3))
 
 
 @pytest.mark.parametrize(
@@ -639,31 +638,31 @@ def test_crypto_weeks_run_monday_to_sunday() -> None:
 def test_calendar_periods_must_lie_wholly_inside(
     *, timespan: Timespan, first: date, last: date, stamps: list[date], outside: list[date]
 ) -> None:
-    starts, _ = stock_bars(first, last, timespan)
+    starts = stock_bars(first, last, timespan)
     assert all(kept(starts, ny(day)) for day in stamps)
     assert not any(kept(starts, ny(day)) for day in outside)
 
 
 def test_a_month_bar_needs_the_month_whole_from_its_first_day() -> None:
-    starts, first = stock_bars(date(2025, 3, 5), date(2025, 3, 20), Timespan.MONTH)
+    starts = stock_bars(date(2025, 3, 5), date(2025, 3, 20), Timespan.MONTH)
     assert starts.empty
-    two, _ = stock_bars(date(2025, 1, 1), date(2025, 4, 30), Timespan.MONTH, multiplier=2)
+    two = stock_bars(date(2025, 1, 1), date(2025, 4, 30), Timespan.MONTH, multiplier=2)
     assert kept(two, ny(date(2025, 3, 1)))
     assert not kept(two, ny(date(2025, 4, 1)))
-    assert stock_bars(date(2025, 1, 2), date(2025, 6, 30), Timespan.MONTH)[1] == ny(
+    assert stock_bars(date(2025, 1, 2), date(2025, 6, 30), Timespan.MONTH).start == ny(
         date(2025, 2, 1)
     )
-    assert first == ny(date(2025, 4, 1))
+    assert starts.start == ny(date(2025, 4, 1))
 
 
 def test_an_unfinished_period_ends_after_now() -> None:
     # A range that ends now leaves out the current month, week, and day.
     now = datetime(2025, 6, 18, 15, tzinfo=UTC)
     span = TimeRange(ny(date(2025, 5, 1)), now)
-    month, _ = bar_starts(AssetClass.STOCKS, span, timespan=Timespan.MONTH, multiplier=1)
+    month = bar_starts(AssetClass.STOCKS, span, timespan=Timespan.MONTH, multiplier=1)
     assert kept(month, ny(date(2025, 5, 1)))
     assert not kept(month, ny(date(2025, 6, 1)))
-    day, _ = bar_starts(AssetClass.STOCKS, span, timespan=Timespan.DAY, multiplier=1)
+    day = bar_starts(AssetClass.STOCKS, span, timespan=Timespan.DAY, multiplier=1)
     assert kept(day, ny(date(2025, 6, 17)))
     assert not kept(day, ny(date(2025, 6, 18)))
 
@@ -674,20 +673,20 @@ def test_futures_bars_by_instants_use_sessions() -> None:
         datetime(2025, 3, 3, 17, tzinfo=CHICAGO).astimezone(UTC),
         datetime(2025, 3, 4, 17, tzinfo=CHICAGO).astimezone(UTC),
     )
-    starts, first = bar_starts(AssetClass.FUTURES, span, timespan=Timespan.SESSION, multiplier=1)
+    starts = bar_starts(AssetClass.FUTURES, span, timespan=Timespan.SESSION, multiplier=1)
     assert starts == span
-    assert first == span.start
+    assert starts.start == span.start
     late = TimeRange(span.start + timedelta(minutes=1), span.end)
-    assert bar_starts(AssetClass.FUTURES, late, timespan=Timespan.SESSION, multiplier=1)[0].empty
+    assert bar_starts(AssetClass.FUTURES, late, timespan=Timespan.SESSION, multiplier=1).empty
     # A week of sessions opens on Sunday evening and ends at Friday's 17:00.
     week = TimeRange(
         datetime(2025, 3, 2, 17, tzinfo=CHICAGO).astimezone(UTC),
         datetime(2025, 3, 7, 17, tzinfo=CHICAGO).astimezone(UTC),
     )
-    weeks, _ = bar_starts(AssetClass.FUTURES, week, timespan=Timespan.WEEK, multiplier=1)
+    weeks = bar_starts(AssetClass.FUTURES, week, timespan=Timespan.WEEK, multiplier=1)
     assert kept(weeks, datetime(2025, 3, 2, 17, tzinfo=CHICAGO))
     shorter = TimeRange(week.start, week.end - timedelta(hours=1))
-    assert bar_starts(AssetClass.FUTURES, shorter, timespan=Timespan.WEEK, multiplier=1)[0].empty
+    assert bar_starts(AssetClass.FUTURES, shorter, timespan=Timespan.WEEK, multiplier=1).empty
 
 
 def test_futures_bar_sessions_keep_whole_periods_of_session_dates() -> None:
@@ -713,15 +712,52 @@ def test_futures_bar_sessions_keep_whole_periods_of_session_dates() -> None:
 def test_months_leave_out_their_leading_and_trailing_weekend_days() -> None:
     # June 2025 starts on a Sunday: a range from Monday the 2nd holds it whole, and its bar
     # is still requested from the 1st, where Massive stamps it.
-    starts, first = stock_bars(date(2025, 6, 2), date(2025, 6, 30), Timespan.MONTH)
+    starts = stock_bars(date(2025, 6, 2), date(2025, 6, 30), Timespan.MONTH)
     assert kept(starts, ny(date(2025, 6, 1)))
-    assert first == ny(date(2025, 6, 1))
+    assert starts.start == ny(date(2025, 6, 1))
     # Crypto trades every day, so its June starts on the 1st.
     span = DaySpan(date(2025, 6, 2), date(2025, 6, 30)).instants(UTC)
-    crypto, _ = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.MONTH, multiplier=1)
+    crypto = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.MONTH, multiplier=1)
     assert crypto.empty
     # Futures months are months of session dates, which are weekdays.
     march = bar_sessions(
         DaySpan(date(2024, 3, 1), date(2024, 3, 29)), timespan=Timespan.MONTH, multiplier=1
     )
     assert march == DaySpan(date(2024, 3, 1), date(2024, 3, 31))
+
+
+def forex_bars(first: date, last: date, timespan: Timespan) -> TimeRange:
+    span = DaySpan(first, last).instants(UTC)
+    return bar_starts(AssetClass.FOREX, span, timespan=timespan, multiplier=1)
+
+
+def test_forex_periods_keep_their_weekends() -> None:
+    # Forex trades from Sunday evening UTC: March 2024 ends on Sunday the 31st, so a range
+    # ending Friday the 29th leaves March out, and June 2025, which starts on Sunday the 1st,
+    # needs a range from the 1st.
+    assert forex_bars(date(2024, 3, 1), date(2024, 3, 29), Timespan.MONTH).empty
+    assert kept(
+        forex_bars(date(2024, 3, 1), date(2024, 3, 31), Timespan.MONTH), utc(date(2024, 3, 1))
+    )
+    assert forex_bars(date(2025, 6, 2), date(2025, 6, 30), Timespan.MONTH).empty
+    assert kept(
+        forex_bars(date(2025, 6, 1), date(2025, 6, 30), Timespan.MONTH), utc(date(2025, 6, 1))
+    )
+    # Weeks are calendar weeks, Monday to Sunday.
+    assert forex_bars(date(2025, 3, 3), date(2025, 3, 7), Timespan.WEEK).empty
+    week = forex_bars(date(2025, 3, 3), date(2025, 3, 9), Timespan.WEEK)
+    assert week == TimeRange(utc(date(2025, 3, 3)), utc(date(2025, 3, 10)))
+    quarters = forex_bars(date(2024, 1, 1), date(2024, 3, 29), Timespan.QUARTER)
+    assert quarters.empty
+
+
+def test_an_open_forex_month_is_unfinished_until_sunday_ends() -> None:
+    # history("2024-03-01") on Sunday 2024-03-31 at 12:00 UTC: Sunday evening's trading has
+    # not happened yet, so March is still unfinished.
+    now = datetime(2024, 3, 31, 12, tzinfo=UTC)
+    span = TimeRange(utc(date(2024, 3, 1)), now)
+    assert bar_starts(AssetClass.FOREX, span, timespan=Timespan.MONTH, multiplier=1).empty
+    # Stocks do not trade on Sunday: their March ended with Friday the 29th.
+    stocks = TimeRange(ny(date(2024, 3, 1)), now)
+    month = bar_starts(AssetClass.STOCKS, stocks, timespan=Timespan.MONTH, multiplier=1)
+    assert kept(month, ny(date(2024, 3, 1)))

@@ -41,7 +41,8 @@ Massive stamps them differently: 00:00 UTC on the aggregates range, 23:59:59.999
 `day_aggs_v1` flat files. Each stamp is moved to 00:00 UTC of its day. For crypto, whose cut
 is not verified (older REST samples sit at midnight New York time), a stamp at any other
 millisecond of the UTC day than its first or last raises `MassiveError`, so a bar of another
-day cut is never returned under a UTC label.
+day cut is never returned under a UTC label. A crypto bar of several days or longer from REST
+must be stamped 00:00 UTC for the same reason (`check_utc_midnights`).
 
 The bound applies to epoch integers only, never to ISO-8601 text, so a pre-1990 date written as
 text stays valid. The module is pure: it makes no Deephaven or network call, and its only state
@@ -72,6 +73,7 @@ __all__ = [
     "MIN_INSTANT_NS",
     "TimeUnit",
     "UnitMismatchError",
+    "check_utc_midnights",
     "instants",
     "masked_instants",
     "mismatch_message",
@@ -368,7 +370,9 @@ _LAST_MS_NS: Final = _DAY_NS - _MS_NS
 """The first nanosecond of the last millisecond of a day: 23:59:59.999."""
 
 
-def utc_day_stamps(label: str, values: pa.Array, *, source: str, checked: bool) -> pa.Array:
+def utc_day_stamps(
+    label: str, values: pa.Array, *, source: str, checked: bool, remedy: str
+) -> pa.Array:
     """Move the stamps of 1-day bars to 00:00 UTC of the day each one falls on.
 
     A forex or crypto 1-day bar covers one UTC day. The aggregates range stamps it at the
@@ -379,18 +383,19 @@ def utc_day_stamps(label: str, values: pa.Array, *, source: str, checked: bool) 
         label: The dataset, for the message, such as `"crypto.bars"`.
         values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
         source: Where the bars came from, for the message, such as a REST path template or a
-            flat-file key.
+            flat-file prefix.
         checked: True to refuse a stamp that is neither the first nor the last millisecond of
             its UTC day (crypto, whose day cut is not verified); False to move any stamp to its
             day's start (forex).
+        remedy: What the caller can do instead, for the message, such as reading the other
+            source.
 
     Returns:
         The stamps at 00:00 UTC, in the same type; nulls stay null.
 
-    Raises:
-        MassiveError: If `checked` and a stamp lies elsewhere in its UTC day, naming the
-            dataset, the source, and the stamp; such a bar would cover another day than the
-            UTC day it would be labelled with.
+    If `checked`, a stamp elsewhere in its UTC day raises the `MassiveError` of `_refuse`,
+    naming the dataset, the source, the stamp, and `remedy`: such a bar would cover another
+    day than the UTC day it would be labelled with.
     """
     ns = values.cast(pa.int64())
     days = pc.divide(ns, _DAY_NS)  # epoch nanoseconds of bars are positive: this floors
@@ -398,13 +403,53 @@ def utc_day_stamps(label: str, values: pa.Array, *, source: str, checked: bool) 
     if checked:
         offset = pc.subtract(ns, starts)
         odd = pc.and_(pc.greater_equal(offset, _MS_NS), pc.less(offset, _LAST_MS_NS))
-        if pc.any(odd).as_py():
-            bad_ns = pc.filter(ns, odd)[0].as_py()
-            bad = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=bad_ns // 1000)
-            raise MassiveError(
-                f"{label}: a 1-day bar from {source} is stamped {bad.isoformat()}, which is "
-                "neither the start nor the last millisecond of a UTC day, so it does not cover "
-                "the UTC day it would be labelled with; report the stamp so the day cut can "
-                "be settled"
-            )
+        _refuse(label, ns, odd, source=source, what="1-day bar", remedy=remedy)
     return starts.cast(values.type)
+
+
+def check_utc_midnights(label: str, values: pa.Array, *, source: str, remedy: str) -> None:
+    """Refuse bars of several days or longer whose stamps are not 00:00 UTC.
+
+    A crypto bar of several days, a week, or longer is built from UTC days, so it must start at
+    a UTC midnight; one stamped at midnight New York time would cover hours of the day after
+    its last one, while its stamp places it inside the requested days.
+
+    Args:
+        label: The dataset, for the message, such as `"crypto.bars"`.
+        values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
+        source: Where the bars came from, for the message: a REST path template.
+        remedy: What the caller can do instead, for the message.
+
+    A stamp that is not 00:00 UTC raises the `MassiveError` of `_refuse`, naming the dataset,
+    the source, the stamp, and `remedy`.
+    """
+    ns = values.cast(pa.int64())
+    odd = pc.not_equal(pc.multiply(pc.divide(ns, _DAY_NS), _DAY_NS), ns)
+    _refuse(label, ns, odd, source=source, what="bar", remedy=remedy)
+
+
+def _refuse(
+    label: str, ns: pa.Array, odd: pa.Array, *, source: str, what: str, remedy: str
+) -> None:
+    """Raise for the first bar a mask marks as off the UTC day cut, if any.
+
+    Args:
+        label: The dataset, for the message.
+        ns: The stamps, as epoch nanoseconds.
+        odd: True for each stamp that is off the cut; null for a null stamp.
+        source: Where the bars came from, for the message.
+        what: The kind of bar, for the message, such as `"1-day bar"`.
+        remedy: What the caller can do instead, for the message.
+
+    Raises:
+        MassiveError: If `odd` holds a True, naming the first such stamp.
+    """
+    if not pc.any(odd).as_py():
+        return
+    bad_ns = pc.filter(ns, odd)[0].as_py()
+    bad = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=bad_ns // 1000)
+    raise MassiveError(
+        f"{label}: a {what} from {source} is stamped {bad.isoformat()}, which is not a UTC day "
+        "boundary, so it does not cover the UTC days it would be labelled with; "
+        f"{remedy}, and report the stamp so the day cut can be settled"
+    )

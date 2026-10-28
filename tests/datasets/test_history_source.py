@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -20,13 +20,14 @@ from deephaven_massive._datasets.dates import (
 from deephaven_massive._datasets.history_source import (
     HistoryWindow,
     SourceChoice,
+    StampRule,
     choose_source,
     flat_file_prefix,
     history_window,
     partition_dates,
     published,
     rest_history_problem,
-    utc_day_bars,
+    stamp_rule,
     within_publication_grace,
 )
 from deephaven_massive._datasets.request import Request
@@ -272,14 +273,18 @@ def test_futures_bars_by_instants_request_them_exactly() -> None:
     assert partition_dates(FUTURES_BARS, bars_window) == (date(2025, 3, 4),)
 
 
-def test_utc_day_bars() -> None:
+def test_stamp_rule() -> None:
     day = request(timespan=Timespan.DAY)
-    assert utc_day_bars(FOREX_BARS, day)
-    assert utc_day_bars(CRYPTO_BARS, day)
-    assert not utc_day_bars(STOCK_BARS, day)
-    assert not utc_day_bars(FOREX_BARS, request(timespan=Timespan.MINUTE))
-    assert not utc_day_bars(FOREX_BARS, request(timespan=Timespan.DAY, multiplier=2))
-    assert not utc_day_bars(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day)
+    assert stamp_rule(FOREX_BARS, day) is StampRule.UTC_DAY
+    assert stamp_rule(CRYPTO_BARS, day) is StampRule.UTC_DAY_CHECKED
+    assert stamp_rule(STOCK_BARS, day) is StampRule.KEEP
+    assert stamp_rule(FOREX_BARS, request(timespan=Timespan.MINUTE)) is StampRule.KEEP
+    assert stamp_rule(FOREX_BARS, request(timespan=Timespan.DAY, multiplier=2)) is (StampRule.KEEP)
+    for timespan, multiplier in ((Timespan.DAY, 2), (Timespan.WEEK, 1), (Timespan.YEAR, 1)):
+        longer = request(timespan=timespan, multiplier=multiplier)
+        assert stamp_rule(CRYPTO_BARS, longer) is StampRule.UTC_MIDNIGHT
+    assert stamp_rule(CRYPTO_BARS, request(timespan=Timespan.HOUR)) is StampRule.KEEP
+    assert stamp_rule(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day) is (StampRule.KEEP)
 
 
 def test_published_reads_the_class_zone_and_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -608,52 +613,41 @@ def test_publication_grace_reads_the_clock(monkeypatch: pytest.MonkeyPatch) -> N
     assert within_publication_grace(STOCK_TRADES, date(2025, 3, 4), cutoff=time(11, 30)) is False
 
 
-def test_crypto_day_bars_keep_one_source_whatever_the_symbol_count() -> None:
-    # With S3 credentials: flat files for one pair and for many.
-    days = [date(2025, 3, 3)]
-    for symbols in (("X:BTCUSD",), many(60)):
-        req = request(symbols, timespan=Timespan.DAY)
-        choice = choose_source(
-            CRYPTO_BARS, req, days, requested=HistorySource.AUTO, config=config(), now=NOW
-        )
-        assert choice == SourceChoice(
-            HistorySource.FLAT_FILES, "crypto 1-day bars read flat files when S3 is configured"
-        )
-        # Without them: REST for one pair and for many.
-        assert choose(CRYPTO_BARS, req, cfg=NO_S3) is HistorySource.REST
-    # Minute bars still switch at the threshold, and an explicit REST stays REST.
-    assert choose(CRYPTO_BARS, request(("X:BTCUSD",), timespan=Timespan.MINUTE)) is (
-        HistorySource.REST
-    )
+def test_crypto_and_forex_day_bars_follow_the_usual_auto_rule() -> None:
+    # Every source stamps them alike, and a crypto stamp off the cut fails loudly, so AUTO
+    # picks the source by symbol count as for every other dataset.
+    for spec, pair in ((CRYPTO_BARS, "X:BTCUSD"), (FOREX_BARS, "C:EURUSD")):
+        assert choose(spec, request((pair,), timespan=Timespan.DAY)) is HistorySource.REST
+        assert choose(spec, request(many(60), timespan=Timespan.DAY)) is (HistorySource.FLAT_FILES)
+    # An unpublished day sends the whole range to REST, with S3 configured or not.
+    unpublished = (date(2025, 3, 10),)
+    crypto = request(many(60), timespan=Timespan.DAY)
+    assert choose(CRYPTO_BARS, crypto, dates=unpublished) is HistorySource.REST
 
 
-def test_crypto_day_bars_refuse_unready_flat_files_rather_than_switch() -> None:
-    req = request(("X:BTCUSD",), timespan=Timespan.DAY)
-    unpublished = [date(2025, 3, 10)]
-    with pytest.raises(
-        ValueError, match=r"crypto\.bars 1-day bars read flat files whenever"
-    ) as caught:
-        choose_source(
-            CRYPTO_BARS, req, unpublished, requested=HistorySource.AUTO, config=config(), now=NOW
-        )
-    assert "source=dm.HistorySource.REST" in str(caught.value)
-    assert "not yet published" in str(caught.value)
-    # Forced flat files keep their own message.
-    with pytest.raises(ValueError, match=r"^crypto\.bars cannot be read from flat files"):
-        choose_source(
-            CRYPTO_BARS,
-            req,
-            unpublished,
-            requested=HistorySource.FLAT_FILES,
-            config=config(),
-            now=NOW,
-        )
+def test_futures_bars_of_several_sessions_by_date_are_refused() -> None:
+    for timespan in (Timespan.SESSION, Timespan.WEEK, Timespan.MONTH):
+        with pytest.raises(
+            ValueError,
+            match=rf"^futures\.bars: bars of 2 {timespan.value}s cannot be selected by session "
+            r"dates, .*; pass datetimes, or multiplier=1$",
+        ):
+            window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=timespan, multiplier=2)
+    # Datetimes, multiplier 1, and intraday multiples are fine.
+    start = datetime(2025, 3, 2, 17, tzinfo=CHICAGO)
+    assert not window(
+        FUTURES_BARS, start, start + timedelta(days=7), timespan=Timespan.SESSION, multiplier=2
+    ).empty
+    assert window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.SESSION).sessions
+    assert window(
+        FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.MINUTE, multiplier=5
+    ).sessions
 
 
-def test_forex_day_bars_still_switch_at_the_threshold() -> None:
-    # Only crypto 1-day bars keep a fixed source; forex 1-day bars follow the symbol count.
-    one = request(("C:EURUSD",), timespan=Timespan.DAY)
-    assert choose(FOREX_BARS, one) is HistorySource.REST
-    assert choose(FOREX_BARS, request(many(60), timespan=Timespan.DAY)) is (
-        HistorySource.FLAT_FILES
-    )
+@pytest.mark.parametrize("key", ["session_end_date", "session_end_date_gte", "session_end_date_lt"])
+def test_a_session_end_date_filter_needs_datetimes(key: str) -> None:
+    filters = ((key, date(2025, 3, 4)),)
+    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
+        window(FUTURES_TRADES, "2025-03-04", "2025-03-04", filters=filters)
+    start = datetime(2025, 3, 4, 8, tzinfo=CHICAGO)
+    assert window(FUTURES_TRADES, start, start + timedelta(hours=1), filters=filters).times

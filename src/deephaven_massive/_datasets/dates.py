@@ -23,10 +23,12 @@ day zone (for futures, the session the current instant belongs to). `bounds` app
 rules to a dataset's `history()` arguments.
 
 Bars are kept only when their whole window lies inside the range (`bar_starts`,
-`bar_sessions`): an intraday or 1-day bar's window is its own interval, a week runs Monday to
-Friday, and months, quarters, and years are calendar periods less their leading and trailing
-weekend days (crypto, which trades every day, keeps its weekends: Monday-to-Sunday weeks and
-whole months); a bar of several units spans that many. A bar whose window has not ended yet
+`bar_sessions`): an intraday or 1-day bar's window is its own interval. For stocks, options,
+indices, and futures sessions, which do not trade at weekends, a week runs Monday to Friday
+and months, quarters, and years are calendar periods less their leading and trailing weekend
+days. Forex and crypto trade at weekends (forex from Sunday evening UTC), so their weeks run
+Monday to Sunday and their months, quarters, and years are whole calendar periods. A bar of
+several units spans that many. A bar whose window has not ended yet
 (the current month, say) is never returned. There is no holiday calendar: a week whose Friday
 is a holiday is still the Monday-to-Friday week.
 
@@ -91,6 +93,7 @@ __all__ = [
     "parse_date_like",
     "publish_time",
     "require_aware",
+    "trades_at_weekends",
 ]
 
 NEW_YORK: Final = ZoneInfo("America/New_York")
@@ -146,6 +149,8 @@ _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _SATURDAY: Final = 5
 _DAYS_A_WEEK: Final = 7
 _WEEKEND_DAYS: Final = 2
+_WEEKEND_TRADING: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
+"""The classes that trade at weekends, whose bar periods keep their Saturdays and Sundays."""
 
 _INTRADAY_SECONDS: Final[Mapping[Timespan, int]] = {
     Timespan.SECOND: 1,
@@ -495,6 +500,21 @@ def futures_bar_request(span: DaySpan) -> TimeRange:
     return TimeRange(lower.astimezone(UTC), upper.astimezone(UTC))
 
 
+def trades_at_weekends(asset_class: AssetClass | None) -> bool:
+    """Tell whether an asset class trades at weekends, so its Saturdays and Sundays hold data.
+
+    Forex trades from Sunday evening UTC and crypto every day; stocks, options, indices,
+    futures sessions, and data of no class do not.
+
+    Args:
+        asset_class: The class, or None.
+
+    Returns:
+        True for forex and crypto.
+    """
+    return asset_class in _WEEKEND_TRADING
+
+
 def intraday(timespan: Timespan) -> bool:
     """Tell whether a bar timespan is shorter than a day (second, minute, or hour).
 
@@ -513,8 +533,9 @@ class _Periods:
 
     A period is named by its *anchor*, its first calendar day (a Monday for a week). A day
     belongs to the period whose *membership* starts on or before it; a period's *window* is
-    the days its bar covers. For every class but crypto, which trades every day, the window of
-    a week, month, quarter, or year leaves out the period's leading and trailing weekend days
+    the days its bar covers. For a class that does not trade at weekends (stocks, options,
+    indices, and futures sessions; not forex or crypto), the window of a week, month,
+    quarter, or year leaves out the period's leading and trailing weekend days
     (a week runs Monday to Friday, and March 2024 from Friday the 1st to Friday the 29th), and
     a week's Saturday and Sunday belong to the next week, so a bar Massive stamps on the Sunday
     before a week still names that week. There is no holiday calendar: a holiday is a
@@ -593,11 +614,11 @@ class _Periods:
         """Tell whether the period's window leaves out its leading and trailing weekend days.
 
         Returns:
-            True for weeks, months, quarters, and years of every class but crypto, which
-            trades every day.
+            True for weeks, months, quarters, and years of every class but forex and
+            crypto, which trade at weekends.
         """
         longer = self.timespan is Timespan.WEEK or self.timespan in _PERIOD_MONTHS
-        return longer and self.asset_class is not AssetClass.CRYPTO
+        return longer and not trades_at_weekends(self.asset_class)
 
     def window_start(self, anchor: date) -> date:
         """Return the first day of a period's window: its first weekday where weekends are out.
@@ -680,16 +701,17 @@ def _round_to_unit(moment: datetime, seconds: int, *, up: bool) -> datetime:
 
 def bar_starts(
     asset_class: AssetClass | None, span: TimeRange, *, timespan: Timespan, multiplier: int
-) -> tuple[TimeRange, datetime]:
-    """Return the bar starts whose whole bar lies in a range, and where the first bar starts.
+) -> TimeRange:
+    """Return the range of bar starts whose whole bar lies in a range.
 
     A bar is kept only when its whole window lies inside `span`. An intraday bar sits on whole
     units of UTC time (so on whole hours of every zone the library uses) and spans `multiplier`
     units from its start. A bar of a day or longer spans `multiplier` periods from the period
-    its start belongs to (`_Periods`): days, futures sessions, weeks (Monday to Friday), or
-    calendar months, quarters, and years less their leading and trailing weekend days (crypto
-    keeps its weekends), in the class's day zone, or for futures in sessions, which open at
-    17:00 Chicago time on the day before.
+    its start belongs to (`_Periods`): days, futures sessions, weeks, or calendar months,
+    quarters, and years. Weeks run Monday to Friday and longer periods lose their leading and
+    trailing weekend days, except for forex and crypto, which trade at weekends and keep
+    whole calendar weeks and periods. Days are those of the class's day zone; for futures
+    they are sessions, which open at 17:00 Chicago time on the day before.
 
     Args:
         asset_class: The class whose days apply (`day_class`), or None for New York days.
@@ -699,17 +721,17 @@ def bar_starts(
         multiplier: How many units one bar spans, at least 1.
 
     Returns:
-        The half-open range of bar starts (`Timestamp`) to keep, empty when no bar fits, and
-        the calendar start of the first fitting bar's period (its Monday, or the 1st of its
-        month even on a weekend, where Massive stamps such a bar), from which a request for
-        the bars starts.
+        The half-open range of bar starts (`Timestamp`) to keep, empty when no bar fits. It
+        starts where the first fitting period's days begin to belong to it (the Saturday
+        before a Monday-to-Friday week, the 1st of a month even on a weekend), so a bar
+        stamped anywhere in that period counts; a request for the bars starts there too.
     """
     if timespan in _INTRADAY_SECONDS:
         unit = _INTRADAY_SECONDS[timespan]
         low = _round_to_unit(span.start, unit, up=True)
         whole = timedelta(seconds=unit * (multiplier - 1))
         high = _round_to_unit(span.end, unit, up=False) - whole
-        return TimeRange(low, max(low, high)), low
+        return TimeRange(low, max(low, high))
     periods = _Periods(asset_class, timespan)
     first = periods.day_of(span.start)
     if periods.day_start(first) < span.start:
@@ -720,7 +742,7 @@ def bar_starts(
     first_period, last_period = periods.admitted(first, last, multiplier)
     lower = periods.day_start(periods.membership(first_period))
     upper = periods.day_start(periods.membership(periods.shift(last_period, 1)))
-    return TimeRange(lower, max(lower, upper)), periods.day_start(first_period)
+    return TimeRange(lower, max(lower, upper))
 
 
 def bar_sessions(span: DaySpan, *, timespan: Timespan, multiplier: int) -> DaySpan:
@@ -835,29 +857,33 @@ def day_class(spec: DatasetSpec, classes: Iterable[AssetClass] = ()) -> AssetCla
 
 
 def calendar_day(spec: DatasetSpec, value: DateLike, name: str) -> date:
-    """Turn the single day a dataset's path takes into a calendar date in its day zone.
+    """Turn the single day a dataset's path or parameter takes into a calendar date.
 
-    Endpoints such as the daily open-close summary take one day in the request path. A date
-    or a `"YYYY-MM-DD"` string is that day as given. An aware `datetime` names the calendar day
-    it falls on in the dataset's day zone (`day_zone`: New York for stocks, options, indices,
-    and datasets without an asset class; UTC for forex and crypto; Chicago for futures), so
-    `datetime(2025, 3, 4, 2, 0, tzinfo=UTC)` is 2025-03-03 for a stock and 2025-03-04 for
-    crypto.
+    Endpoints such as the daily open-close summary take one calendar day (the day of the
+    dataset's day zone: New York for stocks, options, and indices, UTC for forex and crypto). A
+    date or a `"YYYY-MM-DD"` string is that day as given. A calendar date is a whole day, so a
+    `datetime` is refused, as on a calendar-date time axis: which day an instant names would
+    depend on a zone the caller did not state.
 
     Args:
-        spec: The dataset, whose asset class picks the zone.
-        value: The day, as an ISO-8601 string, a `date`, or an aware `datetime`.
+        spec: The dataset, for the message.
+        value: The day, as an ISO-8601 date string or a `date`.
         name: The parameter's name, used in error messages (`"date"`).
-
-    An unparseable or naive value raises the `TypeError` or `ValueError` of `parse_date_like`.
 
     Returns:
         The calendar date to put in the request.
+
+    Raises:
+        ValueError: If `value` is a `datetime`, or ISO-8601 text with a time
+            (`"<dataset>: <name> is a calendar date; pass a date"`).
+
+    Text that is not ISO-8601, or a value of another type, raises the `ValueError` or
+    `TypeError` of `parse_date_like`.
     """
     parsed = parse_date_like(value, name)
     if not isinstance(parsed, datetime):
         return parsed
-    return parsed.astimezone(day_zone(spec.asset_class)).date()
+    raise ValueError(f"{spec.name}: {name} is a calendar date; pass a date")
 
 
 _UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {

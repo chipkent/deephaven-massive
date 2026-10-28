@@ -1097,7 +1097,8 @@ def test_a_roll_forward_gives_up_loudly_after_a_week(
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
     with pytest.raises(
         dm.MassiveError,
-        match=r"2025-01-18\.csv\.gz does not exist and no session file follows within 7 days",
+        # The message names the run's first missing weekday, Monday 01-20.
+        match=r"2025-01-20\.csv\.gz does not exist and no session file follows within 7 days",
     ):
         q.history(
             datetime(2025, 1, 17, 18, tzinfo=CHICAGO),  # the weekend sessions are missing too
@@ -2157,3 +2158,18 @@ def test_minute_bar_files_keep_only_whole_bars_of_an_instant_range(
         source=HistorySource.FLAT_FILES,
     )
     assert pick(t, "Timestamp") == [(minutes[1],)]
+
+
+def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
+    *, session: dm.MassiveSession, fake_s3: FakeS3
+) -> None:
+    q = query(
+        session,
+        FUTURES_TRADES,
+        symbols=dm.ALL,
+        venue=FuturesVenue.CME,
+        filters={"session_end_date": "2025-01-21"},
+    )
+    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
+        q.history("2025-01-21", "2025-01-21", source=HistorySource.FLAT_FILES)
+    assert fake_s3.requests == []

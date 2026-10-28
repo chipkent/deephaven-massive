@@ -214,6 +214,19 @@ FOREX_BARS = DatasetSpec(
         (R, FOREX_GROUPED_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("WindowStart")),
     },
 )
+CRYPTO_RANGE_PATH = "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}"
+CRYPTO_BARS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="crypto.bars",
+    asset_class=AssetClass.CRYPTO,
+    is_bars=True,
+    history_path=CRYPTO_RANGE_PATH,
+    keys={
+        (R, CRYPTO_RANGE_PATH): SourceKeys(
+            KeySpec("cryptoTicker", from_request=True), KeySpec("WindowStart")
+        ),
+    },
+)
 CONSTITUENTS_PATH = "/etf-global/v1/constituents"
 CONSTITUENTS = DatasetSpec(
     summary="A dataset for the tests.",
@@ -285,6 +298,7 @@ SPECS = (
     BARS,
     FUTURES_BARS,
     FOREX_BARS,
+    CRYPTO_BARS,
     CONSTITUENTS,
     NEWS,
     RATINGS,
@@ -1195,8 +1209,9 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
         ("NQH5", date(2024, 4, 1)),
     ]
     assert (
-        "futures.trades history: 6 requests, one per day or session; at a Basic key's 5 "
-        "requests a minute that takes about 2 minutes"
+        "futures.trades history: at least 6 requests, one per session and symbol, more where a "
+        "session spans several pages; at a Basic key's 5 requests a minute that takes at least "
+        "1 minute"
     ) in caplog.text
 
 
@@ -1209,7 +1224,7 @@ def test_a_short_session_download_is_not_announced(
     with caplog.at_level(logging.INFO, LOGGER):
         history(session, FUTURES_TRADES, start="2025-03-01", end="2025-03-09", symbols=["ESH5"])
     assert len(sent(fake_rest)) == 5
-    assert "one per day or session" not in caplog.text
+    assert "requests a minute that takes" not in caplog.text
 
 
 def test_a_session_end_date_filter_needs_datetimes(
@@ -1817,8 +1832,10 @@ def utc_ms(day: date) -> int:
 def test_week_bars_request_the_first_whole_week_and_keep_whole_weeks(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Wednesday 03-05 to Friday 03-21 holds the weeks of 03-10 and 03-17 whole.
-    start, end = ny_ms(date(2025, 3, 10)), ny_ms(date(2025, 3, 22)) - 1
+    # Wednesday 03-05 to Friday 03-21 holds the weeks of 03-10 and 03-17 whole. The request
+    # starts on the Saturday before the first of them, so a bar stamped on its Sunday is
+    # returned whether Massive selects bars by stamp or builds them from `{from}`.
+    start, end = ny_ms(date(2025, 3, 8)), ny_ms(date(2025, 3, 22)) - 1
     path = f"/v2/aggs/ticker/AAPL/range/1/week/{start}/{end}"
     stamps = [ny_ms(date(2025, 3, d)) for d in (2, 9, 16, 23)]  # Sundays, as a week may be
     fake_rest.reply(path, Reply(envelope([{"t": t, "c": 1.0} for t in stamps])))
@@ -1876,21 +1893,26 @@ def test_an_empty_range_returns_every_column_without_a_request(
 def test_a_long_grouped_daily_download_is_announced(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    for day in range(3, 11):
+    for day in range(3, 18):
         fake_rest.reply(GROUPED_PATH.format(date=f"2025-03-{day:02d}"), Reply(envelope([])))
     with caplog.at_level(logging.INFO, LOGGER):
         history(
             session,
             BARS,
             start="2025-03-03",
-            end="2025-03-10",
+            end="2025-03-17",
             symbols=dm.ALL,
             timespan=Timespan.DAY,
             adjusted=True,
         )
-    assert len(sent(fake_rest)) == 8
-    assert "stocks.bars history: 8 requests, one per day or session" in caplog.text
-    assert "takes about 2 minutes" in caplog.text
+    # Stocks have no grouped day on a Saturday or Sunday: 11 weekdays, not 15 days.
+    days = sorted(path.rsplit("/", 1)[1] for path, _ in sent(fake_rest))
+    assert len(days) == 11
+    assert all(date.fromisoformat(day).weekday() < 5 for day in days)
+    assert (
+        "stocks.bars history: 11 requests, one per day; at a Basic key's 5 requests a minute "
+        "that takes about 2 minutes"
+    ) in caplog.text
 
 
 def test_forex_day_bars_are_stamped_at_the_utc_days_start(
@@ -1940,4 +1962,63 @@ def test_a_history_by_instants_is_not_announced_however_many_symbols(
     with caplog.at_level(logging.INFO, LOGGER):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=tickers)
     assert len(sent(fake_rest)) == 6
-    assert "one per day or session" not in caplog.text
+    assert "requests a minute that takes" not in caplog.text
+
+
+def crypto_bars(
+    m: dm.MassiveSession, timespan: Timespan, *, multiplier: int, start: str, end: str
+) -> list[dict[str, Any]]:
+    return history(
+        m,
+        CRYPTO_BARS,
+        start=start,
+        end=end,
+        symbols=["X:BTCUSD"],
+        timespan=timespan,
+        multiplier=multiplier,
+    )
+
+
+def test_longer_crypto_bars_must_start_at_utc_midnight(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Two-day bars stamped at midnight New York time would hold hours of the next day.
+    start, end = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 7)) - 1
+    two_days = f"/v2/aggs/ticker/X:BTCUSD/range/2/day/{start}/{end}".replace(":", "%3A")
+    new_york = ny_ms(date(2025, 3, 3))
+    fake_rest.reply(two_days, Reply(envelope([{"t": new_york, "c": 1.0}])))
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^crypto\.bars: a bar from /v2/aggs/ticker/\{cryptoTicker\}/range/.* is stamped "
+        r"2025-03-03T05:00:00\+00:00, which is not a UTC day boundary.*source=dm\.HistorySource"
+        r"\.FLAT_FILES",
+    ):
+        crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
+    # A week bar at 00:00 UTC Monday is kept as stamped.
+    monday, after = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 10))
+    week = f"/v2/aggs/ticker/X:BTCUSD/range/1/week/{monday}/{after - 1}".replace(":", "%3A")
+    fake_rest.reply(week, Reply(envelope([{"t": monday, "c": 2.0}])))
+    out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
+    assert [(r["Timestamp"], r["Close"]) for r in out] == [(monday * 10**6, 2.0)]
+
+
+def test_forex_grouped_daily_keeps_its_weekend_days(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Forex trades from Sunday evening UTC, so its grouped days include the weekend.
+    for day in ("2025-03-07", "2025-03-08", "2025-03-09"):
+        fake_rest.reply(FOREX_GROUPED_PATH.format(date=day), Reply(envelope([])))
+    history(
+        session,
+        FOREX_BARS,
+        start="2025-03-07",
+        end="2025-03-09",
+        symbols=dm.ALL,
+        timespan=Timespan.DAY,
+        adjusted=True,
+    )
+    assert sorted(path.rsplit("/", 1)[1] for path, _ in sent(fake_rest)) == [
+        "2025-03-07",
+        "2025-03-08",
+        "2025-03-09",
+    ]

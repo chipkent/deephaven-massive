@@ -99,8 +99,9 @@ from deephaven.arrow import to_table
 from deephaven_massive._datasets.dates import TimeRange
 from deephaven_massive._datasets.history_source import (
     NOT_PUBLISHED,
+    StampRule,
     published,
-    utc_day_bars,
+    stamp_rule,
     within_publication_grace,
 )
 from deephaven_massive._datasets.schema import rename, required_fields, widen
@@ -294,7 +295,7 @@ class _Transform:
         prefix: str,
         symbols: NormalizedSymbols | None,
         window: HistoryWindow,
-        day_bars: bool = False,
+        stamps: StampRule = StampRule.KEEP,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
@@ -312,7 +313,8 @@ class _Transform:
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures sessions named by date keep
                 every time of their files, which hold exactly the requested sessions.
-            day_bars: True for forex and crypto 1-day bars, whose stamps move to 00:00 UTC.
+            stamps: How the bars' stamps are treated (`history_source.stamp_rule`); the
+                files hold only 1-day bars of the rules other than `KEEP`.
 
         Returns:
             The transform.
@@ -355,8 +357,8 @@ class _Transform:
             columns=tuple((c.type, c.name, by_column.get(c.name)) for c in schema.columns),
             arrow_schema=schema.arrow_schema(),
             session_header=session_header,
-            day_source=prefix if day_bars else None,
-            checked_days=spec.asset_class is AssetClass.CRYPTO,
+            day_source=None if stamps is StampRule.KEEP else prefix,
+            checked_days=stamps is StampRule.UTC_DAY_CHECKED,
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
@@ -419,7 +421,11 @@ class _Transform:
         if name == "Timestamp" and self.day_source is not None:
             source_label = f"the flat files {self.day_source}"
             values = utc_day_stamps(
-                self.dataset, values, source=source_label, checked=self.checked_days
+                self.dataset,
+                values,
+                source=source_label,
+                checked=self.checked_days,
+                remedy="read REST with source=dm.HistorySource.REST",
             )
         return values
 
@@ -501,7 +507,7 @@ class FlatFileHistory:
             prefix=prefix,
             symbols=request.symbols,
             window=window,
-            day_bars=utc_day_bars(spec, request),
+            stamps=stamp_rule(spec, request),
         )
         keys = _keys(prefix, request.venue, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None
@@ -587,13 +593,14 @@ class FlatFileHistory:
         days only follows an existing file and needs nothing, while a run that holds a
         weekday is followed by the days after the range, up to `ROLL_LIMIT` (7 days) past the
         run's first day, until a file exists. A day whose file is not published yet, or a
-        missing weekday file that may still be late (`within_publication_grace`), stops the
-        search with an error, and so does a search that finds no file: the range's last hours
-        may lie in the file, so the call never returns a silently short table. The reads run
-        on the caller thread, one at a time; the transform keeps only the rows inside the
-        range. Each read checks the session before its request and after every block, as the
-        pool's reads do, so a close stops it with `"MassiveSession #1 is closed"`; the pool's
-        cancel event is already set when this runs, so these reads take an event of their own.
+        missing file that may still be late (`within_publication_grace`), stops the search
+        with an error naming the run's first missing weekday, and so does a search that finds
+        no file: the range's last hours may lie in the file, so the call never returns a
+        silently short table. The reads run on the caller thread, one at a time; the transform
+        keeps only the rows inside the range. Each read checks the session before its request
+        and after every block, as the pool's reads do, so a close stops it with
+        `"MassiveSession #1 is closed"`; the pool's cancel event is already set when this runs,
+        so these reads take an event of their own.
 
         Args:
             spec: The dataset, for the log.
@@ -607,7 +614,7 @@ class FlatFileHistory:
 
         Raises:
             MassiveError: If the next session's file is not published yet, or a missing
-                weekday file may still be late, or no file exists within `ROLL_LIMIT` of the
+                file may still be late, or no file exists within `ROLL_LIMIT` of the
                 run's first day. A failed read raises the public error `_read_key` raises
                 (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
         """
@@ -623,8 +630,9 @@ class FlatFileHistory:
             if not any(key.day.weekday() < _SATURDAY for key in run):
                 continue
             name = None if venue is None else venue.value
-            holiday = run[-1]
-            day, limit = own[-1].day, holiday.day + ROLL_LIMIT
+            # The run is newest first; name its first missing weekday, the likely holiday.
+            holiday = next(key for key in reversed(run) if key.day.weekday() < _SATURDAY)
+            day, limit = own[-1].day, run[-1].day + ROLL_LIMIT
             while True:
                 day += timedelta(days=1)
                 if day > limit:
@@ -651,8 +659,7 @@ class FlatFileHistory:
                     )
                     tables.extend(part)
                     break
-                late = within_publication_grace(spec, day, cutoff=cutoff)
-                if day.weekday() < _SATURDAY and late:
+                if within_publication_grace(spec, day, cutoff=cutoff):
                     raise MassiveError(
                         f"{spec.name}: {holiday.key} does not exist, and the next session's file, "
                         f"{key.key}, does not exist either: {day.isoformat()} is "

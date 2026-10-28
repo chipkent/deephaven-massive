@@ -234,10 +234,12 @@ def test_ticker_details_and_events_queries(massive_session: dm.MassiveSession) -
     details = ref.ticker_details("AAPL", date=date(2024, 1, 2))
     assert details._spec is reference.TICKER_DETAILS
     assert details._request == Request(symbols=("AAPL",), params=(("date", date(2024, 1, 2)),))
-    # An aware datetime names its New York day: 02:00 UTC on Jan 3 is still Jan 2 there.
+    # The day is a calendar date, so an aware datetime is refused.
     early = datetime(2025, 1, 3, 2, tzinfo=UTC)
-    assert ref.ticker_details("AAPL", date=early)._request.params == (("date", date(2025, 1, 2)),)
-    assert dict(ref.tickers(date=early)._request.params)["date"] == date(2025, 1, 2)
+    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+        ref.ticker_details("AAPL", date=early)
+    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+        ref.tickers(date=early)
     assert ref.ticker_details(["O:SPY251219C00600000"])._request == Request(
         symbols=("O:SPY251219C00600000",)
     )

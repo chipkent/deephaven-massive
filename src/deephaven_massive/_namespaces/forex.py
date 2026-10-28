@@ -322,7 +322,8 @@ class _Forex(Namespace):
         already is, and the grouped daily, `/prev`, and the day files (stamped 23:59:59.999
         UTC) are moved to the start of their day. `history()` returns only the bars whose
         whole window lies inside the range and has ended, so the current day's bar never
-        appears.
+        appears. Forex trades from Sunday evening UTC, so its weeks run Monday to
+        Sunday and its months, quarters, and years are whole calendar periods.
 
         Each column is described in the web UI's column tooltips, by `columns()`, and at
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#bars.

@@ -562,12 +562,18 @@ class HistoryQuery(QueryBase):
           end`. Equal instants give an empty table.
 
         `end=None`, the default, reads through now. A bar is returned only when its whole
-        window lies inside the range and has ended: an intraday or 1-day bar its own interval,
-        a week Monday to Friday (Monday to Sunday for crypto), a month, quarter, or year its
-        calendar period, a bar of several units all of them, and a futures bar named by
-        session dates its sessions. So the current day's, week's, or month's bar is never
-        returned, and `history("2025-03-05", "2025-03-20")` of monthly bars is empty. There is
-        no holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
+        window lies inside the range and has ended: an intraday or 1-day bar its own interval;
+        for stocks, options, indices, and futures, a week Monday to Friday and a month,
+        quarter, or year its calendar period less its leading and trailing weekend days; for
+        forex and crypto, which trade at weekends, whole calendar weeks (Monday to Sunday),
+        months, quarters, and years; a bar of several units all of them; and a futures bar
+        named by session dates its sessions. So the current day's, week's, or month's bar is
+        never returned, and `history("2025-03-05", "2025-03-20")` of monthly bars is empty.
+        Datetime bounds keep only whole calendar days of 1-day bars: Monday 09:30 to Friday
+        16:00 New York time returns Tuesday to Thursday, so pass dates for daily bars. Futures
+        bars of a session or longer with `multiplier` above 1 cannot be named by dates (their
+        session label is not verified) and raise `ValueError`; pass datetimes. There is no
+        holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
         week. Forex and crypto 1-day bars are stamped at 00:00 UTC of their day whatever the
         source. There is no `limit`: the library pages internally.
 
@@ -578,15 +584,15 @@ class HistoryQuery(QueryBase):
         the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
         daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
         or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
-        `dm.ALL`); otherwise it uses REST. Crypto 1-day bars are the exception: `AUTO` reads
-        them from flat files whenever S3 credentials are configured and from REST otherwise,
-        so the symbol count never changes the data; `source=` picks one explicitly. A reactive
-        symbol table is read once, when the verb is called, and every source receives the
-        same sorted canonical symbols; rows that are not valid symbols of the class are
-        ignored with a WARNING. Flat-file reads skip a missing weekend file silently and a
-        missing weekday file (a holiday) with a WARNING. Futures trades and quotes named by
-        session dates are read over REST one request series per weekday session and symbol;
-        a long one-request-per-day download logs its request count first, at INFO.
+        `dm.ALL`); otherwise it uses REST. A crypto bar of a day or longer whose stamp is off
+        the UTC day cut fails loudly, whichever source serves it, so the source never changes
+        which days a bar covers; `source=` picks a source explicitly. A reactive symbol table
+        is read once, when the verb is called, and every source receives the same sorted
+        canonical symbols; rows that are not valid symbols of the class are ignored with a
+        WARNING. Flat-file reads skip a missing weekend file silently and a missing weekday
+        file (a holiday) with a WARNING. Futures trades and quotes named by session dates are
+        read over REST one request series per weekday session and symbol; a long
+        one-request-per-day download logs its request count first, at INFO.
 
         Side effects: network requests on the calling thread, and for flat files a pool of up
         to `max_concurrency` reader threads that end before the call returns. It blocks until
@@ -611,7 +617,8 @@ class HistoryQuery(QueryBase):
         `date`, or `datetime`. `ValueError`, synchronously, before any request: a naive or
         unparseable bound; a date mixed with a datetime; `start` after `end` (or after now when
         `end` is None); a reactive symbol table without a valid symbol; futures trades or
-        quotes named by session dates on a query that also filters `session_end_date`; a
+        quotes named by session dates on a query that also filters `session_end_date` in any
+        form; futures bars of a session or longer with `multiplier` above 1 named by dates; a
         source that cannot serve the request (`REST` without REST history or with `dm.ALL` and
         no grouped-daily endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO`
         when neither can, with every violated condition listed); or a call on a Deephaven
@@ -622,9 +629,10 @@ class HistoryQuery(QueryBase):
         yet published (flat files land ~11:00 ET next day), or was a market holiday"; after
         that the day is skipped with a WARNING, as a holiday); when a futures range named by
         instants ends on a holiday and the next session's file, which holds the holiday's
-        hours, is not published yet or does not exist within 7 days; when a crypto 1-day bar
-        is stamped elsewhere in its UTC day than its first or last millisecond; or once the
-        session is closed.
+        hours, is not published yet or does not exist within 7 days; when a crypto bar of a
+        day or longer is stamped off the UTC day cut (a 1-day bar elsewhere than its day's first
+        or last millisecond, a longer one elsewhere than 00:00 UTC); or once the session is
+        closed.
 
         Example:
             ::

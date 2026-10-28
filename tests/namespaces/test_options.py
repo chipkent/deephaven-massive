@@ -452,12 +452,15 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
         contracts(filters={"ticker": CONTRACT})
 
 
-def test_as_of_and_date_take_the_new_york_day(massive_session: dm.MassiveSession) -> None:
-    late = datetime(2025, 1, 3, 2, 0, tzinfo=UTC)  # still January 2 in New York
-    q = massive_session.options.contracts(as_of=late)
+def test_as_of_and_date_refuse_a_time(massive_session: dm.MassiveSession) -> None:
+    # Both are calendar dates: an instant would name a day only through a zone.
+    late = datetime(2025, 1, 3, 2, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match=r"^options\.contracts: as_of is a calendar date"):
+        massive_session.options.contracts(as_of=late)
+    with pytest.raises(ValueError, match=r"^options\.daily_open_close: date is a calendar date"):
+        massive_session.options.daily_open_close(CONTRACT, late)
+    q = massive_session.options.contracts(as_of="2025-01-02")
     assert dict(q._request.params) == {"as_of": date(2025, 1, 2)}
-    q = massive_session.options.daily_open_close(CONTRACT, late)
-    assert dict(q._request.params) == {"date": date(2025, 1, 2)}
 
 
 def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSession) -> None:
