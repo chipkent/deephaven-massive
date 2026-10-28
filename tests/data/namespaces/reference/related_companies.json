@@ -1,0 +1,37 @@
+{
+  "request_id": "31d59dda-80e5-4721-8496-d0d32a654afe",
+  "results": [
+    {
+      "ticker": "MSFT"
+    },
+    {
+      "ticker": "GOOGL"
+    },
+    {
+      "ticker": "AMZN"
+    },
+    {
+      "ticker": "FB"
+    },
+    {
+      "ticker": "TSLA"
+    },
+    {
+      "ticker": "NVDA"
+    },
+    {
+      "ticker": "INTC"
+    },
+    {
+      "ticker": "ADBE"
+    },
+    {
+      "ticker": "NFLX"
+    },
+    {
+      "ticker": "PYPL"
+    }
+  ],
+  "status": "OK",
+  "stock_symbol": "AAPL"
+}

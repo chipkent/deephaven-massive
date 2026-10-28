@@ -1,0 +1,21 @@
+{
+  "next_url": "https://api.massive.com/v3/quotes/C:EUR-USD?cursor=YWN0aXZlPXRydWUmZGF0ZT0yMDIxLTA0LTI1JmxpbWl0PTEmb3JkZXI9YXNjJnBhZ2VfbWFya2VyPUElN0M5YWRjMjY0ZTgyM2E1ZjBiOGUyNDc5YmZiOGE1YmYwNDVkYzU0YjgwMDcyMWE2YmI1ZjBjMjQwMjU4MjFmNGZiJnNvcnQ9dGlja2Vy",
+  "request_id": "a47d1beb8c11b6ae897ab76cdbbf35a3",
+  "results": [
+    {
+      "ask_exchange": 48,
+      "ask_price": 1.18565,
+      "bid_exchange": 48,
+      "bid_price": 1.18558,
+      "participant_timestamp": 1625097600000000000
+    },
+    {
+      "ask_exchange": 48,
+      "ask_price": 1.18565,
+      "bid_exchange": 48,
+      "bid_price": 1.18559,
+      "participant_timestamp": 1625097600000000000
+    }
+  ],
+  "status": "OK"
+}

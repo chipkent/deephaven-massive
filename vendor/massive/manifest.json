@@ -1,5 +1,5 @@
 {
- "fetched": "2026-10-27",
+ "fetched": "2026-10-28",
  "files": {
   "flat-files/crypto/day-aggregates.md": {
    "fetched_sha256": "1c0293db35f8951550d720f51da23b8599c62925f66c91278ab6ca2e80b2f053",
@@ -207,8 +207,8 @@
    "url": "https://massive.com/docs/llms.txt"
   },
   "openapi.json": {
-   "fetched_sha256": "a810172184cffe258bae9e8a991197f302ef6b7b93b9a36158e16e22e2f65d4c",
-   "stored_sha256": "05793874b027ad5720d680536f3c3e1c94defdd9c9be071694dd9e287a9899f1",
+   "fetched_sha256": "e72880086a488fb9856fbbc1fc6356dcd046bd06d1970699332d6225ad3c7ea8",
+   "stored_sha256": "c6f3ecacb65f0c73200d49b8657ce55b6277d577fab34088e0d3d61d51b8d4d7",
    "url": "https://api.massive.com/openapi"
   },
   "rest/alternative/consumer-spending/merchant-aggregates.md": {

@@ -1,0 +1,24 @@
+{
+  "request_id": "1daccfd9794e482e96d104dee6ed432b",
+  "results": [
+    {
+      "accession_number": "0000320193-25-000079",
+      "cik": "0000320193",
+      "filing_date": "2025-10-31",
+      "filing_url": "https://www.sec.gov/Archives/edgar/data/320193/0000320193-25-000079.txt",
+      "form_type": "10-K",
+      "issuer_name": "Apple Inc.",
+      "ticker": "AAPL"
+    },
+    {
+      "accession_number": "0000950170-25-010491",
+      "cik": "0000789019",
+      "filing_date": "2025-01-29",
+      "filing_url": "https://www.sec.gov/Archives/edgar/data/789019/0000950170-25-010491.txt",
+      "form_type": "10-Q",
+      "issuer_name": "MICROSOFT CORP",
+      "ticker": "MSFT"
+    }
+  ],
+  "status": "OK"
+}

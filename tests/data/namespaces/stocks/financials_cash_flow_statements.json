@@ -1,0 +1,34 @@
+{
+  "request_id": "d6d389ca03a0450d93c4ecb13ff26dae",
+  "results": [
+    {
+      "cash_from_operating_activities_continuing_operations": 27867000000,
+      "change_in_cash_and_equivalents": 8107000000,
+      "change_in_other_operating_assets_and_liabilities_net": -2034000000,
+      "cik": "0000320193",
+      "depreciation_depletion_and_amortization": 2830000000,
+      "dividends": -3945000000,
+      "filing_date": "2025-08-01",
+      "fiscal_quarter": 3,
+      "fiscal_year": 2025,
+      "long_term_debt_issuances_repayments": -1192000000,
+      "net_cash_from_financing_activities": -24833000000,
+      "net_cash_from_financing_activities_continuing_operations": -24833000000,
+      "net_cash_from_investing_activities": 5073000000,
+      "net_cash_from_investing_activities_continuing_operations": 5073000000,
+      "net_cash_from_operating_activities": 27867000000,
+      "net_income": 23434000000,
+      "other_financing_activities": -23599000000,
+      "other_investing_activities": 8535000000,
+      "other_operating_activities": 3637000000,
+      "period_end": "2025-06-28",
+      "purchase_of_property_plant_and_equipment": -3462000000,
+      "short_term_debt_issuances_repayments": 3903000000,
+      "tickers": [
+        "AAPL"
+      ],
+      "timeframe": "quarterly"
+    }
+  ],
+  "status": "OK"
+}

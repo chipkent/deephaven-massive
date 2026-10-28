@@ -1,0 +1,36 @@
+{
+  "request_id": "5b3cc7c674b34fdd89034b74500bfab5",
+  "results": [
+    {
+      "basic_earnings_per_share": 1.57,
+      "basic_shares_outstanding": 14902886000,
+      "cik": "0000320193",
+      "consolidated_net_income_loss": 23434000000,
+      "cost_of_revenue": 50318000000,
+      "diluted_earnings_per_share": 1.57,
+      "diluted_shares_outstanding": 14948179000,
+      "ebitda": 31032000000,
+      "filing_date": "2025-08-01",
+      "fiscal_quarter": 3,
+      "fiscal_year": 2025,
+      "gross_profit": 43718000000,
+      "income_before_income_taxes": 28031000000,
+      "income_taxes": 4597000000,
+      "net_income_loss_attributable_common_shareholders": 23434000000,
+      "operating_income": 28202000000,
+      "other_income_expense": -171000000,
+      "other_operating_expenses": 0,
+      "period_end": "2025-06-28",
+      "research_development": 8866000000,
+      "revenue": 94036000000,
+      "selling_general_administrative": 6650000000,
+      "tickers": [
+        "AAPL"
+      ],
+      "timeframe": "quarterly",
+      "total_operating_expenses": 15516000000,
+      "total_other_income_expense": -171000000
+    }
+  ],
+  "status": "OK"
+}

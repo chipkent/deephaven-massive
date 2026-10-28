@@ -1,0 +1,15 @@
+{
+  "request_id": "c7856101f86c20d855b0ea1c5a6d6efa",
+  "results": [
+    {
+      "cik": "0001005101",
+      "filing_date": "2025-09-19",
+      "primary_category": "financial_and_market",
+      "secondary_category": "credit_and_liquidity",
+      "supporting_text": "In addition to the net proceeds we received from our recent equity and debt financings, we may need to raise additional equity or debt financing to continue the development and marketing of our Fintech app, to fund ongoing operations, invest in acquisitions, and for working capital purposes. Our inability to raise such additional financing may limit our ability to continue the development of our Fintech app.",
+      "tertiary_category": "access_to_capital_and_financing",
+      "ticker": "MGLD"
+    }
+  ],
+  "status": "OK"
+}

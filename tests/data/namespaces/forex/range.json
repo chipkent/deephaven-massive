@@ -1,0 +1,20 @@
+{
+  "adjusted": true,
+  "queryCount": 1,
+  "request_id": "79c061995d8b627b736170bc9653f15d",
+  "results": [
+    {
+      "c": 1.17721,
+      "h": 1.18305,
+      "l": 1.1756,
+      "n": 125329,
+      "o": 1.17921,
+      "t": 1626912000000,
+      "v": 125329,
+      "vw": 1.1789
+    }
+  ],
+  "resultsCount": 1,
+  "status": "OK",
+  "ticker": "C:EURUSD"
+}

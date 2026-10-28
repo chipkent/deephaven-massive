@@ -320,7 +320,11 @@ def _fixed_params(spec: DatasetSpec, params: Mapping[str, object]) -> dict[str, 
 
 
 def _filters(
-    spec: DatasetSpec, filters: object, *, typed: Iterable[str]
+    spec: DatasetSpec,
+    filters: object,
+    *,
+    typed: Iterable[str],
+    arguments: Mapping[str, str],
 ) -> tuple[tuple[str, ParamValue], ...]:
     """Normalize the `filters` mapping into a sorted tuple.
 
@@ -330,6 +334,9 @@ def _filters(
         filters: The mapping as passed.
         typed: The wire names of the factory's typed parameters, set or not; a filter may not
             name one of them, nor any of its suffixed forms.
+        arguments: The factory's argument name of each typed wire parameter whose argument
+            is named differently (`{"type": "ticker_type"}`), for the message that names
+            the argument to use; any other parameter's argument has its wire name.
 
     Returns:
         `(name, value)` pairs sorted by name.
@@ -347,7 +354,9 @@ def _filters(
     """
     if not isinstance(filters, Mapping):
         raise TypeError(f"filters must be a mapping, not {type(filters).__name__}")
-    reserved = {filter_key(form) for name in typed for form in param_family(name)}
+    reserved = {
+        filter_key(form): arguments.get(name, name) for name in typed for form in param_family(name)
+    }
     library = {filter_key(form) for name in spec.fixed_params for form in param_family(name)}
     symbol_keys = (
         set()
@@ -361,13 +370,15 @@ def _filters(
         if key in {filter_key(name) for name in spec.axis_params}:
             raise ValueError(f"{key} is set through start= and end=, not filters")
         if key == "adjusted":
-            raise ValueError("adjusted is set through build_query(adjusted=...), not filters")
+            raise ValueError("adjusted is set through its own argument, adjusted=, not filters")
         if key in symbol_keys:
             raise ValueError(f"{key} is set through symbols=, not filters")
         if key in library:
             raise ValueError(f"the library sets {key} itself; it is not a filter")
         if key in reserved:
-            raise ValueError(f"{key} is set through its own argument, not filters")
+            raise ValueError(
+                f"{key} is set through its own argument, {reserved[key]}=, not filters"
+            )
         pairs.append((key, _value(key, value)))
     return tuple(sorted(pairs))
 
@@ -447,6 +458,7 @@ def build_query(
     start: DateLike | None = None,
     end: DateLike | None = None,
     params: Mapping[str, object] | None = None,
+    arguments: Mapping[str, str] | None = None,
     filters: Mapping[str, FilterValue] | None = None,
     limit: int | None = None,
 ) -> QueryBase:
@@ -481,6 +493,9 @@ def build_query(
             excluded. A calendar-date axis takes dates only (`_check_axis`).
         params: The dataset's other typed parameters by wire name; None values are dropped,
             but every key, set or not, is reserved from `filters` with its suffixed forms.
+        arguments: The factory's argument name of each key of `params` that the factory
+            names differently from the wire (`{"type": "ticker_type"}`), so a refused filter
+            names the argument to use; None when every argument has its wire name.
         filters: The `filters` mapping, by key: a wire parameter name with its dots written
             as underscores. `Catalog.check_filters` validates it and parses each value into
             the form that is sent (ISO-8601 text of a date or timestamp parameter becomes a
@@ -540,7 +555,11 @@ def build_query(
     first = None if start is None else parse_date_like(start, "start")
     last = None if end is None else parse_date_like(end, "end")
     _check_axis(core, spec, start=first, end=last)
-    given = () if filters is None else _filters(spec, filters, typed=params or {})
+    given = (
+        ()
+        if filters is None
+        else _filters(spec, filters, typed=params or {}, arguments=arguments or {})
+    )
     request = Request(
         symbols=normalized,
         timespan=timespan,

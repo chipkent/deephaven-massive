@@ -1,0 +1,36 @@
+[
+  {
+    "date": "2020-11-26",
+    "exchange": "NYSE",
+    "name": "Thanksgiving",
+    "status": "closed"
+  },
+  {
+    "date": "2020-11-26",
+    "exchange": "NASDAQ",
+    "name": "Thanksgiving",
+    "status": "closed"
+  },
+  {
+    "date": "2020-11-26",
+    "exchange": "OTC",
+    "name": "Thanksgiving",
+    "status": "closed"
+  },
+  {
+    "close": "2020-11-27T18:00:00.000Z",
+    "date": "2020-11-27",
+    "exchange": "NASDAQ",
+    "name": "Thanksgiving",
+    "open": "2020-11-27T14:30:00.000Z",
+    "status": "early-close"
+  },
+  {
+    "close": "2020-11-27T18:00:00.000Z",
+    "date": "2020-11-27",
+    "exchange": "NYSE",
+    "name": "Thanksgiving",
+    "open": "2020-11-27T14:30:00.000Z",
+    "status": "early-close"
+  }
+]

@@ -648,6 +648,8 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
         ("/benzinga/v1/firms", "last_updated"): _iso('"2020-01-07T12:41:25Z"'),
         ("/futures/v1/market-status", "timestamp"): _iso('"2025-12-04T23:00:00+00:00"'),
         ("/v1/marketstatus/now", "serverTime"): _iso('"2020-11-10T17:37:37-05:00"'),
+        ("/v1/marketstatus/upcoming", "open"): _iso('"2020-11-27T14:30:00.000Z"'),
+        ("/v1/marketstatus/upcoming", "close"): _iso('"2020-11-27T18:00:00.000Z"'),
         ("/futures/v1/products", "last_updated"): TypeFix(
             conversion=Conversion.ISO_DATE_TEXT,
             reason="The specification declares format date-time, but the documentation sample "
