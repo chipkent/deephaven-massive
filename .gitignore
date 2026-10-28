@@ -238,3 +238,8 @@ uv.lock
 # An interrupted `refresh --fetch` leaves its staging or backup directory beside the snapshot.
 vendor/massive-incoming/
 vendor/massive-previous/
+
+# The output and evidence of live integration runs (docs/live-tests.md): they hold raw licensed
+# rows, so they are never committed.
+live-checks.log
+live-evidence.log

@@ -31,6 +31,13 @@ Trades of US-listed options contracts (OPRA), tick by tick.
 | `Channel` | long | Always null for `options.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `options.trades`; supplied by `crypto.trades`. |  |  |  |  |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/flat-files/options/trades.md>
+- <https://massive.com/docs/rest/options/trades-quotes/last-trade.md>
+- <https://massive.com/docs/rest/options/trades-quotes/trades.md>
+- <https://massive.com/docs/websocket/options/trades.md>
+
 <a id="quotes"></a>
 
 ## `m.options.quotes`
@@ -60,6 +67,12 @@ Quotes of US-listed options contracts (OPRA), tick by tick.
 | `Channel` | long | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `Exchange` | long | Always null for `options.quotes`; supplied by `futures.quotes`, `forex.quotes`, `crypto.quotes`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `options.quotes`; supplied by `crypto.quotes`. |  |  |  |  |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/flat-files/options/quotes.md>
+- <https://massive.com/docs/rest/options/trades-quotes/quotes.md>
+- <https://massive.com/docs/websocket/options/quotes.md>
 
 <a id="bars"></a>
 
@@ -91,6 +104,15 @@ Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 | `SettlementPrice` | double | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `Exchange` | long | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/flat-files/options/day-aggregates.md>
+- <https://massive.com/docs/flat-files/options/minute-aggregates.md>
+- <https://massive.com/docs/rest/options/aggregates/custom-bars.md>
+- <https://massive.com/docs/rest/options/aggregates/previous-day-bar.md>
+- <https://massive.com/docs/websocket/options/aggregates-per-minute.md>
+- <https://massive.com/docs/websocket/options/aggregates-per-second.md>
+
 <a id="fmv"></a>
 
 ## `m.options.fmv`
@@ -102,6 +124,10 @@ Massive's fair market value of US-listed options contracts, streamed in real tim
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/websocket/options/fair-market-value.md>
 
 <a id="chain"></a>
 
@@ -157,6 +183,10 @@ The snapshot of every contract in one underlying's option chain.
 | `Underlying` | String | The underlying instrument, in the library's canonical symbol form. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset." | REST | `underlying_asset.ticker` |
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. | REST | `underlying_asset.timeframe` |
 | `UnderlyingAssetValue` | double | The value of the underlying index. | REST | `underlying_asset.value` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/options/snapshots/option-chain-snapshot.md>
 
 <a id="snapshots"></a>
 
@@ -239,6 +269,10 @@ The current snapshot of each requested options contract, with its greeks.
 | `UnderlyingAssetValue` | double | The value of the underlying index. | REST | `underlying_asset.value` |
 | `Value` | double | Value of Index. | REST | `value` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/options/snapshots/unified-snapshot.md>
+
 <a id="contracts"></a>
 
 ## `m.options.contracts`
@@ -259,6 +293,11 @@ Reference data on options contracts: type, exercise style, expiration, and strik
 | `StrikePrice` | double | The strike price of the option contract. | REST | `strike_price` |
 | `Underlying` | String | The underlying instrument, in the library's canonical symbol form. From REST `underlying_ticker`: "The underlying ticker that the option contract relates to." | REST | `underlying_ticker` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/options/contracts/all-contracts.md>
+- <https://massive.com/docs/rest/options/contracts/contract-overview.md>
+
 <a id="daily_open_close"></a>
 
 ## `m.options.daily_open_close`
@@ -278,32 +317,10 @@ The open, high, low, close, and volume of each options contract on one day.
 | `PreMarket` | double | The open price of the ticker symbol in pre-market trading. | REST | `preMarket` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST | `volume` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/options/aggregates/daily-ticker-summary.md>
+
 ---
 
 Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-28. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and for columns that only other datasets of the same kind fill.
-
-Massive's documentation of these datasets:
-
-- <https://massive.com/docs/flat-files/options/day-aggregates.md>
-- <https://massive.com/docs/flat-files/options/minute-aggregates.md>
-- <https://massive.com/docs/flat-files/options/quotes.md>
-- <https://massive.com/docs/flat-files/options/trades.md>
-- <https://massive.com/docs/rest/crypto/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/forex/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/indices/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/options/aggregates/custom-bars.md>
-- <https://massive.com/docs/rest/options/aggregates/daily-ticker-summary.md>
-- <https://massive.com/docs/rest/options/aggregates/previous-day-bar.md>
-- <https://massive.com/docs/rest/options/contracts/all-contracts.md>
-- <https://massive.com/docs/rest/options/contracts/contract-overview.md>
-- <https://massive.com/docs/rest/options/snapshots/option-chain-snapshot.md>
-- <https://massive.com/docs/rest/options/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/options/trades-quotes/last-trade.md>
-- <https://massive.com/docs/rest/options/trades-quotes/quotes.md>
-- <https://massive.com/docs/rest/options/trades-quotes/trades.md>
-- <https://massive.com/docs/rest/stocks/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/websocket/options/aggregates-per-minute.md>
-- <https://massive.com/docs/websocket/options/aggregates-per-second.md>
-- <https://massive.com/docs/websocket/options/fair-market-value.md>
-- <https://massive.com/docs/websocket/options/quotes.md>
-- <https://massive.com/docs/websocket/options/trades.md>

@@ -7,9 +7,10 @@ description:
 
 - `dh_type` maps each `ColumnType` to its Deephaven `DType`, and `col_defs` turns a `Schema`
   into the `{name: DType}` column definitions that `table_publisher` and `input_table` take.
-- `describe` returns a copy of a result table that carries the dataset's column descriptions
-  (the web UI's column-header tooltips) and its table description, `"<dataset>: <summary>"`.
-  Every verb calls it on the exact table it returns.
+- `describe` returns a copy of a result table in the dataset's column order that carries the
+  dataset's column descriptions (the web UI's column-header tooltips) and its table
+  description, `"<dataset>: <summary>"`. Every verb calls it on the exact table it returns,
+  so every verb returns the columns in the order `columns()` lists them.
 - `column_table` builds the static table a query's `columns()` returns: one row per column,
   with its type, description, and transports.
 
@@ -99,16 +100,20 @@ def col_defs(schema: Schema) -> dict[str, dtypes.DType]:
 
 
 def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
-    """Return a copy of a result table that carries the dataset's descriptions.
+    """Return a copy of a result table in the dataset's column order, with its descriptions.
 
-    The copy gets two table attributes through Deephaven's `GridAttributes` methods, which
-    `io.deephaven.engine.table.Table` extends: `withColumnDescriptions` with every column of
-    the schema whose description is not empty (`ColumnDescriptions`, which Barrage sends to
-    clients and the web UI shows as the column-header tooltip), then `withDescription` with
-    `"<dataset>: <summary>"` (`TableDescription`), such as
-    `"stocks.trades: Trades of US-listed stocks, tick by tick."`. `withColumnDescriptions`
-    checks that every described column exists, so a schema that disagrees with the table fails
-    here, at once; `Table.with_attributes`, which skips that check, is not used.
+    The copy lists the schema's columns first, in schema order, which is the order `columns()`
+    promises for every verb. A `last_by` puts its key columns first, so the table is first
+    reordered by a view (`moveColumnsUp`), which copies no data and keeps the table's
+    attributes. The copy then gets two table attributes through
+    Deephaven's `GridAttributes` methods, which `io.deephaven.engine.table.Table` extends:
+    `withColumnDescriptions` with every column of the schema whose description is not empty
+    (`ColumnDescriptions`, which Barrage sends to clients and the web UI shows as the
+    column-header tooltip), then `withDescription` with `"<dataset>: <summary>"`
+    (`TableDescription`), such as `"stocks.trades: Trades of US-listed stocks, tick by tick."`.
+    The reordering checks that every schema column exists, and `withColumnDescriptions` that
+    every described one does, so a schema that disagrees with the table fails here, at once;
+    `Table.with_attributes`, which skips that check, is not used.
 
     Call it last, on the exact table a verb returns, after its shape is derived: an
     append-only or ring table built from a described blink table would lose the attributes,
@@ -145,26 +150,27 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
             result.attributes()["TableDescription"]  # "stocks.x: Example prices."
 
     Args:
-        table: The table the verb would otherwise return. It must have every column of
-            `schema` that has a description.
+        table: The table the verb would otherwise return, with every column of `schema`.
         spec: The dataset, for its name and summary.
         schema: The dataset's schema (`Catalog.dataset_schema(spec)`), for its descriptions.
 
     Returns:
-        A new table with the same rows, columns, and other attributes as `table`, plus
-        `TableDescription` and, when the schema describes any column, `ColumnDescriptions`.
+        A new table with the same rows, columns, and other attributes as `table`, the
+        schema's columns first and in schema order, plus `TableDescription` and, when the
+        schema describes any column, `ColumnDescriptions`.
 
     Raises:
-        RuntimeError: If a described column is missing from `table` (Deephaven's
-            `NoSuchColumnException`, "Unknown column names [...]"), or if `table` has already
+        RuntimeError: If a column of `schema` is missing from `table` (Deephaven's
+            `IllegalArgumentException`, "Column(s) not found: ..."), or if `table` has already
             failed, as a failed stream's blink table has (copying a table listens to it). The
             Java methods are called directly, so the error is jpy's `RuntimeError`, not
             Deephaven's `DHError`; its message names the dataset and the Java exception, which
             is chained as its cause.
     """
     descriptions = {c.name: c.description for c in schema.columns if c.description}
-    described = table.j_table
     try:
+        # A key aggregation (`last_by`) puts its keys first; every verb lists schema order.
+        described = table.j_table.moveColumnsUp(*schema.column_names)
         if descriptions:  # an empty attribute would claim descriptions the table lacks
             described = described.withColumnDescriptions(j_hashmap(descriptions))
         described = described.withDescription(f"{spec.name}: {spec.summary}")

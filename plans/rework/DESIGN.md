@@ -350,8 +350,14 @@ with `_`. Examples:
 test code imports helpers as `tests._fakes…`. So `tests/massive/` can never shadow a top-level
 `massive` package.
 
-Integration tests end in `_integration`. They are skipped unless `MASSIVE_API_KEY` is set and
-run only in the later live-testing planned PR. The exceptions to the mirror rule, and no
+Integration tests end in `_integration` and carry the `integration` marker, which `addopts`
+deselects in every default run (CI's included); `uv run pytest -m integration` runs them, and
+each skips unless `MASSIVE_API_KEY` is set (and always under CI).
+[`docs/live-tests.md`](../../docs/live-tests.md) is the runbook for them. The live tests that deliberately exceed Massive's subscription and connection
+limits also carry `integration_limits`, and the smoke tier (every dataset and verb once,
+checked automatically) carries `integration_smoke`: `-m integration` deselects both, and only
+`-m integration_limits` or `-m integration_smoke` runs them. `MASSIVE_LIVE_PLANS` declares the
+key's plans, and each test's `needs` marker skips it when they fall short. The exceptions to the mirror rule, and no
 others:
 
 - `tests/conftest.py`: starts the embedded JVM in `pytest_configure`, before collection, and
@@ -808,7 +814,9 @@ taxonomy is a reference list revised in place, not a feed of new rows).
 
 - `REPLACE` is a keyed table (`poll_keys`) from which keys absent in the latest cycle are
   deleted, also when the cycle is empty.
-- `UPSERT` is keyed the same way and never deletes.
+- `UPSERT` is keyed the same way and never deletes. When `poll_keys` are every column
+  (`reference.related_companies`), it keeps each distinct row once and adds the new ones each
+  cycle brings.
 - `APPEND` is append-only and appends only rows it has not seen before. A row's identity is
   its `poll_keys` followed by its `revision_keys` (empty by default). Each cycle skips every
   row whose identity the table already holds, and a second row with the same identity in one
@@ -984,9 +992,13 @@ set regardless, for every API client to read. The Python package has no wrapper 
 direct `jpy` import (`jpy` is not a declared dependency) is needed: it calls
 `withColumnDescriptions` with a `java.util.HashMap` (`deephaven.jcompat.j_hashmap`) of every
 column whose description is not empty, then `withDescription`, and wraps the outcome in a new
-`deephaven.table.Table`, whose constructor casts it back to `Table`.
-`withColumnDescriptions` checks that every named column exists, so a schema that disagrees
-with the table fails at once; `Table.with_attributes` skips that check and is not used. The
+`deephaven.table.Table`, whose constructor casts it back to `Table`. Before the attributes,
+it puts the table's columns in schema order with `moveColumnsUp(*schema.column_names)`, a view
+that copies no data and keeps the table's attributes (the blink attribute included): a
+`last_by`, the shape of `last_by()` and of an `UPSERT` or `REPLACE` `poll()`, puts its key
+columns first, and `columns()` promises every verb the schema's order. The reordering checks
+that every schema column exists and `withColumnDescriptions` that every named column does, so a
+schema that disagrees with the table fails at once; `Table.with_attributes` skips that check and is not used. The
 table description is `"<dataset>: <summary>"` (`"stocks.trades: Trades of US-listed stocks,
 tick by tick."`), where `<summary>` is the one-sentence `DatasetSpec.summary`. The summary is
 a required field of every spec; `DatasetSpec.__post_init__` raises `ValueError`, naming the
@@ -1035,9 +1047,17 @@ result order. The table's columns are **Column**, **Deephaven type**, **Descript
 **Wire field** column per transport the dataset uses (`REST field`, `Flat-file field`,
 `WebSocket field`). A wire-field cell lists the distinct wire keys of that
 transport's sources that feed the column, in source order and before any projection, or
-`request` for a key filled from the request. A footer names the snapshot's fetch date and the
-vendor URLs of the sources the page's datasets use, from the `Provenance` passed to the renderer
-([section 19.4](#194-generated-schemas)). Units and nullability get no columns: every
+`request` for a key filled from the request. Under the table, a list headed "Massive's
+documentation of this dataset:" gives the vendor pages of that dataset's own sources, sorted and
+distinct, from the `Provenance` passed to the renderer ([section 19.4](#194-generated-schemas));
+a dataset whose sources have no URLs gets no list. A source several asset classes share (the
+unified snapshot `/v3/snapshot`, `/v3/reference/tickers`) has one page per class; for a dataset
+with an `asset_class`, only the pages whose URL path has a segment equal to that class's value
+(`/docs/rest/options/snapshots/unified-snapshot.md` for `options.snapshots`) are listed, and all
+of the source's pages when none matches, so a dataset never loses its links to a change in the
+vendor's URL layout. A dataset that spans classes (`asset_class` None, such as
+`reference.snapshots` or `reference.tickers`) lists every class's page. The page ends with a
+footer naming the generator command and the snapshot's fetch date. Units and nullability get no columns: every
 timestamp is an `Instant`, and **Supplied by** with the description already says when a
 column is null. Readers can see what each table holds before they install.
 
@@ -2401,7 +2421,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `blink_to_append_only(blink)`, fed only the rows whose identity (`poll_keys`, then
   `revision_keys`) the poller has not appended yet ([section 7](#7-query-classes-and-verbs)); the
   poller thread alone owns that set of identities, so it needs no lock, and adds a cycle's
-  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE`
+  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`, or
+`blink.select_distinct(poll_keys)` when they are every column (a `last_by` with nothing to
+aggregate is refused, and the distinct rows are what it would keep); `REPLACE`
   is that `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone
   row for every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`,
   so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
@@ -4315,7 +4337,14 @@ document already reflects them.
     `DESCRIPTION_FIXES` entry quotes the empty text and takes the sibling's, with its reason,
     so no column of a dataset is left blank for want of text Massive already wrote
     ([section 19.4](#194-generated-schemas)).
-55. **Every bar of a day or longer is stamped at its window's start** (2026-10-28). One
+55. **Each dataset links its own Massive documentation** (2026-10-28). The column
+    reference lists each dataset's vendor pages under that dataset's section instead of one
+    page-wide list at the foot of the page, which tied no link to a dataset and, through a
+    source several asset classes share, linked unrelated classes' pages (the options page
+    listed the stocks, forex, crypto, and indices unified-snapshot pages). A dataset of one
+    asset class links only that class's page of a shared source; the footer keeps the fetch
+    date ([section 7.4](#74-column-descriptions)).
+56. **Every bar of a day or longer is stamped at its window's start** (2026-10-28). One
     `history()` call returns the same rows whichever source answers it, so a bar of a day or
     longer of every class but futures, from every source, is stamped at 00:00 of the day it
     starts on in the class day zone: New York for stocks, options, and indices, UTC for forex
@@ -4339,8 +4368,10 @@ document already reflects them.
 ## 23. Open verification items
 
 Each item is handled conservatively now, covered by a fixture test in its unit-test module, and
-retired by a live integration test (`*_integration.py`, skipped without `MASSIVE_API_KEY`) in the
-later live-testing planned PR. Each item that a live test refutes becomes an owner decision
+retired by a live integration test (`*_integration.py`, marked `integration`, skipped without
+`MASSIVE_API_KEY`); [`docs/live-tests.md`](../../docs/live-tests.md) says how to run them, each
+test's docstring what its evidence means, and the comment on issue #26 what each outcome
+changes. Each item that a live test refutes becomes an owner decision
 before 1.0. Items 17 and 18 concern Deephaven, not Massive: the work that adds column
 descriptions settles them in the embedded test JVM and the web UI, and they need no live test.
 
@@ -4348,24 +4379,24 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 |---|---|---|---|---|
 | 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, raises `MassiveError` naming the dataset, the source, and the other source. `AUTO` picks the source as for every dataset, so the check alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all raise, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time raise | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `Timestamp` and whether the OHLCV agree |
 | 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path raises | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
-| 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_stocks_integration.py` (Business key): one FMV frame converts to a current `Instant` |
+| 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_crypto_integration.py` (Currencies Business): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
 | 5 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_hosts.py`: both replies | `tests/ingest/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |
 | 6 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/ingest/test_hosts.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/ingest/test_hosts_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
 | 7 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/ingest/test_hosts.py`: with and without the fields | `tests/ingest/test_hosts_integration.py`: record which fields the live payload carries |
 | 8 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/ingest/test_ws.py`: verdict and non-verdict messages | `tests/ingest/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
-| 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/ingest/test_ws_integration.py`: record whether an acknowledgement arrives |
-| 10 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/ingest/test_ws_integration.py`: a 1,000-topic frame is acknowledged |
-| 11 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/ingest/test_ws_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
+| 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/massive/ws/test_client_integration.py`: record whether an acknowledgement arrives |
+| 10 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/massive/ws/test_client_integration.py`: a 1,000-topic frame is acknowledged |
+| 11 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/massive/ws/test_client_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
 | 12 | Exact `max_connections` status text and timing | Any status `max_connections`, in the auth reply or after it, shows `WAITING_SLOT` | `tests/ingest/test_ws.py`: both placements | `tests/ingest/test_ws_integration.py`: two sessions with one individual key |
 | 13 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/massive/net/test_codec.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
 | 14 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/datasets/test_history_source.py`: AUTO before and after the cutoff | `tests/ingest/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |
-| 15 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/ingest/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
+| 15 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/massive/ws/test_client_integration.py`: subscribe both on a test key and record whether duplicates arrive |
 | 16 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): request a weekend key and record the status |
 | 17 | Retired: `poll()` results are no longer keyed `input_table`s but shapes of a publisher's blink table ([section 14](#14-publishers-fan-out-and-failure-semantics)), so no input-table attribute is involved | | | |
 | 18 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
-| 19 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/namespaces/test_forex_integration.py`: one `C` frame; record the form of `x` |
-| 20 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/namespaces/test_crypto_integration.py`: one `XT` frame; record the form of `i` |
+| 19 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/massive/ws/test_client_integration.py`: one raw `C` frame; record the form of `x` |
+| 20 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/massive/ws/test_client_integration.py`: one raw `XT` frame; record the form of `i` |
 | 21 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); the overflow check and the [1990, 2100] bound fail loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
 | 22 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
 | 23 | Where the futures snapshot carries a contract's ticker: the OpenAPI schema nests it as `details.ticker`, which the generator names `DetailsTicker` | `futures.snapshots` declares `DetailsTicker` as its `symbol` key; a row without it is a missing required key and fails loudly ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: a spec-shaped fixture fills `Symbol` from `details.ticker` | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for a current contract; record where the ticker appears and that `Symbol` is filled |
@@ -4374,7 +4405,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 26 | Whether Massive reads a percent-encoded colon in a path segment (`/v2/aggs/ticker/I%3ASPX/prev`) as `I:SPX` | Every path value is percent-encoded whole; a value containing `/` is refused before sending, since Massive answers 404 for `%2F` | `tests/massive/rest/test_query.py`: `I:SPX` becomes `I%3ASPX`; a `/` raises | `tests/namespaces/test_indices_integration.py`: one `I:SPX` `/prev` call returns a row for `I:SPX` |
 | 27 | Spelling of an explicit forex pair topic: the WebSocket documentation gives `{from}-{to}` (`C.EUR-USD`), while quote and aggregate frames spell the pair `EUR/USD` | Topics use `EUR-USD`; frames of any spelling map back to `C:EURUSD` | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`: `C.EUR-USD` is subscribed and an `EUR/USD` frame reaches its stream | `tests/namespaces/test_forex_integration.py`: subscribe `C.EUR-USD` and `CA.EUR-USD`; record the acknowledgement and that frames arrive |
 | 28 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The reader assumes the canonical form: symbol pushdown compares the file's `ticker` column with canonical symbols, and `Symbol` holds the column as written. Were the files to write `X:EUR-USD`, a symbol request would match no row; that outcome becomes an owner decision | `tests/ingest/test_flatfiles.py`: symbol pushdown keeps the rows whose ticker equals a requested canonical symbol | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |
-| 29 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run of bars named by date, whether 7 days cover every flat-file roll-forward, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | Trades and quotes named by date are requested by `session_end_date`, which needs no margin; bars named by date are requested from the session's regular open less 4 days and post-filtered on `SessionEndDate`; bars named by instants are filtered locally on their own window; an instant range whose trailing missing files hold a weekday rolls forward up to 7 days and raises `MassiveError` if the next file is unpublished or absent | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept, and an unpublished or absent next file raises | `tests/namespaces/test_futures_integration.py`: `trades` and `bars` of ES for 2025-01-21, and one `YEAR` bar request; record the first row's time and whether the candles arrive |
+| 29 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run of bars named by date, whether 7 days cover every flat-file roll-forward, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | Trades and quotes named by date are requested by `session_end_date`, which needs no margin; bars named by date are requested from the session's regular open less 4 days and post-filtered on `SessionEndDate`; bars named by instants are filtered locally on their own window; an instant range whose trailing missing files hold a weekday rolls forward up to 7 days and raises `MassiveError` if the next file is unpublished or absent | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept, and an unpublished or absent next file raises | `tests/namespaces/test_futures_integration.py`: minute bars of ES around the 2026-01-20 session, and `YEAR` candles from a year start and from mid-year; record the first bar's time and whether the candles arrive |
 | 30 | Whether `/v3/reference/tickers` returns one row per ticker with `active=false`, when delisted listings may reuse a ticker | `reference.tickers` polls keyed by `Symbol`; were several rows to share a ticker, a `poll()` table would keep one of them while `fetch()` shows all | `tests/namespaces/test_reference.py`: the vendor sample decodes with one row per ticker | `tests/namespaces/test_reference_integration.py`: one `tickers(active=False)` request over a letter range; record any ticker on several rows |
 | 31 | Whether `(asset_class, id)` identifies one row of `/v3/reference/exchanges` | `reference.exchanges` polls keyed by `AssetClass` and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `exchanges()` request; record any repeated key |
 | 32 | Whether `(asset_class, type, id)` identifies one row of `/v3/reference/conditions` | `reference.conditions` polls keyed by `AssetClass`, `Type`, and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `conditions()` request; record any repeated key |
