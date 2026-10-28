@@ -1,0 +1,47 @@
+{
+  "request_id": "6a7e466379af0a71039d60cc78e72282",
+  "results": [
+    {
+      "last_updated": 1748894400000000000,
+      "market_status": "closed",
+      "name": "S&P 500",
+      "session": {
+        "change": 24.25,
+        "change_percent": 0.41,
+        "close": 5935.94,
+        "high": 5940.35,
+        "low": 5876.0,
+        "open": 5896.68,
+        "previous_close": 5911.69
+      },
+      "ticker": "I:SPX",
+      "timeframe": "REAL-TIME",
+      "type": "indices",
+      "value": 5935.94
+    },
+    {
+      "last_updated": 1748894400000000000,
+      "market_status": "closed",
+      "name": "Nasdaq-100",
+      "session": {
+        "change": 150.11,
+        "change_percent": 0.7,
+        "close": 21491.1,
+        "high": 21500.0,
+        "low": 21250.5,
+        "open": 21300.12,
+        "previous_close": 21340.99
+      },
+      "ticker": "I:NDX",
+      "timeframe": "REAL-TIME",
+      "type": "indices",
+      "value": 21491.1
+    },
+    {
+      "error": "NOT_FOUND",
+      "message": "Ticker not found.",
+      "ticker": "I:NOPE"
+    }
+  ],
+  "status": "OK"
+}

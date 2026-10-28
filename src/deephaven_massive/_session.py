@@ -24,12 +24,12 @@ import itertools
 import logging
 import threading
 import weakref
-from typing import TYPE_CHECKING, Final, Self
+from typing import TYPE_CHECKING, Final, Self, cast
 
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 
-from deephaven_massive._config import MassiveConfig, require_positive_int
+from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest.clients import SessionClients
@@ -45,7 +45,7 @@ from deephaven_massive._namespaces import (
     reference,
     stocks,
 )
-from deephaven_massive._namespaces.base import list_params
+from deephaven_massive._namespaces.base import build_query, list_params
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
 from deephaven_massive._namespaces.forex import _Forex
@@ -63,7 +63,7 @@ from deephaven_massive._tables.core import (
     has_script_query_scope,
     on_update_graph,
 )
-from deephaven_massive._types import ALL, override
+from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -321,38 +321,54 @@ class MassiveSession:
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
     ) -> Query:
-        """Return the unified snapshot (`GET /v3/snapshot`) of tickers of any asset classes.
+        """The current state of tickers of any asset classes, from Massive's unified snapshot.
 
-        Requests carry up to 250 tickers each; rows are the union schema of the unified
-        snapshot. `dm.ALL` is not accepted: the endpoint needs tickers, and each class's
-        `snapshots(dm.ALL)` covers a whole market. `limit` caps the total number of rows.
-        Invalid `sort`, `order`, or `limit` values raise `TypeError` or `ValueError`.
+        One row per ticker: its latest trade, quote, minute and session bars, and, for options,
+        the greeks, implied volatility, open interest, and underlying asset. Rows are the union
+        schema of the unified snapshot, so a column another class fills is null. The catalog
+        record is `reference.snapshots`, the name `m.streams()` and messages show. Served over
+        REST (`/v3/snapshot` with `ticker.any_of`, up to 250 tickers per request); `fetch()`
+        returns one row per requested ticker and `poll()` re-fetches them, keyed by `Symbol`.
+        A ticker Massive does not know or the plan does not cover keeps its row, with `Error`
+        and `Message` set. `dm.ALL` is not accepted: the endpoint needs tickers, and each
+        class's `snapshots(dm.ALL)` covers a whole market. Its columns, and what each means,
+        are in
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#snapshots,
+        in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            symbols: The tickers, in canonical form with their class prefixes (`AAPL`,
-                `O:SPY251219C00600000`, `C:EURUSD`, ...).
-            sort: The field to sort by, or None for the endpoint's default.
-            order: The sort direction, or None.
-            limit: The maximum number of rows, or None for all.
-            filters: Further query parameters of the path, by key, such as `{"type": "stocks"}`.
+            symbols: The tickers, in any accepted form of their classes (`AAPL`,
+                `O:SPY251219C00600000`, `EUR/USD`, `X:BTCUSD`, `I:SPX`), or a Deephaven table
+                with a `Symbol` column; each prefix selects the class.
+            sort: The field to sort by (`"ticker"`); None for the endpoint's default. With
+                more than 250 tickers it orders the rows within each request of 250, not
+                across them.
+            order: The sort direction, within each request the same way; None for the
+                endpoint's default.
+            limit: The maximum total number of rows across pages; None for every row. The
+                page size is internal.
+            filters: Further query parameters of the endpoint, by wire name with dots written
+                as underscores, such as `{"type": "options"}`.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        Raises:
-            ValueError: If `symbols` is `dm.ALL`.
-            NotImplementedError: Always, until the unified snapshot dataset is implemented.
+        `dm.ALL`, an invalid symbol, or an unknown filter raises `ValueError`; an argument of
+        the wrong type raises `TypeError`.
         """
-        list_params(sort=sort, order=order)
-        if limit is not None:
-            require_positive_int("limit", limit)
-        if symbols is ALL:
-            raise ValueError(
-                "m.snapshots() needs tickers; use a class's snapshots(dm.ALL), such as "
-                "m.stocks.snapshots(dm.ALL), for a whole market"
-            )
-        del filters  # validated against the generated parameters once it is implemented
-        raise NotImplementedError("m.snapshots() is not implemented yet")
+        query = build_query(
+            self._core,
+            reference.SNAPSHOTS,
+            symbols=symbols,
+            all_alternative=(
+                "a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "
+                "market"
+            ),
+            params=list_params(sort=sort, order=order),
+            filters=filters,
+            limit=limit,
+        )
+        return cast("Query", query)
 
     def connections(self) -> Table:
         """Return the live diagnostics table of connections and host decisions.

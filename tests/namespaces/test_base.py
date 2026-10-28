@@ -370,7 +370,7 @@ def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> N
     # A filter would reach REST but not the source choice, which could then pick flat files,
     # whose bars are unadjusted.
     with pytest.raises(
-        ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\), not filters"
+        ValueError, match=r"^adjusted is set through its own argument, adjusted=, not filters"
     ):
         build_query(massive_session._core, STOCK_BARS, symbols=["AAPL"], filters={"adjusted": True})
 
@@ -445,9 +445,6 @@ def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
 
 # Datasets served by a method of the session itself rather than of a namespace.
 _SESSION_FACTORIES = {"reference.snapshots": "snapshots"}
-# Session factories whose dataset is not declared yet: the method raises `NotImplementedError`.
-# A test fails once the dataset is in the catalog, so the exemption goes with it.
-_PENDING = frozenset({"snapshots"})
 
 
 def _hints(function: Callable[..., object]) -> dict[str, Any]:
@@ -538,26 +535,23 @@ def _bar_problems(name: str, spec: DatasetSpec, factory: Callable[..., object]) 
     return problems
 
 
-def _factory_map(session: type, pending: frozenset[str]) -> dict[str, Callable[..., object]]:
+def _factory_map(session: type) -> dict[str, Callable[..., object]]:
     """Return every factory method reachable from a session class, by dataset name.
 
     Args:
         session: The session class whose namespaces hold the factories.
-        pending: The session methods whose dataset is not declared yet, left out.
 
     Returns:
         The namespace factories (`_factories`) and the session's own dataset methods.
     """
     factories = dict(_factories(session, ""))
     for dataset, method in _SESSION_FACTORIES.items():
-        if hasattr(session, method) and method not in pending:
+        if hasattr(session, method):
             factories[dataset] = getattr(session, method)
     return factories
 
 
-def summary_problems(
-    session: type, specs: Mapping[str, DatasetSpec], *, pending: frozenset[str] = _PENDING
-) -> list[str]:
+def summary_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list[str]:
     """Return every factory whose docstring does not start with its dataset's summary.
 
     The summary is the sentence a result's table description and the column reference show, so
@@ -568,12 +562,11 @@ def summary_problems(
     Args:
         session: The session class whose namespaces hold the factories.
         specs: The catalog's specs by name.
-        pending: The session methods whose dataset is not declared yet, left out of the rule.
 
     Returns:
         One message per factory whose docstring is missing or starts otherwise.
     """
-    factories = _factory_map(session, pending)
+    factories = _factory_map(session)
     problems = []
     for name, spec in specs.items():
         factory = factories.get(name)
@@ -584,21 +577,18 @@ def summary_problems(
     return problems
 
 
-def annotation_problems(
-    session: type, specs: Mapping[str, DatasetSpec], *, pending: frozenset[str] = _PENDING
-) -> list[str]:
+def annotation_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list[str]:
     """Return every break of the annotation rule.
 
     Args:
         session: The session class whose namespaces hold the factories.
         specs: The catalog's specs by name.
-        pending: The session methods whose dataset is not declared yet, left out of the rule.
 
     Returns:
         One message per factory without a spec, spec without a factory, or factory whose return
         annotation is not the class its spec derives.
     """
-    factories = _factory_map(session, pending)
+    factories = _factory_map(session)
     problems = [f"{name}: a factory with no dataset" for name in sorted(factories - specs.keys())]
     for name, spec in specs.items():
         factory = factories.get(name)
@@ -613,12 +603,6 @@ def annotation_problems(
 
 def test_every_factory_returns_the_class_of_its_dataset() -> None:
     assert annotation_problems(dm.MassiveSession, CATALOG.by_name) == []
-
-
-def test_a_pending_session_factory_has_no_dataset_yet() -> None:
-    pending = {d for d, method in _SESSION_FACTORIES.items() if method in _PENDING}
-    assert pending
-    assert pending.isdisjoint(CATALOG.by_name)
 
 
 class _Good(Namespace):
@@ -707,7 +691,7 @@ def test_the_annotation_rule_passes_matching_factories() -> None:
         (DIVIDENDS, "stocks.dividends"),
         (DIVIDENDS, "reference.snapshots"),  # served by the session's own `snapshots()`
     )
-    assert annotation_problems(_GoodSession, specs, pending=frozenset()) == []
+    assert annotation_problems(_GoodSession, specs) == []
 
 
 def test_the_annotation_rule_reports_every_mismatch() -> None:
@@ -717,7 +701,7 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
         (STOCK_BARS, "options.minute_bars"),
         (DIVIDENDS, "options.splits"),
     )
-    assert annotation_problems(_BadSession, specs, pending=frozenset()) == [
+    assert annotation_problems(_BadSession, specs) == [
         "options.news: a factory with no dataset",
         "reference.snapshots: a factory with no dataset",
         "options.bars: the bars implementation must return HistoryQuery",
@@ -776,7 +760,7 @@ def test_the_summary_rule_reports_every_mismatch() -> None:
             _summarized("stocks.ipos", "Initial public offerings."),  # no factory: skipped
         )
     }
-    assert summary_problems(_SummarizedSession, specs, pending=frozenset()) == [
+    assert summary_problems(_SummarizedSession, specs) == [
         "stocks.splits: the docstring must start with 'Stock splits of US-listed stocks.'",
         "stocks.news: the docstring must start with 'News articles.'",
     ]

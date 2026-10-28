@@ -14,7 +14,7 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive import _enums
 from deephaven_massive._enums import ChannelFamily, Recency, _require_enum
-from deephaven_massive._massive import ParamKind, Transport, sources
+from deephaven_massive._massive import ParamKind, Transport, source, sources
 
 EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
     dm.AssetClass: ["stocks", "options", "futures", "indices", "forex", "crypto"],
@@ -41,6 +41,31 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
     dm.Locale: ["us", "global"],
     dm.ConditionDataType: ["trade", "bbo", "nbbo"],
     dm.Sip: ["CTA", "UTP", "OPRA"],
+    dm.TickerType: [
+        "CS",
+        "ADRC",
+        "ADRP",
+        "ADRR",
+        "UNIT",
+        "RIGHT",
+        "PFD",
+        "FUND",
+        "SP",
+        "WARRANT",
+        "INDEX",
+        "ETF",
+        "ETN",
+        "OS",
+        "GDR",
+        "OTHER",
+        "NYRS",
+        "AGEN",
+        "EQLK",
+        "BOND",
+        "ADRW",
+        "BASKET",
+        "LT",
+    ],
 }
 
 # Enums that mirror a parameter enum of the generated REST paths, by parameter name. Every path
@@ -55,6 +80,8 @@ REST_MIRRORS: dict[type[StrEnum], str] = {
     dm.ConditionDataType: "data_type",
     dm.ContractType: "contract_type",
 }
+# dm.TickerType mirrors the `type` parameter of one path only: `/v3/snapshot` also has a
+# `type`, the asset class of a row; see test_ticker_type_mirrors_the_tickers_type_parameter.
 # Not mirrors: dm.AssetClass (its values are the WebSocket cluster paths, with futures and
 # forex, while the REST asset_class parameters say "fx" and differ per path); dm.Timespan
 # (it adds SESSION, the futures resolution, and the indicators' timespan has no SECOND);
@@ -91,6 +118,13 @@ def test_mirrored_enums_have_the_value_set_of_the_rest_parameter(
     }
     assert found  # the parameter is still an enum somewhere
     assert all(set(values) == {m.value for m in ours} for values in found)
+
+
+def test_ticker_type_mirrors_the_tickers_type_parameter() -> None:
+    tickers = source(Transport.REST, "/v3/reference/tickers")
+    (param,) = [p for p in tickers.params if p.name == "type"]
+    assert param.kind is ParamKind.ENUM
+    assert [m.value for m in dm.TickerType] == list(param.values)
 
 
 def test_internal_enums() -> None:
@@ -251,12 +285,45 @@ def test_literal_detection_ignores_enum_members() -> None:
 # with its own rejection test.
 ENUM_PARAMETERS = {
     "MassiveConfig.__init__.ws_hosts": "test_config.py::test_ws_hosts_types",
-    "MassiveSession.snapshots.order": "test_session.py::test_unified_snapshots_shell",
+    "MassiveSession.snapshots.order": "test_session.py::test_unified_snapshots",
+    "_Economy.funding_conditions.order": "namespaces/test_economy.py::test_enums_reject_text",
+    "_Economy.inflation.order": "namespaces/test_economy.py::test_enums_reject_text",
+    "_Economy.inflation_expectations.order": "namespaces/test_economy.py::test_enums_reject_text",
+    "_Economy.labor_market.order": "namespaces/test_economy.py::test_enums_reject_text",
+    "_Economy.treasury_yields.order": "namespaces/test_economy.py::test_enums_reject_text",
+    "_Indicators.ema.order": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.ema.series_type": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.ema.timespan": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.macd.order": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.macd.series_type": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.macd.timespan": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.rsi.order": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.rsi.series_type": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.rsi.timespan": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.sma.order": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.sma.series_type": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Indicators.sma.timespan": "namespaces/test_indicators.py::test_enums_reject_text",
+    "_Reference.conditions.asset_class": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.conditions.data_type": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.conditions.order": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.conditions.sip": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.exchanges.asset_class": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.exchanges.locale": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.news.order": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.ticker_types.asset_class": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.ticker_types.locale": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.tickers.market": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.tickers.ticker_type": "namespaces/test_reference.py::test_enums_reject_text",
+    "_Reference.tickers.order": "namespaces/test_reference.py::test_enums_reject_text",
     "Query.poll.mode": "test_query.py::test_poll_mode_is_an_enum",
     "HistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
     "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
+    "_Indices.bars.timespan": "namespaces/test_indices.py::test_bars_check_their_argument_types",
+    "_Indices.snapshots.order": (
+        "namespaces/test_indices.py::test_snapshots_check_their_list_parameters"
+    ),
     "_Crypto.bars.timespan": "namespaces/test_crypto.py::test_bar_arguments_are_checked",
     "_Crypto.movers.direction": "namespaces/test_crypto.py::test_movers",
     **dict.fromkeys(

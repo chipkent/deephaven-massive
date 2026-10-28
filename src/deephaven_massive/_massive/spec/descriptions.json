@@ -1,6 +1,6 @@
 {
  "generated_by": "python -m deephaven_massive._massive.refresh",
- "fetched": "2026-10-27",
+ "fetched": "2026-10-28",
  "urls": {
   "REST": {
    "/benzinga/v1/analyst-insights": [
@@ -2166,7 +2166,7 @@
     "last_quote.last_updated": "The nanosecond timestamp of when this information was updated.",
     "last_quote.midpoint": "The average of the bid and ask price.",
     "last_quote.timeframe": "The time relevance of the data.",
-    "last_trade.conditions": "A list of condition codes.",
+    "last_trade.conditions": "A list of condition codes. The codes depend on the asset type; see the condition codes for stocks (https://massive.com/docs/rest/stocks/market-operations/condition-codes), options (https://massive.com/docs/rest/options/market-operations/condition-codes), or crypto (https://massive.com/docs/rest/crypto/market-operations/condition-codes).",
     "last_trade.decimal_size": "The size of a trade, including fractional shares, represented as a decimal string where the fractional part is expressed in millionths. This field is only returned for stocks snapshots.",
     "last_trade.exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs.",
     "last_trade.id": "The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID.",
@@ -2192,11 +2192,11 @@
     "session.late_trading_change_percent": "Today's late trading change as a percentage.",
     "session.low": "The lowest price of the asset for the day.",
     "session.open": "The open price of the asset for the day.",
-    "session.previous_close": "The closing price of the asset for the previous trading day.",
+    "session.previous_close": "The closing price of the asset for the previous trading day. This is the correct field for the prior session's reference price, and it is retained across the daily session rollover. It is absent only for an asset with no completed prior session, such as a newly listed ticker or option contract.",
     "session.price": "The price of the most recent trade or bid price for this asset.",
     "session.regular_trading_change": "Today's change in regular trading hours, difference between current price and previous trading day's close, otherwise difference between today's close and previous day's close.",
     "session.regular_trading_change_percent": "Today's regular trading change as a percentage.",
-    "session.volume": "The trading volume for the asset for the day.",
+    "session.volume": "The trading volume for the asset for the day. A value of 0 means no trades have occurred yet in the current session.",
     "ticker": "The ticker symbol for the asset.",
     "timeframe": "The time relevance of the data.",
     "type": "The asset class for this ticker.",
@@ -2260,7 +2260,7 @@
     "last_quote.last_updated": "The nanosecond timestamp of when this information was updated.",
     "last_quote.midpoint": "The average of the bid and ask price.",
     "last_quote.timeframe": "The time relevance of the data.",
-    "last_trade.conditions": "A list of condition codes.",
+    "last_trade.conditions": "A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means.",
     "last_trade.exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs.",
     "last_trade.price": "The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00.",
     "last_trade.sip_timestamp": "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it.",
