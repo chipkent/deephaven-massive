@@ -369,7 +369,7 @@ def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.Massiv
             "sort": "strike_price",
             "underlyingAsset": "AAPL",
         },
-        "filters": {"expiration_date_lte": "2025-01-17", "strike_price_gte": 150},
+        "filters": {"expiration_date_lte": date(2025, 1, 17), "strike_price_gte": 150},
     }
     assert q._request.limit == 10
     assert request_of(massive_session.options.chain("SPY"))["params"] == {"underlyingAsset": "SPY"}
