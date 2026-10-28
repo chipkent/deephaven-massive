@@ -55,6 +55,8 @@ DATASETS = {
     "partners.fable.merchant_aggregates": ("/consumer-spending/eu/v1/merchant-aggregates", None),
     "partners.fable.merchant_hierarchy": ("/consumer-spending/eu/v1/merchant-hierarchy", None),
 }
+# The datasets with the list parameters `sort`, `order`, and `limit`.
+LIST_DATASETS = [n for n in DATASETS if n != "partners.benzinga.consensus_ratings"]
 WITH_SYMBOLS = [name for name, (_, symbol) in DATASETS.items() if symbol is not None]
 LIST_WITH_SYMBOLS = [n for n in WITH_SYMBOLS if n != "partners.benzinga.consensus_ratings"]
 WITHOUT_SYMBOLS = [
@@ -195,6 +197,44 @@ def test_poll_keys_are_columns_and_news_appends(name: str) -> None:
     assert set(spec.poll_keys) <= set(CATALOG.dataset_schema(spec).column_names)
     expected = PollMode.APPEND if name == "partners.benzinga.news" else PollMode.REPLACE
     assert spec.poll_mode is expected
+
+
+ETF_KEYS = ("Symbol", "EffectiveDate", "ProcessedDate")
+
+
+@pytest.mark.parametrize(
+    ("name", "keys"),
+    [
+        # Benzinga gives every record its own id; a consensus is one row per stock.
+        *((n, ("BenzingaId",)) for n in LIST_DATASETS if n.startswith("partners.benzinga.")),
+        ("partners.benzinga.consensus_ratings", ("Symbol",)),
+        # A fund's data is per effective date, and an issuer can restate a date later.
+        ("partners.etf_global.analytics", ETF_KEYS),
+        ("partners.etf_global.constituents", (*ETF_KEYS, "ConstituentRank")),
+        ("partners.etf_global.fund_flows", ETF_KEYS),
+        ("partners.etf_global.profiles", ETF_KEYS),
+        ("partners.etf_global.taxonomies", ETF_KEYS),
+        ("partners.tmx.corporate_events", ("TmxRecordId",)),
+        (
+            "partners.fable.merchant_aggregates",
+            (
+                "TransactionDate",
+                "PublishedDate",
+                "Name",
+                "Type",
+                "UserCountry",
+                "Channel",
+                "ConsumerType",
+                "MccGroup",
+                "TransactionCurrency",
+            ),
+        ),
+        ("partners.fable.merchant_hierarchy", ("LookupName", "ActiveFrom")),
+    ],
+)
+def test_poll_keys_tell_rows_apart(name: str, keys: tuple[str, ...]) -> None:
+    # A keyed poll replaces rows by these keys, and an appending poll skips rows it has seen.
+    assert spec_of(name).poll_keys == keys
 
 
 # The fixtures, shaped from the vendor's samples.
@@ -428,9 +468,7 @@ def test_bad_filters_are_refused(
         factory(massive_session, name)(filters=filters)
 
 
-@pytest.mark.parametrize(
-    "name", [n for n in DATASETS if n != "partners.benzinga.consensus_ratings"]
-)
+@pytest.mark.parametrize("name", LIST_DATASETS)
 def test_order_is_an_enum(massive_session: dm.MassiveSession, name: str) -> None:
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         factory(massive_session, name)(sort="date", order=cast("Order", "desc"))
@@ -640,9 +678,7 @@ def test_consensus_ratings_send_one_request_per_symbol(
     assert sorted((r["Symbol"], r["BuyRatings"]) for r in out) == [("AAPL", 6), ("MSFT", 9)]
 
 
-@pytest.mark.parametrize(
-    "name", [n for n in DATASETS if n != "partners.benzinga.consensus_ratings"]
-)
+@pytest.mark.parametrize("name", LIST_DATASETS)
 def test_order_needs_sort(name: str, massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match="order needs sort"):
         factory(massive_session, name)(order=Order.ASC)
