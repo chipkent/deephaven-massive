@@ -242,7 +242,7 @@ SPLITS: Final = DatasetSpec(
     poll_keys=("Id",),
     page_size=5_000,
 )
-# The IPO path filters one `ticker` per request, so a symbol list fans out.
+# The IPO path filters one `ticker` per request, so the REST layer sends one request per symbol.
 IPOS: Final = DatasetSpec(
     name="stocks.ipos",
     summary="Initial public offerings on US exchanges, upcoming and past, one row per offering.",
@@ -251,7 +251,6 @@ IPOS: Final = DatasetSpec(
     keys={(_R, _IPOS): _ticker_keys()},
     time_axis=("listing_date.gte", "listing_date.lte"),
     symbol_param="ticker",
-    per_symbol=True,
     poll_mode=PollMode.APPEND,
     page_size=1_000,
 )
