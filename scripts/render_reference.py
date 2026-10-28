@@ -24,8 +24,17 @@ import importlib
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from deephaven_server import Server
+
+# Neither module imports Deephaven (the package's own __init__.py imports lazily), so both
+# import before the server starts.
+from deephaven_massive import _massive
+from deephaven_massive._datasets.column_reference import render, sync
+
+if TYPE_CHECKING:
+    from deephaven_massive import _session
 
 _DIRECTORY = Path(__file__).resolve().parent.parent / "docs" / "datasets"
 """The column reference's directory, found from this script's place in the checkout."""
@@ -41,11 +50,14 @@ def main() -> None:
     atexit.register(_exit)
     # Port 0 asks the OS for an ephemeral port, so the command never clashes with a server.
     Server(port=0, jvm_args=["-Xmx1g"]).start()
-    # Imported only once the server runs: the session module imports Deephaven.
-    wire = importlib.import_module("deephaven_massive._massive")
-    reference = importlib.import_module("deephaven_massive._datasets.column_reference")
-    catalog = importlib.import_module("deephaven_massive._session").CATALOG
-    result = reference.sync(_DIRECTORY, reference.render(catalog, wire.provenance()))
+    # The session module, which builds the catalog, imports Deephaven, so it is imported only
+    # once the server runs. The type checker reads the static import above instead, so a
+    # renamed module or `CATALOG` fails the type check.
+    if TYPE_CHECKING:
+        session = _session
+    else:
+        session = importlib.import_module("deephaven_massive._session")
+    result = sync(_DIRECTORY, render(session.CATALOG, _massive.provenance()))
     shown = _DIRECTORY.relative_to(_DIRECTORY.parent.parent)
     for name in result.written:
         sys.stdout.write(f"wrote {shown / name}\n")

@@ -183,7 +183,7 @@ enable_error_code = [
 # directory, the repository root (`tests.namespaces.test_init`). So `tests/test_init.py` and
 # `tests/namespaces/test_init.py` never collide, and since `tests/` is not a search root,
 # `import massive` never resolves to `tests/massive/`.
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 mypy_path = ["src"]
 explicit_package_bases = true
 
