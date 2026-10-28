@@ -321,13 +321,22 @@ class Query(QueryBase):
         Args:
             interval: Seconds between cycles, or a `timedelta`; must be positive.
             mode: How cycles combine (`PollMode`); None uses the dataset's default, `APPEND`
-                for news and filings and `REPLACE` otherwise.
+                for news, IPOs, and filings (not the filing taxonomies) and `REPLACE`
+                otherwise.
 
         Returns:
             A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`. A
             `REPLACE` table removes keys absent from the latest cycle, but its hidden state
             keeps every key it has ever held, as `last_by()` does; over a key set that keeps
             changing (an options chain, the day's movers) its memory grows with the keys seen.
+            An `APPEND` table adds only rows whose poll-key tuple it has not appended before
+            (a second row with the same key in one cycle is skipped too). It remembers a key
+            for 100 successful cycles after the last cycle that returned it, so a row every
+            response repeats is appended once, while a row absent from 100 consecutive cycles
+            that then returns is appended again; a failed cycle forgets nothing. The memory
+            is bounded by 100 times the largest cycle. On a dataset whose poll key is the
+            default `Symbol` (a snapshot), `APPEND` adds one row per symbol, not one per
+            cycle.
         """
         self._core.require_verb_thread()
         period = _interval(interval)

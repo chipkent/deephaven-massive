@@ -6,7 +6,12 @@ publishes its rows, and waits for the next cycle. Every mode publishes through o
 `table_publisher`, created with the result inside its result scope on the caller thread, so a
 failure can fail the table (`publish_failure`) in every mode:
 
-- `APPEND`: the publisher's blink table made append-only; every cycle's rows are appended.
+- `APPEND`: the publisher's blink table made append-only, fed only the rows not seen before. A
+  row is identified by its tuple of poll keys (`DatasetSpec.poll_keys`); a cycle skips every row
+  whose key the poller already appended, or that an earlier row of the same cycle carries. The
+  poller remembers a key for `APPEND_MEMORY` published cycles after the last cycle that
+  returned it, so a row every response repeats is appended once and the memory stays bounded
+  (see `APPEND_MEMORY` for the trade-off).
 - `UPSERT`: the blink table's `last_by` on the dataset's poll keys (`DatasetSpec.poll_keys`):
   keyed, and a key never leaves.
 - `REPLACE`: the same `last_by`, plus one *tombstone* row for each key the previous cycle had
@@ -44,6 +49,7 @@ unclosed session from being collected (whose collection then stops the poller).
 from __future__ import annotations
 
 import functools
+import itertools
 import logging
 import threading
 import time
@@ -81,6 +87,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.core import SessionCore
 
 __all__ = [
+    "APPEND_MEMORY",
     "CLOCK",
     "LIVE_COLUMN",
     "CycleReader",
@@ -163,6 +170,20 @@ class _SystemClock:
         """
         return event.wait(seconds)
 
+
+APPEND_MEMORY: int = 100
+"""How many published cycles an `APPEND` poller remembers a key after the last cycle that
+returned it; read once by each new poller, and replaced by tests.
+
+A window of cycles bounds the memory at this many times the largest cycle, and it never holds
+more keys than the table holds rows, since every remembered key was appended. It never forgets
+a key the latest cycle returned, so a row every response repeats is appended once. The
+trade-off: a row absent from this many consecutive published cycles that then returns is
+appended again. A cycle that fails publishes nothing and counts for nothing, so an outage
+forgets no key. A key-count limit would instead evict keys of the latest response whenever one
+response held more rows than the limit, and append them again every cycle; an age limit would
+depend on the interval.
+"""
 
 CLOCK: PollClock = _SystemClock()
 """The clock every new poller waits on; tests replace it so that no cycle waits for real."""
@@ -261,18 +282,21 @@ class Poller:
     Created by `open_poll` on the caller thread, which builds the table (`build`), registers
     the poller, and then starts its thread (`start`). The thread enters the session's execution
     context for its whole life. Every other method is safe from any thread: `stop` and
-    `release` only set an event and update registries.
+    `release` only set an event and update registries. The key state of `REPLACE` and `APPEND`
+    belongs to the thread alone, so it takes no lock.
     """
 
     __slots__ = (
         "__weakref__",
         "_clock",
         "_core",
+        "_cycles",
         "_exec_ctx",
         "_interval",
         "_keys",
         "_label",
         "_max_concurrency",
+        "_memory",
         "_mode",
         "_pollers",
         "_published",
@@ -280,6 +304,7 @@ class Poller:
         "_read",
         "_request",
         "_schema",
+        "_seen",
         "_spec",
         "_stop",
         "_stream_id",
@@ -333,6 +358,11 @@ class Poller:
         self._stop = stop
         self._publisher = publisher
         self._keys: set[tuple[Hashable, ...]] = set()
+        # The APPEND key memory: each key appended, mapped to the last published cycle that
+        # returned it, oldest first. Only the poller thread touches it and `_cycles`.
+        self._seen: dict[tuple[Hashable, ...], int] = {}
+        self._cycles = 0
+        self._memory = APPEND_MEMORY
         self._published = 0
         self._thread = threading.Thread(
             target=self._run, name=f"{core.label} poll #{stream_id}", daemon=True
@@ -443,8 +473,7 @@ class Poller:
         table, requests = self._read(symbols=symbols, record=record, executor=pool)
         if self._stop.is_set():
             return False
-        self._publish(table)
-        self._published += table.num_rows
+        self._published += self._publish(table)
         update = StreamUpdate(
             rows_published=self._published,
             requests_per_cycle=requests,
@@ -474,21 +503,76 @@ class Poller:
         core.update_streams({self._stream_id: StreamUpdate(error=str(error))})
         return True
 
-    def _publish(self, table: pa.Table) -> None:
-        """Publish one cycle's rows, with the tombstones of the keys it lost for `REPLACE`.
+    def _publish(self, table: pa.Table) -> int:
+        """Publish one cycle's rows as the mode shapes them.
+
+        `REPLACE` adds a tombstone for each key the cycle lost; `APPEND` keeps only the rows
+        not seen before (`_fresh`). `UPSERT` publishes the rows as they are.
 
         Args:
             table: The cycle's rows in the dataset's schema.
+
+        Returns:
+            How many of the cycle's rows were published (tombstones not counted).
         """
         keys = None
+        cycle_keys = None
+        published: int = table.num_rows
         if self._mode is PollMode.REPLACE:
             table, keys = self._replace(table)
+        elif self._mode is PollMode.APPEND:
+            table, cycle_keys = self._fresh(table)
+            published = table.num_rows
         if table.num_rows:
             self._publisher.add(dh_arrow.to_table(table))
+        # The key state changes only once the cycle is published: if it failed, the next
+        # cycle still tombstones the keys this one dropped, or appends the rows it skipped.
         if keys is not None:
-            # Only once the cycle is published: if it failed, the next cycle still tombstones
-            # the keys this one dropped.
             self._keys = keys
+        if cycle_keys is not None:
+            self._remember(cycle_keys)
+        return published
+
+    def _fresh(self, table: pa.Table) -> tuple[pa.Table, list[tuple[Hashable, ...]]]:
+        """Keep the rows of an `APPEND` cycle whose key the poller has not appended yet.
+
+        A row whose key an earlier row of the same cycle carries is dropped too. The memory is
+        left as is; `_publish` updates it once the cycle is published.
+
+        Args:
+            table: The cycle's rows.
+
+        Returns:
+            The rows to append, and every row's key in the cycle's order.
+        """
+        names = self._spec.poll_keys
+        keys = list(zip(*(table.column(name).to_pylist() for name in names), strict=True))
+        taken: set[tuple[Hashable, ...]] = set()
+        fresh = []
+        for key in keys:
+            new = key not in self._seen and key not in taken
+            taken.add(key)
+            fresh.append(new)
+        return table.filter(pa.array(fresh, pa.bool_())), keys
+
+    def _remember(self, keys: list[tuple[Hashable, ...]]) -> None:
+        """Count a published `APPEND` cycle, refresh its keys, and forget the expired ones.
+
+        Each key of the cycle moves to the end of the memory with the cycle's number, so the
+        memory stays ordered by the last cycle that returned each key, and the keys not
+        returned in the last `APPEND_MEMORY` cycles are dropped from its front.
+
+        Args:
+            keys: Every row's key in the published cycle.
+        """
+        self._cycles += 1
+        for key in keys:
+            self._seen.pop(key, None)
+            self._seen[key] = self._cycles
+        oldest = self._cycles - self._memory
+        expired = list(itertools.takewhile(lambda item: item[1] <= oldest, self._seen.items()))
+        for key, _ in expired:
+            del self._seen[key]
 
     def _replace(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
         """Mark a cycle's rows live and add one tombstone per key the last published cycle had.

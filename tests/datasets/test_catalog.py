@@ -18,7 +18,7 @@ import pytest
 from deephaven_massive._datasets import catalog as catalog_module
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._enums import AssetClass, ContractType, Timespan
+from deephaven_massive._enums import AssetClass, ContractType, PollMode, Timespan
 from deephaven_massive._massive import (
     Field,
     ParamKind,
@@ -896,6 +896,32 @@ def test_poll_keys_gate() -> None:
     assert problems(change(EXCHANGES, poll_keys=("Symbol",))) == (
         "poll keys: reference.exchanges: ['Symbol'] are not columns",
     )
+
+
+def test_append_keys_gate() -> None:
+    assert problems(change(EXCHANGES, poll_mode=PollMode.APPEND)) == ()
+    assert problems(change(EXCHANGES, poll_mode=PollMode.APPEND, poll_keys=())) == (
+        (
+            "append keys: reference.exchanges: an APPEND dataset declares poll_keys that are "
+            "unique per row, not []"
+        ),
+    )
+    defaulted = DatasetSpec(
+        name="reference.exchanges",
+        summary="A dataset for the tests.",
+        fetch_path="/v3/reference/exchanges",
+        poll_mode=PollMode.APPEND,
+    )
+    missing = "poll keys: reference.exchanges: ['Symbol'] are not columns"
+    assert problems(defaulted) == (
+        (
+            "append keys: reference.exchanges: an APPEND dataset declares poll_keys that are "
+            "unique per row, not ['Symbol']"
+        ),
+        missing,
+    )
+    # A keyed mode may keep the default key.
+    assert problems(change(defaulted, poll_mode=PollMode.UPSERT)) == (missing,)
 
 
 def test_a_bad_member_is_reported_once() -> None:

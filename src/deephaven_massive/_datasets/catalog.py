@@ -78,6 +78,9 @@ _LIST_TYPES: Final = frozenset({WireType.JSON_TEXT, WireType.INT_ARRAY})
 
 _SOURCE_GONE: Final = "deprecated or removed in the snapshot"
 
+_DEFAULT_POLL_KEYS: Final = ("Symbol",)
+"""The `poll()` key of a dataset that declares none: one row per symbol."""
+
 
 @dataclass(frozen=True, slots=True)
 class KeySpec:
@@ -257,7 +260,9 @@ class DatasetSpec:
             requested symbols, such as `"ticker.any_of"` or `"tickers"`; None when the path
             takes the symbol as a path parameter or the dataset has no symbols.
         poll_mode: The default `poll()` mode.
-        poll_keys: The key columns of a keyed (`REPLACE`, `UPSERT`) `poll()` table.
+        poll_keys: The key columns of a keyed (`REPLACE`, `UPSERT`) `poll()` table, and the
+            columns that identify a row an `APPEND` table has already appended. A dataset
+            whose `poll_mode` is `APPEND` declares its own, unique per row (a catalog gate).
         per_symbol: True when the endpoint takes one symbol per request, so a symbol list fans
             out to one request per symbol.
         fetch_paths_by_class: The REST path behind `fetch()` and `poll()` for the symbols of
@@ -287,7 +292,7 @@ class DatasetSpec:
     time_axis: tuple[str, str] | None = None
     symbol_param: str | None = None
     poll_mode: PollMode = PollMode.REPLACE
-    poll_keys: tuple[str, ...] = ("Symbol",)
+    poll_keys: tuple[str, ...] = _DEFAULT_POLL_KEYS
     per_symbol: bool = False
     fetch_paths_by_class: Mapping[AssetClass, str] = field(default_factory=dict)
     symbols_per_request: int | None = None
@@ -1019,6 +1024,9 @@ class Catalog:
           REST path: the `start`/`end` pair and the symbol parameter of the history path (or
           of the fetch path when there is none), and each key filled from the request, which
           names a parameter of its own path.
+        - **append keys:** a dataset whose `poll_mode` is `APPEND` declares its own non-empty
+          `poll_keys`, not the default `("Symbol",)`: `APPEND` skips every row whose key it
+          has already appended, so its key must be unique per row.
         - **poll keys:** every `poll_keys` column is a column of the dataset's schema.
 
         Returns:
@@ -1039,6 +1047,11 @@ class Catalog:
             found.extend(keys)
             found.extend(self._kind_problems(spec))
             found.extend(self._parameter_problems(spec))
+            if spec.poll_mode is PollMode.APPEND and spec.poll_keys in ((), _DEFAULT_POLL_KEYS):
+                found.append(
+                    f"append keys: {spec.name}: an APPEND dataset declares poll_keys that are "
+                    f"unique per row, not {list(spec.poll_keys)}"
+                )
             if keys:
                 continue  # the merge would only repeat them
             try:

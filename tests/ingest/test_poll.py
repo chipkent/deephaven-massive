@@ -191,7 +191,7 @@ def test_upsert_keeps_every_key(
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0), ("MSFT", 2.0)])
 
 
-def test_append_appends_every_cycle(
+def test_append_appends_only_keys_not_seen_before(
     *,
     massive_session: dm.MassiveSession,
     script: Script,
@@ -199,14 +199,15 @@ def test_append_appends_every_cycle(
     clock: FakeClock,
     dh_to_pylist: ToPylist,
 ) -> None:
+    # The test dataset's poll key is the default `Symbol`: one row per symbol is appended.
     script.rows(("AAPL", 1.0))
     table = start(
         massive_session, script=script, pollers=pollers, clock=clock, mode=PollMode.APPEND
     )
     until(lambda: len(dh_to_pylist(table)) == 1)
-    script.rows(("AAPL", 1.0), ("MSFT", 2.0))
+    script.rows(("AAPL", 5.0), ("MSFT", 2.0))
     next_cycle(clock)
-    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("AAPL", 1.0), ("MSFT", 2.0)])
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
     # The wait between cycles counts from each cycle's start.
     assert all(wait <= 60 for wait in clock.waits)
 
@@ -776,10 +777,10 @@ def test_a_failure_while_publishing_keeps_the_poller(
     publish = poll.Poller._publish
     failures = [RuntimeError("publish failed")]
 
-    def flaky(self: poll.Poller, table: pa.Table) -> None:
+    def flaky(self: poll.Poller, table: pa.Table) -> int:
         if failures:
             raise failures.pop()
-        publish(self, table)
+        return publish(self, table)
 
     monkeypatch.setattr(poll.Poller, "_publish", flaky)
     script.rows(("AAPL", 1.0))
@@ -863,3 +864,127 @@ def test_the_path_column_names_the_paths_static_symbols_read(
     (row,) = streams_of(routed_session, dh_to_pylist)
     assert row["Path"] == SMA_STOCK
     del table
+
+
+# --- APPEND end to end ---------------------------------------------------------------------------
+
+
+FEED = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="stocks.dividends",
+    asset_class=AssetClass.STOCKS,
+    fetch_path=PATH,
+    symbol_param="ticker.any_of",
+    keys={(R, PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+    poll_mode=PollMode.APPEND,
+    poll_keys=("Id",),
+)
+
+
+@pytest.fixture
+def feed_session(
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> Iterator[dm.MassiveSession]:
+    monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    monkeypatch.setitem(
+        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=FakeClock())
+    )
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+def page(*rows: tuple[str, float]) -> Reply:
+    # One cycle's reply: dividends identified by their id.
+    return Reply(envelope([{"id": i, "ticker": "AAPL", "cash_amount": a} for i, a in rows]))
+
+
+def feed(m: dm.MassiveSession) -> Table:
+    # The default mode of the feed, APPEND.
+    q = build_query(m._core, FEED, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    return q.poll(60)
+
+
+def ids(table: Table, to_pylist: ToPylist) -> list[tuple[str, float]]:
+    return sorted((row["Id"], row["CashAmount"]) for row in to_pylist(table))
+
+
+def test_append_skips_every_row_it_already_appended(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    fake_rest.reply(
+        PATH,
+        page(("a", 1.0), ("b", 2.0), ("b", 9.0)),  # a repeated key within one cycle
+        page(("b", 2.0), ("a", 8.0), ("c", 3.0)),  # a and b again, with c new
+        page(),
+        page(("a", 1.0), ("c", 3.0), ("d", 4.0)),
+    )
+    table = feed(feed_session)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
+    next_cycle(clock)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0), ("c", 3.0)])
+    next_cycle(clock)
+    next_cycle(clock)
+    expected = [("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 4.0)]
+    until(lambda: ids(table, dh_to_pylist) == expected)
+    (row,) = streams_of(feed_session, dh_to_pylist)
+    assert row["RowsPublished"] == 4  # the skipped rows are not counted
+    assert len(fake_rest.requests) == 4
+
+
+def test_append_forgets_a_key_absent_from_its_memory_of_cycles(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(poll, "APPEND_MEMORY", 2)
+    fake_rest.reply(
+        PATH,
+        page(("b", 2.0), ("a", 1.0)),
+        page(("b", 2.0)),
+        page(("a", 1.0), ("b", 2.0)),  # a was absent for one cycle only: still remembered
+        page(("b", 2.0)),
+        page(("b", 2.0)),  # a has now been absent for two cycles: forgotten
+        page(("a", 1.0), ("b", 2.0)),  # b, returned every cycle, is still remembered
+    )
+    table = feed(feed_session)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
+    for _ in range(5):
+        next_cycle(clock)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("a", 1.0), ("b", 2.0)])
+    assert len(fake_rest.requests) == 6
+
+
+def test_a_failed_append_remembers_nothing(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_rest.reply(PATH, page(("a", 1.0)), page(("b", 2.0)), page(("a", 1.0), ("b", 2.0)))
+    table = feed(feed_session)
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0)])
+    convert = dh_arrow.to_table
+    failures = [RuntimeError("conversion failed")]
+
+    def flaky(data: pa.Table) -> Table:
+        if failures:
+            raise failures.pop()
+        return convert(data)
+
+    monkeypatch.setattr(dh_arrow, "to_table", flaky)
+    next_cycle(clock)  # b's cycle fails to publish
+    assert ids(table, dh_to_pylist) == [("a", 1.0)]
+    next_cycle(clock)  # so the next cycle appends b, and still skips a
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])

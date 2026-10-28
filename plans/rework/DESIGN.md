@@ -800,9 +800,26 @@ dataset has `poll()`. Current state on every tier is `m.<class>.snapshots(symbol
 request per cycle.
 
 **`poll()`.** `mode=None` uses the catalog default: `PollMode.APPEND` for `reference.news`,
-`stocks.ipos`, every `stocks.filings.*`, and `partners.benzinga.news`; `PollMode.REPLACE`
-otherwise. `REPLACE` is a keyed table from which keys absent in the latest cycle are deleted.
-`UPSERT` is keyed and never deletes. `APPEND` is append-only. A reactive `Table` passed as
+`stocks.ipos`, every `stocks.filings.*` except the two taxonomies
+(`filings.risk_factor_taxonomy` and `filings.disclosure_taxonomy`), and
+`partners.benzinga.news`; `PollMode.REPLACE` otherwise, the two taxonomies included (a taxonomy
+is a reference list that is revised in place, not a feed of new rows). `REPLACE` is a keyed
+table from which keys absent in the latest cycle are deleted. `UPSERT` is keyed and never
+deletes. `APPEND` is append-only and appends only rows it has not seen before: a row is
+identified by its `poll_keys` tuple, and each cycle skips every row whose key it already
+appended, also a second row with the same key in one cycle, and appends the rest. The keys it
+remembers are those of the last 100 published cycles: a key is remembered for 100 cycles after
+the last cycle that returned it, so a row that every response repeats is never appended twice.
+A cycle that fails publishes nothing and remembers nothing, so an outage forgets no key. The
+trade-off: a row absent from 100 consecutive successful cycles that then returns is appended
+again. The memory is bounded by 100 times the largest cycle, and it never exceeds the rows the
+table itself holds, since every remembered key was appended. A window of cycles is chosen over
+a key count or an age: a count limit smaller than one response would evict keys the latest
+response still returns and append them again every cycle, and an age limit would depend on the
+interval. Every dataset whose default is `APPEND` declares `poll_keys` that are unique per row
+(a catalog gate). On a dataset whose poll keys name an instrument rather than a row (the
+default `Symbol` of a snapshot), an explicit `mode=APPEND` appends one row per symbol and then
+skips that symbol while it stays in the responses. A reactive `Table` passed as
 `symbols` is read once per cycle with `Table.snapshot()` on the poller thread, never inside a
 listener. Fan-out endpoints issue one request per symbol per cycle under `max_concurrency`;
 `m.streams()` shows `RequestsPerCycle`.
@@ -2109,14 +2126,18 @@ How a request is built from a `DatasetSpec` and a `Request`:
   created with the result in the result scope; every mode is shaped from its blink table, so
   `publish_failure` fails the table in every mode. (A keyed `input_table` cannot be failed:
   Deephaven notifies failures only inside an update cycle.) `APPEND` is
-  `blink_to_append_only(blink)`; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE` is that
-  `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone row for
-  every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`, so its
-  rows and its removals land in one update. The `last_by` state keeps a hidden row for every key
-  ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a churning
-  key set (an options chain, the day's movers) grows with the keys it has held. The `poll()`
-  docstring says so. The poller holds the session core only weakly, so a `poll()` table never
-  keeps an unclosed session alive.
+  `blink_to_append_only(blink)`, fed only the rows whose `poll_keys` tuple the poller has not
+  seen in its last 100 published cycles (the `poll()` paragraph of
+  [section 7](#7-query-classes-and-verbs)); the poller thread alone owns that key memory, an
+  insertion-ordered map from key to the last cycle that returned it, so it needs no lock, and it
+  is updated only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`;
+  `REPLACE` is that `last_by` filtered on a hidden boolean column, to which each cycle adds one
+  tombstone row for every key the previous cycle had and this one lacks, then dropped. A cycle
+  is one `add`, so its rows and its removals land in one update. The `last_by` state keeps a
+  hidden row for every key ever seen, the trade-off `last_by()` streams already accept: a
+  `REPLACE` poll over a churning key set (an options chain, the day's movers) grows with the keys
+  it has held. The `poll()` docstring says so. The poller holds the session core only weakly, so
+  a `poll()` table never keeps an unclosed session alive.
 
 ## 15. Options contract cap
 
@@ -3327,6 +3348,10 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
   `(kind, group)`;
 - **Wire parameters:** every declared wire name (time-axis pair, symbol parameter, path
   placeholders) is a parameter of its `RestPath`;
+- **Poll keys:** every `poll_keys` column is a column of the dataset's schema;
+- **Append keys:** a dataset whose default `poll()` mode is `APPEND` declares its own,
+  non-empty `poll_keys` (not the default `Symbol`), since `APPEND` skips every row whose key it
+  has already appended and so needs a key that is unique per row;
 - **Generated sources:** every path, channel, and prefix a dataset uses is generated; a miss names
   the dataset and says "deprecated or removed in the snapshot";
 - **Coverage:** generated ⊆ used ∪ undeclared, and no namespace's undeclared file lists a source
