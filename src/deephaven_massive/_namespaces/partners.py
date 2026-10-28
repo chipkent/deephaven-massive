@@ -880,11 +880,10 @@ class _Benzinga(Namespace):
 
         Served by REST only, from `GET /benzinga/v2/news`: `fetch()` reads every page into a
         static table, and `poll(interval)` re-reads the endpoint into a live table that, by
-        default (`PollMode.APPEND`), only grows: each cycle appends every article its request
-        returns, so an article repeats in every cycle that returns it; `mode=PollMode.UPSERT`
-        keeps one row per article, keyed by `BenzingaId`. There is no stream and no
-        `history()`; use `start` and `end` for a past range. The columns and what they mean
-        are in the column reference,
+        default (`PollMode.APPEND`), only grows: each cycle appends the articles it has not
+        seen before, keyed by `BenzingaId`, so every article appears once. There is no
+        stream and no `history()`; use `start` and `end` for a past range. The columns and
+        what they mean are in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-news,
         in the web UI's column tooltips, and in `columns()`.
 
