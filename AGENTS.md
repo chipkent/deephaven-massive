@@ -62,6 +62,20 @@ lexicon, `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_
 source (another asset class's or event's text, or a statement Massive's own documentation of the
 field contradicts) is corrected the same way, by a `DESCRIPTION_FIXES` entry that quotes it.
 
+Every generated source must be read by a dataset: the coverage test in
+`tests/datasets/test_catalog.py` fails on one that is not. So when a refresh adds an endpoint,
+channel, or flat-file prefix, do one of three things in the same pull request:
+
+- **Add a dataset** that reads it (`DESIGN.md` § 8).
+- **Exclude it**, with an `EXCLUSIONS` entry and its reason (`exclusions.py`), when the library
+  should never offer it; the refresh then stops generating it.
+- **Defer it**, when a dataset should come later: open an issue, then add a `DEFERRED` entry
+  next to the coverage test, keyed by the generated source key, with the reason and the issue
+  number, both required. For example:
+  `(Transport.REST, "/v1/example"): Deferral("Pages by cursor only; needs a new verb.", 123),`.
+  The test fails on an entry that names a source the refresh does not generate or one a
+  dataset already reads, so delete the entry in the pull request that adds the dataset.
+
 `--check` downloads the live sources into a scratch directory and prints a Markdown report of
 what differs from the snapshot and the committed schemas, each item under the action that
 resolves it; it exits 0 without drift, 1 with drift, and 2 when the check cannot be made. With

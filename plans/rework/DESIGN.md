@@ -1410,12 +1410,15 @@ used:
   pinned snapshot in `tests/massive/refresh/test_generate.py` (WebSocket channels and flat-file
   prefixes) and `tests/massive/refresh/test_rest.py` (REST paths, and every path a
   documentation page names is in the OpenAPI spec);
-- **generated = used**, tested in `tests/datasets/test_catalog.py`: every generated item is
-  read by a declared dataset (the coverage test, with a negative test that drops a dataset),
-  and every item a dataset reads is generated (the generated-sources gate). A new generated
-  item, from a refresh that takes a vendor addition, therefore fails the coverage test until a
-  dataset reads it or an `EXCLUSIONS` entry, with its reason, keeps the refresh from
-  generating it.
+- **generated = used ⊎ deferred**, tested in `tests/datasets/test_catalog.py`: every generated
+  item is read by a declared dataset or deferred (the coverage test, with a negative test that
+  drops a dataset), and every item a dataset reads is generated (the generated-sources gate).
+  A deferred item is a `DEFERRED` entry of the coverage test: the generated source key, a
+  reason, and the number of the issue that will add its dataset, both required. An entry that
+  names an item not generated, or one a dataset reads, fails the test, so the list cannot go
+  stale. A new generated item, from a refresh that takes a vendor addition, therefore fails the
+  coverage test until a dataset reads it, a `DEFERRED` entry defers it, or an `EXCLUSIONS`
+  entry, with its reason, keeps the refresh from generating it.
 
 `/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}` are ordinary
 generated paths: every path reaches the same REST client in the same way.
@@ -3676,7 +3679,8 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
   schema;
 - **Generated sources:** every path, channel, and prefix a dataset uses is generated; a miss names
   the dataset and says "deprecated or removed in the snapshot";
-- **Coverage:** generated = used: every generated source is read by some dataset
+- **Coverage:** generated = used ⊎ deferred: every generated source is read by some dataset,
+  or deferred with a reason and an issue
   ([section 8.12](#812-excluded-endpoints)).
 
 `KINDS` overlaps the catalog by design: the refresh checks names before any dataset is
@@ -3786,7 +3790,7 @@ refresh gate and the catalog gates. What each change does:
 | Field renamed | A removal plus an addition. | The column is renamed in the diff, or stays the same if the long form is unchanged; `transport-agreement` catches a one-sided rename. |
 | Type changed | A value that no longer converts fails loudly. | `type-agreement` or the member-types gate fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
 | Unit changed | The overflow check or the bound fails loudly. | `--check` reports the changed tag, and the `UNITS` entry is re-verified. |
-| New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and the coverage gate fails until a `DatasetSpec` or an `EXCLUSIONS` entry is added. |
+| New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and the coverage gate fails until a `DatasetSpec`, a `DEFERRED` entry, or an `EXCLUSIONS` entry is added. |
 | Endpoint deprecated or removed | `MassiveError` with the HTTP status. | It leaves the generated set, and the generated-sources gate names every dataset that uses it. |
 
 ## 20. Quality gates
