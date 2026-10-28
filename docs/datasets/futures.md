@@ -133,8 +133,8 @@ Snapshots of futures contracts: the latest trade, quote, minute bar, and session
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `details.ticker`. | REST | `details.ticker` |
-| `DetailsProductCode` | String | The identifier for the contract's product. | REST | `details.product_code` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`. | REST | `ticker` |
+| `ProductCode` | String | The identifier for the contract's product. | REST | `product_code` |
 | `DetailsSettlementDate` | Instant | The day that this contract is settled. | REST | `details.settlement_date` |
 | `LastMinuteClose` | double | The price at the end of the minute bar. | REST | `last_minute.close` |
 | `LastMinuteHigh` | double | The highest price reached in the minute bar. | REST | `last_minute.high` |

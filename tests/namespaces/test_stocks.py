@@ -330,8 +330,12 @@ def test_poll_appends_filings_upserts_ipos_and_replaces_taxonomies_and_the_rest(
     assert spec_of(name).poll_mode is expected
 
 
-def test_ipos_are_upserted_by_symbol() -> None:
-    assert spec_of("ipos").poll_keys == ("Symbol",)
+def test_ipos_are_upserted_by_symbol_and_issuer() -> None:
+    # Both are required on every row and stay fixed as an offering changes status.
+    assert spec_of("ipos").poll_keys == ("Symbol", "IssuerName")
+    fields = cast("RestPath", source(R, "/vX/reference/ipos"))
+    assert fields.field("Ticker").required
+    assert fields.field("IssuerName").required
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
@@ -1483,16 +1487,27 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
 
 
 NULLABLE_KEYS = {
-    "filings.institutional_holdings": {"PutCall", "OtherManagers"},
+    "filings.institutional_holdings": {
+        "PutCall",
+        "OtherManagers",
+        "SharesOrPrincipalAmount",
+        "SharesOrPrincipalType",
+        "VotingAuthoritySole",
+        "VotingAuthorityShared",
+        "VotingAuthorityNone",
+    },
     "filings.insider_holdings": {"NatureOfOwnership", "ExercisePrice", "ExerciseDate"},
     "filings.insider_transactions": {
         "NatureOfOwnership",
         "ExercisePrice",
+        "ExerciseDate",
         "ExpirationDate",
         "TransactionDate",
         "TransactionCode",
         "TransactionShares",
         "TransactionPricePerShare",
+        "TransactionAcquiredDisposed",
+        "SharesOwnedFollowingTransaction",
     },
 }
 
@@ -1523,6 +1538,122 @@ def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
     rows = _rows_when(table, len(body["results"]))
     assert not table.j_table.isFailed()
     assert any(row[column] is None for row in rows for column in NULLABLE_KEYS[name])
+    rest_session.release(table)
+
+
+# --- Rows that share a ticker or an accession number -----------------------------------------
+
+
+@pytest.mark.parametrize("name", ["filings.index", "filings.text_8k"])
+def test_a_filing_under_two_filers_polls_as_two_rows(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+) -> None:
+    # EDGAR lists one accession under each filer: an issuer and the reporting owner, who has
+    # no ticker. Both rows must survive the poll, not only the first.
+    path = cast("str", spec_of(name).fetch_path)
+    body = json.loads(load_fixture(FIXTURES, SOURCES[path][0]))
+    first = body["results"][0]
+    owner = {k: v for k, v in first.items() if k != "ticker"} | {"cik": "0001214128"}
+    body["results"] = [first, owner]
+    fake_rest.reply(path, Reply(body=body))
+    table = cast("Query", factory(rest_session, name)()).poll(60)
+    rows = _rows_when(table, 2)
+    assert sorted((row["Cik"], row["AccessionNumber"]) for row in rows) == sorted(
+        [(first["cik"], first["accession_number"]), ("0001214128", first["accession_number"])]
+    )
+    rest_session.release(table)
+
+
+def test_two_issuers_of_one_ticker_poll_as_two_offerings(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    # A recycled ticker: an earlier issuer's withdrawn offering and a later issuer's listing.
+    path = "/vX/reference/ipos"
+    body = json.loads(load_fixture(FIXTURES, "ipos.json"))
+    first = body["results"][0]
+    earlier = first | {"issuer_name": "Rapport Acquisition Corp.", "ipo_status": "withdrawn"}
+    body["results"] = [earlier, first]
+    fake_rest.reply(path, Reply(body=body))
+    table = rest_session.stocks.ipos().poll(60)
+    rows = _rows_when(table, 2)
+    assert sorted((row["Symbol"], row["IssuerName"], row["IpoStatus"]) for row in rows) == [
+        ("RAPP", "Rapport Acquisition Corp.", "withdrawn"),
+        ("RAPP", "Rapport Therapeutics Inc.", "history"),
+    ]
+    rest_session.release(table)
+
+
+# Lines of one filing that agree on every other key and differ in one column: a 13-F lists one
+# security on several lines split by amount or voting authority, and a Form 4 reports option
+# tranches that differ only in when they become exercisable, two sales that differ only in the
+# shares owned afterwards, or one acquisition and one disposal.
+DISTINGUISHING_LINES = [
+    ("filings.institutional_holdings", "shares_or_principal_amount"),
+    ("filings.institutional_holdings", "shares_or_principal_type"),
+    ("filings.institutional_holdings", "voting_authority_sole"),
+    ("filings.institutional_holdings", "voting_authority_shared"),
+    ("filings.institutional_holdings", "voting_authority_none"),
+    ("filings.insider_transactions", "exercise_date"),
+    ("filings.insider_transactions", "shares_owned_following_transaction"),
+    ("filings.insider_transactions", "transaction_acquired_disposed"),
+]
+
+
+def _poll_lines(
+    session: dm.MassiveSession, server: FakeRestServer, *, name: str, lines: list[dict[str, Any]]
+) -> tuple[Table, list[dict[str, Any]]]:
+    # Serve `lines` as one response and poll the dataset with its default mode until every
+    # line is published.
+    path = cast("str", spec_of(name).fetch_path)
+    server.reply(path, Reply(body={"status": "OK", "request_id": "r", "results": lines}))
+    table = cast("Query", factory(session, name)()).poll(60)
+    return table, _rows_when(table, len(lines))
+
+
+@pytest.mark.parametrize(("name", "wire_key"), DISTINGUISHING_LINES)
+def test_ownership_filing_lines_that_differ_in_one_column_poll_as_two_rows(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+    wire_key: str,
+) -> None:
+    template = cast("str", spec_of(name).fetch_path)
+    field = next(f for f in cast("RestPath", source(R, template)).fields if f.wire_key == wire_key)
+    first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
+    other = first | {wire_key: _other(first.get(wire_key), field.wire_type)}
+    table, rows = _poll_lines(rest_session, fake_rest, name=name, lines=[first, other])
+    assert not table.j_table.isFailed()
+    assert len({row[field.column] for row in rows}) == 2
+    rest_session.release(table)
+
+
+@pytest.mark.parametrize(
+    ("name", "wire_key"),
+    [
+        ("filings.institutional_holdings", "voting_authority_shared"),
+        ("filings.insider_transactions", "shares_owned_following_transaction"),
+    ],
+)
+def test_an_ownership_filing_line_with_an_empty_optional_key_still_polls(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+    wire_key: str,
+) -> None:
+    # Massive marks the field optional (or the form lets the filer leave it out): one line
+    # without it is a value, not a data failure that would stop the live table.
+    template = cast("str", spec_of(name).fetch_path)
+    first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
+    table, _ = _poll_lines(rest_session, fake_rest, name=name, lines=[first | {wire_key: None}])
+    assert not table.j_table.isFailed()
     rest_session.release(table)
 
 

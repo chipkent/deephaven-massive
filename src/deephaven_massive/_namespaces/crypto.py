@@ -165,6 +165,10 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOTS,
     keys={(_R, _SNAPSHOTS): _keys(KeySpec("Ticker"))},
     symbol_param="tickers",
+    # The pairs travel comma-separated in the URL, so a long watchlist is split into requests
+    # of 250 pairs, as for the stocks and forex snapshots, to keep each URL well under the
+    # lengths servers refuse.
+    symbols_per_request=250,
     revision_keys=("Updated",),
 )
 """`m.crypto.snapshots`: the full-market snapshot, narrowed by `tickers` unless `dm.ALL`."""
@@ -469,11 +473,12 @@ class _Crypto(Namespace):
         change; and the time the snapshot was last updated. Massive clears the snapshot at
         midnight Eastern time and fills it as trades arrive.
 
-        Transports: one REST request,
-        `/v2/snapshot/locale/global/markets/crypto/tickers`, with the pairs in `tickers`.
-        `fetch()` returns every row of that one response and `poll(interval)` repeats it,
-        keyed by `Symbol` (`PollMode.REPLACE` by default). The endpoint is not paginated and
-        there is no `limit`. It needs a Currencies Starter plan or above, as the crypto
+        Transports: REST, `/v2/snapshot/locale/global/markets/crypto/tickers`, with the
+        pairs in `tickers`: one request for up to 250 pairs, and one more for each further 250,
+        so that no URL grows too long; `dm.ALL` is one request. `fetch()` returns every row of
+        the responses and `poll(interval)` repeats them, keyed by `Symbol`
+        (`PollMode.REPLACE` by default). The endpoint is not paginated and there is no
+        `limit`. It needs a Currencies Starter plan or above, as the crypto
         streams do. The streams' `last_by()` never seeds from REST; poll this dataset for the
         current state of pairs instead.
 
