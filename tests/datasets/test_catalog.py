@@ -528,7 +528,8 @@ def test_members_of_one_group_follow_their_positions() -> None:
 def test_the_trades_pair_has_identical_columns_with_one_timestamp() -> None:
     catalog = Catalog((STOCK_TRADES, CRYPTO_TRADES))
     stocks, crypto = catalog.dataset_schema(STOCK_TRADES), catalog.dataset_schema(CRYPTO_TRADES)
-    assert stocks.columns == crypto.columns
+    # The same names and types; the descriptions are each dataset's own.
+    assert [(c.name, c.type) for c in stocks.columns] == [(c.name, c.type) for c in crypto.columns]
     assert (stocks.name, crypto.name) == ("stocks.trades", "crypto.trades")
     names = stocks.column_names
     assert names[:2] == ("Symbol", "Timestamp")

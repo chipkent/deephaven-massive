@@ -83,13 +83,12 @@ def _alive(table: Table) -> bool:
     return False
 
 
-def test_make_result_wraps_and_manages(dh_exec_ctx: object) -> None:
+def test_a_result_outlives_the_scope_of_its_source(dh_exec_ctx: object) -> None:
     user = new_scope()
     with user.open():
         source = time_table("PT1S")  # refreshing, so its liveness is observable
-    result, scope = make_result(lambda: Table(j_table=source.j_table), wrap=True)
-    assert result is not source
-    assert result == source
+    result, scope = make_result(lambda: source.where("true"))
+    assert result != source  # a new table, managed by the result scope
     user.release()
     assert _alive(result)  # the result scope now holds the only reference
     scope.release()
@@ -241,7 +240,7 @@ def test_a_derived_table_keeps_the_stream_alive(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
-def test_blink_returns_distinct_wrappers_and_records(
+def test_blink_returns_distinct_tables_and_records(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreams,
     drain: Callable[[], None],
@@ -250,7 +249,9 @@ def test_blink_returns_distinct_wrappers_and_records(
     a = q.blink()
     b = q.blink()
     assert a is not b
-    assert a == b  # one Java table
+    assert a != b  # two described copies of the stream's one blink table
+    assert a.is_blink
+    assert b.is_blink
     records = massive_session._core.results._results
     assert records[id(a)] is not records[id(b)]
     record_b = records[id(b)]

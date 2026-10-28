@@ -4,11 +4,11 @@ import logging
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeAlias, cast
 
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, empty_table, input_table, new_table, time_table
+from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import TablePublisher
@@ -19,7 +19,7 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive import _errors
 from deephaven_massive._datasets import history_source
-from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
@@ -34,7 +34,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
-from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.liveness import entered, new_scope
 
 TIMEOUT = 30.0
 
@@ -96,6 +96,12 @@ FUTURES_SPEC = DatasetSpec(
 )
 
 
+RowsWhen: TypeAlias = Callable[
+    [Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]
+]
+"""The `rows_when` fixture: waits until a live table's rows satisfy a predicate."""
+
+
 class FakeStreams(Protocol):
     # What the tests read from the `fake_streams` fixture (tests/conftest.py).
     opened: list[tuple[str, str | None]]
@@ -103,13 +109,15 @@ class FakeStreams(Protocol):
 
 
 class Recorder:
-    # Stands in for the REST and flat-file transports and records every call.
-    def __init__(self) -> None:
+    # Stands in for the REST and flat-file transports and records every call. Each call returns
+    # an empty table in the dataset's schema, as a transport does when no row matches.
+    def __init__(self, catalog: Catalog) -> None:
         self.calls: list[tuple[str, DatasetSpec, Request, dict[str, Any]]] = []
+        self._catalog = catalog
 
     def _record(self, verb: str, spec: DatasetSpec, request: Request, **extra: object) -> Table:
         self.calls.append((verb, spec, request, dict(extra)))
-        return empty_table(0)
+        return dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
 
     def fetch(self, spec: DatasetSpec, request: Request) -> Table:
         return self._record("fetch", spec, request)
@@ -132,14 +140,14 @@ class Recorder:
 
 @pytest.fixture
 def rest(massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> Recorder:
-    recorder = Recorder()
+    recorder = Recorder(massive_session._core.catalog)
     monkeypatch.setattr(massive_session._core, "rest_transport", lambda: recorder)
     return recorder
 
 
 @pytest.fixture
 def flat(massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> Recorder:
-    recorder = Recorder()
+    recorder = Recorder(massive_session._core.catalog)
     monkeypatch.setattr(massive_session._core, "flat_file_transport", lambda: recorder)
     return recorder
 
@@ -175,6 +183,7 @@ def test_queries_are_immutable_hashable_and_typed(massive_session: dm.MassiveSes
     assert [name for name in dir(a) if not name.startswith("_")] == [
         "append_only",
         "blink",
+        "columns",
         "fetch",
         "history",
         "last_by",
@@ -365,7 +374,7 @@ def test_history_dispatches_by_the_source_choice(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    rest, flat = Recorder(), Recorder()
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
     monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
@@ -614,6 +623,166 @@ def test_the_guard_runs_before_argument_checks(massive_session: dm.MassiveSessio
         q.last_by(by="Nope")
 
 
+# --- Column descriptions on every result -----------------------------------------------------
+
+
+def assert_described(session: dm.MassiveSession, spec: DatasetSpec, table: Table) -> None:
+    schema = session._core.catalog.dataset_schema(spec)
+    found = table.attributes()["ColumnDescriptions"]
+    described = {str(e.getKey()): str(e.getValue()) for e in found.entrySet().toArray()}
+    assert described == {c.name: c.description for c in schema.columns if c.description}
+    assert described
+    assert table.attributes()["TableDescription"] == f"{spec.name}: {spec.summary}"
+
+
+def test_every_stream_shape_is_described(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    q, reactive = trades(massive_session), trades(massive_session, watchlist)
+    results = [
+        q.blink(),
+        q.append_only(),
+        q.ring(5),
+        q.last_by(),
+        reactive.last_by(),  # where_in after the aggregation
+        reactive.last_by(by="Exchange"),  # where_in before it
+    ]
+    for result in results:
+        assert_described(massive_session, TRADES_SPEC, result)
+    assert results[0].is_blink
+    # The stream's own blink table is never described: every result is a copy.
+    streams = massive_session._core._streams.values()
+    blinks = [state.handle.blink for state in streams if state.handle is not None]
+    assert blinks
+    assert all("TableDescription" not in blink.attributes() for blink in blinks)
+    for result in results:
+        massive_session.release(result)
+
+
+def test_every_static_verb_is_described(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    stream_latest = trades(s3_session)
+    previous = make(s3_session, BARS_SPEC, symbols=["EUR/USD"], timespan=Timespan.DAY)
+    assert isinstance(previous, HistoryLatestQuery)
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    cases = [
+        (NEWS_SPEC, news(s3_session).fetch()),
+        (TRADES_SPEC, stream_latest.fetch()),
+        (BARS_SPEC, previous.fetch()),
+        (TRADES_SPEC, stream_latest.history("2025-03-03", "2025-03-04")),  # REST
+        (VALUES_SPEC, values.history("2025-03-03", "2025-03-04")),  # flat files
+    ]
+    for spec, table in cases:
+        assert_described(s3_session, spec, table)
+        assert not table.is_refreshing
+    assert [c[0] for c in rest.calls] == ["fetch", "fetch", "fetch", "history"]
+    assert [c[0] for c in flat.calls] == ["history"]
+
+
+# --- columns() -------------------------------------------------------------------------------
+
+
+def expected_columns(session: dm.MassiveSession, spec: DatasetSpec) -> list[dict[str, str]]:
+    return [
+        {
+            "Name": c.name,
+            "Type": c.type.value,
+            "Description": c.description,
+            "SuppliedBy": ", ".join(t.value for t in c.supplied_by),
+        }
+        for c in session._core.catalog.dataset_schema(spec).columns
+    ]
+
+
+def test_columns_lists_the_schema_without_any_request(
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    flat: Recorder,
+    *,
+    fake_streams: FakeStreams,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    table = trades(massive_session).columns()
+    assert not table.is_refreshing
+    assert [(c.name, c.data_type) for c in table.columns] == [
+        ("Name", dtypes.string),
+        ("Type", dtypes.string),
+        ("Description", dtypes.string),
+        ("SuppliedBy", dtypes.string),
+    ]
+    listed = dh_to_pylist(table)
+    assert listed == expected_columns(massive_session, TRADES_SPEC)
+    assert listed[0]["Name"] == "Symbol"
+    assert listed[0]["Description"].startswith("The instrument")
+    assert listed[0]["SuppliedBy"] == "REST, WS"
+    # The arguments choose rows, never columns.
+    assert dh_to_pylist(trades(massive_session, ["MSFT", "IBM"]).columns()) == listed
+    assert dh_to_pylist(trades(massive_session, dm.ALL).columns()) == listed
+    assert dh_to_pylist(news(massive_session).columns()) == expected_columns(
+        massive_session, NEWS_SPEC
+    )
+    assert (rest.calls, flat.calls, fake_streams.opened) == ([], [], [])
+    # Not a result: the session tracks nothing and rejects it.
+    assert massive_session._core.results.held() == 0
+    with pytest.raises(ValueError, match="not"):
+        massive_session.release(table)
+
+
+def test_columns_works_on_a_closed_session(
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    q = trades(massive_session)
+    massive_session.close()
+    assert dh_to_pylist(q.columns()) == expected_columns(massive_session, TRADES_SPEC)
+
+
+def test_columns_raises_on_the_update_graph(massive_session: dm.MassiveSession) -> None:
+    q = trades(massive_session)
+    update_graph = massive_session._core.exec_ctx.update_graph
+    with shared_lock(update_graph), pytest.raises(ValueError, match="update-graph lock"):
+        q.columns()
+
+
+def test_columns_from_many_threads_at_once(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    # 16 threads list the columns and open blink() results of one session at the same time.
+    q = trades(massive_session)
+    start = threading.Barrier(16)
+    sizes: list[int] = []
+    blinks: list[Table] = []
+    lock = threading.Lock()
+
+    def work() -> None:
+        start.wait(TIMEOUT)
+        with entered(massive_session._core.exec_ctx):
+            table = q.columns()
+            blink = q.blink()
+        with lock:
+            sizes.append(table.size)
+            blinks.append(blink)
+
+    threads = [threading.Thread(target=work) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(TIMEOUT)
+    columns = len(massive_session._core.catalog.dataset_schema(TRADES_SPEC).columns)
+    assert sizes == [columns] * 16
+    assert len(blinks) == 16
+    assert fake_streams.opened == [("stocks.trades", "T")]
+    for blink in blinks:
+        massive_session.release(blink)
+
+
 FOREX_SPEC = DatasetSpec(
     name="forex.quotes",
     summary="A dataset for the tests.",
@@ -623,18 +792,8 @@ FOREX_SPEC = DatasetSpec(
 )
 
 
-def _wait_for(condition: Callable[[], bool]) -> bool:
-    # Bounded wait for an update-graph cycle to apply a change.
-    pause = threading.Event()  # never set; only paces the loop
-    for _ in range(200):
-        if condition():
-            return True
-        pause.wait(0.05)
-    return condition()
-
-
 def test_last_by_matches_non_canonical_spellings_in_a_reactive_table(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, rows_when: RowsWhen
 ) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["EUR/USD", "not a pair"])]))
@@ -644,22 +803,22 @@ def test_last_by_matches_non_canonical_spellings_in_a_reactive_table(
     schema = massive_session._core.catalog.dataset_schema(FOREX_SPEC)
     row = schema.to_arrow([{"Symbol": "C:EURUSD", "AskPrice": 1.08}])
     fake_streams.publishers[1].add(dh_arrow.to_table(row))
-    assert _wait_for(lambda: current.size == 1)
-    assert dh_arrow.to_arrow(current).column("Symbol").to_pylist() == ["C:EURUSD"]
+    shown = rows_when(current, lambda rows: len(rows) == 1)
+    assert [r["Symbol"] for r in shown] == ["C:EURUSD"]
     # Removing the spelling from the watchlist evicts the canonical row.
     watchlist.delete(new_table([string_col("Symbol", ["EUR/USD"])]))
-    assert _wait_for(lambda: current.size == 0)
+    rows_when(current, lambda rows: not rows)
     massive_session.release(current)
 
 
 def test_last_by_over_groups_of_symbols_filters_before_aggregating(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, rows_when: RowsWhen
 ) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
     current = trades(massive_session, watchlist).last_by(by="Exchange")
     watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
-    assert _wait_for(lambda: watchlist.size == 1)
+    rows_when(watchlist, lambda rows: len(rows) == 1)
     # A late MSFT trade on exchange 4 must not hide AAPL's latest trade there.
     rows = massive_session._core.catalog.dataset_schema(TRADES_SPEC).to_arrow(
         [
@@ -668,9 +827,8 @@ def test_last_by_over_groups_of_symbols_filters_before_aggregating(
         ]
     )
     fake_streams.publishers[1].add(dh_arrow.to_table(rows))
-    assert _wait_for(lambda: current.size == 1)
-    shown = dh_arrow.to_arrow(current).select(["Symbol", "Exchange"]).to_pylist()
-    assert shown == [{"Symbol": "AAPL", "Exchange": 4}]
+    shown = rows_when(current, lambda rows: len(rows) == 1)
+    assert [(r["Symbol"], r["Exchange"]) for r in shown] == [("AAPL", 4)]
     massive_session.release(current)
 
 
