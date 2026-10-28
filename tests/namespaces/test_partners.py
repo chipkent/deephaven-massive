@@ -385,11 +385,14 @@ def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession
 def test_news_selects_articles_by_ticker_and_time(massive_session: dm.MassiveSession) -> None:
     end = datetime(2025, 6, 3, 14, 30, tzinfo=UTC)
     q = massive_session.partners.benzinga.news(
-        symbols="X:BTCUSD", start="2025-06-02", end=end, filters={"channels_any_of": ["news"]}
+        symbols="X:BTCUSD",
+        start=datetime(2025, 6, 2, tzinfo=UTC),
+        end=end,
+        filters={"channels_any_of": ["news"]},
     )
     request = q._request
     assert request.symbols == ("X:BTCUSD",)  # no class: each prefix picks its own
-    assert request.start == date(2025, 6, 2)
+    assert request.start == datetime(2025, 6, 2, tzinfo=UTC)
     assert request.end == end
     assert request.filters == (("channels_any_of", ("news",)),)
     news = inspect.signature(partners._Benzinga.news).parameters
@@ -427,7 +430,7 @@ def test_a_range_must_not_end_before_it_starts(
     make = factory(massive_session, name)
     q = make(start="2025-07-01", end="2025-07-01")  # one whole day
     assert q._request.start == q._request.end == date(2025, 7, 1)
-    with pytest.raises(ValueError, match="before"):
+    with pytest.raises(ValueError, match="must not be after end"):
         make(start="2025-07-02", end="2025-07-01")
     with pytest.raises(ValueError, match="needs a timezone"):
         make(start="2025-07-01T09:30")
@@ -652,13 +655,13 @@ def test_news_sends_an_instant_range_and_tickers(
     fake_rest.reply("/benzinga/v2/news", Reply(envelope([])))
     end = datetime(2025, 6, 3, 14, 30, tzinfo=UTC)
     rest_session.partners.benzinga.news(
-        symbols=["NVDA", "AAPL"], start="2025-06-02", end=end
+        symbols=["NVDA", "AAPL"], start=datetime(2025, 6, 2, 4, tzinfo=UTC), end=end
     ).fetch()
     ((path, query),) = sent(fake_rest)
     assert path == "/benzinga/v2/news"
     assert query.pop("tickers.any_of") == ["AAPL,NVDA"]
-    # The axis is an instant: a date start is 00:00 New York, an aware datetime end is the
-    # first instant excluded. Both go out as instants; compare them as instants.
+    # The axis is an instant: an aware datetime start is the first instant included and an
+    # aware datetime end the first excluded. Both go out as instants; compare them as instants.
     bounds = {k: v for k, v in query.items() if k.startswith("published")}
     assert sorted(bounds) == ["published.gte", "published.lt"]
     assert datetime.fromisoformat(bounds["published.gte"][0]) == datetime(2025, 6, 2, 4, tzinfo=UTC)

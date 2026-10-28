@@ -255,7 +255,9 @@ class _Indices(Namespace):
         `history()` reads the range aggregates endpoint
         (`/v2/aggs/ticker/{indicesTicker}/range/...`, one request series per index) or, for
         1-minute and 1-day bars, the `us_indices/minute_aggs_v1` and `us_indices/day_aggs_v1`
-        flat files. There is no `limit`; the library pages internally.
+        flat files. There is no `limit`; the library pages internally. `history()` returns
+        only the bars whose whole window lies inside the range and has ended, so the current
+        day's bar never appears.
 
         `dm.ALL` is accepted by the stream verbs and by `history()` from flat files (1-minute
         and 1-day bars). `history()` over REST and `fetch()` take one index per request, so
@@ -390,14 +392,14 @@ class _Indices(Namespace):
         Args:
             symbols: The indices, such as `["I:SPX", "I:NDX"]` (`"SPX"` becomes `"I:SPX"`), or
                 a Deephaven table with a `Symbol` column, re-read on every `poll()` cycle.
-            date: The day, as an ISO-8601 date (`"2025-06-02"`), a `date`, or an aware
-                `datetime`, which names the New York calendar day it falls on.
+            date: The day, as an ISO-8601 date (`"2025-06-02"`) or a `date`. It is a calendar
+                date, so a `datetime` raises `ValueError`.
 
         Returns:
             A `Query` with `fetch()` and `poll()`. Nothing is requested until a verb is called.
 
         A `date` that is not a `str`, `date`, or `datetime`, or `symbols` of an unsupported
-        type, raises `TypeError`. `dm.ALL`, a naive `datetime` or text that is not ISO-8601 as
+        type, raises `TypeError`. `dm.ALL`, a `datetime` or text that is not an ISO-8601 date as
         `date`, a symbol that is not a valid index symbol, an empty symbol list, or a table
         without a `Symbol` column raises `ValueError`.
 

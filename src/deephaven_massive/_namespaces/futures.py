@@ -290,10 +290,12 @@ class _Futures(Namespace):
         trades stream over the WebSocket `T` channel of the `/futures` cluster. `history()`
         reads the REST endpoint `/futures/v1/trades/{ticker}`, one contract per request, or
         the flat files `us_futures_<venue>/trades_v1` (`venue`, or all four venues when it is
-        None). A date bound of `history()` is a trading session: the session whose
-        `SessionEndDate` is that date. Futures have no "last trade" endpoint, so there is no
-        `fetch()`; `m.futures.snapshots(symbols).fetch()` gives the latest trade of each
-        contract in one request.
+        None). A date bound of `history()` is a whole trading session, the session whose
+        `SessionEndDate` is that date, requested over REST one session at a time
+        (`session_end_date=<date>`, weekdays only, whatever hours a holiday added to it).
+        Datetime bounds are exact instants on `Timestamp`. Futures have no "last trade"
+        endpoint, so there is no `fetch()`; `m.futures.snapshots(symbols).fetch()` gives the
+        latest trade of each contract in one request.
 
         `dm.ALL` streams every contract and reads every contract from flat files; REST history
         needs explicit symbols. There is no `limit`: `history()` pages internally.
@@ -339,7 +341,9 @@ class _Futures(Namespace):
         side. Live quotes stream over the WebSocket `Q` channel of the `/futures` cluster.
         `history()` reads the REST endpoint `/futures/v1/quotes/{ticker}`, one contract per
         request, or the flat files `us_futures_<venue>/quotes_v1` (`venue`, or all four venues
-        when it is None). A date bound of `history()` is a trading session. There is no
+        when it is None). A date bound of `history()` is a whole trading session, requested over
+        REST one session at a time as for `trades`. Datetime bounds are exact instants on
+        `Timestamp`. There is no
         `fetch()`: `m.futures.snapshots(symbols).fetch()` gives the latest quote of each
         contract in one request.
 
@@ -422,11 +426,15 @@ class _Futures(Namespace):
         17:00 America/Chicago, so daily bars are `Timespan.SESSION`; there is no
         `Timespan.DAY` and no previous-session `fetch()`.
 
-        A date bound of `history()` is a trading session, and a bar is kept when its
-        `SessionEndDate` falls within `[start, end]`. A bar of a session or a longer period
-        (`WEEK` to `YEAR`) starts at its period's first instant but carries the period's last
-        trading session as its `SessionEndDate`, so it is selected by that date, not by its
-        `Timestamp`.
+        A date bound of `history()` is a whole trading session. Bars are requested from four days
+        before the first session's regular open (a holiday can open a session early) to 18:00
+        Chicago time on the last date, and kept by `SessionEndDate`: an intraday bar when its
+        session is in the range and it has ended, a bar of a session or a longer period
+        (`WEEK`, Monday to Friday, to `YEAR`) when every session of its period is in the range
+        and has ended. Bars of a session or longer with `multiplier` above 1 cannot be selected
+        by dates, since the session Massive labels them with is not verified: `history()`
+        raises `ValueError` for them; pass datetimes, which keep the bars whose whole window lies
+        in the range.
 
         `dm.ALL` streams every contract and reads every contract from flat files; REST history
         needs explicit symbols. There is no `limit`: `history()` pages internally.
@@ -789,9 +797,10 @@ class _Futures(Namespace):
             product_code: Only this product, such as `"ES"` (sent as `product_code`), or
                 these products, such as `["ES", "NQ"]` (sent as `product_code.any_of`);
                 None for every product.
-            start: The first session, as an ISO date string or a `date`; None for no lower
-                bound.
-            end: The last session, as an ISO date string or a `date`; None for no upper bound.
+            start: The first session, as an ISO date string or a `date` (a `datetime` raises
+                `ValueError`); None for no lower bound.
+            end: The last session, in the same forms. None (the default) sends no upper bound, so
+                rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by; None for the endpoint's default (`product_code`).
             order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
                 `sort`; it needs `sort`. None for the endpoint's default direction.
@@ -802,10 +811,10 @@ class _Futures(Namespace):
         Returns:
             A query with `fetch()` and `poll()`.
 
-        An `end` before `start`, an unparseable or naive bound, a `session_end_date` filter,
-        an unknown filter, a filter value of the wrong kind, or an `order` without `sort`
-        raises `ValueError`; a `sort` that is not a `str` or an `order` that is not a
-        `dm.Order` raises `TypeError`. No request is made.
+        An `end` before `start`, an unparseable bound, a `datetime` bound (`session_end_date`
+        is a calendar date), a `session_end_date` filter, an unknown filter, a filter value of
+        the wrong kind, or an `order` without `sort` raises `ValueError`; a `sort` that is not a
+        `str` or an `order` that is not a `dm.Order` raises `TypeError`. No request is made.
 
         An empty `product_code` sequence raises `ValueError`, and a `product_code` that is
         neither a `str` nor a sequence of `str` raises `TypeError`.

@@ -8,7 +8,7 @@ and each verb returns a Deephaven `Table` of a particular shape:
 |----------------------------|-----------------------------------------------------------|
 | `Query`                    | `fetch()`, `poll(interval)`                               |
 | `StreamQuery`              | `blink()`, `append_only()`, `ring(capacity)`, `last_by()` |
-| `HistoryQuery`             | `history(start, end)`                                     |
+| `HistoryQuery`             | `history(start, end=None)`                                |
 | `StreamHistoryQuery`       | the stream verbs and `history()`                          |
 | `StreamHistoryLatestQuery` | the above and `fetch()` (the "last" endpoint)             |
 | `HistoryLatestQuery`       | `history()` and `fetch()` (the previous session's bar)    |
@@ -41,13 +41,15 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
+from deephaven import arrow as dh_arrow
 from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 
 from deephaven_massive._config import require_positive_int, require_positive_number
-from deephaven_massive._datasets.dates import bounds, parse_date_like
+from deephaven_massive._datasets.dates import parse_date_like
 from deephaven_massive._datasets.history_source import (
     choose_source,
+    history_window,
     partition_dates,
     rest_history_problem,
 )
@@ -540,23 +542,54 @@ class StreamQuery(QueryBase):
 
 
 class HistoryQuery(QueryBase):
-    """A dataset with a historical retrieval path: `history(start, end)`.
+    """A dataset with a historical retrieval path: `history(start, end=None)`.
 
-    No namespace declares a dataset of this kind yet, so no query can be built and there is no
-    example here yet.
+    Built by a dataset method, such as `m.options.bars(...)` with a timespan that has no
+    stream; immutable and reusable. Every call of `history()` reads its range afresh.
+
+    Example:
+        ::
+
+            q = m.options.bars("O:AAPL250117C00150000", dm.Timespan.HOUR)
+            week = q.history("2025-01-06", "2025-01-10")  # whole days, both inclusive
     """
 
     __slots__ = ()
 
     def history(
-        self, start: DateLike, end: DateLike, *, source: HistorySource = HistorySource.AUTO
+        self,
+        start: DateLike,
+        end: DateLike | None = None,
+        *,
+        source: HistorySource = HistorySource.AUTO,
     ) -> Table:
-        """Return the rows in `[start, end)` as a static table.
+        """Return the dataset's rows over a range of whole days or of exact instants.
 
-        A date `start` is that day's midnight and a date `end` the next day's midnight in the
-        asset class's day zone (New York for stocks, options, and indices; UTC for forex and
-        crypto; sessions for futures), so whole days are inclusive. There is no `limit`: the
-        library pages internally.
+        The two bounds are of one kind, never mixed:
+
+        - **Dates** (`"2025-03-03"` or a `date`) are whole days, inclusive at both ends:
+          `history("2025-03-03", "2025-03-03")` is all of March 3. A day is a calendar day in
+          the asset class's day zone: New York for stocks, options, and indices, UTC for forex
+          and crypto. For futures a date names the trading session whose `SessionEndDate` it
+          is, which opens at 17:00 Chicago time the evening before (earlier after a holiday).
+        - **Aware datetimes** are exact instants, half-open: rows with `start <= Timestamp <
+          end`. Equal instants give an empty table.
+
+        `end=None`, the default, reads through now. A bar is returned only when its whole
+        window lies inside the range and has ended: an intraday or 1-day bar its own interval;
+        for stocks, options, indices, and futures, a week Monday to Friday and a month,
+        quarter, or year its calendar period less its leading and trailing weekend days; for
+        forex and crypto, which trade at weekends, whole calendar weeks (Monday to Sunday),
+        months, quarters, and years; a bar of several units all of them; and a futures bar
+        named by session dates its sessions. So the current day's, week's, or month's bar is
+        never returned, and `history("2025-03-05", "2025-03-20")` of monthly bars is empty.
+        Datetime bounds keep only whole calendar days of 1-day bars: Monday 09:30 to Friday
+        16:00 New York time returns Tuesday to Thursday, so pass dates for daily bars. Futures
+        bars of a session or longer with `multiplier` above 1 cannot be named by dates (their
+        session label is not verified) and raise `ValueError`; pass datetimes. There is no
+        holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
+        week. Forex and crypto 1-day bars are stamped at 00:00 UTC of their day whatever the
+        source. There is no `limit`: the library pages internally.
 
         Flat files (S3) can serve a request when S3 credentials are configured, the dataset
         has files for it (bars: only 1-minute and 1-day bars, and 1-session bars for futures,
@@ -565,48 +598,83 @@ class HistoryQuery(QueryBase):
         the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
         daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
         or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
-        `dm.ALL`); otherwise it uses REST. A reactive symbol table is read once, when the verb
-        is called, and every source receives the same sorted canonical symbols; rows that are
-        not valid symbols of the class are ignored with a WARNING. Flat-file reads skip a
-        missing weekend file silently and a missing weekday file (a holiday) with a WARNING.
+        `dm.ALL`); otherwise it uses REST. A crypto bar of a day or longer whose stamp is off
+        the UTC day cut fails loudly, whichever source serves it, so the source never changes
+        which days a bar covers; `source=` picks a source explicitly. A reactive symbol table
+        is read once, when the verb is called, and every source receives the same sorted
+        canonical symbols; rows that are not valid symbols of the class are ignored with a
+        WARNING. Flat-file reads skip a missing weekend file silently and a missing weekday
+        file (a holiday) with a WARNING. Futures trades and quotes named by session dates are
+        read over REST one request series per weekday session and symbol; a long
+        one-request-per-day download logs its request count first, at INFO.
 
-        A `source` that is not a `HistorySource`, or a bound of the wrong type, raises
-        `TypeError`. A naive or unparseable bound, an empty range, a reactive symbol table
-        without a valid symbol, a source that cannot serve
-        the request (`REST` without REST history or with `dm.ALL` and no grouped-daily
-        endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO` when neither
-        can, with every violated condition listed) raises `ValueError`, synchronously. A failed
-        request raises `MassiveError` (`EntitlementError` on HTTP 403, which for futures flat
-        files names the venue and the `venue=` parameter; `AuthenticationError` when S3 rejects
-        the flat-file credentials). A missing flat file for the last requested day raises
-        `MassiveError` only within a day after its publication time ("... is not yet published
-        (flat files land ~11:00 ET next day), or was a market holiday"); after that the date is
-        skipped with a WARNING, as a holiday.
-
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
+        Side effects: network requests on the calling thread, and for flat files a pool of up
+        to `max_concurrency` reader threads that end before the call returns. It blocks until
+        the whole range is read.
 
         Args:
-            start: The first day or instant, as an ISO string, `date`, or aware `datetime`.
-            end: The last day, or the first instant excluded.
-            source: Where to read: `AUTO` picks flat files or REST, `REST` or `FLAT_FILES`
-                forces one.
+            start: The first day, or the first instant included: an ISO-8601 string, a `date`,
+                or a timezone-aware `datetime`.
+            end: The last day included, or the first instant excluded, of the same kind as
+                `start`; None (the default) reads through now: the current instant for a
+                datetime `start`, today in the day zone (for futures, the current session)
+                for a date `start`.
+            source: Where to read: `AUTO` (the default) picks flat files or REST, `REST` or
+                `FLAT_FILES` forces one.
 
         Returns:
-            A static table in the dataset's schema.
+            A static table in the dataset's schema (see `columns()`), oldest first within each
+            symbol over REST, in file order over flat files; empty, with every column, when
+            no row lies in the range.
+
+        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`,
+        `date`, or `datetime`. `ValueError`, synchronously, before any request: a naive or
+        unparseable bound; a date mixed with a datetime; `start` after `end` (or after now when
+        `end` is None); a reactive symbol table without a valid symbol; futures trades or
+        quotes named by session dates on a query that also filters `session_end_date` in any
+        form; futures bars of a session or longer with `multiplier` above 1 named by dates; a
+        source that cannot serve the request (`REST` without REST history or with `dm.ALL` and
+        no grouped-daily endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO`
+        when neither can, with every violated condition listed); or a call on a Deephaven
+        update-graph thread. `MassiveError` when a request fails (`EntitlementError` on HTTP
+        403, which for futures flat files names the venue and the `venue=` parameter;
+        `AuthenticationError` when S3 rejects the flat-file credentials); when the flat file of
+        the last requested day is missing within a day after its publication time ("... is not
+        yet published (flat files land ~11:00 ET next day), or was a market holiday"; after
+        that the day is skipped with a WARNING, as a holiday); when a futures range named by
+        instants ends on a holiday and the next session's file, which holds the holiday's
+        hours, is not published yet or does not exist within 7 days; when a crypto bar of a
+        day or longer is stamped off the UTC day cut (a 1-day bar elsewhere than its day's first
+        or last millisecond, a longer one elsewhere than 00:00 UTC); or once the session is
+        closed.
+
+        Example:
+            ::
+
+                q = m.crypto.trades("BTC-USD")
+                day = q.history("2026-01-02", "2026-01-02")  # all of that UTC day
+                hour = q.history(
+                    datetime(2026, 1, 2, 14, tzinfo=UTC), datetime(2026, 1, 2, 15, tzinfo=UTC)
+                )
+                since = q.history("2026-01-02")  # through now
         """
         self._core.require_verb_thread()
         chosen = _require_enum(source, HistorySource, "source")
-        first, last = parse_date_like(start, "start"), parse_date_like(end, "end")
+        first = parse_date_like(start, "start")
+        last = None if end is None else parse_date_like(end, "end")
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
             symbols = _read_symbol_table(self._core, self._spec, symbols)
         # A dataset with a path per symbol class takes its days from its symbols' class.
         listed = symbols if isinstance(symbols, tuple) else ()
-        window = bounds(self._spec, first, last, classes=map(symbol_class, listed))
         request = replace(self._request, start=first, end=last, symbols=symbols)
+        window = history_window(
+            self._spec, request, start=first, end=last, classes=map(symbol_class, listed)
+        )
         if chosen is HistorySource.REST:
             self._check_rest_history()
+            if window.empty:
+                return self._empty()
             return self._described(self._core.rest_transport().history(self._spec, request, window))
         dates = partition_dates(self._spec, window)
         choice = choose_source(
@@ -619,11 +687,25 @@ class HistoryQuery(QueryBase):
                 choice.source.name,
                 choice.reason,
             )
+        if window.empty:
+            return self._empty()
         if choice.source is HistorySource.REST:
             return self._described(self._core.rest_transport().history(self._spec, request, window))
         return self._described(
             self._core.flat_file_transport().history(self._spec, request, window, dates=dates)
         )
+
+    def _empty(self) -> Table:
+        """Return the empty result of a range no row can lie in, without any request.
+
+        Returns:
+            A static table with every column of the dataset and no row, described as a
+            result is (`_described`).
+        """
+        schema = self._core.catalog.dataset_schema(self._spec)
+        with entered(self._core.exec_ctx):
+            table = dh_arrow.to_table(schema.arrow_schema().empty_table())
+        return self._described(table)
 
     def _check_rest_history(self) -> None:
         """Reject `history(source=REST)` where REST cannot serve the request.

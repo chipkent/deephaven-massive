@@ -683,7 +683,7 @@ class _StockFinancials(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type, such as a `str` timeframe; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
@@ -694,7 +694,8 @@ class _StockFinancials(Namespace):
                 twelve months.
             start: The first period end date to include (`period_end`), inclusive; None for
                 no lower bound.
-            end: The last period end date to include, inclusive; None for no upper bound.
+            end: The last period end date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"period_end"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -763,7 +764,7 @@ class _StockFinancials(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type, such as a `str` timeframe; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
@@ -773,7 +774,8 @@ class _StockFinancials(Namespace):
                 None for every timeframe the endpoint holds.
             start: The first period end date to include (`period_end`), inclusive; None for
                 no lower bound.
-            end: The last period end date to include, inclusive; None for no upper bound.
+            end: The last period end date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"period_end"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -832,7 +834,7 @@ class _StockFinancials(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type, such as a `str` timeframe; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
@@ -842,7 +844,8 @@ class _StockFinancials(Namespace):
                 None for every timeframe the endpoint holds.
             start: The first period end date to include (`period_end`), inclusive; None for
                 no lower bound.
-            end: The last period end date to include, inclusive; None for no upper bound.
+            end: The last period end date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"period_end"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -1021,16 +1024,17 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as a non-`str` form type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds
-        an invalid ticker, a bound is naive or not ISO-8601, `end` is before `start`, or a filter is
-        unknown, reserved, or of the wrong kind.
+        type, such as a non-`str` form type; `ValueError` if `symbols` is `dm.ALL`, empty, or
+        holds an invalid ticker, a bound is not a date or ISO date, `end` is before `start`, or a
+        filter is unknown, reserved, or of the wrong kind.
 
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
             form_type: The SEC form type, such as `"10-K"` or `"8-K"`; None for every form.
             start: The first filing date to include, inclusive; None for no lower bound.
-            end: The last filing date to include, inclusive; None for no upper bound.
+            end: The last filing date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -1085,14 +1089,15 @@ class _StockFilings(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound.
-            end: The last filing date to include, inclusive; None for no upper bound.
+            end: The last filing date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -1146,14 +1151,15 @@ class _StockFilings(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound.
-            end: The last filing date to include, inclusive; None for no upper bound.
+            end: The last filing date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -1208,14 +1214,15 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is naive or not ISO-8601,
+        type; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date,
         `end` is before `start`, or a filter is unknown, reserved, or of the wrong kind.
 
         Args:
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
             start: The first filing date to include, inclusive; None for no lower bound.
-            end: The last filing date to include, inclusive; None for no upper bound.
+            end: The last filing date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -1269,14 +1276,15 @@ class _StockFilings(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound.
-            end: The last filing date to include, inclusive; None for no upper bound.
+            end: The last filing date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -1330,14 +1338,15 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if a bound is naive or not ISO-8601, `end` is
+        type, such as an `int` CIK; `ValueError` if a bound is not a date or ISO date, `end` is
         before `start`, or a filter is unknown, reserved, or of the wrong kind.
 
         Args:
             filer_cik: The SEC CIK of the filing manager, as text with its leading zeros,
                 such as `"0001067983"`; None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound.
-            end: The last filing date to include, inclusive; None for no upper bound.
+            end: The last filing date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -1396,9 +1405,9 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is naive
-        or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the wrong
-        kind.
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+        the wrong kind.
 
         Args:
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
@@ -1406,7 +1415,8 @@ class _StockFilings(Namespace):
             issuer_cik: The SEC CIK of the issuing company, as text; None for every issuer.
             owner_cik: The SEC CIK of the reporting owner, as text; None for every owner.
             start: The first filing date to include, inclusive; None for no lower bound.
-            end: The last filing date to include, inclusive; None for no upper bound.
+            end: The last filing date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -1465,9 +1475,9 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is naive
-        or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the wrong
-        kind.
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+        the wrong kind.
 
         Args:
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
@@ -1475,7 +1485,8 @@ class _StockFilings(Namespace):
             issuer_cik: The SEC CIK of the issuing company, as text; None for every issuer.
             owner_cik: The SEC CIK of the reporting owner, as text; None for every owner.
             start: The first filing date to include, inclusive; None for no lower bound.
-            end: The last filing date to include, inclusive; None for no upper bound.
+            end: The last filing date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.
@@ -1818,9 +1829,11 @@ class _Stocks(Namespace):
         `us_stocks_sip/day_aggs_v1`); with `dm.ALL`, one-day REST history reads the grouped
         daily bars (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), one request per day.
 
-        `history()` has no `limit`: it pages internally. `dm.ALL` streams every ticker and
-        works with `history()` where a flat file or the grouped daily path serves it;
-        `fetch()` refuses it. Columns:
+        `history()` has no `limit`: it pages internally. It returns only the bars whose whole
+        window lies inside the range and has ended: a week runs Monday to Friday and a month
+        from its first to its last weekday, so the current day's, week's, or month's bar never
+        appears. `dm.ALL` streams every ticker and works with `history()` where a flat file or
+        the grouped daily path serves it; `fetch()` refuses it. Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#bars,
         the web UI's column tooltips, or `columns()`.
 
@@ -2047,14 +2060,14 @@ class _Stocks(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if `date` is not a `str`, `date`,
         or `datetime`, `adjusted` is not a `bool`, or `symbols` is not an accepted form;
-        `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or `date` is naive
-        or not ISO-8601.
+        `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or `date` is a
+        `datetime` or not an ISO-8601 date.
 
         Args:
             symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
                 column (re-read each `poll()` cycle).
-            date: The trading day: an ISO-8601 date, a `date`, or an aware `datetime`, whose
-                New York date is used.
+            date: The trading day: an ISO-8601 date or a `date`. It is a calendar date, so a
+                `datetime` raises `ValueError`.
             adjusted: True (the default) for prices adjusted for splits; False for unadjusted.
 
         Returns:
@@ -2100,14 +2113,16 @@ class _Stocks(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
             start: The first ex-dividend date to include, inclusive; None for no lower bound.
-            end: The last ex-dividend date to include, inclusive; None for no upper bound.
+            end: The last ex-dividend date to include, inclusive. None (the default) sends no upper
+                bound, so an announced dividend whose ex-date is still to come is returned too; pass
+                `end=` to stop at a date.
             sort: The field to sort by, such as `"ex_dividend_date"`; None for the server
                 default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
@@ -2161,14 +2176,15 @@ class _Stocks(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
             start: The first execution date to include, inclusive; None for no lower bound.
-            end: The last execution date to include, inclusive; None for no upper bound.
+            end: The last execution date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"execution_date"`; None for the server
                 default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
@@ -2224,14 +2240,15 @@ class _Stocks(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every offering.
             start: The first listing date to include, inclusive; None for no lower bound.
-            end: The last listing date to include, inclusive; None for no upper bound.
+            end: The last listing date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"listing_date"`; None for the server default.
             order: The sort direction, sent as the IPO path's own `order` parameter, so it works
                 with or without `sort`; None for the server default.
@@ -2285,14 +2302,15 @@ class _Stocks(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
             start: The first settlement date to include, inclusive; None for no lower bound.
-            end: The last settlement date to include, inclusive; None for no upper bound.
+            end: The last settlement date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"settlement_date"`; None for the server
                 default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
@@ -2347,14 +2365,15 @@ class _Stocks(Namespace):
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
         type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
         wrong kind.
 
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
             start: The first trading day to include, inclusive; None for no lower bound.
-            end: The last trading day to include, inclusive; None for no upper bound.
+            end: The last trading day to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"date"`; None for the server default.
             order: The direction of `sort`; without `sort` it raises `ValueError`. None for
                 the server default.

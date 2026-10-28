@@ -377,7 +377,7 @@ def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.Massive
         massive_session.forex.quotes(dm.ALL).history("2026-10-20", "2026-10-20", source=rest)
     with pytest.raises(ValueError, match=r"forex\.bars history over REST needs explicit symbols"):
         massive_session.forex.bars(dm.ALL, dm.Timespan.HOUR).history(
-            date(2026, 10, 20), datetime(2026, 10, 21, tzinfo=UTC), source=rest
+            date(2026, 10, 20), date(2026, 10, 20), source=rest
         )
 
 
@@ -537,8 +537,9 @@ def test_daily_bars_fetch_reads_the_previous_session(
     )
     table = rest_session.forex.bars("EUR/USD", dm.Timespan.DAY).fetch()
     assert sent(fake_rest) == [("/v2/aggs/ticker/C:EURUSD/prev", {})]
+    # Stamped 23:59:59.999 UTC by `/prev`, at the start of its UTC day here.
     assert pick(table, *BAR_COLUMNS) == [
-        ("C:EURUSD", 1_651_708_799_999 * MS, 1.05252, 1.0631, 1.0505, 1.06206, 180300.0, 1.055)
+        ("C:EURUSD", 1_651_622_400_000 * MS, 1.05252, 1.0631, 1.0505, 1.06206, 180300.0, 1.055)
     ]
 
 

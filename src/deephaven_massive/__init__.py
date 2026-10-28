@@ -13,7 +13,7 @@ Every dataset is a method on a namespace grouped by asset class (`stocks`, `opti
 `futures`, `indices`, `forex`, `crypto`) or by topic (`reference`, `indicators`, `economy`,
 `partners`). Each method returns an immutable query, and a verb on that query picks the table
 shape: `blink()`, `append_only()`, `ring(n)`, `last_by()`, `fetch()`, `poll(interval)`, or
-`history(start, end)`. The same code runs on every Massive plan: the library finds the right
+`history(start, end=None)`. The same code runs on every Massive plan: the library finds the right
 WebSocket host for your key, and a dataset your plan lacks fails the table with a message that
 names the alternative. The library runs inside an existing Deephaven server (it needs an active
 `ExecutionContext`) and never starts one.
