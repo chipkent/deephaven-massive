@@ -33,7 +33,16 @@ field gets one column and one type whichever transport serves it:
   the source: a replacement, or per-asset-class texts (`Field.class_descriptions`) for a source
   that serves several classes. No name, type, or gate depends on it, except that a `NAMES`
   entry quotes the one its name was derived from and a `DESCRIPTION_FIXES` entry the one it
-  replaces.
+  replaces. A field inside a nested object also carries the description of each enclosing
+  object that has one (`RawField.notes`), outermost first, each after the field's own text
+  as a sentence naming the object: ``From the `session` object: <its text>``. The vendor
+  often documents a whole object's behavior only there (a `session` whose prices are
+  omitted before the regular open, a `lastQuote` returned only on some plans, `greeks` left
+  out for some contracts), and the flattened columns would otherwise lose it. The note is the
+  object's whole text, never cut: no rule that shortened it could tell the sentence that
+  explains a null from the one that introduces the object. A `DESCRIPTION_FIXES` entry under
+  the object's wire key corrects its note as one under a field's key corrects the field's
+  text.
 
 Hand input is keyed by source: a REST path template, a WebSocket `"<cluster>/<channel>"`, or a
 flat-file prefix, so one table serves every transport. A `SourceFields` collects its problems
@@ -91,6 +100,9 @@ class RawField:
             flat-file "Columns" type `timestamp - integer`), which makes it timestamp-like
             whatever its name.
         items: The resolved schema of an array's items; `None` for any other field.
+        notes: The enclosing objects that carry a description, outermost first, each as its
+            dotted wire key below the rows (`session`) and its description as the
+            specification gives it; empty for a field at the top of the row.
     """
 
     wire_key: str
@@ -98,10 +110,17 @@ class RawField:
     required: bool
     timestamp: bool = False
     items: JsonObject | None = None
+    notes: tuple[tuple[str, str], ...] = ()
 
 
 def openapi_field(
-    spec: OpenApi, wire_key: str, schema: JsonObject, *, required: bool, where: str = ""
+    spec: OpenApi,
+    wire_key: str,
+    schema: JsonObject,
+    *,
+    required: bool,
+    where: str = "",
+    notes: tuple[tuple[str, str], ...] = (),
 ) -> RawField:
     """Return a field of an OpenAPI document, with an array's items resolved.
 
@@ -113,6 +132,7 @@ def openapi_field(
         schema: The field's resolved schema.
         required: Whether the vendor marks it, and every object above it, required.
         where: The source and key, for messages; the wire key when omitted.
+        notes: The described enclosing objects (`RawField.notes`); none by default.
 
     Returns:
         The field.
@@ -120,7 +140,7 @@ def openapi_field(
     items = None
     if schema.get("type") == "array":
         items = spec.schema(schema.get("items", {}), where or wire_key)
-    return RawField(wire_key, schema, required, items=items)
+    return RawField(wire_key, schema, required, items=items, notes=notes)
 
 
 def representation(schema: JsonObject, last: str) -> WireType | None:
@@ -195,6 +215,9 @@ class SourceFields:
         self.declared_keys: dict[str, str] = {}
         # The wire keys whose `DESCRIPTION_FIXES` entry `description` looked up.
         self.described_keys: set[str] = set()
+        # Each enclosing object's note and per-asset-class notes, by its wire key, once looked
+        # up.
+        self.notes: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {}
 
     def use(self) -> PathUse:
         """Return what the source consumed so far, for the checks that span sources.
@@ -364,7 +387,7 @@ class SourceFields:
             wire_type = WireType.EPOCH
         else:
             wire_type = fix.wire_type if fix is not None else spec_type
-        described, class_texts = self.description(raw.wire_key, description)
+        described, class_texts = self.noted(raw, description)
         column = naming.column_name(long_names)
         self.concepts[column] = ".".join(naming.snake(name) for name in long_names)
         self.columns[raw.wire_key] = column
@@ -379,6 +402,44 @@ class SourceFields:
             class_descriptions=class_texts,
         )
 
+    def noted(self, raw: RawField, vendor: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+        """Return a field's description followed by the notes of its enclosing objects.
+
+        The field's own text and each object's note are corrected by their own
+        `DESCRIPTION_FIXES` entries (`description`); an object's note is looked up once per
+        source, so a stale entry on it is reported once. Each note reads
+        ``From the `<object wire key>` object: <text>``.
+
+        Args:
+            raw: The field, under its `KEY_FIXES` key if it has one.
+            vendor: The field's own description, as the specification gives it.
+
+        Returns:
+            The description and the per-asset-class descriptions (`Field.class_descriptions`).
+            A class that the field's entry or any note's entry lists gets its own text: the
+            field's text and each note for that class, the shared one where an entry lists
+            no text for it.
+        """
+        own, own_classes = self.description(raw.wire_key, vendor)
+        notes: list[tuple[str, str, dict[str, str]]] = []
+        for key, note in raw.notes:
+            if key not in self.notes:
+                self.notes[key] = self.description(key, note)
+            text, classes = self.notes[key]
+            notes.append((key, text, dict(classes)))
+        by_class = dict(own_classes)
+        listed = sorted({*by_class, *(name for _, _, classes in notes for name in classes)})
+
+        def joined(asset_class: str) -> str:
+            # `""` names no class, so it reads the shared texts.
+            parts = [
+                f"From the `{key}` object: {classes.get(asset_class, text)}"
+                for key, text, classes in notes
+            ]
+            return _with_notes(by_class.get(asset_class, own), parts)
+
+        return joined(""), tuple((name, joined(name)) for name in listed)
+
     def description(self, wire_key: str, vendor: str) -> tuple[str, tuple[tuple[str, str], ...]]:
         """Return a field's description as plain text, corrected where the vendor's is wrong.
 
@@ -386,7 +447,8 @@ class SourceFields:
         `DESCRIPTION_FIXES` entry, so an entry under any other key is reported stale.
 
         Args:
-            wire_key: The field's wire key, after any `KEY_FIXES` entry.
+            wire_key: The field's wire key, after any `KEY_FIXES` entry, or an enclosing
+                object's, for its note (`noted`).
             vendor: The vendor's description, as the specification gives it.
 
         Returns:
@@ -629,6 +691,24 @@ class SourceFields:
                 f"convert to {item.wire_type}; add a TYPE_FIXES entry citing it, or a "
                 "SAMPLE_ERRORS entry if the sample is wrong",
             )
+
+
+def _with_notes(text: str, notes: Sequence[str]) -> str:
+    """Return a field's description followed by the notes of its enclosing objects.
+
+    Args:
+        text: The field's own description, as plain text; may be empty.
+        notes: The rendered notes, outermost object first.
+
+    Returns:
+        The description and the notes joined by spaces, with a period closing a description
+        that ends without sentence punctuation; the description alone when there are no notes.
+    """
+    if not notes:
+        return text
+    if text and not text.endswith((".", "!", "?")):
+        text += "."
+    return " ".join([text, *notes] if text else notes)
 
 
 def _json_text(value: Json) -> str:
