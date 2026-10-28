@@ -230,18 +230,9 @@ def test_class_hierarchy() -> None:
 # --- Transport hooks that are not implemented yet --------------------------------------------
 
 
-def test_transport_hooks_raise_not_implemented(massive_session: dm.MassiveSession) -> None:
-    q = trades(massive_session)
-    with pytest.raises(NotImplementedError, match="REST transport"):
-        q.fetch()
+def test_the_stream_hook_raises_not_implemented(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(NotImplementedError, match="WebSocket transport"):
-        q.append_only()
-    with pytest.raises(NotImplementedError, match="REST transport"):
-        q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
-    with pytest.raises(NotImplementedError, match="REST transport"):
-        q.history("2025-03-03", "2025-03-03")  # AUTO: the dataset has no flat files
-    with pytest.raises(NotImplementedError, match="REST transport"):
-        news(massive_session).poll(30)
+        trades(massive_session).append_only()
 
 
 # --- fetch and poll --------------------------------------------------------------------------
