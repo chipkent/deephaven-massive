@@ -23,9 +23,11 @@ from deephaven.table_listener import listen
 import deephaven_massive as dm
 from deephaven_massive import _namespaces, _session
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport
+from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
@@ -37,7 +39,7 @@ from deephaven_massive._namespaces.options import _Options
 from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable, _Partners, _Tmx
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
-from deephaven_massive._query import StreamQuery
+from deephaven_massive._query import Query, StreamQuery
 from deephaven_massive._tables.liveness import (
     StreamHandle,
     new_scope,
@@ -49,7 +51,6 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    from deephaven_massive._datasets.request import Request
     from deephaven_massive._tables.core import SessionCore
     from tests._fakes.stream import FakeStreamTransport
 
@@ -240,15 +241,33 @@ def test_namespaces(massive_session: dm.MassiveSession) -> None:
     assert type(m.partners.fable) is _Fable
 
 
-def test_unified_snapshots_shell(massive_session: dm.MassiveSession) -> None:
+def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
+    query = massive_session.snapshots(
+        ["X:BTCUSD", "aapl", "c:eurusd", "O:SPY251219C00600000"],
+        sort="ticker",
+        order=dm.Order.DESC,
+        limit=3,
+        filters={"type": "options"},
+    )
+    assert type(query) is Query
+    assert query._spec is reference.SNAPSHOTS
+    assert query._spec is _session.CATALOG.by_name["reference.snapshots"]
+    assert query._request == Request(
+        symbols=("AAPL", "C:EURUSD", "O:SPY251219C00600000", "X:BTCUSD"),
+        params=(("order", dm.Order.DESC), ("sort", "ticker")),
+        filters=(("type", "options"),),
+        limit=3,
+    )
     with pytest.raises(ValueError, match=r"m\.stocks\.snapshots\(dm\.ALL\)"):
         massive_session.snapshots(dm.ALL)
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         massive_session.snapshots(["AAPL"], order=cast("dm.Order", "asc"))
     with pytest.raises(ValueError, match="limit must be positive"):
         massive_session.snapshots(["AAPL"], limit=0)
-    with pytest.raises(NotImplementedError, match="not implemented yet"):
-        massive_session.snapshots(["AAPL", "O:SPY251219C00600000"], filters={"type": "CS"})
+    with pytest.raises(ValueError, match="filter 'type' takes"):
+        massive_session.snapshots(["AAPL"], filters={"type": "CS"})
+    with pytest.raises(ValueError, match="ticker_any_of"):
+        massive_session.snapshots(["AAPL"], filters={"ticker_any_of": ["MSFT"]})
 
 
 # --- Diagnostics -----------------------------------------------------------------------------

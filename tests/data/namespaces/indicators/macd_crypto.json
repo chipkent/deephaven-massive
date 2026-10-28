@@ -1,0 +1,24 @@
+{
+  "next_url": "https://api.massive.com/v1/indicators/macd/X:BTCUSD?cursor=YWN0aXZlPXRydWUmZGF0ZT0yMDIxLTA0LTI1JmxpbWl0PTEmb3JkZXI9YXNjJnBhZ2VfbWFya2VyPUElN0M5YWRjMjY0ZTgyM2E1ZjBiOGUyNDc5YmZiOGE1YmYwNDVkYzU0YjgwMDcyMWE2YmI1ZjBjMjQwMjU4MjFmNGZiJnNvcnQ9dGlja2Vy",
+  "request_id": "a47d1beb8c11b6ae897ab76cdbbf35a3",
+  "results": {
+    "underlying": {
+      "url": "https://api.massive.com/v2/aggs/ticker/X:BTCUSD/range/1/day/2003-01-01/2022-07-25"
+    },
+    "values": [
+      {
+        "histogram": 38.3801666667,
+        "signal": 106.9811666667,
+        "timestamp": 1517562000016,
+        "value": 145.3613333333
+      },
+      {
+        "histogram": 41.098859136,
+        "signal": 102.7386283473,
+        "timestamp": 1517562001016,
+        "value": 143.8374874833
+      }
+    ]
+  },
+  "status": "OK"
+}

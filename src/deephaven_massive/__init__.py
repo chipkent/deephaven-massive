@@ -32,7 +32,8 @@ Public API:
     - `ALL`: every symbol on a stream, in a flat file, or in a snapshot.
     - The enums (all `StrEnum`s whose values are Massive's wire strings): `AssetClass`,
       `Timespan`, `PollMode`, `HistorySource`, `FuturesVenue`, `Direction`, `ContractType`,
-      `SeriesType`, `Timeframe`, `Order`, `Market`, `Locale`, `ConditionDataType`, `Sip`.
+      `SeriesType`, `Timeframe`, `Order`, `Market`, `TickerType`, `Locale`, `ConditionDataType`,
+      `Sip`.
       Parameters take only enum members; convert text with, for example,
       `Timespan("minute")`.
 
@@ -81,6 +82,7 @@ __all__ = [
     "PollMode",
     "SeriesType",
     "Sip",
+    "TickerType",
     "Timeframe",
     "Timespan",
     "__version__",
@@ -108,6 +110,7 @@ _EXPORTS: dict[str, str] = {
     "PollMode": "deephaven_massive._enums",
     "SeriesType": "deephaven_massive._enums",
     "Sip": "deephaven_massive._enums",
+    "TickerType": "deephaven_massive._enums",
     "Timeframe": "deephaven_massive._enums",
     "Timespan": "deephaven_massive._enums",
 }
@@ -129,6 +132,7 @@ if TYPE_CHECKING:
         PollMode,
         SeriesType,
         Sip,
+        TickerType,
         Timeframe,
         Timespan,
     )
