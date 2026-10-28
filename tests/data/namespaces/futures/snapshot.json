@@ -4,9 +4,7 @@
   "results": [
     {
       "details": {
-        "settlement_date": 1753851600000000000,
-        "ticker": "CBN5",
-        "product_code": "CB"
+        "settlement_date": 1753851600000000000
       },
       "last_minute": {
         "close": 240.00000000000003,
@@ -30,6 +28,7 @@
         "price": 240.00000000000003,
         "size": 5
       },
+      "product_code": "CB",
       "session": {
         "change": 21.11,
         "change_percent": 0.09622134,
@@ -40,7 +39,8 @@
         "previous_settlement": 219.39,
         "settlement_price": 240.50000000000003,
         "volume": 55
-      }
+      },
+      "ticker": "CBN5"
     }
   ],
   "status": "OK"

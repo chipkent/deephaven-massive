@@ -809,8 +809,12 @@ request per cycle.
 **`poll()`.** `mode=None` uses the catalog default: `PollMode.APPEND` for `reference.news`,
 every `stocks.filings.*` but the two taxonomies, and `partners.benzinga.news`;
 `PollMode.UPSERT` for `stocks.ipos`, whose records are revised in place as an offering moves
-through its statuses; `PollMode.REPLACE` otherwise, the two filing taxonomies included (a
-taxonomy is a reference list revised in place, not a feed of new rows).
+through its statuses (keyed by `Symbol` and `IssuerName`, both required, so a ticker two
+issuers used stays two rows; the key assumes Massive keeps an offering's issuer name unchanged
+through its statuses, which no vendor source states, and a renamed issuer would leave its old
+row behind: [section 23](#23-open-verification-items)); `PollMode.REPLACE` otherwise, the two
+filing taxonomies included (a taxonomy is a reference list revised in place, not a feed of new
+rows).
 
 - `REPLACE` is a keyed table (`poll_keys`) from which keys absent in the latest cycle are
   deleted, also when the cycle is empty.
@@ -842,12 +846,16 @@ taxonomy is a reference list revised in place, not a feed of new rows).
   updated). On a dataset with neither unique `poll_keys` nor `revision_keys` (the default
   `Symbol`), an explicit `APPEND` appends one row per symbol.
 - A dataset may name poll-key columns the vendor leaves empty on some rows in
-  `nullable_poll_keys`, each with its reason from the vendor's description (the 13-F `PutCall`
-  is empty for common stock; the Form 3 and Form 4 exercise price and dates are set only for
+  `nullable_poll_keys`, each with its reason from the vendor's description, its marking the
+  field optional, or an authoritative regulatory source such as the SEC's own form
+  instructions (the 13-F `PutCall` is empty for common stock, and its amount and voting
+  authority columns are marked optional; the Form 3 and Form 4 exercise price and dates are set only for
   derivatives, and their `NatureOfOwnership` only for indirect ownership; a Form 4 holding
-  record has no transaction columns; no futures key is nullable, since no vendor description or
-  fixture leaves one empty). A null there is a value. The catalog gate requires at
-  least one poll-key column outside that map, so no row is identified by nulls alone.
+  record has no transaction columns, and the SEC's Form 4 instructions let a filer report the
+  value owned after a transaction instead of `SharesOwnedFollowingTransaction`; no futures key
+  is nullable, since no vendor description or fixture leaves one empty). A null there is a
+  value. The catalog gate requires at least one poll-key column outside that map, so no row is
+  identified by nulls alone.
 - A null value in any other `poll_keys` column, or a NaN in a float one, fails the table in
   every mode, as a missing required key does: it would otherwise merge unrelated rows into one
   key. The `RowDataError` names the dataset, the key column, the row's position in the cycle,
@@ -1206,7 +1214,7 @@ below and selects the flat-file prefix only: it is not part of the stream key
 | `trades(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (dates: one request series per weekday session, `session_end_date=<date>`; datetimes: the exact `timestamp` range; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/trades_v1` |
 | `quotes(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` (as `trades`) | `us_futures_{venue}/quotes_v1` |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, venue: FuturesVenue \| None = None)` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns; dates: from the first session's open less 4 days to 18:00 CT on the last date, kept by `SessionEndDate`, and bars of a session or longer with `multiplier` above 1 refused with `ValueError`; datetimes: the exact `window_start` range, bars kept by their own window; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
-| `snapshots(symbols, *, product_code: str \| Sequence[str] \| None = None, …F)`; `ALL` with `product_code` is every contract of the products; `Symbol` is the generated `DetailsTicker` field, where the OpenAPI schema nests the contract's ticker (`details.ticker`; [section 23](#23-open-verification-items)) | Query | | `/futures/v1/snapshot` | |
+| `snapshots(symbols, *, product_code: str \| Sequence[str] \| None = None, …F)`; `ALL` with `product_code` is every contract of the products; `Symbol` is the contract's top-level `ticker`, where both vendor samples send it, though the OpenAPI schema nests it as `details.ticker` (a `KEY_FIXES` entry; [section 23](#23-open-verification-items)) | Query | | `/futures/v1/snapshot` | |
 | `contracts(*, product_code: str \| Sequence[str] \| None = None, …F)`, `products(*, product_code: str \| Sequence[str] \| None = None, …F)`, `exchanges(*, limit: int \| None = None)`, `market_status(*, product_code: str \| Sequence[str] \| None = None, limit: int \| None = None)` (neither path has a filter beyond the typed arguments, nor `sort`) | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
 | `schedules(*, product_code: str \| Sequence[str] \| None = None, …T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
 
@@ -2273,10 +2281,11 @@ How a request is built from a `DatasetSpec` and a `Request`:
   ([section 12](#12-timestamp-units-and-day-boundaries)).
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
-  (250 on the unified snapshot and the indices snapshot), the transport splits the symbol
-  list into batches of at most that size, issues them in order, and concatenates the rows;
-  None sends every symbol in one request. A projected
-  `fetch()` (`indices.values`) batches the same way, so it is not one request per symbol.
+  (250 on the unified snapshot, the indices snapshot, and the stocks, forex, and crypto
+  snapshots), the transport splits the symbol list into batches of at most that size, issues
+  them in order, and concatenates the rows; None sends every symbol in one request. A
+  projected `fetch()` (`indices.values`) batches the same way, so it is not one request per
+  symbol.
 - **A path per symbol class.** `DatasetSpec.fetch_paths_by_class: Mapping[AssetClass, str]`
   (empty by default) names the fetch path that serves symbols of one class, for a dataset that
   spans classes whose vendor templates differ (the indicators:
@@ -3268,8 +3277,8 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
-| `KEY_FIXES` | `overrides.py` | `{(source, declared key): (wire key, reason)}`: a field the specification declares under one key while every documented sample (the response example and the documentation sample) sends it under another that nothing declares; the field is read under the samples' key, keeping its declared type and description, and every other hand entry names it by that key. Stale once the declared key is gone, or the example no longer sends the corrected key or sends the declared one; each goes into section 23 | ticker events `event_type` → `type` (column `Type`) |
-| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text or asset classes, reason)}`: a field whose vendor description is clearly wrong for its source (another asset class's or event's text copied onto it, or a statement the vendor's own documentation contradicts), or missing where a sibling source describes the same field (the entry then quotes `""`); the entry quotes the vendor's text (as plain text, after normalization) and gives the replacement, either `text` for every use of the source, or, for a source that serves several asset classes, `asset_classes`: the text a dataset of each listed class shows, every other class keeping the vendor's. The replacement is Massive's own wording for the same field of a sibling source wherever that is right and says what the field holds; it is written here only when no sibling text is adequate, and the reason says so. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once no generated field looks the entry up (its source or key is gone, or the key is one a `KEY_FIXES` entry replaces or only an example sends), or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | the crypto last trade's and trades flat file's `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated"; the futures trades' `price` ("100 contracts × $2.00 = $200.00", no multiplier) → the `futures/T` channel's text; the unified `/v3/snapshot` `last_trade.price` → the options trades' text, for `options` only; the futures snapshot's `details.product_code` (no description) → the `/futures/v1/contracts` text |
+| `KEY_FIXES` | `overrides.py` | `{(source, declared key): (wire key, reason)}`: a field the specification declares under one key while every documented sample (the response example and the documentation sample) sends it under another that nothing declares; the field is read under the samples' key, keeping its declared type and description, and every other hand entry names it by that key. Stale once the declared key is gone, or the example no longer sends the corrected key or sends the declared one; each goes into section 23 | ticker events `event_type` → `type` (column `Type`); futures snapshot `details.ticker` → `ticker` and `details.product_code` → `product_code` |
+| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text or asset classes, reason)}`: a field whose vendor description is clearly wrong for its source (another asset class's or event's text copied onto it, or a statement the vendor's own documentation contradicts), or missing where a sibling source describes the same field (the entry then quotes `""`); the entry quotes the vendor's text (as plain text, after normalization) and gives the replacement, either `text` for every use of the source, or, for a source that serves several asset classes, `asset_classes`: the text a dataset of each listed class shows, every other class keeping the vendor's. The replacement is Massive's own wording for the same field of a sibling source wherever that is right and says what the field holds; it is written here only when no sibling text is adequate, and the reason says so. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once no generated field looks the entry up (its source or key is gone, or the key is one a `KEY_FIXES` entry replaces or only an example sends), or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | the crypto last trade's and trades flat file's `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated"; the futures trades' `price` ("100 contracts × $2.00 = $200.00", no multiplier) → the `futures/T` channel's text; the unified `/v3/snapshot` `last_trade.price` → the options trades' text, for `options` only; the futures snapshot's `product_code` (no description) → the `/futures/v1/contracts` text |
 | `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
@@ -3402,7 +3411,7 @@ checks.
   beside a `$ref`, an `allOf`, or a one-branch choice describes that use and replaces the
   referenced schema's own); at the 2026-10-27 snapshot, 1,597 of the 1,599 leaf response
   fields of the generated paths carry one (the two without are futures
-  `/futures/v1/snapshot` `details.product_code` and `details.ticker`). WebSocket: the
+  `/futures/v1/snapshot` `product_code` and `ticker`). WebSocket: the
   `description` of each message property in `websocket.json`, all 237 fields of the 28
   generated channels at the 2026-10-27 snapshot. Flat files: the description cell of the
   page's "Columns" table, all 178 fields of the 21 generated prefixes. A WebSocket source's
@@ -3437,7 +3446,7 @@ checks.
   see the datasets. A field Massive leaves without a description, where a sibling source
   describes the same field, gets an entry too: it quotes the empty text, so it goes stale once
   Massive adds one, and its text is the sibling's (the futures snapshot's
-  `details.product_code` takes the `/futures/v1/contracts` text). That is the only hand input
+  `product_code` takes the `/futures/v1/contracts` text). That is the only hand input
   on descriptions; a description that is merely terse or imprecise is kept.
 - **No gate.** A field without a description gets `""`, and nothing stops the refresh.
   Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
@@ -3578,9 +3587,11 @@ per source in a
   generated column (`filer_cik` stays `FilerCik`). Only a `fanout` key may set it False, and
   such a key is a column of the rows, never `from_request`;
 - `required` (default True) says whether every row must carry the key. False is for a symbol
-  Massive documents as present only "if available", such as the `ticker` of
-  the stocks `filings.index`: a row without it keeps a null `Symbol` instead of failing the request
-  as a missing required key. Only a `symbol` key read from a REST path's rows may set it
+  Massive documents as present only "if available" or marks optional, such as the `ticker` of
+  the stocks `filings.index`, the TMX corporate events, and the Benzinga `analyst_insights`,
+  `ratings`, `bulls_bears_say`, `guidance`, and `earnings` (whose only documented
+  analyst-insights row has no `ticker`): a row without it keeps a null `Symbol` instead of
+  failing the request as a missing required key. Only a `symbol` key read from a REST path's rows may set it
   False; flat files and streams filter and route rows by symbol, and the `time`, `fanout`,
   and `session` keys are always required. A dataset with an optional symbol key cannot put
   `Symbol` in its `poll_keys`, whatever its mode (`DatasetSpec` refuses it): a row without a
@@ -4326,7 +4337,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 20 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/massive/ws/test_client_integration.py`: one raw `XT` frame; record the form of `i` |
 | 21 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); the overflow check and the [1990, 2100] bound fail loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
 | 22 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
-| 23 | Where the futures snapshot carries a contract's ticker: the OpenAPI schema nests it as `details.ticker`, which the generator names `DetailsTicker` | `futures.snapshots` declares `DetailsTicker` as its `symbol` key; a row without it is a missing required key and fails loudly ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: a spec-shaped fixture fills `Symbol` from `details.ticker` | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for a current contract; record where the ticker appears and that `Symbol` is filled |
+| 23 | Where the futures snapshot carries a contract's ticker and product code: the OpenAPI response schema nests both under `details` (`details.ticker`, `details.product_code`), while the OpenAPI response example and the documentation sample both send `ticker` and `product_code` at the top level of each result, with `details` holding only `settlement_date`; the path's `ticker.any_of` filter and its default sort `ticker` also name a top-level field | Two `KEY_FIXES` entries read the fields as `ticker` and `product_code`, columns `Ticker` (the `symbol` key, so `Symbol`) and `ProductCode`; were the wire to nest them as the schema says, every row would fail loudly as a missing required key and `details.ticker` and `details.product_code` would be reported as drift ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: the vendor's own sample, served unchanged, fills `Symbol` and `ProductCode` from the top level | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for current contracts; record where `ticker` and `product_code` appear and that `Symbol` is filled |
 | 24 | Key of the REST ticker events' event type (`/vX/reference/tickers/{id}/events`): the schema declares the required `event_type`, while the response example, the documentation sample, and Massive's Python client all use `type` | A `KEY_FIXES` entry reads the field as `type`, column `Type`; were the wire to send `event_type`, `Type` would be null and `event_type` would be reported as drift | `tests/massive/refresh/test_overrides.py`: the entry reads `event_type` as `type`, column `Type` | `tests/namespaces/test_reference_integration.py`: one `ticker_events` request; record which key the events carry |
 | 25 | Whether rows of the stocks `filings.index`, `filings.sections_10k`, `filings.text_8k`, and `filings.risk_factors` always carry `ticker`: no filings response schema marks it required, and the index documents it as present only "if available" | Each of the four declares its symbol key `KeySpec("Ticker", required=False)`: a row without `ticker` keeps a null `Symbol` instead of failing the request, and none keys a `poll()` on `Symbol`, in any mode | `tests/ingest/test_rest.py`: a row without its optional symbol keeps a null `Symbol`; `tests/datasets/test_catalog.py`: only a symbol key from REST rows may be optional; `tests/namespaces/test_stocks.py`: a row without `ticker` of each of the four keeps a null `Symbol` | `tests/namespaces/test_stocks_integration.py`: one request over a month of each of the four; record how many rows lack `ticker` |
 | 26 | Whether Massive reads a percent-encoded colon in a path segment (`/v2/aggs/ticker/I%3ASPX/prev`) as `I:SPX` | Every path value is percent-encoded whole; a value containing `/` is refused before sending, since Massive answers 404 for `%2F` | `tests/massive/rest/test_query.py`: `I:SPX` becomes `I%3ASPX`; a `/` raises | `tests/namespaces/test_indices_integration.py`: one `I:SPX` `/prev` call returns a row for `I:SPX` |
@@ -4344,3 +4355,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 38 | Whether crypto range and `/prev` 1-day bars cover the UTC day: compare them with the same day rebuilt from 1-minute bars | Item 1's loud check: a stamp elsewhere than a UTC day boundary fails | `tests/namespaces/test_crypto.py`: as item 1 | `tests/namespaces/test_crypto_integration.py`: rebuild one day of `X:BTCUSD` from `minute_aggs_v1` over the UTC day and over the New York day; record which matches the range and `/prev` bars |
 | 39 | Whether grouped daily and `day_aggs_v1` hold the same pairs on a day, for forex and crypto | `AUTO` keeps one source for crypto 1-day bars; nothing assumes the sets match | `tests/datasets/test_history_source.py`: crypto 1-day bars keep one source whatever the symbol count | `tests/namespaces/test_forex_integration.py`, `tests/namespaces/test_crypto_integration.py`: one day of `dm.ALL` 1-day bars from both sources; record the pairs only one holds |
 | 40 | Which session a futures bar of several sessions or longer is labelled with (`SessionEndDate` of its first or last session), and how such bars are aligned | Futures bars of a session or longer with `multiplier` above 1 named by dates raise `ValueError` ("pass datetimes, or multiplier=1"); named by datetimes, they are kept by their own window | `tests/datasets/test_history_source.py`, `tests/namespaces/test_futures.py`: the refusal for 2-session, 2-week, and 2-month bars | `tests/namespaces/test_futures_integration.py`: 2-session and 2-month bars of ES over a quarter; record each bar's `Timestamp` and `SessionEndDate` |
+| 41 | Whether Massive keeps an IPO's `issuer_name` unchanged while the offering moves through its statuses (rumor or pending, new, history, postponed, withdrawn); the vendor documents it only as "Name of issuer" | `stocks.ipos` upserts by `Symbol` and `IssuerName`, so two issuers of one ticker stay apart; were Massive to revise a name, the row under the old name would stay beside the new one, since `UPSERT` never deletes | `tests/namespaces/test_stocks.py`: two issuers of one ticker poll as two rows | `tests/namespaces/test_stocks_integration.py`: a year of IPOs; record every ticker whose rows carry more than one `issuer_name` |

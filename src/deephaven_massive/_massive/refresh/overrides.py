@@ -821,6 +821,22 @@ KEY_FIXES: Mapping[tuple[str, str], KeyFix] = MappingProxyType(
             "client builds each event from exactly the keys `type`, `date`, and "
             "`ticker_change`, and would refuse an `event_type` key.",
         ),
+        ("/futures/v1/snapshot", "details.ticker"): KeyFix(
+            wire_key="ticker",
+            reason="The specification's response schema nests the contract's ticker under "
+            '`details`, but its response example and the documentation sample send `"ticker": '
+            '"CBN5"` at the top level of the result, with `details` holding only '
+            "`settlement_date`. The path's own filter `ticker.any_of` and its default sort "
+            "`ticker` name a top-level field too.",
+        ),
+        ("/futures/v1/snapshot", "details.product_code"): KeyFix(
+            wire_key="product_code",
+            reason="The specification's response schema nests the contract's product code under "
+            '`details`, but its response example and the documentation sample send `"product_'
+            'code": "CB"` at the top level of the result, with `details` holding only '
+            "`settlement_date`. The path's own filter `product_code` names a top-level field "
+            "too.",
+        ),
     }
 )
 """`(source, declared key)` to the wire key of a field every documented sample sends under it."""
@@ -1063,13 +1079,13 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
             _FUTURES_PRICE,
         ),
         ("/futures/v1/snapshot", "last_trade.price"): _FUTURES_PRICE,
-        ("/futures/v1/snapshot", "details.product_code"): DescriptionFix(
+        ("/futures/v1/snapshot", "product_code"): DescriptionFix(
             vendor="",
             text="The identifier for the contract's product.",
             reason="Massive gives the snapshot's product code no description, which leaves the "
             "`futures.snapshots` column blank. The text is Massive's own for the same field of "
-            "the contracts endpoint (`/futures/v1/contracts` `product_code`); the snapshot's "
-            "`details` describe the same contract.",
+            "the contracts endpoint (`/futures/v1/contracts` `product_code`); each snapshot "
+            "row describes one contract, as each contracts row does.",
         ),
     }
 )
