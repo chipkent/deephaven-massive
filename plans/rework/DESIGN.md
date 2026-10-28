@@ -1553,9 +1553,13 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   options, `I:` indices, `C:` forex, `X:` crypto), a symbol without one is a stock, and that
   class's rules apply unchanged: `["X:BTCUSD", "i:spx", "aapl"]` normalizes to
   `("AAPL", "I:SPX", "X:BTCUSD")`. A WebSocket dataset always declares its class.
-- A `Table` must have a `Symbol` column. Streams listen to it and subscribe or unsubscribe as
-  rows are added or removed. Polls re-read it each cycle. Its rows may use any accepted input
-  form: every consumer reads the table through one canonicalized view
+- A `Table` must have a `Symbol` column. A refreshing table is reactive: streams listen to it and
+  subscribe or unsubscribe as rows are added or removed, and polls re-read it each cycle. A
+  static (non-refreshing) table is a fixed symbol list for the stream verbs: read once when the
+  verb is called, as `fetch()` and `history()` read any table, it opens the same stream as the
+  equal symbol list, and one holding no valid symbol raises `ValueError`. `poll()` re-reads it
+  each cycle, which for a static table returns the same symbols every time. Its rows may use
+  any accepted input form: every consumer reads the table through one canonicalized view
   (`canonical_view` in `_tables/watchlist.py`), so `last_by()`'s `where_in` filter and the subscribed topics
   agree on `C:EURUSD` whether the row says `EUR/USD` or `C:EURUSD`. A row that is not a valid
   symbol for the class matches nothing and is logged once at WARNING.
@@ -2140,8 +2144,11 @@ Then: record `HostDecision(delayed host, DELAYED, "server verdict: <message>")` 
 decision of the pair and rewrites its `Transport=REST` row; log a WARNING; move the connection's
 streams to the delayed host's connection, which starts after the backoff; close the old one;
 and do not fail the streams. The streams' `m.streams()` rows show the new host. Since the pair
-then resolves to `DELAYED`, this happens at most once per (class, family) per session. In every other case the verdict is an
-`EntitlementError` for that step's streams.
+then resolves to `DELAYED`, this happens at most once per (class, family) per session. A step can
+be refused more than once: a step of more than 1,000 topics goes out in several subscribe frames,
+and each frame may be refused. A later verdict for a step whose connection is already moving is
+part of that move: it neither starts another move nor fails the streams. In every other case the
+verdict is an `EntitlementError` for that step's streams.
 
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
 `error` for the stream's topic, or REST 403 for `poll()`), a fatal WebSocket handshake error
@@ -2528,9 +2535,10 @@ table, so the queue stays bounded however fast rows arrive.
 | `Recency` | `REALTIME`, `DELAYED`, `UNKNOWN` |
 | `Evidence` | the evidence string of [section 13.2](#132-host-decision) |
 | `State` | `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`, `RECONNECTING`, `FAILED`, `CLOSED` |
-| `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts |
+| `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts; rewritten on every acknowledgement, refusal, and `NO_ACK`, also while a subscription step is in flight |
+| `BufferedRows` | WebSocket connections only (0 on `REST` rows): rows received and waiting for the connection's flush thread; every family row of a connection shows the same count. The row is rewritten at least once a second while the count is above zero. Rows are never dropped; above `BACKLOG_WARNING_ROWS` (1,000,000) a WARNING says the flushes are falling behind, logged again only after the backlog has fallen below half of it |
 | `Reconnects` | count |
-| `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant` |
+| `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant`; `NextReconnectAt` is set only while the connection waits for its next attempt (`RECONNECTING`, `WAITING_SLOT`) |
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
 | `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra) and `channel:field-` (missing), sorted, truncated at 200 characters |
 
@@ -2587,7 +2595,7 @@ without the GIL.
 | verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
-| reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
+| reaper, one per session | library | `scope.release()`; stream held-result counts; for a session collected without `close()`, the session's closers, which close its connections and wait up to `JOIN_TIMEOUT` (5 s) for each connection's threads | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (under the registry lock: unmaps the key; deletes the record, or marks it for the last hold to delete); `call_soon_threadsafe` | sends; JVM calls; blocking |

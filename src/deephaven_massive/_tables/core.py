@@ -939,8 +939,9 @@ class SessionCore:
     def fail_stream(self, stream_id: int, error: str) -> None:
         """Record that a stream failed and stop reusing it for new verbs.
 
-        Called by the transport after it fails the stream's table (`publish_failure`). The
-        stream's row becomes `FAILED` with `error`, and its key is unmapped, so the next verb
+        Called by the transport just before it fails the stream's table (`publish_failure`),
+        so a verb that finds the table failed always finds the failure recorded. The stream's
+        row becomes `FAILED` with `error`, and its key is unmapped, so the next verb
         with the same key opens a fresh stream instead of returning the dead table. A
         registered `poll()` table's row becomes `FAILED` the same way. The failed
         stream's record stays in the registry until its holds are released and its blink table

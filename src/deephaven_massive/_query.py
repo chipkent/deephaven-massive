@@ -371,6 +371,12 @@ class StreamQuery(QueryBase):
     connection raise `ValueError` at once; those of a reactive symbol table are deferred
     instead (`Deferred` in `m.streams()`).
 
+    A refreshing `Table` passed as symbols is reactive: the stream subscribes and unsubscribes
+    as its rows change. A static (non-refreshing) `Table` is a fixed symbol list instead, read
+    once when the verb is called, as `fetch()`, `poll()`, and `history()` read one: the stream
+    is the one an equal symbol list opens, and a table with no valid symbol raises
+    `ValueError`.
+
     No namespace declares a dataset of this kind yet, so no query can be built and there is no
     example here yet.
     """
@@ -386,7 +392,24 @@ class StreamQuery(QueryBase):
         """
         return self._spec.channels[self._request.timespan]
 
-    def _stream(self, shape: Callable[[Table], Table]) -> Table:
+    def _stream_request(self) -> Request:
+        """Return the request the stream is opened for, with a static symbol table read once.
+
+        A static table cannot be listened to, so it is read now, like `fetch()` reads one
+        (`_read_symbol_table`), and becomes the sorted tuple of its valid symbols; a refreshing
+        table stays reactive. A static table with no valid symbol raises the `ValueError` of
+        `_read_symbol_table`.
+
+        Returns:
+            The request.
+        """
+        request = self._request
+        symbols = request.symbols
+        if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
+            return replace(request, symbols=_read_symbol_table(self._core, self._spec, symbols))
+        return request
+
+    def _stream(self, shape: Callable[[Table], Table], request: Request) -> Table:
         """Shape a live result from this query's stream, creating the stream if needed.
 
         The result is the shape, described last (`describe`): an append-only or ring table
@@ -396,6 +419,7 @@ class StreamQuery(QueryBase):
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
                 `blink()`, whose described copy is then a new table of its own.
+            request: The request from `_stream_request`.
 
         Returns:
             The tracked live result.
@@ -404,7 +428,7 @@ class StreamQuery(QueryBase):
         schema = self._core.catalog.dataset_schema(spec)
         return self._core.stream_result(
             spec,
-            self._request,
+            request,
             channel=self._channel,
             build=lambda blink: describe(shape(blink), spec, schema),
         )
@@ -415,6 +439,9 @@ class StreamQuery(QueryBase):
         Each call returns a new table, a described copy of the stream's blink table, with its
         own liveness scope, so two `blink()` results are released independently.
 
+        A static symbol table is read once, now (see the class); one that holds no valid symbol
+        raises `ValueError`.
+
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -422,12 +449,15 @@ class StreamQuery(QueryBase):
             A live blink table in the dataset's schema.
         """
         self._core.require_verb_thread()
-        return self._stream(lambda blink: blink)
+        return self._stream(lambda blink: blink, self._stream_request())
 
     def append_only(self) -> Table:
         """Return every row received since the call, in arrival order.
 
         Memory grows with the stream; use `ring()` to bound it.
+
+        A static symbol table is read once, now (see the class); one that holds no valid symbol
+        raises `ValueError`.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -436,13 +466,16 @@ class StreamQuery(QueryBase):
             A live append-only table in the dataset's schema.
         """
         self._core.require_verb_thread()
-        return self._stream(blink_to_append_only)
+        return self._stream(blink_to_append_only, self._stream_request())
 
     def ring(self, capacity: int) -> Table:
         """Return the most recent `capacity` rows received.
 
         A `capacity` that is not an `int` raises `TypeError`, and one outside 1 to 2**31 - 1
         raises `ValueError` (`require_positive_int`).
+
+        A static symbol table is read once, now (see the class); one that holds no valid symbol
+        raises `ValueError`.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -455,7 +488,7 @@ class StreamQuery(QueryBase):
         """
         self._core.require_verb_thread()
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
-        return self._stream(lambda blink: ring_table(blink, rows))
+        return self._stream(lambda blink: ring_table(blink, rows), self._stream_request())
 
     def last_by(self, by: str | Sequence[str] | None = None) -> Table:
         """Return the latest row per key, by default one row per `Symbol`.
@@ -472,6 +505,9 @@ class StreamQuery(QueryBase):
         that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
         unknown column raises `ValueError`.
 
+        A static symbol table is read once, now (see the class); one that holds no valid symbol
+        raises `ValueError`.
+
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -485,9 +521,10 @@ class StreamQuery(QueryBase):
         """
         self._core.require_verb_thread()
         keys = self._last_by_keys(by)
-        symbols = self._request.symbols
+        request = self._stream_request()
+        symbols = request.symbols
         if not isinstance(symbols, SymbolTable):
-            return self._stream(lambda blink: blink.last_by(list(keys)))
+            return self._stream(lambda blink: blink.last_by(list(keys)), request)
         watch = symbols.table
         asset_class = self._spec.asset_class
         if "Symbol" in keys:
@@ -495,13 +532,15 @@ class StreamQuery(QueryBase):
             return self._stream(
                 lambda blink: blink.last_by(list(keys)).where_in(
                     canonical_view(asset_class, watch), "Symbol"
-                )
+                ),
+                request,
             )
         # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
         return self._stream(
             lambda blink: blink.where_in(canonical_view(asset_class, watch), "Symbol").last_by(
                 list(keys)
-            )
+            ),
+            request,
         )
 
     def _last_by_keys(self, by: object) -> tuple[str, ...]:

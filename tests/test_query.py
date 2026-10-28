@@ -591,10 +591,46 @@ def test_stream_verbs_build_results(
 def test_last_by_follows_a_reactive_table(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
-    watchlist = new_table([string_col("Symbol", ["AAPL"])])
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     current = trades(massive_session, watchlist).last_by()
     assert current.is_refreshing
     massive_session.release(current)
+
+
+def test_a_static_symbol_table_is_a_fixed_symbol_list(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # Read once, like fetch() reads it: every verb opens the stream an equal symbol list opens.
+    fixed = trades(massive_session, new_table([string_col("Symbol", ["msft", "AAPL", "$$$"])]))
+    results = [
+        fixed.blink(),
+        fixed.append_only(),
+        fixed.ring(3),
+        fixed.last_by(),
+        fixed.last_by("Exchange"),
+        trades(massive_session, ["AAPL", "MSFT"]).blink(),
+    ]
+    assert all(r.is_refreshing for r in results)
+    assert len(fake_streams.opened) == 1
+    assert massive_session._core.diagnostics.barrier().wait(10.0)
+    [row] = dh_to_pylist(massive_session.streams())
+    assert (row["SymbolCount"], row["Symbols"]) == (2, "AAPL, MSFT")
+    for result in results:
+        massive_session.release(result)
+
+
+@pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
+def test_a_static_symbol_table_without_a_valid_symbol_opens_no_stream(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
+) -> None:
+    for content in ([], ["$$$"]):
+        q = trades(massive_session, new_table([string_col("Symbol", content)]))
+        call = getattr(q, verb)
+        with pytest.raises(ValueError, match="the symbol table holds no valid symbols"):
+            call(3) if verb == "ring" else call()
+    assert fake_streams.opened == []
 
 
 def test_bar_channels_follow_the_timespan(

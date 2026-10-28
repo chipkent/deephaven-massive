@@ -1619,3 +1619,116 @@ def test_a_topic_reconnects_once_per_session(harness: Harness) -> None:
     assert harness.connections.first_no_ack("/stocks", "T.AAPL")
     assert not harness.connections.first_no_ack("/stocks", "T.AAPL")
     assert harness.connections.first_no_ack("/options", "T.AAPL")
+
+
+def test_a_verdict_on_every_frame_of_a_step_moves_the_streams_without_failing_them(
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # A step of more than 1,000 topics goes out in two subscribe frames, and the server refuses
+    # each. The second verdict must find the move under way, not fail the streams being moved.
+    harness = Harness(fake_ws_server, decide=unknown_futures)
+    try:
+        harness.connections._reconnect_backoff = 0.01
+        message = "Real-time data requires an upgrade"
+        fake_ws_server.step_refusals.extend([message] * 2)
+        record = harness.connections._record_verdict
+
+        def record_after_both(
+            asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
+        ) -> None:
+            # The hand-over waits for the verdict to be recorded: hold it until both refusals
+            # have reached the old connection, so they arrive while its streams are moving.
+            harness.wait(lambda h: sum(s.kind is StatusKind.REFUSED for s in h.statuses) == 2)
+            record(asset_class, family, decision)
+
+        harness.connections._record_verdict = record_after_both
+        symbols = [f"S{i:04}" for i in range(1001)]
+        result = harness.query(FUTURES, symbols).blink()
+        harness.wait(lambda h: h.opens == 2)
+        assert harness.urls == ["wss://socket.test/futures", "wss://delayed.test/futures"]
+        harness.subscribed("T.S0000", "T.S1000")
+        # The old connection's last flush applies whatever failure it had queued.
+        wait_for(
+            lambda: (
+                not any(
+                    t.name == "massive-flush socket.test/futures" for t in threading.enumerate()
+                )
+            )
+        )
+        assert len(harness.verdicts) == 1
+        [stream] = streams_of(harness, dh_to_pylist)
+        assert (stream["State"], stream["Error"], stream["Host"]) == (
+            "RUNNING",
+            None,
+            "delayed.test",
+        )
+        harness.session.release(result)
+    finally:
+        harness.close()
+
+
+def test_a_static_symbol_table_subscribes_its_symbols_once(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    fixed = new_table([string_col("Symbol", ["AAPL", "MSFT"])])
+    results = [harness.query(TRADES, fixed).blink(), harness.query(TRADES, fixed).last_by()]
+    harness.subscribed("T.AAPL", "T.MSFT")
+    [stream] = streams_of(harness, dh_to_pylist)
+    assert (stream["SymbolCount"], stream["State"]) == (2, "RUNNING")
+    for result in results:
+        harness.session.release(result)
+
+
+def test_the_next_reconnect_time_is_shown_only_while_waiting(harness: Harness) -> None:
+    result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    connection = harness.connection()
+
+    def after(*states: tuple[WsState, float | None]) -> int | None:
+        for state, detail in states:
+            connection._on_state(state, detail)
+        return connection._next_reconnect_at
+
+    assert harness.on_loop(connection, lambda: after((WsState.RECONNECTING, 2.0))) == 2 * 10**9
+    assert harness.on_loop(connection, lambda: after((WsState.CONNECTING, None))) is None
+    harness.session.release(result)
+
+
+def test_a_connections_drift_key_is_fixed_when_it_is_created(harness: Harness) -> None:
+    forex = harness.query(FOREX, ["EUR/USD"]).blink()
+    harness.subscribed("C.EUR-USD")
+    connection = harness.connection("wss://socket.test/forex")
+    key = ("WS", "forex", ChannelFamily.TICK.value)
+    assert connection.key == key
+    fmv = harness.query(FOREX_FMV, ["EUR/USD"]).blink()  # joins the same connection
+    harness.subscribed("FMV.EUR-USD")
+    with harness.session._core.registry_lock:
+        assert connection.families == {ChannelFamily.TICK, ChannelFamily.FMV}
+    assert connection.key == key
+    harness.session.release(forex)
+    harness.session.release(fmv)
+
+
+def test_buffered_rows_are_shown_until_they_are_published(
+    harness: Harness,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ws, "_BACKLOG_ROW_DELAY", 0.05)
+    result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    connection = harness.connection()
+    monkeypatch.setattr(ws, "_MESSAGE_ROW_NS", 0)  # every message rewrites the row
+    harness.send(trade("AAPL"), trade("AAPL"))
+    assert harness.on_loop(connection, lambda: connection.flusher.backlog) == 2
+    [row] = connections_of(harness, dh_to_pylist)
+    assert row["BufferedRows"] == 2
+    harness.flush()  # no message follows: the row is rewritten by itself once the rows went
+
+    def shown() -> int:
+        [row] = connections_of(harness, dh_to_pylist)
+        return cast("int", row["BufferedRows"])
+
+    wait_for(lambda: shown() == 0)
+    harness.session.release(result)

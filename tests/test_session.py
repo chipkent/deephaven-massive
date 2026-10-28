@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import new_table, time_table
+from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import string_col
 from deephaven.execution_context import make_user_exec_ctx
 from deephaven.table_listener import listen
@@ -305,14 +305,18 @@ def test_all_and_reactive_symbols_in_stream_rows(
     massive_session: dm.MassiveSession, stream_rows: Callable[[], list[dict[str, Any]]]
 ) -> None:
     every = stream_query(massive_session, dm.ALL).blink()
-    watch = stream_query(massive_session, new_table([string_col("Symbol", ["A"])])).blink()
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])  # refreshing
+    watch = stream_query(massive_session, watchlist).blink()
+    fixed = stream_query(massive_session, new_table([string_col("Symbol", ["A"])])).blink()
     rows = stream_rows()
     assert [(r["SymbolCount"], r["Symbols"]) for r in rows] == [
         (None, "ALL"),
         (None, "reactive table"),
+        (1, "A"),  # a static table is a fixed symbol list
     ]
     massive_session.release(every)
     massive_session.release(watch)
+    massive_session.release(fixed)
 
 
 # --- close() ---------------------------------------------------------------------------------

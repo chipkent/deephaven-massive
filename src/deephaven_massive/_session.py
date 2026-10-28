@@ -374,9 +374,11 @@ class MassiveSession:
         """Return the live diagnostics table of connections and host decisions.
 
         One row per WebSocket connection plus one `Transport=REST` row per resolved (asset
-        class, channel family), with the host, recency, evidence, state, topic counts, the
-        last error, and `SchemaDrift`: the fields a connection's frames had beyond the
-        documented schema (`channel:field+`) or lacked (`channel:field-`). The table is the
+        class, channel family), with the host, recency, evidence, state, topic counts,
+        `BufferedRows` (rows a connection received that its flush thread has not published
+        yet; a WARNING is logged when they pass 1,000,000), the last error, and `SchemaDrift`:
+        the fields a connection's frames had beyond the documented schema (`channel:field+`)
+        or lacked (`channel:field-`). The table is the
         session's; do not edit it. After `close()` this raises
         `MassiveError` (see `SessionCore.require_open`).
 
