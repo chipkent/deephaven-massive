@@ -20,7 +20,17 @@ uv run pytest -m integration               # live tests only (owner, with MASSIV
 uv run pytest -m integration_smoke         # every dataset and verb once, unattended (owner)
 uv run pytest -m integration_limits        # the live tests that exceed Massive's limits (owner)
 uv build                                   # sdist and wheel
+PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest -q   # free-threaded
 ```
+
+The free-threaded run keeps its own environment, `.venv-314t`: a plain `uv run --python 3.14t`
+would replace `.venv`. CI's build job checks the built wheel with `scripts/check_wheel.py`,
+which runs in a fresh environment holding only the wheel and `deephaven-server`, starts a
+server, imports every shipped module, and renders the column reference from the installed
+catalog to compare it with `docs/datasets/`. To run it yourself, install `dist/*.whl` and
+`deephaven-server` into a new virtual environment with `uv venv` and `uv pip install`, then
+run that environment's `python -I scripts/check_wheel.py docs/datasets` from the repository
+root.
 
 Live integration tests (`tests/**/test_*_integration.py`) carry the `integration` marker, which
 `addopts` deselects, so no default run, CI's included, runs them. They also skip without
