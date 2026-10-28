@@ -593,8 +593,8 @@ TRANSPORT_LABELS: Final[Mapping[Transport, str]] = MappingProxyType(
 )
 """How every text a user reads spells each transport: the key-column descriptions, the
 `SuppliedBy` column of `columns()`, and the column reference all use it, so a filter copied
-from one works on another. The `Transport` values are internal names and appear only in the
-diagnostics tables. Read-only."""
+from one works on another. The `Transport` values stay internal names, which the diagnostics
+tables show. Read-only."""
 
 _KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The instrument, in the library's canonical symbol form.",

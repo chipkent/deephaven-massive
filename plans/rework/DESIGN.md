@@ -968,8 +968,8 @@ transports one way, `REST`, `flat files`, and `WebSocket` (`schema.TRANSPORT_LAB
 key-column descriptions of [section 19.4](#194-generated-schemas) rule 3, `columns()`'s
 `SuppliedBy`, and the column reference's **Supplied by**, so a filter copied from a page
 (``cols.where("SuppliedBy = `WebSocket`")``) works on `columns()`. The `Transport` enum values
-(`REST`, `FLAT_FILES`, `WS`) are internal names; only the diagnostics tables of
-[section 17](#17-diagnostics) show them.
+(`REST`, `FLAT_FILES`, `WS`) stay internal names, which the diagnostics tables of
+[section 17](#17-diagnostics) show.
 
 **1. Every result is described.** Deephaven 42.7 stores column descriptions as the table
 attribute `ColumnDescriptions` and a table description as `TableDescription`, set through
