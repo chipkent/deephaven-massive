@@ -583,6 +583,9 @@ def test_trades_fetch_reads_the_last_trade(
     assert (row["Symbol"], row["Timestamp"], row["Price"]) == (TSLA, 1617901342969834000, 115.55)
     assert (row["Size"], row["Exchange"], row["Conditions"]) == (25.0, 312, [227])
     assert row["ParticipantTimestamp"] == 1617901342969834000
+    with pytest.raises(ValueError, match=r"use m\.options\.snapshots\(dm\.ALL\)\.fetch\(\)"):
+        rest_session.options.trades(dm.ALL).fetch()
+    assert len(sent(fake_rest)) == 1
 
 
 def test_trades_and_quotes_history_read_a_day_over_rest(
@@ -709,9 +712,10 @@ def test_snapshots_ask_for_options_250_contracts_a_request(
     contracts = [f"O:NCLH221014C{strike:08d}" for strike in range(1000, 1000 + 251)]
     rest_session.options.snapshots(contracts).fetch()
     requests = sent(fake_rest)
-    assert [len(q["ticker.any_of"][0].split(",")) for _, q in requests] == [250, 1]
+    # The two requests run concurrently, so they arrive in either order.
+    chunks = sorted((q["ticker.any_of"][0].split(",") for _, q in requests), key=len)
+    assert chunks == [contracts[-1:], contracts[:250]]
     assert all(q["type"] == ["options"] and q["limit"] == ["250"] for _, q in requests)
-    assert requests[1][1]["ticker.any_of"] == [contracts[-1]]
 
 
 def test_snapshots_keep_the_error_row_of_a_contract(

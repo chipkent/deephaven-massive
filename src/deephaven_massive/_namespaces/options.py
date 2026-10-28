@@ -12,9 +12,8 @@ columns: those come from the generated wire schemas.
 
 Option symbols are OCC symbols. Every method accepts them with or without the `O:` prefix
 (`AAPL250117C00150000` or `O:AAPL250117C00150000`), and the `Symbol` column always holds the
-prefixed form (`normalize` in `_datasets/symbols.py`). Rows that describe a contract of another
-instrument, the chain, the snapshots, and the contract reference data, carry that instrument as
-`Underlying`.
+prefixed form (`normalize` in `_datasets/symbols.py`). The rows of the chain, the snapshots,
+and the contract reference data also carry the contract's underlying instrument as `Underlying`.
 
 One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count topics
 against that cap and raise `ValueError` before subscribing a static list that would cross it.
