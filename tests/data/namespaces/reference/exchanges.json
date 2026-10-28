@@ -1,0 +1,26 @@
+{
+  "count": 2,
+  "request_id": "31d59dda-80e5-4721-8496-d0d32a654afe",
+  "results": [
+    {
+      "acronym": "AMEX",
+      "asset_class": "stocks",
+      "id": 1,
+      "locale": "us",
+      "mic": "XASE",
+      "name": "NYSE American, LLC",
+      "operating_mic": "XNYS",
+      "participant_id": "A",
+      "type": "exchange",
+      "url": "https://www.nyse.com/markets/nyse-american"
+    },
+    {
+      "asset_class": "stocks",
+      "id": 62,
+      "locale": "us",
+      "name": "OTC Equity Security",
+      "type": "SIP"
+    }
+  ],
+  "status": "OK"
+}

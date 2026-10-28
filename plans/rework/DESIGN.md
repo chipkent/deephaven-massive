@@ -144,7 +144,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 
 ## 3. Exports
 
-`deephaven_massive/__init__.py` exports exactly these 21 names and nothing else:
+`deephaven_massive/__init__.py` exports exactly these 22 names and nothing else:
 
 ```python
 import deephaven_massive as dm
@@ -174,6 +174,7 @@ dm.SeriesType
 dm.Timeframe
 dm.Order
 dm.Market
+dm.TickerType
 dm.Locale
 dm.ConditionDataType
 dm.Sip
@@ -220,7 +221,7 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 src/deephaven_massive/
 __init__.py              public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
 _config.py               MassiveConfig (section 5)
-_enums.py                the fourteen public enums, Recency, ChannelFamily, _require_enum
+_enums.py                the fifteen public enums, Recency, ChannelFamily, _require_enum
 _types.py                Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py               MassiveError (.status, .request_id), AuthenticationError, EntitlementError,
                          from_wire
@@ -854,7 +855,7 @@ DaySpan = Literal[Timespan.DAY]
 FuturesSpan = Literal[Timespan.SECOND, Timespan.MINUTE, Timespan.HOUR, Timespan.SESSION,
                       Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR]   # no DAY
 
-class _Stocks:   # same shape on m.options and m.forex; m.indices and m.crypto have no `adjusted`
+class _Stocks:   # same shape on m.options; m.indices, m.forex, and m.crypto have no `adjusted`
     @overload
     def bars(self, symbols: Symbols, timespan: StreamSpan = Timespan.MINUTE, *,
              multiplier: Literal[1] = 1, adjusted: bool = True) -> StreamHistoryQuery: ...
@@ -1150,7 +1151,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
 | `quotes(symbols)` | StreamHistoryLatestQuery | `C` | fetch `/v1/last_quote/currencies/{from}/{to}`; history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold) | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
 | `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
 | `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/forex/{gainers\|losers}` | |
@@ -1173,44 +1174,55 @@ All return `Query`.
 
 | Method | REST |
 |---|---|
-| `tickers(*, symbols=None, market: Market \| None = None, type: str \| None = None, exchange: str \| None = None, cusip: str \| None = None, cik: str \| None = None, date: DateLike \| None = None, active: bool = True, search: str \| None = None, …F)` | `/v3/reference/tickers`. `cusip` and `cik` are `str`, as the spec types them. |
+| `tickers(*, symbols=None, market: Market \| None = None, ticker_type: TickerType \| None = None, exchange: str \| None = None, cusip: str \| None = None, cik: str \| None = None, date: DateLike \| None = None, active: bool = True, search: str \| None = None, …F)` | `/v3/reference/tickers`. `cusip` and `cik` are `str`, as the spec types them. `ticker_type` is sent as the wire parameter `type`. |
 | `ticker_details(symbols, *, date: DateLike \| None = None)` | `/v3/reference/tickers/{t}` per symbol |
 | `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
 | `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
 | `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(*, symbols=None, …T)`, axis `published_utc` | `/v2/reference/news` |
+| `news(*, symbols=None, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` is one symbol: a list of several raises `ValueError` (build one query per symbol) and a `Table` raises `TypeError` |
 | `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
-| `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions` |
+| `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, condition_id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions`; `condition_id` is sent as the wire parameter `id` |
 | `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
 | `market_holidays()` | `/v1/marketstatus/upcoming` |
 
-`AssetClass.FOREX` is sent as `fx` on these endpoints. `AssetClass.FUTURES` has no value on
-these endpoints and raises `ValueError`.
+`AssetClass.FOREX` is sent as `fx` on these endpoints. Each endpoint accepts the classes its
+generated `asset_class` enum lists, and any other class raises `ValueError` naming those it
+accepts: `ticker_types` takes every class but futures, `exchanges` every class but indices, and
+`conditions` neither futures nor indices.
 
 ### 8.8 `m.indicators`
 
 All return `Query`. The symbol prefix selects the asset class. The axis is `timestamp`.
 
 ```python
-sma(symbols, window: int, *, timespan: Timespan = Timespan.DAY, multiplier: int = 1,
+sma(symbols, window: int, *, timespan: Timespan = Timespan.DAY,
     series_type: SeriesType = SeriesType.CLOSE, adjusted: bool | None = None,
-    expand_underlying: bool = False, …T)
+    start: DateLike | None = None, end: DateLike | None = None,
+    order: Order | None = None, limit: int | None = None,
+    filters: Mapping[str, FilterValue] | None = None)
 ema(...)   # same signature as sma
 rsi(...)   # same signature as sma
 macd(symbols, *, short_window: int, long_window: int, signal_window: int,
-     timespan: Timespan = Timespan.DAY, multiplier: int = 1,
+     timespan: Timespan = Timespan.DAY,
      series_type: SeriesType = SeriesType.CLOSE, adjusted: bool | None = None,
-     expand_underlying: bool = False, …T)
+     start: DateLike | None = None, end: DateLike | None = None,
+     order: Order | None = None, limit: int | None = None,
+     filters: Mapping[str, FilterValue] | None = None)
 ```
 
-REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol. `Timespan.SESSION` is rejected
-here. The indicator paths have an `order` parameter but no `sort`, so their `…F` block keeps
-`order` and has no `sort` ([section 9](#9-filters)). Crypto symbols are served by the
-`{cryptoTicker}` templates, chosen per symbol through `DatasetSpec.fetch_paths_by_class`
-([section 13.4](#134-rest)). Those templates have no `adjusted` parameter, so `adjusted`
-defaults to None, which sends nothing and leaves Massive's default in force. An explicit
-`True` or `False` is sent where the chosen path declares `adjusted`, and raises `ValueError`
-for a symbol whose path does not (a crypto symbol), rather than being dropped silently.
+REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol. The axis is half-open
+(`timestamp.gte`/`.lt`). The indicator paths have an `order` parameter but no `sort`, so the
+signature keeps `order` and has no `sort` ([section 9](#9-filters)). They have no multiplier,
+so none is offered. `expand_underlying` is not offered either: the underlying bars it adds
+are not rows of the table, so the library always sends `expand_underlying=false`
+(`DatasetSpec.fixed_params`), which also reserves it from `filters`. `Timespan.SECOND` and `Timespan.SESSION` are rejected with
+`ValueError`: the endpoints' timespan enum runs from `minute` to `year`. Crypto symbols are
+served by the `{cryptoTicker}` templates, chosen per symbol through
+`DatasetSpec.fetch_paths_by_class` ([section 13.4](#134-rest)). Those templates have no
+`adjusted` parameter, so `adjusted` defaults to None, which sends nothing and leaves Massive's
+default in force. An explicit `True` or `False` is sent where the chosen path declares
+`adjusted`, and raises `ValueError` for a symbol whose path does not (a crypto symbol), rather
+than being dropped silently.
 
 ### 8.9 `m.economy`
 
@@ -1275,7 +1287,6 @@ Excluded items fall into two lists.
 | Endpoint | Reason |
 |---|---|
 | `/v3/reference/dividends`, `/v3/reference/splits` | Deprecated; replaced by `/stocks/v1/*`. |
-| `/v1/summaries` | Not in the documentation index. |
 | Crypto `/book` REST endpoint; WebSocket `XL2` | Deprecated and sunset (the REST path is marked deprecated in the OpenAPI spec). |
 | WebSocket `LV`; Launchpad hosts and paths | Product retired. |
 | `/v1/historic/*`, `/v2/ticks/*` | Deprecated 2022 (marked deprecated in the OpenAPI spec); replaced by `/v3/trades` and `/v3/quotes`. |
@@ -1290,6 +1301,7 @@ Documentation only:
 | Endpoint | Reason |
 |---|---|
 | `/benzinga/v1/transcripts` | Never existed. |
+| `/v1/summaries` | Removed from the OpenAPI spec (2026-10-28); it was never in the documentation index. |
 | `/benzinga/v1/news` | Sunset; replaced by `/benzinga/v2/news`. Absent from the OpenAPI spec and the documentation at the pinned snapshot. |
 | `/vX/reference/financials` | Sunset; replaced by `/stocks/financials/v1/*`. Absent from the OpenAPI spec and the documentation at the pinned snapshot. |
 | WebSocket `/futures/{venue}` | Not documented: the futures WebSocket pages list `/futures` only, and `websocket.json` has no such channel at the pinned snapshot. |
@@ -1487,7 +1499,7 @@ free-threaded target: pyarrow, numpy, and pandas no longer publish cp313t wheels
 
 **Criterion.** Every closed set of values in a public signature is a `StrEnum` whose values are
 Massive's wire strings. Signatures take only the enum. There are no string `Literal`
-categoricals and no `Enum | Literal` unions. Open sets (`sort`, `form_type`, `type`) are
+categoricals and no `Enum | Literal` unions. Open sets (`sort`, `form_type`) are
 `str`. The one spelling per value gives tab completion in every IDE, including the Deephaven web
 console, and typo safety at both type-check time and run time.
 
@@ -1511,6 +1523,7 @@ has the same value set as that parameter.
 | `Timeframe` | ANNUAL, QUARTERLY, TRAILING_TWELVE_MONTHS | `annual`, `quarterly`, `trailing_twelve_months` (the income and cash flow statements document all three, the balance sheets the first two) | `stocks.financials` statements |
 | `Order` | ASC, DESC | `asc`, `desc` | the `…F` block |
 | `Market` | STOCKS, OTC, INDICES, FX, CRYPTO | `stocks`, `otc`, `indices`, `fx`, `crypto` | `reference.tickers` |
+| `TickerType` | CS, ADRC, ADRP, ADRR, UNIT, RIGHT, PFD, FUND, SP, WARRANT, INDEX, ETF, ETN, OS, GDR, OTHER, NYRS, AGEN, EQLK, BOND, ADRW, BASKET, LT | the same codes, upper case | `reference.tickers` (`ticker_type`, sent as `type`); checked against the generated `type` enum of `/v3/reference/tickers` |
 | `Locale` | US, GLOBAL | `us`, `global` | `reference.ticker_types`, `reference.exchanges` |
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
@@ -1618,8 +1631,8 @@ path per symbol class (`fetch_paths_by_class`, the indicators, whose crypto bars
 days) serves class-specific data, so each REST request, and `history()`, follows the class its
 own symbols share (`symbol_class`): a crypto or forex ticker's days are UTC days, a stock,
 option, or index ticker's New York days, and a request with symbols of several classes uses
-New York. A filter on a publication time does not depend on which tickers are listed, so
-`m.reference.news(["AAPL", "X:BTCUSD"], start=...)` asks for one New York window.
+New York. A filter on a publication time does not depend on which ticker the articles
+mention, so `m.reference.news(symbols="X:BTCUSD", start=...)` asks for a New York window.
 
 **Day zone per class.**
 
@@ -2224,7 +2237,7 @@ reaches that instant; comparing full instants, not a time of day, keeps the rule
 every day zone. Futures files are named by session date, and their clock starts at the next
 midnight in America/Chicago, where Massive standardizes futures data. `indices.values` is
 flat-file only.
-`indices.bars` and `crypto.bars` have no `adjusted`, so the predicate is satisfied.
+`indices.bars`, `forex.bars`, and `crypto.bars` have no `adjusted`, so the predicate is satisfied.
 
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
 nothing is split between the sources. A dataset without instruments counts as `ALL`.
@@ -3046,7 +3059,7 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
 | `PARAM_UNITS` | `overrides.py` | `{(path, base parameter): (unit, reason)}`: the unit of every timestamp-like string parameter, and of any other string parameter documented as taking an epoch, or "not an epoch" (sent as date or date-time text) | `/v3/trades` `timestamp` → ns; indicators `timestamp` → ms; aggregate range `{from}`/`{to}` → ms; benzinga `last_updated` → not an epoch |
-| `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, the executable rows of section 8.12 | `/v1/summaries` |
+| `EXCLUSIONS` | `exclusions.py` | `(kind, item, reason)`, the executable rows of section 8.12 | `/stocks/filings/vX/form-5` |
 
 **The naming policy** (owner-approved), applied mechanically by the generator, with no
 per-column exceptions:
@@ -3288,7 +3301,7 @@ entry declares is coercion, which never happens. The conversions:
 
 | `Conversion` | Declared → wire type | Accepts | Used by |
 |---|---|---|---|
-| `iso-text-instant` | `string` → `iso-instant` | ISO-8601 instant text | benzinga analysts and firms `last_updated`, futures market-status `timestamp`, `/v1/marketstatus/now` `serverTime` |
+| `iso-text-instant` | `string` → `iso-instant` | ISO-8601 instant text | benzinga analysts and firms `last_updated`, futures market-status `timestamp`, `/v1/marketstatus/now` `serverTime`, `/v1/marketstatus/upcoming` `open` and `close` |
 | `iso-date-text` | `iso-instant` → `date` | `YYYY-MM-DD` | futures products `last_updated` (sample `"2025-02-22"`) |
 | `quoted-integer` | `long` → `long` | an integer, or decimal digits in text | WebSocket forex `C` `x` (sample `"44"`) |
 | `text-or-integer-id` | `long` or `string` → `string` | text or an integer | the crypto trade ID, one decision: the full-market and movers snapshots `lastTrade.i`, declared text (samples `413131` and `"517478762"`), and WebSocket `XT` `i`, declared an integer (sample `14272084`); TMX `tmx_company_id`, declared an integer (sample `"2208"`) |
@@ -4035,3 +4048,6 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 27 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The reader assumes the canonical form: symbol pushdown compares the file's `ticker` column with canonical symbols, and `Symbol` holds the column as written. Were the files to write `X:EUR-USD`, a symbol request would match no row; that outcome becomes an owner decision | `tests/ingest/test_flatfiles.py`: symbol pushdown keeps the rows whose ticker equals a requested canonical symbol | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |
 | 28 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | A date `start` requests from the session's regular open less 4 days and post-filters `SessionEndDate`; an instant range whose trailing missing files hold a weekday rolls forward to the next file within 4 days of the run's first day | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept | `tests/namespaces/test_futures_integration.py`: `trades` and `bars` of ES for 2025-01-21, and one `YEAR` bar request; record the first row's time and whether the candles arrive |
 | 29 | Day alignment of crypto 1-day bars: every documented REST sample (`/prev`, the aggregates range) stamps a daily bar at midnight New York time, while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC; forex day bars may share the question | Each source's own stamp is kept and documented on `crypto.bars`; `history()` keeps the rows whose `Timestamp` falls in the requested UTC range, and `AUTO` may pick either source by symbol count | `tests/namespaces/test_crypto.py`: the documented REST and flat-file samples round-trip with their own stamps | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `Timestamp` and whether the OHLCV agree |
+| 30 | Whether `/v3/reference/tickers` returns one row per ticker with `active=false`, when delisted listings may reuse a ticker | `reference.tickers` polls keyed by `Symbol`; were several rows to share a ticker, a `poll()` table would keep one of them while `fetch()` shows all | `tests/namespaces/test_reference.py`: the vendor sample decodes with one row per ticker | `tests/namespaces/test_reference_integration.py`: one `tickers(active=False)` request over a letter range; record any ticker on several rows |
+| 31 | Whether `(asset_class, id)` identifies one row of `/v3/reference/exchanges` | `reference.exchanges` polls keyed by `AssetClass` and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `exchanges()` request; record any repeated key |
+| 32 | Whether `(asset_class, type, id)` identifies one row of `/v3/reference/conditions` | `reference.conditions` polls keyed by `AssetClass`, `Type`, and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `conditions()` request; record any repeated key |

@@ -1,0 +1,33 @@
+{
+  "count": 2,
+  "request_id": "req-1",
+  "results": [
+    {
+      "benzinga_firm_id": "5e17143f7da4190001b2eaa6",
+      "benzinga_id": "65eb18289b25ca0001b34332",
+      "firm_name": "B of A Securities",
+      "full_name": "Alice Xiao",
+      "last_updated": "2025-05-19T04:31:12Z",
+      "overall_avg_return": 12.48,
+      "overall_avg_return_percentile": 66.53,
+      "overall_success_rate": 100,
+      "smart_score": 67.94,
+      "total_ratings": 4,
+      "total_ratings_percentile": 32.17
+    },
+    {
+      "benzinga_firm_id": "5e17143f7da4190001b2eaa6",
+      "benzinga_id": "65eb18289b25ca0001b34330",
+      "firm_name": "B of A Securities",
+      "full_name": "Alice Xiao",
+      "last_updated": "2025-05-19T04:31:12Z",
+      "overall_avg_return": 12.48,
+      "overall_avg_return_percentile": 66.53,
+      "overall_success_rate": 100,
+      "smart_score": 67.94,
+      "total_ratings": 4,
+      "total_ratings_percentile": 32.17
+    }
+  ],
+  "status": "OK"
+}

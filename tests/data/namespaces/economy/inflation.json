@@ -1,0 +1,16 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "cpi": 310.45,
+      "cpi_core": 320.1,
+      "cpi_year_over_year": 3.18,
+      "date": "2025-06-01",
+      "pce": 132.73,
+      "pce_core": 131.9,
+      "pce_spending": 20345.6
+    }
+  ],
+  "status": "OK"
+}
