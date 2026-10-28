@@ -24,6 +24,10 @@ Benzinga's profiles of sell-side analysts, with each analyst's firm and track re
 | `TotalRatings` | double | The total number of ratings issued by the analyst included in the performance calculation. | REST | `total_ratings` |
 | `TotalRatingsPercentile` | double | The analyst's percentile rank based on the total number of ratings issued, relative to other analysts. | REST | `total_ratings_percentile` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/benzinga/analyst-details.md>
+
 <a id="benzinga-analyst_insights"></a>
 
 ## `m.partners.benzinga.analyst_insights`
@@ -44,6 +48,10 @@ Benzinga analyst insights on US stocks: a rating, a price target, and the reason
 | `PriceTarget` | double | The current price target set by the analyst. | REST | `price_target` |
 | `Rating` | String | The current rating set by the analyst. | REST | `rating` |
 | `RatingAction` | String | The description of the change in rating from the firm's last rating. Possible values include: downgrades, maintains, reinstates, reiterates, upgrades, assumes, initiates_coverage_on, terminates_coverage_on, removes, suspends, firm_dissolved. | REST | `rating_action` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/benzinga/analyst-insights.md>
 
 <a id="benzinga-ratings"></a>
 
@@ -78,6 +86,10 @@ Analyst rating and price-target actions on US stocks, as reported by Benzinga.
 | `RatingAction` | String | The description of the change in rating from the firm's last rating. Possible values include: downgrades, maintains, reinstates, reiterates, upgrades, assumes, initiates_coverage_on, terminates_coverage_on, removes, suspends, firm_dissolved. | REST | `rating_action` |
 | `Time` | String | The time (formatted as 24-hour HH:MM:SS UTC) when the rating was issued. | REST | `time` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/benzinga/analyst-ratings.md>
+
 <a id="benzinga-consensus_ratings"></a>
 
 ## `m.partners.benzinga.consensus_ratings`
@@ -101,6 +113,10 @@ The consensus of analyst ratings and price targets for each US stock, from Benzi
 | `StrongSellRatings` | long | The count of 'Strong Sell' ratings from contributing analysts. | REST | `strong_sell_ratings` |
 | `Ticker` | String | The requested ticker. | REST | `ticker` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/benzinga/consensus-ratings.md>
+
 <a id="benzinga-bulls_bears_say"></a>
 
 ## `m.partners.benzinga.bulls_bears_say`
@@ -114,6 +130,10 @@ Benzinga's bull case and bear case summaries for US stocks.
 | `BenzingaId` | String | The unique identifier used by Benzinga for this bull/bear case record. | REST | `benzinga_id` |
 | `BullCase` | String | A concise summary of the bullish investment thesis, highlighting positive aspects, growth opportunities, and reasons why the stock could appreciate in value. | REST | `bull_case` |
 | `LastUpdated` | Instant | The timestamp (formatted as an ISO 8601 timestamp) when the bull/bear case was last updated in the system. | REST | `last_updated` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/benzinga/bulls-bears-say.md>
 
 <a id="benzinga-guidance"></a>
 
@@ -149,6 +169,10 @@ Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 | `RevenueMethod` | String | The methodology of the revenue figure. Possible values are gaap (standardized financials under Generally Accepted Accounting Principles) and adj (adjusted, non-GAAP). | REST | `revenue_method` |
 | `Time` | String | The time of day the guidance was announced, in HH:mm:ss format. | REST | `time` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/benzinga/corporate-guidance.md>
+
 <a id="benzinga-earnings"></a>
 
 ## `m.partners.benzinga.earnings`
@@ -182,6 +206,10 @@ Earnings announcements of US companies from Benzinga, with estimates and surpris
 | `RevenueSurprisePercent` | double | The revenue surprise relative to the estimate, as a decimal fraction (0.126 = 12.6%), calculated as revenue_surprise divided by the absolute value of estimated_revenue. Positive is a beat and negative a miss. | REST | `revenue_surprise_percent` |
 | `Time` | String | The time (formatted as 24-hour HH:MM:SS EST) when the earnings are scheduled or were reported. | REST | `time` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/benzinga/earnings.md>
+
 <a id="benzinga-firms"></a>
 
 ## `m.partners.benzinga.firms`
@@ -194,6 +222,10 @@ The research firms behind Benzinga's analyst ratings.
 | `Currency` | String | Primary currency used by the financial firm, with some entries having null values. | REST | `currency` |
 | `LastUpdated` | Instant | Timestamp indicating when the firm's information was last modified or verified in the database. | REST | `last_updated` |
 | `Name` | String | The name of a research firm or investment bank which issues ratings. | REST | `name` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/benzinga/firm-details.md>
 
 <a id="benzinga-news"></a>
 
@@ -215,6 +247,10 @@ Benzinga news articles, with headline, teaser, body, and the tickers each one na
 | `Tickers` | String | A list of stock or crypto tickers mentioned in the article. | REST | `tickers` |
 | `Title` | String | The headline of the news article. | REST | `title` |
 | `Url` | String | The direct link to the source of the news article. | REST | `url` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/benzinga/news.md>
 
 <a id="etf_global-analytics"></a>
 
@@ -259,6 +295,10 @@ ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 | `RiskTotalScore` | double | ETF Global's proprietary Red Diamond overall risk assessment score for the ETF. | REST | `risk_total_score` |
 | `RiskVolatility` | double | A component score measuring the volatility risk of the ETF's price movements. | REST | `risk_volatility` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/etf-global/analytics.md>
+
 <a id="etf_global-constituents"></a>
 
 ## `m.partners.etf_global.constituents`
@@ -286,6 +326,10 @@ The holdings of US-listed ETFs from ETF Global, one row per fund, date, and hold
 | `UsCode` | String | A unique identifier code for the constituent security in US markets. | REST | `us_code` |
 | `Weight` | double | The constituent's weight in the ETF's portfolio, as a decimal fraction (0.0789 = 7.89%). Short positions are negative. For most funds the weights sum to about 1; leveraged and inverse funds vary. A few constituents have no weight, so a sum can fall short. | REST | `weight` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/etf-global/constituents.md>
+
 <a id="etf_global-fund_flows"></a>
 
 ## `m.partners.etf_global.fund_flows`
@@ -300,6 +344,10 @@ Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.
 | `Nav` | double | The net asset value per share, representing the per-share value of the ETF's underlying holdings. | REST | `nav` |
 | `ProcessedDate` | LocalDate | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
 | `SharesOutstanding` | double | The total number of ETF shares currently issued and outstanding in the market. | REST | `shares_outstanding` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/etf-global/fundflows.md>
 
 <a id="etf_global-profiles"></a>
 
@@ -366,6 +414,10 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 | `TransferAgent` | String | The transfer agent for the ETF. | REST | `transfer_agent` |
 | `Trustee` | String | The trustee of the ETF. | REST | `trustee` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/etf-global/profiles.md>
+
 <a id="etf_global-taxonomies"></a>
 
 ## `m.partners.etf_global.taxonomies`
@@ -414,6 +466,10 @@ ETF Global's classification of US-listed ETFs by strategy, structure, and exposu
 | `UsCode` | String | A unique identifier code that identifies this ETF in US markets. | REST | `us_code` |
 | `WeightingMethodology` | String | The methodology used to weight holdings. | REST | `weighting_methodology` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/etf-global/taxonomies.md>
+
 <a id="tmx-corporate_events"></a>
 
 ## `m.partners.tmx.corporate_events`
@@ -433,6 +489,10 @@ Corporate events from TMX: earnings dates, dividends, conferences, and more.
 | `TradingVenue` | String | MIC (Market Identifier Code) of the exchange where the company's stock is listed. | REST | `trading_venue` |
 | `Type` | String | The normalized type of corporate event. Possible values include: analyst_day, business_update, capital_markets_day, conference, dividend, earnings_announcement_date, earnings_conference_call, earnings_results_announcement, forum, interim_statement, other_interim_announcement, production_update, research_and_development_day, seminar, shareholder_meeting, sales_update, stock_split, summit, service_level_update, tradeshow, company_travel, and workshop. | REST | `type` |
 | `Url` | String | URL linking to the primary public source of the event announcement, if available. | REST | `url` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/partners/tmx/corporate-events.md>
 
 <a id="fable-merchant_aggregates"></a>
 
@@ -468,6 +528,10 @@ Daily European consumer spending per merchant, from Fable Data's transaction pan
 | `Type` | String | The type of aggregation. Can be 'merchant' or 'payment_processor'. | REST | `type` |
 | `UserCountry` | String | Country of consumer's residence (ISO codes). Available countries: UK, DE, FR, ES, IT, AT. Values outside these are mapped to 'unknown'. | REST | `user_country` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/alternative/consumer-spending/merchant-aggregates.md>
+
 <a id="fable-merchant_hierarchy"></a>
 
 ## `m.partners.fable.merchant_hierarchy`
@@ -494,26 +558,10 @@ Fable Data's map from merchants to parent companies, tickers, and industries.
 | `SubIndustry` | String | Sub-industry classification based on GICS/BICS/ICB standards. | REST | `sub_industry` |
 | `Ticker` | String | Stock ticker associated with the merchant (~250 US public companies mapped). Uses Bloomberg standard. | REST | `ticker` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/alternative/consumer-spending/merchant-hierarchy.md>
+
 ---
 
 Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-28. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and for columns that only other datasets of the same kind fill.
-
-Massive's documentation of these datasets:
-
-- <https://massive.com/docs/rest/alternative/consumer-spending/merchant-aggregates.md>
-- <https://massive.com/docs/rest/alternative/consumer-spending/merchant-hierarchy.md>
-- <https://massive.com/docs/rest/partners/benzinga/analyst-details.md>
-- <https://massive.com/docs/rest/partners/benzinga/analyst-insights.md>
-- <https://massive.com/docs/rest/partners/benzinga/analyst-ratings.md>
-- <https://massive.com/docs/rest/partners/benzinga/bulls-bears-say.md>
-- <https://massive.com/docs/rest/partners/benzinga/consensus-ratings.md>
-- <https://massive.com/docs/rest/partners/benzinga/corporate-guidance.md>
-- <https://massive.com/docs/rest/partners/benzinga/earnings.md>
-- <https://massive.com/docs/rest/partners/benzinga/firm-details.md>
-- <https://massive.com/docs/rest/partners/benzinga/news.md>
-- <https://massive.com/docs/rest/partners/etf-global/analytics.md>
-- <https://massive.com/docs/rest/partners/etf-global/constituents.md>
-- <https://massive.com/docs/rest/partners/etf-global/fundflows.md>
-- <https://massive.com/docs/rest/partners/etf-global/profiles.md>
-- <https://massive.com/docs/rest/partners/etf-global/taxonomies.md>
-- <https://massive.com/docs/rest/partners/tmx/corporate-events.md>
