@@ -387,6 +387,8 @@ def test_text_finer_than_a_microsecond_is_refused_not_cut() -> None:
         parse_date_like("2025-01-02T09:30:00.123456789+00:00", "timestamp_gte")
     with pytest.raises(ValueError, match=r"more than six fractional digits of a second"):
         parse_date_like("2025-01-02T09:30:00,1234567Z", "start")
+    with pytest.raises(ValueError, match=r"more than six fractional digits of a second"):
+        parse_date_like("2025-06-02T120000.123456789Z", "timestamp_gte")  # the basic form
     assert parse_date_like("2025-01-02T09:30:00.123456Z", "start") == datetime(
         2025, 1, 2, 9, 30, 0, 123456, tzinfo=UTC
     )

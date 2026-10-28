@@ -89,8 +89,10 @@ Futures are absent: a futures date names a trading session, not a calendar day (
 and `futures_sessions`). Datasets without an asset class use New York."""
 
 _DATE_ONLY: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-# A fraction of a second finer than the microsecond, which `datetime.fromisoformat` truncates.
-_BELOW_MICROSECOND: Final = re.compile(r"\d:\d{2}[.,]\d{7,}")
+# A fraction of a second finer than the microsecond, which `datetime.fromisoformat` truncates,
+# in the extended (`09:30:00.1234567`) and the basic (`093000.1234567`) time form alike. Only a
+# fraction of a second can hold a `.` or `,` in ISO-8601 text, so the separator marks it.
+_BELOW_MICROSECOND: Final = re.compile(r"[.,]\d{7,}")
 _ONE_DAY: Final = timedelta(days=1)
 
 
