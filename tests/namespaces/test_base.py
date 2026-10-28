@@ -10,6 +10,7 @@ against synthetic namespaces that break it.
 """
 
 import collections.abc
+import dataclasses
 import datetime as dt
 import typing
 from collections.abc import Callable, Iterator, Mapping
@@ -31,7 +32,9 @@ from deephaven_massive._namespaces.base import (
     bar_query_class,
     build_query,
     list_params,
+    optional_text,
     query_class,
+    require_bool,
 )
 from deephaven_massive._query import (
     HistoryLatestQuery,
@@ -779,3 +782,45 @@ def test_a_typed_parameter_is_reserved_from_filters(massive_session: dm.MassiveS
         build(massive_session, DIVIDENDS, params={"frequency": None}, filters={"pay_date": "x"})
     assert "frequency" not in str(caught.value)
     assert "'distribution_type'" in str(caught.value)
+
+
+def test_a_fixed_parameter_is_sent_and_reserved(massive_session: dm.MassiveSession) -> None:
+    # The library sets `frequency` itself here: it is sent, and no filter form may name it.
+    fixed = dataclasses.replace(DIVIDENDS, fixed_params={"frequency": 4})
+    q = build(massive_session, fixed, symbols=["AAPL"])
+    assert dict(q._request.params) == {"frequency": 4}
+    for key in ("frequency", "frequency_gte"):
+        with pytest.raises(ValueError, match=rf"^the library sets {key} itself; it is not a"):
+            build(massive_session, fixed, filters={key: 4})
+    # A refused filter's list of valid keys leaves the fixed family out.
+    with pytest.raises(ValueError, match="has no filter 'nope'") as refused:
+        build(massive_session, fixed, filters={"nope": 1})
+    assert "frequency" not in str(refused.value)
+    with pytest.raises(ValueError, match="has no filter 'nope'") as listed:
+        build(massive_session, DIVIDENDS, filters={"nope": 1})
+    assert "frequency" in str(listed.value)
+    with pytest.raises(ValueError, match=r"the library sets \['frequency'\] itself"):
+        build(massive_session, fixed, params={"frequency": 2})
+
+
+def test_a_symbol_filter_names_symbols(massive_session: dm.MassiveSession) -> None:
+    for key in ("ticker", "ticker_any_of", "ticker_all_of"):
+        with pytest.raises(ValueError, match=rf"^{key} is set through symbols=, not filters$"):
+            build(massive_session, DIVIDENDS, filters={key: "AAPL"})
+    # The range forms select an alphabetical range, which `symbols` cannot express.
+    assert build(massive_session, DIVIDENDS, filters={"ticker_gte": "A"})._request.filters
+
+
+def test_require_bool() -> None:
+    for good in (True, False):
+        assert require_bool("flag", good) is good
+    for bad in (0, 1, "true", None):
+        with pytest.raises(TypeError, match=rf"^flag must be a bool, not {type(bad).__name__}$"):
+            require_bool("flag", bad)
+
+
+def test_optional_text() -> None:
+    assert optional_text("search", None) is None
+    assert optional_text("search", "apple") == "apple"
+    with pytest.raises(TypeError, match=r"^search must be a str, not int$"):
+        optional_text("search", 5)

@@ -78,12 +78,27 @@ FOREX = DatasetSpec(
     channels={None: "C"},
     keys={(W, "forex/C"): SourceKeys(KeySpec("Ticker"), KeySpec("ParticipantTimestamp"))},
 )
+FOREX_FMV = DatasetSpec(
+    name="test.forex_fmv",
+    summary="A test dataset.",
+    asset_class=AssetClass.FOREX,
+    channels={None: "FMV"},
+    family=ChannelFamily.FMV,
+    keys={(W, "forex/FMV"): SourceKeys(KeySpec("Ticker"))},
+)
 OPTIONS = DatasetSpec(
     name="test.options",
     summary="A test dataset.",
     asset_class=AssetClass.OPTIONS,
     channels={None: "T"},
     keys={(W, "options/T"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
+)
+OPTION_QUOTES = DatasetSpec(
+    name="test.option_quotes",
+    summary="A test dataset.",
+    asset_class=AssetClass.OPTIONS,
+    channels={None: "Q"},
+    keys={(W, "options/Q"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 FUTURES = DatasetSpec(
     name="test.futures",
@@ -418,9 +433,21 @@ def test_wire_symbols_become_canonical(
     harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]], *, rows_when: RowsWhen
 ) -> None:
     result = harness.query(FOREX, ["C:EURUSD"]).append_only()
-    harness.subscribed("C.EUR/USD")
+    harness.subscribed("C.EUR-USD")
     harness.send({"ev": "C", "p": "EUR/USD", "a": 1.1, "b": 1.0, "t": 1_700_000_000_000, "x": 1})
     harness.connection("wss://socket.test/forex").flusher.flush()
+    shown = rows_when(result, lambda rows: len(rows) == 1)
+    assert [r["Symbol"] for r in shown] == ["C:EURUSD"]
+
+
+def test_an_fmv_frame_in_the_canonical_spelling_reaches_its_forex_stream(
+    harness: Harness, *, rows_when: RowsWhen
+) -> None:
+    # FMV frames name the pair `C:EURUSD`, while the topic spells it `EUR-USD`.
+    result = harness.query(FOREX_FMV, ["C:EURUSD"]).append_only()
+    harness.subscribed("FMV.EUR-USD")
+    harness.send({"ev": "FMV", "sym": "C:EURUSD", "fmv": 1.1, "t": 1_700_000_000_000_000_000})
+    harness.connection(harness.urls[-1]).flusher.flush()
     shown = rows_when(result, lambda rows: len(rows) == 1)
     assert [r["Symbol"] for r in shown] == ["C:EURUSD"]
 
@@ -721,14 +748,30 @@ def test_static_options_beyond_the_cap_raise(
 ) -> None:
     monkeypatch.setattr(ws, "OPTIONS_CAP", 2)
     contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000", "O:SPY251219C00620000"]
-    with pytest.raises(ValueError, match="3 new option contracts and 0 in use exceed the 2"):
+    with pytest.raises(ValueError, match="3 new option topics and 0 in use exceed the 2"):
         harness.query(OPTIONS, contracts).blink()
     first = harness.query(OPTIONS, contracts[:2]).blink()
-    with pytest.raises(ValueError, match="1 new option contracts and 2 in use"):
+    with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
         harness.query(OPTIONS, contracts[2:]).blink()
     every = harness.query(OPTIONS, dm.ALL).blink()  # a wildcard counts zero
     harness.session.release(first)
     harness.session.release(every)
+
+
+def test_the_cap_message_counts_topics_not_contracts(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Quotes of the contracts already traded are new topics, though no contract is new.
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 3)
+    contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000"]
+    trades = harness.query(OPTIONS, contracts).blink()
+    with pytest.raises(
+        ValueError,
+        match=r"^test.option_quotes: 2 new option topics and 2 in use exceed the 3 topics one "
+        r"/options connection carries; a topic is one contract on one channel",
+    ):
+        harness.query(OPTION_QUOTES, contracts).blink()
+    harness.session.release(trades)
 
 
 def test_reactive_options_beyond_the_cap_are_deferred(
@@ -1245,7 +1288,7 @@ def test_contracts_of_opening_streams_count_against_the_cap(
     connection = harness.connection("wss://socket.test/options")
     with harness.session._core.registry_lock:
         connection.cap_pending[99] = frozenset({"T.O:SPY251219C00610000"})  # still opening
-        with pytest.raises(ValueError, match="1 new option contracts and 2 in use"):
+        with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
             ws.WsConnections._check_cap(OPTIONS, connection, frozenset({"T.O:SPY251219C00620000"}))
         del connection.cap_pending[99]
     harness.session.release(first)
@@ -1440,7 +1483,7 @@ def test_contracts_a_wildcard_covers_still_count_against_the_cap(
     first = harness.query(OPTIONS, ["O:SPY251219C00600000", "O:SPY251219C00610000"]).blink()
     connection = harness.connection("wss://socket.test/options")
     harness.on_loop(connection, lambda: None)
-    with pytest.raises(ValueError, match="1 new option contracts and 2 in use"):
+    with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
         harness.query(OPTIONS, ["O:SPY251219C00620000"]).blink()
     assert connection.cap_pending == {}  # the opened stream counts through the admitted set
     harness.session.release(first)
