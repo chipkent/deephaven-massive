@@ -16,6 +16,7 @@ def test_the_default_hand_input_is_the_real_tables() -> None:
     assert hand.tag_conflicts is overrides.TAG_CONFLICTS
     assert hand.type_fixes is overrides.TYPE_FIXES
     assert hand.key_fixes is overrides.KEY_FIXES
+    assert hand.description_fixes is overrides.DESCRIPTION_FIXES
     assert hand.result_keys is overrides.RESULT_KEYS
     assert hand.param_units is overrides.PARAM_UNITS
     assert hand.exclusions is exclusions.EXCLUSIONS

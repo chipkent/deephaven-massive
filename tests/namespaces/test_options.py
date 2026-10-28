@@ -1129,3 +1129,12 @@ def test_the_snapshots_revise_on_a_new_quote_or_trade() -> None:
     assert revised == {"options.chain": revision, "options.snapshots": revision}
     for spec in (options.CHAIN, options.SNAPSHOTS):
         assert set(revision) <= set(CATALOG.dataset_schema(spec).column_names)
+
+
+def test_the_options_snapshots_and_chain_describe_a_trade_alike() -> None:
+    by_name = CATALOG.by_name
+    snapshots = {c.name: c for c in CATALOG.dataset_schema(by_name["options.snapshots"]).columns}
+    chain = {c.name: c for c in CATALOG.dataset_schema(by_name["options.chain"]).columns}
+    for name in ("LastTradePrice", "LastTradeExchange"):
+        assert snapshots[name].description == chain[name].description
+    assert "AAPL" not in snapshots["LastTradeId"].description

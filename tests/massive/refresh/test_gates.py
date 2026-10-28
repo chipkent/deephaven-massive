@@ -24,6 +24,7 @@ from deephaven_massive._massive.refresh.gates import (
     concept_collisions,
     stale_entries,
     unneeded_type_fixes,
+    unused_description_fixes,
 )
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.rest import generate_rest
@@ -46,6 +47,7 @@ _EMPTY = HandInput(
     tag_conflicts={},
     type_fixes={},
     key_fixes={},
+    description_fixes={},
     result_keys={},
     param_units={},
     exclusions=(),
@@ -277,6 +279,32 @@ def test_stale_entry_none_for_entries_the_paths_use() -> None:
         identities=frozenset({"id"}),
     )
     assert list(stale_entries(hand, {_PATH: use})) == []
+
+
+# --- Description fixes no field looked up ------------------------------------------------
+
+_FIX = overrides.DescriptionFix(vendor="Per share.", text="Per coin.", reason="test")
+
+
+def test_a_description_fix_takes_effect_only_under_a_key_its_field_looked_up() -> None:
+    # `declared` is a key a key fix replaces and `sent` one only an example sends: the source
+    # has both, but no field looks a description up under either.
+    keys = ("price", "declared", "sent", "absent")
+    hand = dataclasses.replace(
+        _EMPTY,
+        description_fixes={**{(_PATH, key): _FIX for key in keys}, ("/gone", "price"): _FIX},
+    )
+    use = PathUse(
+        wire_keys=frozenset({"price", "declared"}),
+        example_keys=frozenset({"sent"}),
+        described_keys=frozenset({"price"}),
+    )
+    assert _found(unused_description_fixes(hand, {_PATH: use})) == [
+        ("stale-entry", "/gone", "price"),
+        ("stale-entry", _PATH, "absent"),
+        ("stale-entry", _PATH, "declared"),
+        ("stale-entry", _PATH, "sent"),
+    ]
 
 
 # --- Type fixes no sample needs ---------------------------------------------------------

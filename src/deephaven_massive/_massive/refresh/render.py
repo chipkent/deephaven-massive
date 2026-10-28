@@ -9,10 +9,11 @@ refresh diff shows each changed field as one changed line. `rest.json` holds the
 with their result keys and parameters; `ws.json` the WebSocket channels and `flatfiles.json`
 the flat-file prefixes, each with only its key, fields, and memberships.
 
-The vendor's descriptions go in `descriptions.json` alone, never in a schema file: they change
+The field descriptions go in `descriptions.json` alone, never in a schema file: they change
 far more often than the schema, and a refresh that only rewords them must leave the schema
 files unchanged, so a reviewer sees at once that no schema moved. The descriptions arrive
-already plain text (`plain_text`, applied by the generators).
+already plain text (`plain_text`, applied by the generators): the vendor's, or the refresh's
+correction (`overrides.DESCRIPTION_FIXES`) where the vendor's is clearly wrong.
 
 It imports the standard library and `spec.types` only.
 """
@@ -173,7 +174,8 @@ def render_descriptions(
 
     Transports, sources, and fields keep the order they are given in. A field whose
     `description` is empty has no entry, and a source with no described field has none
-    either; every source given in `urls` keeps its URLs, sorted.
+    either; `class_descriptions` holds only the fields with per-asset-class descriptions.
+    Every source given in `urls` keeps its URLs, sorted.
 
     Args:
         sources: The generated sources of each transport, each field's `description` already
@@ -185,16 +187,23 @@ def render_descriptions(
 
     Returns:
         The file's text: `{"generated_by", "fetched", "urls": {<transport>: {<source key>:
-        [<url>, ...]}}, "descriptions": {<transport>: {<source key>: {<wire key>: <text>}}}}`,
-        one line per URL and per description, ending in a newline.
+        [<url>, ...]}}, "descriptions": {<transport>: {<source key>: {<wire key>: <text>}}},
+        "class_descriptions": {<transport>: {<source key>: {<wire key>: {<asset class>:
+        <text>}}}}}`, one line per URL and per description, ending in a newline.
     """
     texts: dict[str, dict[str, dict[str, str]]] = {}
+    by_class: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
     for transport, described in sources.items():
         texts[transport.value] = {}
+        by_class[transport.value] = {}
         for source in described:
             fields = {f.wire_key: f.description for f in source.fields if f.description}
             if fields:
                 texts[transport.value][source.key] = fields
+            classed = {f.wire_key: dict(f.class_descriptions) for f in source.fields}
+            classed = {key: found for key, found in classed.items() if found}
+            if classed:
+                by_class[transport.value][source.key] = classed
     document = {
         "generated_by": _GENERATED_BY,
         "fetched": fetched.isoformat(),
@@ -203,6 +212,7 @@ def render_descriptions(
             for transport, by_key in urls.items()
         },
         "descriptions": texts,
+        "class_descriptions": by_class,
     }
     return json.dumps(document, indent=1, ensure_ascii=False) + "\n"
 

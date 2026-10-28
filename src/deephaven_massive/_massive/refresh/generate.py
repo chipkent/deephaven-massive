@@ -199,6 +199,7 @@ def _check_kinds(
         by_key[source.key] = source
     problems += gates.stale_entries(hand, uses)
     problems += gates.unneeded_type_fixes(hand, uses)
+    problems += gates.unused_description_fixes(hand, uses)
     problems += gates.concept_collisions(hand, uses)
     found, member_problems = kinds.members(hand, by_key)
     problems += member_problems
