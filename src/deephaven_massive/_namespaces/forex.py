@@ -7,8 +7,8 @@ nothing touches the network until a verb is called on the query. This module own
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
 
-A currency pair may be written in any of Massive's spellings: `EUR/USD` (the WebSocket form),
-`EUR-USD`, `EURUSD`, or `C:EURUSD` (the REST ticker). Every factory normalizes it with
+A currency pair may be written in any of Massive's spellings: `EUR/USD`, `EUR-USD` (the
+WebSocket form), `EURUSD`, or `C:EURUSD` (the REST ticker). Every factory normalizes it with
 `_datasets/symbols.py`, so the `Symbol` column and the query always hold the canonical
 `C:EURUSD`, and the transports convert back to the WebSocket form for topics. The last-quote
 endpoint takes a pair as two path segments (`/v1/last_quote/currencies/EUR/USD`); its spec
@@ -20,10 +20,10 @@ from __future__ import annotations
 import functools
 import logging
 import math
-import re
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.symbols import is_forex_currency
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -55,9 +55,6 @@ _FILES: Final = Transport.FLAT_FILES
 
 _PAGE_SIZE: Final = 50_000
 """The largest page the quotes and aggregate-range endpoints accept (their documented maximum)."""
-
-_CURRENCY: Final = re.compile(r"^[A-Z]{3}$")
-"""A currency code as the conversion endpoint takes it: three ISO 4217 letters."""
 
 _LAST_QUOTE: Final = "/v1/last_quote/currencies/{from}/{to}"
 _QUOTES: Final = "/v3/quotes/{fxTicker}"
@@ -197,7 +194,7 @@ def _currency(name: str, value: object) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")
     code = value.strip().upper()
-    if not _CURRENCY.match(code):
+    if not is_forex_currency(code):
         raise ValueError(f"{name}={value!r} is not a three-letter currency code such as 'USD'")
     return code
 

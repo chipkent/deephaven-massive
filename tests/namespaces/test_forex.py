@@ -300,6 +300,7 @@ def test_a_large_integer_amount_keeps_every_digit(massive_session: dm.MassiveSes
     ("kwargs", "failure"),
     [
         ({"from_currency": "EURO"}, (ValueError, "from_currency='EURO' is not a three-letter")),
+        ({"from_currency": "EU1"}, (ValueError, "from_currency='EU1' is not a three-letter")),
         ({"to_currency": "U$D"}, (ValueError, r"to_currency='U\$D' is not a three-letter")),
         ({"from_currency": 840}, (TypeError, "from_currency must be a str, not int")),
         ({"amount": 0}, (ValueError, "amount must be positive and finite, got 0")),
@@ -331,6 +332,7 @@ def test_conversion_rejects_bad_arguments(
         ("EUR/US", "cannot read 'EUR/US' as a currency pair"),
         ("EUR/USD/JPY", "cannot read 'EUR/USD/JPY' as a currency pair"),
         ("X:BTCUSD", "carries the prefix of another asset class; forex symbols use the C:"),
+        ("EU1/USD", "cannot read 'EU1/USD' as a currency pair"),
         ([], "no symbols"),
     ],
 )
@@ -507,6 +509,8 @@ def test_quotes_history_reads_the_quote_history(
             "/v3/quotes/C:EURUSD",
             {
                 "limit": ["50000"],
+                "order": ["asc"],
+                "sort": ["timestamp"],
                 "timestamp.gte": [str(day)],
                 "timestamp.lt": [str(day + 86_400 * NS)],
             },
@@ -554,7 +558,7 @@ def test_bars_history_reads_the_aggregate_range(
     assert sent(fake_rest) == [
         (
             "/v2/aggs/ticker/C:EURUSD/range/1/hour/1626912000000/1626998399999",
-            {"limit": ["50000"]},
+            {"limit": ["50000"], "sort": ["asc"]},
         )
     ]
     assert pick(table, *BAR_COLUMNS) == [
@@ -747,10 +751,10 @@ def landed(blink: Table) -> Callable[[], list[dict[str, Any]]]:
 
 def test_a_quote_frame_lands_in_blink(socket: Socket) -> None:
     read = landed(socket.session.forex.quotes("C:EURUSD").blink())
-    socket.subscribed("C.EUR/USD")
+    socket.subscribed("C.EUR-USD")
     assert socket.hosts == [(AssetClass.FOREX, ChannelFamily.TICK)]
     socket.send(
-        {"ev": "C", "p": "EUR/USD", "x": 44, "a": 1.0832, "b": 1.0831, "t": 1_700_000_000_123}
+        {"ev": "C", "p": "EUR-USD", "x": 44, "a": 1.0832, "b": 1.0831, "t": 1_700_000_000_123}
     )
     columns = ("Symbol", "Timestamp", "AskPrice", "BidPrice", "Exchange")
     assert [tuple(r[c] for c in columns) for r in read()] == [
@@ -765,10 +769,10 @@ def test_a_bar_frame_lands_in_blink(socket: Socket, timespan: dm.Timespan, chann
     query = socket.session.forex.bars("EUR/USD", timespan)
     assert isinstance(query, StreamHistoryQuery)
     read = landed(query.blink())
-    socket.subscribed(f"{channel}.EUR/USD")
+    socket.subscribed(f"{channel}.EUR-USD")
     frame = {
         "ev": channel,
-        "pair": "EUR/USD",
+        "pair": "EUR-USD",
         "o": 1.08,
         "c": 1.09,
         "h": 1.1,
@@ -786,7 +790,7 @@ def test_a_bar_frame_lands_in_blink(socket: Socket, timespan: dm.Timespan, chann
 
 def test_a_fair_value_frame_lands_in_blink(socket: Socket) -> None:
     read = landed(socket.session.forex.fmv("EUR/USD").blink())
-    socket.subscribed("FMV.EUR/USD")
+    socket.subscribed("FMV.EUR-USD")
     # Fair value is served by the FMV family's host, not the tick host.
     assert socket.hosts == [(AssetClass.FOREX, ChannelFamily.FMV)]
     socket.send({"ev": "FMV", "fmv": 1.0631, "sym": "C:EURUSD", "t": 1_678_220_098_130})
