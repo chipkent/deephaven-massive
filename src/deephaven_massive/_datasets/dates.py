@@ -54,6 +54,7 @@ __all__ = [
     "check_order",
     "flat_file_published",
     "futures_session",
+    "futures_session_open",
     "futures_sessions",
     "history_range",
     "parse_date_like",
@@ -306,6 +307,21 @@ def futures_sessions(start: date, end: date) -> FuturesSessions:
 
 _SESSION_ROLL: Final = timedelta(hours=7)
 """Adding this to a Chicago time moves 17:00, when the next futures session opens, to midnight."""
+
+
+def futures_session_open(session: date) -> datetime:
+    """Return the instant a futures trading session opens: 17:00 Chicago on the day before.
+
+    The inverse of `futures_session` at the session's first instant, from the same roll.
+
+    Args:
+        session: The session's `session_end_date`.
+
+    Returns:
+        The aware instant, in Chicago time.
+    """
+    midnight = datetime(session.year, session.month, session.day, tzinfo=CHICAGO)
+    return midnight - _SESSION_ROLL
 
 
 def futures_session(moment: datetime) -> date:

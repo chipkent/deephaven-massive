@@ -1,0 +1,15 @@
+{
+  "status": "OK",
+  "request_id": "6aeb7bcd9f2e0f0c4ed0d2a6b6a7d3c1",
+  "results": [
+    {
+      "ticker": "I:SPX",
+      "name": "S&P 500",
+      "value": 5900.25,
+      "last_updated": 1704310200000000000,
+      "timeframe": "REAL-TIME",
+      "type": "indices",
+      "market_status": "open"
+    }
+  ]
+}

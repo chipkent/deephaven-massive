@@ -1,0 +1,30 @@
+{
+  "status": "OK",
+  "request_id": "6aeb7bcd9f2e0f0c4ed0d2a6b6a7d3c1",
+  "results": [
+    {
+      "ticker": "SPY",
+      "type": "stocks",
+      "market_status": "open",
+      "name": "SPY",
+      "session": {
+        "close": 185.2,
+        "open": 182.1,
+        "volume": 1000
+      },
+      "fmv": 185.3
+    },
+    {
+      "ticker": "AAPL",
+      "type": "stocks",
+      "market_status": "open",
+      "name": "AAPL",
+      "session": {
+        "close": 185.2,
+        "open": 182.1,
+        "volume": 1000
+      },
+      "fmv": 185.1
+    }
+  ]
+}
