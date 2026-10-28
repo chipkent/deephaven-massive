@@ -1,7 +1,10 @@
 """Tests for the `m.forex` namespace: its dataset specs, schemas, factories, and fixtures.
 
 The REST fixtures under `tests/data/namespaces/forex/` are the vendor's documented sample
-responses; each is decoded against its generated path to prove it has the generated shape.
+responses; each is decoded against its generated path to prove it has the generated shape, and
+served by the fake REST server to check each dataset's exact request and rows. Every streamed
+channel lands one frame from the fake WebSocket server in `blink()`, and every flat-file prefix
+round-trips one file through the fake S3.
 """
 
 import json
@@ -26,7 +29,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import Recency
+from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._ingest import ws
 from deephaven_massive._massive import RestPath, Source, Status, Transport, source, to_batch
 from deephaven_massive._namespaces import forex
@@ -632,6 +635,7 @@ class Socket:
     def __init__(self, server: FakeMassiveServer) -> None:
         self.server = server
         self.frames = 0
+        self.hosts: list[tuple[AssetClass, ChannelFamily]] = []
         self.cond = threading.Condition()
         self.session = dm.MassiveSession(
             dm.MassiveConfig(api_key="test-key", flush_interval=3600.0)
@@ -639,12 +643,16 @@ class Socket:
         core = self.session._core
         self.connections = ws.WsConnections(
             core,
-            resolve_host=lambda *_: REALTIME,
+            resolve_host=self.resolve,
             record_verdict=lambda *_: None,
             client_factory=self.client,
         )
         cast("Any", core._ports)._streams = self.connections
         core.on_close(self.connections.close)
+
+    def resolve(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
+        self.hosts.append((asset_class, family))
+        return REALTIME
 
     def client(
         self,
@@ -718,6 +726,7 @@ def landed(blink: Table) -> Callable[[], list[dict[str, Any]]]:
 def test_a_quote_frame_lands_in_blink(socket: Socket) -> None:
     read = landed(socket.session.forex.quotes("C:EURUSD").blink())
     socket.subscribed("C.EUR/USD")
+    assert socket.hosts == [(AssetClass.FOREX, ChannelFamily.TICK)]
     socket.send(
         {"ev": "C", "p": "EUR/USD", "x": 44, "a": 1.0832, "b": 1.0831, "t": 1_700_000_000_123}
     )
@@ -756,6 +765,8 @@ def test_a_bar_frame_lands_in_blink(socket: Socket, timespan: dm.Timespan, chann
 def test_a_fair_value_frame_lands_in_blink(socket: Socket) -> None:
     read = landed(socket.session.forex.fmv("EUR/USD").blink())
     socket.subscribed("FMV.EUR/USD")
+    # Fair value is served by the FMV family's host, not the tick host.
+    assert socket.hosts == [(AssetClass.FOREX, ChannelFamily.FMV)]
     socket.send({"ev": "FMV", "fmv": 1.0631, "sym": "C:EURUSD", "t": 1_678_220_098_130})
     assert [(r["Symbol"], r["Timestamp"], r["Fmv"]) for r in read()] == [
         ("C:EURUSD", 1_678_220_098_130 * MS, 1.0631)

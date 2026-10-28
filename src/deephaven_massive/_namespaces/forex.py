@@ -320,8 +320,9 @@ class _Forex(Namespace):
                 Defaults to one minute.
             multiplier: The number of `timespan` units in one bar's window, a positive
                 integer. Defaults to 1.
-            adjusted: Whether REST bars are adjusted for splits, sent as the endpoints'
-                `adjusted` parameter. Defaults to True; flat files serve only False.
+            adjusted: Whether REST bars are adjusted, sent as the endpoints' `adjusted`
+                parameter. Defaults to True; flat files hold only unadjusted bars, so
+                `history()` reads them only with False.
 
         Returns:
             A `StreamHistoryQuery` for one-second or one-minute bars, a `HistoryLatestQuery`
