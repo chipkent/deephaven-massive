@@ -29,8 +29,8 @@ which runs in a fresh environment holding only the wheel and `deephaven-server`,
 server, imports every shipped module, and renders the column reference from the installed
 catalog to compare it with `docs/datasets/`. To run it yourself, install `dist/*.whl` and
 `deephaven-server` into a new virtual environment with `uv venv` and `uv pip install`, then
-run that environment's `python -I scripts/check_wheel.py docs/datasets` from the repository
-root.
+run `uv run --no-project --python <venv>/bin/python python -I scripts/check_wheel.py
+docs/datasets` from the repository root.
 
 Live integration tests (`tests/**/test_*_integration.py`) carry the `integration` marker, which
 `addopts` deselects, so no default run, CI's included, runs them. They also skip without

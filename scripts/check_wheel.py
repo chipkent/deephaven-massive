@@ -19,19 +19,19 @@ library itself never starts a server) and then:
    committed pages in the directory given as the only argument;
 5. opens a session and closes it; nothing reaches the network.
 
-Exit status: 0 when every check passes; 1 when one fails, after the interpreter has printed
-the failure (a `WheelCheckError` naming the check, or any other exception). The process leaves
-through `os._exit` once its output is flushed, because a normal interpreter shutdown after the
-embedded JVM has run can crash on macOS.
+Exit status: 0 when every check passes; 1 when one fails, after the script has printed the
+failure's traceback (a `WheelCheckError` naming the check, or any other exception). The process
+leaves through `os._exit` once its output is flushed, because a normal interpreter shutdown
+after the embedded JVM has run can crash on macOS.
 """
 
 from __future__ import annotations
 
-import atexit
 import importlib
 import os
 import pkgutil
 import sys
+import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,6 +43,8 @@ import deephaven_massive
 from deephaven_massive import _massive
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from deephaven_massive import _session
     from deephaven_massive._datasets import column_reference
 
@@ -64,14 +66,15 @@ def main() -> None:
     writes to standard output. It reads, and never writes, the directory of committed pages.
 
     Raises:
-        WheelCheckError: If the arguments are not one directory, or at the first check that
-            fails.
+        WheelCheckError: If the arguments are not one existing directory, or at the first
+            check that fails.
     """
-    atexit.register(_exit)
     arguments = sys.argv[1:]
     if len(arguments) != 1:
         raise WheelCheckError("usage: check_wheel.py <directory of the committed pages>")
     committed = Path(arguments[0])
+    if not committed.is_dir():
+        raise WheelCheckError(f"{committed}, the directory of committed pages, does not exist")
     package_dir = Path(deephaven_massive.__file__).resolve().parent
     if package_dir.is_relative_to(_CHECKOUT_SOURCE):
         raise WheelCheckError(
@@ -124,18 +127,23 @@ def _report(line: str) -> None:
     sys.stdout.write(f"ok: {line}\n")
 
 
-def _exit() -> None:
-    """Flush the output and leave, skipping the JVM's and jpy's finalizers.
-
-    Runs at interpreter exit. The status is 1 when an exception escaped `main`, a failed check's
-    `WheelCheckError` included (the interpreter has printed it and set `sys.last_value`), and 0
-    otherwise.
-    """
-    status = 1 if getattr(sys, "last_value", None) is not None else 0
+def _exit(status: int) -> None:
+    """Flush the output and leave with `status`, skipping the JVM's and jpy's finalizers."""
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(status)
 
 
+def _fail(kind: type[BaseException], value: BaseException, tb: TracebackType | None) -> None:
+    """Print an exception that escaped `main` and leave with status 1.
+
+    Installed as `sys.excepthook`, so every failure, an interrupt included, fails the check.
+    """
+    traceback.print_exception(kind, value, tb)
+    _exit(1)
+
+
 if __name__ == "__main__":
+    sys.excepthook = _fail
     main()
+    _exit(0)
