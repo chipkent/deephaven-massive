@@ -1931,9 +1931,12 @@ How a request is built from a `DatasetSpec` and a `Request`:
   turned into a calendar date by `calendar_day` in `_datasets/dates.py`: a date or
   `"YYYY-MM-DD"` as given, an aware `datetime` as the calendar day it falls on in the dataset's
   day zone ([section 12](#12-timestamp-units-and-day-boundaries)).
-- **Bars ranges.** A bars spec declares no `time_axis`. `history()` fills the range path's
-  `{from}` and `{to}` segments from its bounds, as epoch milliseconds or as `YYYY-MM-DD`
-  according to the kind the generated path gives the parameter.
+- **Bars ranges.** A bars spec whose range path has `{from}` and `{to}` segments declares no
+  `time_axis`: `history()` fills those segments from its bounds, as epoch milliseconds or as
+  `YYYY-MM-DD` according to the kind the generated path gives the parameter. `futures.bars`,
+  whose path `/futures/v1/aggs/{ticker}` has no such segments, declares the instant pair
+  `window_start.gte`/`window_start.lt` and sends its session-widened bounds there
+  ([section 12](#12-timestamp-units-and-day-boundaries)).
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
   (250 on the unified snapshot and the indices snapshot), the transport splits the symbol

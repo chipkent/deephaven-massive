@@ -27,6 +27,20 @@
       "session_end_date": "2024-12-17",
       "ticker": "GCJ5",
       "timestamp": 1734472770000588000
+    },
+    {
+      "ask_price": 2687,
+      "ask_size": 2,
+      "ask_timestamp": 1734478200000000000,
+      "bid_price": 2686.5,
+      "bid_size": 1,
+      "bid_timestamp": 1734478200000000000,
+      "channel": 360,
+      "report_sequence": 2250400,
+      "sequence_number": 15357900,
+      "session_end_date": "2024-12-18",
+      "ticker": "GCJ5",
+      "timestamp": 1734478200000000000
     }
   ],
   "status": "OK"

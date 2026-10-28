@@ -140,7 +140,6 @@ TRADES: Final = DatasetSpec(
         (_FLAT_FILES, _TRADES_FILES): _tick_keys("Timestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    per_symbol=True,
     page_size=50_000,
 )
 
@@ -158,7 +157,6 @@ QUOTES: Final = DatasetSpec(
         (_FLAT_FILES, _QUOTES_FILES): _tick_keys("Timestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    per_symbol=True,
     page_size=50_000,
 )
 
@@ -179,7 +177,6 @@ BARS: Final = DatasetSpec(
         (_FLAT_FILES, _SESSION_FILES): _tick_keys("WindowStart"),
     },
     time_axis=("window_start.gte", "window_start.lt"),
-    per_symbol=True,
     page_size=50_000,
 )
 
@@ -415,6 +412,12 @@ class _Futures(Namespace):
         17:00 America/Chicago, so daily bars are `Timespan.SESSION`; there is no
         `Timespan.DAY` and no previous-session `fetch()`.
 
+        A date bound of `history()` is a trading session, and a bar is kept when its
+        `SessionEndDate` falls within `[start, end]`. A bar of a session or a longer period
+        (`WEEK` to `YEAR`) starts at its period's first instant but carries the period's last
+        trading session as its `SessionEndDate`, so it is selected by that date, not by its
+        `Timestamp`.
+
         `dm.ALL` streams every contract and reads every contract from flat files; REST history
         needs explicit symbols. There is no `limit`: `history()` pages internally.
 
@@ -481,7 +484,7 @@ class _Futures(Namespace):
         symbols are sent together as `ticker.any_of`; `dm.ALL` asks for every contract, all
         pages of it, which with `product_code` is every contract of the products. `fetch()`
         reads it once, `poll()` re-reads it on an interval; it is the one-request way to get
-        the current state of a set of contracts on every plan.
+        the current state of a set of contracts.
 
         `limit` caps the total number of rows across pages; the page size is internal.
 

@@ -26,6 +26,19 @@
       "transactions": 83673,
       "volume": 155170,
       "window_start": 1738627200000000000
+    },
+    {
+      "close": 2870.1,
+      "dollar_volume": 351002210.5,
+      "high": 2890.2,
+      "low": 2861.3,
+      "open": 2884.9,
+      "session_end_date": "2025-02-06",
+      "settlement_price": 2871.0,
+      "ticker": "GCJ5",
+      "transactions": 70110,
+      "volume": 121734,
+      "window_start": 1738713600000000000
     }
   ],
   "status": "OK"

@@ -445,6 +445,11 @@ _REST_FIXTURES = {
     "exchanges.json": "/futures/v1/exchanges",
     "market_status.json": "/futures/v1/market-status",
     "schedules.json": "/futures/v1/schedules",
+    "poll_keys_contracts.json": "/futures/v1/contracts",
+    "poll_keys_products.json": "/futures/v1/products",
+    "poll_keys_exchanges.json": "/futures/v1/exchanges",
+    "poll_keys_market_status.json": "/futures/v1/market-status",
+    "poll_keys_schedules.json": "/futures/v1/schedules",
 }
 
 
@@ -552,8 +557,12 @@ def test_tick_history_over_rest_covers_whole_chicago_sessions(
         )
     ]
     payload = json.loads(load_fixture(OWNER, fixture))["results"]
+    # The fixture's last row belongs to the next session, which the request window covers.
+    assert payload[-1]["session_end_date"] == "2024-12-18"
     assert [(r["Symbol"], r["Timestamp"], r["SequenceNumber"]) for r in out] == [
-        (symbol, p["timestamp"], p["sequence_number"]) for p in payload
+        (symbol, p["timestamp"], p["sequence_number"])
+        for p in payload
+        if p["session_end_date"] == "2024-12-17"
     ]
     assert {r["SessionEndDate"] for r in out} == {date(2024, 12, 17)}
     assert all(r["Exchange"] is None for r in out)  # only the flat files carry it
@@ -808,13 +817,13 @@ def test_schedules_over_rest(
 
 
 @pytest.mark.parametrize(
-    ("dataset", "path", "fixture"),
+    ("dataset", "path"),
     [
-        ("contracts", "/futures/v1/contracts", "contracts.json"),
-        ("products", "/futures/v1/products", "products.json"),
-        ("exchanges", "/futures/v1/exchanges", "exchanges.json"),
-        ("market_status", "/futures/v1/market-status", "market_status.json"),
-        ("schedules", "/futures/v1/schedules", "schedules.json"),
+        ("contracts", "/futures/v1/contracts"),
+        ("products", "/futures/v1/products"),
+        ("exchanges", "/futures/v1/exchanges"),
+        ("market_status", "/futures/v1/market-status"),
+        ("schedules", "/futures/v1/schedules"),
     ],
 )
 def test_poll_keys_tell_the_rows_apart(
@@ -823,14 +832,19 @@ def test_poll_keys_tell_the_rows_apart(
     serve: Callable[[str, str], None],
     dataset: str,
     path: str,
-    fixture: str,
 ) -> None:
-    # The keys of a REPLACE poll name every row once, or the keyed table would lose rows.
-    serve(path, fixture)
+    # The keys of a REPLACE poll name every row once, or the keyed table would merge rows.
+    # The fixture holds, for each key column, a row that differs from the first only there,
+    # so every key column is needed: without any one of them, two rows would collide.
+    serve(path, f"poll_keys_{dataset}.json")
     out = rows(getattr(rest_session.futures, dataset)().fetch())
     keys = _spec(dataset).poll_keys
+    assert len(out) == len(keys) + 1
     assert len({tuple(r[k] for k in keys) for r in out}) == len(out)
     assert all(r[k] is not None for r in out for k in keys)
+    for dropped in keys:
+        rest = [k for k in keys if k != dropped]
+        assert len({tuple(r[k] for k in rest) for r in out}) < len(out), dropped
 
 
 # Streams: a session whose futures connection reaches the fake WebSocket server.
