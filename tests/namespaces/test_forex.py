@@ -12,7 +12,7 @@ import json
 import string
 import threading
 from collections.abc import Callable, Iterator, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -23,7 +23,6 @@ from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
 from deephaven.table import Table
-from deephaven.table_listener import TableUpdate, listen
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
@@ -54,6 +53,7 @@ from tests._fakes.ws import FakeMassiveServer
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 NS = 10**9
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 MS = 10**6
 DOCS = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#"
 
@@ -726,49 +726,45 @@ def socket(fake_ws_server: FakeMassiveServer) -> Iterator[Socket]:
     harness.session.close()
 
 
-def landed(blink: Table) -> Callable[[], list[dict[str, Any]]]:
-    # The blink table holds a row for one update cycle only; an append-only view keeps it, and
-    # a listener on that view says when the cycle that adds the row has run.
-    kept = blink_to_append_only(blink)
-    updated = threading.Event()
-
-    def on_update(update: TableUpdate, is_replay: bool) -> None:
-        if not is_replay and update.added():
-            updated.set()
-
-    handle = listen(kept, on_update)
-
-    def read() -> list[dict[str, Any]]:
-        try:
-            if not kept.size:
-                assert updated.wait(WAIT)
-            return rows(kept)
-        finally:
-            handle.stop()
-
-    return read
+RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]
 
 
-def test_a_quote_frame_lands_in_blink(socket: Socket) -> None:
-    read = landed(socket.session.forex.quotes("C:EURUSD").blink())
+def kept(blink: Table) -> Table:
+    # The blink table holds a row for one update cycle only; an append-only view keeps it.
+    return blink_to_append_only(blink)
+
+
+def at_ms(millis: int) -> datetime:
+    # The instant `millis` milliseconds after the epoch, as a snapshot's row holds it.
+    return EPOCH + timedelta(milliseconds=millis)
+
+
+def test_a_quote_frame_lands_in_blink(socket: Socket, rows_when: RowsWhen) -> None:
+    table = kept(socket.session.forex.quotes("C:EURUSD").blink())
     socket.subscribed("C.EUR-USD")
     assert socket.hosts == [(AssetClass.FOREX, ChannelFamily.TICK)]
     socket.send(
         {"ev": "C", "p": "EUR-USD", "x": 44, "a": 1.0832, "b": 1.0831, "t": 1_700_000_000_123}
     )
     columns = ("Symbol", "Timestamp", "AskPrice", "BidPrice", "Exchange")
-    assert [tuple(r[c] for c in columns) for r in read()] == [
-        ("C:EURUSD", 1_700_000_000_123 * MS, 1.0832, 1.0831, 44)
-    ]
+    (row,) = rows_when(table, bool)
+    assert tuple(row[c] for c in columns) == (
+        "C:EURUSD",
+        at_ms(1_700_000_000_123),
+        1.0832,
+        1.0831,
+        44,
+    )
 
 
-@pytest.mark.parametrize(
-    ("timespan", "channel"), [(dm.Timespan.MINUTE, "CA"), (dm.Timespan.SECOND, "CAS")]
-)
-def test_a_bar_frame_lands_in_blink(socket: Socket, timespan: dm.Timespan, channel: str) -> None:
+@pytest.mark.parametrize("case", [(dm.Timespan.MINUTE, "CA"), (dm.Timespan.SECOND, "CAS")])
+def test_a_bar_frame_lands_in_blink(
+    socket: Socket, rows_when: RowsWhen, case: tuple[dm.Timespan, str]
+) -> None:
+    timespan, channel = case
     query = socket.session.forex.bars("EUR/USD", timespan)
     assert isinstance(query, StreamHistoryQuery)
-    read = landed(query.blink())
+    table = kept(query.blink())
     socket.subscribed(f"{channel}.EUR-USD")
     frame = {
         "ev": channel,
@@ -783,20 +779,29 @@ def test_a_bar_frame_lands_in_blink(socket: Socket, timespan: dm.Timespan, chann
     }
     socket.send(frame)
     columns = ("Symbol", "Timestamp", "Open", "Close", "Volume", "EndTimestamp")
-    assert [tuple(r[c] for c in columns) for r in read()] == [
-        ("C:EURUSD", 1_700_000_040_000 * MS, 1.08, 1.09, 20.0, 1_700_000_100_000 * MS)
-    ]
+    (row,) = rows_when(table, bool)
+    assert tuple(row[c] for c in columns) == (
+        "C:EURUSD",
+        at_ms(1_700_000_040_000),
+        1.08,
+        1.09,
+        20.0,
+        at_ms(1_700_000_100_000),
+    )
 
 
-def test_a_fair_value_frame_lands_in_blink(socket: Socket) -> None:
-    read = landed(socket.session.forex.fmv("EUR/USD").blink())
+def test_a_fair_value_frame_lands_in_blink(socket: Socket, rows_when: RowsWhen) -> None:
+    table = kept(socket.session.forex.fmv("EUR/USD").blink())
     socket.subscribed("FMV.EUR-USD")
     # Fair value is served by the FMV family's host, not the tick host.
     assert socket.hosts == [(AssetClass.FOREX, ChannelFamily.FMV)]
     socket.send({"ev": "FMV", "fmv": 1.0631, "sym": "C:EURUSD", "t": 1_678_220_098_130})
-    assert [(r["Symbol"], r["Timestamp"], r["Fmv"]) for r in read()] == [
-        ("C:EURUSD", 1_678_220_098_130 * MS, 1.0631)
-    ]
+    (row,) = rows_when(table, bool)
+    assert (row["Symbol"], row["Timestamp"], row["Fmv"]) == (
+        "C:EURUSD",
+        at_ms(1_678_220_098_130),
+        1.0631,
+    )
 
 
 # --- Flat files, end to end -------------------------------------------------------------------
@@ -915,6 +920,17 @@ def until(condition: Callable[[], bool]) -> None:
     assert condition()
 
 
+def changes(
+    expected: set[tuple[str, float]], column: str
+) -> Callable[[list[dict[str, Any]]], bool]:
+    # True for a snapshot whose rows are exactly `expected`, as (Symbol, column) pairs.
+    def match(found: list[dict[str, Any]]) -> bool:
+        pairs = [(row["Symbol"], row[column]) for row in found]
+        return len(pairs) == len(expected) and set(pairs) == expected
+
+    return match
+
+
 def snapshot_row(ticker: str, change: float) -> dict[str, object]:
     return {"ticker": ticker, "todaysChangePerc": change, "updated": 1_605_280_919_000}
 
@@ -934,6 +950,7 @@ def test_snapshot_polls_keep_one_row_per_symbol(
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     poll_clock: FakeClock,
+    rows_when: RowsWhen,
     make: Callable[[dm.MassiveSession], Query],
     path: str,
 ) -> None:
@@ -944,18 +961,10 @@ def test_snapshot_polls_keep_one_row_per_symbol(
     second = {"status": "OK", "tickers": [snapshot_row("C:EURUSD", 3.0)]}
     fake_rest.reply(path, Reply(first), Reply(second))
     table = make(rest_session).poll(60)
-    until(
-        lambda: (
-            sorted(pick(table, "Symbol", "TodaysChangePerc"))
-            == [
-                ("C:EURUSD", 1.0),
-                ("C:GBPUSD", 2.0),
-            ]
-        )
-    )
+    rows_when(table, changes({("C:EURUSD", 1.0), ("C:GBPUSD", 2.0)}, "TodaysChangePerc"))
     # The next cycle replaces the rows by Symbol: EUR/USD is updated, GBP/USD leaves.
     next_cycle(poll_clock)
-    until(lambda: pick(table, "Symbol", "TodaysChangePerc") == [("C:EURUSD", 3.0)])
+    rows_when(table, changes({("C:EURUSD", 3.0)}, "TodaysChangePerc"))
     assert [p for p, _ in sent(fake_rest)] == [path, path]
 
 
@@ -964,11 +973,12 @@ def test_a_conversion_poll_keeps_one_row(
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     poll_clock: FakeClock,
+    rows_when: RowsWhen,
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     body = fixture_body(load_fixture, "conversion.json")
     fake_rest.reply("/v1/conversion/AUD/USD", Reply(body), Reply({**body, "converted": 74.0}))
     table = rest_session.forex.conversion("AUD", "USD", amount=100).poll(60)
-    until(lambda: pick(table, "Symbol", "Converted") == [("C:AUDUSD", 73.14)])
+    rows_when(table, changes({("C:AUDUSD", 73.14)}, "Converted"))
     next_cycle(poll_clock)
-    until(lambda: pick(table, "Symbol", "Converted") == [("C:AUDUSD", 74.0)])
+    rows_when(table, changes({("C:AUDUSD", 74.0)}, "Converted"))
