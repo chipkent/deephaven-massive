@@ -266,6 +266,8 @@ ENUM_PARAMETERS = {
     "_Futures.contracts.order": _FUTURES_ENUMS,
     "_Futures.products.order": _FUTURES_ENUMS,
     "_Futures.schedules.order": _FUTURES_ENUMS,
+    "_Crypto.bars.timespan": "namespaces/test_crypto.py::test_bar_arguments_are_checked",
+    "_Crypto.movers.direction": "namespaces/test_crypto.py::test_movers",
     **dict.fromkeys(
         (
             "_Options.bars.timespan",
