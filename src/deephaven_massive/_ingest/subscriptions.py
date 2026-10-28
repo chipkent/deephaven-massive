@@ -142,9 +142,9 @@ class Subscriptions:
     static=True)`) are admitted first, since their verb already checked them against the cap;
     a reactive table's topics then take the room left, the ones admitted before keeping their
     place and the new ones entering in sorted order. The admitted set outlives a generation,
-    so a reconnect never reshuffles it. Topics covered by an acknowledged wildcard of their
-    channel are not on the wire and do not count; when the wildcard goes, they re-enter
-    through the cap like new ones.
+    so a reconnect never reshuffles it. Every wanted explicit topic counts, also one covered by
+    an acknowledged wildcard of its channel and so not on the wire meanwhile: the wildcard may
+    go at any time, and a static contract must never be deferred then.
 
     Each subscribed topic has a watchdog bound to its generation. After `ack_timeout` without
     an acknowledgement it re-sends the topic alone; after another it marks the topic `NO_ACK`,
@@ -443,16 +443,7 @@ class Subscriptions:
         """Recompute the explicit topics the cap admits and those it defers (see the class)."""
         if self._cap is None:
             return
-        covered = {
-            channel_of(t)
-            for t in self._refs
-            if is_wildcard(t) and t in self._acked and t not in self._refused
-        }
-        explicit = sorted(
-            t
-            for t in self._refs
-            if not is_wildcard(t) and t not in self._refused and channel_of(t) not in covered
-        )
+        explicit = sorted(t for t in self._refs if not is_wildcard(t) and t not in self._refused)
         static = [t for t in explicit if t in self._static][: self._cap]
         room = self._cap - len(static)
         kept = [t for t in explicit if t in self._admitted and t not in self._static][:room]

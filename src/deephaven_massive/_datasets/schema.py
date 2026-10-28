@@ -563,6 +563,8 @@ def widen(values: pa.Array, target: pa.DataType) -> pa.Array:
     (`join`): a `long` in a `double` column is cast, and a `long` in an `int[]` column becomes
     a one-element list (a null stays null). A column already of its type is cast to itself, at
     no cost. Every transport converts its decoded columns with it, so they all widen alike.
+    A `long` beyond 2**53 in a `double` column takes the nearest `double`, as the lattice join
+    means it to, rather than failing the whole column.
 
     Args:
         values: The column as decoded, in its wire type's Arrow type.
@@ -575,7 +577,8 @@ def widen(values: pa.Array, target: pa.DataType) -> pa.Array:
         offsets = pa.array(range(len(values) + 1), pa.int32())
         items = pc.cast(values, target.value_type)
         return pa.ListArray.from_arrays(offsets, items, mask=values.is_null())
-    return pc.cast(values, target)
+    to_float = pa.types.is_integer(values.type) and pa.types.is_floating(target)
+    return pc.cast(values, target, safe=not to_float)
 
 
 def dataset_schema(

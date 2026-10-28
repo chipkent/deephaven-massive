@@ -175,6 +175,11 @@ def test_iso_text_becomes_an_instant_to_the_nanosecond() -> None:
 # --- The lattice -----------------------------------------------------------------------------
 
 
+def test_widening_a_large_integer_to_a_double_rounds_it() -> None:
+    big = pa.array([2**53 + 1, None], pa.int64())
+    assert widen(big, pa.float64()).to_pylist() == [float(2**53), None]
+
+
 def test_widening_gives_each_column_its_merged_arrow_type() -> None:
     # Checked on the arrays, before a batch is assembled, which on some pyarrow versions casts
     # by itself.

@@ -427,18 +427,36 @@ def test_the_cap_admits_contracts_in_sorted_order_and_defers_the_rest() -> None:
     ]
 
 
-def test_covered_contracts_count_only_while_on_the_wire() -> None:
+def test_covered_contracts_count_against_the_cap() -> None:
+    # A wildcard keeps covered contracts off the wire, but they count: it may go at any time.
     loop = make_loop(cap=1)
-    loop.subs.add(["T.*", "T.O:A", "T.O:B"])
+    loop.subs.add(["T.*"])
+    loop.subs.add(["T.O:B"], static=True)
+    loop.subs.add(["T.O:A"])
     loop.subs.opened(1)
-    loop.subs.status(ack("T.*", "T.O:A"))  # T.* covers both: neither counts
-    assert loop.subs.deferred == frozenset()
-    assert loop.sender.take()[-1] == ("unsubscribe", 1, ("T.O:A",))
+    assert loop.sender.take() == [("subscribe", 1, ("T.*", "T.O:B"))]
+    loop.subs.status(ack("T.*", "T.O:B"))  # T.* now covers T.O:B, which leaves the wire
+    assert loop.sender.take() == [("unsubscribe", 1, ("T.O:B",))]
+    assert loop.subs.admitted == {"T.O:B"}
+    assert loop.subs.deferred == {"T.O:A"}
     loop.subs.remove(["T.*"])
+    loop.subs.reconcile()  # the static contract keeps its place; the reactive one waits
+    assert loop.subs.deferred == {"T.O:A"}
+    assert loop.sender.take() == [("subscribe", 1, ("T.O:B",))]
+
+
+def test_an_admitted_reactive_contract_keeps_its_place_across_a_reconnect() -> None:
+    # Sorted order decides only between new contracts: one admitted before keeps its place.
+    loop = make_loop(cap=1)
+    loop.subs.add(["T.O:B"])
+    loop.subs.opened(1)
+    loop.subs.add(["T.O:A"])  # sorts first, but the room is taken
     loop.subs.reconcile()
-    # They re-enter through the cap in sorted order.
-    assert loop.subs.deferred == {"T.O:B"}
-    assert loop.sender.take() == [("subscribe", 1, ("T.O:A",))]
+    assert loop.subs.deferred == {"T.O:A"}
+    loop.subs.ended()
+    loop.subs.opened(2)
+    assert loop.subs.deferred == {"T.O:A"}
+    assert loop.sender.take()[-1] == ("subscribe", 2, ("T.O:B",))
 
 
 def test_a_refusal_of_topics_nobody_wants_reports_nothing() -> None:

@@ -479,9 +479,19 @@ class Connection:
             awaited = stream_id in self.awaiting
         if awaited:
             self._early.setdefault(stream_id, []).append((callback, args))
+        else:
+            self._after_change()  # a stream that never arrived may have been the last lease
 
     def check_idle(self) -> None:
-        """Arm the idle close if the connection has no stream left."""
+        """Arm the idle close if the connection has no stream left.
+
+        Also forgets the calls kept for streams it no longer awaits (a move whose hand-over
+        never came).
+        """
+        with self._lock:
+            awaited = set(self.awaiting)
+        for stream_id in [s for s in self._early if s not in awaited]:
+            del self._early[stream_id]
         self._after_change()
 
     def _after_change(self, *, opened: int | None = None) -> None:
@@ -507,11 +517,13 @@ class Connection:
     def hand_over(self, successor: Connection) -> None:
         """Move every stream to `successor` and close. Loop thread.
 
-        Called when the server's real-time verdict moves the connection to another host. The
-        streams' routes move to `successor` under `registry_lock` (or, if it has already
-        failed, the streams fail here); their topics reach its loop with `adopt`; a release or
-        symbol change that still arrives here is forwarded. This flush thread applies what it
-        has queued before it ends.
+        Called when the server's real-time verdict moves the connection to another host. Under
+        `registry_lock`, the streams are routed on `successor` too (or, if it has already
+        failed, they fail here); their topics reach its loop with `adopt`; a release or symbol
+        change that still arrives here is forwarded. The streams stay routed on this
+        connection as well, until its flush thread ends: its last flush applies the failures it
+        has queued and publishes the rows it has buffered (a stream's publish lock keeps the two
+        flush threads from interleaving on one stream).
 
         Args:
             successor: The connection that takes over.
@@ -521,9 +533,8 @@ class Connection:
         self._successor = successor
         with self._lock:
             failure = successor.failure
-            if failure is None:  # else the streams stay routed here, for this flusher to fail
+            if failure is None:
                 for stream in streams:
-                    self.flusher.routes.remove(stream.stream_id)
                     successor.flusher.routes.add(stream.channel, stream.sink)
         if failure is not None:
             self.flusher.fail([s.stream_id for s in streams], failure)
@@ -640,11 +651,11 @@ class Connection:
             )
         self._last_error = str(public)
         logger.error("%s", public)
-        with self._lock:
+        with self._lock:  # one section: no verb leases the connection once it has failed
             self.failure = public
             routed = [sink.stream_id for sink in self.flusher.routes.sinks()]
+            self._transport.retire(self, idle=False)
         self.flusher.fail(routed, public)
-        self._transport.retire(self, idle=False)
         self.flusher.stop(final=True)  # the failures above are applied before it ends
 
     # --- loop thread: failures and drift -------------------------------------------------------
@@ -1428,8 +1439,10 @@ class WsConnections:
             client_factory=self._factory,
         )
         successor: Connection | None = None
+        moved: list[int] = []
         with self._lock:
-            if not self._is_closed():
+            # Not if the session closed, or the connection failed (its streams fail with it).
+            if not self._is_closed() and connection.failure is None:
                 # A stream of the class may already have opened the delayed host's connection.
                 successor = self._connections.setdefault(url, candidate)
                 successor.families.add(ChannelFamily.TICK)
@@ -1442,13 +1455,18 @@ class WsConnections:
                         successor.awaiting.add(stream_id)
                         successor.leases += 1
                         connection.leases -= 1
+                        moved.append(stream_id)
         if successor is not candidate:
             candidate.close()
-        if successor is None:  # the session closed meanwhile: its connections are closing
+        if successor is None:  # the session closed or the connection failed meanwhile
             connection.close()
             return
         successor.start(delay=self._reconnect_backoff)  # does nothing if it already started
-        connection.post(connection.hand_over, successor)
+        if not connection.post(connection.hand_over, successor):
+            # The old loop ended first: its streams were failed there and never arrive.
+            with self._lock:
+                successor.awaiting.difference_update(moved)
+            successor.post(successor.check_idle)
 
     # --- closing -------------------------------------------------------------------------------
 

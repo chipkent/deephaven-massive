@@ -318,6 +318,29 @@ def test_a_flush_publishes_each_channel_once_to_every_stream(
     assert (aapl.rows_published, every.rows_published, idle.rows_published) == (1, 2, 0)
 
 
+def test_a_stream_routed_while_rows_drain_gets_them(
+    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The routes are read after the rows are drained, so a stream routed meanwhile is served.
+    core = massive_session._core
+    first, _ = make_sink(core, ALL)
+    late, late_blink = make_sink(core, ALL)
+    shown = blink_to_append_only(late_blink)
+    flusher.routes.add("T", first)
+    flusher.rows("T", [trade("AAPL")])
+    routes_type = type(flusher.routes)
+    buffers = routes_type.buffers
+
+    def routing_meanwhile(routes: object) -> tuple[object, ...]:
+        drained = buffers(flusher.routes)
+        flusher.routes.add("T", late)
+        return drained
+
+    monkeypatch.setattr(routes_type, "buffers", routing_meanwhile)
+    flusher.flush()
+    wait_for(lambda: shown.size == 1)
+
+
 def test_a_failure_fails_each_stream_once(
     massive_session: dm.MassiveSession, flusher: Flusher
 ) -> None:

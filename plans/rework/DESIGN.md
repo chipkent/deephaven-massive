@@ -1752,8 +1752,8 @@ they break**, so a stream never loses data because of another stream's wildcard:
 - During an overlap, an event may arrive twice for one round trip. That brief duplicate is
   accepted; a gap would be silent and unrecoverable.
 - Covered explicit topics count toward the options cap ([section 15](#15-options-contract-cap))
-  only while they are on the wire; when a wildcard is removed, they re-enter through the cap's
-  deferral in sorted order.
+  even while the wildcard keeps them off the wire, so removing the wildcard never pushes a
+  contract past the cap.
 
 Responsibilities:
 
@@ -2044,9 +2044,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
 Massive allows 1,000 option contracts per `/options` connection. The library counts
 **topics** per connection: `T.X` and `Q.X` count as two. Whether the server counts contracts or
 topics is **UNVERIFIED**, so the stricter count is used (fixture test). Wildcards count zero.
-An explicit topic covered by an acknowledged wildcard counts only while it is on the wire
-([section 13.3](#133-connection-and-subscription-protocol)); when the wildcard is removed, the
-covered topics re-enter through the deferral below, in sorted order.
+Every wanted explicit topic counts, also one covered by an acknowledged wildcard and so off the
+wire meanwhile ([section 13.3](#133-connection-and-subscription-protocol)): the wildcard may be
+removed at any time, and a static contract the verb accepted must never be deferred then.
 
 Because the library knows the count before sending, a frame that would cross the cap is never
 sent:
@@ -2055,10 +2055,12 @@ sent:
   synchronously.
 - **Reactive `Table` input.** Static topics are admitted first (their verb checked them);
   a reactive table's adds take the room left, in sorted order, and contracts admitted before
-  keep their place, across reconnects too. The rest are deferred: not subscribed, not failed. `m.streams()` shows `State=RUNNING`, `Deferred=<n>`, and
+  keep their place, across reconnects too. The rest are deferred: not subscribed, not failed.
+  `m.streams()` shows `State=RUNNING`, `Deferred=<n>`, and
   `Error="over capacity: 1234/1000; 234 deferred"`, with a WARNING on each transition. When
   removals free capacity, deferred contracts subscribe in the same order. Rows for deferred
-  contracts are absent, never stale.
+  contracts are absent, never stale, except while a wildcard on the connection delivers them
+  anyway.
 
 No all-or-nothing server refusal can occur, so frame chunking has no interaction with the cap.
 
@@ -2225,9 +2227,10 @@ without the GIL.
 
 | Thread | Created by | Does | Must not |
 |---|---|---|---|
-| caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key | hold the registry lock while calling Deephaven or waiting |
+| caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key; fails a new stream whose connection failed while it opened (`publish_failure`, outside every lock) | hold the registry lock while calling Deephaven or waiting |
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
-| flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
+| flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
+| verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
@@ -2242,6 +2245,14 @@ without the GIL.
   **leaf lock**: no Deephaven call, no network call, no blocking wait, and no wait on a
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
   atomically under the lock; readers copy references out and release the lock before working.
+- Two locks of the WebSocket flush are not leaf locks, and are never taken under
+  `registry_lock` or the UG lock:
+  - each connection's **flush lock** serializes its flushes (the flush thread's, and any a test
+    calls); a flush calls Deephaven under it;
+  - each stream's **publish lock** serializes `publisher.add` and `publish_failure` for the
+    stream, which two flush threads can briefly share when a connection moves, and the caller
+    thread when a stream's connection failed while it opened. Failing a stream takes
+    `registry_lock` under it (`SessionCore.fail_stream`).
 - The other locks are leaf locks too, each guarding one thing and making no Deephaven,
   network, or blocking call while held:
   - the REST transport's host-decision cache, which holds one future per (class, family);
@@ -2290,6 +2301,10 @@ lock is held and may take `registry_lock`. Therefore no library thread acquires 
 directly or through auto-locking in `Table.snapshot()`, `where_in`, `last_by`, or
 `deephaven.arrow.to_table`, while holding `registry_lock`. That single rule prevents the UG and
 registry deadlock. Verbs called on the UG thread raise `ValueError`.
+
+The WebSocket flush adds two locks above `registry_lock`: a connection's **flush lock**, then a
+stream's **publish lock**, then `registry_lock`. Nothing takes the flush or the publish lock
+while holding `registry_lock` or the UG lock, so the order has no cycle.
 
 ### 18.4 Free-threaded specifics
 

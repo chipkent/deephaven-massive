@@ -348,8 +348,10 @@ class StreamSink:
     - its publish lock serializes `publish` and `fail`, which call Deephaven. Usually only the
       flush thread takes it, but a stream can briefly be reached from two flush threads (when
       the server's verdict moves its connection), and is failed from the caller thread when
-      its connection failed while it was opening. The lock is never taken while another
-      library lock is held.
+      its connection failed while it was opening. The order is the flush lock (on a flush
+      thread), then the publish lock, then `registry_lock` (`SessionCore.fail_stream`, which
+      `fail` calls); the publish lock is never taken under `registry_lock` or the update-graph
+      lock.
 
     A failed stream publishes nothing more, and is failed once.
 
