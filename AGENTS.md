@@ -165,6 +165,10 @@ nothing is kept or shimmed for compatibility.
     reviewer, break the code on purpose to prove the tests catch it, check the docs and the
     PR description, and fix every finding. Only then push. CI and the review bots confirm a
     clean branch; they are not the place to find its problems.
+17. **Every PR description meets the standard below** (see "Pull request descriptions"): a
+    Summary from which a newcomer could explain the whole PR, the required sections in order,
+    nothing the reader must decode, and rewritten to the final state on every push that changes
+    the PR.
 
 ## Layers
 
@@ -203,6 +207,40 @@ anything with behavior worth knowing is a defect, not brevity.
   section numbers, planned-PR names, or decision numbers. The planning documents are
   temporary; the implementation explains itself, so state the behavior or the reason directly.
   Only files under `plans/` may cross-reference each other.
+
+## Pull request descriptions
+
+The owner reads every PR description to decide whether to merge it. Write it as an editor would
+leave it: the big picture first, plain words, short sentences, every term defined, and no
+process narrative. A reader who knows nothing about the work must be able to explain the PR to
+someone else after reading the Summary alone. `.github/pull_request_template.md` holds the
+skeleton. Use these sections, in this order:
+
+1. **Summary**, the most important part, over several paragraphs when the PR needs them. In
+   plain English it gives the background (the part of the library the PR touches, what a user
+   does with it, and every term the reader needs, defined); exactly what the PR does, step by
+   step in full sentences, covering every user-visible change and every rule it adds or
+   changes; why it matters, with a concrete example a user would hit; and what the reader
+   should check or decide before merging. No file names, internal function names, review
+   labels, or decision numbers.
+2. **Why**: the problem, with one concrete example (a call, and what went wrong).
+3. **What changes**: the behavior after the merge, one bullet per user-visible change, with a
+   short before-and-after example wherever the public API or a result changes.
+4. **Decisions**: every owner decision the PR applies and every departure from the plan, each
+   with a one-line reason; "None" when there are none.
+5. **How it works**, only when a reviewer needs it: a short paragraph on the approach and where
+   it lives, not a file-by-file list.
+6. **Verification**: what was run and what it showed (`scripts/check.sh`, the free-threaded
+   tests, mutation probes, live checks), in a few lines.
+7. **Follow-ups**: work deliberately left out, each with its reason or the live check it waits
+   on.
+8. `Closes #<issue>` (or `Refs #<issue>`) on its own line, or "No tracking issue."
+9. The required footer.
+
+Never include review-finding labels (H1, M2), agent identifiers, commit-by-commit narration,
+first-person process ("I did X, then Y"), counts that will go stale, or anything else the reader
+must decode. The description describes the branch as it is: when a push changes the PR, rewrite
+the description to the final state in the same batch, instead of appending to it.
 
 ## Deephaven invariants
 
