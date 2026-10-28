@@ -261,6 +261,27 @@ ENUM_PARAMETERS = {
     "_Crypto.movers.direction": "namespaces/test_crypto.py::test_movers",
     **dict.fromkeys(
         (
+            "_Benzinga.analysts.order",
+            "_Benzinga.analyst_insights.order",
+            "_Benzinga.ratings.order",
+            "_Benzinga.bulls_bears_say.order",
+            "_Benzinga.guidance.order",
+            "_Benzinga.earnings.order",
+            "_Benzinga.firms.order",
+            "_Benzinga.news.order",
+            "_EtfGlobal.analytics.order",
+            "_EtfGlobal.constituents.order",
+            "_EtfGlobal.fund_flows.order",
+            "_EtfGlobal.profiles.order",
+            "_EtfGlobal.taxonomies.order",
+            "_Tmx.corporate_events.order",
+            "_Fable.merchant_aggregates.order",
+            "_Fable.merchant_hierarchy.order",
+        ),
+        "namespaces/test_partners.py::test_order_is_an_enum",
+    ),
+    **dict.fromkeys(
+        (
             "_Options.bars.timespan",
             "_Options.chain.contract_type",
             "_Options.chain.order",
