@@ -1486,7 +1486,15 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
 
 
 NULLABLE_KEYS = {
-    "filings.institutional_holdings": {"PutCall", "OtherManagers"},
+    "filings.institutional_holdings": {
+        "PutCall",
+        "OtherManagers",
+        "SharesOrPrincipalAmount",
+        "SharesOrPrincipalType",
+        "VotingAuthoritySole",
+        "VotingAuthorityShared",
+        "VotingAuthorityNone",
+    },
     "filings.insider_holdings": {"NatureOfOwnership", "ExercisePrice", "ExerciseDate"},
     "filings.insider_transactions": {
         "NatureOfOwnership",
@@ -1578,30 +1586,74 @@ def test_two_issuers_of_one_ticker_poll_as_two_offerings(
     rest_session.release(table)
 
 
-# The poll-key columns that tell apart lines of one filing that agree on every other key: a
-# 13-F lists one security on several lines split by amount or voting authority, and a Form 4
-# reports option tranches that differ only in when they become exercisable, or two sales that
-# differ only in the shares owned afterwards, or one acquisition and one disposal.
-DISTINGUISHING_KEYS = {
-    "filings.institutional_holdings": {
-        "SharesOrPrincipalAmount",
-        "SharesOrPrincipalType",
-        "MarketValue",
-        "VotingAuthoritySole",
-        "VotingAuthorityShared",
-        "VotingAuthorityNone",
-    },
-    "filings.insider_transactions": {
-        "ExerciseDate",
-        "SharesOwnedFollowingTransaction",
-        "TransactionAcquiredDisposed",
-    },
-}
+# Lines of one filing that agree on every other key and differ in one column: a 13-F lists one
+# security on several lines split by amount or voting authority, and a Form 4 reports option
+# tranches that differ only in when they become exercisable, two sales that differ only in the
+# shares owned afterwards, or one acquisition and one disposal.
+DISTINGUISHING_LINES = [
+    ("filings.institutional_holdings", "shares_or_principal_amount"),
+    ("filings.institutional_holdings", "shares_or_principal_type"),
+    ("filings.institutional_holdings", "voting_authority_sole"),
+    ("filings.institutional_holdings", "voting_authority_shared"),
+    ("filings.institutional_holdings", "voting_authority_none"),
+    ("filings.insider_transactions", "exercise_date"),
+    ("filings.insider_transactions", "shares_owned_following_transaction"),
+    ("filings.insider_transactions", "transaction_acquired_disposed"),
+]
 
 
-@pytest.mark.parametrize("name", list(DISTINGUISHING_KEYS))
-def test_ownership_filing_lines_that_differ_only_in_amounts_stay_apart(name: str) -> None:
-    assert DISTINGUISHING_KEYS[name] <= set(spec_of(name).poll_keys)
+def _poll_lines(
+    session: dm.MassiveSession, server: FakeRestServer, *, name: str, lines: list[dict[str, Any]]
+) -> tuple[Table, list[dict[str, Any]]]:
+    # Serve `lines` as one response and poll the dataset with its default mode until every
+    # line is published.
+    path = cast("str", spec_of(name).fetch_path)
+    server.reply(path, Reply(body={"status": "OK", "request_id": "r", "results": lines}))
+    table = cast("Query", factory(session, name)()).poll(60)
+    return table, _rows_when(table, len(lines))
+
+
+@pytest.mark.parametrize(("name", "wire_key"), DISTINGUISHING_LINES)
+def test_ownership_filing_lines_that_differ_in_one_column_poll_as_two_rows(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+    wire_key: str,
+) -> None:
+    template = cast("str", spec_of(name).fetch_path)
+    field = next(f for f in cast("RestPath", source(R, template)).fields if f.wire_key == wire_key)
+    first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
+    other = first | {wire_key: _other(first.get(wire_key), field.wire_type)}
+    table, rows = _poll_lines(rest_session, fake_rest, name=name, lines=[first, other])
+    assert not table.j_table.isFailed()
+    assert len({row[field.column] for row in rows}) == 2
+    rest_session.release(table)
+
+
+@pytest.mark.parametrize(
+    ("name", "wire_key"),
+    [
+        ("filings.institutional_holdings", "voting_authority_shared"),
+        ("filings.insider_transactions", "shares_owned_following_transaction"),
+    ],
+)
+def test_an_ownership_filing_line_with_an_empty_optional_key_still_polls(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+    wire_key: str,
+) -> None:
+    # Massive marks the field optional (or the form lets the filer leave it out): one line
+    # without it is a value, not a data failure that would stop the live table.
+    template = cast("str", spec_of(name).fetch_path)
+    first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
+    table, _ = _poll_lines(rest_session, fake_rest, name=name, lines=[first | {wire_key: None}])
+    assert not table.j_table.isFailed()
+    rest_session.release(table)
 
 
 # --- Filings without a ticker --------------------------------------------------------------------

@@ -264,11 +264,12 @@ IPOS: Final = DatasetSpec(
     time_axis=("listing_date.gte", "listing_date.lte"),
     symbol_param="ticker",
     poll_mode=PollMode.UPSERT,
-    # One offering is one issuer listing under one ticker. Both are required on every row, and
-    # neither changes as the offering moves through its statuses, so the row is revised in
-    # place; a ticker an earlier, different issuer used (a recycled SPAC ticker) stays apart.
-    # The listing date and ISIN are no key: an offering can be postponed to a new date, and
-    # either can be missing before the listing.
+    # One offering is one issuer listing under one ticker; both are required on every row, and
+    # a ticker an earlier, different issuer used (a recycled SPAC ticker) stays apart. The key
+    # assumes Massive keeps an offering's issuer name unchanged through its statuses, which no
+    # vendor source states: a renamed issuer would leave its old row behind. The listing date
+    # and ISIN are no key: an offering can be postponed to a new date, and either can be
+    # missing before the listing.
     poll_keys=("Symbol", "IssuerName"),
     page_size=1_000,
 )
@@ -445,8 +446,8 @@ FILINGS_INDEX: Final = _filing(
     "index",
     _INDEX,
     symbol_param="ticker.any_of",
-    # EDGAR lists a filing once under each filer: a Form 4 under the issuer and each reporting
-    # owner, a joint filing under each co-registrant.
+    # EDGAR's index lists a filing once under each filer (a Form 4 under the issuer and each
+    # reporting owner, a joint filing under each co-registrant), and so can this one.
     poll_keys=("Cik", "AccessionNumber"),
     page_size=10_000,
     summary="The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.",
@@ -486,6 +487,16 @@ RISK_FACTORS: Final = _filing(
     page_size=50_000,
     summary="Risk factors disclosed in company filings, classified by category, one row each.",
 )
+_13F_AMOUNTS: Final = (
+    "SharesOrPrincipalAmount",
+    "SharesOrPrincipalType",
+    "VotingAuthoritySole",
+    "VotingAuthorityShared",
+    "VotingAuthorityNone",
+)
+"""The amount and voting authority of one 13-F line, which tell apart several lines of one
+filing for the same security."""
+
 INSTITUTIONAL_HOLDINGS: Final = _filing(
     "institutional_holdings",
     _FORM_13F,
@@ -498,17 +509,13 @@ INSTITUTIONAL_HOLDINGS: Final = _filing(
         "InvestmentDiscretion",
         "OtherManagers",
         # One filing can list the same security on several lines, split by amount or voting
-        # authority; Form 13-F requires each of these on every line.
-        "SharesOrPrincipalAmount",
-        "SharesOrPrincipalType",
-        "MarketValue",
-        "VotingAuthoritySole",
-        "VotingAuthorityShared",
-        "VotingAuthorityNone",
+        # authority. The market value follows from the amount, so it tells no lines apart.
+        *_13F_AMOUNTS,
     ),
     nullable_poll_keys={
         "PutCall": "PUT or CALL for an option, and empty for common stock",
         "OtherManagers": "the other managers sharing discretion, only if applicable",
+        **dict.fromkeys(_13F_AMOUNTS, "Massive marks the field optional"),
     },
     keys=SourceKeys(fanout=KeySpec("FilerCik", instrument=False)),
     page_size=1_000,
@@ -546,8 +553,9 @@ INSIDER_TRANSACTIONS: Final = _filing(
         **_DERIVATIVE,
         "ExerciseDate": _DERIVATIVE_ONLY,
         "ExpirationDate": _DERIVATIVE_ONLY,
-        "SharesOwnedFollowingTransaction": "Form 4 lets a filer report the value owned "
-        "afterwards instead of the shares, which the row does not carry",
+        "SharesOwnedFollowingTransaction": "the SEC's Form 4 instructions let a filer report "
+        "the value owned afterwards instead of the shares (valueOwnedFollowingTransaction in "
+        "the EDGAR Form 4 XML technical specification), and the row does not carry that value",
         **dict.fromkeys(
             (
                 "TransactionDate",
@@ -1038,12 +1046,12 @@ class _StockFilings(Namespace):
         """The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.
 
         Each row names a filing's form type, filer CIK, issuer, ticker, filing date, and the URL of
-        the document on EDGAR. A filing with several filers has a row under each filer's CIK: a
-        Form 4 under the issuer and each reporting owner, a joint 10-K or 8-K under each
-        co-registrant. Served by REST (`/stocks/filings/vX/index`) through `fetch()` and
-        `poll()`. By default `poll()` appends only the rows it has not seen before, telling rows
-        apart by `Cik` and `AccessionNumber`, so every filer's row is kept. A filing whose
-        company has no ticker keeps a null `Symbol`.
+        the document on EDGAR. A filing with several filers can have a row under each filer's
+        CIK, as EDGAR's own index lists it: a Form 4 under the issuer and each reporting owner,
+        a joint 10-K or 8-K under each co-registrant. Served by REST (`/stocks/filings/vX/index`)
+        through `fetch()` and `poll()`. By default `poll()` appends only the rows it has not
+        seen before, telling rows apart by `Cik` and `AccessionNumber`, so every filer's row is
+        kept. A filing whose company has no ticker keeps a null `Symbol`.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -2262,7 +2270,10 @@ class _Stocks(Namespace):
         `Symbol` and `IssuerName`, as it moves from rumor or pending to new and history (or is
         postponed or withdrawn); rows are never deleted. Two issuers that used one ticker stay
         two rows, while an issuer's withdrawn offering and its later offering under the same
-        ticker share one row, which shows the latest.
+        ticker share one row, which shows the latest. The key assumes Massive keeps an
+        offering's issuer name the same through its statuses, which Massive does not
+        document: if it revised the name (a legal suffix added, say), the row under the old
+        name would stay, showing the offering's earlier state beside the new row.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every offering. Columns:
