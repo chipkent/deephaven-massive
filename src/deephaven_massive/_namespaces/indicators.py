@@ -34,7 +34,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._datasets.request import ParamValue
+    from deephaven_massive._massive import RestPath
     from deephaven_massive._query import Query
+    from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
 __all__ = ["DATASETS", "_Indicators"]
@@ -43,9 +45,6 @@ logger = logging.getLogger(__name__)
 
 _PAGE_SIZE: Final = 5000
 """The largest page the indicator endpoints serve (their documented `limit` maximum)."""
-
-_NO_TIMESPAN: Final = frozenset({Timespan.SECOND, Timespan.SESSION})
-"""Timespans the indicator endpoints do not accept: they compute from minute bars and up."""
 
 
 def _indicator(name: str, summary: str) -> DatasetSpec:
@@ -79,6 +78,8 @@ def _indicator(name: str, summary: str) -> DatasetSpec:
         time_axis=("timestamp.gte", "timestamp.lt"),
         poll_keys=("Symbol", "Timestamp"),
         per_symbol=True,
+        # Its underlying bars are not rows of the table, so the library never asks for them.
+        fixed_params={"expand_underlying": False},
         page_size=_PAGE_SIZE,
     )
 
@@ -98,24 +99,32 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (SMA, EMA, RSI, MACD)
 """Every dataset of `m.indicators`, one `DatasetSpec` each (for example `indicators.sma`)."""
 
 
-def _check_timespan(timespan: object) -> Timespan:
-    """Validate the bar size an indicator is computed over.
+def _check_timespan(core: SessionCore, spec: DatasetSpec, timespan: object) -> Timespan:
+    """Validate the bar size an indicator is computed over, against its generated parameter.
+
+    The indicator paths take `timespan` as an enum from `minute` to `year`, so `SECOND` and
+    `SESSION` are refused here, before any request.
 
     Args:
+        core: The session core, whose catalog holds the generated paths.
+        spec: The indicator; its fetch path has a `timespan` enum parameter.
         timespan: The `timespan` argument as passed.
 
     Returns:
         The timespan.
 
     Raises:
-        ValueError: If the timespan is `SECOND` or `SESSION`, which the endpoints do not
-            accept.
+        ValueError: If the endpoint does not accept the timespan; the message lists those it
+            does.
 
     A `timespan` that is not a `dm.Timespan` raises the `TypeError` of `_require_enum`.
     """
     span = _require_enum(timespan, Timespan, "timespan")
-    if span in _NO_TIMESPAN:
-        raise ValueError(f"indicators do not accept Timespan.{span.name}; use MINUTE or longer")
+    path = cast("RestPath", core.catalog.source(Transport.REST, cast("str", spec.fetch_path)))
+    accepted = next(param.values for param in path.params if param.name == "timespan")
+    if span.value not in accepted:
+        names = [member.name for member in Timespan if member.value in accepted]
+        raise ValueError(f"indicators do not accept Timespan.{span.name}; they accept {names}")
     return span
 
 
@@ -175,7 +184,7 @@ class _Indicators(Namespace):
         invalid arguments raise the `TypeError` or `ValueError` of `_check_timespan`,
         `require_positive_int`, `_require_enum`, and `build_query`.
         """
-        span = _check_timespan(timespan)
+        span = _check_timespan(self._core, spec, timespan)
         params: dict[str, ParamValue | None] = {
             name: require_positive_int(name, value) for name, value in windows.items()
         }
@@ -229,8 +238,10 @@ class _Indicators(Namespace):
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
-                for crypto and forex, New York otherwise), a `datetime` is used as is;
-                None for the endpoint's default range.
+                for crypto and forex, New York otherwise), a `datetime` is used as is.
+                None sets no lower bound: every value back to the start of the series,
+                read page by page, so pass `start`, or `limit` with the default newest-first
+                order, to bound it.
             end: The end of the range: a date includes that whole day in the same zone,
                 a `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
@@ -294,8 +305,10 @@ class _Indicators(Namespace):
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
-                for crypto and forex, New York otherwise), a `datetime` is used as is;
-                None for the endpoint's default range.
+                for crypto and forex, New York otherwise), a `datetime` is used as is.
+                None sets no lower bound: every value back to the start of the series,
+                read page by page, so pass `start`, or `limit` with the default newest-first
+                order, to bound it.
             end: The end of the range: a date includes that whole day in the same zone,
                 a `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
@@ -359,8 +372,10 @@ class _Indicators(Namespace):
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
-                for crypto and forex, New York otherwise), a `datetime` is used as is;
-                None for the endpoint's default range.
+                for crypto and forex, New York otherwise), a `datetime` is used as is.
+                None sets no lower bound: every value back to the start of the series,
+                read page by page, so pass `start`, or `limit` with the default newest-first
+                order, to bound it.
             end: The end of the range: a date includes that whole day in the same zone,
                 a `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
@@ -429,8 +444,10 @@ class _Indicators(Namespace):
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
-                for crypto and forex, New York otherwise), a `datetime` is used as is;
-                None for the endpoint's default range.
+                for crypto and forex, New York otherwise), a `datetime` is used as is.
+                None sets no lower bound: every value back to the start of the series,
+                read page by page, so pass `start`, or `limit` with the default newest-first
+                order, to bound it.
             end: The end of the range: a date includes that whole day in the same zone,
                 a `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they

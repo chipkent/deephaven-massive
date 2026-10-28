@@ -34,6 +34,7 @@ from deephaven_massive._enums import (
     Order,
     PollMode,
     Sip,
+    TickerType,
     _require_enum,
 )
 from deephaven_massive._massive import Transport
@@ -132,7 +133,9 @@ MARKET_STATUS: Final = DatasetSpec(
     name="reference.market_status",
     summary="Whether the markets are open now, by exchange, currency market, and index group.",
     fetch_path="/v1/marketstatus/now",
-    poll_keys=("ServerTime",),
+    # One row and no key: a `poll()` table keeps the latest status, never a row per
+    # `ServerTime`, which changes on every call.
+    poll_keys=(),
 )
 MARKET_HOLIDAYS: Final = DatasetSpec(
     name="reference.market_holidays",
@@ -275,7 +278,7 @@ class _Reference(Namespace):
         *,
         symbols: Symbols | None = None,
         market: Market | None = None,
-        ticker_type: str | None = None,
+        ticker_type: TickerType | None = None,
         exchange: str | None = None,
         cusip: str | None = None,
         cik: str | None = None,
@@ -301,9 +304,9 @@ class _Reference(Namespace):
             symbols: The tickers to look up, of any asset classes, or a Deephaven table with a
                 `Symbol` column; None for every ticker.
             market: The market to list; None for every market.
-            ticker_type: The ticker type code, such as `"CS"` for common stock
-                (`ticker_types()` lists them), sent as the wire parameter `type`; None
-                for every type.
+            ticker_type: The ticker type, such as `dm.TickerType.CS` for common stock
+                (`ticker_types()` lists them with descriptions), sent as the wire
+                parameter `type`; None for every type.
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
@@ -331,7 +334,9 @@ class _Reference(Namespace):
             raise TypeError(f"active must be a bool, not {type(active).__name__}")
         params: dict[str, ParamValue | None] = {
             "market": None if market is None else _require_enum(market, Market, "market"),
-            "type": _text("ticker_type", ticker_type),
+            "type": None
+            if ticker_type is None
+            else _require_enum(ticker_type, TickerType, "ticker_type"),
             "exchange": _text("exchange", exchange),
             "cusip": _text("cusip", cusip),
             "cik": _text("cik", cik),
@@ -346,6 +351,7 @@ class _Reference(Namespace):
             symbols=symbols,
             all_alternative="symbols=None for every ticker",
             params=params,
+            arguments={"type": "ticker_type"},
             filters=filters,
             limit=limit,
         )
@@ -482,8 +488,10 @@ class _Reference(Namespace):
         """News articles about tickers, with their publishers and sentiment insights.
 
         Served over REST (`/v2/reference/news`); `fetch()` returns every article in range and
-        `poll()` appends the articles each cycle returns. An article lists several tickers,
-        so the table has no `Symbol`: it keeps the article's `Tickers` (JSON text), and
+        `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range,
+        so pass `start`: a poll without it re-reads the news archive every cycle. An article
+        lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
+        (JSON text), and
         `symbols` only selects the articles that mention one ticker. The endpoint's `ticker`
         parameter takes a single ticker, so `symbols` is one symbol; for several, build one
         query per symbol. `symbols=None` reads every article; `dm.ALL` is not accepted (use
@@ -494,8 +502,8 @@ class _Reference(Namespace):
         Args:
             symbols: The one ticker whose articles to read, as a `str` or a one-element
                 sequence; None for every article.
-            start: The earliest publication (a date or an aware `datetime`); None for no
-                lower bound.
+            start: The earliest publication: a date is its 00:00 in New York, a `datetime`
+                is used as is; None for no lower bound, which reads the whole archive.
             end: The end of the range: a date includes that whole day, a `datetime` is
                 exclusive; None for no upper bound.
             sort: The field to sort by (`"published_utc"`); None for the endpoint's default.
@@ -625,7 +633,14 @@ class _Reference(Namespace):
             "sip": None if sip is None else _require_enum(sip, Sip, "sip"),
             **list_params(sort=sort, order=order),
         }
-        query = build_query(self._core, CONDITIONS, params=params, filters=filters, limit=limit)
+        query = build_query(
+            self._core,
+            CONDITIONS,
+            params=params,
+            arguments={"id": "condition_id"},
+            filters=filters,
+            limit=limit,
+        )
         return cast("Query", query)
 
     def market_status(self) -> Query:
@@ -633,7 +648,7 @@ class _Reference(Namespace):
 
         One row, with the nested exchange, currency, and index-group maps flattened into
         columns. Served over REST (`/v1/marketstatus/now`); `fetch()` returns the current
-        status and `poll()` keeps the latest, keyed by `ServerTime`. The dataset takes no
+        status and `poll()` keeps only the latest in one row (`REPLACE`, `UPSERT`). It takes no
         symbols, so `dm.ALL` does not apply. Its columns, and what each means, are in
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#market_status,
         in the web UI's column tooltips, and in the query's `columns()`.

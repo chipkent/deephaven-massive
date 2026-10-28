@@ -71,7 +71,12 @@ def test_a_windowed_indicator_builds_its_query(
     assert query._request == Request(
         symbols=("AAPL", "X:BTCUSD"),
         timespan=dm.Timespan.DAY,
-        params=(("series_type", dm.SeriesType.CLOSE), ("window", 20)),
+        # `expand_underlying=false` is fixed by the library on every request.
+        params=(
+            ("expand_underlying", False),
+            ("series_type", dm.SeriesType.CLOSE),
+            ("window", 20),
+        ),
     )
     later = factory(
         "AAPL",
@@ -91,6 +96,7 @@ def test_a_windowed_indicator_builds_its_query(
         start=date(2025, 1, 2),
         end=datetime(2025, 1, 3, 15, tzinfo=UTC),
         params=(
+            ("expand_underlying", False),
             ("order", dm.Order.ASC),
             ("series_type", dm.SeriesType.HIGH),
             ("window", 5),
@@ -111,6 +117,7 @@ def test_macd_takes_three_windows(massive_session: dm.MassiveSession) -> None:
     )
     assert query._spec is indicators.MACD
     assert dict(query._request.params) == {
+        "expand_underlying": False,
         "long_window": 26,
         "series_type": dm.SeriesType.CLOSE,
         "short_window": 12,
@@ -131,6 +138,10 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         i.rsi("AAPL", 0)
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         i.rsi("AAPL", 14, adjusted=cast("bool", 1))
+    with pytest.raises(ValueError, match="the library sets expand_underlying itself"):
+        i.sma("AAPL", 20, filters={"expand_underlying": True})
+    with pytest.raises(ValueError, match=r"^adjusted is set through its own argument, adjusted="):
+        i.sma("AAPL", 20, filters={"adjusted": True})
     with pytest.raises(ValueError, match="timestamp_gte is set through start= and end="):
         i.sma("AAPL", 20, filters={"timestamp_gte": 1})
     with pytest.raises(ValueError, match="carries the prefix"):
@@ -235,7 +246,8 @@ def test_each_symbol_class_is_served_by_its_own_path(
         "window": ["50"],
         "series_type": ["open"],
         "order": ["asc"],
-        "limit": ["5000"],
+        "expand_underlying": ["false"],
+        "limit": ["10"],  # the page size, capped by the total-row limit
         "timestamp.gte": ["1517529600000"],
         "timestamp.lt": ["1517616000000"],
     }
@@ -295,15 +307,18 @@ def test_a_date_bound_is_a_day_in_the_symbols_zone(
     empty = Reply(envelope({"values": []}))
     fake_rest.reply("/v1/indicators/sma/AAPL", empty)
     fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", empty)
+    fake_rest.reply("/v1/indicators/sma/C%3AEURUSD", empty)
     day = date(2025, 1, 2)
-    rest_session.indicators.sma(["AAPL", "X:BTCUSD"], 20, start=day, end=day).fetch()
+    symbols = ["AAPL", "X:BTCUSD", "C:EURUSD"]
+    rest_session.indicators.sma(symbols, 20, start=day, end=day).fetch()
     requests = sent(fake_rest)
-    # A crypto day is a UTC day; a stock day is a New York day (UTC-5 in January).
-    crypto = requests["/v1/indicators/sma/X:BTCUSD"]
-    assert (crypto["timestamp.gte"], crypto["timestamp.lt"]) == (
-        [str(int(datetime(2025, 1, 2, tzinfo=UTC).timestamp() * 1000))],
-        [str(int(datetime(2025, 1, 3, tzinfo=UTC).timestamp() * 1000))],
-    )
+    # A crypto or forex day is a UTC day; a stock day is a New York day (UTC-5 in January).
+    # Forex takes the stock template, so its zone comes from the symbol, not the path.
+    for path in ("/v1/indicators/sma/X:BTCUSD", "/v1/indicators/sma/C:EURUSD"):
+        assert (requests[path]["timestamp.gte"], requests[path]["timestamp.lt"]) == (
+            [str(int(datetime(2025, 1, 2, tzinfo=UTC).timestamp() * 1000))],
+            [str(int(datetime(2025, 1, 3, tzinfo=UTC).timestamp() * 1000))],
+        )
     stock = requests["/v1/indicators/sma/AAPL"]
     assert (stock["timestamp.gte"], stock["timestamp.lt"]) == (
         [str(int(datetime(2025, 1, 2, 5, tzinfo=UTC).timestamp() * 1000))],

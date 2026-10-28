@@ -2,12 +2,15 @@
 
 import json
 import re
+import threading
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import pyarrow as pa
 import pytest
 from deephaven import new_table
 from deephaven.column import string_col
@@ -18,11 +21,13 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType, required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._ingest.poll import Pollers, open_poll
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces.base import Namespace
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 OWNER = "namespaces/reference"
@@ -127,7 +132,7 @@ def test_news_keeps_its_tickers_and_appends() -> None:
         (reference.TICKER_TYPES, ("AssetClass", "Locale", "Code")),
         (reference.EXCHANGES, ("AssetClass", "Id")),
         (reference.CONDITIONS, ("AssetClass", "Type", "Id")),
-        (reference.MARKET_STATUS, ("ServerTime",)),
+        (reference.MARKET_STATUS, ()),
         (reference.MARKET_HOLIDAYS, ("Exchange", "Date")),
     ],
 )
@@ -148,6 +153,12 @@ def test_market_status_flattens_its_maps() -> None:
     assert types["ExchangesNyse"] is ColumnType.STRING
     assert types["CurrenciesFx"] is ColumnType.STRING
     assert types["IndicesGroupsSAndP"] is ColumnType.STRING
+
+
+def test_market_holidays_hours_are_instants() -> None:
+    types = _types(reference.MARKET_HOLIDAYS)
+    assert (types["Open"], types["Close"]) == (ColumnType.INSTANT, ColumnType.INSTANT)
+    assert types["Date"] is ColumnType.LOCAL_DATE
 
 
 def test_the_unified_snapshot_record() -> None:
@@ -187,7 +198,7 @@ def test_tickers_query(massive_session: dm.MassiveSession) -> None:
     full = ref.tickers(
         symbols=["msft", "AAPL"],
         market=dm.Market.STOCKS,
-        ticker_type="CS",
+        ticker_type=dm.TickerType.CS,
         exchange="XNAS",
         cusip="037833100",
         cik="0000320193",
@@ -211,7 +222,7 @@ def test_tickers_query(massive_session: dm.MassiveSession) -> None:
             ("order", dm.Order.DESC),
             ("search", "apple"),
             ("sort", "ticker"),
-            ("type", "CS"),
+            ("type", dm.TickerType.CS),
         ),
         filters=(("ticker_gte", "A"),),
         limit=5,
@@ -369,7 +380,7 @@ def test_dm_all_names_the_alternative(massive_session: dm.MassiveSession) -> Non
 
 def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
-    for name in ("ticker_type", "exchange", "cusip", "cik", "search"):
+    for name in ("exchange", "cusip", "cik", "search"):
         with pytest.raises(TypeError, match=f"{name} must be a str, not int"):
             ref.tickers(**{name: 1})
     with pytest.raises(TypeError, match="active must be a bool, not NoneType"):
@@ -387,6 +398,11 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
     for bad in (True, "2"):
         with pytest.raises(TypeError, match="condition_id must be an int"):
             ref.conditions(condition_id=bad)
+    # A reserved wire name names the factory's argument, which may be spelled differently.
+    with pytest.raises(ValueError, match=r"^type is set through its own argument, ticker_type="):
+        ref.tickers(filters={"type": "CS"})
+    with pytest.raises(ValueError, match=r"^id_gte is set through its own argument, condition_id="):
+        ref.conditions(filters={"id_gte": 1})
     with pytest.raises(ValueError, match="published_utc_gte is set through start= and end="):
         ref.news(filters={"published_utc_gte": "2025-01-01"})
     with pytest.raises(ValueError, match="end"):
@@ -399,6 +415,7 @@ def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
     calls: list[tuple[Callable[..., Query], str, str]] = [
         (ref.tickers, "market", "Market"),
+        (ref.tickers, "ticker_type", "TickerType"),
         (ref.tickers, "order", "Order"),
         (ref.ticker_types, "asset_class", "AssetClass"),
         (ref.ticker_types, "locale", "Locale"),
@@ -537,7 +554,7 @@ def test_tickers_fetch(
     fake_rest.reply("/v3/reference/tickers", sample(load_fixture, "tickers"))
     out = dh_to_pylist(
         rest_session.reference.tickers(
-            symbols="A", market=dm.Market.STOCKS, ticker_type="CS", date="2021-04-25"
+            symbols="A", market=dm.Market.STOCKS, ticker_type=dm.TickerType.CS, date="2021-04-25"
         ).fetch()
     )
     assert sent(fake_rest) == [
@@ -657,13 +674,13 @@ def test_lookup_fetches(
     fake_rest.reply("/v3/reference/conditions", sample(load_fixture, "conditions"))
     fake_rest.reply("/v1/marketstatus/now", sample(load_fixture, "market_status"))
     fake_rest.reply("/v1/marketstatus/upcoming", sample(load_fixture, "market_holidays"))
-    types = dh_to_pylist(ref.ticker_types(asset_class=dm.AssetClass.FOREX).fetch())
+    types = dh_to_pylist(ref.ticker_types(asset_class=dm.AssetClass.STOCKS).fetch())
     exchanges = dh_to_pylist(ref.exchanges(locale=dm.Locale.US).fetch())
     conditions = dh_to_pylist(ref.conditions(condition_id=2, sip=dm.Sip.CTA).fetch())
     status = dh_to_pylist(ref.market_status().fetch())
     holidays = dh_to_pylist(ref.market_holidays().fetch())
     assert sent(fake_rest) == [
-        ("/v3/reference/tickers/types", {"asset_class": ["fx"]}),
+        ("/v3/reference/tickers/types", {"asset_class": ["stocks"]}),
         ("/v3/reference/exchanges", {"locale": ["us"]}),
         ("/v3/reference/conditions", {"id": ["2"], "sip": ["CTA"], "limit": ["1000"]}),
         ("/v1/marketstatus/now", {}),
@@ -678,7 +695,9 @@ def test_lookup_fetches(
     assert status[0]["ExchangesOtc"] == "closed"
     assert len(holidays) == 5
     assert holidays[3]["Status"] == "early-close"
-    assert holidays[3]["Open"] == "2020-11-27T14:30:00.000Z"
+    assert holidays[3]["Open"] == datetime(2020, 11, 27, 14, 30, tzinfo=UTC)
+    assert holidays[3]["Close"] == datetime(2020, 11, 27, 18, tzinfo=UTC)
+    assert holidays[0]["Open"] is None  # a full holiday has no hours
 
 
 def test_unified_snapshots_fetch(
@@ -716,3 +735,65 @@ def test_unified_snapshots_send_250_tickers_a_request(
     batches = [q["ticker.any_of"][0].split(",") for _, q in sent(fake_rest)]
     assert sorted(len(batch) for batch in batches) == [1, 250]
     assert sorted(s for batch in batches for s in batch) == symbols
+
+
+# --- Polling the market status ------------------------------------------------------------
+
+
+class _Statuses:
+    # A cycle reader that answers each cycle with the next scripted market status row.
+    def __init__(self, *markets: str) -> None:
+        schema = CATALOG.dataset_schema(reference.MARKET_STATUS).arrow_schema()
+        self.tables = [
+            pa.Table.from_pylist(
+                [{"Market": market, "ServerTime": datetime(2025, 1, 2, 15, i, tzinfo=UTC)}],
+                schema=schema,
+            )
+            for i, market in enumerate(markets)
+        ]
+
+    def __call__(
+        self,
+        *,
+        symbols: object,
+        record: Callable[[object], None],
+        executor: ThreadPoolExecutor,
+    ) -> tuple[pa.Table, int]:
+        return self.tables.pop(0) if len(self.tables) > 1 else self.tables[0], 1
+
+
+def _until(condition: Callable[[], bool]) -> None:
+    # Waits for the update graph to apply a published cycle; fails after 30 s.
+    event = threading.Event()
+    for _ in range(3000):
+        if condition():
+            return
+        event.wait(0.01)
+    assert condition()
+
+
+@pytest.mark.parametrize("mode", [dm.PollMode.REPLACE, dm.PollMode.UPSERT])
+def test_market_status_polls_one_row_in_every_keyed_mode(
+    massive_session: dm.MassiveSession, dh_to_pylist: ToRows, mode: dm.PollMode
+) -> None:
+    # No poll key: the table is the latest status, never one row per `ServerTime`.
+    assert reference.MARKET_STATUS.poll_keys == ()
+    clock = FakeClock(manual=True)
+    pollers = Pollers(massive_session._core.label)
+    table = open_poll(
+        massive_session._core,
+        spec=reference.MARKET_STATUS,
+        request=Request(),
+        interval=timedelta(seconds=60),
+        mode=mode,
+        read=cast("Any", _Statuses("open", "closed")),
+        pollers=pollers,
+        host="api.massive.com",
+        path="/v1/marketstatus/now",
+        clock=clock,
+    )
+    _until(lambda: [r["Market"] for r in dh_to_pylist(table)] == ["open"])
+    clock.wait_for_sleepers(1)
+    clock.advance(60)
+    _until(lambda: [r["Market"] for r in dh_to_pylist(table)] == ["closed"])
+    massive_session.release(table)

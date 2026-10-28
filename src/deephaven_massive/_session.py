@@ -340,8 +340,11 @@ class MassiveSession:
             symbols: The tickers, in any accepted form of their classes (`AAPL`,
                 `O:SPY251219C00600000`, `EUR/USD`, `X:BTCUSD`, `I:SPX`), or a Deephaven table
                 with a `Symbol` column; each prefix selects the class.
-            sort: The field to sort by (`"ticker"`); None for the endpoint's default.
-            order: The sort direction; None for the endpoint's default.
+            sort: The field to sort by (`"ticker"`); None for the endpoint's default. With
+                more than 250 tickers it orders the rows within each request of 250, not
+                across them.
+            order: The sort direction, within each request the same way; None for the
+                endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
                 page size is internal.
             filters: Further query parameters of the endpoint, by wire name with dots written

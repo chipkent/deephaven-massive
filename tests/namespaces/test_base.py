@@ -370,7 +370,7 @@ def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> N
     # A filter would reach REST but not the source choice, which could then pick flat files,
     # whose bars are unadjusted.
     with pytest.raises(
-        ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\), not filters"
+        ValueError, match=r"^adjusted is set through its own argument, adjusted=, not filters"
     ):
         build_query(massive_session._core, STOCK_BARS, symbols=["AAPL"], filters={"adjusted": True})
 

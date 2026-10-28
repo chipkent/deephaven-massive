@@ -12,7 +12,7 @@ data is) and `ChannelFamily` (which host a channel is served from). Both appear 
 the diagnostics tables, beside the wire package's `Transport`, which names WebSocket, REST, or
 flat files once for both sides of the wire boundary.
 
-The fourteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
+The fifteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
 private.
 """
 
@@ -37,6 +37,7 @@ __all__ = [
     "Recency",
     "SeriesType",
     "Sip",
+    "TickerType",
     "Timeframe",
     "Timespan",
 ]
@@ -257,6 +258,45 @@ class Market(StrEnum):
     INDICES = "indices"
     FX = "fx"
     CRYPTO = "crypto"
+
+
+class TickerType(StrEnum):
+    """The type code of a ticker, which `m.reference.tickers` filters by.
+
+    The values are Massive's codes, upper case as on the wire; `m.reference.ticker_types()`
+    lists them with their descriptions.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            assert dm.TickerType("ETF") is dm.TickerType.ETF
+    """
+
+    CS = "CS"  # common stock
+    ADRC = "ADRC"  # American depositary receipt, common
+    ADRP = "ADRP"  # American depositary receipt, preferred
+    ADRR = "ADRR"  # American depositary receipt, rights
+    UNIT = "UNIT"  # unit
+    RIGHT = "RIGHT"  # rights
+    PFD = "PFD"  # preferred stock
+    FUND = "FUND"  # fund
+    SP = "SP"  # structured product
+    WARRANT = "WARRANT"  # warrant
+    INDEX = "INDEX"  # index
+    ETF = "ETF"  # exchange-traded fund
+    ETN = "ETN"  # exchange-traded note
+    OS = "OS"  # ordinary shares
+    GDR = "GDR"  # global depositary receipt
+    OTHER = "OTHER"  # other security type
+    NYRS = "NYRS"  # New York registry shares
+    AGEN = "AGEN"  # agency bond
+    EQLK = "EQLK"  # equity-linked bond
+    BOND = "BOND"  # corporate bond
+    ADRW = "ADRW"  # American depositary receipt, warrants
+    BASKET = "BASKET"  # basket
+    LT = "LT"  # liquidating trust
 
 
 class Locale(StrEnum):

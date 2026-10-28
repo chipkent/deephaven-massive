@@ -163,9 +163,11 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date (a `date`, `"YYYY-MM-DD"`, or an aware `datetime`'s day);
-                None for the start of the series.
-            end: The last date, inclusive; None for the latest.
+            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
+                its New York day; None for the start of the series.
+            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
+                `datetime`, which is exclusive and so names the New York day of the instant
+                just before it; None for the latest.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
@@ -210,9 +212,11 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date (a `date`, `"YYYY-MM-DD"`, or an aware `datetime`'s day);
-                None for the start of the series.
-            end: The last date, inclusive; None for the latest.
+            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
+                its New York day; None for the start of the series.
+            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
+                `datetime`, which is exclusive and so names the New York day of the instant
+                just before it; None for the latest.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
@@ -257,9 +261,11 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date (a `date`, `"YYYY-MM-DD"`, or an aware `datetime`'s day);
-                None for the start of the series.
-            end: The last date, inclusive; None for the latest.
+            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
+                its New York day; None for the start of the series.
+            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
+                `datetime`, which is exclusive and so names the New York day of the instant
+                just before it; None for the latest.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
@@ -304,9 +310,11 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date (a `date`, `"YYYY-MM-DD"`, or an aware `datetime`'s day);
-                None for the start of the series.
-            end: The last date, inclusive; None for the latest.
+            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
+                its New York day; None for the start of the series.
+            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
+                `datetime`, which is exclusive and so names the New York day of the instant
+                just before it; None for the latest.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
@@ -351,9 +359,11 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date (a `date`, `"YYYY-MM-DD"`, or an aware `datetime`'s day);
-                None for the start of the series.
-            end: The last date, inclusive; None for the latest.
+            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
+                its New York day; None for the start of the series.
+            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
+                `datetime`, which is exclusive and so names the New York day of the instant
+                just before it; None for the latest.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
