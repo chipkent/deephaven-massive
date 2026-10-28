@@ -417,7 +417,9 @@ gone; the transports it builds hold the core itself, never the weak reference.
   `ssl`, `http`, `urllib`, `subprocess`, `_thread`, `multiprocessing`, `select`, or
   `selectors`, and read neither `threading.Thread` nor `threading.Timer`, by attribute, import,
   or literal `getattr` (`threading` itself stays allowed, for leaf locks);
-- `_massive.__all__` splits into vocabulary names (the three errors and the spec names) and
+- `_massive.__all__` splits into vocabulary names (the three errors, the spec names, and the
+  pure parameter encoder `encode_value`; a subprocess test checks that reading every one of
+  them loads no client and no network module) and
   client names (`RestClient`, `Page`, `to_batch`, `WsClient`, `WsState`, `Status`,
   `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`,
   `object_key`); under `src/`, only `_ingest` uses a client name (by import, attribute,
@@ -1336,8 +1338,9 @@ m.options.contracts(underlying="NVDA",
 The mapping is mechanical and one to one: a key ending in `_gt`, `_gte`, `_lt`, `_lte`, or
 `_any_of` is sent as `<field>.<suffix>` exactly when the spec lists that dotted parameter for the
 path; every other key is sent unchanged. `Sequence[str]` values of an `.any_of` parameter are
-joined with commas; dates are ISO-8601; an aware `datetime` becomes the parameter's documented
-form (an exact integer count of the parameter's `unit` for a timestamp parameter, ISO-8601
+joined with commas (a `date` item of a list of dates, such as `date_any_of`, as its ISO-8601
+day); dates are ISO-8601; an aware `datetime` becomes the parameter's documented form (an exact
+integer count of the parameter's `unit` for a timestamp parameter, ISO-8601 in UTC with a `Z`
 otherwise), and a naive one raises `ValueError` (§ 11).
 
 Validation is synchronous at query construction, against the generated parameters of the
@@ -1354,7 +1357,32 @@ so `date.any_of` is reserved too although `start` and `end` cannot express a lis
 (its base name and its `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and `.all_of` forms, so
 `product_code_any_of` is rejected on a futures dataset that types `product_code`). An unknown
 key, a value of the wrong kind, or a value outside a parameter's enum raises `ValueError` naming
-the valid keys or values; a key reserved by a typed parameter names that parameter. The
+the valid keys or values (the valid keys are only those the caller can pass: every reserved key
+is left out); a key reserved by a typed parameter names that parameter. The check
+first puts each value in the form that is sent: ISO-8601 text of a `DATE` or `TIMESTAMP`
+parameter becomes a `date` or an aware `datetime` (`dates.parse_date_like`), and a `LIST`
+value is split into its comma-separated items, with the spaces around each removed, so
+`"a,b"`, `"a, b"`, and `("a", "b")` are one value and one query key (the wire joins a list
+with commas, so no item can hold one); an empty item (`"a,,b"`) raises `ValueError`. It then
+runs the wire package's own encoder (`encode_value`) on that value, so everything the encoder
+refuses (a non-finite number, an empty list, an instant finer than a timestamp parameter's
+unit) fails here, at construction, with the encoder's message. `Request.filters` holds the
+parsed values, never the caller's text, so validation and encoding cannot disagree. Every path
+of the dataset that declares the key checks the value, since any of them may send it: one that
+cannot encode it fails the check and is named in the message, and paths that read it as
+different values (a date parameter on one, a text one on another) fail it too.
+
+A `date` on a range filter (`_gt`, `_gte`, `_lt`, `_lte`) of a parameter that compares
+instants (a timestamp parameter, or a date-typed one over an instant field, such as
+`last_updated_gte` on the benzinga paths) keeps its calendar meaning and never leaves the day
+boundary to Massive: the REST transport sends `_gte` a day as the day's start, `_lt` a day as
+the day's start, `_gt` a day as the day's end, and `_lte` a day as the day's end, where a day
+starts at 00:00 in the request's day zone ([section 12](#12-timestamp-units-and-day-boundaries))
+and its end is the next day's start less one unit of the parameter. The request keeps the
+date, since the zone follows each request's symbols. Where no unit can end a day exactly (a
+nanosecond timestamp, or ISO-8601 text, whose precision Massive does not document), `_gt` and
+`_lte` with a date raise `ValueError` at construction, naming the `_gte` and `_lt` forms. The
+base name and `.any_of` keep the date. An aware `datetime` is always sent as given. The
 reservation is one shared check in the filter validation, fed the dataset's typed parameters,
 never a guard in a namespace module. Parameters the library always sets itself (the
 `type=options` of `options.snapshots`) are reserved the same way. When Massive adds a filter,
@@ -1362,12 +1390,15 @@ refreshing the snapshot adds it; no code changes.
 
 **`sort` and `order`.** Most list endpoints have no `order` parameter: the direction is an
 `.asc` or `.desc` suffix inside `sort`. On such a path the REST transport folds the two, so
-`sort="date", order=Order.DESC` sends `sort=date.desc`, and `sort` alone is sent unchanged; on
-such a path `order` without `sort` raises `ValueError` at query construction, since there is
-nothing to fold it into. A path that has its own `order` parameter (`/v3/snapshot/indices`,
-`/v3/trades`, the reference lists, the indicators) receives `sort` and `order` as they are,
-and `order` alone is valid there. Which form applies is read from the path's generated
-parameters, never from a hand list. A dataset whose paths have neither parameter offers
+`sort="date", order=Order.DESC` sends `sort=date.desc`, and `sort` alone is sent unchanged. A
+path that has its own `order` parameter (`/v3/snapshot`, `/v3/snapshot/indices`, `/v3/trades`,
+the reference lists such as tickers, news, and conditions, the indicators) receives `sort` and
+`order` as they are, and `order` alone is valid there. `order` without `sort` raises
+`ValueError` only where it would have to fold and there is nothing to fold it into: at query
+construction when none of the dataset's REST paths has an `order` parameter, and from the verb
+when the path chosen for a request (a per-symbol detail path, a path per symbol class) has
+neither. Which form applies is read from the path's generated parameters, never from a hand
+list. A dataset whose paths have neither parameter offers
 neither; one whose paths have `order` but no `sort` (the indicators) offers `order` alone
 ([section 8](#8-namespace-tree)).
 
@@ -1376,7 +1407,12 @@ neither; one whose paths have `order` but no `sort` (the indicators) offers `ord
 `.lt` (`timestamp.gte`/`timestamp.lt`, `published_utc.gte`/`published_utc.lt`,
 `published.gte`/`published.lt`), and a calendar-date axis is whole days, `.gte` and `.lte`
 (`ex_dividend_date.gte`/`ex_dividend_date.lte`, `filing_date.gte`/`filing_date.lte`,
-`session_end_date.gte`/`session_end_date.lte` on `futures.schedules`, and so on). Bars declare
+`session_end_date.gte`/`session_end_date.lte` on `futures.schedules`, and so on). Whether an
+axis is an instant axis follows from the generated row field its parameter filters (the field
+whose wire key is the parameter's base name), not from the parameter's kind: Massive types the
+`published_utc` and benzinga `published` filters as dates, but their fields are ISO-8601
+instants, so they are instant axes, and a date bound on them is sent as the instant of
+[section 12](#12-timestamp-units-and-day-boundaries), never as a bare date. Bars declare
 no `time_axis`: `history()` fills the range path's `{from}` and `{to}` segments instead
 ([section 13.4](#134-rest)). Passing any form of the same axis
 through `filters` (as `timestamp_gte`, `timestamp_lte`, or `timestamp`, for example) raises
@@ -1472,7 +1508,9 @@ sides of the boundary.
 naive `datetime`, or an ISO string with a time but no offset, raises a `ValueError` that names
 the parameter, the value, and the fix, for example `start=datetime.datetime(2025, 1, 2, 9, 30)
 needs a timezone: pass an aware datetime or a date`. The same rule and message apply to a naive
-`datetime` passed as a `filters` value or a typed parameter.
+`datetime` passed as a `filters` value or a typed parameter. ISO text with more than six
+fractional digits of a second raises `ValueError` too: a `datetime` holds microseconds, and
+cutting the rest would move the time.
 
 **ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
 becomes an `Instant`. It must carry an offset (`Z` or `±HH:MM`): text without one is an
@@ -1545,6 +1583,28 @@ the futures `SessionEndDate` are `LocalDate`.
 range is half-open: `[start, end)`. A `date` or `"YYYY-MM-DD"` `start` is that day's 00:00 in
 the class day zone. A `date` `end` is the next day's 00:00, so whole days are inclusive. A
 timezone-aware `datetime` is used as is.
+
+The same rule bounds the time axis of a `…T` dataset on an instant axis: a timestamp
+parameter, or a date-typed parameter over an instant field (`published_utc`, benzinga
+`published`). A date `start` is sent as that day's 00:00 in the request's day zone and a date
+`end` as the next day's 00:00, with `.gte` and `.lt`, so Massive never decides where a day
+starts. A date-typed parameter takes the instant as
+ISO-8601 text in UTC (`2025-06-02T04:00:00Z`); since Massive documents no
+precision for that text, such an axis cannot be declared with `.gt` or `.lte` (the request
+fails with `ValueError`). A calendar-date axis (`period_end`, `ex_dividend_date`) keeps
+whole-day date bounds with `.gte` and `.lte`; an aware `datetime` bound on it becomes the
+calendar day it falls on in the request's day zone, and an upper one, being the first instant
+excluded, the day of the instant just before it, so a day the range covers in part is
+included, as the flat-file partitions of `history()` are.
+
+**The request's day zone** (`dates.day_class`). A dataset with an asset class follows its
+class. A dataset without one uses New York days, with one exception: a dataset that declares a
+path per symbol class (`fetch_paths_by_class`, the indicators, whose crypto bars have UTC
+days) serves class-specific data, so each REST request, and `history()`, follows the class its
+own symbols share (`symbol_class`): a crypto or forex ticker's days are UTC days, a stock,
+option, or index ticker's New York days, and a request with symbols of several classes uses
+New York. A filter on a publication time does not depend on which tickers are listed, so
+`m.reference.news(["AAPL", "X:BTCUSD"], start=...)` asks for one New York window.
 
 **Day zone per class.**
 
@@ -1926,6 +1986,19 @@ How a request is built from a `DatasetSpec` and a `Request`:
   turned into a calendar date by `calendar_day` in `_datasets/dates.py`: a date or
   `"YYYY-MM-DD"` as given, an aware `datetime` as the calendar day it falls on in the dataset's
   day zone ([section 12](#12-timestamp-units-and-day-boundaries)).
+- **Time axis.** `start` and `end` go to the `time_axis` pair by the rules of
+  [section 9](#9-filters) and [section 12](#12-timestamp-units-and-day-boundaries): instants
+  on an instant axis (decided by the generated row field the parameter filters, so a
+  date-typed `published_utc.gte` gets an instant), whole-day dates on a calendar-date axis.
+  Each request's dates, its axis and its date filters on instant parameters, follow the
+  request's day zone ([section 12](#12-timestamp-units-and-day-boundaries)): the dataset's
+  class, or for a dataset with a path per symbol class the class of the request's own symbols,
+  so a crypto indicator's `start="2025-03-03"` is UTC midnight and a stock indicator's New
+  York midnight.
+- **Currency pairs.** A per-symbol request on a path whose `{from}` and `{to}` nothing else
+  fills (crypto's daily open-close, whose rows carry their own `symbol`) takes them from the
+  request's symbol, split into its two currencies, wherever the dataset's symbol key comes
+  from; the rows' symbol is made canonical as usual.
 - **Bars ranges.** A bars spec declares no `time_axis`. `history()` fills the range path's
   `{from}` and `{to}` segments from its bounds, as epoch milliseconds or as `YYYY-MM-DD`
   according to the kind the generated path gives the parameter.
@@ -2367,11 +2440,13 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
                      convert_field applies a field's named conversion and raises with the
                      shared bad-value message; missing_key_message and excerpt, so both
                      decoders word a row failure alike and add only their own context
+  values.py          encode_value(param, value, *, label): one REST parameter value's wire
+                     text by ParamKind, for the REST client and the library's filter check
   rest.json  ws.json  flatfiles.json        generated, committed
 rest/                imports net, spec
   __init__.py        RestClient, Page, to_batch
   client.py          pool, bearer auth, retries, not-before instant (leaf lock), next_url paging, close
-  query.py           path and query encoding by ParamKind
+  query.py           request targets (values encoded by spec.values), next_url checks
   response.py        strict decoding, envelopes, result keys, error mapping
   batch.py           to_batch(rows, rest_path, *, required) -> (RecordBatch, DriftReport)
 ws/                  imports net, spec
@@ -2428,7 +2503,7 @@ vendor/massive/      outside the package; Massive's published content, vendored 
   rest/  websocket/  flat-files/   (the pages of each area llms.txt links)
 ```
 
-**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 28
+**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 29
 names, resolving them lazily (PEP 562), so a REST-only session never imports boto3 or
 websockets:
 
@@ -2437,7 +2512,11 @@ websockets:
 - WebSocket: `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`;
 - flat files: `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`;
 - spec: `source`, `sources`, `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`,
-  `WireType`, `WireUnit`, `DriftReport`, `provenance`, `Provenance`.
+  `WireType`, `WireUnit`, `DriftReport`, `provenance`, `Provenance`, and `encode_value` (one
+  parameter value's wire text by its `ParamKind`, in `spec.values`, which the REST client and
+  the library's filter check both run, so a filter the check accepts always encodes; it loads
+  no client, and a subprocess test checks that no vocabulary name loads a client or network
+  module).
 
 `Param` is reached as an attribute of `RestPath`. `Transport` (`REST`, `WS`, `FLAT_FILES`) is
 the library's one transport enum.
@@ -2523,7 +2602,8 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   ISO-8601, an aware `datetime` for a `TIMESTAMP` parameter as an exact integer count of the
   parameter's `unit` (`Param.unit`, set exactly for `TIMESTAMP`: nanoseconds for most,
   milliseconds for the indicators' `timestamp` filters) computed from `timedelta` days,
-  seconds, and microseconds (never through a float), and as ISO-8601 for a `DATE` parameter;
+  seconds, and microseconds (never through a float), and for a `DATE` parameter as ISO-8601
+  text in UTC ending in `Z` (`2025-06-02T04:00:00Z`, the form of Massive's examples);
   a non-empty sequence of `str` joined with commas (the `.any_of` form). A naive `datetime`, an
   instant that is not a whole number of the parameter's unit (rounding would move a range
   bound), an empty sequence, and a non-finite number raise `ValueError`; a value of a type the
@@ -2588,8 +2668,11 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   `ERROR` raises `WireError`. `OK`, `DELAYED`, and `success` (the "last" endpoints) are the
   documented good statuses, named once (`rest.response.GOOD_STATUSES`). Any other status still
   yields its rows and is reported in `Page.drift.statuses`, which the library logs at WARNING
-  once per (path, status). A `status` or `request_id` that is not text is a `WireError`. The
-  envelope's `status` and `request_id` are kept on the `Page`, so callers can read `DELAYED`.
+  once per (path, status). A `status` that is not text is a `WireError`. The `request_id` is
+  metadata and never fails a call: Massive's documentation samples send it as text and as a
+  number (`1`), so any JSON scalar is kept as text (`"1"`), and an object or list is dropped
+  (`None`), in a 200 envelope and in an error body alike. The envelope's `status` and
+  `request_id` are kept on the `Page`, so callers can read `DELAYED`.
 - **Batches.** `to_batch` turns a page's rows into one Arrow batch of the path's generated
   fields, in long-form column names, and returns its `DriftReport`; it validates every value
   per [section 19.5](#195-runtime-drift). It is the only code that walks a wire path; no row

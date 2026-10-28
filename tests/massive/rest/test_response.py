@@ -239,9 +239,19 @@ def test_an_unknown_status_keeps_its_rows_and_is_reported_as_drift(rest_path: Re
     assert page.drift == DriftReport(statuses=frozenset({"PARTIAL"}))
 
 
-@pytest.mark.parametrize("body", [{"status": 1}, {"status": "OK", "request_id": 5}])
-def test_a_status_or_request_id_that_is_not_text_is_an_error(body: dict[str, object]) -> None:
-    with pytest.raises(WireError, match="the envelope's status or request_id is not text"):
+@pytest.mark.parametrize(
+    ("request_id", "kept"),
+    [(1, "1"), (2.5, "2.5"), (True, "true"), (None, None), ({"a": 1}, None), (["a"], None)],
+)
+def test_a_request_id_of_any_type_is_kept_as_text(request_id: object, kept: str | None) -> None:
+    # Massive's documentation samples send `"request_id": 1`; metadata never fails a call.
+    page = _decode({"status": "OK", "request_id": request_id, "results": []})
+    assert page.request_id == kept
+
+
+@pytest.mark.parametrize("body", [{"status": 1}, {"status": None}])
+def test_a_status_that_is_not_text_is_an_error(body: dict[str, object]) -> None:
+    with pytest.raises(WireError, match="the envelope's status is not text"):
         _decode(body)
 
 
@@ -325,6 +335,8 @@ def test_an_http_error_with_an_empty_or_undecodable_body() -> None:
     assert str(http_error(503, b"\xffoops", _REQUEST)).endswith(": �oops")
 
 
-def test_a_request_id_that_is_not_text_is_left_out() -> None:
+def test_an_error_keeps_a_numeric_request_id_as_text() -> None:
     error = http_error(500, b'{"request_id": 7, "message": "m"}', _REQUEST)
-    assert error.request_id is None
+    assert error.request_id == "7"
+    nested = http_error(500, b'{"request_id": {"id": 7}, "message": "m"}', _REQUEST)
+    assert nested.request_id is None

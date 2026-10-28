@@ -19,6 +19,8 @@ against the same description and no schema is written by hand:
   descriptions are kept out of the schema files so that a refresh that only rewords them
   leaves those byte for byte unchanged. All ship in the wheel as package data, while the
   refresh that writes them does not.
+- `spec.values` writes one REST parameter value as wire text by its `ParamKind`
+  (`encode_value`), for the REST client and for the library's filter check alike.
 - `spec.convert` checks one decoded JSON value against its `WireType` and converts it
   exactly (an ISO instant to integer nanoseconds, for example), for every JSON decoder,
   including a field's named conversion where the vendor's samples differ from its type.

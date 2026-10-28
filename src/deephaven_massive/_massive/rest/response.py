@@ -183,8 +183,7 @@ def http_error(status: int, data: bytes, request: Request) -> WireError:
         message = body.get("message") or body.get("error")
         if isinstance(message, str) and message:
             detail = message[:_EXCERPT]
-        rid = body.get("request_id")
-        request_id = rid if isinstance(rid, str) else None
+        request_id = _request_id(body.get("request_id"))
     return kind(**request.context(f"HTTP {status}", detail, status=status, request_id=request_id))
 
 
@@ -217,6 +216,29 @@ def _as_rows(value: object, request: Request) -> list[dict[str, object]]:
     return value
 
 
+def _request_id(value: object) -> str | None:
+    """Return an envelope's `request_id` as text, whatever JSON scalar Massive sent.
+
+    The `request_id` is metadata for logs and support requests, so it never fails a call:
+    Massive's documentation samples send it as text and as a number (`1`). Text is kept, an
+    integer or a number becomes its `repr` text (`1`, `2.5`, `1e+20`), and a boolean `true` or
+    `false`. A missing value, `null`, or an object or list (never documented) gives None.
+
+    Args:
+        value: The decoded `request_id` value, or None when the envelope has none.
+
+    Returns:
+        The text, or None.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return repr(value)
+    return None
+
+
 def _envelope(body: dict[str, object], request: Request) -> tuple[str, str | None]:
     """Read and check an envelope's `status` and `request_id`.
 
@@ -225,19 +247,19 @@ def _envelope(body: dict[str, object], request: Request) -> tuple[str, str | Non
         request: The request, for the error.
 
     Returns:
-        The `status` (`""` when absent) and the `request_id` (`None` when absent).
+        The `status` (`""` when absent) and the `request_id` as text (`_request_id`; `None`
+        when absent).
 
     Raises:
-        WireError: If `status` or `request_id` is not text, or `status` is `ERROR`.
+        WireError: If `status` is not text, or `status` is `ERROR`. A `request_id` of any type
+            is accepted: it is metadata and never fails a call.
         WireEntitlementError: If `status` is `NOT_AUTHORIZED`.
     """
     status = body.get("status", "")
-    request_id = body.get("request_id")
-    if not isinstance(status, str) or not isinstance(request_id, str | None):
+    request_id = _request_id(body.get("request_id"))
+    if not isinstance(status, str):
         raise WireError(
-            **request.context(
-                "HTTP 200", "the envelope's status or request_id is not text", status=200
-            )
+            **request.context("HTTP 200", "the envelope's status is not text", status=200)
         )
     if status in {"NOT_AUTHORIZED", "ERROR"}:
         message = body.get("message") or body.get("error") or "no message"
