@@ -211,6 +211,29 @@ def test_append_appends_every_cycle(
     assert all(wait <= 60 for wait in clock.waits)
 
 
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_every_mode_is_described_and_ticks(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+) -> None:
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
+    schema = massive_session._core.catalog.dataset_schema(DIVIDENDS)
+    found = table.attributes()["ColumnDescriptions"]
+    described = {str(e.getKey()): str(e.getValue()) for e in found.entrySet().toArray()}
+    assert described == {c.name: c.description for c in schema.columns if c.description}
+    assert described  # the generated dividends path describes its fields
+    assert table.attributes()["TableDescription"] == "stocks.dividends: A dataset for the tests."
+    # The described copy ticks with the shape the poller publishes to.
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
+    massive_session.release(table)
+
+
 # --- Rows and failures ---------------------------------------------------------------------------
 
 
@@ -695,7 +718,7 @@ def test_an_emptied_symbol_table_evicts_every_key(
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: symbols_of(table, dh_to_pylist) == ["I:SPX"])
     watch.delete(new_table([string_col("Symbol", ["I:SPX"])]))
-    until(lambda: watch.size == 0)
+    until(lambda: dh_to_pylist(watch) == [])
     requests = len(fake_rest.requests)
     next_cycle(clock)
     until(lambda: symbols_of(table, dh_to_pylist) == [])
@@ -824,7 +847,7 @@ def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
     watch.delete(new_table([string_col("Symbol", ["AAPL"])]))
-    until(lambda: watch.size == 0)
+    until(lambda: dh_to_pylist(watch) == [])
     next_cycle(clock)
     until(lambda: symbols_of(table, dh_to_pylist) == [])
     assert not table.j_table.isFailed()

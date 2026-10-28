@@ -188,6 +188,23 @@ def test_get_returns_the_page_with_its_envelope(
     assert (page.status, page.request_id, page.rows) == ("DELAYED", "r9", [{"i": 1}])
 
 
+def test_a_numeric_request_id_never_fails_a_call(
+    client: RestClient, fake_rest: FakeRestServer
+) -> None:
+    # Massive's documentation samples send `"request_id": 1`.
+    fake_rest.reply(
+        "/v3/trades/AAPL",
+        Reply({"status": "OK", "request_id": 1, "results": [{"i": 1}]}),
+        Reply({"request_id": 7, "message": "bad ticker"}, status=400),
+    )
+    page = client.get(_TRADES, _AAPL, {})
+    assert (page.status, page.request_id, page.rows) == ("OK", "1", [{"i": 1}])
+    with pytest.raises(WireError) as caught:
+        client.get(_TRADES, _AAPL, {})
+    assert caught.value.request_id == "7"
+    assert "(request_id 7): bad ticker" in str(caught.value)
+
+
 def test_parameters_that_do_not_fit_raise_before_any_request(
     client: RestClient, fake_rest: FakeRestServer
 ) -> None:

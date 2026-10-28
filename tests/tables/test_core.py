@@ -37,6 +37,7 @@ from deephaven_massive._massive import DriftReport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._tables import core as _core
+from deephaven_massive._tables.columns import describe
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     Diagnostics,
@@ -747,8 +748,8 @@ def test_an_interrupt_after_make_result_releases_the_result_scope(
     real_entered = entered
     armed: list[bool] = []
 
-    def making(build: Callable[[], Table], *, wrap: bool = False) -> tuple[Table, LivenessScope]:
-        made = real_make(build, wrap=wrap)
+    def making(build: Callable[[], Table]) -> tuple[Table, LivenessScope]:
+        made = real_make(build)
         armed.append(True)
         return made
 
@@ -1264,6 +1265,29 @@ def test_a_failure_while_the_shape_is_derived_is_named(
     with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
         core.stream_result(SPEC, q._request, channel="T", build=failing_then_shaping)
     assert isinstance(raised.value.__cause__, DHError)
+    drain()
+    assert core.results.held() == 0
+
+
+def test_a_failure_while_the_blink_copy_is_described_is_named(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    drain: Callable[[], None],
+) -> None:
+    # `describe` calls Java directly, so a failed blink table surfaces as jpy's RuntimeError.
+    core = massive_session._core
+    q = stream_query(massive_session)
+    schema = core.catalog.dataset_schema(SPEC)
+
+    def failing_then_describing(blink: Table) -> Table:
+        fake_streams.publishers[1].publish_failure(RuntimeError("entitlement"))
+        assert fake_streams.shutdown[1].wait(TIMEOUT)
+        core.fail_stream(1, "entitlement")
+        return describe(blink, SPEC, schema)
+
+    with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
+        core.stream_result(SPEC, q._request, channel="T", build=failing_then_describing)
+    assert type(raised.value.__cause__) is RuntimeError
     drain()
     assert core.results.held() == 0
 

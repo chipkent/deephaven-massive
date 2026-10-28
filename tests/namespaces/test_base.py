@@ -148,9 +148,18 @@ def test_list_params() -> None:
         list_params(sort=cast("str", 1), order=None)
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         list_params(sort=None, order=cast("Order", "desc"))
-    # Most list endpoints take the direction as a suffix of `sort`, so it needs a sort field.
-    with pytest.raises(ValueError, match="order needs sort"):
-        list_params(sort=None, order=Order.DESC)
+    # Whether `order` needs `sort` depends on the dataset's paths, which `build_query` reads.
+    assert list_params(sort=None, order=Order.DESC) == {"order": Order.DESC}
+
+
+def test_order_without_sort_follows_the_dataset_paths(massive_session: dm.MassiveSession) -> None:
+    # The indicator path has its own `order` parameter; the dividends path only `sort`.
+    assert build(massive_session, INDICATOR, params={"order": Order.DESC})._request.params == (
+        ("order", Order.DESC),
+    )
+    with pytest.raises(ValueError, match=r"^stocks\.dividends: order needs sort"):
+        build(massive_session, DIVIDENDS, params={"order": Order.DESC, "sort": None})
+    build(massive_session, DIVIDENDS, params={"order": Order.DESC, "sort": "pay_date"})
 
 
 def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSession) -> None:
@@ -249,14 +258,15 @@ def test_filter_validation(massive_session: dm.MassiveSession) -> None:
         build(massive_session, DIVIDENDS, filters=[("a", 1)])
     with pytest.raises(TypeError, match="filter names must be str"):
         build(massive_session, DIVIDENDS, filters={1: "a"})
-    with pytest.raises(TypeError, match="sequence of str; got dict"):
+    with pytest.raises(TypeError, match="sequence of str or date; got dict"):
         build(massive_session, DIVIDENDS, filters={"a": {"b": 1}})
-    with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str$"):
+    with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
         build(massive_session, DIVIDENDS, filters={"a": ["A", 1]})
-    # A dataset without a time axis takes its timestamp filters through `filters`.
+    # A dataset without a time axis takes its timestamp filters through `filters`, and the
+    # request keeps what the text means, never the text.
     assert build(
         massive_session, INDICATOR, filters={"timestamp_gte": "2025-01-02"}
-    )._request.filters
+    )._request.filters == (("timestamp_gte", date(2025, 1, 2)),)
 
 
 def test_time_bounds_must_be_aware(massive_session: dm.MassiveSession) -> None:
@@ -290,7 +300,7 @@ def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession
     build(massive_session, DIVIDENDS, filters={"frequency": 4})
     with pytest.raises(ValueError, match="has no filter 'pay_date_lte'"):
         build(massive_session, DIVIDENDS, filters={"pay_date_lte": "2025-12-31"})
-    with pytest.raises(ValueError, match="filter 'frequency' takes a integer value"):
+    with pytest.raises(ValueError, match=r"filter 'frequency' takes integer values"):
         build(massive_session, DIVIDENDS, filters={"frequency": "4"})
 
 
@@ -780,3 +790,8 @@ def test_a_typed_parameter_is_reserved_from_filters(massive_session: dm.MassiveS
                 params={"frequency": None},
                 filters={key: 4},
             )
+    # The valid filters an unknown key's message names leave the typed family out.
+    with pytest.raises(ValueError, match="has no filter 'pay_date'") as caught:
+        build(massive_session, DIVIDENDS, params={"frequency": None}, filters={"pay_date": "x"})
+    assert "frequency" not in str(caught.value)
+    assert "'distribution_type'" in str(caught.value)
