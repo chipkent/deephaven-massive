@@ -911,9 +911,9 @@ the documented way to convert text.
 ### 7.4 Column descriptions
 
 Each dataset column has one description, chosen by the rule of
-[section 19.4](#194-generated-schemas) from the field descriptions in
-`spec/descriptions.json` (the vendor's, corrected where they are clearly wrong). It reaches users through three outlets, all generated from the same
-dataset schema, so they can never disagree.
+[section 19.4](#194-generated-schemas) from the field descriptions in `spec/descriptions.json`
+(the vendor's, corrected where they are clearly wrong). It reaches users through three outlets,
+all generated from the same dataset schema, so they can never disagree.
 
 **1. Every result is described.** Deephaven 42.7 stores column descriptions as the table
 attribute `ColumnDescriptions` and a table description as `TableDescription`, set through
@@ -3133,14 +3133,14 @@ description for the reviewer. Every gate has a descriptive name, which is how th
   name) with no `PARAM_UNITS` entry fails the same gate;
 - **`stale-entry`:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict,
   `TYPE_FIXES`, `KEY_FIXES`, `DESCRIPTION_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`,
-  `PARAM_UNITS`, or `EXCLUSIONS` entry
-  naming a source, field, or parameter the snapshot lacks, or claiming what the snapshot contradicts (a type fix
-  whose declared type the spec no longer gives, a key fix whose key the example no longer
-  sends in place of the declared one, a tag conflict the tag no longer contradicts,
-  a `NAMES` or `DESCRIPTION_FIXES` quote the description no longer matches, an exclusion of a path the spec already
-  marks deprecated or draft); an identity entry no generated object uses is stale too, and so
-  is a `DESCRIPTION_FIXES` entry no generated field looked up, which is checked against the
-  keys the generators looked up rather than every key a source declares or an example sends;
+  `PARAM_UNITS`, or `EXCLUSIONS` entry naming a source, field, or parameter the snapshot lacks,
+  or claiming what the snapshot contradicts (a type fix whose declared type the spec no longer
+  gives, a key fix whose key the example no longer sends in place of the declared one, a tag
+  conflict the tag no longer contradicts, a `NAMES` or `DESCRIPTION_FIXES` quote the
+  description no longer matches, an exclusion of a path the spec already marks deprecated or
+  draft); an identity entry no generated object uses is stale too, and so is a
+  `DESCRIPTION_FIXES` entry no generated field looked up, which is checked against the keys the
+  generators looked up rather than every key a source declares or an example sends;
 - **`type-agreement`:** within one kind, one column name joins to one `WireType`, unless a
   `TYPE_FIXES` entry resolves it; the message prints both keys' descriptions, because a
   conflict is first treated as a possible naming error (stocks and futures `dv` are exactly
@@ -3178,8 +3178,9 @@ Descriptions differ across transports and change about twenty times as often as 
 `type-agreement` and `transport-agreement`, not description matching, are the mechanical
 checks.
 
-**Field descriptions.** The refresh also records the vendor's description of every field, so
-that users can read what each column means ([section 7.4](#74-column-descriptions)).
+**Field descriptions.** The refresh also records the vendor's description of every field
+(corrected where it is clearly wrong), so that users can read what each column means
+([section 7.4](#74-column-descriptions)).
 
 - **Where they come from.** REST: the OpenAPI `description` of each response property, after
   `$ref` and `allOf` are resolved, the description nearest the field winning (one written
@@ -3214,10 +3215,12 @@ that users can read what each column means ([section 7.4](#74-column-description
   same field of a sibling source wherever that text is right and says what the field holds;
   only when no sibling text is adequate (right but saying nothing useful, like the crypto
   WebSocket trade's "The price.", or wrong too) is it written in the entry, and the reason says
-  why. A source that serves several asset classes (the unified `/v3/snapshot`) can be
-  corrected per class: the entry gives the text for each listed class, and every other class
-  keeps the vendor's. That is the only hand input on descriptions; a description that is
-  merely terse or imprecise is kept.
+  why. A source that serves several asset classes (the unified `/v3/snapshot`) can be corrected
+  per class: the entry gives the text for each listed class, and every other class keeps the
+  vendor's. A class text that no dataset of its class shows (no such dataset reads the source,
+  or an earlier source's text wins the column) fails a catalog test, since the refresh cannot
+  see the datasets. That is the only hand input on descriptions; a description that is merely
+  terse or imprecise is kept.
 - **No gate.** A field without a description gets `""`, and nothing stops the refresh.
   Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
   changed description is an ordinary line in the refresh diff, except where a
@@ -3239,27 +3242,28 @@ that users can read what each column means ([section 7.4](#74-column-description
   }
   ```
 
-  A field without a description has no entry, and a source with no described field has no
-  entry under `descriptions`; `class_descriptions` holds only the fields corrected per asset
-  class, each asset class an `AssetClass` value. Every generated source has at least one URL, sorted and as
-  fetched: for REST, every documentation page that names its path (every generated path has
-  one, by the `docs` gate; a path several asset classes share, such as
+  A field without a description has no entry, and a source with no described field has no entry
+  under `descriptions`; `class_descriptions` holds only the fields corrected per asset class,
+  each asset class an `AssetClass` value. Every generated source has at least one URL, sorted
+  and as fetched: for REST, every documentation page that names its path (every generated path
+  has one, by the `docs` gate; a path several asset classes share, such as
   `/v3/reference/tickers`, has one page per asset class), as the snapshot's manifest records
   it. The entries are one per line, in generated order, so a reworded description is one
   changed line of the diff.
-- **Joined at load.** `Field` gains `description: str = ""` and `class_descriptions:
-  tuple[tuple[str, str], ...] = ()` (asset class and text, sorted by class), read through
-  `Field.description_for(asset_class)`, which returns the class's own text or `description`,
-  and the `spec` loader fills both from `descriptions.json` when it loads the schema files, under the same once-only lock. An
-  entry that names a source or wire key the schema files lack raises at load: the files are
-  generated together, so only a hand edit can cause it. The same load checks the URLs: a
-  source without one, or a URL of a source the schema lacks, raises, so `sources` and
-  `provenance` reject the same files. A description belongs to a `(source, wire key)`, so a
-  projected field keeps the description of its wire key. `provenance() -> Provenance(fetched:
-  date, urls: Mapping[tuple[Transport, str], tuple[str, ...]])` exposes the fetch date and the
-  URLs of each source, for the footer of the column reference; it loads every transport the
-  file gives URLs for. Each file is read once under the lock, whichever of `sources` and
-  `provenance` comes first. No other name is added to the interface.
+- **Joined at load.** `Field` gains `description: str = ""` and
+  `class_descriptions: tuple[tuple[str, str], ...] = ()` (asset class and text, sorted by
+  class), read through `Field.description_for(asset_class)`, which returns the class's own text
+  or `description`, and the `spec` loader fills both from `descriptions.json` when it loads the
+  schema files, under the same once-only lock. An entry that names a source or wire key the
+  schema files lack raises at load: the files are generated together, so only a hand edit can
+  cause it. The same load checks the URLs: a source without one, or a URL of a source the
+  schema lacks, raises, so `sources` and `provenance` reject the same files. A description
+  belongs to a `(source, wire key)`, so a projected field keeps the description of its wire
+  key.
+  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], tuple[str, ...]])`
+  exposes the fetch date and the URLs of each source, for the footer of the column reference;
+  it loads every transport the file gives URLs for. Each file is read once under the lock,
+  whichever of `sources` and `provenance` comes first. No other name is added to the interface.
 
 **Dataset schemas** are merged at run time, after the rename, never inferred from data.
 `dataset_schema` is a method of the `Catalog` (`_datasets/catalog.py`), and its cache lives on
