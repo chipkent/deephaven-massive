@@ -12,9 +12,8 @@ import inspect
 import io
 import json
 import re
-import threading
 from collections.abc import Callable, Iterator
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -913,14 +912,9 @@ def flush(m: dm.MassiveSession) -> None:
         connection.flusher.flush()
 
 
-def wait_for(condition: Callable[[], bool]) -> None:
-    # Bounded wait for an update-graph cycle to apply a change.
-    pause = threading.Event()  # never set; only paces the loop
-    for _ in range(int(WS_TIMEOUT / 0.02)):
-        if condition():
-            return
-        pause.wait(0.02)
-    assert condition()
+def at_ms(millis: int) -> datetime:
+    # The instant `millis` milliseconds after the epoch, as a snapshot's row holds it.
+    return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=millis)
 
 
 @pytest.mark.parametrize(
@@ -939,6 +933,7 @@ def test_one_frame_lands_in_blink(
     fake_ws_server: FakeMassiveServer,
     load_fixture: Loader,
     dh_exec_ctx: object,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
     build: Callable[[Any], StreamHistoryQuery],
     topic: str,
     index: int,
@@ -947,17 +942,19 @@ def test_one_frame_lands_in_blink(
     live = build(ws_session.futures).blink()
     seen = blink_to_append_only(live)
 
-    def landed() -> bool:
+    def landed(arrived: list[dict[str, Any]]) -> bool:
+        # The frame may reach the session after any one flush, so every check flushes again.
         flush(ws_session)
-        return seen.size == 1
+        return len(arrived) == 1
 
     subscribed(fake_ws_server, topic)
     fake_ws_server.send(json.dumps([frame]))
-    wait_for(landed)
-    row = rows(seen)[0]
+    # Wait on a consistent snapshot of the rows and assert on that same snapshot: a size read
+    # can show a row that the update cycle in progress is still adding.
+    (row,) = rows_when(seen, landed)
     assert row["Symbol"] == frame["sym"]
     time_key = "t" if frame["ev"] in {"T", "Q"} else "s"
-    assert row["Timestamp"] == frame[time_key] * 10**6  # sent in milliseconds
+    assert row["Timestamp"] == at_ms(frame[time_key])  # sent in milliseconds
     assert row["SessionEndDate"] is None  # the stream carries no session
     if frame["ev"] == "T":
         assert (row["Price"], row["Size"], row["SequenceNumber"]) == (6064.5, 100, 32599300)
@@ -965,12 +962,12 @@ def test_one_frame_lands_in_blink(
         assert (row["BidPrice"], row["AskPrice"], row["AskTimestamp"]) == (
             6064.25,
             6064.5,
-            frame["at"] * 10**6,
+            at_ms(frame["at"]),
         )
     else:
         assert (row["Open"], row["Close"], row["Volume"]) == (6994.5, 6995.0, 91.0)
         assert row["DollarVolume"] == 1353.1
-        assert row["EndTimestamp"] == frame["e"] * 10**6
+        assert row["EndTimestamp"] == at_ms(frame["e"])
     ws_session.release(live)
 
 
