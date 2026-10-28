@@ -23,7 +23,6 @@ against that cap and raise `ValueError` before subscribing a static list that wo
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -40,7 +39,7 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping
 
     from deephaven_massive._query import (
         HistoryLatestQuery,
@@ -201,6 +200,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOT,
     keys={(_REST, _SNAPSHOT): _keys("Ticker", fanout="UnderlyingAssetTicker")},
     symbol_param="ticker.any_of",
+    symbols_per_request=_SNAPSHOT_PAGE,
     page_size=_SNAPSHOT_PAGE,
 )
 
@@ -209,7 +209,7 @@ CONTRACTS: Final = DatasetSpec(
     summary="Reference data on options contracts: type, exercise style, expiration, and strike.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CONTRACTS,
-    extra_paths=(_CONTRACT,),
+    detail_path=_CONTRACT,
     keys={
         (_REST, _CONTRACTS): _keys("Ticker", fanout="UnderlyingTicker"),
         # The per-contract rows carry their ticker, although the request names it too.
@@ -262,26 +262,18 @@ def _underlying(value: object) -> str:
     return ticker
 
 
-def _check_typed(
-    filters: Mapping[str, FilterValue] | None, typed: Sequence[tuple[str, str]]
-) -> None:
-    """Reject a filter that would set a parameter a typed argument or the library sets.
-
-    A `filters` value that is not a mapping passes unchecked, so the dataset factory reports
-    its `TypeError`.
+def _contract_type(value: object) -> ContractType | None:
+    """Check the optional `contract_type` argument of the chain and the contracts.
 
     Args:
-        filters: The `filters` mapping as passed, or None.
-        typed: `(filter key, the argument that sets it)` pairs.
+        value: The argument as passed.
 
-    Raises:
-        ValueError: If `filters` holds one of the keys, naming the argument to use instead.
+    Returns:
+        The member, or None when the argument is None.
+
+    A value that is not a `dm.ContractType` raises the `TypeError` of `_require_enum`.
     """
-    if not isinstance(filters, Mapping):
-        return
-    for key, argument in typed:
-        if key in filters:
-            raise ValueError(f"{key} is set through {argument}, not filters")
+    return None if value is None else _require_enum(value, ContractType, "contract_type")
 
 
 class _Options(Namespace):
@@ -568,10 +560,10 @@ class _Options(Namespace):
                     filters={"expiration_date_lte": "2025-01-17"},
                 ).fetch()
         """
-        _check_typed(filters, (("contract_type", "contract_type="),))
-        params: dict[str, object] = {"underlyingAsset": _underlying(underlying)}
-        if contract_type is not None:
-            params["contract_type"] = _require_enum(contract_type, ContractType, "contract_type")
+        params: dict[str, object] = {
+            "underlyingAsset": _underlying(underlying),
+            "contract_type": _contract_type(contract_type),
+        }
         params.update(list_params(sort=sort, order=order))
         return cast(
             "Query", build_query(self._core, CHAIN, params=params, filters=filters, limit=limit)
@@ -630,7 +622,6 @@ class _Options(Namespace):
                 watch = ["O:AAPL250117C00150000", "O:AAPL250117P00150000"]
                 greeks = m.options.snapshots(watch).poll(5)
         """
-        _check_typed(filters, (("type", "the dataset, which sends type=options"),))
         params: dict[str, object] = {"type": _SNAPSHOT_TYPE}
         params.update(list_params(sort=sort, order=order))
         return cast(
@@ -659,7 +650,9 @@ class _Options(Namespace):
         contract, primary exchange, and CFI code. Without `symbols` it lists contracts from the
         REST contracts endpoint (`/v3/reference/options/contracts`), paginated internally and
         narrowed by the other arguments; with `symbols` it reads each contract's own endpoint
-        (`/v3/reference/options/contracts/{options_ticker}`), one request per contract.
+        (`/v3/reference/options/contracts/{options_ticker}`), one request per contract, which
+        takes only `as_of`: with `symbols`, a verb raises `ValueError` before any request if
+        `underlying`, `contract_type`, `expired`, `sort`, `order`, or a filter is set.
         `poll()` re-reads it each interval.
 
         `limit` caps the total number of rows across pages (None, the default, returns every
@@ -713,26 +706,14 @@ class _Options(Namespace):
                     filters={"strike_price_gte": 100, "expiration_date_lte": "2026-01-16"},
                 ).fetch()
         """
-        _check_typed(
-            filters,
-            (
-                ("underlying_ticker", "underlying="),
-                ("contract_type", "contract_type="),
-                ("as_of", "as_of="),
-                ("expired", "expired="),
-            ),
-        )
-        params: dict[str, object] = {}
-        if underlying is not None:
-            params["underlying_ticker"] = _underlying(underlying)
-        if contract_type is not None:
-            params["contract_type"] = _require_enum(contract_type, ContractType, "contract_type")
-        if as_of is not None:
-            params["as_of"] = calendar_day(CONTRACTS, as_of, "as_of")
-        if expired is not None:
-            if not isinstance(expired, bool):
-                raise TypeError(f"expired must be a bool, not {type(expired).__name__}")
-            params["expired"] = expired
+        if expired is not None and not isinstance(expired, bool):
+            raise TypeError(f"expired must be a bool, not {type(expired).__name__}")
+        params: dict[str, object] = {
+            "underlying_ticker": None if underlying is None else _underlying(underlying),
+            "contract_type": _contract_type(contract_type),
+            "as_of": None if as_of is None else calendar_day(CONTRACTS, as_of, "as_of"),
+            "expired": expired,
+        }
         params.update(list_params(sort=sort, order=order))
         return cast(
             "Query",

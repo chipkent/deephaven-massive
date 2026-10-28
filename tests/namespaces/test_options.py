@@ -3,23 +3,37 @@
 The specs are checked against the generated sources through the catalog gates, their merged
 schemas for the key columns, the payload fixtures (shaped from Massive's sample responses)
 against the generated REST fields, and each factory for the request it builds and the errors
-it raises at construction.
+it raises at construction. Each dataset then runs end to end on every transport it has: the
+exact REST requests through the fake REST server, one frame of each channel through the fake
+WebSocket server into `blink()`, and one flat file of each prefix through the fake S3.
 """
 
+from __future__ import annotations
+
+import functools
 import inspect
 import json
-from collections.abc import Callable, Mapping
+import threading
 from datetime import UTC, date, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import parse_qs, unquote, urlsplit
 
+import pyarrow as pa
 import pytest
+from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
+from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
+from deephaven_massive import _massive
+from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
+from deephaven_massive._ingest import ws
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import options
 from deephaven_massive._namespaces.base import Namespace, query_class
@@ -33,6 +47,21 @@ from deephaven_massive._query import (
     StreamQuery,
 )
 from deephaven_massive._session import CATALOG
+from tests._fakes.clock import FakeClock
+
+# The reply and envelope builders are plain functions of the fake, which no fixture can hand
+# over; the server itself comes from the `fake_rest` fixture.
+from tests._fakes.rest import Reply
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping, Sequence
+
+    from deephaven.table import Table
+
+    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
+    from tests._fakes.rest import FakeRestServer
+    from tests._fakes.s3 import FakeS3
+    from tests._fakes.ws import FakeMassiveServer
 
 R = Transport.REST
 OWNER = "namespaces/options"
@@ -341,7 +370,7 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
         chain("  ")
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
         chain("AAPL", contract_type=cast("dm.ContractType", "call"))
-    with pytest.raises(ValueError, match="contract_type is set through contract_type="):
+    with pytest.raises(ValueError, match=r"^contract_type is set through its own argument"):
         chain("AAPL", filters={"contract_type": "call"})
     with pytest.raises(ValueError, match=r"options\.chain has no filter 'ticker'"):
         chain("AAPL", filters={"ticker": "x"})
@@ -359,7 +388,7 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
         "filters": {"ticker_gte": "O:A"},
     }
     assert snapshots(dm.ALL)._request.symbols is dm.ALL
-    with pytest.raises(ValueError, match="type is set through the dataset"):
+    with pytest.raises(ValueError, match=r"^type is set through its own argument"):
         snapshots(dm.ALL, filters={"type": "stocks"})
     with pytest.raises(ValueError, match="no filter 'ticker_any_of'"):
         snapshots(dm.ALL, filters={"ticker_any_of": [CONTRACT]})
@@ -398,13 +427,13 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
         contracts(expired=cast("bool", 1))
     with pytest.raises(ValueError, match="needs a timezone"):
         contracts(as_of=datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None))
-    for key, argument in (
-        ("underlying_ticker", "underlying="),
-        ("contract_type", "contract_type="),
-        ("as_of", "as_of="),
-        ("expired", "expired="),
+    for key in (
+        "underlying_ticker",
+        "contract_type",
+        "as_of_gte",
+        "expired",
     ):
-        with pytest.raises(ValueError, match=f"{key} is set through {argument}"):
+        with pytest.raises(ValueError, match=f"^{key} is set through its own argument"):
             contracts(filters={key: "x"})
     with pytest.raises(ValueError, match=r"options\.contracts has no filter 'ticker'"):
         contracts(filters={"ticker": CONTRACT})
@@ -491,3 +520,577 @@ def test_typed_filters_are_left_alone_when_no_filters_are_given(
     # A filters value that is no mapping gets the factory's TypeError, not a key complaint.
     with pytest.raises(TypeError, match="filters must be a mapping, not list"):
         massive_session.options.chain("AAPL", filters=cast("Mapping[str, Any]", ["contract_type"]))
+
+
+# --- End to end: REST ------------------------------------------------------------------------
+
+TSLA = "O:TSLA210903C00700000"
+NS = 10**9
+
+
+@pytest.fixture
+def rest_session(
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[dm.MassiveSession]:
+    # A session on the fake REST server whose retry waits never sleep. The session reads
+    # `_massive.RestClient` when it creates its client; `setitem` keeps the lazily resolved name
+    # out of the module's attributes at teardown.
+    monkeypatch.setitem(
+        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=FakeClock())
+    )
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+def wire(path: str) -> str:
+    # A path as the client sends it: the colon of an `O:` symbol is percent-encoded.
+    return path.replace(":", "%3A")
+
+
+def body(load_fixture: Callable[[str, str], bytes], name: str) -> object:
+    return json.loads(load_fixture(OWNER, name))
+
+
+def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
+    # Every GET the server received: its decoded path and query.
+    return [
+        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
+        for r in server.requests
+        if r.method == "GET"
+    ]
+
+
+def rows(table: Table) -> list[dict[str, Any]]:
+    # Instants become epoch nanoseconds, so assertions keep every digit.
+    data = dh_arrow.to_arrow(table)
+    columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
+    out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    return out
+
+
+def test_trades_fetch_reads_the_last_trade(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(wire(f"/v2/last/trade/{TSLA}"), Reply(body(load_fixture, "last_trade.json")))
+    out = rows(rest_session.options.trades("TSLA210903C00700000").fetch())
+    assert sent(fake_rest) == [(f"/v2/last/trade/{TSLA}", {})]
+    assert len(out) == 1
+    row = out[0]
+    assert (row["Symbol"], row["Timestamp"], row["Price"]) == (TSLA, 1617901342969834000, 115.55)
+    assert (row["Size"], row["Exchange"], row["Conditions"]) == (25.0, 312, [227])
+    assert row["ParticipantTimestamp"] == 1617901342969834000
+
+
+def test_trades_and_quotes_history_read_a_day_over_rest(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    contract = "O:AZO140621P00530000"
+    fake_rest.reply(wire(f"/v3/trades/{contract}"), Reply(body(load_fixture, "trades.json")))
+    day = date(2014, 6, 2)
+    midnight = int(datetime(2014, 6, 2, 4, tzinfo=UTC).timestamp()) * NS  # New York midnight
+    trades = rows(
+        rest_session.options.trades(contract).history(day, day, source=HistorySource.REST)
+    )
+    assert sent(fake_rest) == [
+        (
+            f"/v3/trades/{contract}",
+            {
+                "timestamp.gte": [str(midnight)],
+                "timestamp.lt": [str(midnight + 86_400 * NS)],
+                "limit": ["50000"],
+            },
+        )
+    ]
+    assert [(r["Symbol"], r["Timestamp"], r["Price"], r["Conditions"]) for r in trades] == [
+        (contract, 1401715883806000000, 6.91, None),
+        (contract, 1401716547786000000, 7.2, [209]),
+    ]
+
+    quote_contract = "O:SPY241220P00720000"
+    fake_rest.reply(wire(f"/v3/quotes/{quote_contract}"), Reply(body(load_fixture, "quotes.json")))
+    day = date(2022, 2, 17)
+    quotes = rows(
+        rest_session.options.quotes(quote_contract).history(day, day, source=HistorySource.REST)
+    )
+    path, query = sent(fake_rest)[-1]
+    assert path == f"/v3/quotes/{quote_contract}"
+    assert query["limit"] == ["50000"]
+    # The rows are newest first, as the vendor sample gives them; history keeps server order.
+    assert [(r["Symbol"], r["Timestamp"], r["BidPrice"], r["AskSize"]) for r in quotes] == [
+        (quote_contract, 1645119125346243600, 277.5, 10.0),
+        (quote_contract, 1645119118474271000, 277.5, 1.0),
+    ]
+
+
+def test_bars_fetch_the_previous_session_and_read_a_range(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(wire(f"/v2/aggs/ticker/{TSLA}/prev"), Reply(body(load_fixture, "prev.json")))
+    prev = rows(rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch())
+    assert sent(fake_rest) == [(f"/v2/aggs/ticker/{TSLA}/prev", {"adjusted": ["true"]})]
+    assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Volume"]) for r in prev] == [
+        (TSLA, 1605042000000 * 10**6, 115.97, 131704427.0)
+    ]
+
+    contract = "O:RDFN211119C00025000"
+    start = int(datetime(2021, 9, 23, 4, tzinfo=UTC).timestamp()) * 1000  # New York midnight
+    end = int(datetime(2021, 9, 25, 4, tzinfo=UTC).timestamp()) * 1000 - 1
+    path = f"/v2/aggs/ticker/{contract}/range/1/day/{start}/{end}"
+    fake_rest.reply(wire(path), Reply(body(load_fixture, "range.json")))
+    bars = rows(
+        rest_session.options.bars(contract, dm.Timespan.DAY, adjusted=False).history(
+            date(2021, 9, 23), date(2021, 9, 24), source=HistorySource.REST
+        )
+    )
+    assert sent(fake_rest)[-1] == (path, {"adjusted": ["false"], "limit": ["50000"]})
+    assert [(r["Symbol"], r["Timestamp"], r["Close"]) for r in bars] == [
+        (contract, 1632369600000 * 10**6, 26.2),
+        (contract, 1632456000000 * 10**6, 28.3),
+    ]
+
+
+def test_chain_reads_one_underlying(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply("/v3/snapshot/options/AAPL", Reply(body(load_fixture, "chain.json")))
+    out = rows(
+        rest_session.options.chain(
+            "aapl",
+            contract_type=dm.ContractType.CALL,
+            sort="strike_price",
+            order=dm.Order.ASC,
+            filters={"expiration_date_lte": date(2022, 1, 21), "strike_price_gte": 150},
+        ).fetch()
+    )
+    assert sent(fake_rest) == [
+        (
+            "/v3/snapshot/options/AAPL",
+            {
+                "contract_type": ["call"],
+                "sort": ["strike_price"],
+                "order": ["asc"],
+                "expiration_date.lte": ["2022-01-21"],
+                "strike_price.gte": ["150"],
+                "limit": ["250"],
+            },
+        )
+    ]
+    (row,) = out
+    assert (row["Symbol"], row["Underlying"]) == ("O:AAPL220121C00150000", "AAPL")
+    assert (row["DetailsStrikePrice"], row["GreeksTheta"], row["OpenInterest"]) == (
+        150.0,
+        0.00229,
+        1543.0,
+    )
+    assert row["DetailsExpirationDate"] == date(2022, 1, 21)
+    assert row["DayLastUpdated"] == 1605195918507251700
+
+
+def test_snapshots_ask_for_options_250_contracts_a_request(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
+    contracts = [f"O:NCLH221014C{strike:08d}" for strike in range(1000, 1000 + 251)]
+    rest_session.options.snapshots(contracts).fetch()
+    requests = sent(fake_rest)
+    assert [len(q["ticker.any_of"][0].split(",")) for _, q in requests] == [250, 1]
+    assert all(q["type"] == ["options"] and q["limit"] == ["250"] for _, q in requests)
+    assert requests[1][1]["ticker.any_of"] == [contracts[-1]]
+
+
+def test_snapshots_keep_the_error_row_of_a_contract(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
+    out = rows(rest_session.options.snapshots(dm.ALL).fetch())
+    assert sent(fake_rest) == [("/v3/snapshot", {"type": ["options"], "limit": ["250"]})]
+    found, missing = out
+    assert (found["Symbol"], found["Underlying"], found["Error"]) == (
+        "O:NCLH221014C00005000",
+        "NCLH",
+        None,
+    )
+    assert found["GreeksDelta"] == 0.5520187372272933
+    assert found["LastTradeSipTimestamp"] == 1675280958783136800
+    assert (missing["Symbol"], missing["Underlying"]) == ("O:NCLH221014C00999000", None)
+    assert (missing["Error"], missing["Message"]) == ("NOT_FOUND", "Ticker not found.")
+
+
+def test_contracts_list_or_read_each_contract(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply("/v3/reference/options/contracts", Reply(body(load_fixture, "contracts.json")))
+    listed = rows(
+        rest_session.options.contracts(
+            underlying="aapl",
+            contract_type=dm.ContractType.CALL,
+            as_of=date(2021, 11, 1),
+            expired=False,
+            sort="strike_price",
+            order=dm.Order.DESC,
+            filters={"strike_price_lte": 90},
+        ).fetch()
+    )
+    assert sent(fake_rest) == [
+        (
+            "/v3/reference/options/contracts",
+            {
+                "underlying_ticker": ["AAPL"],
+                "contract_type": ["call"],
+                "as_of": ["2021-11-01"],
+                "expired": ["false"],
+                "sort": ["strike_price"],
+                "order": ["desc"],
+                "strike_price.lte": ["90"],
+                "limit": ["1000"],
+            },
+        )
+    ]
+    assert [(r["Symbol"], r["Underlying"], r["StrikePrice"]) for r in listed] == [
+        ("O:AAPL211119C00085000", "AAPL", 85.0),
+        ("O:AAPL211119C00090000", "AAPL", 90.0),
+    ]
+    assert listed[0]["AdditionalUnderlyings"] is None
+    assert json.loads(listed[1]["AdditionalUnderlyings"])[0]["underlying"] == "VMW"
+
+    one = "O:AAPL211119C00085000"
+    fake_rest.reply(
+        wire(f"/v3/reference/options/contracts/{one}"), Reply(body(load_fixture, "contract.json"))
+    )
+    described = rows(rest_session.options.contracts(symbols=one, as_of="2021-11-01").fetch())
+    assert sent(fake_rest)[-1] == (
+        f"/v3/reference/options/contracts/{one}",
+        {"as_of": ["2021-11-01"]},
+    )
+    assert [(r["Symbol"], r["Underlying"], r["ExpirationDate"]) for r in described] == [
+        (one, "AAPL", date(2021, 11, 19))
+    ]
+
+
+def test_a_list_argument_with_named_contracts_fails_before_any_request(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The per-contract path takes only `as_of`; a list-only argument cannot be honored there.
+    q = rest_session.options.contracts(symbols=[CONTRACT], underlying="AAPL")
+    with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
+        q.fetch()
+    assert sent(fake_rest) == []
+
+
+def test_daily_open_close_reads_one_day_per_contract(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    path = f"/v1/open-close/{TSLA}/2023-01-09"
+    fake_rest.reply(wire(path), Reply(body(load_fixture, "open_close.json")))
+    out = rows(
+        rest_session.options.daily_open_close(TSLA, date(2023, 1, 9), adjusted=False).fetch()
+    )
+    assert sent(fake_rest) == [(path, {"adjusted": ["false"]})]
+    assert [(r["Symbol"], r["From"], r["Open"], r["Close"], r["AfterHours"]) for r in out] == [
+        (TSLA, date(2023, 1, 9), 25.0, 26.35, 26.35)
+    ]
+
+
+# --- End to end: WebSocket -------------------------------------------------------------------
+
+TIMEOUT = 15.0
+REALTIME = HostDecision("socket.test", Recency.REALTIME, "test evidence")
+
+
+class Streams:
+    """A session whose WebSocket connections reach the fake Massive server.
+
+    The host decision is fixed (no REST request decides it), and each connection's client is a
+    real `WsClient` on the fake server's endpoint of the same path, counting the frames it
+    delivers so a test waits for exactly one.
+    """
+
+    def __init__(self, server: FakeMassiveServer) -> None:
+        self.server = server
+        self.cond = threading.Condition()
+        self.frames = 0
+        self.families: list[ChannelFamily] = []
+        self.session = dm.MassiveSession(
+            dm.MassiveConfig(api_key="test-key", flush_interval=3600.0)
+        )
+        self.connections = ws.WsConnections(
+            self.session._core,
+            resolve_host=self.resolve,
+            record_verdict=lambda *_: None,
+            client_factory=self.factory,
+        )
+        cast("Any", self.session._core._ports)._streams = self.connections
+        self.session._core.on_close(self.connections.close)
+
+    def resolve(self, _: dm.AssetClass, family: ChannelFamily) -> HostDecision:
+        self.families.append(family)
+        return REALTIME
+
+    def factory(
+        self,
+        url: str,
+        *,
+        sources: Sequence[Source],
+        on_open: Callable[[int], None],
+        on_status: Callable[[int, Status], None],
+        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
+        on_state: Callable[[WsState, float | WireError | None], None],
+    ) -> _massive.WsClient:
+        return _massive.WsClient(
+            self.server.url("/" + url.split("/", 3)[3]),
+            api_key="test-key",
+            sources=sources,
+            on_open=on_open,
+            on_status=on_status,
+            on_data=self.counting(on_data),
+            on_state=on_state,
+            reconnect_backoff=0.05,
+            max_reconnect_backoff=0.1,
+        )
+
+    def counting(self, on_data: Callable[..., None]) -> Callable[..., None]:
+        # The client's data callback, counting each frame after the library has taken it.
+        def counted(*event: object) -> None:
+            on_data(*event)
+            with self.cond:
+                self.frames += 1
+                self.cond.notify_all()
+
+        return counted
+
+    def subscribed(self, topic: str) -> None:
+        def named() -> bool:
+            frames = [json.loads(f) for f in self.server.frames()]
+            return any(
+                f["action"] == "subscribe" and topic in f["params"].split(",") for f in frames
+            )
+
+        self.server.wait_for(lambda s: bool(s.connections) and s.connections[-1].auth is not None)
+        self.server.wait_for(lambda _: named())
+
+    def send(self, frame: dict[str, object]) -> None:
+        with self.cond:
+            before = self.frames
+        self.server.send(json.dumps([frame]))
+        with self.cond:
+            assert self.cond.wait_for(lambda: self.frames > before, TIMEOUT)
+        with self.session._core.registry_lock:
+            connections = list(self.connections._connections.values())
+        for connection in connections:
+            connection.flusher.flush()
+
+
+@pytest.fixture
+def streams(fake_ws_server: FakeMassiveServer) -> Iterator[Streams]:
+    harness = Streams(fake_ws_server)
+    yield harness
+    harness.session.close()
+
+
+def received(table: Table, count: int = 1) -> list[dict[str, Any]]:
+    # Waits, a bounded number of update-graph cycles, for the rows a frame published.
+    pause = threading.Event()  # never set; only paces the loop
+    for _ in range(300):
+        if table.size >= count:
+            break
+        pause.wait(0.02)
+    return rows(table)
+
+
+SPY = "O:SPY251219C00650000"
+TRADE_FRAME = {
+    "ev": "T",
+    "sym": SPY,
+    "x": 65,
+    "p": 1.54,
+    "s": 1,
+    "c": [233],
+    "t": 1629820676333,
+    "q": 651921857,
+}
+QUOTE_FRAME = {
+    "ev": "Q",
+    "sym": SPY,
+    "bx": 302,
+    "ax": 302,
+    "bp": 9.71,
+    "ap": 9.81,
+    "bs": 17,
+    "as": 24,
+    "t": 1644506128351,
+    "q": 844090872,
+}
+
+
+def bar_frame(event: str) -> dict[str, object]:
+    return {
+        "ev": event,
+        "sym": SPY,
+        "v": 2,
+        "av": 8,
+        "op": 2.2,
+        "vw": 2.05,
+        "o": 2.05,
+        "c": 2.05,
+        "h": 2.05,
+        "l": 2.05,
+        "a": 2.1312,
+        "z": 2,
+        "s": 1632419640000,
+        "e": 1632419700000,
+    }
+
+
+@pytest.mark.parametrize(
+    ("dataset", "topic", "frame", "expected"),
+    [
+        ("trades", "T", TRADE_FRAME, {"Timestamp": 1629820676333 * 10**6, "Price": 1.54}),
+        ("quotes", "Q", QUOTE_FRAME, {"Timestamp": 1644506128351 * 10**6, "BidPrice": 9.71}),
+        ("bars-second", "A", bar_frame("A"), {"Timestamp": 1632419640000 * 10**6, "Close": 2.05}),
+        ("bars-minute", "AM", bar_frame("AM"), {"Timestamp": 1632419640000 * 10**6, "Vwap": 2.05}),
+        (
+            "fmv",
+            "FMV",
+            {"ev": "FMV", "fmv": 7.2, "sym": SPY, "t": 1401715883806000000},
+            {"Timestamp": 1401715883806000000, "Fmv": 7.2},
+        ),
+    ],
+)
+def test_a_frame_of_each_channel_lands_in_blink(
+    *,
+    streams: Streams,
+    dataset: str,
+    topic: str,
+    frame: dict[str, object],
+    expected: dict[str, Any],
+) -> None:
+    m = streams.session
+    queries: dict[str, Callable[[], Any]] = {
+        "trades": lambda: m.options.trades(SPY),
+        "quotes": lambda: m.options.quotes(SPY),
+        "bars-second": lambda: m.options.bars(SPY, dm.Timespan.SECOND),
+        "bars-minute": lambda: m.options.bars(SPY),
+        "fmv": lambda: m.options.fmv(SPY),
+    }
+    blink = queries[dataset]().blink()
+    seen = blink_to_append_only(blink)
+    streams.subscribed(f"{topic}.{SPY}")
+    streams.send(frame)
+    (row,) = received(seen)
+    assert row["Symbol"] == SPY
+    assert {name: row[name] for name in expected} == expected
+    family = ChannelFamily.FMV if topic == "FMV" else ChannelFamily.TICK
+    assert streams.families == [family]
+    m.release(blink)
+
+
+# --- End to end: flat files ------------------------------------------------------------------
+
+
+@pytest.fixture
+def s3_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
+    # A session with S3 credentials, on a Monday after the March 13, 2023 files are published,
+    # whose flat-file retries never sleep.
+    monkeypatch.setattr(history_source, "_now", lambda: datetime(2023, 3, 14, 16, tzinfo=UTC))
+    monkeypatch.setitem(
+        vars(_massive),
+        "FlatFileClient",
+        functools.partial(_massive.FlatFileClient, clock=FakeClock()),
+    )
+    fields: dict[str, object] = {
+        "api_key": "test-key",
+        "s3_access_key_id": "AKIDFLATFILES",
+        "s3_secret_access_key": "flat-file-secret",
+    }
+    m = dm.MassiveSession(dm.MassiveConfig(**cast("dict[str, Any]", fields)))
+    yield m
+    m.close()
+
+
+DAY = date(2023, 3, 13)
+PUT = "O:SPY230327P00390000"
+CALL = "O:IWM230327C00137000"
+
+
+@pytest.mark.parametrize(
+    ("prefix", "header", "lines", "build", "expected"),
+    [
+        (
+            "us_options_opra/trades_v1",
+            "ticker,conditions,correction,exchange,price,sip_timestamp,size",
+            [
+                f"{PUT},232,,312,11.82,1678715620948000000,1",
+                f"{CALL},209,,325,11.07,1678716040304000000,15",
+            ],
+            lambda m: m.options.trades(PUT),
+            {"Timestamp": 1678715620948000000, "Price": 11.82, "Conditions": [232]},
+        ),
+        (
+            "us_options_opra/quotes_v1",
+            (
+                "ticker,ask_exchange,ask_price,ask_size,bid_exchange,bid_price,bid_size,"
+                "sequence_number,sip_timestamp"
+            ),
+            [f"{PUT},309,326.77,1,309,321.77,1,81779,1678715620948000000"],
+            lambda m: m.options.quotes(PUT),
+            {"Timestamp": 1678715620948000000, "AskPrice": 326.77, "SequenceNumber": 81779},
+        ),
+        (
+            "us_options_opra/minute_aggs_v1",
+            "ticker,volume,open,close,high,low,window_start,transactions",
+            [f"{PUT},1,11.82,11.82,11.82,11.82,1678715580000000000,1"],
+            lambda m: m.options.bars(PUT, adjusted=False),
+            {"Timestamp": 1678715580000000000, "Close": 11.82, "Transactions": 1},
+        ),
+        (
+            "us_options_opra/day_aggs_v1",
+            "ticker,volume,open,close,high,low,window_start,transactions",
+            [f"{PUT},200,11.82,9.83,11.82,8.09,1678680000000000000,62"],
+            lambda m: m.options.bars(PUT, dm.Timespan.DAY, adjusted=False),
+            {"Timestamp": 1678680000000000000, "Close": 9.83, "Volume": 200.0},
+        ),
+    ],
+)
+def test_a_flat_file_of_each_prefix_round_trips(
+    *,
+    s3_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    prefix: str,
+    header: str,
+    lines: list[str],
+    build: Callable[[dm.MassiveSession], Any],
+    expected: dict[str, Any],
+) -> None:
+    key = f"{prefix}/2023/03/2023-03-13.csv.gz"
+    fake_s3.put(key, make_csv_gz("\n".join([header, *lines]) + "\n"))
+    out = rows(build(s3_session).history(DAY, DAY, source=HistorySource.FLAT_FILES))
+    assert fake_s3.requests == [("flatfiles", key)]
+    (row,) = out  # the other contract's row is filtered out
+    assert row["Symbol"] == PUT
+    assert {name: row[name] for name in expected} == expected
