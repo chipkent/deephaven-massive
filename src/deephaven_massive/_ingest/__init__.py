@@ -3,7 +3,9 @@
 - `clients`: `SessionClients`, which owns a session's wire clients and connections and provides
   the transports to the session core through its `IngestPorts` protocol;
 - `flatfiles`: `FlatFileHistory`, which serves `history()` from the S3 flat files through the
-  session's `FlatFileClient`.
+  session's `FlatFileClient`;
+- `ws`: the WebSocket transport, one connection per URL over `WsClient`, and the
+  subscription protocol (the reconcile loop, acknowledgements, refusals, the options cap).
 
 Layer: ingest, above the wire (`_massive`), the vocabulary (the root `_config`, `_enums`,
 `_errors`, `_types`), the datasets (`_datasets`), and the tables (`_tables`), all of which it

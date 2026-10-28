@@ -175,6 +175,11 @@ def test_iso_text_becomes_an_instant_to_the_nanosecond() -> None:
 # --- The lattice -----------------------------------------------------------------------------
 
 
+def test_widening_a_large_integer_to_a_double_rounds_it() -> None:
+    big = pa.array([2**53 + 1, None], pa.int64())
+    assert widen(big, pa.float64()).to_pylist() == [float(2**53), None]
+
+
 def test_widening_gives_each_column_its_merged_arrow_type() -> None:
     # Checked on the arrays, before a batch is assembled, which on some pyarrow versions casts
     # by itself.
@@ -591,4 +596,197 @@ def test_epochs_of_different_units_share_a_column() -> None:
     )
     tables = {"stocks/T": made, "stocks/Q": other}
     schema = dataset_schema(stream, (stream, second), lambda _, key: tables[key])
-    assert schema.columns == (Column("At", ColumnType.INSTANT),)
+    assert [(c.name, c.type) for c in schema.columns] == [("At", ColumnType.INSTANT)]
+
+
+# --- Column descriptions ---------------------------------------------------------------------
+
+
+def described(text: str, wire_key: str, column: str) -> Field:
+    return Field(wire_key=wire_key, column=column, wire_type=WireType.DOUBLE, description=text)
+
+
+def test_a_plain_column_has_no_description_or_origin() -> None:
+    plain = Column("Rows", ColumnType.LONG)
+    assert (plain.description, plain.supplied_by, dict(plain.wire_keys)) == ("", (), {})
+    assert hash(plain) == hash(Column("Rows", ColumnType.LONG))  # wire_keys is not hashed
+
+
+def test_rest_text_wins_and_source_order_breaks_ties() -> None:
+    # Two REST paths and one channel; the descriptions differ per source.
+    dataset = DatasetSpec(
+        name="stocks.x",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        fetch_path="/first",
+        history_path="/second",
+        channels={None: "T"},
+    )
+    made = {
+        "/first": Source(
+            key="/first",
+            transport=R,
+            fields=(described("", "price", "Price"), described("First size.", "size", "Size")),
+        ),
+        "/second": Source(
+            key="/second",
+            transport=R,
+            fields=(
+                described("Second price.", "price", "Price"),
+                described("Second size.", "size_2", "Size"),
+            ),
+        ),
+        "stocks/T": Source(
+            key="stocks/T",
+            transport=W,
+            fields=(
+                described("WS price.", "p", "Price"),
+                described("WS size.", "s", "Size"),
+                described("", "f", "Flag"),
+            ),
+        ),
+    }
+    schema = dataset_schema(dataset, (dataset,), lambda _, key: made[key])
+    columns = {c.name: c for c in schema.columns}
+    # The first REST path has no text for Price, so the second REST path's wins over WS.
+    assert columns["Price"].description == "Second price."
+    # Both REST paths describe Size: the first declared source wins.
+    assert columns["Size"].description == "First size."
+    # Nothing describes Flag: an empty description, and nothing fails.
+    assert columns["Flag"].description == ""
+    assert columns["Price"].supplied_by == (R, W)
+    assert columns["Flag"].supplied_by == (W,)
+    # The distinct wire keys per transport, in source order.
+    assert dict(columns["Price"].wire_keys) == {R: ("price",), W: ("p",)}
+    assert dict(columns["Size"].wire_keys) == {R: ("size", "size_2"), W: ("s",)}
+
+
+TRADES_KEYS = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
+STOCK_TRADES = DatasetSpec(
+    name="stocks.trades",
+    summary="Trades of US-listed stocks, tick by tick.",
+    asset_class=AssetClass.STOCKS,
+    kind="trades",
+    fetch_path="/v2/last/trade/{stocksTicker}",
+    history_path="/v3/trades/{stockTicker}",
+    channels={None: "T"},
+    flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+    keys={
+        (R, "/v2/last/trade/{stocksTicker}"): TRADES_KEYS,
+        (R, "/v3/trades/{stockTicker}"): SourceKeys(
+            KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp")
+        ),
+        (W, "stocks/T"): TRADES_KEYS,
+        (F, "us_stocks_sip/trades_v1"): TRADES_KEYS,
+    },
+)
+CRYPTO_TRADES = DatasetSpec(
+    name="crypto.trades",
+    summary="Trades of crypto pairs, tick by tick.",
+    asset_class=AssetClass.CRYPTO,
+    kind="trades",
+    history_path="/v3/trades/{cryptoTicker}",
+    channels={None: "XT"},
+    keys={
+        (R, "/v3/trades/{cryptoTicker}"): SourceKeys(
+            KeySpec("cryptoTicker", from_request=True), KeySpec("ParticipantTimestamp")
+        ),
+        (W, "crypto/XT"): SourceKeys(KeySpec("Pair"), KeySpec("ParticipantTimestamp")),
+    },
+)
+TRADES = Catalog((STOCK_TRADES, CRYPTO_TRADES))
+
+
+def wire(transport: Transport, key: str, column: str) -> Field:
+    return source(transport, key).field(column)
+
+
+def test_a_column_only_other_members_supply_names_them() -> None:
+    columns = {c.name: c for c in TRADES.dataset_schema(CRYPTO_TRADES).columns}
+    tape = columns["Tape"]
+    assert tape.description == "Always null for `crypto.trades`; supplied by `stocks.trades`."
+    assert (tape.supplied_by, dict(tape.wire_keys)) == ((), {})
+    # Crypto renames its own participant time to Timestamp, so the stocks column is union-only.
+    assert columns["ParticipantTimestamp"].description == (
+        "Always null for `crypto.trades`; supplied by `stocks.trades`."
+    )
+    # Each dataset gets its own text, never the kind's: the stocks Tape is the vendor's.
+    stocks_tape = next(c for c in TRADES.dataset_schema(STOCK_TRADES).columns if c.name == "Tape")
+    assert stocks_tape.description == wire(R, "/v2/last/trade/{stocksTicker}", "Tape").description
+
+
+def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
+    columns = {c.name: c for c in TRADES.dataset_schema(STOCK_TRADES).columns}
+    last, history = "/v2/last/trade/{stocksTicker}", "/v3/trades/{stockTicker}"
+    files = "us_stocks_sip/trades_v1"
+    symbol = [
+        "The instrument, in the library's canonical symbol form.",
+        f'REST `T`: "{wire(R, last, "Ticker").description}"',
+        "REST: the request's `stockTicker` parameter.",
+        f'FLAT_FILES `ticker`: "{wire(F, files, "Ticker").description}"',
+        f'WS `sym`: "{wire(W, "stocks/T", "Ticker").description}"',
+    ]
+    assert columns["Symbol"].description == " ".join(symbol)
+    assert dict(columns["Symbol"].wire_keys) == {R: ("T", None), F: ("ticker",), W: ("sym",)}
+    assert columns["Symbol"].supplied_by == (R, F, W)
+    timestamp = [
+        "The row's primary time, as an Instant.",
+        f'REST `t`: "{wire(R, last, "SipTimestamp").description}"',
+        f'REST `sip_timestamp`: "{wire(R, history, "SipTimestamp").description}"',
+        f'FLAT_FILES `sip_timestamp`: "{wire(F, files, "SipTimestamp").description}"',
+        f'WS `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',
+    ]
+    assert columns["Timestamp"].description == " ".join(timestamp)
+
+
+def test_an_underlying_column_takes_its_own_sentence() -> None:
+    contracts = (R, "/v3/reference/options/contracts")
+    dataset = spec(
+        "options.contracts",
+        {contracts: SourceKeys(KeySpec("Ticker"), fanout=KeySpec("UnderlyingTicker"))},
+        asset_class=AssetClass.OPTIONS,
+    )
+    underlying = next(
+        c for c in dataset_schema(dataset, (dataset,), lookup).columns if c.name == "Underlying"
+    )
+    assert underlying.description == (
+        "The underlying instrument, in the library's canonical symbol form. "
+        f'REST `underlying_ticker`: "{wire(*contracts, "UnderlyingTicker").description}"'
+    )
+
+
+def test_a_vendor_field_named_like_a_key_keeps_its_vendor_text() -> None:
+    # A `timestamp` field that is no declared time key is not the row's primary time.
+    stamped = Field(
+        wire_key="timestamp",
+        column="Timestamp",
+        wire_type=WireType.EPOCH,
+        unit=WireUnit.MS,
+        description="When the status was last updated.",
+    )
+    status = DatasetSpec(
+        name="reference.x", summary="A dataset for the tests.", fetch_path="/status"
+    )
+    made = Source(key="/status", transport=R, fields=(stamped,))
+    (column,) = dataset_schema(status, (status,), lambda *_: made).columns
+    assert (column.name, column.description) == ("Timestamp", "When the status was last updated.")
+
+
+def test_a_key_part_without_text_names_the_key_and_repeats_once() -> None:
+    # Two REST paths rename the same undescribed wire key: it is named once, without a quote.
+    plain = Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING)
+    dataset = DatasetSpec(
+        name="reference.x",
+        summary="A dataset for the tests.",
+        fetch_path="/first",
+        extra_paths=("/second",),
+        keys={
+            (R, "/first"): SourceKeys(KeySpec("Ticker")),
+            (R, "/second"): SourceKeys(KeySpec("Ticker")),
+        },
+    )
+    made = Source(key="/first", transport=R, fields=(plain,))
+    schema = dataset_schema(dataset, (dataset,), lambda *_: made)
+    assert schema.columns[0].description == (
+        "The instrument, in the library's canonical symbol form. REST `sym`."
+    )

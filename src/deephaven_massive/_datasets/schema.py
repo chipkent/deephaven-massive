@@ -21,8 +21,10 @@ the dataset's table shape:
   every source of every member of the dataset's kind (`Catalog.members`), `Symbol` and
   `Timestamp` first where the dataset declares them, each column's wire type
   the lattice join (`join`) of every contribution. Every member of a kind therefore has the
-  same columns: crypto trades carry the stocks-only `Tape`, always null. `Catalog` caches the
-  result per dataset; this module holds no state.
+  same columns: crypto trades carry the stocks-only `Tape`, always null. Each column also gets
+  one description chosen for the dataset, the transports that fill it, and the wire keys behind
+  it (`Column`); every result's column descriptions and the queries' `columns()` tables read
+  them from here. `Catalog` caches the result per dataset; this module holds no state.
 
 The merge runs from the committed generated files only, never from data. The Deephaven types of
 these columns, and the column definitions `table_publisher` and `input_table` take, come from
@@ -36,8 +38,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, date, datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
@@ -45,13 +49,13 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.timestamps import TimeUnit, time_unit
 from deephaven_massive._errors import MassiveError
-from deephaven_massive._massive import WireType
+from deephaven_massive._massive import Transport, WireType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
-    from deephaven_massive._massive import Field, Source, Transport
+    from deephaven_massive._massive import Field, Source
 
 __all__ = [
     "COLUMN_TYPES",
@@ -152,15 +156,37 @@ def key_column(role: str, key: KeySpec) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Column:
-    """One typed column of a schema.
+    """One typed column of a schema, with what it means and where it comes from.
+
+    A dataset schema (`dataset_schema`) fills every attribute; the library's own diagnostics
+    tables give only a name and a type. The description and the transports are what every
+    result's column descriptions and the queries' `columns()` tables show, so both read them
+    from here and never disagree; the wire keys name the vendor fields behind the column.
+    Immutable and shared freely across threads.
 
     Attributes:
         name: The PascalCase column name.
         type: The column's type.
+        description: What the column holds, chosen per dataset from the vendor's field
+            descriptions or written by the library for the key columns and for a column only
+            other datasets of the kind supply (see `dataset_schema`); empty when nothing
+            describes it.
+        supplied_by: The transports whose sources of this dataset fill the column (a key
+            filled from the request counts), in the order `REST`, `FLAT_FILES`, `WS`; empty
+            for a column only other datasets of the kind supply, which this dataset leaves
+            null.
+        wire_keys: For each transport of `supplied_by`, the distinct wire keys behind the
+            column, in the order of the dataset's sources, before any projection renames
+            them; None stands for a key filled from the request. Excluded from hashing.
     """
 
     name: str
     type: ColumnType
+    description: str = ""
+    supplied_by: tuple[Transport, ...] = ()
+    wire_keys: Mapping[Transport, tuple[str | None, ...]] = dataclass_field(
+        default_factory=lambda: MappingProxyType({}), hash=False
+    )
 
 
 _INTEGER_TYPES: Final = frozenset({ColumnType.LONG, ColumnType.INT})
@@ -556,6 +582,140 @@ def join(first: WireType, second: WireType) -> WireType | None:
     return _JOINS.get(frozenset({first, second}))
 
 
+_TRANSPORT_ORDER: Final = (Transport.REST, Transport.FLAT_FILES, Transport.WS)
+"""The order in which a column's transports are listed and its descriptions are tried: REST
+first, because its descriptions are the most complete."""
+
+_KEY_SENTENCES: Final[Mapping[str, str]] = {
+    "Symbol": "The instrument, in the library's canonical symbol form.",
+    "Timestamp": "The row's primary time, as an Instant.",
+    "Underlying": "The underlying instrument, in the library's canonical symbol form.",
+}
+"""The library's own sentence for each renamed key column; its description goes on to name
+the wire key or request parameter behind it on each transport."""
+
+_Contribution = tuple[Transport, SourceColumn]
+"""One column one source of a dataset contributes, with the source's transport."""
+
+
+def _own_contributions(
+    spec: DatasetSpec, source: Callable[[Transport, str], Source]
+) -> dict[str, list[_Contribution]]:
+    """Return what the dataset's own sources contribute to each column, in description order.
+
+    Args:
+        spec: The dataset.
+        source: Returns the generated source of a transport and key.
+
+    Returns:
+        For each column the dataset's own sources fill, every contribution: the transports in
+        the order `REST`, `FLAT_FILES`, `WS` and, within one transport, the sources in their
+        declared order (`DatasetSpec.sources`: role paths, then channels, then prefixes).
+    """
+    own: dict[str, list[_Contribution]] = {}
+    for transport in _TRANSPORT_ORDER:
+        for declared, key in spec.sources:
+            if declared is transport:
+                for column in rename(spec, source(transport, key)):
+                    own.setdefault(column.column, []).append((transport, column))
+    return own
+
+
+def _key_part(transport: Transport, column: SourceColumn) -> str:
+    """Say where one source's value of a renamed key column comes from.
+
+    Args:
+        transport: The source's transport.
+        column: The source's contribution to the key column.
+
+    Returns:
+        ``REST `sip_timestamp`: "<vendor description>"`` for a wire key with a description,
+        ``REST `sip_timestamp`.`` for one without, or ``REST: the request's `stocksTicker`
+        parameter.`` for a key filled from the request.
+    """
+    if column.field is None:
+        return f"{transport.value}: the request's `{column.parameter}` parameter."
+    if column.field.description:
+        return f'{transport.value} `{column.field.wire_key}`: "{column.field.description}"'
+    return f"{transport.value} `{column.field.wire_key}`."
+
+
+def _description(
+    spec: DatasetSpec,
+    name: str,
+    *,
+    own: Sequence[_Contribution],
+    suppliers: Sequence[str],
+    is_key: bool,
+) -> str:
+    """Pick one column's description for one dataset (the rules of `dataset_schema`).
+
+    Args:
+        spec: The dataset.
+        name: The column.
+        own: The dataset's own contributions to the column, in description order; empty when
+            only other members of the kind supply it.
+        suppliers: The members of the kind that supply the column, by name, in member order.
+        is_key: True when the column is one of the dataset's declared key columns. Only then
+            does a `Symbol`, `Timestamp`, or `Underlying` column get the library's sentence;
+            a vendor field that merely carries one of those names is described as any other.
+
+    Returns:
+        The description; empty when no source describes the column.
+    """
+    if not own:
+        named = ", ".join(f"`{member}`" for member in suppliers)
+        return f"Always null for `{spec.name}`; supplied by {named}."
+    if is_key and name in _KEY_SENTENCES:
+        parts = [_KEY_SENTENCES[name]]
+        for transport, column in own:
+            part = _key_part(transport, column)
+            if part not in parts:
+                parts.append(part)
+        return " ".join(parts)
+    for _, column in own:
+        if column.field is not None and column.field.description:
+            return column.field.description
+    return ""
+
+
+def _column(
+    spec: DatasetSpec,
+    name: str,
+    *,
+    column_type: ColumnType,
+    own: Sequence[_Contribution],
+    suppliers: Sequence[str],
+    is_key: bool,
+) -> Column:
+    """Build one column of a dataset schema with its description, transports, and wire keys.
+
+    Args:
+        spec: The dataset.
+        name: The column.
+        column_type: Its merged type.
+        own: The dataset's own contributions to the column, in description order.
+        suppliers: The members of the kind that supply the column, by name, in member order.
+        is_key: True when the column is one of the dataset's declared key columns.
+
+    Returns:
+        The column.
+    """
+    wire_keys: dict[Transport, list[str | None]] = {}
+    for transport, column in own:
+        keys = wire_keys.setdefault(transport, [])
+        key = None if column.field is None else column.field.wire_key
+        if key not in keys:
+            keys.append(key)
+    return Column(
+        name,
+        column_type,
+        _description(spec, name, own=own, suppliers=suppliers, is_key=is_key),
+        tuple(wire_keys),
+        MappingProxyType({transport: tuple(keys) for transport, keys in wire_keys.items()}),
+    )
+
+
 def widen(values: pa.Array, target: pa.DataType) -> pa.Array:
     """Widen one source column to its dataset column's Arrow type, by the lattice joins.
 
@@ -563,6 +723,8 @@ def widen(values: pa.Array, target: pa.DataType) -> pa.Array:
     (`join`): a `long` in a `double` column is cast, and a `long` in an `int[]` column becomes
     a one-element list (a null stays null). A column already of its type is cast to itself, at
     no cost. Every transport converts its decoded columns with it, so they all widen alike.
+    A `long` beyond 2**53 in a `double` column takes the nearest `double`, as the lattice join
+    means it to, rather than failing the whole column.
 
     Args:
         values: The column as decoded, in its wire type's Arrow type.
@@ -575,7 +737,8 @@ def widen(values: pa.Array, target: pa.DataType) -> pa.Array:
         offsets = pa.array(range(len(values) + 1), pa.int32())
         items = pc.cast(values, target.value_type)
         return pa.ListArray.from_arrays(offsets, items, mask=values.is_null())
-    return pc.cast(values, target)
+    to_float = pa.types.is_integer(values.type) and pa.types.is_floating(target)
+    return pc.cast(values, target, safe=not to_float)
 
 
 def dataset_schema(
@@ -593,9 +756,31 @@ def dataset_schema(
     `join` of every contribution, mapped through `COLUMN_TYPES`. `Catalog.dataset_schema`
     calls it once per dataset and caches the result.
 
+    Each column also gets its transports and wire keys from the dataset's own sources
+    (`Column.supplied_by`, `Column.wire_keys`), and one description chosen for this dataset,
+    never one per kind: a kind spans asset classes, and the stock text for a price ("dollar
+    value per whole share") is wrong for crypto. Three rules choose it:
+
+    1. A column the dataset's own sources supply takes the first non-empty vendor description
+       among them, trying the transports in the order REST, flat files, WebSocket and, within
+       one transport, the sources in their declared order (role paths, then channels, then
+       prefixes). REST comes first because its text is the most complete.
+    2. A column that exists only through the kind's union, which no source of the dataset
+       supplies, says so and names the members that do, in member order:
+       ``Always null for `crypto.trades`; supplied by `stocks.trades`.``
+    3. `Symbol`, `Timestamp`, and `Underlying`, when they are declared key columns of the
+       dataset, get the library's own sentence ("The row's primary time, as an Instant."),
+       followed, per source in the order of rule 1, by the wire key the source renames and
+       its quoted vendor description
+       (``REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp..."``), or, for a
+       key filled from the request, the request parameter it came from (``REST: the
+       request's `stocksTicker` parameter.``); a part two sources share appears once.
+
+    A column whose sources carry no description gets `""`, and nothing fails.
+
     Args:
-        spec: The dataset whose schema is built; it names the schema and decides the leading
-            key columns.
+        spec: The dataset whose schema is built; it names the schema, decides the leading
+            key columns, and is the dataset the descriptions are chosen for.
         members: The datasets whose sources merge, in member order: the datasets of the
             dataset's kind (`Catalog.members`), or the dataset alone when it is in no kind.
         source: Returns the generated source of a transport and key.
@@ -609,6 +794,7 @@ def dataset_schema(
             raises the `ValueError` of `rename`, and an unknown source whatever `source` raises.
     """
     types: dict[str, WireType] = {}
+    suppliers: dict[str, list[str]] = {}
     for member in members:
         for transport, key, found in _by_position(member, source):
             for contribution in rename(member, found):
@@ -623,7 +809,24 @@ def dataset_schema(
                         f"{transport.value} {key}"
                     )
                 types[contribution.column] = joined
+                named = suppliers.setdefault(contribution.column, [])
+                if member.name not in named:
+                    named.append(member.name)
     declared = {key_column(r, k) for keys in spec.keys.values() for r, k in keys.declared()}
     leading = [name for name in _LEADING if name in declared]
     order = [*leading, *(name for name in types if name not in leading)]
-    return Schema(spec.name, tuple(Column(name, COLUMN_TYPES[types[name]]) for name in order))
+    own = _own_contributions(spec, source)
+    return Schema(
+        spec.name,
+        tuple(
+            _column(
+                spec,
+                name,
+                column_type=COLUMN_TYPES[types[name]],
+                own=own.get(name, ()),
+                suppliers=suppliers[name],
+                is_key=name in declared,
+            )
+            for name in order
+        ),
+    )

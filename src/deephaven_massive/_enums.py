@@ -178,17 +178,20 @@ class Direction(StrEnum):
 class ContractType(StrEnum):
     """The type of an options contract, as `options.chain` and `options.contracts` filter it.
 
+    Its values are the `contract_type` values both endpoints accept: calls and puts.
+
     Example:
         ::
 
             import deephaven_massive as dm
 
+            m = dm.MassiveSession()
+            puts = m.options.chain("AAPL", contract_type=dm.ContractType.PUT).fetch()
             assert dm.ContractType("call") is dm.ContractType.CALL
     """
 
     CALL = "call"
     PUT = "put"
-    OTHER = "other"
 
 
 class SeriesType(StrEnum):

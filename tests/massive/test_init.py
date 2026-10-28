@@ -15,7 +15,7 @@ from deephaven_massive._massive.flatfiles import client as flatfiles_client
 from deephaven_massive._massive.flatfiles import layout, reader
 from deephaven_massive._massive.net import errors
 from deephaven_massive._massive.rest import batch, client, response
-from deephaven_massive._massive.spec import types
+from deephaven_massive._massive.spec import types, values
 
 EXPECTED_INTERFACE = [
     "DriftReport",
@@ -41,6 +41,7 @@ EXPECTED_INTERFACE = [
     "WireUnit",
     "WsClient",
     "WsState",
+    "encode_value",
     "object_key",
     "provenance",
     "source",
@@ -78,6 +79,7 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.RestClient is client.RestClient
     assert _massive.Page is response.Page
     assert _massive.to_batch is batch.to_batch
+    assert _massive.encode_value is values.encode_value
 
 
 def test_every_lazy_name_is_in_all_and_none_is_bound() -> None:
