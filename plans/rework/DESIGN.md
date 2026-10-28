@@ -3901,7 +3901,11 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Packaging.** `uv.lock` is not committed, and CI resolves afresh on every run. The wheel
   excludes all of `refresh/` (`[tool.hatch.build.targets.wheel] exclude =
   ["src/deephaven_massive/_massive/refresh"]`), the snapshot included; `spec/*.json` ship as
-  package data, and the CI build job asserts both. Development dependencies use a PEP 735
+  package data, and the CI build job asserts both. The build job also installs the wheel, with
+  `deephaven-server`, into a fresh environment and runs `scripts/check_wheel.py` there: inside
+  a started server it imports every shipped module, resolves every public name, renders the
+  column reference from the installed catalog and compares it with `docs/datasets/`, and opens
+  and closes a session. Development dependencies use a PEP 735
   `[dependency-groups]` table; license metadata follows PEP 639. `__version__` comes from
   `importlib.metadata`. `deephaven-server` is a development dependency only. The runtime
   dependencies are declared directly, with floors: `deephaven-core`, `pyarrow`, `boto3`,
