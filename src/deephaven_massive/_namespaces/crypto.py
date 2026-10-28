@@ -306,7 +306,6 @@ class _Crypto(Namespace):
         timespan: StreamSpan = Timespan.MINUTE,
         *,
         multiplier: Literal[1] = 1,
-        adjusted: bool = True,
     ) -> StreamHistoryQuery: ...
     @overload
     def bars(
@@ -315,7 +314,6 @@ class _Crypto(Namespace):
         timespan: DaySpan,
         *,
         multiplier: Literal[1] = 1,
-        adjusted: bool = True,
     ) -> HistoryLatestQuery: ...
     @overload
     def bars(
@@ -324,7 +322,6 @@ class _Crypto(Namespace):
         timespan: Timespan = Timespan.MINUTE,
         *,
         multiplier: int = 1,
-        adjusted: bool = True,
     ) -> HistoryQuery: ...
     def bars(
         self,
@@ -332,7 +329,6 @@ class _Crypto(Namespace):
         timespan: Timespan = Timespan.MINUTE,
         *,
         multiplier: int = 1,
-        adjusted: bool = True,
     ) -> HistoryQuery:
         """Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
@@ -352,9 +348,11 @@ class _Crypto(Namespace):
 
         `history()` reads the aggregates range endpoint over REST, one pair at a time, or the
         `global_crypto/minute_aggs_v1` and `global_crypto/day_aggs_v1` flat files for 1-minute
-        and 1-day unadjusted bars. There is no `limit`: `history()` pages internally (the
-        endpoint's own `limit` counts base aggregates, not rows, so it cannot cap rows) and
-        `fetch()` returns one row per pair.
+        and 1-day bars. Crypto has no splits or other corporate actions, so there is no
+        `adjusted` choice: REST, flat files, and the stream serve the same bars, and the
+        library sends Massive's `adjusted` parameter on no request. There is no `limit`:
+        `history()` pages internally (the endpoint's own `limit` counts base aggregates, not
+        rows, so it cannot cap rows) and `fetch()` returns one row per pair.
 
         `dm.ALL` streams every pair and reads every pair's flat files; with 1-day bars,
         `history()` over REST reads the grouped-daily endpoint, one request per day. `fetch()`
@@ -369,8 +367,8 @@ class _Crypto(Namespace):
         that carries another class's prefix, an empty sequence or exhausted generator, or a
         table without a `Symbol` column raises `ValueError`; a `timespan` that is not a
         `dm.Timespan` (a plain string such as `"minute"` included), a `multiplier` that is
-        not an `int`, an `adjusted` that is not a `bool`, or `symbols` of another type than
-        a string, a sequence of strings, a table, or `dm.ALL` raises `TypeError`.
+        not an `int`, or `symbols` of another type than a string, a sequence of strings, a
+        table, or `dm.ALL` raises `TypeError`.
 
         Args:
             symbols: The pairs, as `BTC-USD`, `BTC/USD`, or `X:BTCUSD`; one string, a
@@ -379,9 +377,6 @@ class _Crypto(Namespace):
                 `Timespan.SESSION` is for futures only.
             multiplier: How many `timespan` units one bar spans, a positive integer; 1 by
                 default. Only 1 streams or fetches.
-            adjusted: Whether REST bars are adjusted for splits, sent as the endpoint's
-                `adjusted` parameter; True by default. Flat files hold unadjusted bars only, so
-                `history()` reads them only with `adjusted=False`.
 
         Returns:
             The query; its class follows from `timespan` and `multiplier` as above. No request
@@ -404,7 +399,6 @@ class _Crypto(Namespace):
                 symbols=symbols,
                 timespan=timespan,
                 multiplier=multiplier,
-                adjusted=adjusted,
             ),
         )
 

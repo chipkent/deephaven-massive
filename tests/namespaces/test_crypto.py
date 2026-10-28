@@ -309,17 +309,18 @@ def test_bars_pick_their_class(
     q = massive_session.crypto.bars("BTC-USD", timespan, multiplier=multiplier)
     assert type(q) is expected
     request = request_of(q)
-    assert (request.timespan, request.multiplier, request.adjusted) == (timespan, multiplier, True)
+    assert (request.timespan, request.multiplier, request.adjusted) == (timespan, multiplier, None)
 
 
 def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.bars(dm.ALL, adjusted=False)
+    q = massive_session.crypto.bars(dm.ALL)
     assert type(q) is StreamHistoryQuery
     request = request_of(q)
+    # Crypto has no corporate actions: bars carry no adjustment choice.
     assert (request.symbols, request.timespan, request.adjusted) == (
         dm.ALL,
         dm.Timespan.MINUTE,
-        False,
+        None,
     )
 
 
@@ -331,8 +332,8 @@ def test_bar_arguments_are_checked(massive_session: dm.MassiveSession) -> None:
         bars("BTC-USD", "minute")  # type: ignore[call-overload]  # a plain string is refused
     with pytest.raises(ValueError, match="multiplier"):
         bars("BTC-USD", dm.Timespan.HOUR, multiplier=0)
-    with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars("BTC-USD", adjusted="yes")  # type: ignore[call-overload]  # not a bool
+    with pytest.raises(TypeError, match="adjusted"):
+        bars("BTC-USD", adjusted=True)  # type: ignore[call-overload]  # crypto bars have none
 
 
 def test_movers(massive_session: dm.MassiveSession) -> None:
@@ -449,23 +450,11 @@ def test_rest_history_needs_explicit_symbols(massive_session: dm.MassiveSession)
         massive_session.crypto.bars(dm.ALL).history("2026-01-02", "2026-01-02", source=rest)
 
 
-@pytest.mark.parametrize(
-    ("make", "reason"),
-    [
-        (
-            lambda c: c.bars("BTC-USD", dm.Timespan.HOUR, adjusted=False),
-            r"crypto\.bars flat files hold only 1-minute, 1-day bars",
-        ),
-        (lambda c: c.bars("BTC-USD"), "flat-file bars are unadjusted; pass adjusted=False"),
-    ],
-    ids=["hourly", "adjusted"],
-)
-def test_flat_file_history_states_its_constraints(
-    massive_session: dm.MassiveSession, make: Callable[[Any], HistoryQuery], reason: str
-) -> None:
-    q = make(massive_session.crypto)
+def test_flat_file_history_states_its_constraints(massive_session: dm.MassiveSession) -> None:
+    q = massive_session.crypto.bars("BTC-USD", dm.Timespan.HOUR)
     with pytest.raises(
-        ValueError, match=r"crypto\.bars cannot be read from flat files: .*" + reason
+        ValueError,
+        match=r"crypto\.bars cannot be read from flat files: .*hold only 1-minute, 1-day bars",
     ):
         q.history("2026-01-02", "2026-01-02", source=dm.HistorySource.FLAT_FILES)
 
@@ -620,8 +609,8 @@ def test_daily_bars_fetch_reads_the_previous_day(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", load_fixture(OWNER, "prev.json"))
-    out = rows(rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY, adjusted=False).fetch())
-    assert sent(fake_rest) == [("/v2/aggs/ticker/X:BTCUSD/prev", {"adjusted": ["false"]})]
+    out = rows(rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY).fetch())
+    assert sent(fake_rest) == [("/v2/aggs/ticker/X:BTCUSD/prev", {})]
     assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Vwap"]) for r in out] == [
         ("X:BTCUSD", 1605416400000 * MS, 16035.9, 15954.2111)
     ]
@@ -636,7 +625,7 @@ def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
     serve(fake_rest, path, load_fixture(OWNER, "range.json"))
     q = rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY)
     out = rows(q.history("2020-06-01", "2020-06-02", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(path, {"adjusted": ["true"], "limit": ["50000"]})]
+    assert sent(fake_rest) == [(path, {"limit": ["50000"]})]
     assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Transactions"]) for r in out] == [
         ("X:BTCUSD", 1590984000000 * MS, 9557.9, 1),
         ("X:BTCUSD", 1591070400000 * MS, 10096.87, 1),
@@ -650,7 +639,7 @@ def test_every_pairs_daily_bars_read_the_grouped_day(
     serve(fake_rest, path, load_fixture(OWNER, "grouped.json"))
     q = rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
     out = rows(q.history("2020-02-02", "2020-02-02", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(path, {"adjusted": ["true"]})]
+    assert sent(fake_rest) == [(path, {})]
     assert [(r["Symbol"], r["Timestamp"], r["Transactions"]) for r in out] == [
         ("X:ARDRUSD", 1580676480000 * MS, 18388),
         ("X:NGCUSD", 1580674080000 * MS, 18),
@@ -874,7 +863,7 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
             ],
         ),
         (
-            lambda c: c.bars("BTC-USD", adjusted=False),
+            lambda c: c.bars("BTC-USD"),
             "global_crypto/minute_aggs_v1",
             [
                 ("X:BTCUSD", 1679961600000000000, 27139.64),
@@ -882,7 +871,7 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
             ],
         ),
         (
-            lambda c: c.bars(dm.ALL, dm.Timespan.DAY, adjusted=False),
+            lambda c: c.bars(dm.ALL, dm.Timespan.DAY),
             "global_crypto/day_aggs_v1",
             [
                 ("X:LINKUSD", 1680047999999000000, 6.947),
