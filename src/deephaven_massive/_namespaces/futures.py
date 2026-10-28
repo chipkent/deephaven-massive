@@ -81,6 +81,10 @@ def _tick_keys(time: str) -> SourceKeys:
     return SourceKeys(symbol=_TICKER, time=KeySpec(time), session=_SESSION)
 
 
+_PRODUCT_CODE_ARGUMENT: Final = {"product_code.any_of": "product_code"}
+"""The argument that sets `product_code.any_of`, for the message that rejects it in `filters`."""
+
+
 def _product_codes(product_code: object) -> dict[str, object]:
     """Return the wire parameter that carries a `product_code` argument.
 
@@ -532,6 +536,7 @@ class _Futures(Namespace):
             symbols=symbols,
             params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
             filters=filters,
+            arguments=_PRODUCT_CODE_ARGUMENT,
             limit=limit,
         )
         return cast("Query", query)
@@ -596,6 +601,7 @@ class _Futures(Namespace):
             CONTRACTS,
             params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
             filters=filters,
+            arguments=_PRODUCT_CODE_ARGUMENT,
             limit=limit,
         )
         return cast("Query", query)
@@ -659,6 +665,7 @@ class _Futures(Namespace):
             PRODUCTS,
             params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
             filters=filters,
+            arguments=_PRODUCT_CODE_ARGUMENT,
             limit=limit,
         )
         return cast("Query", query)
@@ -814,6 +821,7 @@ class _Futures(Namespace):
             end=end,
             params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
             filters=filters,
+            arguments=_PRODUCT_CODE_ARGUMENT,
             limit=limit,
         )
         return cast("Query", query)

@@ -272,7 +272,9 @@ def test_market_status(massive_session: dm.MassiveSession) -> None:
 def test_product_code_forms_are_set_only_through_product_code(
     massive_session: dm.MassiveSession, call: Callable[[Any], object]
 ) -> None:
-    with pytest.raises(ValueError, match="is set through its own argument, not filters"):
+    with pytest.raises(
+        ValueError, match="is set through its own argument, product_code=, not filters"
+    ):
         call(massive_session.futures)
 
 
