@@ -113,7 +113,7 @@ The timeline of a ticker's events, such as ticker changes, one row per event.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `id` parameter. | REST | request |
 | `Date` | LocalDate | The date the event took place | REST | `date` |
 | `Type` | String | The type of historical event for the asset | REST | `type` |
-| `TickerChangeTicker` | String | A ticker symbol. From the `ticker_change` object: Details about a ticker change | REST | `ticker_change.ticker` |
+| `TickerChangeTicker` | String | A ticker symbol. From the `ticker_change` object: Details about a ticker change. | REST | `ticker_change.ticker` |
 
 Massive's documentation of this dataset:
 

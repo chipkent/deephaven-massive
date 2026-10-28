@@ -42,7 +42,9 @@ field gets one column and one type whichever transport serves it:
   object's whole text, never cut: no rule that shortened it could tell the sentence that
   explains a null from the one that introduces the object. A `DESCRIPTION_FIXES` entry under
   the object's wire key corrects its note as one under a field's key corrects the field's
-  text.
+  text, and one quoting `""` gives a note to an object the vendor leaves undescribed. A
+  field a `KEY_FIXES` entry moves out of an object keeps only the notes of the objects that
+  still enclose it.
 
 Hand input is keyed by source: a REST path template, a WebSocket `"<cluster>/<channel>"`, or a
 flat-file prefix, so one table serves every transport. A `SourceFields` collects its problems
@@ -100,9 +102,10 @@ class RawField:
             flat-file "Columns" type `timestamp - integer`), which makes it timestamp-like
             whatever its name.
         items: The resolved schema of an array's items; `None` for any other field.
-        notes: The enclosing objects that carry a description, outermost first, each as its
-            dotted wire key below the rows (`session`) and its description as the
-            specification gives it; empty for a field at the top of the row.
+        notes: The enclosing objects, outermost first, each as its dotted wire key below the
+            rows (`session`) and its description as the specification gives it (`""` when it
+            gives none, which adds no note unless a `DESCRIPTION_FIXES` entry gives one);
+            empty for a field at the top of the row.
     """
 
     wire_key: str
@@ -132,7 +135,7 @@ def openapi_field(
         schema: The field's resolved schema.
         required: Whether the vendor marks it, and every object above it, required.
         where: The source and key, for messages; the wire key when omitted.
-        notes: The described enclosing objects (`RawField.notes`); none by default.
+        notes: The enclosing objects (`RawField.notes`); none by default.
 
     Returns:
         The field.
@@ -337,7 +340,10 @@ class SourceFields:
         key_fix = self.hand.key_fixes.get((self.source, raw.wire_key))
         if key_fix is not None:
             self.declared_keys[key_fix.wire_key] = raw.wire_key
-            raw = dataclasses.replace(raw, wire_key=key_fix.wire_key)
+            # The field now sits where the samples send it, so only the objects that still
+            # enclose it there keep their notes.
+            kept = tuple(n for n in raw.notes if key_fix.wire_key.startswith(n[0] + "."))
+            raw = dataclasses.replace(raw, wire_key=key_fix.wire_key, notes=kept)
             self.wire_keys.add(raw.wire_key)
         long_names = self.long_names(raw)
         spec_type = self.wire_type(raw)
@@ -431,10 +437,12 @@ class SourceFields:
         listed = sorted({*by_class, *(name for _, _, classes in notes for name in classes)})
 
         def joined(asset_class: str) -> str:
-            # `""` names no class, so it reads the shared texts.
+            # `""` names no class, so it reads the shared texts. An object without a text,
+            # for this class or at all, adds no note.
             parts = [
-                f"From the `{key}` object: {classes.get(asset_class, text)}"
+                f"From the `{key}` object: {note}"
                 for key, text, classes in notes
+                if (note := classes.get(asset_class, text))
             ]
             return _with_notes(by_class.get(asset_class, own), parts)
 
@@ -698,17 +706,17 @@ def _with_notes(text: str, notes: Sequence[str]) -> str:
 
     Args:
         text: The field's own description, as plain text; may be empty.
-        notes: The rendered notes, outermost object first.
+        notes: The rendered notes, outermost object first, none empty.
 
     Returns:
-        The description and the notes joined by spaces, with a period closing a description
-        that ends without sentence punctuation; the description alone when there are no notes.
+        The description and the notes joined by spaces, each part that ends without sentence
+        punctuation closed with a period, so one part's last sentence never runs into the
+        next; the description alone, unchanged, when there are no notes.
     """
     if not notes:
         return text
-    if text and not text.endswith((".", "!", "?")):
-        text += "."
-    return " ".join([text, *notes] if text else notes)
+    parts = [text, *notes] if text else notes
+    return " ".join(part if part.endswith((".", "!", "?")) else part + "." for part in parts)
 
 
 def _json_text(value: Json) -> str:

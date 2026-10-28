@@ -389,3 +389,64 @@ def test_per_asset_class_texts_combine_a_fields_own_and_its_notes() -> None:
         ("crypto", f"Per share. {note} The latest crypto trade."),
         ("options", f"Per contract. {note} The most recent quote."),
     )
+
+
+def test_every_part_closes_its_last_sentence_before_the_next() -> None:
+    raw = RawField(
+        "event.change.ticker",
+        {"type": "string", "description": "The new ticker"},
+        required=False,
+        notes=(("event", "Details about an event"), ("event.change", "A ticker change")),
+    )
+    item = _rules().field(raw)
+    assert item is not None
+    assert item.description == (
+        "The new ticker. From the `event` object: Details about an event. "
+        "From the `event.change` object: A ticker change."
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixed_key", "expected"),
+    [
+        # Moved out of `details` to the top of the row: no object encloses it any more.
+        ("ticker", "The ticker."),
+        # Moved within `details`: `details` still encloses it, `details.codes` does not.
+        ("details.ticker", "The ticker. From the `details` object: The contract details."),
+        # A key that merely starts with an object's name is not inside it.
+        ("details_ticker", "The ticker."),
+    ],
+)
+def test_a_key_fix_keeps_only_the_notes_of_the_objects_that_still_enclose_the_field(
+    fixed_key: str, expected: str
+) -> None:
+    fix = overrides.KeyFix(wire_key=fixed_key, reason="test")
+    hand = dataclasses.replace(_EMPTY, key_fixes={("us_x/trades_v1", "details.codes.t"): fix})
+    raw = RawField(
+        "details.codes.t",
+        {"type": "string", "description": "The ticker."},
+        required=False,
+        notes=(("details", "The contract details."), ("details.codes", "The codes.")),
+    )
+    item = _rules(hand).field(raw)
+    assert item is not None
+    assert (item.wire_key, item.description) == (fixed_key, expected)
+
+
+def test_an_undescribed_objects_note_given_for_some_classes_adds_nothing_to_the_rest() -> None:
+    fix = overrides.DescriptionFix(
+        vendor="", asset_classes={"options": "The contract's last minute."}, reason="test"
+    )
+    hand = dataclasses.replace(_EMPTY, description_fixes={("us_x/trades_v1", "last"): fix})
+    raw = RawField(
+        "last.price",
+        {"type": "number", "description": "The price"},
+        required=False,
+        notes=(("last", ""),),
+    )
+    item = _rules(hand).field(raw)
+    assert item is not None
+    assert item.description == "The price"
+    assert item.class_descriptions == (
+        ("options", "The price. From the `last` object: The contract's last minute."),
+    )

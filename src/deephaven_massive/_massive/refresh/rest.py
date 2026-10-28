@@ -305,8 +305,8 @@ class _PathGenerator(SourceFields):
     ) -> None:
         """Append the leaves of an object schema to `out`, nested objects flattened.
 
-        A nested object with a description adds it, under the object's wire key, to the
-        notes of every leaf below it (`fields.RawField.notes`).
+        Every nested object adds its description (`""` when it has none), under the object's
+        wire key, to the notes of every leaf below it (`fields.RawField.notes`).
 
         Args:
             node: The resolved object schema.
@@ -315,8 +315,7 @@ class _PathGenerator(SourceFields):
             out: Where the leaves go.
             skip: Keys of this object to leave out (the envelope keys of a single-object
                 body); each must have its envelope type.
-            notes: The described objects enclosing this one, outermost first; none for the
-                row.
+            notes: The objects enclosing this one, outermost first; none for the row.
         """
         required_here = required(node)
         for name, child in (properties(node) or {}).items():
@@ -328,14 +327,16 @@ class _PathGenerator(SourceFields):
             child_required = is_required and name in required_here
             if properties(schema) is not None:
                 self.objects.add(wire_key)
-                note = text(schema, "description").strip()
+                # Every object is passed on, described or not: an empty note adds nothing
+                # unless a `DESCRIPTION_FIXES` entry gives the object a text.
+                note = (wire_key, text(schema, "description"))
                 self.flatten(
                     schema,
                     wire_key + ".",
                     is_required=child_required,
                     out=out,
                     skip=frozenset(),
-                    notes=(*notes, (wire_key, note)) if note else notes,
+                    notes=(*notes, note),
                 )
             else:
                 self.wire_keys.add(wire_key)

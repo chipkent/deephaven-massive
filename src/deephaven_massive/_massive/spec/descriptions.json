@@ -2335,7 +2335,7 @@
    "/vX/reference/tickers/{id}/events": {
     "date": "The date the event took place",
     "type": "The type of historical event for the asset",
-    "ticker_change.ticker": "A ticker symbol. From the `ticker_change` object: Details about a ticker change"
+    "ticker_change.ticker": "A ticker symbol. From the `ticker_change` object: Details about a ticker change."
    }
   },
   "WS": {
@@ -2859,6 +2859,30 @@
  "class_descriptions": {
   "REST": {
    "/v3/snapshot": {
+    "last_minute.close": {
+     "options": "The closing value for the minute aggreate. From the `last_minute` object: The most recent minute aggregate for this contract."
+    },
+    "last_minute.decimal_volume": {
+     "options": "The trading volume for the minute aggregate with decimal precision. This field provides support for fractional shares, representing volume as a decimal string where the fractional part is expressed in millionths. This field is only returned for stocks snapshots. From the `last_minute` object: The most recent minute aggregate for this contract."
+    },
+    "last_minute.high": {
+     "options": "The highest value for the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this contract."
+    },
+    "last_minute.low": {
+     "options": "The lowest value for the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this contract."
+    },
+    "last_minute.open": {
+     "options": "The open value for the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this contract."
+    },
+    "last_minute.transactions": {
+     "options": "The number of transactions that took place within the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this contract."
+    },
+    "last_minute.volume": {
+     "options": "The trading volume for the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this contract."
+    },
+    "last_minute.vwap": {
+     "options": "The trading volume weighted average price for the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this contract."
+    },
     "last_trade.exchange": {
      "options": "The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades."
     },

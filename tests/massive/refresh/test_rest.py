@@ -642,6 +642,24 @@ def test_a_flattened_field_carries_the_descriptions_of_its_enclosing_objects() -
     ]
 
 
+def test_a_description_fix_gives_an_undescribed_object_its_note() -> None:
+    # An object the vendor leaves undescribed adds a note only when an entry names it; the
+    # entry quotes the empty text, so it goes stale once the vendor describes the object.
+    fix = overrides.DescriptionFix(vendor="", text="The latest bar.", reason="test")
+    hand = dataclasses.replace(
+        _hand(identity={"bar": "", "other": ""}),
+        description_fixes={(_PATH, "bar"): fix},
+    )
+    row = _row(
+        bar={"type": "object", "properties": {"close": {"type": "number", "description": "C."}}},
+        other={"type": "object", "properties": {"open": {"type": "number", "description": "O."}}},
+    )
+    assert [(f.wire_key, f.description) for f in _one(row, hand).fields] == [
+        ("bar.close", "C. From the `bar` object: The latest bar."),
+        ("other.open", "O."),
+    ]
+
+
 def test_a_field_without_a_description_generates_and_stops_nothing() -> None:
     # No gate looks at descriptions: a missing, empty, or non-text one is simply "".
     path = _one(
