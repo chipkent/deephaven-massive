@@ -1075,29 +1075,53 @@ def coverage_problems(
 
 GENERATED = {(t, key) for t in Transport for key in sources(t)}
 
+SourceKey = tuple[Transport, str]
+Base = tuple[list[DatasetSpec], dict[SourceKey, Deferral]]
+
 
 def test_every_generated_source_is_read_by_a_dataset_or_deferred() -> None:
     assert coverage_problems(CATALOG.by_name.values(), GENERATED, DEFERRED) == []
 
 
-def sole_reader() -> tuple[list[DatasetSpec], list[tuple[Transport, str]]]:
-    # The catalog without one dataset that is the only reader of some source, and the sources
-    # only it read. Which dataset is chosen does not matter, so a new reader of today's
-    # choice moves the test to another dataset instead of breaking it.
-    specs = list(CATALOG.by_name.values())
-    readers: dict[tuple[Transport, str], int] = {}
+def sole_readers(specs: list[DatasetSpec]) -> list[tuple[DatasetSpec, list[SourceKey]]]:
+    # Each dataset that is the only reader of some source, with the sources only it reads.
+    readers: dict[SourceKey, int] = {}
     for spec in specs:
         for source in spec.sources:
             readers[source] = readers.get(source, 0) + 1
-    removed = next(spec for spec in specs if any(readers[s] == 1 for s in spec.sources))
-    orphaned = sorted(s for s in removed.sources if readers[s] == 1)
+    found = [(spec, sorted(s for s in spec.sources if readers[s] == 1)) for spec in specs]
+    return [(spec, orphaned) for spec, orphaned in found if orphaned]
+
+
+@pytest.fixture(params=["real", "one-more-deferred"])
+def base(request: pytest.FixtureRequest) -> Base:
+    # The catalog and the deferrals each negative test starts from: the real ones, and the
+    # real ones plus one deferred dataset's sources, so the tests hold whatever DEFERRED holds.
+    specs = list(CATALOG.by_name.values())
+    if request.param == "real":
+        return specs, dict(DEFERRED)
+    spec, orphaned = sole_readers(specs)[-1]
+    deferred = {**DEFERRED, **dict.fromkeys(orphaned, Deferral("Waits for a new verb.", 1))}
+    return [s for s in specs if s is not spec], deferred
+
+
+def without_a_sole_reader(specs: list[DatasetSpec]) -> tuple[list[DatasetSpec], list[SourceKey]]:
+    # The catalog without one dataset that is the only reader of some source, and the sources
+    # only it read. Which dataset is chosen does not matter, so a new reader of today's
+    # choice moves the test to another dataset instead of breaking it.
+    removed, orphaned = sole_readers(specs)[0]
     return [spec for spec in specs if spec is not removed], orphaned
 
 
-def test_coverage_names_a_source_no_dataset_reads() -> None:
-    specs, orphaned = sole_reader()
+def test_the_bases_pass_the_coverage_test(base: Base) -> None:
+    specs, deferred = base
+    assert coverage_problems(specs, GENERATED, deferred) == []
+
+
+def test_coverage_names_a_source_no_dataset_reads(base: Base) -> None:
+    specs, orphaned = without_a_sole_reader(base[0])
     assert orphaned
-    assert coverage_problems(specs, GENERATED, {}) == [
+    assert coverage_problems(specs, GENERATED, base[1]) == [
         f"coverage: {t.value} {key} is generated, but no dataset reads it; add a dataset, an "
         "EXCLUSIONS entry, or a DEFERRED entry"
         for t, key in orphaned
@@ -1105,32 +1129,34 @@ def test_coverage_names_a_source_no_dataset_reads() -> None:
     assert coverage_problems([], set(), {}) == []
 
 
-def test_coverage_accepts_a_deferred_source() -> None:
-    specs, orphaned = sole_reader()
-    deferred = dict.fromkeys(orphaned, Deferral("Waits for a new verb.", 1))
+def test_coverage_accepts_a_deferred_source(base: Base) -> None:
+    specs, orphaned = without_a_sole_reader(base[0])
+    deferred = {**base[1], **dict.fromkeys(orphaned, Deferral("Waits for a new verb.", 1))}
     assert coverage_problems(specs, GENERATED, deferred) == []
 
 
-def test_coverage_refuses_a_deferral_of_a_source_not_generated() -> None:
-    deferred = {(R, "/v1/gone"): Deferral("Waits for a new verb.", 1)}
-    assert coverage_problems(CATALOG.by_name.values(), GENERATED, deferred) == [
+def test_coverage_refuses_a_deferral_of_a_source_not_generated(base: Base) -> None:
+    deferred = {**base[1], (R, "/v1/gone"): Deferral("Waits for a new verb.", 1)}
+    assert coverage_problems(base[0], GENERATED, deferred) == [
         "coverage: DEFERRED names REST /v1/gone, which is not generated"
     ]
 
 
-def test_coverage_refuses_a_deferral_of_a_source_a_dataset_reads() -> None:
-    _, orphaned = sole_reader()
-    deferred = {orphaned[0]: Deferral("Waits for a new verb.", 1)}
+def test_coverage_refuses_a_deferral_of_a_source_a_dataset_reads(base: Base) -> None:
+    _, orphaned = without_a_sole_reader(base[0])
+    deferred = {**base[1], orphaned[0]: Deferral("Waits for a new verb.", 1)}
     t, key = orphaned[0]
-    assert coverage_problems(CATALOG.by_name.values(), GENERATED, deferred) == [
+    assert coverage_problems(base[0], GENERATED, deferred) == [
         f"coverage: DEFERRED names {t.value} {key}, which a dataset reads; remove it"
     ]
 
 
 @pytest.mark.parametrize(("reason", "issue"), [("", 1), ("  ", 1), ("Waits.", 0)])
-def test_coverage_refuses_a_deferral_without_a_reason_or_an_issue(reason: str, issue: int) -> None:
-    specs, orphaned = sole_reader()
-    deferred = dict.fromkeys(orphaned, Deferral(reason, issue))
+def test_coverage_refuses_a_deferral_without_a_reason_or_an_issue(
+    base: Base, reason: str, issue: int
+) -> None:
+    specs, orphaned = without_a_sole_reader(base[0])
+    deferred = {**base[1], **dict.fromkeys(orphaned, Deferral(reason, issue))}
     assert coverage_problems(specs, GENERATED, deferred) == [
         f"coverage: DEFERRED {t.value} {key} needs a reason and an issue" for t, key in orphaned
     ]

@@ -67,8 +67,10 @@ Every generated source must be read by a dataset: the coverage test in
 channel, or flat-file prefix, do one of three things in the same pull request:
 
 - **Add a dataset** that reads it (`DESIGN.md` § 8).
-- **Exclude it**, with an `EXCLUSIONS` entry and its reason (`exclusions.py`), when the library
-  should never offer it; the refresh then stops generating it.
+- **Exclude it**, with an `EXCLUSIONS` entry and its reason (`exclusions.py`), only when the
+  library deliberately never supports it; the refresh then stops generating it. An exclusion
+  never means "not yet": its reason is permanent (retired, undocumented, a duplicate of another
+  source), and a source that should get a dataset later is deferred instead.
 - **Defer it**, when a dataset should come later: open an issue, then add a `DEFERRED` entry
   next to the coverage test, keyed by the generated source key, with the reason and the issue
   number, both required. For example:

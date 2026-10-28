@@ -7,6 +7,12 @@ pinned snapshot; one that names an item the snapshot lacks fails the refresh as 
 list can never silently outlive the vendor's own sources. Endpoints that are absent from every
 vendor source are not listed here; the design documents them so nobody re-adds them.
 
+An exclusion never means "not yet". It is only for an item the library deliberately never
+supports, and its reason is permanent: deprecated in practice, retired, undocumented, or a
+duplicate of another source. An item that should get a dataset later is generated, not
+excluded, and waits in the coverage test's `DEFERRED` list, whose entry names the issue that
+will add the dataset.
+
 A path or channel the specification marks deprecated (`x-polygon-deprecation`) or draft
 (`x-polygon-draft`) is never generated and never listed here: the specification already
 accounts for it. So every item of the vendor sources is exactly one of generated, excluded,
