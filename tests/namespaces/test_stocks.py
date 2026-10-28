@@ -2,10 +2,9 @@
 
 The factories are checked without the network: each builds a query whose class, request, and
 synchronous errors are asserted. The payload fixtures under `tests/data/namespaces/stocks/` are
-the vendor's documented response examples, without their `next_url` (the fake server would
-follow it to Massive) and with a text `request_id` where an example shows another type; each is
-served by the fake REST server, decoded through its generated path, and must carry the keys the
-dataset declares, with no drift.
+the vendor's documented response examples, verbatim but for their `next_url`, which the fake
+server would follow to Massive; each is served by the fake REST server, decoded through its
+generated path, and must carry the keys the dataset declares, with no drift.
 
 End to end, every REST dataset sends its exact request to the fake REST server and returns the
 fixture's rows; every streamed channel's documented message, sent by the fake WebSocket server,
@@ -1052,6 +1051,25 @@ def test_ipos_fan_out_one_request_per_ticker(
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, "ipos.json"))))
     table_rows(rest_session.stocks.ipos(["RAPP", "ACME"]).fetch())
     assert sorted(q["ticker"] for _, q in sent(fake_rest)) == ["ACME", "RAPP"]
+
+
+@pytest.mark.parametrize(
+    "name", [n for n in [*LIST_WITH_SYMBOLS, *LIST_WITHOUT_SYMBOLS] if n != "ipos"]
+)
+def test_order_needs_sort_where_the_path_folds_it_into_sort(
+    massive_session: dm.MassiveSession, name: str
+) -> None:
+    with pytest.raises(ValueError, match="order needs sort"):
+        factory(massive_session, name)(order=dm.Order.DESC)
+
+
+def test_ipos_send_their_own_order_without_sort(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    path = "/vX/reference/ipos"
+    fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, "ipos.json"))))
+    rest_session.stocks.ipos(order=dm.Order.ASC).fetch()
+    assert sent(fake_rest) == [(path, {"order": "asc", "limit": "1000"})]
 
 
 # --- End to end: WebSocket -----------------------------------------------------------------------

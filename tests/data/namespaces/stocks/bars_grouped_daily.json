@@ -1,7 +1,10 @@
 {
   "adjusted": true,
   "queryCount": 3,
-  "request_id": "5e3a1c0f9b2d4e6f8a7b6c5d4e3f2a1b",
+  "request_id": {
+    "description": "A request id assigned by the server.",
+    "type": "string"
+  },
   "results": [
     {
       "T": "KIMpL",
