@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Final
 
+from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._massive import Transport
 
 if TYPE_CHECKING:
@@ -52,13 +53,6 @@ COMMAND: Final = "uv run python scripts/render_reference.py"
 _TRANSPORT_ORDER: Final = (Transport.REST, Transport.FLAT_FILES, Transport.WS)
 """The order of the transports in a **Supplied by** cell and of the wire-field columns, the
 order of `Column.supplied_by`."""
-
-_SUPPLIED_BY: Final[Mapping[Transport, str]] = {
-    Transport.REST: "REST",
-    Transport.FLAT_FILES: "flat files",
-    Transport.WS: "WebSocket",
-}
-"""How a **Supplied by** cell spells each transport."""
 
 _WIRE_HEADINGS: Final[Mapping[Transport, str]] = {
     Transport.REST: "REST field",
@@ -284,7 +278,7 @@ def _cells(column: Column, wire: Sequence[Transport]) -> list[str]:
         The column's name, type, description, transports, and one wire-field cell per
         transport of `wire`.
     """
-    supplied = ", ".join(_SUPPLIED_BY[t] for t in column.supplied_by)
+    supplied = ", ".join(TRANSPORT_LABELS[t] for t in column.supplied_by)
     fields = [
         ", ".join(
             _FROM_REQUEST if key is None else f"`{key}`" for key in column.wire_keys.get(t, ())
