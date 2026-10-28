@@ -21,6 +21,7 @@ from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
 from deephaven.table import Table
+from deephaven.table_listener import TableUpdate, listen
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
@@ -709,16 +710,24 @@ def socket(fake_ws_server: FakeMassiveServer) -> Iterator[Socket]:
 
 
 def landed(blink: Table) -> Callable[[], list[dict[str, Any]]]:
-    # The blink table holds a row for one update cycle only; an append-only view keeps it.
+    # The blink table holds a row for one update cycle only; an append-only view keeps it, and
+    # a listener on that view says when the cycle that adds the row has run.
     kept = blink_to_append_only(blink)
+    updated = threading.Event()
+
+    def on_update(update: TableUpdate, is_replay: bool) -> None:
+        if not is_replay and update.added():
+            updated.set()
+
+    handle = listen(kept, on_update)
 
     def read() -> list[dict[str, Any]]:
-        pause = threading.Event()  # never set; only paces the wait for the update cycle
-        for _ in range(500):
-            if kept.size:
-                break
-            pause.wait(0.02)
-        return rows(kept)
+        try:
+            if not kept.size:
+                assert updated.wait(WAIT)
+            return rows(kept)
+        finally:
+            handle.stop()
 
     return read
 
