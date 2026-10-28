@@ -392,9 +392,11 @@ def test_snapshots_query(m: dm.MassiveSession) -> None:
 
 def test_snapshots_filters_are_the_snapshot_parameters(m: dm.MassiveSession) -> None:
     # The equality forms of the symbol parameter are set through symbols only.
-    for key in ("ticker", "ticker_any_of", "timestamp_gte"):
-        with pytest.raises(ValueError, match=f"has no filter '{key}'"):
+    for key in ("ticker", "ticker_any_of", "ticker_all_of"):
+        with pytest.raises(ValueError, match=f"{key} is set through symbols=, not filters"):
             m.indices.snapshots("I:SPX", filters={key: "I:A"})
+    with pytest.raises(ValueError, match=r"has no filter 'timestamp_gte'; valid filters: \["):
+        m.indices.snapshots("I:SPX", filters={"timestamp_gte": "I:A"})
     with pytest.raises(ValueError, match="'ticker_lt' takes text, not 5"):
         m.indices.snapshots("I:SPX", filters={"ticker_lt": 5})
 
@@ -633,7 +635,7 @@ def test_bars_history_over_rest_fills_the_range_and_the_symbol(
     fake_rest.reply(quote(path), Reply(load_fixture(OWNER, "range.json")))
     q = rest_session.indices.bars(["I:SPX"])
     out = rows(q.history(date(2025, 6, 2), date(2025, 6, 2), source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(path, {"limit": ["50000"]})]
+    assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Close"]) for r in out] == [
         ("I:SPX", 1748871000000 * MS, 5896.68, 5899.02),
         ("I:SPX", 1748871060000 * MS, 5899.02, 5898.4),
@@ -783,7 +785,9 @@ def test_a_frame_lands_in_blink(
     seen = blink_to_append_only(blink)
     subscribed(fake_ws_server, topic)
     fake_ws_server.send(load_fixture(OWNER, fixture).decode())
-    wait_for(lambda: seen.size == 1)
+    # Wait on a consistent snapshot of the rows, never on a size read in the middle of an
+    # update cycle; the table is append-only, so the row stays for the read below.
+    wait_for(lambda: len(rows(seen)) == 1)
     assert (rows(seen) if topic.startswith("V.") else bar_rows(seen)) == [expected]
 
 
