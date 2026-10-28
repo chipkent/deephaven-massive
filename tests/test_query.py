@@ -4,7 +4,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeAlias, cast
 
 import pytest
 from deephaven import arrow as dh_arrow
@@ -94,6 +94,12 @@ FUTURES_SPEC = DatasetSpec(
     channels={None: "T"},
     history_path="/futures/v1/trades/{ticker}",
 )
+
+
+RowsWhen: TypeAlias = Callable[
+    [Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]
+]
+"""The `rows_when` fixture: waits until a live table's rows satisfy a predicate."""
 
 
 class FakeStreams(Protocol):
@@ -622,18 +628,8 @@ FOREX_SPEC = DatasetSpec(
 )
 
 
-def _wait_for(condition: Callable[[], bool]) -> bool:
-    # Bounded wait for an update-graph cycle to apply a change.
-    pause = threading.Event()  # never set; only paces the loop
-    for _ in range(200):
-        if condition():
-            return True
-        pause.wait(0.05)
-    return condition()
-
-
 def test_last_by_matches_non_canonical_spellings_in_a_reactive_table(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, rows_when: RowsWhen
 ) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["EUR/USD", "not a pair"])]))
@@ -643,22 +639,22 @@ def test_last_by_matches_non_canonical_spellings_in_a_reactive_table(
     schema = massive_session._core.catalog.dataset_schema(FOREX_SPEC)
     row = schema.to_arrow([{"Symbol": "C:EURUSD", "AskPrice": 1.08}])
     fake_streams.publishers[1].add(dh_arrow.to_table(row))
-    assert _wait_for(lambda: current.size == 1)
-    assert dh_arrow.to_arrow(current).column("Symbol").to_pylist() == ["C:EURUSD"]
+    shown = rows_when(current, lambda rows: len(rows) == 1)
+    assert [r["Symbol"] for r in shown] == ["C:EURUSD"]
     # Removing the spelling from the watchlist evicts the canonical row.
     watchlist.delete(new_table([string_col("Symbol", ["EUR/USD"])]))
-    assert _wait_for(lambda: current.size == 0)
+    rows_when(current, lambda rows: not rows)
     massive_session.release(current)
 
 
 def test_last_by_over_groups_of_symbols_filters_before_aggregating(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, rows_when: RowsWhen
 ) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
     current = trades(massive_session, watchlist).last_by(by="Exchange")
     watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
-    assert _wait_for(lambda: watchlist.size == 1)
+    rows_when(watchlist, lambda rows: len(rows) == 1)
     # A late MSFT trade on exchange 4 must not hide AAPL's latest trade there.
     rows = massive_session._core.catalog.dataset_schema(TRADES_SPEC).to_arrow(
         [
@@ -667,9 +663,8 @@ def test_last_by_over_groups_of_symbols_filters_before_aggregating(
         ]
     )
     fake_streams.publishers[1].add(dh_arrow.to_table(rows))
-    assert _wait_for(lambda: current.size == 1)
-    shown = dh_arrow.to_arrow(current).select(["Symbol", "Exchange"]).to_pylist()
-    assert shown == [{"Symbol": "AAPL", "Exchange": 4}]
+    shown = rows_when(current, lambda rows: len(rows) == 1)
+    assert [(r["Symbol"], r["Exchange"]) for r in shown] == [("AAPL", 4)]
     massive_session.release(current)
 
 

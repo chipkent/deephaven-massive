@@ -17,6 +17,7 @@ import importlib
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -134,6 +135,41 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
         return rows
 
     return to_pylist
+
+
+_ROWS_WHEN_TIMEOUT = 15.0
+"""Seconds `rows_when` waits for a live table's rows to match."""
+
+
+@pytest.fixture
+def rows_when(
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]:
+    """Return a function that waits until a live table's rows satisfy a predicate.
+
+    Each check reads one consistent snapshot of the table (`dh_to_pylist`) and hands the rows
+    to the predicate, so the wait never decides on a size read in the middle of an update cycle
+    and then reads rows from another state. The function returns the matching rows, and fails
+    the test after 15 seconds with the last rows it saw.
+
+    Returns:
+        A function `(table, predicate) -> rows`.
+    """
+
+    def wait(
+        table: Table, predicate: Callable[[list[dict[str, Any]]], bool]
+    ) -> list[dict[str, Any]]:
+        pause = threading.Event()  # never set; only paces the polling
+        deadline = time.monotonic() + _ROWS_WHEN_TIMEOUT
+        while True:
+            rows = dh_to_pylist(table)
+            if predicate(rows):
+                return rows
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"the table's rows never matched; last seen: {rows!r}")
+            pause.wait(0.02)
+
+    return wait
 
 
 @pytest.fixture
