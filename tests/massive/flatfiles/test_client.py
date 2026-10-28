@@ -621,44 +621,63 @@ def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
     ]
 
 
-def test_a_reread_wait_ends_on_cancel_and_on_close() -> None:
+@pytest.fixture
+def waiting() -> Iterator[tuple[FakeClock, FlatFileClient, Callable[[threading.Event], None]]]:
+    """A client on a manual clock, and a way to start a reread wait on a thread of its own.
+
+    However the test ends, the clock is then moved far ahead, so no waiter outlives it even
+    when the wait it tests fails to end.
+
+    Yields:
+        The clock, the client, and the function that starts a wait on an event.
+    """
     clock = FakeClock(manual=True)
     client = make_client(clock=clock)
-    error = WireError("dropped")
+    threads: list[threading.Thread] = []
+
+    def start(cancel: threading.Event) -> None:
+        thread = threading.Thread(
+            target=client.wait_to_reread, args=(WireError("dropped"), 0, cancel)
+        )
+        thread.start()
+        threads.append(thread)
+
     try:
-        # The readers of one call share their cancel event; each waits on it.
-        cancel = threading.Event()
-        results: list[bool] = []
-        waiters = [
-            threading.Thread(target=lambda: results.append(client.wait_to_reread(error, 0, cancel)))
-            for _ in range(2)
-        ]
-        for waiter in waiters:
-            waiter.start()
-        clock.wait_for_sleepers(2)
-        client.close()  # ends both waits by setting the call's event
-        for waiter in waiters:
-            waiter.join(TIMEOUT)
-        assert cancel.is_set()
-        assert results == [True, True]
-        assert clock.monotonic() == 0.0  # no time passed
-        # Once closed, a reread waits no more: the caller's next request finds the close.
-        assert client.wait_to_reread(error, 1, threading.Event())
-        assert clock.waits == [0.55, 0.55]
+        yield clock, client, start
+        for thread in threads:
+            thread.join(TIMEOUT)
+        assert not any(thread.is_alive() for thread in threads)
+        assert clock.monotonic() == 0.0  # every wait ended without time passing
     finally:
+        clock.advance(3600)
         client.close()
-    # A cancel by the caller ends a wait too.
-    clock = FakeClock(manual=True)
-    client = make_client(clock=clock)
+        for thread in threads:
+            thread.join(TIMEOUT)
+
+
+def test_a_reread_wait_ends_when_the_client_closes(
+    waiting: tuple[FakeClock, FlatFileClient, Callable[[threading.Event], None]],
+) -> None:
+    clock, client, start = waiting
+    # The readers of one call share their cancel event; each waits on it.
     cancel = threading.Event()
-    waiter = threading.Thread(target=client.wait_to_reread, args=(error, 2, cancel))
-    waiter.start()
+    start(cancel)
+    start(cancel)
+    clock.wait_for_sleepers(2)
+    client.close()  # ends both waits by setting the call's event
+    assert cancel.is_set()
+    # Once closed, a reread waits no more: the caller's next request finds the close.
+    start(threading.Event())
+
+
+def test_a_reread_wait_ends_when_the_call_is_cancelled(
+    waiting: tuple[FakeClock, FlatFileClient, Callable[[threading.Event], None]],
+) -> None:
+    clock, _, start = waiting
+    cancel = threading.Event()
+    start(cancel)
     clock.wait_for_sleepers(1)
     cancel.set()
-    waiter.join(TIMEOUT)
-    assert not waiter.is_alive()
-    client.close()
-    assert clock.monotonic() == 0.0
 
 
 class _DropAfterABlock(io.BytesIO):

@@ -50,7 +50,7 @@ weekday.
 
 A missing file is one S3 answers with `NoSuchKey`; any other 404 (`NoSuchBucket`, for a wrong
 `MassiveConfig.s3_bucket`) raises `MassiveError` naming the bucket and the settings to check.
-Holidays are isolated, so a range whose every trading-day file is missing raises
+Holidays are isolated, so a range that holds a trading date but no file at all raises
 `MassiveError` too, rather than return an empty table: the bucket may be wrong, Massive may
 have renamed the prefix, or the range may lie wholly before the dataset's first file. A
 futures range named by instants is exempt, since its roll forward finds the next session's
@@ -506,7 +506,7 @@ class FlatFileHistory:
         the venue and the `venue=` parameter for futures; `MassiveError` when the file for the
         last requested date is missing on a trading day within a day after its publication time
         (`"... is not yet published (flat files land ~11:00 ET next day), or was a market
-        holiday"`), when every trading-day file of the range is missing (`"<dataset>: no file
+        holiday"`), when a range with a trading date has no file at all (`"<dataset>: no file
         of the range exists, from s3://<bucket>/<first key> to <last key>: ..."`), when the S3
         client cannot be created, the bucket is unreachable, does not exist (`NoSuchBucket`),
         or answers another error, a file's connection drops part-way on its first read and on
@@ -867,9 +867,10 @@ class FlatFileHistory:
         weekday file is skipped with a WARNING (most likely a market holiday). The file for the
         last requested date may instead be late, so within `PUBLICATION_GRACE` (in
         `_datasets/history_source.py`) after its publication time it raises; after that it is
-        skipped with a WARNING too. Holidays are isolated, so when the file of every trading
-        date is missing, across every venue, the call raises instead, before any WARNING: the
-        bucket or the prefix is wrong, or the range lies before the dataset's first file. A
+        skipped with a WARNING too. Holidays are isolated, so when no file of the range exists,
+        across every venue, and the range holds a trading date, the call raises instead, before
+        any WARNING: the bucket or the prefix is wrong, or the range lies before the dataset's
+        first file. A range of weekend days only (for every class but crypto) is no error. A
         futures range named by instants is left to `_roll_forward`, which finds the next
         session's file or raises.
 
@@ -884,7 +885,7 @@ class FlatFileHistory:
             MassiveError: If the file for `last` is missing on a trading day within a day after
                 its publication time: `"<dataset>: <key> does not exist: <date> is not yet
                 published (flat files land ~11:00 ET next day), or was a market holiday"`;
-                if every trading date's file is missing: `"<dataset>: no file of the range
+                if no file of a range with a trading date exists: `"<dataset>: no file of the range
                 exists, from s3://<bucket>/<first key> to <last key>: ..."`, with the causes
                 and the settings to check.
         """
@@ -896,7 +897,7 @@ class FlatFileHistory:
                     f"{spec.name}: {key.key} does not exist: {key.day.isoformat()} is not yet "
                     "published (flat files land ~11:00 ET next day), or was a market holiday"
                 )
-        if absent and not rolls and len(absent) == sum(_trades(spec, key) for key in keys):
+        if absent and not rolls and len(missing) == len(keys):
             raise MassiveError(
                 f"{spec.name}: no file of the range exists, from "
                 f"s3://{self._core.config.s3_bucket}/{absent[0].key} to {absent[-1].key}: "

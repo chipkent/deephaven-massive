@@ -2460,9 +2460,9 @@ calendar). Within one day after its `publish_time` it raises
 ~11:00 ET next day), or was a market holiday")`. After that window it is treated as a holiday:
 a WARNING, and the date is skipped like any other missing weekday, so the rest of the range is
 returned. A futures range named by datetimes that ends on a holiday reads the next session's
-file, or raises, as [section 12](#12-timestamp-units-and-day-boundaries) describes. A range in
-which the file of every trading date is missing (every weekday, or every date for crypto,
-across every venue) raises `MassiveError` instead of returning an empty table, with no WARNING
+file, or raises, as [section 12](#12-timestamp-units-and-day-boundaries) describes. A range that
+holds a trading date (a weekday, or any date for crypto) but no file at all, across every
+venue, raises `MassiveError` instead of returning an empty table, with no WARNING
 per date: a wrong bucket, a prefix Massive has renamed, and a range wholly before the
 dataset's first file all look like that, while holidays can explain it only for a range of one
 or two weekdays. The message names the first and last missing objects and lists all of those
