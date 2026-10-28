@@ -500,7 +500,6 @@ RISK_FACTOR_TAXONOMY: Final = DatasetSpec(
     name="stocks.filings.risk_factor_taxonomy",
     summary="The taxonomy that classifies filing risk factors, one row per category.",
     fetch_path=_RISK_TAXONOMY,
-    poll_mode=PollMode.APPEND,
     poll_keys=("Taxonomy", *_CATEGORIES),
     page_size=1_000,
 )
@@ -508,7 +507,6 @@ DISCLOSURE_TAXONOMY: Final = DatasetSpec(
     name="stocks.filings.disclosure_taxonomy",
     summary="The taxonomy that classifies 8-K disclosures, one row per category.",
     fetch_path=_DISCLOSURE_TAXONOMY,
-    poll_mode=PollMode.APPEND,
     poll_keys=("Taxonomy", *_CATEGORIES),
     page_size=1_000,
 )
@@ -978,9 +976,9 @@ class _StockFilings(Namespace):
     """`m.stocks.filings`: SEC filings of US companies and their classification taxonomies.
 
     Created once per session by `_Stocks`; holds no state of its own, so it is safe to use from
-    any thread. Each method builds a query and never blocks. By default `poll()` on every
-    filings dataset appends every row each cycle returns rather than replacing the table, so
-    rows repeat from one cycle to the next.
+    any thread. Each method builds a query and never blocks. By default `poll()` on a filings
+    dataset appends only the rows it has not seen before, while the two taxonomies replace
+    their table each cycle.
 
     Example:
         ::
@@ -1010,8 +1008,8 @@ class _StockFilings(Namespace):
 
         Each row names a filing's form type, filer CIK, issuer, ticker, filing date, and the URL of
         the document on EDGAR. Served by REST (`/stocks/filings/vX/index`) through `fetch()` and
-        `poll()`. By default `poll()` appends every row each cycle returns, so rows repeat from one
-        cycle to the next; for a one-off read, use `fetch()`.
+        `poll()`. By default `poll()` appends only the rows it has not seen before, telling rows
+        apart by the dataset's key columns.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1073,8 +1071,8 @@ class _StockFilings(Namespace):
         Each row holds one section (the business description or the risk factors) of a company's
         10-K, with its ticker, CIK, period end, and filing date. Served by REST
         (`/stocks/filings/10-K/vX/sections`) through `fetch()` and `poll()`. By default `poll()`
-        appends every row each cycle returns, so rows repeat from one cycle to the next; for a
-        one-off read, use `fetch()`.
+        appends only the rows it has not seen before, telling rows apart by the dataset's key
+        columns.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1133,8 +1131,8 @@ class _StockFilings(Namespace):
 
         Each row holds the text of the items a company reported on an 8-K (or an amendment), with
         its ticker, CIK, form type, and filing date. Served by REST (`/stocks/filings/8-K/vX/text`)
-        through `fetch()` and `poll()`. By default `poll()` appends every row each cycle returns, so
-        rows repeat from one cycle to the next; for a one-off read, use `fetch()`.
+        through `fetch()` and `poll()`. By default `poll()` appends only the rows it has not seen
+        before, telling rows apart by the dataset's key columns.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1196,8 +1194,8 @@ class _StockFilings(Namespace):
         share classes, so a row has no `Symbol`: its `Tickers` column holds the JSON list of
         tickers, and `symbols` only selects the filings that list any of them. Served by REST
         (`/stocks/filings/8-K/vX/disclosures`) through `fetch()` and `poll()`. By default `poll()`
-        appends every row each cycle returns, so rows repeat from one cycle to the next; for a
-        one-off read, use `fetch()`.
+        appends only the rows it has not seen before, telling rows apart by the dataset's key
+        columns.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1256,8 +1254,8 @@ class _StockFilings(Namespace):
         Each row is one risk factor a company disclosed, with its primary, secondary, and tertiary
         categories (see `risk_factor_taxonomy()`), the supporting text, and the filing date. Served
         by REST (`/stocks/filings/vX/risk-factors`) through `fetch()` and `poll()`. By default
-        `poll()` appends every row each cycle returns, so rows repeat from one cycle to the next;
-        for a one-off read, use `fetch()`.
+        `poll()` appends only the rows it has not seen before, telling rows apart by the dataset's
+        key columns.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1318,8 +1316,8 @@ class _StockFilings(Namespace):
         the issuer, CUSIP, share count, market value, and voting authority, with the filer's CIK
         (`FilerCik`) and the filing's accession number and date. Rows name a CUSIP, not a ticker, so
         the dataset takes no `symbols`. Served by REST (`/stocks/filings/vX/13-F`) through `fetch()`
-        and `poll()`. By default `poll()` appends every row each cycle returns, so rows repeat from
-        one cycle to the next; for a one-off read, use `fetch()`.
+        and `poll()`. By default `poll()` appends only the rows it has not seen before, telling rows
+        apart by the dataset's key columns.
 
         `limit` caps the total number of rows across pages; the page size is internal. No
         `symbols` means `dm.ALL` does not apply. Columns:
@@ -1384,8 +1382,8 @@ class _StockFilings(Namespace):
         filing can name several share classes, so a row has no `Symbol`: its `Tickers` column holds
         the JSON list of tickers, and `symbols` only selects the filings that list any of them.
         Served by REST (`/stocks/filings/vX/form-3`) through `fetch()` and `poll()`. By default
-        `poll()` appends every row each cycle returns, so rows repeat from one cycle to the next;
-        for a one-off read, use `fetch()`.
+        `poll()` appends only the rows it has not seen before, telling rows apart by the dataset's
+        key columns.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
@@ -1454,8 +1452,7 @@ class _StockFilings(Namespace):
         classes, so a row has no `Symbol`: its `Tickers` column holds the JSON list of tickers, and
         `symbols` only selects the filings that list any of them. Served by REST
         (`/stocks/filings/vX/form-4`) through `fetch()` and `poll()`. By default `poll()` appends
-        every row each cycle returns, so rows repeat from one cycle to the next; for a one-off read,
-        use `fetch()`.
+        only the rows it has not seen before, telling rows apart by the dataset's key columns.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
@@ -1518,8 +1515,8 @@ class _StockFilings(Namespace):
         Each row is one tertiary category of the risk-factor classification with its primary and
         secondary parents, its description, and the taxonomy version; the categories of
         `risk_factors()` come from it. Served by REST (`/stocks/taxonomies/vX/risk-factors`) through
-        `fetch()` and `poll()`. By default `poll()` appends every row each cycle returns, so rows
-        repeat from one cycle to the next; for a one-off read, use `fetch()`.
+        `fetch()` and `poll()`. `poll()` replaces the table each cycle, keyed by `Taxonomy` and the
+        three categories.
 
         `limit` caps the total number of rows across pages; the page size is internal. The
         dataset takes no `symbols`, so `dm.ALL` does not apply. Columns:
@@ -1568,8 +1565,8 @@ class _StockFilings(Namespace):
         Each row is one tertiary category of the 8-K disclosure classification with its primary and
         secondary parents, its description, and the taxonomy version; the categories of
         `disclosures_8k()` come from it. Served by REST (`/stocks/taxonomies/vX/disclosures`)
-        through `fetch()` and `poll()`. By default `poll()` appends every row each cycle returns, so
-        rows repeat from one cycle to the next; for a one-off read, use `fetch()`.
+        through `fetch()` and `poll()`. `poll()` replaces the table each cycle, keyed by `Taxonomy`
+        and the three categories.
 
         `limit` caps the total number of rows across pages; the page size is internal. The
         dataset takes no `symbols`, so `dm.ALL` does not apply. Columns:
@@ -2212,8 +2209,8 @@ class _Stocks(Namespace):
         pending, new, withdrawn, and so on), offer price range, final issue price, shares offered,
         and the listing exchange. Served by REST (`/vX/reference/ipos`) through `fetch()` and
         `poll()`; the endpoint filters one ticker per request, so a symbol list fans out to one
-        request per symbol. By default `poll()` appends every row each cycle returns, so rows repeat
-        from one cycle to the next; for a one-off read, use `fetch()`.
+        request per symbol. By default `poll()` appends only the rows it has not seen before,
+        telling rows apart by the dataset's key columns.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every offering. Columns:

@@ -320,11 +320,13 @@ def test_share_float_keeps_its_effective_date_as_a_column() -> None:
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
-def test_poll_appends_for_ipos_and_filings_and_replaces_otherwise(name: str) -> None:
-    appends = name == "ipos" or name.startswith("filings.")
+def test_poll_appends_for_ipos_and_filings_and_replaces_taxonomies_and_the_rest(name: str) -> None:
+    appends = name == "ipos" or (name.startswith("filings.") and "taxonomy" not in name)
     expected = dm.PollMode.APPEND if appends else dm.PollMode.REPLACE
     assert spec_of(name).poll_mode is expected
 
+
+CATEGORIES = ("PrimaryCategory", "SecondaryCategory", "TertiaryCategory")
 
 # The key of each REST dataset that `poll()` replaces by default: what identifies one row.
 REPLACE_KEYS = {
@@ -340,6 +342,8 @@ REPLACE_KEYS = {
     "financials.income_statements": ("Cik", "PeriodEnd", "Timeframe"),
     "financials.cash_flow_statements": ("Cik", "PeriodEnd", "Timeframe"),
     "financials.ratios": ("Symbol", "Date"),
+    "filings.risk_factor_taxonomy": ("Taxonomy", *CATEGORIES),
+    "filings.disclosure_taxonomy": ("Taxonomy", *CATEGORIES),
 }
 
 

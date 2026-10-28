@@ -798,9 +798,9 @@ dataset has `poll()`. Current state on every tier is `m.<class>.snapshots(symbol
 request per cycle.
 
 **`poll()`.** `mode=None` uses the catalog default: `PollMode.APPEND` for `reference.news`,
-`stocks.ipos`, every `stocks.filings.*`, and `partners.benzinga.news`; `PollMode.REPLACE`
-otherwise. `REPLACE` is a keyed table from which keys absent in the latest cycle are deleted.
-`UPSERT` is keyed and never deletes. `APPEND` is append-only. A reactive `Table` passed as
+`stocks.ipos`, every `stocks.filings.*` but the two taxonomies, and `partners.benzinga.news`;
+`PollMode.REPLACE` otherwise. `REPLACE` is a keyed table from which keys absent in the latest cycle are
+deleted. `UPSERT` is keyed and never deletes. `APPEND` is append-only. A reactive `Table` passed as
 `symbols` is read once per cycle with `Table.snapshot()` on the poller thread, never inside a
 listener. Fan-out endpoints issue one request per symbol per cycle under `max_concurrency`;
 `m.streams()` shows `RequestsPerCycle`.
