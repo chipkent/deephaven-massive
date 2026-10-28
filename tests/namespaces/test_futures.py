@@ -236,14 +236,20 @@ def test_exchanges(massive_session: dm.MassiveSession) -> None:
     assert request(q) == type(request(q))()
     assert repr(q) == "<Query futures.exchanges>"
     assert request(massive_session.futures.exchanges(limit=2)).limit == 2
-    with pytest.raises(ValueError, match=r"has no filter 'mic'; valid filters: \[\]"):
-        massive_session.futures.exchanges(filters={"mic": "XCME"})
+
+
+def rest_params(name: str) -> set[str]:
+    path = _spec(name).fetch_path
+    assert path is not None
+    return {p.name for p in source(Transport.REST, path).params}
 
 
 @pytest.mark.parametrize("name", ["exchanges", "market_status"])
-def test_a_path_without_sort_offers_no_sort_or_order(name: str) -> None:
+def test_a_path_without_filters_or_sort_offers_none(name: str) -> None:
+    # Every parameter of either path is `limit` or a form of the typed `product_code`.
     parameters = inspect.signature(getattr(futures._Futures, name)).parameters
-    assert not {"sort", "order"} & set(parameters)
+    assert not {"filters", "sort", "order"} & set(parameters)
+    assert {p.split(".")[0] for p in rest_params(name)} <= {"limit", "product_code"}
 
 
 def test_market_status(massive_session: dm.MassiveSession) -> None:
@@ -251,9 +257,6 @@ def test_market_status(massive_session: dm.MassiveSession) -> None:
     assert type(q) is Query
     assert request(q).params == (("product_code", "ES"),)
     assert request(q).limit == 3
-    # The path takes nothing but the forms of the product code.
-    with pytest.raises(ValueError, match="has no filter 'ticker'"):
-        massive_session.futures.market_status(filters={"ticker": "ESZ5"})
 
 
 @pytest.mark.parametrize(
@@ -263,15 +266,51 @@ def test_market_status(massive_session: dm.MassiveSession) -> None:
         lambda f: f.contracts(filters={"product_code_gte": "C"}),
         lambda f: f.products(filters={"product_code": "ES"}),
         lambda f: f.schedules(filters={"product_code_lt": "Z"}),
-        lambda f: f.market_status(filters={"product_code_any_of": ["ES", "CL"]}),
     ],
-    ids=["snapshots", "contracts", "products", "schedules", "market_status"],
+    ids=["snapshots", "contracts", "products", "schedules"],
 )
 def test_product_code_forms_are_set_only_through_product_code(
     massive_session: dm.MassiveSession, call: Callable[[Any], object]
 ) -> None:
     with pytest.raises(ValueError, match="is set through its own argument, not filters"):
         call(massive_session.futures)
+
+
+_PRODUCT_DATASETS = ["snapshots", "contracts", "products", "market_status", "schedules"]
+
+
+def _with_product_code(namespace: object, name: str, product_code: object) -> QueryBase:
+    factory = getattr(namespace, name)
+    if name == "snapshots":
+        return cast("QueryBase", factory(dm.ALL, product_code=product_code))
+    return cast("QueryBase", factory(product_code=product_code))
+
+
+@pytest.mark.parametrize("name", _PRODUCT_DATASETS)
+def test_every_product_code_path_takes_a_list_of_codes(name: str) -> None:
+    # One request serves several codes, so a sequence never has to split into requests.
+    assert "product_code.any_of" in rest_params(name)
+
+
+@pytest.mark.parametrize("name", _PRODUCT_DATASETS)
+def test_product_code_is_one_code_or_several(massive_session: dm.MassiveSession, name: str) -> None:
+    f = massive_session.futures
+    one = request(_with_product_code(f, name, "ES")).params
+    several = request(_with_product_code(f, name, ["ES", "NQ"])).params
+    assert ("product_code", "ES") in one
+    assert not any(key == "product_code.any_of" for key, _ in one)
+    assert ("product_code.any_of", ("ES", "NQ")) in several
+    assert not any(key == "product_code" for key, _ in several)
+    assert not any(
+        key.startswith("product_code")
+        for key, _ in request(_with_product_code(f, name, None)).params
+    )
+    with pytest.raises(ValueError, match="product_code is empty; pass None for every product"):
+        _with_product_code(f, name, [])
+    with pytest.raises(TypeError, match="product_code must be a str, a sequence of str, or None"):
+        _with_product_code(f, name, 5)
+    with pytest.raises(TypeError, match="element 1 of the sequence is int, not str"):
+        _with_product_code(f, name, ["ES", 5])
 
 
 def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:
@@ -663,6 +702,42 @@ def test_contracts_over_rest(
     assert "Symbol" not in out[0]
 
 
+def test_several_product_codes_go_in_one_request(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    serve: Callable[[str, str], None],
+) -> None:
+    serve("/futures/v1/contracts", "contracts.json")
+    rest_session.futures.contracts(product_code=["NQ", "ES"]).fetch()
+    assert sent(fake_rest) == [
+        ("/futures/v1/contracts", {"product_code.any_of": ["NQ,ES"], "limit": ["1000"]})
+    ]
+
+
+def test_exchanges_over_rest(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    serve: Callable[[str, str], None],
+) -> None:
+    serve("/futures/v1/exchanges", "exchanges.json")
+    out = rows(rest_session.futures.exchanges().fetch())
+    assert sent(fake_rest) == [("/futures/v1/exchanges", {"limit": ["1000"]})]
+    assert out == [
+        {
+            "Acronym": "CME",
+            "Id": "4",
+            "Locale": "US",
+            "Mic": "XCME",
+            "Name": "Chicago Mercantile Exchange",
+            "OperatingMic": "XCME",
+            "Type": "exchange",
+            "Url": "https://cmegroup.com",
+        }
+    ]
+
+
 def test_products_over_rest(
     *,
     rest_session: dm.MassiveSession,
@@ -737,6 +812,7 @@ def test_schedules_over_rest(
     [
         ("contracts", "/futures/v1/contracts", "contracts.json"),
         ("products", "/futures/v1/products", "products.json"),
+        ("exchanges", "/futures/v1/exchanges", "exchanges.json"),
         ("market_status", "/futures/v1/market-status", "market_status.json"),
         ("schedules", "/futures/v1/schedules", "schedules.json"),
     ],

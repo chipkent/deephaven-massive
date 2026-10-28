@@ -30,6 +30,7 @@ column.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -78,6 +79,39 @@ def _tick_keys(time: str) -> SourceKeys:
         The keys; every such source carries its ticker and session in its rows.
     """
     return SourceKeys(symbol=_TICKER, time=KeySpec(time), session=_SESSION)
+
+
+def _product_codes(product_code: object) -> dict[str, object]:
+    """Return the wire parameter that carries a `product_code` argument.
+
+    Every futures path that takes a product code also takes `product_code.any_of`, so one
+    request serves several codes. Both names are always returned, the unset one as None, so
+    `build_query` reserves every form of `product_code` from `filters` even when the argument
+    is not given.
+
+    Args:
+        product_code: The argument as passed: one code, a sequence of codes, or None.
+
+    Returns:
+        `{"product_code": code, "product_code.any_of": None}` for one code or None, and
+        `{"product_code": None, "product_code.any_of": codes}` for a sequence.
+
+    Raises:
+        TypeError: If the argument is neither None, a `str`, nor a sequence.
+        ValueError: If the sequence is empty, which would select no product.
+
+    An element that is not a `str` raises the `TypeError` of `build_query`.
+    """
+    if product_code is None or isinstance(product_code, str):
+        return {"product_code": product_code, "product_code.any_of": None}
+    if not isinstance(product_code, Sequence):
+        raise TypeError(
+            f"product_code must be a str, a sequence of str, or None, not "
+            f"{type(product_code).__name__}"
+        )
+    if not product_code:
+        raise ValueError("product_code is empty; pass None for every product")
+    return {"product_code": None, "product_code.any_of": tuple(product_code)}
 
 
 def _stream_keys(time: str) -> SourceKeys:
@@ -433,7 +467,7 @@ class _Futures(Namespace):
         self,
         symbols: Symbols,
         *,
-        product_code: str | None = None,
+        product_code: str | Sequence[str] | None = None,
         sort: str | None = None,
         order: Order | None = None,
         limit: int | None = None,
@@ -445,7 +479,7 @@ class _Futures(Namespace):
         `/futures/v1/snapshot`: its last trade, its last quote, its last minute bar, and the
         open, high, low, close, volume, and settlement of its current session. Explicit
         symbols are sent together as `ticker.any_of`; `dm.ALL` asks for every contract, all
-        pages of it, which with `product_code` is every contract of one product. `fetch()`
+        pages of it, which with `product_code` is every contract of the products. `fetch()`
         reads it once, `poll()` re-reads it on an interval; it is the one-request way to get
         the current state of a set of contracts on every plan.
 
@@ -459,8 +493,9 @@ class _Futures(Namespace):
             symbols: The contracts: one ticker such as `"ESZ5"`, a sequence of tickers, a
                 Deephaven table with a `Symbol` column (`poll()` re-reads it each cycle), or
                 `dm.ALL`.
-            product_code: Only contracts of this product, such as `"ES"`; None for every
-                product.
+            product_code: Only contracts of this product, such as `"ES"` (sent as
+                `product_code`), or of these products, such as `["ES", "NQ"]` (sent as
+                `product_code.any_of`); None for every product.
             sort: The field to sort by, such as `"ticker"`; None for the endpoint's default.
             order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
                 `sort`; it needs `sort`. None for the endpoint's default direction.
@@ -476,6 +511,9 @@ class _Futures(Namespace):
         without `sort` raise `ValueError`; a `sort` that is not a `str` or an `order` that is
         not a `dm.Order` raises `TypeError`. No request is made.
 
+        An empty `product_code` sequence raises `ValueError`, and a `product_code` that is
+        neither a `str` nor a sequence of `str` raises `TypeError`.
+
         Example:
             ::
 
@@ -489,7 +527,7 @@ class _Futures(Namespace):
             self._core,
             SNAPSHOTS,
             symbols=symbols,
-            params={"product_code": product_code, **list_params(sort=sort, order=order)},
+            params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
             filters=filters,
             limit=limit,
         )
@@ -498,7 +536,7 @@ class _Futures(Namespace):
     def contracts(
         self,
         *,
-        product_code: str | None = None,
+        product_code: str | Sequence[str] | None = None,
         sort: str | None = None,
         order: Order | None = None,
         limit: int | None = None,
@@ -520,8 +558,9 @@ class _Futures(Namespace):
         in the web UI's column-header tooltips, and by `columns()` on the query.
 
         Args:
-            product_code: Only contracts of this product, such as `"ES"`; None for every
-                product.
+            product_code: Only contracts of this product, such as `"ES"` (sent as
+                `product_code`), or of these products, such as `["ES", "NQ"]` (sent as
+                `product_code.any_of`); None for every product.
             sort: The field to sort by, such as `"ticker"`; None for the endpoint's default
                 (`product_code`).
             order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
@@ -538,6 +577,9 @@ class _Futures(Namespace):
         raises `ValueError`; a `sort` that is not a `str` or an `order` that is not a
         `dm.Order` raises `TypeError`. No request is made.
 
+        An empty `product_code` sequence raises `ValueError`, and a `product_code` that is
+        neither a `str` nor a sequence of `str` raises `TypeError`.
+
         Example:
             ::
 
@@ -549,7 +591,7 @@ class _Futures(Namespace):
         query = build_query(
             self._core,
             CONTRACTS,
-            params={"product_code": product_code, **list_params(sort=sort, order=order)},
+            params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
             filters=filters,
             limit=limit,
         )
@@ -558,7 +600,7 @@ class _Futures(Namespace):
     def products(
         self,
         *,
-        product_code: str | None = None,
+        product_code: str | Sequence[str] | None = None,
         sort: str | None = None,
         order: Order | None = None,
         limit: int | None = None,
@@ -578,7 +620,9 @@ class _Futures(Namespace):
         in the web UI's column-header tooltips, and by `columns()` on the query.
 
         Args:
-            product_code: Only this product, such as `"ES"`; None for every product.
+            product_code: Only this product, such as `"ES"` (sent as `product_code`), or
+                these products, such as `["ES", "NQ"]` (sent as `product_code.any_of`);
+                None for every product.
             sort: The field to sort by, such as `"name"`; None for the endpoint's default
                 (`date`).
             order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
@@ -596,6 +640,9 @@ class _Futures(Namespace):
         `sort` that is not a `str` or an `order` that is not a `dm.Order` raises `TypeError`.
         No request is made.
 
+        An empty `product_code` sequence raises `ValueError`, and a `product_code` that is
+        neither a `str` nor a sequence of `str` raises `TypeError`.
+
         Example:
             ::
 
@@ -607,25 +654,20 @@ class _Futures(Namespace):
         query = build_query(
             self._core,
             PRODUCTS,
-            params={"product_code": product_code, **list_params(sort=sort, order=order)},
+            params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
             filters=filters,
             limit=limit,
         )
         return cast("Query", query)
 
-    def exchanges(
-        self,
-        *,
-        limit: int | None = None,
-        filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    def exchanges(self, *, limit: int | None = None) -> Query:
         """Futures exchanges: the exchanges and trading venues of US futures.
 
         Each row is one venue, such as the Chicago Mercantile Exchange: its id, name, acronym,
         market identifier codes (MIC and operating MIC), type, locale, and web site, from the
-        REST endpoint `/futures/v1/exchanges`. The endpoint has no sort parameter, so the
-        method takes no `sort` or `order`. The dataset takes no symbols and has no `Symbol`
-        column.
+        REST endpoint `/futures/v1/exchanges`. The endpoint has no filter or sort parameter,
+        so the method takes no `filters`, `sort`, or `order`. The dataset takes no symbols and
+        has no `Symbol` column.
 
         `limit` caps the total number of rows across pages; the page size is internal.
 
@@ -635,15 +677,12 @@ class _Futures(Namespace):
 
         Args:
             limit: The most rows to return in total; None for every row.
-            filters: Query parameters of the endpoint, by wire name with dots written as
-                underscores. The endpoint documents none today, so any key raises
-                `ValueError`; a filter Massive adds becomes valid when the library's
-                snapshot of the API is refreshed.
 
         Returns:
             A query with `fetch()` and `poll()`.
 
-        An unknown filter raises `ValueError`. No request is made.
+        A `limit` that is not a positive `int` raises `TypeError` or `ValueError`. No request
+        is made.
 
         Example:
             ::
@@ -653,23 +692,22 @@ class _Futures(Namespace):
                 m = dm.MassiveSession()
                 venues = m.futures.exchanges().fetch()
         """
-        query = build_query(self._core, EXCHANGES, filters=filters, limit=limit)
-        return cast("Query", query)
+        return cast("Query", build_query(self._core, EXCHANGES, limit=limit))
 
     def market_status(
         self,
         *,
-        product_code: str | None = None,
+        product_code: str | Sequence[str] | None = None,
         limit: int | None = None,
-        filters: Mapping[str, FilterValue] | None = None,
     ) -> Query:
         """Futures market status: whether each futures product is trading right now.
 
         Each row is one product's current market event (`MarketEvent`, such as `open`,
         `pause`, or `close`), its trading venue, the session it belongs to, and the time the
         status was evaluated, from the REST endpoint `/futures/v1/market-status`. `poll()`
-        keeps the table current. The endpoint has no sort parameter, so the method takes no
-        `sort` or `order`. The dataset takes no symbols and has no `Symbol` column.
+        keeps the table current. The endpoint's only filter is the product code, which
+        `product_code` sets, and it has no sort parameter, so the method takes no `filters`,
+        `sort`, or `order`. The dataset takes no symbols and has no `Symbol` column.
 
         `limit` caps the total number of rows across pages; the page size is internal.
 
@@ -678,19 +716,16 @@ class _Futures(Namespace):
         in the web UI's column-header tooltips, and by `columns()` on the query.
 
         Args:
-            product_code: Only this product, such as `"ES"`; None for every product.
+            product_code: Only this product, such as `"ES"` (sent as `product_code`), or
+                these products, such as `["ES", "NQ"]` (sent as `product_code.any_of`);
+                None for every product.
             limit: The most rows to return in total; None for every row.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores. The endpoint's only other parameters today are the forms of
-                `product_code`, which are set through `product_code`, so any key raises
-                `ValueError`; a filter Massive adds becomes valid when the library's
-                snapshot of the API is refreshed.
 
         Returns:
             A query with `fetch()` and `poll()`.
 
-        An unknown filter, or a form of `product_code` in `filters`, raises `ValueError`. No
-        request is made.
+        An empty `product_code` sequence raises `ValueError`; a `product_code` that is not a
+        `str` or a sequence of `str` raises `TypeError`. No request is made.
 
         Example:
             ::
@@ -698,21 +733,17 @@ class _Futures(Namespace):
                 import deephaven_massive as dm
 
                 m = dm.MassiveSession()
-                status = m.futures.market_status(product_code="ES").poll(30)
+                status = m.futures.market_status(product_code=["ES", "CL"]).poll(30)
         """
         query = build_query(
-            self._core,
-            MARKET_STATUS,
-            params={"product_code": product_code},
-            filters=filters,
-            limit=limit,
+            self._core, MARKET_STATUS, params=_product_codes(product_code), limit=limit
         )
         return cast("Query", query)
 
     def schedules(
         self,
         *,
-        product_code: str | None = None,
+        product_code: str | Sequence[str] | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -739,7 +770,9 @@ class _Futures(Namespace):
         in the web UI's column-header tooltips, and by `columns()` on the query.
 
         Args:
-            product_code: Only this product, such as `"ES"`; None for every product.
+            product_code: Only this product, such as `"ES"` (sent as `product_code`), or
+                these products, such as `["ES", "NQ"]` (sent as `product_code.any_of`);
+                None for every product.
             start: The first session, as an ISO date string or a `date`; None for no lower
                 bound.
             end: The last session, as an ISO date string or a `date`; None for no upper bound.
@@ -758,6 +791,9 @@ class _Futures(Namespace):
         raises `ValueError`; a `sort` that is not a `str` or an `order` that is not a
         `dm.Order` raises `TypeError`. No request is made.
 
+        An empty `product_code` sequence raises `ValueError`, and a `product_code` that is
+        neither a `str` nor a sequence of `str` raises `TypeError`.
+
         Example:
             ::
 
@@ -773,7 +809,7 @@ class _Futures(Namespace):
             SCHEDULES,
             start=start,
             end=end,
-            params={"product_code": product_code, **list_params(sort=sort, order=order)},
+            params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
             filters=filters,
             limit=limit,
         )

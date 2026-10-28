@@ -1113,12 +1113,15 @@ below and selects the flat-file prefix only: it is not part of the stream key
 | `trades(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (the `timestamp` range, date bounds widened to whole Chicago sessions as for bars, [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/trades_v1` |
 | `quotes(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` (as `trades`) | `us_futures_{venue}/quotes_v1` |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, venue: FuturesVenue \| None = None)` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
-| `snapshots(symbols, *, product_code: str \| None = None, …F)`; `ALL` with `product_code` is every contract of a product; `Symbol` is the generated `DetailsTicker` field, where the OpenAPI schema nests the contract's ticker (`details.ticker`; [section 23](#23-open-verification-items)) | Query | | `/futures/v1/snapshot` | |
-| `contracts(*, product_code: str \| None = None, …F)`, `products(*, product_code: str \| None = None, …F)`, `exchanges(*, limit: int \| None = None, filters: Mapping[str, FilterValue] \| None = None)`, `market_status(*, product_code: str \| None = None, limit: int \| None = None, filters: Mapping[str, FilterValue] \| None = None)` (neither path takes `sort`) | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
-| `schedules(*, product_code: str \| None = None, …T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
+| `snapshots(symbols, *, product_code: str \| Sequence[str] \| None = None, …F)`; `ALL` with `product_code` is every contract of the products; `Symbol` is the generated `DetailsTicker` field, where the OpenAPI schema nests the contract's ticker (`details.ticker`; [section 23](#23-open-verification-items)) | Query | | `/futures/v1/snapshot` | |
+| `contracts(*, product_code: str \| Sequence[str] \| None = None, …F)`, `products(*, product_code: str \| Sequence[str] \| None = None, …F)`, `exchanges(*, limit: int \| None = None)`, `market_status(*, product_code: str \| Sequence[str] \| None = None, limit: int \| None = None)` (neither path has a filter beyond the typed arguments, nor `sort`) | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
+| `schedules(*, product_code: str \| Sequence[str] \| None = None, …T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
 
 `product_code` is typed on every futures dataset whose path takes it (`snapshots`,
-`contracts`, `products`, `market_status`, `schedules`), so it is never a `filters` key there.
+`contracts`, `products`, `market_status`, `schedules`), so none of its forms is a
+`filters` key there. One code is sent as `product_code`; a sequence of codes is sent as
+`product_code.any_of`, which every one of those paths takes, so several products still
+need one request. An empty sequence raises `ValueError`.
 `session_end_date` on `trades` and `quotes` is not their time axis: `start` and `end` of
 `history()` address `timestamp`, and `session_end_date` stays an ordinary filter of the path.
 
