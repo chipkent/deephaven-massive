@@ -1,11 +1,13 @@
 """Tests for the `m.indicators` namespace."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
-from typing import cast
+from typing import Any, cast
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
+from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
@@ -16,6 +18,7 @@ from deephaven_massive._namespaces import indicators
 from deephaven_massive._namespaces.base import Namespace
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 OWNER = "namespaces/indicators"
 R = Transport.REST
@@ -68,7 +71,6 @@ def test_a_windowed_indicator_builds_its_query(
     assert query._request == Request(
         symbols=("AAPL", "X:BTCUSD"),
         timespan=dm.Timespan.DAY,
-        adjusted=True,
         params=(("series_type", dm.SeriesType.CLOSE), ("window", 20)),
     )
     later = factory(
@@ -128,7 +130,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
     with pytest.raises(ValueError, match="window must be positive"):
         i.rsi("AAPL", 0)
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        i.rsi("AAPL", 14, adjusted=cast("bool", None))
+        i.rsi("AAPL", 14, adjusted=cast("bool", 1))
     with pytest.raises(ValueError, match="timestamp_gte is set through start= and end="):
         i.sma("AAPL", 20, filters={"timestamp_gte": 1})
     with pytest.raises(ValueError, match="carries the prefix"):
@@ -180,3 +182,108 @@ def test_the_vendor_samples_decode_without_drift(
     rows = batch.to_pylist()
     assert [{k: row[k] for k in value} for row, value in zip(rows, values, strict=True)] == values
     assert rows[0]["Timestamp"] == 1517562000016
+
+
+# --- End to end through the fake REST server -------------------------------------------------
+
+
+@pytest.fixture
+def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+def sent(server: FakeRestServer) -> dict[str, dict[str, list[str]]]:
+    # Every GET the server received, by decoded path: its decoded query.
+    return {
+        unquote(urlsplit(r.target).path): parse_qs(urlsplit(r.target).query)
+        for r in server.requests
+    }
+
+
+def sample(load_fixture: Callable[[str, str], bytes], name: str) -> Reply:
+    # The vendor sample as the reply body, without its `next_url`, which names Massive's host.
+    body = json.loads(load_fixture(OWNER, f"{name}.json"))
+    body.pop("next_url")
+    return Reply(body)
+
+
+def test_each_symbol_class_is_served_by_its_own_path(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    fake_rest.reply("/v1/indicators/sma/AAPL", sample(load_fixture, "sma_stock"))
+    crypto = envelope({"values": [{"timestamp": 1517562001016, "value": 9001.5}]})
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(crypto))
+    query = rest_session.indicators.sma(
+        ["X:BTCUSD", "AAPL"],
+        50,
+        timespan=dm.Timespan.HOUR,
+        series_type=dm.SeriesType.OPEN,
+        start=datetime(2018, 2, 2, tzinfo=UTC),
+        end=datetime(2018, 2, 3, tzinfo=UTC),
+        order=dm.Order.ASC,
+        limit=10,
+    )
+    out = dh_to_pylist(query.fetch())
+    shared = {
+        "timespan": ["hour"],
+        "window": ["50"],
+        "series_type": ["open"],
+        "order": ["asc"],
+        "limit": ["5000"],
+        "timestamp.gte": ["1517529600000"],
+        "timestamp.lt": ["1517616000000"],
+    }
+    # `adjusted` is None, so neither path receives it.
+    assert sent(fake_rest) == {
+        "/v1/indicators/sma/AAPL": shared,
+        "/v1/indicators/sma/X:BTCUSD": shared,
+    }
+    assert sorted((r["Symbol"], r["Value"]) for r in out) == [
+        ("AAPL", 140.139),
+        ("X:BTCUSD", 9001.5),
+    ]
+    aapl = next(r for r in out if r["Symbol"] == "AAPL")
+    assert aapl["Timestamp"] == datetime(2018, 2, 2, 9, 0, 0, 16000, tzinfo=UTC)
+
+
+def test_an_explicit_adjusted_reaches_only_a_path_that_takes_it(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply("/v1/indicators/ema/AAPL", sample(load_fixture, "sma_stock"))
+    rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch()
+    assert sent(fake_rest)["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
+    with pytest.raises(ValueError, match=r"\{cryptoTicker\} does not take \['adjusted'\]"):
+        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=True).fetch()
+
+
+def test_macd_returns_its_three_lines(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    fake_rest.reply("/v1/indicators/macd/X%3ABTCUSD", sample(load_fixture, "macd_crypto"))
+    query = rest_session.indicators.macd(
+        "X:BTCUSD", short_window=12, long_window=26, signal_window=9
+    )
+    out = dh_to_pylist(query.fetch())
+    params = sent(fake_rest)["/v1/indicators/macd/X:BTCUSD"]
+    assert (params["short_window"], params["long_window"], params["signal_window"]) == (
+        ["12"],
+        ["26"],
+        ["9"],
+    )
+    assert [(r["Symbol"], r["Value"], r["Signal"], r["Histogram"]) for r in out] == [
+        ("X:BTCUSD", 145.3613333333, 106.9811666667, 38.3801666667),
+        ("X:BTCUSD", 143.8374874833, 102.7386283473, 41.098859136),
+    ]

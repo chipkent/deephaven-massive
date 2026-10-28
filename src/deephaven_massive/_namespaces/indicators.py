@@ -8,7 +8,9 @@ out to one request per symbol. The datasets declare no asset class: each symbol'
 selects its class (`X:` crypto, `C:` forex, `I:` indices, `O:` options, none for stocks). One
 URL serves every class, but Massive documents the crypto form apart, without the `adjusted`
 parameter, so each dataset reads two generated paths: the `{stockTicker}` template for every
-class but crypto, and the `{cryptoTicker}` template for crypto. Each row is one indicator value
+class but crypto, and the `{cryptoTicker}` template for crypto (`fetch_paths_by_class`).
+`adjusted` defaults to None, which sends nothing; an explicit value goes only to a path that
+declares it, so it raises `ValueError` for a crypto symbol. Each row is one indicator value
 at one bar's start, `Timestamp`, for the requested `Symbol`.
 
 Each dataset is one factory method on `_Indicators` that validates its arguments and returns a
@@ -24,15 +26,14 @@ from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._enums import SeriesType, Timespan, _require_enum
+from deephaven_massive._enums import AssetClass, Order, SeriesType, Timespan, _require_enum
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import Namespace, build_query
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._datasets.request import ParamValue
-    from deephaven_massive._enums import Order
     from deephaven_massive._query import Query
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
@@ -66,7 +67,7 @@ def _indicator(name: str, summary: str) -> DatasetSpec:
         name=f"indicators.{name}",
         summary=summary,
         fetch_path=stock,
-        extra_paths=(crypto,),
+        fetch_paths_by_class={AssetClass.CRYPTO: crypto},
         keys={
             (Transport.REST, stock): SourceKeys(
                 symbol=KeySpec("stockTicker", from_request=True), time=KeySpec("Timestamp")
@@ -144,7 +145,7 @@ class _Indicators(Namespace):
         *,
         timespan: Timespan,
         series_type: SeriesType,
-        adjusted: bool,
+        adjusted: bool | None,
         start: DateLike | None,
         end: DateLike | None,
         order: Order | None,
@@ -160,7 +161,7 @@ class _Indicators(Namespace):
                 windows), each a positive `int`.
             timespan: The bar timespan.
             series_type: The bar price the indicator is computed from.
-            adjusted: Whether the bars are adjusted for splits.
+            adjusted: Whether the bars are adjusted for splits, or None for Massive's default.
             start: The lower bound of `Timestamp`, or None.
             end: The upper bound of `Timestamp`, or None.
             order: The timestamp order, or None.
@@ -170,21 +171,17 @@ class _Indicators(Namespace):
         Returns:
             The dataset's `Query`.
 
-        Raises:
-            TypeError: If `adjusted` is not a `bool`.
-
         Invalid timespans, windows, a `series_type` that is not a `dm.SeriesType`, or other
         invalid arguments raise the `TypeError` or `ValueError` of `_check_timespan`,
-        `require_positive_int`, `_require_enum`, `list_params`, and `build_query`.
+        `require_positive_int`, `_require_enum`, and `build_query`.
         """
         span = _check_timespan(timespan)
-        if not isinstance(adjusted, bool):
-            raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
-        params: dict[str, ParamValue] = {
+        params: dict[str, ParamValue | None] = {
             name: require_positive_int(name, value) for name, value in windows.items()
         }
         params["series_type"] = _require_enum(series_type, SeriesType, "series_type")
-        params.update(list_params(sort=None, order=order))
+        # The paths have their own `order` and no `sort`, so `order` stands alone.
+        params["order"] = None if order is None else _require_enum(order, Order, "order")
         query = build_query(
             self._core,
             spec,
@@ -207,7 +204,7 @@ class _Indicators(Namespace):
         *,
         timespan: Timespan = Timespan.DAY,
         series_type: SeriesType = SeriesType.CLOSE,
-        adjusted: bool = True,
+        adjusted: bool | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         order: Order | None = None,
@@ -229,8 +226,9 @@ class _Indicators(Namespace):
             window: The number of bars averaged, a positive `int`.
             timespan: The bar size the average is computed over; `MINUTE` or longer.
             series_type: The bar price averaged.
-            adjusted: Whether the bars are adjusted for splits; not sent for crypto, whose
-                endpoint has no such parameter.
+            adjusted: Whether the bars are adjusted for splits; None sends nothing and
+                leaves Massive's default. The crypto endpoint has no such parameter, so an
+                explicit value fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start (a date's 00:00 in the class day zone, or an aware
                 `datetime`); None for the endpoint's default range.
             end: The end of the range: a date includes that whole day, a `datetime` is
@@ -270,7 +268,7 @@ class _Indicators(Namespace):
         *,
         timespan: Timespan = Timespan.DAY,
         series_type: SeriesType = SeriesType.CLOSE,
-        adjusted: bool = True,
+        adjusted: bool | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         order: Order | None = None,
@@ -292,8 +290,9 @@ class _Indicators(Namespace):
             window: The number of bars the average spans, a positive `int`.
             timespan: The bar size the average is computed over; `MINUTE` or longer.
             series_type: The bar price averaged.
-            adjusted: Whether the bars are adjusted for splits; not sent for crypto, whose
-                endpoint has no such parameter.
+            adjusted: Whether the bars are adjusted for splits; None sends nothing and
+                leaves Massive's default. The crypto endpoint has no such parameter, so an
+                explicit value fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start (a date's 00:00 in the class day zone, or an aware
                 `datetime`); None for the endpoint's default range.
             end: The end of the range: a date includes that whole day, a `datetime` is
@@ -333,7 +332,7 @@ class _Indicators(Namespace):
         *,
         timespan: Timespan = Timespan.DAY,
         series_type: SeriesType = SeriesType.CLOSE,
-        adjusted: bool = True,
+        adjusted: bool | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         order: Order | None = None,
@@ -355,8 +354,9 @@ class _Indicators(Namespace):
             window: The number of bars the index looks back over, a positive `int`.
             timespan: The bar size the index is computed over; `MINUTE` or longer.
             series_type: The bar price the index is computed from.
-            adjusted: Whether the bars are adjusted for splits; not sent for crypto, whose
-                endpoint has no such parameter.
+            adjusted: Whether the bars are adjusted for splits; None sends nothing and
+                leaves Massive's default. The crypto endpoint has no such parameter, so an
+                explicit value fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start (a date's 00:00 in the class day zone, or an aware
                 `datetime`); None for the endpoint's default range.
             end: The end of the range: a date includes that whole day, a `datetime` is
@@ -398,7 +398,7 @@ class _Indicators(Namespace):
         signal_window: int,
         timespan: Timespan = Timespan.DAY,
         series_type: SeriesType = SeriesType.CLOSE,
-        adjusted: bool = True,
+        adjusted: bool | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         order: Order | None = None,
@@ -423,8 +423,9 @@ class _Indicators(Namespace):
             signal_window: The bars of the signal line's average, a positive `int`.
             timespan: The bar size the averages are computed over; `MINUTE` or longer.
             series_type: The bar price the averages are computed from.
-            adjusted: Whether the bars are adjusted for splits; not sent for crypto, whose
-                endpoint has no such parameter.
+            adjusted: Whether the bars are adjusted for splits; None sends nothing and
+                leaves Massive's default. The crypto endpoint has no such parameter, so an
+                explicit value fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start (a date's 00:00 in the class day zone, or an aware
                 `datetime`); None for the endpoint's default range.
             end: The end of the range: a date includes that whole day, a `datetime` is

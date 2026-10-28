@@ -31,6 +31,7 @@ from deephaven_massive._enums import (
     ConditionDataType,
     Locale,
     Market,
+    Order,
     PollMode,
     Sip,
     _require_enum,
@@ -43,13 +44,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from deephaven_massive._datasets.request import ParamValue
-    from deephaven_massive._enums import Order
     from deephaven_massive._massive import RestPath
     from deephaven_massive._query import Query
     from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
-__all__ = ["DATASETS", "SNAPSHOTS", "_Reference"]
+__all__ = ["DATASETS", "SNAPSHOTS", "_Reference", "own_order_params"]
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ TICKER_EVENTS: Final = DatasetSpec(
             symbol=KeySpec("id", from_request=True)
         )
     },
-    poll_keys=("Symbol", "Date", "EventType"),
+    poll_keys=("Symbol", "Date", "Type"),
     per_symbol=True,
 )
 RELATED_COMPANIES: Final = DatasetSpec(
@@ -146,6 +146,7 @@ SNAPSHOTS: Final = DatasetSpec(
     keys={(_REST, "/v3/snapshot"): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
     page_size=250,
+    symbols_per_request=250,
 )
 """The unified snapshot, served by `MassiveSession.snapshots()`; at most 250 tickers a page."""
 
@@ -203,6 +204,29 @@ def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | N
             f"{spec.name} does not accept AssetClass.{member.name}; it accepts {names}"
         )
     return _REST_ASSET_CLASS[member]
+
+
+def own_order_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValue]:
+    """Validate `sort` and `order` for a path that has an `order` parameter of its own.
+
+    The tickers, news, conditions, and unified snapshot endpoints take `order` as a parameter,
+    which the REST transport sends as is, so, unlike `list_params`, `order` needs no `sort`:
+    alone it orders by the endpoint's default sort field.
+
+    Args:
+        sort: The field to sort by, or None for the endpoint's default.
+        order: The sort direction, or None for the endpoint's default.
+
+    Returns:
+        The parameters that are set, by wire name.
+
+    A `sort` that is not a `str` or an `order` that is not a `dm.Order` raises `TypeError`
+    (`list_params`, `_require_enum`).
+    """
+    params = list_params(sort=sort, order=None)
+    if order is not None:
+        params["order"] = _require_enum(order, Order, "order")
+    return params
 
 
 def _text(name: str, value: object) -> str | None:
@@ -336,7 +360,7 @@ class _Reference(Namespace):
             "date": None if date is None else calendar_day(TICKERS, date, "date"),
             "active": active,
             "search": _text("search", search),
-            **list_params(sort=sort, order=order),
+            **own_order_params(sort=sort, order=order),
         }
         query = build_query(
             self._core,
@@ -415,7 +439,7 @@ class _Reference(Namespace):
         Served over REST (`/vX/reference/tickers/{id}/events`), one request per symbol; the
         symbol may also be a CUSIP or a Composite FIGI, and `Symbol` is the identifier asked
         about. `fetch()` returns every event and `poll()` re-fetches them, keyed by `Symbol`,
-        `Date`, and `EventType`. `dm.ALL` is not accepted: the endpoint takes one ticker per
+        `Date`, and `Type`. `dm.ALL` is not accepted: the endpoint takes one ticker per
         request. Its columns, and what each means, are in
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#ticker_events,
         in the web UI's column tooltips, and in the query's `columns()`.
@@ -533,7 +557,7 @@ class _Reference(Namespace):
             all_alternative="symbols=None for every article",
             start=start,
             end=end,
-            params=list_params(sort=sort, order=order),
+            params=own_order_params(sort=sort, order=order),
             filters=filters,
             limit=limit,
         )
@@ -621,7 +645,7 @@ class _Reference(Namespace):
             else _require_enum(data_type, ConditionDataType, "data_type"),
             "id": condition_id,
             "sip": None if sip is None else _require_enum(sip, Sip, "sip"),
-            **list_params(sort=sort, order=order),
+            **own_order_params(sort=sort, order=order),
         }
         query = build_query(self._core, CONDITIONS, params=params, filters=filters, limit=limit)
         return cast("Query", query)

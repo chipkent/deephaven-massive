@@ -2,14 +2,16 @@
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, cast
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from deephaven import new_table
 from deephaven.column import string_col
+from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -21,6 +23,7 @@ from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces.base import Namespace
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 OWNER = "namespaces/reference"
 R = Transport.REST
@@ -89,10 +92,10 @@ def test_ticker_events_take_the_symbol_from_the_request() -> None:
     assert CATALOG.dataset_schema(spec).column_names == (
         "Symbol",
         "Date",
-        "EventType",
+        "Type",
         "TickerChangeTicker",
     )
-    assert spec.poll_keys == ("Symbol", "Date", "EventType")
+    assert spec.poll_keys == ("Symbol", "Date", "Type")
 
 
 def test_related_companies_name_the_peer_and_the_company_asked_about() -> None:
@@ -440,13 +443,10 @@ SAMPLES = [
         {"Ticker": "AAPL", "AddressCity": "Cupertino", "ListDate": date(1980, 12, 12)},
     ),
     Sample(reference.TICKER_TYPES, "ticker_types", {"Code": "CS", "AssetClass": "stocks"}),
-    # The vendor's samples send `type`, while its schema names the field `event_type`.
     Sample(
         reference.TICKER_EVENTS,
         "ticker_events",
-        {"Date": date(2022, 6, 9), "TickerChangeTicker": "META", "EventType": None},
-        extra=("type",),
-        missing=("event_type",),
+        {"Date": date(2022, 6, 9), "TickerChangeTicker": "META", "Type": "ticker_change"},
     ),
     Sample(reference.RELATED_COMPANIES, "related_companies", {"Ticker": "MSFT"}),
     Sample(reference.NEWS, "news", {"Tickers": '["UBS"]', "PublisherName": "Investing.com"}),
@@ -494,3 +494,210 @@ def test_the_vendor_samples_decode(
     assert tuple(sorted(report.missing)) == sample.missing
     first = batch.to_pylist()[0]
     assert {column: first[column] for column in sample.expected} == sample.expected
+
+
+# --- End to end through the fake REST server -------------------------------------------------
+
+
+@pytest.fixture
+def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+Fixture = Callable[[str, str], bytes]
+ToRows = Callable[[Table], list[dict[str, Any]]]
+
+
+def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
+    # Every GET the server received: its decoded path and query.
+    return [
+        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
+        for r in server.requests
+    ]
+
+
+def sample(load_fixture: Fixture, name: str) -> Reply:
+    # The vendor sample as the reply body, without its `next_url`, which names Massive's host.
+    body = json.loads(load_fixture(OWNER, f"{name}.json"))
+    if isinstance(body, dict):
+        body.pop("next_url", None)
+    return Reply(body)
+
+
+def test_tickers_fetch(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    dh_to_pylist: ToRows,
+) -> None:
+    fake_rest.reply("/v3/reference/tickers", sample(load_fixture, "tickers"))
+    out = dh_to_pylist(
+        rest_session.reference.tickers(
+            symbols="A", market=dm.Market.STOCKS, ticker_type="CS", date="2021-04-25"
+        ).fetch()
+    )
+    assert sent(fake_rest) == [
+        (
+            "/v3/reference/tickers",
+            {
+                "ticker": ["A"],
+                "market": ["stocks"],
+                "type": ["CS"],
+                "date": ["2021-04-25"],
+                "active": ["true"],
+                "limit": ["1000"],
+            },
+        )
+    ]
+    assert len(out) == 1
+    row = out[0]
+    assert row["Symbol"] == "A"
+    assert row["Name"] == "Agilent Technologies Inc."
+    assert row["LastUpdatedUtc"] == datetime(2021, 4, 25, tzinfo=UTC)
+    assert row["DelistedUtc"] is None
+
+
+def test_ticker_details_fetch_one_request_per_symbol(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    dh_to_pylist: ToRows,
+) -> None:
+    fake_rest.reply("/v3/reference/tickers/AAPL", sample(load_fixture, "ticker_details"))
+    out = dh_to_pylist(rest_session.reference.ticker_details("AAPL", date="2024-01-02").fetch())
+    assert sent(fake_rest) == [("/v3/reference/tickers/AAPL", {"date": ["2024-01-02"]})]
+    assert [(r["Symbol"], r["AddressCity"], r["ListDate"]) for r in out] == [
+        ("AAPL", "Cupertino", date(1980, 12, 12))
+    ]
+
+
+def test_ticker_events_fill_the_symbol_from_the_request(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    dh_to_pylist: ToRows,
+) -> None:
+    fake_rest.reply("/vX/reference/tickers/META/events", sample(load_fixture, "ticker_events"))
+    out = dh_to_pylist(rest_session.reference.ticker_events("META", types="ticker_change").fetch())
+    assert sent(fake_rest) == [("/vX/reference/tickers/META/events", {"types": ["ticker_change"]})]
+    assert [(r["Symbol"], r["Date"], r["Type"], r["TickerChangeTicker"]) for r in out] == [
+        ("META", date(2022, 6, 9), "ticker_change", "META"),
+        ("META", date(2012, 5, 18), "ticker_change", "FB"),
+    ]
+
+
+def test_related_companies_name_the_peer_and_the_ticker_asked_about(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    dh_to_pylist: ToRows,
+) -> None:
+    fake_rest.reply("/v1/related-companies/AAPL", sample(load_fixture, "related_companies"))
+    out = dh_to_pylist(rest_session.reference.related_companies("AAPL").fetch())
+    assert sent(fake_rest) == [("/v1/related-companies/AAPL", {})]
+    assert len(out) == 10
+    assert out[0] == {"Symbol": "MSFT", "Underlying": "AAPL"}
+
+
+def test_news_fetch(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    dh_to_pylist: ToRows,
+) -> None:
+    fake_rest.reply("/v2/reference/news", sample(load_fixture, "news"))
+    query = rest_session.reference.news(
+        symbols="UBS", start=date(2024, 6, 24), end=date(2024, 6, 24), order=dm.Order.DESC
+    )
+    out = dh_to_pylist(query.fetch())
+    ((path, params),) = sent(fake_rest)
+    assert path == "/v2/reference/news"
+    assert params["ticker"] == ["UBS"]
+    assert params["order"] == ["desc"]
+    assert params["limit"] == ["1000"]
+    assert params["published_utc.gte"] == ["2024-06-24"]
+    assert params["published_utc.lt"] == ["2024-06-25"]
+    assert "Symbol" not in out[0]
+    assert out[0]["Tickers"] == '["UBS"]'
+    assert out[0]["PublishedUtc"] == datetime(2024, 6, 24, 18, 33, 53, tzinfo=UTC)
+
+
+def test_lookup_fetches(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    dh_to_pylist: ToRows,
+) -> None:
+    ref = rest_session.reference
+    fake_rest.reply("/v3/reference/tickers/types", sample(load_fixture, "ticker_types"))
+    fake_rest.reply("/v3/reference/exchanges", sample(load_fixture, "exchanges"))
+    fake_rest.reply("/v3/reference/conditions", sample(load_fixture, "conditions"))
+    fake_rest.reply("/v1/marketstatus/now", sample(load_fixture, "market_status"))
+    fake_rest.reply("/v1/marketstatus/upcoming", sample(load_fixture, "market_holidays"))
+    types = dh_to_pylist(ref.ticker_types(asset_class=dm.AssetClass.FOREX).fetch())
+    exchanges = dh_to_pylist(ref.exchanges(locale=dm.Locale.US).fetch())
+    conditions = dh_to_pylist(ref.conditions(condition_id=2, sip=dm.Sip.CTA).fetch())
+    status = dh_to_pylist(ref.market_status().fetch())
+    holidays = dh_to_pylist(ref.market_holidays().fetch())
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers/types", {"asset_class": ["fx"]}),
+        ("/v3/reference/exchanges", {"locale": ["us"]}),
+        ("/v3/reference/conditions", {"id": ["2"], "sip": ["CTA"], "limit": ["1000"]}),
+        ("/v1/marketstatus/now", {}),
+        ("/v1/marketstatus/upcoming", {}),
+    ]
+    assert [r["Code"] for r in types] == ["CS", "ETF"]
+    assert [(r["Id"], r["Acronym"]) for r in exchanges] == [(1, "AMEX"), (62, None)]
+    assert conditions[0]["DataTypes"] == '["trade"]'
+    assert conditions[0]["UpdateRulesMarketCenterUpdatesVolume"] is True
+    assert len(status) == 1
+    assert status[0]["ServerTime"] == datetime(2020, 11, 10, 22, 37, 37, tzinfo=UTC)
+    assert status[0]["ExchangesOtc"] == "closed"
+    assert len(holidays) == 5
+    assert holidays[3]["Status"] == "early-close"
+    assert holidays[3]["Open"] == "2020-11-27T14:30:00.000Z"
+
+
+def test_unified_snapshots_fetch(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    dh_to_pylist: ToRows,
+) -> None:
+    fake_rest.reply("/v3/snapshot", sample(load_fixture, "snapshots"))
+    symbols = ["O:NCLH221014C00005000", "AAPL", "TSLAAPL"]
+    out = dh_to_pylist(rest_session.snapshots(symbols).fetch())
+    assert sent(fake_rest) == [
+        (
+            "/v3/snapshot",
+            {"ticker.any_of": ["AAPL,O:NCLH221014C00005000,TSLAAPL"], "limit": ["250"]},
+        )
+    ]
+    by_symbol = {r["Symbol"]: r for r in out}
+    assert set(by_symbol) == set(symbols)
+    option = by_symbol["O:NCLH221014C00005000"]
+    assert option["UnderlyingAssetTicker"] == "AAPL"
+    assert option["LastTradeConditions"] == [209]
+    assert option["LastTradeSipTimestamp"].value == 1675280958783136800  # every nanosecond
+    # A ticker Massive does not know keeps its row, with the error.
+    assert by_symbol["TSLAAPL"]["Error"] == "NOT_FOUND"
+
+
+def test_unified_snapshots_send_250_tickers_a_request(
+    rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/v3/snapshot", Reply(envelope([])))
+    symbols = [f"T{i:03d}" for i in range(251)]
+    rest_session.snapshots(symbols).fetch()
+    batches = [q["ticker.any_of"][0].split(",") for _, q in sent(fake_rest)]
+    assert sorted(len(batch) for batch in batches) == [1, 250]
+    assert sorted(s for batch in batches for s in batch) == symbols

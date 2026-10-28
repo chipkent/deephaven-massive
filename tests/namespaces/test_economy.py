@@ -1,12 +1,14 @@
 """Tests for the `m.economy` namespace."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import date
-from typing import cast
+from typing import Any, cast
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
@@ -17,6 +19,7 @@ from deephaven_massive._namespaces import economy
 from deephaven_massive._namespaces.base import Namespace
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from tests._fakes.rest import FakeRestServer, Reply
 
 OWNER = "namespaces/economy"
 
@@ -157,3 +160,46 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         e.labor_market(limit=0)
     with pytest.raises(TypeError, match="sort must be a str"):
         e.labor_market(sort=cast("str", 1))
+
+
+# --- End to end through the fake REST server -------------------------------------------------
+
+
+@pytest.fixture
+def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+@EACH
+def test_each_series_fetches_its_vendor_sample(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    series: Series,
+) -> None:
+    # The documentation samples write `request_id` as the number 1; the client needs text.
+    body = json.loads(load_fixture(OWNER, f"{series.method}.json"))
+    body["request_id"] = str(body["request_id"])
+    fake_rest.reply(series.path, Reply(body))
+    factory = getattr(rest_session.economy, series.method)
+    out = dh_to_pylist(
+        factory(
+            start="2020-01-01", end=date(2025, 12, 31), sort="date", order=dm.Order.DESC
+        ).fetch()
+    )
+    (request,) = fake_rest.requests
+    assert urlsplit(request.target).path == series.path
+    # The endpoints have no `order`: its direction becomes the suffix of `sort`.
+    assert parse_qs(urlsplit(request.target).query) == {
+        "date.gte": ["2020-01-01"],
+        "date.lte": ["2025-12-31"],
+        "sort": ["date.desc"],
+        "limit": ["50000"],
+    }
+    assert len(out) == 1
+    assert out[0]["Date"] == series.day
+    assert out[0][series.column] == series.value

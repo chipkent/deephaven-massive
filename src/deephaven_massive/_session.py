@@ -45,7 +45,7 @@ from deephaven_massive._namespaces import (
     reference,
     stocks,
 )
-from deephaven_massive._namespaces.base import build_query, list_params
+from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
 from deephaven_massive._namespaces.forex import _Forex
@@ -361,7 +361,7 @@ class MassiveSession:
                 "a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "
                 "market"
             ),
-            params=list_params(sort=sort, order=order),
+            params=reference.own_order_params(sort=sort, order=order),
             filters=filters,
             limit=limit,
         )
