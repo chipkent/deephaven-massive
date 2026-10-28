@@ -990,9 +990,13 @@ set regardless, for every API client to read. The Python package has no wrapper 
 direct `jpy` import (`jpy` is not a declared dependency) is needed: it calls
 `withColumnDescriptions` with a `java.util.HashMap` (`deephaven.jcompat.j_hashmap`) of every
 column whose description is not empty, then `withDescription`, and wraps the outcome in a new
-`deephaven.table.Table`, whose constructor casts it back to `Table`.
-`withColumnDescriptions` checks that every named column exists, so a schema that disagrees
-with the table fails at once; `Table.with_attributes` skips that check and is not used. The
+`deephaven.table.Table`, whose constructor casts it back to `Table`. Before the attributes,
+it puts the table's columns in schema order with `moveColumnsUp(*schema.column_names)`, a view
+that copies no data and keeps the table's attributes (the blink attribute included): a
+`last_by`, the shape of `last_by()` and of an `UPSERT` or `REPLACE` `poll()`, puts its key
+columns first, and `columns()` promises every verb the schema's order. The reordering checks
+that every schema column exists and `withColumnDescriptions` that every named column does, so a
+schema that disagrees with the table fails at once; `Table.with_attributes` skips that check and is not used. The
 table description is `"<dataset>: <summary>"` (`"stocks.trades: Trades of US-listed stocks,
 tick by tick."`), where `<summary>` is the one-sentence `DatasetSpec.summary`. The summary is
 a required field of every spec; `DatasetSpec.__post_init__` raises `ValueError`, naming the
