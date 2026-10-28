@@ -45,7 +45,7 @@ from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
-from tests._fakes.rest import FakeRestServer, Reply, envelope
+from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 
 R = Transport.REST
 LOGGER = "deephaven_massive._ingest.rest"
@@ -1603,14 +1603,42 @@ def test_an_error_row_needs_only_its_symbol(
 
 
 def test_a_failed_call_cancels_the_calls_not_yet_started(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"{}", status=401))
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
     calls = rest.plan_calls(CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols)
-    with ThreadPoolExecutor(1) as pool, pytest.raises(dm.AuthenticationError):
+    # The other symbols are answered at once with HTTP 404 (no rows), so the one worker could
+    # run through every queued call before the read wakes up to cancel them. Each call after
+    # the failed one is held at the server until the last two calls are done, which only the
+    # read's cancellation can make happen while the worker is held.
+    queued: list[Future[object]] = []  # complete before any callback reads it
+    cancelled = threading.Event()
+
+    def settled(_: Future[object]) -> None:
+        if all(future.done() for future in queued[2:]):
+            cancelled.set()
+
+    def hold(received: Received) -> None:
+        if "BTC" not in received.target and not cancelled.wait(10):
+            cancelled.set()  # nothing cancelled the last calls: let them run, so the count fails
+
+    fake_rest.on_request(hold)
+    pool = ThreadPoolExecutor(1)
+    submit = pool.submit
+
+    def recorded(fn: Callable[[object], object], call: object, /) -> Future[object]:
+        future = submit(fn, call)
+        queued.append(future)
+        if len(queued) == len(calls):
+            for each in queued[2:]:
+                each.add_done_callback(settled)
+        return future
+
+    monkeypatch.setattr(pool, "submit", recorded)
+    with pool, pytest.raises(dm.AuthenticationError):
         reader.read(CRYPTO_LAST, path, calls, limit=None, executor=pool)
     # The one worker may take the next call before the read cancels it; the rest never start.
     assert len(sent(fake_rest)) <= 2
