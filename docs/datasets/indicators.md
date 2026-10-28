@@ -13,7 +13,7 @@ The simple moving average of a ticker's bars, one row per bar.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stockTicker` parameter; REST: the request's `cryptoTicker` parameter. | REST | request |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix Msec timestamp from the last aggregate used in this calculation.". | REST | `timestamp` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix Msec timestamp from the last aggregate used in this calculation." | REST | `timestamp` |
 | `Value` | double | The MACD line value, calculated as the difference between the short-term and long-term exponential moving averages (EMAs) based on the periods specified in the request parameters. | REST | `value` |
 
 <a id="ema"></a>
@@ -25,7 +25,7 @@ The exponential moving average of a ticker's bars, one row per bar.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stockTicker` parameter; REST: the request's `cryptoTicker` parameter. | REST | request |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix Msec timestamp from the last aggregate used in this calculation.". | REST | `timestamp` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix Msec timestamp from the last aggregate used in this calculation." | REST | `timestamp` |
 | `Value` | double | The MACD line value, calculated as the difference between the short-term and long-term exponential moving averages (EMAs) based on the periods specified in the request parameters. | REST | `value` |
 
 <a id="rsi"></a>
@@ -37,7 +37,7 @@ The relative strength index of a ticker's bars, from 0 to 100, one row per bar.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stockTicker` parameter; REST: the request's `cryptoTicker` parameter. | REST | request |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix Msec timestamp from the last aggregate used in this calculation.". | REST | `timestamp` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix Msec timestamp from the last aggregate used in this calculation." | REST | `timestamp` |
 | `Value` | double | The MACD line value, calculated as the difference between the short-term and long-term exponential moving averages (EMAs) based on the periods specified in the request parameters. | REST | `value` |
 
 <a id="macd"></a>
@@ -49,7 +49,7 @@ The moving average convergence/divergence of a ticker's bars, one row per bar.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stockTicker` parameter; REST: the request's `cryptoTicker` parameter. | REST | request |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix Msec timestamp from the last aggregate used in this calculation.". | REST | `timestamp` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix Msec timestamp from the last aggregate used in this calculation." | REST | `timestamp` |
 | `Histogram` | double | The difference between the MACD line (value) and the signal line (signal). Positive histogram values indicate upward (bullish) momentum, while negative histogram values indicate downward (bearish) momentum. | REST | `histogram` |
 | `Signal` | double | The signal line value, calculated as the exponential moving average (EMA) of the MACD line (value) over the signal period defined in the request parameters. Traders typically use crossovers between the MACD and signal lines as trading signals. | REST | `signal` |
 | `Value` | double | The MACD line value, calculated as the difference between the short-term and long-term exponential moving averages (EMAs) based on the periods specified in the request parameters. | REST | `value` |

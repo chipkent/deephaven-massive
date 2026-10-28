@@ -12,8 +12,8 @@ Trades of US-listed stocks, tick by tick.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock.". | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS.". | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
 | `Conditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `c`, `conditions` | `conditions` | `c` |
 | `Correction` | long | The trade correction indicator. | REST, flat files | `e`, `correction` | `correction` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `x`, `exchange` | `exchange` | `x` |
@@ -39,8 +39,8 @@ National best bid and offer quotes of US-listed stocks, tick by tick.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock.". | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS.". | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
 | `AskExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `X`, `ask_exchange` | `ask_exchange` | `ax` |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `P`, `ask_price` | `ask_price` | `ap` |
 | `AskSize` | double | The ask size. This represents the number of shares sellers are offering at the given ask price. | REST, flat files, WebSocket | `S`, `ask_size` | `ask_size` | `as` |
@@ -69,8 +69,8 @@ Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stocksTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock.". | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds.". | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stocksTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -99,8 +99,8 @@ Limit up-limit down price bands of US-listed stocks, as they change.
 
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `T`: "The ticker symbol for the given stock.". | WebSocket | `T` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix MS.". | WebSocket | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `T`: "The ticker symbol for the given stock." | WebSocket | `T` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix MS." | WebSocket | `t` |
 | `HighPrice` | double | The high price. | WebSocket | `h` |
 | `LowPrice` | double | The low price. | WebSocket | `l` |
 | `Indicators` | int[] | The Indicators. See Conditions and Indicators (https://massive.com/glossary/us/stocks/conditions-indicators) for a glossary (LULD indicators are located near the bottom). | WebSocket | `i` |
@@ -115,8 +115,8 @@ Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `T`: "The ticker symbol for the given stock.". | WebSocket | `T` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix Ns.". | WebSocket | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `T`: "The ticker symbol for the given stock." | WebSocket | `T` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix Ns." | WebSocket | `t` |
 | `AuctionTime` | long | The time that the auction is planned to take place in the format (hour x 100) + minutes in Eastern Standard Time, for example 930 would be 9:30 am EST, and 1600 would be 4:00 pm EST. | WebSocket | `at` |
 | `AuctionType` | String | The auction type. `O` - Early Opening Auction (non-NYSE only) `M` - Core Opening Auction `H` - Reopening Auction (Halt Resume) `C` - Closing Auction `P` - Extreme Closing Imbalance (NYSE only) `R` - Regulatory Closing Imbalance (NYSE only) | WebSocket | `a` |
 | `SymbolSequence` | long | The symbol sequence. | WebSocket | `i` |
@@ -133,8 +133,8 @@ Massive's fair market value estimate of US-listed stocks, as it updates.
 
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security.". | WebSocket | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp.". | WebSocket | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
 
 <a id="snapshots"></a>
@@ -145,7 +145,7 @@ Current market snapshots of US-listed stocks, one row per ticker.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
 | `DayDecimalVolume` | String | The volume including fractional shares, respresented as a string. | REST | `day.dv` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
@@ -198,7 +198,7 @@ The twenty US stocks with the largest percentage move today, up or down.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
 | `DayDecimalVolume` | String | The volume including fractional shares, respresented as a string. | REST | `day.dv` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
@@ -251,7 +251,7 @@ The open, close, and pre- and after-market prices of US stocks on one day.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The exchange symbol that this item is traded under.". | REST | `symbol` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The exchange symbol that this item is traded under." | REST | `symbol` |
 | `AfterHours` | double | The close price of the ticker symbol in after hours trading. | REST | `afterHours` |
 | `Close` | double | The close price for the symbol in the given time period. | REST | `close` |
 | `From` | LocalDate | The requested date. | REST | `from` |
@@ -307,7 +307,7 @@ Initial public offerings on US exchanges, upcoming and past, one row per offerin
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker symbol of the IPO event.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker symbol of the IPO event." | REST | `ticker` |
 | `AnnouncedDate` | LocalDate | The date when the IPO event was announced. | REST | `announced_date` |
 | `CurrencyCode` | String | Underlying currency of the security. | REST | `currency_code` |
 | `FinalIssuePrice` | double | The price set by the company and its underwriters before the IPO goes live. | REST | `final_issue_price` |
@@ -336,7 +336,7 @@ Short interest of US-listed stocks, one row per ticker and FINRA settlement date
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock." | REST | `ticker` |
 | `AvgDailyVolume` | long | The average daily trading volume for the stock over a specified period, typically used to contextualize short interest. | REST | `avg_daily_volume` |
 | `DaysToCover` | double | Calculated as short_interest divided by avg_daily_volume, representing the estimated number of days it would take to cover all short positions based on average trading volume. | REST | `days_to_cover` |
 | `SettlementDate` | LocalDate | The date (formatted as YYYY-MM-DD) on which the short interest data is considered settled, typically based on exchange reporting schedules. | REST | `settlement_date` |
@@ -350,7 +350,7 @@ Daily short sale volume of US-listed stocks, one row per ticker and trading day.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock." | REST | `ticker` |
 | `AdfShortVolume` | long | Short volume reported via the Alternative Display Facility (ADF), excluding exempt volume. | REST | `adf_short_volume` |
 | `AdfShortVolumeExempt` | long | Short volume reported via ADF that was marked as exempt. | REST | `adf_short_volume_exempt` |
 | `Date` | LocalDate | The date of trade activity reported in the format YYYY-MM-DD | REST | `date` |
@@ -374,7 +374,7 @@ The free float of US-listed stocks: the latest count of shares the public can tr
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock." | REST | `ticker` |
 | `EffectiveDate` | LocalDate | The effective date of the free float measurement. | REST | `effective_date` |
 | `FreeFloat` | long | Number of shares freely tradable in the market. Free float shares represent the portion of a company's outstanding shares that is freely tradable in the market, excluding any holdings considered strategic, controlling, or long term. This excludes insiders, directors, founders, 5 percent plus shareholders, cross holdings, government stakes except pensions, restricted or locked up shares, employee plans, and any entities with board influence, leaving only shares that are genuinely available for public trading. | REST | `free_float` |
 | `FreeFloatPercent` | double | Percentage of total shares outstanding that are available for public trading, rounded to two decimal places. | REST | `free_float_percent` |
@@ -518,7 +518,7 @@ Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
 | `AverageVolume` | double | Average trading volume over the last 30 trading days, providing context for liquidity. | REST | `average_volume` |
 | `Cash` | double | Cash ratio, calculated as cash and cash equivalents divided by current liabilities, measuring the most liquid form of liquidity coverage. | REST | `cash` |
 | `Cik` | String | Central Index Key (CIK) number assigned by the SEC to identify the company. | REST | `cik` |
@@ -550,7 +550,7 @@ The index of SEC EDGAR filings by US-listed companies, one row per filing.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the filing entity, if available.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the filing entity, if available." | REST | `ticker` |
 | `AccessionNumber` | String | SEC accession number uniquely identifying the filing (e.g., '0000320193-24-000123'). | REST | `accession_number` |
 | `Cik` | String | SEC Central Index Key (CIK) identifying the filing entity. | REST | `cik` |
 | `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
@@ -566,7 +566,7 @@ The text of sections of 10-K annual reports, one row per filing and section.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). | REST | `cik` |
 | `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `FilingUrl` | String | SEC URL source for the full filing. | REST | `filing_url` |
@@ -582,7 +582,7 @@ The item text of 8-K current reports, one row per filing.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
 | `AccessionNumber` | String | SEC accession number uniquely identifying the filing (e.g., '0000004962-25-000002'). | REST | `accession_number` |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). | REST | `cik` |
 | `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
@@ -616,7 +616,7 @@ Risk factors disclosed in company filings, classified by category, one row each.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company.". | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). | REST | `cik` |
 | `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `PrimaryCategory` | String | Top-level risk category | REST | `primary_category` |

@@ -727,8 +727,8 @@ def test_a_key_column_quotes_its_asset_class_s_description() -> None:
         (column,) = dataset_schema(dataset, (dataset,), lambda *_: made).columns
         quoted[asset_class] = column.description.split("REST `ticker`: ")[1]
     assert quoted == {
-        AssetClass.OPTIONS: '"The option contract symbol.".',
-        AssetClass.STOCKS: '"The stock symbol.".',
+        AssetClass.OPTIONS: '"The option contract symbol."',
+        AssetClass.STOCKS: '"The stock symbol."',
     }
 
 
@@ -807,7 +807,7 @@ def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
         f'WebSocket `sym`: "{wire(W, "stocks/T", "Ticker").description}"',
     ]
     assert columns["Symbol"].description == (
-        f"The instrument, in the library's canonical symbol form. From {'; '.join(symbol)}."
+        f"The instrument, in the library's canonical symbol form. From {'; '.join(symbol)}"
     )
     assert dict(columns["Symbol"].wire_keys) == {R: ("T", None), F: ("ticker",), W: ("sym",)}
     assert columns["Symbol"].supplied_by == (R, F, W)
@@ -818,7 +818,7 @@ def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
         f'WebSocket `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',
     ]
     assert columns["Timestamp"].description == (
-        f"The row's primary time, as an Instant. From {'; '.join(timestamp)}."
+        f"The row's primary time, as an Instant. From {'; '.join(timestamp)}"
     )
 
 
@@ -834,7 +834,7 @@ def test_an_underlying_column_takes_its_own_sentence() -> None:
     )
     assert underlying.description == (
         "The underlying instrument, in the library's canonical symbol form. From "
-        f'REST `underlying_ticker`: "{wire(*contracts, "UnderlyingTicker").description}".'
+        f'REST `underlying_ticker`: "{wire(*contracts, "UnderlyingTicker").description}"'
     )
 
 

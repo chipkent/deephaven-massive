@@ -3612,10 +3612,11 @@ a dataset with no asset class takes the field's own description.
    [section 7.4](#74-column-descriptions), the wire key each source renames and its quoted
    field description (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``)
    or, for a key filled from the request, the request parameter it came from
-   (`` REST: the request's `stocksTicker` parameter ``). The items are joined by "; " and
-   the sentence ends with a period, so a lowercase label such as `flat files` never starts a
-   sentence: `` The instrument, in the library's canonical symbol form. From REST `T`: "…";
-   flat files `ticker`: "…"; WebSocket `sym`: "…". ``
+   (`` REST: the request's `stocksTicker` parameter ``). The items are joined by "; ", so a
+   lowercase label such as `flat files` never starts a sentence, and the sentence ends with a
+   period unless its last quoted description already ends one inside the quote:
+   `` The instrument, in the library's canonical symbol form. From REST `T`: "…"; flat files
+   `ticker`: "…"; WebSocket `sym`: "The ticker symbol for the given stock." ``
 
 A column whose sources carry no description gets `""`, and nothing fails. The sentences of
 rules 2 and 3 are the library's statements about its own columns, not hand input about Massive,

@@ -604,6 +604,10 @@ _KEY_SENTENCES: Final[Mapping[str, str]] = {
 """The library's own sentence for each renamed key column; its description goes on to name
 the wire key or request parameter behind it on each transport."""
 
+_QUOTED_ENDS: Final = ('."', '?"', '!"')
+"""The endings of a quoted description that already closes a sentence, so the key column's
+"From …" sentence takes no period after the closing quote."""
+
 _Contribution = tuple[Transport, SourceColumn]
 """One column one source of a dataset contributes, with the source's transport."""
 
@@ -690,7 +694,10 @@ def _description(
             if part not in parts:
                 parts.append(part)
         # One sentence after the library's own, so a lowercase label never starts a sentence.
-        return f"{_KEY_SENTENCES[name]} From {'; '.join(parts)}."
+        # A quote that already ends the sentence inside it gets no second period after it.
+        listed = "; ".join(parts)
+        end = "" if listed.endswith(_QUOTED_ENDS) else "."
+        return f"{_KEY_SENTENCES[name]} From {listed}{end}"
     for _, column in own:
         described = column.field.description_for(asset_class) if column.field else ""
         if described:
