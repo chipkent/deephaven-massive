@@ -567,9 +567,11 @@ def test_a_rejected_key_fails_every_stream(
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    fake_ws_server.auth_replies.append("auth_failed")
     q = harness.query(TRADES, ["AAPL"])
     result = q.blink()
+    harness.subscribed("T.AAPL")  # attached: the failure below cannot race the open
+    fake_ws_server.auth_replies.append("auth_failed")  # for the reconnect
+    fake_ws_server.close(1011)
     harness.wait(lambda h: WsState.FAILED in h.states)
     with harness.session._core.registry_lock:
         failed = harness.connections._streams[1]
@@ -590,8 +592,10 @@ def test_a_fatal_handshake_names_the_status_and_host(
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    fake_ws_server.reject_next(404)
     result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")  # attached: the failure below cannot race the open
+    fake_ws_server.reject_next(404)  # for the reconnect
+    fake_ws_server.close(1011)
     harness.wait(lambda h: WsState.FAILED in h.states)
     [row] = connections_of(harness, dh_to_pylist)
     assert row["LastError"].startswith("the WebSocket connection to socket.test/stocks failed:")

@@ -263,12 +263,12 @@ class ChannelPlan:
                 values = self._canonical(values, symbols)
             elif unit is not None:
                 nanos, bad = masked_instants(unit, values, time_column=name == _TIMESTAMP)
-                if pc.any(bad).as_py():
+                if pc.call_function("any", [bad]).as_py():
                     label = f"{self.dataset}.{name}"
-                    for index in pc.indices_nonzero(bad).to_pylist():
+                    for index in pc.call_function("indices_nonzero", [bad]).to_pylist():
                         sent = values[index].as_py()
                         failures.append((index, mismatch_message(label, unit, sent)))
-                    failed = bad if failed is None else pc.or_(failed, bad)
+                    failed = bad if failed is None else pc.call_function("or", [failed, bad])
                 values = nanos
             arrays.append(widen(values, column_type.arrow_type))
         batch = pa.Table.from_arrays(arrays, schema=self.arrow_schema)
@@ -279,8 +279,8 @@ class ChannelPlan:
                 RowFailure(canonical_symbols[index].as_py(), message)
                 for index, message in sorted(failures)
             ]
-            batch = batch.filter(pc.invert(failed))
-        distinct = pc.unique(batch.column(_SYMBOL)).to_pylist()
+            batch = batch.filter(pc.call_function("invert", [failed]))
+        distinct = pc.call_function("unique", [batch.column(_SYMBOL)]).to_pylist()
         return Converted(
             batch,
             rejected,
@@ -298,14 +298,16 @@ class ChannelPlan:
         Returns:
             The canonical symbols; null where a symbol is not valid for the class.
         """
-        distinct = pc.unique(raw)
+        distinct = pc.call_function("unique", [raw])
         for value in distinct.to_pylist():
             if value is not None and value not in symbols:
                 symbols[value] = _canonical_or_none(self.asset_class, value, self.channel)
         mapped = pa.array(
             [symbols.get(v) if v is not None else None for v in distinct.to_pylist()], pa.string()
         )
-        return pc.take(mapped, pc.index_in(raw, value_set=distinct))
+        return pc.take(
+            mapped, pc.call_function("index_in", [raw], pc.SetLookupOptions(value_set=distinct))
+        )
 
 
 def _canonical_or_none(asset_class: AssetClass, raw: str, channel: str) -> str | None:

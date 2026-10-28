@@ -230,8 +230,8 @@ def instants(label: str, unit: TimeUnit, values: pa.Array, *, time_column: bool)
             sent it, the first value that overflows, or else the first value out of bounds.
     """
     nanos, failed = masked_instants(unit, values, time_column=time_column)
-    if pc.any(failed).as_py():
-        sent = pc.filter(pc.cast(values, pa.int64()), failed).to_pylist()
+    if pc.call_function("any", [failed]).as_py():
+        sent = pc.call_function("filter", [pc.cast(values, pa.int64()), failed]).to_pylist()
         overflow = [v for v in sent if _overflows(unit, v)]
         raise UnitMismatchError(mismatch_message(label, unit, (overflow or sent)[0]))
     return nanos
@@ -260,23 +260,45 @@ def masked_instants(
     """
     sent = pc.cast(values, pa.int64())
     if not time_column:
-        sent = pc.if_else(pc.equal(sent, 0), pa.scalar(None, pa.int64()), sent)
+        sent = pc.call_function(
+            "if_else", [pc.call_function("equal", [sent, 0]), pa.scalar(None, pa.int64()), sent]
+        )
     if unit is TimeUnit.FMV_MAGNITUDE:
         is_ns = pc.call_function("greater_equal", [sent, FMV_NS_THRESHOLD])
         any_ns = pc.call_function("any", [is_ns]).as_py()
         if any_ns is not None:  # None: every value was null, so nothing was classified
             _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
         millis = _NS_PER[TimeUnit.MILLISECONDS]
-        factor = pc.if_else(is_ns, 1, millis)
-        limit = pc.if_else(is_ns, _INT64_MAX, _INT64_MAX // millis)
+        factor = pc.call_function("if_else", [is_ns, 1, millis])
+        limit = pc.call_function("if_else", [is_ns, _INT64_MAX, _INT64_MAX // millis])
     else:
         factor = pa.scalar(_NS_PER[unit], pa.int64())
         limit = pa.scalar(_INT64_MAX // _NS_PER[unit], pa.int64())
-    fits = pc.and_(pc.less_equal(sent, limit), pc.greater_equal(sent, pc.negate(limit)))
-    nanos = pc.multiply(pc.if_else(fits, sent, pa.scalar(None, pa.int64())), factor)
-    inside = pc.and_(pc.greater_equal(nanos, MIN_INSTANT_NS), pc.less(nanos, MAX_INSTANT_NS))
-    failed = pc.and_(pc.is_valid(sent), pc.invert(pc.fill_null(inside, fill_value=False)))
-    return pc.if_else(failed, pa.scalar(None, pa.int64()), nanos), failed
+    fits = pc.call_function(
+        "and",
+        [
+            pc.call_function("less_equal", [sent, limit]),
+            pc.call_function("greater_equal", [sent, pc.call_function("negate", [limit])]),
+        ],
+    )
+    nanos = pc.call_function(
+        "multiply", [pc.call_function("if_else", [fits, sent, pa.scalar(None, pa.int64())]), factor]
+    )
+    inside = pc.call_function(
+        "and",
+        [
+            pc.call_function("greater_equal", [nanos, MIN_INSTANT_NS]),
+            pc.call_function("less", [nanos, MAX_INSTANT_NS]),
+        ],
+    )
+    failed = pc.call_function(
+        "and",
+        [
+            pc.call_function("is_valid", [sent]),
+            pc.call_function("invert", [pc.fill_null(inside, fill_value=False)]),
+        ],
+    )
+    return pc.call_function("if_else", [failed, pa.scalar(None, pa.int64()), nanos]), failed
 
 
 def mismatch_message(label: str, unit: TimeUnit, value: int) -> str:
