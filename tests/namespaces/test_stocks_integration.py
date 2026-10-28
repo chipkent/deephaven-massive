@@ -8,17 +8,17 @@ library filters the very bars in question. How to run these tests is in `docs/li
 
 from __future__ import annotations
 
-import logging
 import time
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
 import deephaven_massive as dm
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -32,13 +32,21 @@ RestRows: TypeAlias = (
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
+HalfDayReport: TypeAlias = "Callable[[str, str], list[str]]"
+FlatFileTickers: TypeAlias = (
+    "Callable[[str, date, Collection[str] | None], "
+    "tuple[list[dict[str, str | None]], frozenset[str]] | None]"
+)
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
-NotOnBasic: TypeAlias = "Callable[[str], None]"
 
 _SYMBOL = "AAPL"
 _RANGE = "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"
 _MS = 1_000_000
+_NEW_YORK = ZoneInfo("America/New_York")
+_HALF_DAYS = (date(2025, 11, 28), date(2025, 12, 24))
+"""US market half days, closing at 13:00 New York time."""
+_GROUPED = "/v2/aggs/grouped/locale/us/market/stocks/{date}"
 _DAY_NS = 86_400 * 1_000_000_000
 _STREAM_WAIT = 60.0
 """Seconds a stream test waits for its first frame; stocks trade on weekdays only."""
@@ -83,39 +91,8 @@ def _stream_evidence(
     return rows
 
 
-@pytest.mark.timeout(100)
-def test_fmv_frames_convert_to_a_current_instant(
-    live_session: dm.MassiveSession,
-    caplog: pytest.LogCaptureFixture,
-    *,
-    wait_rows: WaitRows,
-    stream_report: Report,
-    instant_text: Text,
-    evidence: Evidence,
-) -> None:
-    """Whether a WebSocket `FMV` frame's `t` converts to the current instant.
-
-    `FMV` `t` is documented in nanoseconds while the sample shows milliseconds, so the
-    library reads it by magnitude and logs once which unit it saw. Records the first rows,
-    their age, and that log line. Reading it: an instant within a day of now and the logged
-    unit settle the question; a refused stream (the key lacks the Business entitlement) skips.
-    """
-    caplog.set_level(logging.INFO, logger="deephaven_massive")
-    table = live_session.stocks.fmv(_SYMBOL).append_only()
-    rows = _stream_evidence(
-        live_session, table, wait_rows=wait_rows, report=stream_report, evidence=evidence
-    )
-    detected = [r.getMessage() for r in caplog.records if "FMV timestamps detected" in r.message]
-    evidence(f"magnitude rule log: {detected}")
-    now = time.time_ns()
-    for row in rows[:3]:
-        stamp = int(row["Timestamp"])
-        evidence(f"FMV row: Timestamp={instant_text(stamp)} age_s={(now - stamp) / 1e9:.1f} {row}")
-    if not rows:
-        pytest.skip("no FMV frame arrived (a Business key is needed; see the stream above)")
-    assert abs(now - int(rows[0]["Timestamp"])) < _DAY_NS
-
-
+@pytest.mark.needs("stocks:advanced")
+@pytest.mark.settles("21")
 @pytest.mark.timeout(100)
 def test_luld_frames_convert_to_a_current_instant(
     live_session: dm.MassiveSession,
@@ -146,11 +123,13 @@ def test_luld_frames_convert_to_a_current_instant(
     assert abs(now - int(rows[0]["Timestamp"])) < _DAY_NS
 
 
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("25")
+@pytest.mark.requests(8)
 @pytest.mark.timeout(100)
 def test_filings_rows_without_a_ticker(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
@@ -160,7 +139,6 @@ def test_filings_rows_without_a_ticker(
     rows have no `Symbol`. Reading it: any count is the answer; the library keeps such rows
     with a null `Symbol` either way.
     """
-    not_on_basic("stocks")
     filings = live_session.stocks.filings
     start, end = date(2026, 3, 1), date(2026, 3, 31)
     queries = {
@@ -181,11 +159,13 @@ def test_filings_rows_without_a_ticker(
     assert any(counts.values())
 
 
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("33")
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_stock_week_bars_start_on_monday_or_sunday(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     week_bar_report: Callable[[str, str], list[str]],
     table_rows: TableRows,
     instant_text: Text,
@@ -200,7 +180,6 @@ def test_stock_week_bars_start_on_monday_or_sunday(
     match elsewhere means the library's stock week windows need that start. The last line
     shows which bars the library's `history()` keeps.
     """
-    not_on_basic("stocks")
     lines = week_bar_report("stocksTicker", _SYMBOL)
     for line in lines:
         evidence(line)
@@ -212,9 +191,12 @@ def test_stock_week_bars_start_on_monday_or_sunday(
     assert len(lines) > 1
 
 
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("34")
+@pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_month_bars_from_mid_month_against_the_whole_month(
-    not_on_basic: NotOnBasic, *, rest_rows: RestRows, instant_text: Text, evidence: Evidence
+    *, rest_rows: RestRows, instant_text: Text, evidence: Evidence
 ) -> None:
     """Whether the range returns a partial month bar for a `{from}` inside a month.
 
@@ -223,7 +205,6 @@ def test_month_bars_from_mid_month_against_the_whole_month(
     less volume is a partial bar, which the library already avoids by starting at period
     boundaries.
     """
-    not_on_basic("stocks")
     whole = _bars(rest_rows, "month", multiplier=1, bounds=(date(2026, 3, 1), date(2026, 6, 30)))
     partial = _bars(rest_rows, "month", multiplier=1, bounds=(date(2026, 3, 15), date(2026, 6, 30)))
     for name, bars in (("from 2026-03-01", whole), ("from 2026-03-15", partial)):
@@ -235,9 +216,12 @@ def test_month_bars_from_mid_month_against_the_whole_month(
     assert partial
 
 
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("35")
+@pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_bars_of_several_units_align_to_boundaries_or_to_from(
-    not_on_basic: NotOnBasic, *, rest_rows: RestRows, instant_text: Text, evidence: Evidence
+    *, rest_rows: RestRows, instant_text: Text, evidence: Evidence
 ) -> None:
     """Whether bars of several units align to clock and calendar boundaries or to `{from}`.
 
@@ -245,7 +229,6 @@ def test_bars_of_several_units_align_to_boundaries_or_to_from(
     Reading it: stamps on :30 and :35 and on Mondays mean boundaries, as the library assumes;
     stamps at 14:32 and on Wednesdays mean `{from}`, and the library's bar windows must follow.
     """
-    not_on_basic("stocks")
     five = _bars(
         rest_rows,
         "minute",
@@ -260,3 +243,64 @@ def test_bars_of_several_units_align_to_boundaries_or_to_from(
     )
     assert five
     assert two_weeks
+
+
+def _new_york(nanos: int) -> str:
+    """Write epoch nanoseconds as UTC and New York wall time.
+
+    Returns:
+        Such as `"2025-11-28T18:00:00Z = 13:00 New York"`.
+    """
+    utc = datetime.fromtimestamp(nanos / 1e9, UTC)
+    return f"{utc:%Y-%m-%dT%H:%M:%SZ} = {utc.astimezone(_NEW_YORK):%H:%M} New York"
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("half-day stamps")
+@pytest.mark.requests(6)
+@pytest.mark.timeout(100)
+def test_half_day_stock_bars_and_their_stamps(
+    rest_rows: RestRows, *, half_day_report: HalfDayReport, evidence: Evidence
+) -> None:
+    """How REST stamps the bars of a half trading day, which closes at 13:00 New York time.
+
+    For 2025-11-28 and 2025-12-24, records `AAPL`'s range day bar, its first and last minute
+    bars, and its grouped-daily row, each stamp in UTC and New York time. Reading it: day
+    bars at midnight with minute bars ending at 12:59 confirm the library keeps a half day as
+    a whole day; a day bar stamped at 13:00 or 16:00 shows where Massive cuts it, and the
+    library's day labelling must follow.
+    """
+    lines = half_day_report("stocksTicker", _SYMBOL)
+    for line in lines:
+        evidence(line)
+    for day in _HALF_DAYS:
+        rows = [r for r in rest_rows(_GROUPED, {"date": day}, {}) if r.get("T") == _SYMBOL]
+        for row in rows:
+            evidence(f"{_SYMBOL} {day} grouped daily: t={_new_york(int(row['t']) * _MS)}")
+    assert len(lines) > 1
+
+
+@pytest.mark.needs("stocks:starter", "s3")
+@pytest.mark.settles("half-day stamps")
+@pytest.mark.timeout(100)
+def test_half_day_stock_flat_files_and_their_stamps(
+    flat_file_tickers: FlatFileTickers, *, evidence: Evidence
+) -> None:
+    """How the stock flat files stamp the bars of a half trading day.
+
+    For 2025-11-28 and 2025-12-24, records `AAPL`'s `day_aggs_v1` row and the first and last
+    rows of `minute_aggs_v1`, each `window_start` in UTC and New York time. Reading it beside
+    the REST test: the same stamps mean one day cut for both sources.
+    """
+    read = 0
+    for day in _HALF_DAYS:
+        for prefix in ("us_stocks_sip/day_aggs_v1", "us_stocks_sip/minute_aggs_v1"):
+            result = flat_file_tickers(prefix, day, [_SYMBOL])
+            if result is None:
+                evidence(f"{prefix} {day}: no file")
+                continue
+            rows = [r for r in result[0] if r["window_start"] is not None]
+            read += bool(rows)
+            stamps = [_new_york(int(str(r["window_start"]))) for r in (rows[:1] + rows[-1:])]
+            evidence(f"{prefix} {day}: {len(rows)} rows; first and last window_start {stamps}")
+    assert read

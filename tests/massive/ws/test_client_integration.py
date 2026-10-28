@@ -282,6 +282,8 @@ def probe(live_config: MassiveConfig, monkeypatch: pytest.MonkeyPatch) -> Iterat
         _CLOSED_AT[made.cluster] = time.monotonic()
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("19")
 @pytest.mark.timeout(100)
 def test_form_of_the_forex_quote_exchange_id(probe: OpenProbe, *, evidence: Evidence) -> None:
     """Whether a forex quote's `x` arrives as an integer or as decimal-digit text.
@@ -302,6 +304,8 @@ def test_form_of_the_forex_quote_exchange_id(probe: OpenProbe, *, evidence: Evid
         pytest.skip("no forex quote arrived (is the market closed?)")
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("20")
 @pytest.mark.timeout(100)
 def test_form_of_the_crypto_trade_id(probe: OpenProbe, *, evidence: Evidence) -> None:
     """Whether a crypto trade's `i` arrives as an integer or as text on the WebSocket.
@@ -321,6 +325,8 @@ def test_form_of_the_crypto_trade_id(probe: OpenProbe, *, evidence: Evidence) ->
     assert trades
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("9")
 @pytest.mark.timeout(100)
 def test_whether_an_unsubscribe_is_acknowledged(probe: OpenProbe, *, evidence: Evidence) -> None:
     """Whether Massive acknowledges an unsubscribe, and how soon frames stop.
@@ -346,6 +352,8 @@ def test_whether_an_unsubscribe_is_acknowledged(probe: OpenProbe, *, evidence: E
     assert before.rows
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("10")
 @pytest.mark.integration_limits
 @pytest.mark.timeout(100)
 def test_a_frame_of_one_thousand_topics_is_acknowledged(
@@ -384,6 +392,8 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
     assert topics
 
 
+@pytest.mark.needs("options:advanced")
+@pytest.mark.settles("11")
 @pytest.mark.integration_limits
 @pytest.mark.timeout(100)
 def test_the_options_topic_cap_counts_topics_or_contracts(
@@ -418,6 +428,8 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
     assert tickers
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("15")
 @pytest.mark.integration_limits
 @pytest.mark.timeout(100)
 def test_a_wildcard_and_an_explicit_topic_deliver_an_event_once_or_twice(

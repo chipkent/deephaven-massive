@@ -17,7 +17,13 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._massive import RestClient, Transport, WireError, source
+from deephaven_massive._massive import (
+    RestClient,
+    Transport,
+    WireEntitlementError,
+    WireError,
+    source,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -31,7 +37,6 @@ pytestmark = pytest.mark.integration
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
-NotOnBasic: TypeAlias = "Callable[[str], None]"
 
 _CONTRACT = "ESH6"
 """The front E-mini S&P 500 contract in the first quarter of 2026."""
@@ -46,7 +51,6 @@ _SCHEDULE_LIMIT = 20_000
 """The most schedule events read; a result of exactly this many is cut short."""
 
 _AGGS = "/futures/v1/aggs/{ticker}"
-_TRADES = "/futures/v1/trades/{ticker}"
 _SNAPSHOT = "/futures/v1/snapshot"
 _CONTRACTS = "/futures/v1/contracts"
 _SCHEDULES = "/futures/v1/schedules"
@@ -69,12 +73,22 @@ def _page(client: RestClient, path: str, *, query: Mapping[str, object]) -> list
 
 
 def _aggregates(
-    client: RestClient, resolution: str, *, start: datetime, end: datetime, evidence: Evidence
+    client: RestClient,
+    resolution: str,
+    *,
+    start: datetime,
+    end: datetime,
+    evidence: Evidence,
+    limit: int = 500,
 ) -> list[dict[str, Any]]:
     """Read the raw bars of the test contract at one resolution; record a refusal.
 
     Returns:
-        The bars, oldest first; empty after a refusal, which is recorded as evidence.
+        The bars, oldest first; empty when Massive rejects the request (an unknown
+        resolution), which is recorded as evidence.
+
+    Raises:
+        WireEntitlementError: When the request is refused for want of a plan.
     """
     query = {
         "ticker": _CONTRACT,
@@ -82,19 +96,22 @@ def _aggregates(
         "window_start.gte": start,
         "window_start.lt": end,
         "sort": "window_start.asc",
-        "limit": 500,
+        "limit": limit,
     }
     try:
         return _page(client, _AGGS, query=query)
+    except WireEntitlementError:
+        raise
     except WireError as error:
         evidence(f"{resolution} from {start:%Y-%m-%d}: {type(error).__name__}: {error}")
         return []
 
 
+@pytest.mark.needs("futures:starter")
+@pytest.mark.settles("23")
 def test_where_the_futures_snapshot_carries_the_ticker(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     live_rest: RestClient,
     table_rows: TableRows,
     evidence: Evidence,
@@ -106,7 +123,6 @@ def test_where_the_futures_snapshot_carries_the_ticker(
     Reading it: `details.ticker` only, with `Symbol` filled, confirms the schema; a top-level
     `ticker` alone means the library must read that key instead.
     """
-    not_on_basic("futures")
     rows = _page(live_rest, _SNAPSHOT, query={"product_code": "ES", "limit": 3})
     for row in rows:
         details = row.get("details")
@@ -124,11 +140,13 @@ def test_where_the_futures_snapshot_carries_the_ticker(
     evidence(f"library snapshots({ticker}): Symbol {[r['Symbol'] for r in library]}")
 
 
+@pytest.mark.needs("futures:basic")
+@pytest.mark.settles("29")
+@pytest.mark.requests(8)
 @pytest.mark.timeout(100)
 def test_the_session_after_a_holiday_and_year_candles(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     live_rest: RestClient,
     table_rows: TableRows,
     instant_text: Text,
@@ -136,14 +154,14 @@ def test_the_session_after_a_holiday_and_year_candles(
 ) -> None:
     """When the session after a holiday opens, and how year candles and their filters behave.
 
-    Records the ES schedule around Martin Luther King Day 2026, the first trades of the
-    2026-01-20 session, the library's minute bars of that session, and the 1-year candles of
-    `ESH6` from 2025-01-01 and from mid-year 2025-06-15. Reading it: a session opening at or
-    before the previous regular open, with its bars kept by the library, confirms the 4-day
-    margin covers it; a 2025 candle returned for the mid-year filter means `window_start`
-    filters match the candle's start (snap), its absence that they do not.
+    Records the ES schedule around Martin Luther King Day 2026, the last minute bar before the
+    2026-01-20 session and its first minute bars (read raw, from 2026-01-16), the library's
+    minute bars of that session, and the 1-year candles of `ESH6` from 2025-01-01 and from
+    mid-year 2025-06-15. Reading it: a session opening at or before the previous regular open,
+    with its bars kept by the library, confirms the 4-day margin covers it; a 2025 candle
+    returned for the mid-year filter means `window_start` filters match the candle's start
+    (snap), its absence that they do not.
     """
-    not_on_basic("futures")
     schedule = _page(
         live_rest,
         _SCHEDULES,
@@ -156,18 +174,26 @@ def test_the_session_after_a_holiday_and_year_candles(
     )
     for event in schedule:
         evidence(f"ES schedule: {event}")
-    trades = _page(
+    raw = _aggregates(
         live_rest,
-        _TRADES,
-        query={
-            "ticker": _CONTRACT,
-            "session_end_date": _HOLIDAY_SESSION,
-            "sort": "timestamp.asc",
-            "limit": 5,
-        },
+        "1min",
+        start=datetime(2026, 1, 16, tzinfo=UTC),
+        end=datetime(2026, 1, 20, 12, tzinfo=UTC),
+        evidence=evidence,
+        limit=50_000,
     )
-    for trade in trades:
-        evidence(f"first trades of {_HOLIDAY_SESSION}: {instant_text(int(trade['timestamp']))}")
+    session = [bar for bar in raw if bar.get("session_end_date") == _HOLIDAY_SESSION.isoformat()]
+    before = [bar for bar in raw if bar.get("session_end_date") != _HOLIDAY_SESSION.isoformat()]
+    if before:
+        last = before[-1]
+        evidence(
+            f"last minute bar before the holiday session: "
+            f"{instant_text(int(last['window_start']))} (session {last.get('session_end_date')})"
+        )
+    for bar in session[:3]:
+        evidence(
+            f"first minute bars of {_HOLIDAY_SESSION}: {instant_text(int(bar['window_start']))}"
+        )
     minutes = table_rows(
         live_session.futures.bars(_CONTRACT).history(_HOLIDAY_SESSION, _HOLIDAY_SESSION)
     )
@@ -184,14 +210,16 @@ def test_the_session_after_a_holiday_and_year_candles(
         ]
         evidence(f"1year candles from {start:%Y-%m-%d}: {shown}")
     assert schedule
-    assert trades
+    assert session, f"no minute bar of the {_HOLIDAY_SESSION} session among {len(raw)} read"
 
 
+@pytest.mark.needs("futures:basic")
+@pytest.mark.settles("36")
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_futures_sessions_end_only_on_weekdays(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
@@ -202,7 +230,6 @@ def test_futures_sessions_end_only_on_weekdays(
     confirms that requesting weekday sessions only is complete; any weekend session means the
     library's session iteration must include those days.
     """
-    not_on_basic("futures")
     rows = table_rows(
         live_session.futures.schedules(
             product_code=list(_PRODUCTS),
@@ -226,11 +253,13 @@ def test_futures_sessions_end_only_on_weekdays(
     assert rows
 
 
+@pytest.mark.needs("futures:basic")
+@pytest.mark.settles("40")
+@pytest.mark.requests(10)
 @pytest.mark.timeout(100)
 def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     live_rest: RestClient,
     table_rows: TableRows,
     instant_text: Text,
@@ -246,7 +275,6 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     pairs that shift with the start align to `{from}`, and dates cannot select them. A refused
     resolution is recorded and the rest still run.
     """
-    not_on_basic("futures")
     end = datetime(2026, 3, 21, tzinfo=UTC)
     requests = (
         ("1session", datetime(2026, 1, 1, tzinfo=UTC)),
@@ -279,11 +307,13 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     assert shown
 
 
+@pytest.mark.needs("futures:basic")
+@pytest.mark.settles("futures ticker shapes")
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_shapes_of_futures_contract_tickers(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     live_rest: RestClient,
     table_rows: TableRows,
     evidence: Evidence,
@@ -295,7 +325,6 @@ def test_shapes_of_futures_contract_tickers(
     single contract inside that shape confirms the ticker grammar; anything else extends it,
     or is left to the handling of unknown symbols.
     """
-    not_on_basic("futures")
     singles = _page(live_rest, _CONTRACTS, query={"product_code": "NG", "limit": 1000})
     combos = _page(live_rest, _CONTRACTS, query={"type": "combo", "limit": 50})
     tickers = sorted({str(row.get("ticker")) for row in singles})

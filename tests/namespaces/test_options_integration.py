@@ -16,7 +16,13 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._massive import RestClient, Transport, WireError, source
+from deephaven_massive._massive import (
+    RestClient,
+    Transport,
+    WireEntitlementError,
+    WireError,
+    source,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -31,7 +37,7 @@ pytestmark = pytest.mark.integration
 # Fixture types, repeated in each live module: test modules may not import from conftest.
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
-NotOnBasic: TypeAlias = "Callable[[str], None]"
+HalfDayReport: TypeAlias = "Callable[[str, str], list[str]]"
 
 _CONTRACTS = "/v3/reference/options/contracts"
 _CHAIN = "/v3/snapshot/options/{underlyingAsset}"
@@ -39,6 +45,9 @@ _SNAPSHOT = "/v3/snapshot"
 
 _UNDERLYINGS = ("SPX", "I:SPX", "SPXW", "NDX", "NDXP", "VIX", "VIXW", "BRK.B", "BRKB")
 """Underlyings whose spelling the options endpoints may not agree on."""
+
+_SNAPSHOT_PLAN = "Options Starter ($29/month)"
+"""The plan of the chain and unified snapshots of options."""
 
 _CONTRACT_PAGE = 1000
 _CHAIN_PAGE = 250
@@ -79,16 +88,24 @@ def _raw(
 ) -> list[dict[str, Any]]:
     """Read the raw rows of a request's first page; record a refusal as evidence.
 
-    A refusal (an unknown underlying, a missing entitlement) is itself evidence, so it is
-    recorded and the check goes on.
+    A rejection (an unknown underlying) is itself evidence, so it is recorded and the check
+    goes on; so is a snapshot refused for want of Options Starter, labelled "not entitled".
 
     Returns:
-        The rows; empty after a refusal.
+        The rows; empty after a rejection or a refused snapshot.
+
+    Raises:
+        WireEntitlementError: When the contracts reference itself is refused.
     """
     path_params = {"underlyingAsset": params["underlyingAsset"]} if "{" in path else {}
     query = {key: value for key, value in params.items() if key != "underlyingAsset"}
     try:
         return client.get(source(Transport.REST, path), path_params, query).rows
+    except WireEntitlementError as error:
+        if path == _CONTRACTS:
+            raise
+        evidence(f"{path} {dict(params)}: not entitled: needs {_SNAPSHOT_PLAN} ({error})")
+        return []
     except WireError as error:
         evidence(f"{path} {dict(params)}: {type(error).__name__}: {error}")
         return []
@@ -102,6 +119,8 @@ def _library(build: Callable[[], Query], table_rows: TableRows) -> list[dict[str
     """
     try:
         return table_rows(build().fetch())
+    except dm.EntitlementError as error:
+        return f"not entitled: needs {_SNAPSHOT_PLAN} ({error})"
     except (dm.MassiveError, ValueError) as error:
         return f"{type(error).__name__}: {error}"
 
@@ -117,7 +136,10 @@ def _root_contracts(
     the evidence.
 
     Returns:
-        The root's contracts; empty after a refusal, which is recorded.
+        The root's contracts; empty after a rejection, which is recorded.
+
+    Raises:
+        WireEntitlementError: When the listing is refused for want of a plan.
     """
     prefix = f"O:{root}"
     found: list[dict[str, Any]] = []
@@ -133,6 +155,8 @@ def _root_contracts(
             passed = last[: len(prefix)] > prefix
             if passed or len(found) >= _EXAMPLES or pages >= _MAX_PAGES:
                 break
+    except WireEntitlementError:
+        raise
     except WireError as error:
         evidence(f"{_CONTRACTS} {dict(query)}: {type(error).__name__}: {error}")
     evidence(
@@ -142,11 +166,13 @@ def _root_contracts(
     return found
 
 
+@pytest.mark.needs("options:basic")
+@pytest.mark.settles("index underlying spelling", "BRK.B underlying")
+@pytest.mark.requests(40)
 @pytest.mark.timeout(100)
 def test_underlying_spelling_on_the_options_endpoints(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     live_rest: RestClient,
     table_rows: TableRows,
     evidence: Evidence,
@@ -162,7 +188,6 @@ def test_underlying_spelling_on_the_options_endpoints(
     sends `I:SPX` percent-encoded, so an `I:SPX` chain result counts only if the encoded-colon
     check of the indices tests passes.
     """
-    not_on_basic("options")
     answered = 0
     options = live_session.options
     for underlying in _UNDERLYINGS:
@@ -215,11 +240,12 @@ def test_underlying_spelling_on_the_options_endpoints(
     assert answered
 
 
+@pytest.mark.needs("options:starter")
+@pytest.mark.settles("adjusted deliverables")
 @pytest.mark.timeout(100)
 def test_deliverable_fields_of_adjusted_and_standard_contracts(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     live_rest: RestClient,
     table_rows: TableRows,
     evidence: Evidence,
@@ -238,7 +264,6 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
     digit can tell. A root found by neither lookup, with the page counts showing the listing
     was read past it, is not kept by Massive for that day.
     """
-    not_on_basic("options")
     found = 0
     for root, underlying, listed in _ADJUSTED:
         evidence(f"{root} (underlying {underlying}, as of {listed}):")
@@ -271,3 +296,34 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
             )
             evidence(f"    library contracts({ticker}): {shown}")
     assert found
+
+
+@pytest.mark.needs("options:starter")
+@pytest.mark.settles("half-day stamps")
+@pytest.mark.timeout(100)
+def test_half_day_option_bars_and_their_stamps(
+    live_rest: RestClient, *, half_day_report: HalfDayReport, evidence: Evidence
+) -> None:
+    """How REST stamps an option contract's bars on a half trading day (13:00 New York close).
+
+    Picks one SPY contract listed on 2025-11-28 and expiring after 2025-12-24, and records its
+    range day bar and first and last minute bars on both half days, in UTC and New York time.
+    Reading it: options trade until 13:00 (or 13:15 for index options) on a half day; the
+    stamps show whether the library's day label holds for them.
+    """
+    contracts = live_rest.get(
+        source(Transport.REST, _CONTRACTS),
+        {},
+        {
+            "underlying_ticker": "SPY",
+            "as_of": date(2025, 11, 28),
+            "expiration_date.gte": date(2026, 1, 16),
+            "limit": 1,
+        },
+    ).rows
+    assert contracts, "no SPY contract listed on 2025-11-28"
+    ticker = str(contracts[0]["ticker"])
+    lines = half_day_report("optionsTicker", ticker)
+    for line in lines:
+        evidence(line)
+    assert lines

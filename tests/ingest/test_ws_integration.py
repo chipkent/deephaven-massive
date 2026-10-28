@@ -55,9 +55,11 @@ def _wait_for_state(
         pause.wait(0.5)
 
 
+@pytest.mark.needs("stocks:starter")
+@pytest.mark.settles("8")
 @pytest.mark.timeout(110)
 def test_text_of_the_delayed_key_refusal_on_the_real_time_host(
-    live_env: Callable[[str], str],
+    delayed_key: str,
     *,
     wait_rows: WaitRows,
     stream_report: Report,
@@ -66,13 +68,15 @@ def test_text_of_the_delayed_key_refusal_on_the_real_time_host(
     """The exact text of the refusal a delayed key gets on the real-time host.
 
     The library reads a refusal mentioning "real-time" as the server's verdict that the key
-    lacks real-time data. Pins stocks to `socket.massive.com` with `MASSIVE_DELAYED_API_KEY`,
+    lacks real-time data. Pins stocks to `socket.massive.com` with a delayed key
+    (`MASSIVE_DELAYED_API_KEY`, or the main key when Stocks Starter or Developer is declared),
     subscribes `T.AAPL`, and records the stream's error and the connection's last error.
     Reading it: text containing "real-time" confirms the match; any other text is what the
     match must look for instead.
     """
-    key = live_env("MASSIVE_DELAYED_API_KEY")
-    config = dm.MassiveConfig(api_key=key, ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"})
+    config = dm.MassiveConfig(
+        api_key=delayed_key, ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"}
+    )
     session = dm.MassiveSession(config)
     try:
         table = session.stocks.trades("AAPL").append_only()
@@ -85,6 +89,8 @@ def test_text_of_the_delayed_key_refusal_on_the_real_time_host(
         session.close()
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("12")
 @pytest.mark.integration_limits
 @pytest.mark.timeout(100)
 def test_a_second_connection_with_one_key_waits_for_a_slot(

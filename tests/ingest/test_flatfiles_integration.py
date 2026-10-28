@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._massive import Transport, WireError, sources
+from deephaven_massive._massive import Transport, WireEntitlementError, WireError, sources
 
 if TYPE_CHECKING:
     from collections import Counter
@@ -42,6 +42,8 @@ _VENUES = ("cme", "cbot", "nymex", "comex")
 _DAY_NS = 86_400 * 1_000_000_000
 
 
+@pytest.mark.needs("futures:starter", "s3")
+@pytest.mark.settles("4")
 @pytest.mark.timeout(100)
 def test_futures_files_hold_only_the_session_of_their_key(
     live_session: dm.MassiveSession,
@@ -58,6 +60,11 @@ def test_futures_files_hold_only_the_session_of_their_key(
     which holds the Sunday-evening rows), then reads the CME session bars through the library.
     Reading it: only `2026-06-01` everywhere confirms the key; any other date means the files
     are not keyed by session and the library's check would fail real reads.
+
+    Raises:
+        WireEntitlementError: When a file is refused although Futures Starter and S3 are
+            declared; the test fails.
+        EntitlementError: When the library's read is refused, likewise.
     """
     read = 0
     files = [("us_futures_{venue}/session_aggs_v1", venue) for venue in _VENUES]
@@ -65,8 +72,10 @@ def test_futures_files_hold_only_the_session_of_their_key(
     for prefix, venue in files:
         try:
             counts = flat_file_sessions(prefix, _DAY, venue)
+        except WireEntitlementError:
+            raise
         except WireError as error:
-            evidence(f"{prefix} {venue}: refused: {type(error).__name__}: {error}")
+            evidence(f"{prefix} {venue}: {type(error).__name__}: {error}")
             continue
         if counts is None:
             evidence(f"{prefix} {venue}: no file for {_DAY}")
@@ -78,11 +87,15 @@ def test_futures_files_hold_only_the_session_of_their_key(
             dm.ALL, dm.Timespan.SESSION, venue=dm.FuturesVenue.CME
         ).history(_DAY, _DAY, source=dm.HistorySource.FLAT_FILES)
         evidence(f"library CME session bars of {_DAY}: {len(table_rows(bars))} rows")
+    except dm.EntitlementError:
+        raise
     except dm.MassiveError as error:
         evidence(f"library CME session bars of {_DAY}: {type(error).__name__}: {error}")
     assert read
 
 
+@pytest.mark.needs("indices:starter", "s3")
+@pytest.mark.settles("22")
 def test_index_value_timestamps_are_nanoseconds(
     flat_file_head: FlatFileHead, *, instant_text: Text, evidence: Evidence
 ) -> None:
@@ -115,6 +128,8 @@ def _day_ns(day: date) -> int:
     return (day - date(1970, 1, 1)).days * _DAY_NS
 
 
+@pytest.mark.needs("s3")
+@pytest.mark.settles("28")
 @pytest.mark.timeout(100)
 def test_ticker_spellings_of_every_flat_file(
     flat_file_head: FlatFileHead, *, evidence: Evidence
@@ -133,8 +148,11 @@ def test_ticker_spellings_of_every_flat_file(
         venue = "cme" if "{venue}" in prefix else None
         try:
             result = flat_file_head(prefix, _DAY, venue)
+        except WireEntitlementError as error:
+            evidence(f"{prefix}: not entitled: needs that class's flat files ({error})")
+            continue
         except WireError as error:
-            evidence(f"{prefix}: refused: {type(error).__name__}: {error}")
+            evidence(f"{prefix}: {type(error).__name__}: {error}")
             continue
         if result is None:
             evidence(f"{prefix}: no file for {_DAY}")

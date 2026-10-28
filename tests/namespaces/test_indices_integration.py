@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._massive import RestClient, Transport, WireError, source
+from deephaven_massive._massive import (
+    RestClient,
+    Transport,
+    WireEntitlementError,
+    WireError,
+    source,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,35 +33,38 @@ pytestmark = pytest.mark.integration
 # Fixture types, repeated in each live module: test modules may not import from conftest.
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
-NotOnBasic: TypeAlias = "Callable[[str], None]"
+HalfDayReport: TypeAlias = "Callable[[str, str], list[str]]"
 
-_INDEX = "I:SPX"
 _DAY = date(2026, 6, 1)
 """A past Monday, inside a Basic plan's two years of history, for the endpoints that take a date."""
 
-_RAW_REQUESTS: tuple[tuple[str, dict[str, object], dict[str, object]], ...] = (
-    ("/v2/aggs/ticker/{indicesTicker}/prev", {"indicesTicker": _INDEX}, {}),
-    (
-        "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}",
-        {
-            "indicesTicker": _INDEX,
-            "multiplier": 1,
-            "timespan": "day",
-            "from": _DAY,
-            "to": _DAY,
-        },
-        {},
-    ),
-    ("/v1/open-close/{indicesTicker}/{date}", {"indicesTicker": _INDEX, "date": _DAY}, {}),
-    ("/v3/snapshot/indices", {}, {"ticker.any_of": [_INDEX]}),
-    ("/v3/snapshot", {}, {"ticker.any_of": [_INDEX]}),
-    (
-        "/v1/indicators/sma/{stockTicker}",
-        {"stockTicker": _INDEX},
-        {"timespan": "day", "window": 10, "limit": 2},
-    ),
-)
-"""One request of each REST endpoint that serves an index, with its path values and query."""
+_SNAPSHOTS_PLAN = "Indices Starter ($49/month)"
+"""The plan of the indices snapshot and the unified snapshot of an index."""
+
+
+def _raw_requests(index: str) -> tuple[tuple[str, dict[str, object], dict[str, object]], ...]:
+    """Return one request of each REST endpoint that serves an index.
+
+    Returns:
+        Each request's path template, path values, and query.
+    """
+    return (
+        ("/v2/aggs/ticker/{indicesTicker}/prev", {"indicesTicker": index}, {}),
+        (
+            "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}",
+            {"indicesTicker": index, "multiplier": 1, "timespan": "day", "from": _DAY, "to": _DAY},
+            {},
+        ),
+        ("/v1/open-close/{indicesTicker}/{date}", {"indicesTicker": index, "date": _DAY}, {}),
+        ("/v3/snapshot/indices", {}, {"ticker.any_of": [index]}),
+        ("/v3/snapshot", {}, {"ticker.any_of": [index]}),
+        (
+            "/v1/indicators/sma/{stockTicker}",
+            {"stockTicker": index},
+            {"timespan": "day", "window": 10, "limit": 2},
+        ),
+    )
+
 
 _TICKER_KEYS = ("T", "ticker", "symbol", "underlying")
 
@@ -71,47 +80,57 @@ def _spellings(value: object) -> dict[str, object]:
     return {key: value[key] for key in _TICKER_KEYS if key in value}
 
 
+@pytest.mark.needs("indices:basic")
+@pytest.mark.settles("26")
+@pytest.mark.requests(2)
 def test_a_percent_encoded_index_ticker_in_a_path_reads_as_the_index(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
+    index_symbol: str,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether Massive reads `I%3ASPX` in a path as `I:SPX`.
+    """Whether Massive reads a percent-encoded colon in a path (`I%3ASPX`) as `I:SPX`.
 
-    The library percent-encodes every path value whole, so `/prev` of `I:SPX` is requested as
-    `/v2/aggs/ticker/I%3ASPX/prev`. Passes when the library's `fetch()` returns one row for
-    `I:SPX`. A failure (no row, or a 404) means a colon must be sent unencoded.
+    The library percent-encodes every path value whole, so `/prev` of an index is requested
+    as `/v2/aggs/ticker/I%3A<index>/prev`. Uses `I:SPX`, or `I:NDX` when Indices is on Basic,
+    which excludes SPX. Passes when the library's `fetch()` returns one row for the index. A
+    failure (no row, or a 404) means a colon must be sent unencoded.
     """
-    not_on_basic("indices")
-    rows = table_rows(live_session.indices.bars(_INDEX, dm.Timespan.DAY).fetch())
-    evidence(f"library fetch() of /v2/aggs/ticker/I%3ASPX/prev: {rows}")
-    assert [row["Symbol"] for row in rows] == [_INDEX]
+    rows = table_rows(live_session.indices.bars(index_symbol, dm.Timespan.DAY).fetch())
+    evidence(f"library fetch() of /prev for {index_symbol} (sent encoded): {rows}")
+    assert [row["Symbol"] for row in rows] == [index_symbol]
 
 
+@pytest.mark.needs("indices:basic")
+@pytest.mark.settles("index ticker spelling")
+@pytest.mark.requests(14)
 @pytest.mark.timeout(110)
 def test_index_ticker_spelling_on_every_index_endpoint(
     live_session: dm.MassiveSession,
     *,
+    index_symbol: str,
     live_rest: RestClient,
-    not_on_basic: NotOnBasic,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """Which index endpoints spell an index with its `I:` prefix and which without.
 
-    Sends one raw request of each REST endpoint that serves `I:SPX` (`/prev`, the range,
-    open-close, the indices snapshot, the unified snapshot, an indicator) and records the
-    ticker keys of the body and of the first row, then the library's `Symbol` for the same
-    datasets. Reading it: an endpoint whose rows say `SPX` is one the library must read as
-    `I:SPX`; the library's `Symbol` column shows whether it already does.
+    Sends one raw request of each REST endpoint that serves the index (`I:SPX`, or `I:NDX` on
+    Indices Basic): `/prev`, the range, open-close, the indices snapshot, the unified
+    snapshot, and an indicator. Records the ticker keys of the body and of the first row,
+    then the library's `Symbol` for the same datasets. The two snapshots need Indices
+    Starter; on Basic their lines say "not entitled" and the rest still settle. Reading it: an
+    endpoint whose rows drop `I:` is one the library must read back with the prefix; the
+    library's `Symbol` column shows whether it already does.
     """
-    not_on_basic("indices")
     answered = 0
-    for path, path_params, query in _RAW_REQUESTS:
+    for path, path_params, query in _raw_requests(index_symbol):
         try:
             page = live_rest.get(source(Transport.REST, path), path_params, query)
+        except WireEntitlementError as error:
+            evidence(f"{path}: not entitled: needs {_SNAPSHOTS_PLAN} ({error})")
+            continue
         except WireError as error:
             evidence(f"{path}: {type(error).__name__}: {error}")
             continue
@@ -126,18 +145,40 @@ def test_index_ticker_spelling_on_every_index_endpoint(
         if page.rows:
             evidence(f"    first row keys and values: {page.rows[0]}")
     queries = {
-        "indices.values fetch()": live_session.indices.values(_INDEX).fetch,
-        "indices.bars(DAY) fetch()": live_session.indices.bars(_INDEX, dm.Timespan.DAY).fetch,
-        "indices.snapshots fetch()": live_session.indices.snapshots(_INDEX).fetch,
+        "indices.values fetch()": live_session.indices.values(index_symbol).fetch,
+        "indices.bars(DAY) fetch()": live_session.indices.bars(index_symbol, dm.Timespan.DAY).fetch,
+        "indices.snapshots fetch()": live_session.indices.snapshots(index_symbol).fetch,
         "indices.daily_open_close fetch()": live_session.indices.daily_open_close(
-            _INDEX, _DAY
+            index_symbol, _DAY
         ).fetch,
-        "snapshots (unified) fetch()": live_session.snapshots(_INDEX).fetch,
-        "indicators.sma fetch()": live_session.indicators.sma(_INDEX, 10, limit=2).fetch,
+        "snapshots (unified) fetch()": live_session.snapshots(index_symbol).fetch,
+        "indicators.sma fetch()": live_session.indicators.sma(index_symbol, 10, limit=2).fetch,
     }
     for name, call in queries.items():
         try:
             evidence(f"library {name}: Symbol {[r['Symbol'] for r in table_rows(call())]}")
+        except dm.EntitlementError as error:
+            evidence(f"library {name}: not entitled: needs {_SNAPSHOTS_PLAN} ({error})")
         except dm.MassiveError as error:
             evidence(f"library {name}: {type(error).__name__}: {error}")
     assert answered
+
+
+@pytest.mark.needs("indices:basic")
+@pytest.mark.settles("half-day stamps")
+@pytest.mark.requests(4)
+@pytest.mark.timeout(100)
+def test_half_day_index_bars_and_their_stamps(
+    index_symbol: str, *, half_day_report: HalfDayReport, evidence: Evidence
+) -> None:
+    """How REST stamps an index's bars on a half trading day (13:00 New York close).
+
+    For 2025-11-28 and 2025-12-24, records the index's range day bar and its first and last
+    minute bars (`I:SPX`, or `I:NDX` on Indices Basic), each in UTC and New York time. Reading
+    it: an index computed until 13:00 or past it shows whether the index day ends with the
+    stock half day; the day bar's stamp shows the library's day label holds.
+    """
+    lines = half_day_report("indicesTicker", index_symbol)
+    for line in lines:
+        evidence(line)
+    assert lines

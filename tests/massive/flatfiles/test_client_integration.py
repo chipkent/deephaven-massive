@@ -56,6 +56,8 @@ def _weekdays_before(day: date, count: int) -> list[date]:
     return found
 
 
+@pytest.mark.needs("stocks:starter", "s3")
+@pytest.mark.settles("14")
 def test_when_each_days_file_was_published(
     live_flat_files: FlatFileClient, *, live_s3_config: MassiveConfig, evidence: Evidence
 ) -> None:
@@ -83,6 +85,8 @@ def test_when_each_days_file_was_published(
     assert seen
 
 
+@pytest.mark.needs("stocks:starter", "s3")
+@pytest.mark.settles("16")
 def test_a_weekend_key_is_missing_not_refused(
     live_flat_files: FlatFileClient, *, evidence: Evidence
 ) -> None:

@@ -30,7 +30,6 @@ RestRows: TypeAlias = (
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
-NotOnBasic: TypeAlias = "Callable[[str], None]"
 
 _RECENT_NS = 4 * 86_400 * 1_000_000_000
 """How far from now a last quote or trade may lie: a forex weekend and a holiday."""
@@ -47,10 +46,11 @@ def _check(
     assert abs(age) * 1e9 < _RECENT_NS
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("2")
 def test_forex_last_quote_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -63,17 +63,17 @@ def test_forex_last_quote_timestamp_is_milliseconds(
     forex weekend and a holiday); a wrong unit lands decades away or fails the library's
     bound.
     """
-    not_on_basic("currencies")
     raw = rest_rows("/v1/last_quote/currencies/{from}/{to}", {"from": "EUR", "to": "USD"}, {})
     evidence(f"raw /v1/last_quote/currencies/EUR/USD: {raw}")
     rows = table_rows(live_session.forex.quotes("C:EURUSD").fetch())
     _check("forex.quotes fetch()", rows, column="Timestamp", text=instant_text, evidence=evidence)
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("2")
 def test_crypto_last_trade_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -86,17 +86,17 @@ def test_crypto_last_trade_timestamp_is_milliseconds(
     forex weekend and a holiday); a wrong unit lands decades away or fails the library's
     bound.
     """
-    not_on_basic("currencies")
     raw = rest_rows("/v1/last/crypto/{from}/{to}", {"from": "BTC", "to": "USD"}, {})
     evidence(f"raw /v1/last/crypto/BTC/USD: {raw}")
     rows = table_rows(live_session.crypto.trades("X:BTCUSD").fetch())
     _check("crypto.trades fetch()", rows, column="Timestamp", text=instant_text, evidence=evidence)
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("2")
 def test_forex_conversion_last_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -109,7 +109,6 @@ def test_forex_conversion_last_timestamp_is_milliseconds(
     of now (a forex weekend and a holiday); a wrong unit lands decades away or fails the
     library's bound.
     """
-    not_on_basic("currencies")
     raw = rest_rows("/v1/conversion/{from}/{to}", {"from": "EUR", "to": "USD"}, {})
     evidence(f"raw /v1/conversion/EUR/USD: {raw}")
     rows = table_rows(live_session.forex.conversion("EUR", "USD").fetch())

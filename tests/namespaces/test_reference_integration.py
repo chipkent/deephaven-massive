@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from deephaven_massive._massive import RestClient, Transport, WireError, source
+from deephaven_massive._massive import (
+    RestClient,
+    Transport,
+    WireEntitlementError,
+    WireError,
+    source,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -54,6 +60,9 @@ def _repeated(keys: Iterable[tuple[object, ...]]) -> list[tuple[tuple[object, ..
     return [(key, count) for key, count in Counter(keys).most_common() if count > 1]
 
 
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("24")
+@pytest.mark.requests(2)
 def test_key_of_the_ticker_event_type(
     live_session: dm.MassiveSession,
     *,
@@ -76,6 +85,8 @@ def test_key_of_the_ticker_event_type(
     assert rows
 
 
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("30")
 @pytest.mark.timeout(110)
 def test_inactive_tickers_on_several_rows(
     live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
@@ -101,6 +112,8 @@ def test_inactive_tickers_on_several_rows(
     assert rows
 
 
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("31")
 def test_exchanges_are_keyed_by_asset_class_and_id(
     live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
 ) -> None:
@@ -115,6 +128,8 @@ def test_exchanges_are_keyed_by_asset_class_and_id(
     assert rows
 
 
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("32")
 def test_conditions_are_keyed_by_asset_class_type_and_id(
     live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
 ) -> None:
@@ -130,6 +145,8 @@ def test_conditions_are_keyed_by_asset_class_type_and_id(
     assert rows
 
 
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("stock ticker spellings")
 @pytest.mark.timeout(110)
 def test_stock_ticker_spellings_outside_the_documented_forms(
     live_rest: RestClient, *, evidence: Evidence
@@ -157,6 +174,9 @@ def test_stock_ticker_spellings_outside_the_documented_forms(
     for path in _PARTNER_PAGES:
         try:
             rows = live_rest.get(source(Transport.REST, path), {}, {"limit": 100}).rows
+        except WireEntitlementError as error:
+            evidence(f"{path}: not entitled: needs the partner's $99/month add-on ({error})")
+            continue
         except WireError as error:
             evidence(f"{path}: {type(error).__name__}: {error}")
             continue

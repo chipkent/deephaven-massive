@@ -2296,7 +2296,11 @@ def test_the_default_run_deselects_the_live_tests() -> None:
 def test_both_live_markers_are_registered() -> None:
     markers = _pytest_settings()["markers"]
     assert isinstance(markers, list)
-    assert {str(line).split(":")[0] for line in markers} >= {"integration", "integration_limits"}
+    assert {str(line).split(":")[0] for line in markers} >= {
+        "integration",
+        "integration_limits",
+        "integration_smoke",
+    }
 
 
 def test_the_live_marker_check_runs_before_deselection() -> None:

@@ -18,29 +18,33 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import faulthandler
 import gzip
 import importlib
 import os
 import sys
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
 from deephaven_server import Server
 
+from deephaven_massive._errors import EntitlementError
 from deephaven_massive._massive import (
     FlatFileClient,
     ReadColumn,
     ReadPlan,
     RestClient,
     Transport,
+    WireEntitlementError,
     object_key,
     source,
 )
@@ -52,6 +56,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive import MassiveConfig, MassiveSession
+    from deephaven_massive._massive import RestPath
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
@@ -447,6 +452,9 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
 
 _INTEGRATION = "integration"
 _LIMITS = "integration_limits"
+_SMOKE = "integration_smoke"
+_SEPARATE = (_LIMITS, _SMOKE)
+"""The live tiers that `-m integration` leaves out: each runs only when `-m` names it."""
 _INTEGRATION_FILE_SUFFIX = "_integration.py"
 
 _EVIDENCE: Final = pytest.StashKey[list[tuple[str, str]]]()
@@ -458,8 +466,248 @@ _EVIDENCE_FILE = "live-evidence.log"
 _EVIDENCE_LOCK = threading.Lock()
 """Guards the evidence list and file, so a line may be recorded from any thread."""
 
-_BASIC_SUBSCRIPTION = "MASSIVE_LIVE_BASIC_SUBSCRIPTION"
-"""Names the subscription the key's account holds on Massive's free Basic tier."""
+_PLANS_VARIABLE = "MASSIVE_LIVE_PLANS"
+"""The key's plans, as `stocks=starter,currencies=starter,s3`; unnamed classes are Basic."""
+
+_TIERS: Final = {
+    "stocks": ("basic", "starter", "developer", "advanced", "business"),
+    "options": ("basic", "starter", "developer", "advanced", "business"),
+    "indices": ("basic", "starter", "advanced", "business"),
+    "currencies": ("basic", "starter", "business"),
+    "futures": ("basic", "starter", "developer", "advanced", "business"),
+}
+"""Each class's plans, cheapest first (https://massive.com/pricing)."""
+
+_PRICES: Final = {
+    ("stocks", "starter"): "$29",
+    ("stocks", "developer"): "$79",
+    ("stocks", "advanced"): "$199",
+    ("stocks", "business"): "$2,499",
+    ("options", "starter"): "$29",
+    ("options", "developer"): "$79",
+    ("options", "advanced"): "$199",
+    ("options", "business"): "$1,999",
+    ("indices", "starter"): "$49",
+    ("indices", "advanced"): "$99",
+    ("indices", "business"): "$2,500",
+    ("currencies", "starter"): "$49",
+    ("currencies", "business"): "$999",
+    ("futures", "starter"): "$29",
+    ("futures", "developer"): "$79",
+    ("futures", "advanced"): "$199",
+    ("futures", "business"): "$999 a venue",
+}
+"""The monthly price of each paid plan (https://massive.com/pricing, https://massive.com/business)."""
+
+_S3 = "s3"
+_SOME_BASIC = "some:basic"
+"""A requirement met when at least one class is declared Basic: the rate-limit tests need one."""
+
+_BASIC_RATE = 5
+"""REST requests a minute Massive allows each class on Basic; paid plans have no limit."""
+
+_PACE_LOCK = threading.Lock()
+_PACE_CALLS: dict[str, deque[float]] = {}
+"""When each Basic class's recent REST requests started (`time.monotonic()`), run-wide."""
+
+_REQUEST_SECONDS = 13.0
+"""Seconds of timeout a live test gets for each REST request it makes to a Basic class."""
+
+_DEFAULT_REQUESTS = 10
+"""The REST requests a live test is assumed to make when it declares none (`requests`)."""
+
+_SETTLED: Final = pytest.StashKey[dict[str, tuple[tuple[str, ...], tuple[str, ...]]]]()
+"""Each live test's `settles` items and `needs` requirements, by test id, for the summary."""
+
+
+def _declared_plans() -> tuple[dict[str, str], bool]:
+    """Read `MASSIVE_LIVE_PLANS`: each class's declared plan, and whether S3 is declared.
+
+    Returns:
+        The plan of every class (Basic unless named) and the S3 flag.
+
+    Raises:
+        pytest.UsageError: If an entry names an unknown class or plan.
+    """
+    plans = dict.fromkeys(_TIERS, "basic")
+    s3 = False
+    for entry in os.environ.get(_PLANS_VARIABLE, "").lower().replace(" ", "").split(","):
+        if not entry:
+            continue
+        if entry == _S3:
+            s3 = True
+            continue
+        name, _, tier = entry.partition("=")
+        if tier not in _TIERS.get(name, ()):
+            raise pytest.UsageError(
+                f"{_PLANS_VARIABLE}: {entry!r} is not <class>=<plan> or s3; classes and plans: "
+                + "; ".join(f"{c}: {', '.join(t)}" for c, t in _TIERS.items())
+            )
+        plans[name] = tier
+    return plans, s3
+
+
+def _plan_text(requirement: str) -> str:
+    """Name a requirement for a person: its plan and monthly price.
+
+    Args:
+        requirement: `"<class>:<plan>"`, `"s3"`, or `"some:basic"`.
+
+    Returns:
+        Such as `"Currencies Starter ($49/month)"`.
+    """
+    if requirement == _S3:
+        return "S3 flat files (MASSIVE_S3_* credentials, on the class's Starter plan)"
+    if requirement == _SOME_BASIC:
+        return "at least one class left on Basic"
+    name, _, tier = requirement.partition(":")
+    price = "free" if tier == "basic" else f"{_PRICES[name, tier]}/month"
+    return f"{name.capitalize()} {tier.capitalize()} ({price})"
+
+
+def _unmet(requirements: tuple[str, ...]) -> list[str]:
+    """Return the requirements the declared plans do not meet.
+
+    Args:
+        requirements: `"<class>:<plan>"`, `"s3"`, or `"some:basic"` each.
+
+    Returns:
+        The unmet ones, in order.
+    """
+    plans, s3 = _declared_plans()
+    unmet = []
+    for requirement in requirements:
+        if requirement == _S3:
+            met = s3
+        elif requirement == _SOME_BASIC:
+            met = "basic" in plans.values()
+        else:
+            name, _, tier = requirement.partition(":")
+            tiers = _TIERS[name]
+            met = tiers.index(plans[name]) >= tiers.index(tier)
+        if not met:
+            unmet.append(requirement)
+    return unmet
+
+
+def _requirements(item: pytest.Item) -> tuple[str, ...]:
+    """Return every requirement a test's `needs` markers declare.
+
+    Args:
+        item: The test.
+
+    Returns:
+        The requirements, in marker order.
+    """
+    return tuple(str(arg) for marker in item.iter_markers("needs") for arg in marker.args)
+
+
+def _basic_classes(item: pytest.Item) -> list[str]:
+    """Return the classes a test reads that are declared Basic, whose requests are paced.
+
+    Args:
+        item: The test.
+
+    Returns:
+        The classes.
+    """
+    plans, _ = _declared_plans()
+    named = {r.partition(":")[0] for r in _requirements(item) if ":" in r}
+    return sorted(name for name in named if plans.get(name) == "basic")
+
+
+def _request_class(template: str, target: str) -> str | None:
+    """Return the class whose REST request limit a request counts against.
+
+    A path that names a ticker counts against the ticker's class, by its prefix (`X:` and
+    `C:` currencies, `I:` indices, `O:` options; the futures paths futures; any other stocks).
+    A path without one is placed by its words. Reference data, economy data, market status,
+    partner data, and the unified snapshot belong to no class.
+
+    Args:
+        template: The generated path template, such as `"/v2/aggs/ticker/{stocksTicker}/prev"`.
+        target: The request's path and query.
+
+    Returns:
+        `"stocks"`, `"options"`, `"indices"`, `"currencies"`, `"futures"`, or None.
+    """
+    if template.startswith("/futures/"):
+        return "futures"
+    parts = template.split("/")
+    sent = target.split("?", maxsplit=1)[0].split("/")
+    for index, part in enumerate(parts):
+        if part.startswith("{") and "icker" in part and index < len(sent):
+            ticker = unquote(sent[index])
+            prefixes = {"X:": "currencies", "C:": "currencies", "I:": "indices", "O:": "options"}
+            return prefixes.get(ticker[:2], "stocks")
+    words = (
+        ("/options", "options"),
+        ("/indices", "indices"),
+        ("/crypto", "currencies"),
+        ("/forex", "currencies"),
+        ("/fx/", "currencies"),
+        ("currencies", "currencies"),
+        ("/conversion/", "currencies"),
+        ("/stocks", "stocks"),
+        ("/v2/last/nbbo", "stocks"),
+    )
+    return next((name for word, name in words if word in template), None)
+
+
+def _pace(name: str) -> None:
+    """Wait until a request to a Basic class fits the class's 5 a minute, then count it.
+
+    The budget is shared by every request of the run (the library's own and the tests' raw
+    ones), so a run on a free key never draws a refusal of its own making.
+
+    Args:
+        name: The class.
+    """
+    pause = threading.Event()  # never set; only waits
+    while True:
+        with _PACE_LOCK:
+            calls = _PACE_CALLS.setdefault(name, deque())
+            now = time.monotonic()
+            while calls and now - calls[0] >= 60.0:
+                calls.popleft()
+            if len(calls) < _BASIC_RATE:
+                calls.append(now)
+                return
+            wait = 60.0 - (now - calls[0])
+        pause.wait(wait)
+
+
+class _Targeted(Protocol):
+    """A REST request as the wire client hands it to one attempt: its path and query."""
+
+    target: str
+
+
+@pytest.fixture(autouse=True)
+def _pace_basic_classes(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pace every REST request of a live test to a class declared Basic.
+
+    Each attempt of the wire REST client (the library's requests and the tests' raw ones)
+    waits for a place in its class's budget of 5 a minute (`_pace`); a request of a paid class,
+    or of no class, is never delayed. The library's own pacing replaces this once it lands.
+
+    Args:
+        request: The requesting test, for its markers.
+        monkeypatch: Undoes the wrapping after the test.
+    """
+    if request.node.get_closest_marker(_INTEGRATION) is None:
+        return
+    plans, _ = _declared_plans()
+    attempt = RestClient._attempt
+
+    def paced(self: RestClient, rest_path: RestPath, sent: _Targeted) -> object:
+        name = _request_class(rest_path.key, sent.target)
+        if name is not None and plans.get(name) == "basic":
+            _pace(name)
+        return attempt(self, rest_path, cast("Any", sent))
+
+    monkeypatch.setattr(RestClient, "_attempt", paced)
+
 
 _FLAT_FILE_BLOCK = 1 << 20
 """Bytes of decompressed CSV per block when a live test reads a flat file."""
@@ -472,11 +720,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     Runs first (`tryfirst`), before the `-m` deselection, so the checks cover every collected
     test, also those a default run deselects; run later, a marked unit test would already be
     deselected and escape the check. A live test without the `integration` marker would run in
-    CI, and a marked test elsewhere would never run by default. A test marked
-    `integration_limits` deliberately exceeds Massive's subscription and connection limits, so
-    it must also be a live test, and it is deselected unless the `-m` expression names
-    `integration_limits`: `-m integration` runs every live test but those, and
-    `-m integration_limits` runs only them.
+    CI, and a marked test elsewhere would never run by default. Two tiers of live tests run
+    apart: `integration_limits` (tests that deliberately exceed Massive's subscription and
+    connection limits) and `integration_smoke` (the unattended check that every dataset and
+    verb works). A test of either must also be a live test, and it is deselected unless the
+    `-m` expression names its tier: `-m integration` runs every live test but those, and
+    `-m integration_limits` or `-m integration_smoke` runs only that tier.
 
     Args:
         config: The pytest configuration, for the `-m` expression and the deselection hook.
@@ -484,8 +733,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
     Raises:
         pytest.UsageError: If a test of a `*_integration.py` file lacks the `integration`
-            marker, a test of another file has it, or a test has `integration_limits` without
-            `integration`; the message lists them.
+            marker, a test of another file has it, or a test has `integration_limits` or
+            `integration_smoke` without `integration`; the message lists them.
     """
     wrong = [
         item.nodeid
@@ -501,28 +750,62 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     unpaired = [
         item.nodeid
         for item in items
-        if item.get_closest_marker(_LIMITS) is not None
+        if any(item.get_closest_marker(tier) is not None for tier in _SEPARATE)
         and item.get_closest_marker(_INTEGRATION) is None
     ]
     if unpaired:
         raise pytest.UsageError(
-            "a test marked integration_limits must also be marked integration: "
-            + ", ".join(unpaired)
+            "a test marked integration_limits or integration_smoke must also be marked "
+            "integration: " + ", ".join(unpaired)
         )
-    if _LIMITS in (config.option.markexpr or ""):
+    expression = config.option.markexpr or ""
+    for tier in _SEPARATE:
+        if tier in expression:
+            continue
+        tiered = [item for item in items if item.get_closest_marker(tier) is not None]
+        if tiered:
+            config.hook.pytest_deselected(items=tiered)
+            items[:] = [item for item in items if item.get_closest_marker(tier) is None]
+    _arrange_live_tests(config, items)
+
+
+def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Order, time, and register the live tests for the run's summary.
+
+    The tests that need a class left on Basic (the rate-limit checks) run first, while their
+    class's minute is unspent. A test reading a class declared Basic gets a timeout scaled to
+    its REST requests (its `requests` marker, else 10), since each waits for a place in the
+    class's 5 a minute. Each test's `settles` items and `needs` are kept for the summary.
+
+    Args:
+        config: The pytest configuration, whose stash keeps the items.
+        items: The selected tests; reordered in place.
+    """
+    live = [item for item in items if item.get_closest_marker(_INTEGRATION) is not None]
+    if not live:
         return
-    limits = [item for item in items if item.get_closest_marker(_LIMITS) is not None]
-    if limits:
-        config.hook.pytest_deselected(items=limits)
-        items[:] = [item for item in items if item.get_closest_marker(_LIMITS) is None]
+    items.sort(key=lambda item: _SOME_BASIC not in _requirements(item))
+    settled = config.stash.setdefault(_SETTLED, {})
+    for item in live:
+        settles = tuple(str(a) for m in item.iter_markers("settles") for a in m.args)
+        settled[item.nodeid] = (settles, _requirements(item))
+        if not _basic_classes(item):
+            continue
+        marker = item.get_closest_marker("requests")
+        count = int(marker.args[0]) if marker is not None else _DEFAULT_REQUESTS
+        current = item.get_closest_marker("timeout")
+        base = float(current.args[0]) if current is not None and current.args else 100.0
+        item.add_marker(pytest.mark.timeout(base + _REQUEST_SECONDS * count), append=False)
 
 
 @pytest.fixture(autouse=True)
 def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
-    """Skip a live test under CI, or when `MASSIVE_API_KEY` is not set.
+    """Skip a live test under CI, without `MASSIVE_API_KEY`, or when the plans fall short.
 
     It runs before the test's own fixtures, so a skipped live test touches nothing. `CI` is
-    checked too, so a key added to CI's secrets later still never reaches Massive from CI.
+    checked too, so a key added to CI's secrets later still never reaches Massive from CI. A
+    test's `needs` markers name the plans it needs; one the declared plans
+    (`MASSIVE_LIVE_PLANS`) do not meet skips, naming the plan and its monthly price.
 
     Args:
         request: The requesting test, for its markers.
@@ -532,6 +815,9 @@ def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
     if os.environ.get("CI", "").strip():
         pytest.skip("live tests never run in CI")
     _required_env("MASSIVE_API_KEY")
+    unmet = _unmet(_requirements(request.node))
+    if unmet:
+        pytest.skip("needs " + "; ".join(_plan_text(r) for r in unmet))
 
 
 def _required_env(name: str) -> str:
@@ -549,6 +835,119 @@ def _required_env(name: str) -> str:
     return value
 
 
+_PLANS: Final = {
+    "test_crypto_integration.py": "a Currencies plan that includes this data",
+    "test_forex_integration.py": "a Currencies plan that includes this data",
+    "test_timestamps_integration.py": "a Currencies plan that includes this data",
+    "test_stocks_integration.py": "a Stocks plan that includes this data",
+    "test_options_integration.py": "an Options plan that includes this data",
+    "test_indices_integration.py": "an Indices plan that includes this data",
+    "test_futures_integration.py": "a Futures plan that includes this data",
+    "test_reference_integration.py": "a plan that includes this reference data",
+    "test_flatfiles_integration.py": "flat-file access to this dataset",
+    "test_hosts_integration.py": "the plan this check names in its docstring",
+    "test_ws_integration.py": "the plan this check names in its docstring",
+}
+"""The plan a live test module's data needs, named in a skip when the key lacks it."""
+
+_ENTITLEMENT_MARKS: Final = ("HTTP 403", "NOT_AUTHORIZED", "not entitled", "plan may not include")
+"""Text that marks a stream's or a poll's error as a missing entitlement."""
+
+
+def not_entitled_reason(plan: str, error: object) -> str:
+    """Return the skip reason, and evidence line, of a request the key's plan does not cover.
+
+    Args:
+        plan: The plan the data needs, such as `"a Stocks plan that includes this data"`.
+        error: The refusal, as Massive or the library worded it.
+
+    Returns:
+        `"not entitled: needs <plan> (<error>)"`.
+    """
+    return f"not entitled: needs {plan} ({error})"
+
+
+def is_entitlement_text(text: object) -> bool:
+    """Return whether an error's text (a failed stream's or poll's `Error`) is a refusal.
+
+    Args:
+        text: The error text, or None.
+
+    Returns:
+        True when it holds an HTTP 403, a `NOT_AUTHORIZED` envelope, or the library's wording
+        of a refused topic.
+    """
+    return isinstance(text, str) and any(mark in text for mark in _ENTITLEMENT_MARKS)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
+    """Lift the faulthandler limit from a live test, and decide what a refusal means.
+
+    The 120 s faulthandler limit is cancelled for the call of a live test, whose own timeout,
+    scaled to its paced requests, bounds it instead.
+
+    A test that declares its plans (`needs`) runs only when they are declared held, so a
+    refusal (an `EntitlementError`, or the wire's `WireEntitlementError`: an HTTP 403 or a
+    `NOT_AUTHORIZED` envelope) contradicts the declaration: it is recorded as evidence and
+    fails the test. A live test without `needs` (the smoke tier handles its own) skips with
+    "not entitled: needs <plan>", the plan taken from the test module. Other tests are
+    untouched.
+
+    Args:
+        item: The test being run.
+
+    Yields:
+        Control to the test call.
+
+    Returns:
+        The call's result, unchanged.
+
+    Raises:
+        EntitlementError: When it escapes a test that is not a live test, or one whose
+            declared plans should have covered the request.
+        WireEntitlementError: In the same cases.
+    """
+    if item.get_closest_marker(_INTEGRATION) is not None:
+        # A live test waits on Massive's rate limits and streams, longer than the 120 s after
+        # which faulthandler would end the process; its own (scaled) timeout bounds it.
+        faulthandler.cancel_dump_traceback_later()
+    try:
+        return (yield)
+    except (EntitlementError, WireEntitlementError) as error:
+        if item.get_closest_marker(_INTEGRATION) is None:
+            raise
+        requirements = _requirements(item)
+        if requirements:
+            declared = ", ".join(_plan_text(r) for r in requirements)
+            _record(item.config, item.nodeid, f"refused although {declared} is declared: {error}")
+            raise
+        plan = _PLANS.get(item.path.name, "a plan that includes this data")
+        pytest.skip(not_entitled_reason(plan, error))
+
+
+@pytest.fixture
+def skip_if_not_entitled(
+    table_rows: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[MassiveSession, str], None]:
+    """Return a function that skips a stream or poll test whose stream was refused.
+
+    A refused stream does not raise: its row in `m.streams()` turns `FAILED` with the refusal
+    as its `Error`. Call this after recording the evidence.
+
+    Returns:
+        A function `(session, plan)`: it skips the test, naming the plan, when one of the
+        session's streams failed with a refusal.
+    """
+
+    def check(session: MassiveSession, plan: str) -> None:
+        for row in table_rows(session.streams()):
+            if row["State"] == "FAILED" and is_entitlement_text(row["Error"]):
+                pytest.skip(not_entitled_reason(plan, row["Error"]))
+
+    return check
+
+
 @pytest.fixture
 def live_env() -> Callable[[str], str]:
     """Return a function that reads a required environment variable or skips the test.
@@ -564,23 +963,75 @@ def live_env() -> Callable[[str], str]:
 
 
 @pytest.fixture
-def not_on_basic() -> Callable[[str], None]:
-    """Return a function that skips a test whose REST requests go to the run's Basic subscription.
+def index_symbol() -> str:
+    """Return the index a live test reads: `I:SPX`, or `I:NDX` when Indices is declared Basic.
 
-    A subscription on Massive's free Basic tier answers only 5 REST requests per minute, so a
-    test that sends more to it would record refusals instead of answers. The run names that
-    subscription in `MASSIVE_LIVE_BASIC_SUBSCRIPTION` (`stocks`, `options`, `indices`,
-    `currencies`, or `futures`); a test calls this with each subscription it reads.
+    Indices Basic excludes SPX, DJI, RUT, and VIX
+    (https://massive.com/knowledge-base/article/are-all-indices-available-through-the-basic-subscription-tier).
 
     Returns:
-        A function taking a subscription's name; it skips the test when the run names it.
+        The index's ticker.
+    """
+    plans, _ = _declared_plans()
+    return "I:NDX" if plans["indices"] == "basic" else "I:SPX"
+
+
+@pytest.fixture
+def require_plans() -> Callable[[tuple[str, ...]], None]:
+    """Return a function that skips a test unless the declared plans meet some requirements.
+
+    For a test whose requirements depend on its parameters (the smoke tier's), where a
+    `needs` marker cannot name them.
+
+    Returns:
+        A function taking requirements (`"<class>:<plan>"`, `"s3"`); it skips, naming each
+        unmet plan and its price.
     """
 
-    def check(subscription: str) -> None:
-        if os.environ.get(_BASIC_SUBSCRIPTION, "").strip().lower() == subscription:
-            pytest.skip(f"{subscription} is on Basic ({_BASIC_SUBSCRIPTION}): 5 requests a minute")
+    def check(requirements: tuple[str, ...]) -> None:
+        unmet = _unmet(requirements)
+        if unmet:
+            pytest.skip("needs " + "; ".join(_plan_text(r) for r in unmet))
 
     return check
+
+
+@pytest.fixture
+def basic_class() -> str:
+    """Return a class declared on Basic, preferring the one a run is least likely to need.
+
+    Returns:
+        `"indices"`, `"futures"`, `"options"`, `"stocks"`, or `"currencies"`, the first of those
+        declared Basic; the test is skipped when none is.
+    """
+    plans, _ = _declared_plans()
+    basic = [
+        n for n in ("indices", "futures", "options", "stocks", "currencies") if plans[n] == "basic"
+    ]
+    if not basic:
+        pytest.skip("needs at least one class left on Basic")
+    return basic[0]
+
+
+@pytest.fixture
+def delayed_key(live_config: MassiveConfig) -> str:
+    """Return a key with delayed stocks data: `MASSIVE_DELAYED_API_KEY`, or the main key.
+
+    The main key serves when Stocks is declared Starter or Developer, the delayed plans.
+
+    Args:
+        live_config: The live configuration, for the main key.
+
+    Returns:
+        The key; the test is skipped when there is none.
+    """
+    key = os.environ.get("MASSIVE_DELAYED_API_KEY", "").strip()
+    if key:
+        return key
+    plans, _ = _declared_plans()
+    if plans["stocks"] not in {"starter", "developer"}:
+        pytest.skip("needs a delayed Stocks key: MASSIVE_DELAYED_API_KEY, or Stocks Starter")
+    return live_config.api_key
 
 
 @pytest.fixture
@@ -600,32 +1051,157 @@ def evidence(request: pytest.FixtureRequest) -> Callable[[str], None]:
         A function taking one line of text.
     """
     config = request.config
-    records = config.stash.setdefault(_EVIDENCE, [])
-    path = config.rootpath / _EVIDENCE_FILE
     test_id = request.node.nodeid
 
     def record(line: str) -> None:
-        with _EVIDENCE_LOCK:
-            heading = not records or records[-1][0] != test_id
-            records.append((test_id, line))
-            with path.open("a", encoding="utf-8") as file:
-                if heading:
-                    file.write(f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ} {test_id}\n")
-                file.write(f"    {line}\n")
-                file.flush()
+        _record(config, test_id, line)
 
     return record
+
+
+def _record(config: pytest.Config, test_id: str, line: str) -> None:
+    """Record one evidence line: in the run's list, and appended to `live-evidence.log`.
+
+    Args:
+        config: The pytest configuration, whose stash holds the list.
+        test_id: The test's id, which heads its lines.
+        line: The line.
+    """
+    records = config.stash.setdefault(_EVIDENCE, [])
+    with _EVIDENCE_LOCK:
+        heading = not records or records[-1][0] != test_id
+        records.append((test_id, line))
+        with (config.rootpath / _EVIDENCE_FILE).open("a", encoding="utf-8") as file:
+            if heading:
+                file.write(f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ} {test_id}\n")
+            file.write(f"    {line}\n")
+            file.flush()
+
+
+def _skip_reason(report: pytest.TestReport) -> str:
+    """Return a skipped test's reason.
+
+    Args:
+        report: The skipped test's report.
+
+    Returns:
+        The reason, without pytest's `Skipped: ` prefix.
+    """
+    longrepr = report.longrepr
+    reason = str(longrepr[2]) if isinstance(longrepr, tuple) else str(longrepr)
+    return reason.removeprefix("Skipped: ")
+
+
+def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
+    """Print the smoke tier's coverage: passed, not entitled, otherwise skipped, failed.
+
+    Args:
+        terminalreporter: The terminal reporter, whose statistics hold the reports.
+    """
+
+    def smoke(outcome: str) -> list[pytest.TestReport]:
+        return [
+            report
+            for report in terminalreporter.stats.get(outcome, [])
+            if isinstance(report, pytest.TestReport) and _SMOKE in report.keywords
+        ]
+
+    passed = [r for r in smoke("passed") if r.when == "call"]
+    skipped = smoke("skipped")
+    failed = smoke("failed") + smoke("error")
+    if not (passed or skipped or failed):
+        return
+    refused = [r for r in skipped if _skip_reason(r).startswith("not entitled")]
+    other = [r for r in skipped if r not in refused]
+    terminalreporter.write_sep("=", "smoke coverage")
+    terminalreporter.write_line(
+        f"{len(passed)} passed, {len(refused)} not entitled, {len(other)} skipped otherwise, "
+        f"{len(failed)} failed"
+    )
+    for title, reports in (("not entitled", refused), ("skipped", other), ("failed", failed)):
+        for report in reports:
+            reason = _skip_reason(report) if report.skipped else report.head_line or ""
+            terminalreporter.write_line(
+                f"{title}: {report.nodeid.split('[')[-1].rstrip(']')}: {reason[:200]}"
+            )
+
+
+def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.Config) -> None:
+    """Print which open questions the run verified, and the plans the rest need.
+
+    An item (a `settles` argument) is verified when every test that settles it passed; one
+    whose tests were skipped for a plan is listed under the cheapest plan text it needs.
+
+    Args:
+        terminalreporter: The terminal reporter, whose statistics hold the outcomes.
+        config: The pytest configuration, whose stash holds each test's items and needs.
+    """
+    settled = config.stash.setdefault(_SETTLED, {})
+    ran = any(terminalreporter.stats.get(kind) for kind in ("passed", "failed", "skipped"))
+    keyed = bool(os.environ.get("MASSIVE_API_KEY", "").strip())
+    if not (ran and keyed) or not any(items for items, _ in settled.values()):
+        return
+    outcome: dict[str, str] = {}
+    for kind in ("passed", "failed", "skipped", "error"):
+        for report in terminalreporter.stats.get(kind, []):
+            if isinstance(report, pytest.TestReport) and (
+                report.when == "call" or kind != "passed"
+            ):
+                outcome[report.nodeid] = kind
+    verified: list[str] = []
+    needing: dict[str, list[str]] = {}
+    other: list[str] = []
+    ran_items = {i for t, (items, _) in settled.items() if t in outcome for i in items}
+    if not ran_items:
+        return
+    for item in sorted(ran_items, key=_item_order):
+        tests = [(t, needs) for t, (items, needs) in settled.items() if item in items]
+        tests = [(t, needs) for t, needs in tests if t in outcome]
+        results = [outcome.get(t) for t, _ in tests]
+        if all(result == "passed" for result in results):
+            verified.append(item)
+            continue
+        unmet = [r for t, needs in tests if outcome.get(t) == "skipped" for r in _unmet(needs)]
+        if unmet:
+            needing.setdefault(", ".join(_plan_text(r) for r in dict.fromkeys(unmet)), []).append(
+                item
+            )
+        else:
+            other.append(item)
+    total = len(verified) + sum(len(items) for items in needing.values()) + len(other)
+    terminalreporter.write_sep("=", "open questions")
+    terminalreporter.write_line(f"verified {len(verified)} of {total}: {', '.join(verified)}")
+    for plan, items in needing.items():
+        terminalreporter.write_line(f"{len(items)} need {plan}: {', '.join(items)}")
+    if other:
+        terminalreporter.write_line(
+            f"{len(other)} not verified (failed or skipped): {', '.join(other)}"
+        )
+
+
+def _item_order(item: str) -> tuple[int, str]:
+    """Sort numbered items first, by number, then named ones.
+
+    Args:
+        item: An item, such as `"21"` or `"429 text"`.
+
+    Returns:
+        The sort key.
+    """
+    return (int(item), "") if item.isdigit() else (10_000, item)
 
 
 def pytest_terminal_summary(
     terminalreporter: pytest.TerminalReporter, config: pytest.Config
 ) -> None:
-    """Print the evidence the live tests recorded, grouped by test, after the test results.
+    """Print the smoke tier's coverage, then the evidence the live tests recorded, by test.
 
     Args:
         terminalreporter: The terminal reporter that writes the summary.
         config: The pytest configuration, whose stash holds the evidence.
     """
+    _smoke_coverage(terminalreporter)
+    _settled_summary(terminalreporter, config)
     stored: list[tuple[str, str]] = config.stash.setdefault(_EVIDENCE, [])
     with _EVIDENCE_LOCK:
         records = list(stored)
@@ -1112,6 +1688,76 @@ def week_bar_report(
                 f"week t={_instant_text(stamp * _MS)} v={target} hours from the stamp: {span}; "
                 f"closest windows: {best}"
             )
+        return lines
+
+    return report
+
+
+_HALF_DAYS = (date(2025, 11, 28), date(2025, 12, 24))
+"""US market half days (closing at 13:00 New York time): the day after Thanksgiving 2025 and
+Christmas Eve 2025."""
+
+
+def _wall_clock(stamp_ms: int) -> str:
+    """Describe an epoch-millisecond stamp in UTC and New York time, naming a notable hour.
+
+    Args:
+        stamp_ms: The stamp.
+
+    Returns:
+        Such as `"2025-11-28T18:00:00Z = 13:00 New York (the half-day close)"`.
+    """
+    utc = datetime.fromtimestamp(stamp_ms / 1000, UTC)
+    local = utc.astimezone(_NEW_YORK)
+    notable = {
+        (13, 0): " (the half-day close)",
+        (16, 0): " (the regular close)",
+        (0, 0): " (midnight)",
+        (9, 30): " (the open)",
+    }.get((local.hour, local.minute), "")
+    return f"{utc:%Y-%m-%dT%H:%M:%SZ} = {local:%H:%M} New York{notable}"
+
+
+@pytest.fixture
+def half_day_report(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+) -> Callable[[str, str], list[str]]:
+    """Return a function that shows how REST stamps the bars of a half trading day.
+
+    For each half day (2025-11-28, 2025-12-24) it reads one ticker's day bar and its minute
+    bars from the aggregates range endpoint, unfiltered, and reports the day bar's stamp and
+    the first and last minute bar's, each in UTC and New York time with the notable hour named
+    (13:00 the half-day close, 16:00 the regular close, midnight, the 09:30 open).
+
+    Args:
+        rest_rows: Reads raw REST rows.
+
+    Returns:
+        A function `(ticker_param, ticker)`: the path placeholder of the class (such as
+        `"stocksTicker"`) and the ticker. It returns the evidence lines.
+    """
+
+    def report(ticker_param: str, ticker: str) -> list[str]:
+        path = (
+            f"/v2/aggs/ticker/{{{ticker_param}}}/range/{{multiplier}}/{{timespan}}/{{from}}/{{to}}"
+        )
+        lines = []
+        for day in _HALF_DAYS:
+            for span in ("day", "minute"):
+                params = {ticker_param: ticker, "multiplier": 1, "timespan": span}
+                params |= {"from": day, "to": day}
+                bars = rest_rows(path, params, {"sort": "asc", "limit": 50_000})
+                if not bars:
+                    lines.append(f"{ticker} {day} {span} bars: none")
+                elif span == "day":
+                    lines.extend(
+                        f"{ticker} {day} day bar: t={_wall_clock(int(b['t']))}" for b in bars
+                    )
+                else:
+                    first, last = _wall_clock(int(bars[0]["t"])), _wall_clock(int(bars[-1]["t"]))
+                    lines.append(
+                        f"{ticker} {day} {len(bars)} minute bars: first t={first}, last t={last}"
+                    )
         return lines
 
     return report

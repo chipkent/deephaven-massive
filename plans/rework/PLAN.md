@@ -2490,8 +2490,9 @@ a row concerns: `tests/namespaces/test_{crypto,forex,stocks,indices,options,futu
 (raw frames and statuses), `tests/massive/rest/test_client_integration.py` (the rate limit), and
 `tests/massive/flatfiles/test_client_integration.py` (publication times, missing keys). Create
 `docs/live-tests.md`, the runbook; each test's docstring says what its evidence means, and a
-comment on issue #26 holds the one-time outcome tables. Modify `pyproject.toml` (the
-`integration` and `integration_limits` markers, `integration` deselected in `addopts`),
+comment on issue #26 holds the one-time outcome tables. Create `tests/datasets/test_catalog_integration.py`, the smoke tier (every dataset and verb
+once). Modify `pyproject.toml` (the `integration`, `integration_limits`, `integration_smoke`,
+`needs`, `settles`, and `requests` markers, `integration` deselected in `addopts`),
 `tests/conftest.py` (the marker checks, the key and CI skip, live fixtures, the evidence log),
 `tests/test_layout.py` (the `addopts` exclusion and the marker check's order are pinned),
 `README.md` and `AGENTS.md` (how to run), `.gitignore` (the run logs). CI needs no change:

@@ -13,6 +13,8 @@ or last millisecond fails the request with `MassiveError` rather than being rela
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -38,9 +40,10 @@ FlatFileTickers: TypeAlias = (
     "tuple[list[dict[str, str | None]], frozenset[str]] | None]"
 )
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
+WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
+Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
-NotOnBasic: TypeAlias = "Callable[[str], None]"
 
 _PAIR = "X:BTCUSD"
 _RANGE = "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}"
@@ -51,6 +54,9 @@ _FILE_DAY = date(2026, 6, 1)
 """A past Monday whose flat files are published, inside a Basic plan's two years of history."""
 
 _MS = 1_000_000
+_DAY_NS = 86_400 * 1_000_000_000
+_STREAM_WAIT = 60.0
+"""Seconds the FMV test waits for its first frame."""
 _NEW_YORK = ZoneInfo("America/New_York")
 _TOLERANCE = 1e-6
 """The relative error within which a high, low, or volume read from text equals a JSON number."""
@@ -103,11 +109,19 @@ def _same(left: Sequence[Any], right: Sequence[Any]) -> bool:
 def _library_rows(call: Callable[[], Table], table_rows: TableRows) -> list[dict[str, Any]] | str:
     """Run one library call and describe its outcome.
 
+    A refusal is not an outcome to record: it propagates, so the test fails (the declared plan
+    covers the data) rather than reporting it as an answer.
+
     Returns:
-        The result's rows, or the text of the `MassiveError` the call raised.
+        The result's rows, or the text of the `MassiveError` (other than a refusal) it raised.
+
+    Raises:
+        EntitlementError: When the call is refused.
     """
     try:
         return table_rows(call())
+    except dm.EntitlementError:
+        raise
     except dm.MassiveError as error:
         return f"MassiveError: {error}"
 
@@ -131,11 +145,13 @@ def _rebuilt(minutes: list[dict[str, Any]], start: datetime, end: datetime) -> t
     )
 
 
+@pytest.mark.needs("currencies:basic")
+@pytest.mark.settles("1")
+@pytest.mark.requests(8)
 @pytest.mark.timeout(100)
 def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -152,7 +168,6 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     grouped stamp at no day boundary (such as 20:48 UTC) is the same bar with a write-time
     stamp if its OHLCV equal the range bar's, otherwise another day cut.
     """
-    not_on_basic("currencies")
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
     (prev,) = prevs
@@ -195,11 +210,12 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     assert grouped
 
 
+@pytest.mark.needs("currencies:starter", "s3")
+@pytest.mark.settles("1")
 @pytest.mark.timeout(100)
 def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     rest_rows: RestRows,
     flat_file_tickers: FlatFileTickers,
     table_rows: TableRows,
@@ -215,7 +231,6 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     confirms one day cut for both sources; a file row equal to no REST bar, or to a bar of
     another day, means the two sources cut days differently.
     """
-    not_on_basic("currencies")
     read = flat_file_tickers(_DAY_FILE, _FILE_DAY, [_PAIR])
     assert read is not None, f"{_DAY_FILE} has no file for {_FILE_DAY}"
     rows, extra = read
@@ -255,9 +270,11 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     assert rows
 
 
+@pytest.mark.needs("currencies:basic")
+@pytest.mark.settles("38")
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days(
-    not_on_basic: NotOnBasic,
     *,
     rest_rows: RestRows,
     instant_text: Text,
@@ -273,7 +290,6 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
     needs an owner decision; equal to neither means another cut (compare the stamps and the
     minute coverage).
     """
-    not_on_basic("currencies")
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
     (prev,) = prevs
@@ -320,9 +336,10 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
     )
 
 
+@pytest.mark.needs("currencies:starter", "s3")
+@pytest.mark.settles("39")
 @pytest.mark.timeout(100)
 def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
-    not_on_basic: NotOnBasic,
     *,
     rest_rows: RestRows,
     flat_file_tickers: FlatFileTickers,
@@ -334,7 +351,6 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     `dm.ALL` crypto day bars hold the same pairs from either source; otherwise the difference
     belongs in the documentation of `dm.ALL` day bars.
     """
-    not_on_basic("currencies")
     grouped = {str(row["T"]) for row in rest_rows(_GROUPED, {"date": _FILE_DAY}, {})}
     read = flat_file_tickers(_DAY_FILE, _FILE_DAY, None)
     assert read is not None, f"{_DAY_FILE} has no file for {_FILE_DAY}"
@@ -346,11 +362,13 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     assert filed
 
 
+@pytest.mark.needs("currencies:basic")
+@pytest.mark.settles("33")
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_crypto_week_bars_start_on_monday_or_sunday(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     week_bar_report: Callable[[str, str], list[str]],
     table_rows: TableRows,
     instant_text: Text,
@@ -364,7 +382,6 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
     assumes; any other start means the library's crypto week windows need that start. The last
     line shows which bars the library's `history()` keeps.
     """
-    not_on_basic("currencies")
     lines = week_bar_report("cryptoTicker", _PAIR)
     for line in lines:
         evidence(line)
@@ -374,3 +391,39 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
     stamps = [instant_text(row["Timestamp"]) for row in table_rows(kept)]
     evidence(f"library history 2026-03-02..2026-03-15 keeps the bars stamped {stamps}")
     assert len(lines) > 1
+
+
+@pytest.mark.needs("currencies:business")
+@pytest.mark.settles("3")
+@pytest.mark.timeout(100)
+def test_fmv_frames_convert_to_a_current_instant(
+    live_session: dm.MassiveSession,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    wait_rows: WaitRows,
+    stream_report: Report,
+    instant_text: Text,
+    evidence: Evidence,
+) -> None:
+    """Whether a WebSocket `FMV` frame's `t` converts to the current instant.
+
+    `FMV` `t` is documented in nanoseconds while the sample shows milliseconds, so the
+    library reads it by magnitude and logs once which unit it saw. Streams `X:BTCUSD`'s fair
+    market value (the cheapest Business plan is Currencies Business) and records the first
+    rows, their age, and that log line. Reading it: an instant within a day of now and the
+    logged unit settle the question.
+    """
+    caplog.set_level(logging.INFO, logger="deephaven_massive")
+    table = live_session.crypto.fmv(_PAIR).append_only()
+    rows = wait_rows(live_session, table, time.monotonic() + _STREAM_WAIT)
+    for line in stream_report(live_session):
+        evidence(line)
+    live_session.release(table)
+    detected = [r.getMessage() for r in caplog.records if "FMV timestamps detected" in r.message]
+    evidence(f"magnitude rule log: {detected}")
+    now = time.time_ns()
+    for row in rows[:3]:
+        stamp = int(row["Timestamp"])
+        evidence(f"FMV row: Timestamp={instant_text(stamp)} age_s={(now - stamp) / 1e9:.1f} {row}")
+    assert rows, "no FMV frame arrived in 60 s"
+    assert abs(now - int(rows[0]["Timestamp"])) < _DAY_NS

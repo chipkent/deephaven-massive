@@ -40,7 +40,6 @@ TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
-NotOnBasic: TypeAlias = "Callable[[str], None]"
 
 _PAIR = "C:EURUSD"
 _RANGE = "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}"
@@ -125,20 +124,30 @@ def _rebuilt(bars: list[dict[str, Any]], start: datetime, end: datetime) -> tupl
 def _library_rows(call: Callable[[], Table], table_rows: TableRows) -> list[dict[str, Any]] | str:
     """Run one library call and describe its outcome.
 
+    A refusal is not an outcome to record: it propagates, so the test fails (the declared plan
+    covers the data) rather than reporting it as an answer.
+
     Returns:
-        The result's rows, or the text of the `MassiveError` the call raised.
+        The result's rows, or the text of the `MassiveError` (other than a refusal) it raised.
+
+    Raises:
+        EntitlementError: When the call is refused.
     """
     try:
         return table_rows(call())
+    except dm.EntitlementError:
+        raise
     except dm.MassiveError as error:
         return f"MassiveError: {error}"
 
 
+@pytest.mark.needs("currencies:basic")
+@pytest.mark.settles("37")
+@pytest.mark.requests(6)
 @pytest.mark.timeout(100)
 def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -153,7 +162,6 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     labelled D-1 by the library, a bug to fix by mapping that source's stamp to the day it
     closes.
     """
-    not_on_basic("currencies")
     prevs = rest_rows(_PREV, {"forexTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
     (prev,) = prevs
@@ -190,9 +198,11 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     assert grouped
 
 
+@pytest.mark.needs("currencies:basic")
+@pytest.mark.settles("37")
+@pytest.mark.requests(3)
 @pytest.mark.timeout(100)
 def test_forex_day_bars_rebuilt_from_hour_bars_over_the_utc_and_trading_days(
-    not_on_basic: NotOnBasic,
     *,
     rest_rows: RestRows,
     instant_text: Text,
@@ -207,7 +217,6 @@ def test_forex_day_bars_rebuilt_from_hour_bars_over_the_utc_and_trading_days(
     days, and the library's labelling and week windows need that cut; equal to neither means
     another cut.
     """
-    not_on_basic("currencies")
     prevs = rest_rows(_PREV, {"forexTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
     (prev,) = prevs
@@ -241,11 +250,12 @@ def test_forex_day_bars_rebuilt_from_hour_bars_over_the_utc_and_trading_days(
     )
 
 
+@pytest.mark.needs("currencies:starter", "s3")
+@pytest.mark.settles("37")
 @pytest.mark.timeout(100)
 def test_forex_day_bar_of_the_flat_file_and_its_stamp(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     rest_rows: RestRows,
     flat_file_tickers: FlatFileTickers,
     table_rows: TableRows,
@@ -261,7 +271,6 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
     right if each stamp lies in that UTC day; a file row matching another day's REST bar means
     the sources cut or label days differently.
     """
-    not_on_basic("currencies")
     read = flat_file_tickers(_DAY_FILE, _FILE_DAY, [_PAIR])
     assert read is not None, f"{_DAY_FILE} has no file for {_FILE_DAY}"
     rows, extra = read
@@ -302,9 +311,10 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
     assert rows
 
 
+@pytest.mark.needs("currencies:starter", "s3")
+@pytest.mark.settles("39")
 @pytest.mark.timeout(100)
 def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
-    not_on_basic: NotOnBasic,
     *,
     rest_rows: RestRows,
     flat_file_tickers: FlatFileTickers,
@@ -316,7 +326,6 @@ def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     `dm.ALL` forex day bars hold the same pairs from either source; otherwise the difference
     belongs in the documentation of `dm.ALL` day bars.
     """
-    not_on_basic("currencies")
     grouped = {str(row["T"]) for row in rest_rows(_GROUPED, {"date": _FILE_DAY}, {})}
     read = flat_file_tickers(_DAY_FILE, _FILE_DAY, None)
     assert read is not None, f"{_DAY_FILE} has no file for {_FILE_DAY}"
@@ -328,11 +337,13 @@ def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     assert filed
 
 
+@pytest.mark.needs("currencies:basic")
+@pytest.mark.settles("33")
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_forex_week_bars_start_on_monday_or_sunday(
     live_session: dm.MassiveSession,
     *,
-    not_on_basic: NotOnBasic,
     week_bar_report: Callable[[str, str], list[str]],
     table_rows: TableRows,
     instant_text: Text,
@@ -347,7 +358,6 @@ def test_forex_week_bars_start_on_monday_or_sunday(
     weeks, and the library's forex week windows must start there. The last line shows which
     bars the library's `history()` keeps.
     """
-    not_on_basic("currencies")
     lines = week_bar_report("forexTicker", _PAIR)
     for line in lines:
         evidence(line)
@@ -359,6 +369,8 @@ def test_forex_week_bars_start_on_monday_or_sunday(
     assert len(lines) > 1
 
 
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("27")
 @pytest.mark.timeout(100)
 def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     live_session: dm.MassiveSession,

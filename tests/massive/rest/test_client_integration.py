@@ -1,11 +1,10 @@
 """Live checks of Massive's REST rate limit: the refusal's text and which requests it counts.
 
-Massive limits a subscription on its free Basic tier to 5 REST requests per minute and answers
-HTTP 429 beyond that. These tests deliberately exceed that limit, a few refusals in all, so
-they are marked `integration_limits`, run only with `-m integration_limits`, and belong last
-in a run, with no other client of the key. They also need `MASSIVE_LIVE_BASIC_SUBSCRIPTION`
-naming a subscription the key's account holds on Basic (`stocks`, `options`, `indices`,
-`currencies`, or `futures`), since a paid tier never refuses.
+Massive limits each class on its free Basic plan to 5 REST requests per minute and answers
+HTTP 429 beyond that. These tests deliberately draw a few refusals from a class the run
+declares Basic (`MASSIVE_LIVE_PLANS`; Indices is preferred, since a run needs it least), so
+they need at least one class left on Basic, and the run puts them first, while that class's
+minute is unspent. They run with no other client of the key.
 
 Each test first lets a minute pass, so earlier requests no longer count, then sends single raw
 requests (one attempt each, no retry) and records each answer's status, its rate-limit
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive import MassiveConfig
 
-pytestmark = [pytest.mark.integration, pytest.mark.integration_limits]
+pytestmark = pytest.mark.integration
 
 # Fixture types, repeated in each live module: test modules may not import from conftest.
 Evidence: TypeAlias = "Callable[[str], None]"
@@ -43,7 +42,7 @@ _LIMIT = 5
 _MINUTE = 61.0
 """Seconds a test lets pass first, so earlier requests have left the limit's window."""
 
-_BY_SUBSCRIPTION: dict[str, Request] = {
+_BY_CLASS: dict[str, Request] = {
     "stocks": ("/v2/aggs/ticker/{stocksTicker}/prev", {"stocksTicker": "AAPL"}, {}),
     "options": ("/v3/reference/options/contracts", {}, {"underlying_ticker": "AAPL", "limit": 1}),
     "indices": ("/v2/aggs/ticker/{indicesTicker}/prev", {"indicesTicker": "I:SPX"}, {}),
@@ -101,23 +100,13 @@ def _pause() -> None:
     threading.Event().wait(_MINUTE)
 
 
-def _subscription_request(live_env: Callable[[str], str]) -> tuple[str, Request]:
-    """Return the Basic subscription the run names and a request of its data.
-
-    Returns:
-        The subscription's name and the request.
-    """
-    name = live_env("MASSIVE_LIVE_BASIC_SUBSCRIPTION").lower()
-    if name not in _BY_SUBSCRIPTION:
-        pytest.fail(f"MASSIVE_LIVE_BASIC_SUBSCRIPTION must be one of {sorted(_BY_SUBSCRIPTION)}")
-    return name, _BY_SUBSCRIPTION[name]
-
-
+@pytest.mark.needs("some:basic")
+@pytest.mark.settles("429 text")
 @pytest.mark.timeout(100)
 def test_text_of_the_rate_limit_refusal(
     send: Callable[[Request], tuple[int, str]],
     *,
-    live_env: Callable[[str], str],
+    basic_class: str,
     evidence: Evidence,
 ) -> None:
     """The exact status, headers, and message of a Basic subscription's rate-limit refusal.
@@ -125,23 +114,25 @@ def test_text_of_the_rate_limit_refusal(
     Sends seven requests of the named subscription's data within a minute and records each
     answer. Reading it: the 429's message is the text that marks a Basic refusal, so the rate
     governor's match must contain it; its headers show whether Massive says when to retry.
-    Fails when no request is refused: the subscription is then not on Basic.
+    Fails when no request is refused: the class is then not on Basic, as declared.
     """
-    name, request = _subscription_request(live_env)
+    name, request = basic_class, _BY_CLASS[basic_class]
     _pause()
     statuses = []
     for number in range(1, _LIMIT + 3):
         status, described = send(request)
         statuses.append(status)
         evidence(f"{name} request {number} of {request[0]}: HTTP {status}; {described}")
-    assert 429 in statuses, "no request was refused: is the named subscription on Basic?"
+    assert 429 in statuses, f"no request was refused: is {name} on Basic, as declared?"
 
 
+@pytest.mark.needs("some:basic")
+@pytest.mark.settles("rate bucket")
 @pytest.mark.timeout(100)
 def test_requests_without_a_subscription_after_the_limit_is_reached(
     send: Callable[[Request], tuple[int, str]],
     *,
-    live_env: Callable[[str], str],
+    basic_class: str,
     evidence: Evidence,
 ) -> None:
     """Whether requests of data outside every subscription count against a Basic limit.
@@ -149,10 +140,10 @@ def test_requests_without_a_subscription_after_the_limit_is_reached(
     Spends the named Basic subscription's minute (until its first 429), then sends one request
     each of market status, ticker types, and treasury yields. Reading it: all three answered
     means data outside the subscriptions is not charged to the spent subscription; refusals
-    mean it is, and the rate governor must charge it there. Skips when the limit is never
-    reached, since the later answers would then say nothing.
+    mean it is, and the rate governor must charge it there. Fails when the limit is never
+    reached: the class is then not on Basic, as declared, and the later answers say nothing.
     """
-    name, request = _subscription_request(live_env)
+    name, request = basic_class, _BY_CLASS[basic_class]
     _pause()
     refused = False
     for number in range(1, _LIMIT + 3):
@@ -162,17 +153,19 @@ def test_requests_without_a_subscription_after_the_limit_is_reached(
             refused = True
             break
     if not refused:
-        pytest.skip(f"the {name} limit was not reached; the subscription may not be on Basic")
+        pytest.fail(f"the {name} limit was not reached, although {name} is declared Basic")
     for unassigned in _UNASSIGNED:
         status, described = send(unassigned)
         evidence(f"then {unassigned[0]}: HTTP {status}; {described}")
 
 
+@pytest.mark.needs("some:basic")
+@pytest.mark.settles("rate bucket")
 @pytest.mark.timeout(100)
 def test_requests_without_a_subscription_alone(
     send: Callable[[Request], tuple[int, str]],
     *,
-    live_env: Callable[[str], str],
+    basic_class: str,
     evidence: Evidence,
 ) -> None:
     """Whether data outside every subscription has a per-minute limit of its own.
@@ -182,7 +175,6 @@ def test_requests_without_a_subscription_alone(
     rate-limited; a refusal after five means it has a Basic limit of its own, which the rate
     governor must pace as a bucket of its own.
     """
-    _subscription_request(live_env)
     _pause()
     for number in range(1, 2 * _LIMIT + 1):
         unassigned = _UNASSIGNED[number % len(_UNASSIGNED)]
