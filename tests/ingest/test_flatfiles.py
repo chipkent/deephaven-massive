@@ -68,6 +68,8 @@ class FakeS3(Protocol):
         self, key: str, header: Sequence[str], rows: Iterable[Mapping[str, object]]
     ) -> None: ...
     def put_dropped(self, key: str, data: bytes) -> None: ...
+    def drop(self, key: str, *, times: int, at: int) -> None: ...
+    def data(self, key: str) -> bytes: ...
     def refuse(self, prefix: str, *, status: int, code: str, message: str) -> None: ...
     def fail(self, key: str, failure: str) -> None: ...
     def keys(self) -> list[str]: ...
@@ -1212,11 +1214,12 @@ def test_futures_dates_do_not_roll_forward(
     fake_s3: FakeS3,
     clock: Callable[[datetime], None],
 ) -> None:
-    # A date names its own session exactly: a holiday's hours belong to another session.
+    # A date names its own session exactly: a holiday's hours belong to another session. With
+    # no file in the range at all, the call says so rather than read the next session.
     clock(datetime(2025, 2, 10, tzinfo=UTC))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
-    t = q.history("2025-01-20", "2025-01-20", source=HistorySource.FLAT_FILES)
-    assert t.size == 0
+    with pytest.raises(dm.MassiveError, match="no file of the range exists"):
+        q.history("2025-01-20", "2025-01-20", source=HistorySource.FLAT_FILES)
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
 
@@ -1417,6 +1420,146 @@ def test_a_dropped_connection_is_a_massive_error(
         dm.MassiveError, match=re.escape(f"cannot read s3://flatfiles/{TRADES_0303}")
     ):
         q.history("2025-03-03", "2025-03-03")
+
+
+def test_a_dropped_connection_is_read_again_from_the_start(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    many_blocks: Callable[[str], int],
+    monkeypatch: pytest.MonkeyPatch,
+    retry_clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    many_blocks(TRADES_0303)
+    converted: list[int] = []
+    convert = dh_arrow.to_table
+
+    def counted(data: pa.Table) -> Table:
+        converted.append(data.num_rows)
+        return convert(data)
+
+    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 1)  # a table per block, so drops leave some
+    size = len(fake_s3.data(TRADES_0303))
+    fake_s3.drop(TRADES_0303, times=2, at=size // 2)
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    # Every row once, in file order: the tables of the two cut-short reads were discarded.
+    assert pick(t, "Id") == [(str(n),) for n in range(4000)]
+    assert sum(converted) > 4000  # ... although they had gathered some of them
+    assert fake_s3.keys() == [TRADES_0303] * 3
+    assert fake_s3.closed_bodies == [TRADES_0303] * 3
+    waits = retry_clock.waits
+    assert len(waits) == 2
+    assert 0.5 <= waits[0] <= 0.6
+    assert 1.0 <= waits[1] <= 1.2
+    rereads = [r.getMessage() for r in caplog.records if "again from its start" in r.getMessage()]
+    assert len(rereads) == 2
+    assert rereads[0].startswith(f"cannot read {LOCATION.format(TRADES_0303)}: ")
+
+
+def test_a_connection_that_keeps_dropping_fails_after_three_rereads(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    put: Callable[[str, str], None],
+    retry_clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    put(TRADES_0304, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.drop(TRADES_0304, times=4, at=len(fake_s3.data(TRADES_0304)) // 2)
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with (
+        caplog.at_level(logging.INFO, logger=LOGGER),
+        pytest.raises(
+            dm.MassiveError, match=re.escape(f"cannot read {LOCATION.format(TRADES_0304)}: ")
+        ),
+    ):
+        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+    assert sorted(fake_s3.keys()) == [TRADES_0303] + [TRADES_0304] * 4
+    assert len(retry_clock.waits) == 3
+    assert [r.levelno for r in caplog.records if "giving up after 4 reads" in r.getMessage()] == [
+        logging.ERROR
+    ]
+
+
+def test_a_reread_is_not_made_for_a_broken_file(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, retry_clock: FakeClock
+) -> None:
+    fake_s3.put(TRADES_0303, b"not gzip")
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(dm.MassiveError, match="Not a gzipped file"):
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert (fake_s3.keys(), retry_clock.waits) == ([TRADES_0303], [])
+
+
+@pytest.mark.parametrize("code", ["NoSuchBucket", "NotFound"])
+def test_a_404_that_is_not_a_missing_file_names_the_bucket(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    caplog: pytest.LogCaptureFixture,
+    code: str,
+) -> None:
+    # A wrong bucket answers 404 for every key; it must not read as a run of holidays.
+    fake_s3.refuse("", status=404, code=code, message="The specified bucket does not exist")
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with (
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+        pytest.raises(dm.MassiveError) as info,
+    ):
+        q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)
+    assert type(info.value) is dm.MassiveError
+    assert str(info.value) == (
+        f"cannot read {LOCATION.format(TRADES_0303)}: HTTP 404 ({code}: The specified bucket "
+        "does not exist); check MassiveConfig s3_bucket and s3_endpoint_url"
+    )
+    assert (info.value.status, info.value.request_id) == (404, fake_s3.request_id)
+    assert caplog.messages == []
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "first", "last"),
+    [
+        pytest.param("2025-03-03", "2025-03-05", TRADES_0303, TRADES_0305, id="three-weekdays"),
+        # The weekend files are missing too, but only the weekday ones are named.
+        pytest.param("2025-03-01", "2025-03-03", TRADES_0303, TRADES_0303, id="one-weekday"),
+    ],
+)
+def test_a_range_without_any_file_is_an_error(
+    *,
+    session: dm.MassiveSession,
+    caplog: pytest.LogCaptureFixture,
+    start: str,
+    end: str,
+    first: str,
+    last: str,
+) -> None:
+    # A renamed prefix, a range before the dataset's first file, and a wrong bucket on a server
+    # that answers `NoSuchKey` all look like this; holidays never span a whole range this long.
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with (
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+        pytest.raises(dm.MassiveError) as info,
+    ):
+        q.history(start, end, source=HistorySource.FLAT_FILES)
+    assert str(info.value) == (
+        f"stocks.trades: no file of the range exists, from s3://flatfiles/{first} to {last}: "
+        "the range may begin before the dataset's first file, the bucket may not hold this "
+        "prefix (check MassiveConfig s3_bucket and s3_endpoint_url), or every date in it was a "
+        "market holiday"
+    )
+    assert caplog.messages == []  # no holiday WARNING per date before the error
+
+
+def test_a_crypto_range_without_any_file_is_an_error(*, session: dm.MassiveSession) -> None:
+    # Crypto trades every day, so a range of weekend days alone is judged too.
+    q = query(session, CRYPTO_TRADES, symbols=["BTC-USD"])
+    with pytest.raises(dm.MassiveError, match=r"crypto\.trades: no file of the range exists"):
+        q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
 
 
 def test_every_response_body_is_closed(

@@ -278,7 +278,16 @@ def test_another_403_is_a_wire_entitlement_error(
     assert not isinstance(info.value, WireAuthError)
 
 
-@pytest.mark.parametrize(("status", "code"), [(400, "InvalidArgument"), (501, "NotImplemented")])
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        (400, "InvalidArgument"),
+        (501, "NotImplemented"),
+        # Only `NoSuchKey` is a missing file: a wrong bucket must not read as one.
+        (404, "NoSuchBucket"),
+        (404, "NotFound"),
+    ],
+)
 def test_another_status_is_a_wire_error_at_once(
     *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock, status: int, code: str
 ) -> None:
@@ -572,8 +581,84 @@ def test_a_dropped_body_fails_the_read_and_is_never_requested_again(
         list(file.batches(stocks_plan()))
     assert info.value.message.startswith(f"cannot read s3://flatfiles/{KEY} at ")
     assert isinstance(info.value.__cause__, OSError)
+    assert file.dropped
     assert (fake_s3.keys(), clock.waits) == ([KEY], [])
     assert fake_s3.closed_bodies == [KEY]
+
+
+def test_a_broken_file_is_not_a_dropped_read(*, client: FlatFileClient, fake_s3: FakeS3) -> None:
+    # gzip's own error for a body that is not gzip is an `OSError` too, yet the transfer was
+    # whole: reading the file again would fail the same way.
+    fake_s3.put(KEY, b"not gzip")
+    file = client.open(KEY)
+    assert file is not None
+    with file, pytest.raises(WireError, match="Not a gzipped file"):
+        list(file.batches(stocks_plan()))
+    assert not file.dropped
+
+
+def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
+    *, client: FlatFileClient, clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=client_module.__name__)
+    error = WireError("cannot read s3://flatfiles/k at here: dropped")
+    cancel = threading.Event()
+    assert [client.wait_to_reread(error, retry, cancel) for retry in range(4)] == [
+        True,
+        True,
+        True,
+        False,
+    ]
+    assert clock.waits == WAITS  # giving up does not wait
+    logged = [
+        (r.levelno, r.getMessage()) for r in caplog.records if r.name == client_module.__name__
+    ]
+    assert logged == [
+        (logging.INFO, f"{error}; reading it again from its start, reread 1 of 3 in 0.55 s"),
+        (logging.INFO, f"{error}; reading it again from its start, reread 2 of 3 in 1.10 s"),
+        (logging.INFO, f"{error}; reading it again from its start, reread 3 of 3 in 2.20 s"),
+        (logging.ERROR, f"{error}; giving up after 4 reads"),
+    ]
+
+
+def test_a_reread_wait_ends_on_cancel_and_on_close() -> None:
+    clock = FakeClock(manual=True)
+    client = make_client(clock=clock)
+    error = WireError("dropped")
+    try:
+        # The readers of one call share their cancel event; each waits on it.
+        cancel = threading.Event()
+        results: list[bool] = []
+        waiters = [
+            threading.Thread(target=lambda: results.append(client.wait_to_reread(error, 0, cancel)))
+            for _ in range(2)
+        ]
+        for waiter in waiters:
+            waiter.start()
+        clock.wait_for_sleepers(2)
+        client.close()  # ends both waits by setting the call's event
+        for waiter in waiters:
+            waiter.join(TIMEOUT)
+        assert cancel.is_set()
+        assert results == [True, True]
+        assert clock.monotonic() == 0.0  # no time passed
+        # Once closed, a reread waits no more: the caller's next request finds the close.
+        assert client.wait_to_reread(error, 1, threading.Event())
+        assert clock.waits == [0.55, 0.55]
+    finally:
+        client.close()
+    # A cancel by the caller ends a wait too.
+    clock = FakeClock(manual=True)
+    client = make_client(clock=clock)
+    cancel = threading.Event()
+    waiter = threading.Thread(target=client.wait_to_reread, args=(error, 2, cancel))
+    waiter.start()
+    clock.wait_for_sleepers(1)
+    cancel.set()
+    waiter.join(TIMEOUT)
+    assert not waiter.is_alive()
+    client.close()
+    assert clock.monotonic() == 0.0
 
 
 class _DropAfterABlock(io.BytesIO):
@@ -614,6 +699,7 @@ def test_a_drop_after_the_first_block_fails_loudly_and_repeats_no_row(
         read(file)
     assert info.value.message.startswith("cannot read here: ")
     assert isinstance(info.value.__cause__, OSError)
+    assert file.dropped
     assert 0 < len(seen) < total
     assert seen == list(range(len(seen)))  # in order, none twice
 
@@ -806,6 +892,10 @@ _SLOW_DOWN = (
     b'<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>SlowDown</Code>'
     b"<Message>Please reduce your request rate.</Message></Error>"
 )
+_NO_SUCH_KEY = (
+    b'<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>NoSuchKey</Code>'
+    b"<Message>The specified key does not exist.</Message></Error>"
+)
 
 
 def _symbols(file: FlatFile | None) -> list[str]:
@@ -839,7 +929,11 @@ def test_ssl_cert_file_is_trusted_and_the_shared_schedule_retries_over_the_netwo
     data = make_csv_gz(load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode())
     target = f"/flatfiles/{KEY}"
     tls_server.reply(
-        target, Reply(_SLOW_DOWN, status=503), Reply(reset=True), Reply(data), Reply(status=404)
+        target,
+        Reply(_SLOW_DOWN, status=503),
+        Reply(reset=True),
+        Reply(data),
+        Reply(_NO_SUCH_KEY, status=404),
     )
     clock = FakeClock()
     client = make_client(endpoint_url=tls_server.url, clock=clock)
@@ -863,7 +957,7 @@ def test_the_proxy_carries_its_credentials_and_no_secret_is_logged(
     caplog.set_level(logging.DEBUG)
     proxy = fake_rest.url.removeprefix("http://")
     trusted.setenv("HTTPS_PROXY", f"http://alice:s%40cret@{proxy}")
-    tls_server.reply(f"/flatfiles/{KEY}", Reply(reset=True), Reply(status=404))
+    tls_server.reply(f"/flatfiles/{KEY}", Reply(reset=True), Reply(_NO_SUCH_KEY, status=404))
     client = make_client(endpoint_url=tls_server.url)
     try:
         assert client.open(KEY) is None

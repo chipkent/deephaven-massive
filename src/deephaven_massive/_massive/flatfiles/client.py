@@ -5,8 +5,9 @@
 prefixes for the refresh's drift check (`prefixes`). It takes plain arguments, never the
 library's configuration, and maps every S3 failure to the wire errors of `net.errors`:
 
-- a 404 for an object is no error: `open` returns None, and the library applies its
-  missing-file policy (a 404 for the bucket itself, from `prefixes`, is a `WireError`);
+- a 404 whose S3 error code is `NoSuchKey` is no error: `open` returns None, and the library
+  applies its missing-file policy; any other 404 (`NoSuchBucket`, another code, or none) is a
+  `WireError` naming the bucket and the key, so a wrong bucket never looks like a missing file;
 - a 403 whose S3 error code says the credentials themselves are wrong (`InvalidAccessKeyId`,
   `SignatureDoesNotMatch`) is `WireAuthError`;
 - any other 403 is `WireEntitlementError`;
@@ -34,8 +35,12 @@ The client follows the network rules the REST and WebSocket clients follow, from
   cannot be made, is reset, or times out, and an error response whose body is cut short or
   stalls. Each retry is logged at INFO and giving up at ERROR. A TLS failure is never
   retried, nor is a proxy's refusal of its credentials (HTTP 407: the same credentials would be
-  refused again, and a corporate proxy may lock the account), nor a failure part-way through
-  an object's body: rows already handed on cannot be taken back, so the read fails instead.
+  refused again, and a corporate proxy may lock the account).
+- **Rereads.** A failure part-way through an object's body is not retried here: the reader has
+  already handed blocks on, which the client cannot take back. The read fails and
+  `FlatFile.dropped` says why; a caller that has kept the file's rows to itself can discard
+  them and read the object again from its start, waiting first with `wait_to_reread`, which
+  follows the same schedule and limit.
 
 The body of an object reaches `FlatFile` through a small stream that turns botocore's read
 errors (a connection dropped part-way through the body) into `OSError`, so the reader needs no
@@ -102,6 +107,9 @@ _Answer = TypeVar("_Answer")
 # The source of retry jitter. `SystemRandom` draws from the OS and keeps no state, so threads
 # share it safely; jitter needs no cryptographic strength, only independence.
 _JITTER = random.SystemRandom()
+
+_MISSING_KEY: Final = "NoSuchKey"
+"""The S3 error code, answered with HTTP 404, of an object the bucket does not hold."""
 
 _CREDENTIAL_ERRORS: Final = frozenset({"InvalidAccessKeyId", "SignatureDoesNotMatch"})
 """S3 error codes, answered with HTTP 403, that mean the S3 credentials themselves are wrong."""
@@ -225,6 +233,7 @@ class FlatFileClient:
         "_lock",
         "_max_pool",
         "_proxy",
+        "_rereads",
         "_secret_access_key",
     )
 
@@ -264,6 +273,9 @@ class FlatFileClient:
         # The proxy the client was created with, without its user and password, for messages.
         self._proxy: str | None = None
         self._closed = threading.Event()
+        # The cancel event of every `wait_to_reread` in progress, which `close()` sets. A list,
+        # since the readers of one call share their event; guarded by `_lock`.
+        self._rereads: list[threading.Event] = []
 
     @property
     def closed(self) -> bool:
@@ -282,7 +294,10 @@ class FlatFileClient:
 
         Errors: `WireError` when the client is closed (no request is made) or cannot be
         created, TLS fails (never retried), a retryable failure persists after the last retry,
-        or S3 answers any other status but 200 and 404. On HTTP 403 it is the subclass
+        S3 answers a 404 whose error code is not `NoSuchKey` (such as `NoSuchBucket`, a wrong
+        bucket: `"cannot read s3://flatfile/<key> at https://files.massive.com: HTTP 404
+        (NoSuchBucket: The specified bucket does not exist)"`), or S3 answers any other status
+        but 200 and 404. On HTTP 403 it is the subclass
         `WireAuthError` when S3 rejects the credentials themselves, and otherwise
         `WireEntitlementError`: the plan lacks the files. The message names the object and
         quotes S3's error code and message, such as `"HTTP 403 for s3://flatfiles/<key> at
@@ -292,7 +307,7 @@ class FlatFileClient:
             key: The object key (`object_key`).
 
         Returns:
-            The object, open for reading, or None if the bucket answered 404.
+            The object, open for reading, or None if the bucket answered 404 `NoSuchKey`.
         """
         location = f"s3://{self._bucket}/{key} at {self._endpoint_url}"
 
@@ -300,7 +315,8 @@ class FlatFileClient:
             try:
                 return client.get_object(Bucket=self._bucket, Key=key)["Body"]
             except ClientError as error:
-                if _status(error) == HTTPStatus.NOT_FOUND:
+                code = error.response.get("Error", {}).get("Code")
+                if _status(error) == HTTPStatus.NOT_FOUND and code == _MISSING_KEY:
                     return None
                 raise
 
@@ -308,6 +324,49 @@ class FlatFileClient:
         if body is None:
             return None
         return FlatFile(_Body(body), key, location=location, host=self._host)
+
+    def wait_to_reread(self, error: WireError, retry: int, cancel: threading.Event) -> bool:
+        """Wait before reading an object again whose body failed part-way, if a reread is left.
+
+        A caller that read an object, kept every row of it to itself, and lost the connection
+        part-way through (`FlatFile.dropped`) calls this before it opens the object again and
+        reads it from the start. Rereads follow the schedule of `open`'s retries: at most
+        three (`retry` 0, 1, 2), after 0.5, 1, then 2 seconds plus up to 20 % jitter, on the
+        client's clock. Each is logged at INFO and giving up at ERROR, naming the failure.
+        Blocks the calling thread for the wait, which ends early once `cancel` is set, by the
+        caller or by `close()`; the caller then finds the call stopped or the client closed.
+
+        Args:
+            error: The failed read's error, for the log.
+            retry: How many rereads of this object have already happened.
+            cancel: The caller's event that ends the wait. `close()` sets it, so it should be
+                one that stops the caller's work, never one shared with unrelated work.
+
+        Returns:
+            True once the wait has ended: read the object again. False when the rereads are
+            spent, after logging at ERROR, without waiting: raise `error`.
+        """
+        if retry == MAX_RETRIES:
+            _log.error("%s; giving up after %d reads", error, retry + 1)
+            return False
+        wait = transient_wait(retry, _JITTER.random())
+        _log.info(
+            "%s; reading it again from its start, reread %d of %d in %.2f s",
+            error,
+            retry + 1,
+            MAX_RETRIES,
+            wait,
+        )
+        with self._lock:
+            if self._closed.is_set():
+                return True
+            self._rereads.append(cancel)
+        try:
+            self._clock.wait(cancel, wait)
+        finally:
+            with self._lock:
+                self._rereads.remove(cancel)
+        return True
 
     def prefixes(self) -> list[str]:
         """List the bucket's top-level prefixes: the first segment of every object key.
@@ -485,10 +544,14 @@ class FlatFileClient:
 
         Idempotent and safe from any thread. Reads in progress keep their open bodies until
         their readers close them; a request in flight closes the client again as it returns.
+        Every `wait_to_reread` in progress ends at once: its `cancel` event is set.
         """
         with self._lock:
             self._closed.set()
             client, self._client = self._client, None
+            waiting = list(self._rereads)
+        for cancel in waiting:
+            cancel.set()
         if client is not None:
             client.close()
 
