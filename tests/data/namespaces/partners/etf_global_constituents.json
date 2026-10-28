@@ -1,0 +1,47 @@
+{
+  "count": 2,
+  "request_id": "req-1",
+  "results": [
+    {
+      "asset_class": "Equity",
+      "composite_ticker": "SPY",
+      "constituent_name": "CAESARS ENTERTAINMENT INC COMMON STOCK",
+      "constituent_rank": 42,
+      "constituent_ticker": "CZR",
+      "country_of_exchange": "US",
+      "currency_traded": "USD",
+      "effective_date": "2025-09-18",
+      "exchange": "NYSE",
+      "figi": "BBG0074Q3NK6",
+      "isin": "US12769G1004",
+      "market_value": 63308625.6,
+      "processed_date": "2025-09-19",
+      "security_type": "Common Stock",
+      "sedol": "BMWWGB0",
+      "shares_held": 2398054,
+      "us_code": "12769G100",
+      "weight": 9.58005e-05
+    },
+    {
+      "asset_class": "Equity",
+      "composite_ticker": "SPY",
+      "constituent_name": "CAESARS ENTERTAINMENT INC COMMON STOCK",
+      "constituent_rank": 43,
+      "constituent_ticker": "CZR",
+      "country_of_exchange": "US",
+      "currency_traded": "USD",
+      "effective_date": "2025-09-18",
+      "exchange": "NYSE",
+      "figi": "BBG0074Q3NK6",
+      "isin": "US12769G1004",
+      "market_value": 63308625.6,
+      "processed_date": "2025-09-19",
+      "security_type": "Common Stock",
+      "sedol": "BMWWGB0",
+      "shares_held": 2398054,
+      "us_code": "12769G100",
+      "weight": 9.58005e-05
+    }
+  ],
+  "status": "OK"
+}

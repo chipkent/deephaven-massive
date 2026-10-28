@@ -1,0 +1,40 @@
+{
+  "request_id": "d9f86384d43845a4a3d7b79098fb08dd",
+  "results": [
+    {
+      "accounts_payable": 50374000000,
+      "accrued_and_other_current_liabilities": 62499000000,
+      "accumulated_other_comprehensive_income": -6369000000,
+      "cash_and_equivalents": 36269000000,
+      "cik": "0000320193",
+      "common_stock": 89806000000,
+      "debt_current": 19268000000,
+      "deferred_revenue_current": 8979000000,
+      "filing_date": "2025-08-01",
+      "fiscal_quarter": 3,
+      "fiscal_year": 2025,
+      "inventories": 5925000000,
+      "long_term_debt_and_capital_lease_obligations": 82430000000,
+      "other_assets": 160496000000,
+      "other_current_assets": 14359000000,
+      "other_equity": 0,
+      "other_noncurrent_liabilities": 42115000000,
+      "period_end": "2025-06-28",
+      "property_plant_equipment_net": 48508000000,
+      "receivables": 46835000000,
+      "retained_earnings_deficit": -17607000000,
+      "tickers": [
+        "AAPL"
+      ],
+      "timeframe": "quarterly",
+      "total_assets": 331495000000,
+      "total_current_assets": 103388000000,
+      "total_current_liabilities": 141120000000,
+      "total_equity": 65830000000,
+      "total_equity_attributable_to_parent": 65830000000,
+      "total_liabilities": 265665000000,
+      "total_liabilities_and_equity": 331495000000
+    }
+  ],
+  "status": "OK"
+}
