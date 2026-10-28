@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from botocore.exceptions import ClientError
 
-from deephaven_massive._massive import FlatFileClient, WireEntitlementError, object_key
+from deephaven_massive._massive import FlatFileClient, WireError, object_key
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -88,30 +88,47 @@ def test_when_each_days_file_was_published(
 @pytest.mark.needs("stocks:starter", "s3")
 @pytest.mark.settles("16")
 def test_a_weekend_key_is_missing_not_refused(
-    live_flat_files: FlatFileClient, *, evidence: Evidence
+    live_flat_files: FlatFileClient, *, live_s3_config: MassiveConfig, evidence: Evidence
 ) -> None:
-    """Whether a key with no file answers 404 (missing) rather than 403 (refused).
+    """Whether a key with no file answers 404 `NoSuchKey` (missing), not 403 or another 404.
 
     S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn
-    every weekend into an entitlement error. First opens the existing 2026-06-01 stock file,
-    so the credentials are known to reach the dataset, then the Sunday before. Passes when the
-    Sunday's key is missing.
+    every weekend into an entitlement error; and a front end that rewrites 404 bodies (Massive
+    serves an HTML "404 Not Found" page for a path it does not route) would hide S3's
+    `NoSuchKey`, which the client requires before it calls a key missing, so every range that
+    holds a weekend would raise. First opens the existing 2026-06-01 stock file, so the
+    credentials are known to reach the dataset. Then requests the Sunday before directly, to
+    record the status, S3's error code, and the content type, and opens it through the
+    client. Passes when the Sunday's key is missing.
 
     Raises:
-        WireEntitlementError: When the Sunday's key is refused (HTTP 403); it is recorded
-            first, and fails the test.
+        WireError: When the Sunday's key is refused (HTTP 403, `WireEntitlementError`) or
+            answers a 404 that is not `NoSuchKey`; the answer is recorded first, and fails
+            the test.
     """
     control = live_flat_files.open(object_key(_DAY_FILE, _DAY))
     evidence(f"control {_DAY}: {'exists' if control is not None else 'missing'}")
     assert control is not None, f"the {_DAY} stock file must exist for the check to mean anything"
     control.close()
     key = object_key(_DAY_FILE, _WEEKEND)
+    s3, _proxy = live_flat_files._client_for(key)
+    answer, code = "exists", None
+    try:
+        s3.get_object(Bucket=live_s3_config.s3_bucket, Key=key)["Body"].close()
+    except ClientError as error:
+        metadata = error.response.get("ResponseMetadata", {})
+        code = error.response.get("Error", {}).get("Code")
+        answer = (
+            f"HTTP {metadata.get('HTTPStatusCode')}, code {code}, "
+            f"content type {metadata.get('HTTPHeaders', {}).get('content-type')}"
+        )
+    evidence(f"{key}: {answer}")
     try:
         file = live_flat_files.open(key)
-    except WireEntitlementError as error:
-        evidence(f"{key}: refused (HTTP {error.status}): {error}")
+    except WireError as error:
+        evidence(f"{key}: the client raised {type(error).__name__}: {error}")
         raise
-    evidence(f"{key}: {'missing (HTTP 404)' if file is None else 'exists'}")
     if file is not None:
         file.close()
-    assert file is None
+    assert file is None, f"{key} exists ({answer})"
+    assert code == "NoSuchKey", answer

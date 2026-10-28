@@ -1418,7 +1418,8 @@ Excluded items fall into two lists.
 | Crypto `/book` REST endpoint; WebSocket `XL2` | Deprecated and sunset (the REST path is marked deprecated in the OpenAPI spec). |
 | WebSocket `LV`; Launchpad hosts and paths | Product retired. |
 | `/v1/historic/*`, `/v2/ticks/*` | Deprecated 2022 (marked deprecated in the OpenAPI spec); replaced by `/v3/trades` and `/v3/quotes`. |
-| Form 5, per-asset `/v1/exchanges` (`/stocks`, `/options`, `/forex`, `/crypto`), `/options/v3/*`, `/v1/reference/ipos`, `/stocks/dev/*`, `/stocks/insiders/vX/*`, `vX_0` paths | Present only in the OpenAPI spec; no page `llms.txt` links names them (`undocumented`). |
+| Form 5, per-asset `/v1/exchanges` (`/stocks`, `/options`, `/forex`, `/crypto`), `/options/v3/*`, `/v1/reference/ipos`, `/stocks/dev/*`, `vX_0` paths | Present only in the OpenAPI spec; no page `llms.txt` links names them (`undocumented`). |
+| `/stocks/insiders/vX/activity`, `/stocks/insiders/vX/holdings` | Not yet declared. Documented since 2026-10-28: daily insider buying and selling totals per issuer, and each insider's current holding per issuer. No dataset serves either yet (the Form 3 and Form 4 datasets return individual filings); their datasets are a separate addition. |
 | `/v1/reference/sec/filings*` | Marked `x-polygon-draft` in the OpenAPI spec and undocumented. |
 | `/v1/indicators/{sma,ema,rsi,macd}/{optionsTicker,indicesTicker,fxTicker}` | The same URL, fields, and parameters as the `{stockTicker}` template, which serves every asset class by the ticker's prefix; a refresh test checks they still repeat it. The `{cryptoTicker}` templates document no `adjusted` parameter, so they are generated in their own right. |
 | Single-ticker v2 snapshots `/v2/snapshot/.../tickers/{t}` | Covered by `snapshots(symbols)` with the `tickers` filter. |
@@ -2647,7 +2648,21 @@ calendar). Within one day after its `publish_time` it raises
 ~11:00 ET next day), or was a market holiday")`. After that window it is treated as a holiday:
 a WARNING, and the date is skipped like any other missing weekday, so the rest of the range is
 returned. A futures range named by datetimes that ends on a holiday reads the next session's
-file, or raises, as [section 12](#12-timestamp-units-and-day-boundaries) describes. Futures
+file, or raises, as [section 12](#12-timestamp-units-and-day-boundaries) describes. No data is
+no data: a range in which no file exists, whatever the reason (a weekend, a holiday, a range
+before the dataset's first file), returns an empty table with every column, and its missing
+weekdays log their WARNINGs as above. A missing file is a 404 whose body is S3's XML error
+with the code `NoSuchKey`. Any other 404 (another S3 code, no code, or a body that is not S3's,
+such as the HTML "Massive 404 Not Found" page Massive's front end serves for a path it does
+not route, which is what a wrong `s3_bucket` meets) raises `MassiveError` naming
+`s3://<bucket>/<key> at <endpoint>` and adding "check MassiveConfig s3_bucket and
+s3_endpoint_url": `cannot read s3://flatfile/<key> at https://files.massive.com: HTTP 404 (404:
+Not Found); check MassiveConfig s3_bucket and s3_endpoint_url`. A connection that drops
+part-way through a file's body makes the read start that file again from its first byte, at
+most `MAX_RETRIES` (3) more times, after the waits of the shared retry schedule (0.5, 1, 2 s
+plus jitter). The rows already read from that file are discarded, and freed before the wait,
+which is safe because no row leaves a file's read before the file ends. The last failure
+raises `MassiveError` naming the file. Futures
 `venue=None` reads four prefixes per date; a 403 on any prefix raises
 `EntitlementError` naming the venue and the `venue=` parameter. A 403 whose S3 error code says
 the credentials themselves are wrong (`InvalidAccessKeyId`, `SignatureDoesNotMatch`) raises
@@ -3264,7 +3279,11 @@ boto3 S3 client lazily, under a leaf lock, and keeps a closed flag (a `threading
 closed, it makes no request. A request in flight at the close closes the client again as it
 returns.
 
-- **`open(key) -> FlatFile | None`.** `None` for a missing key (404). `object_key(prefix, day,
+- **`open(key) -> FlatFile | None`.** `None` for a missing key: HTTP 404 whose body is S3's
+  XML error with the code `NoSuchKey`. Any other 404 (another S3 code, no code, or a body that
+  is not S3's, such as the HTML page Massive's front end serves for a path it does not route,
+  which botocore reads as the code `404`) is a `WireError` naming the bucket and the key, so a
+  wrong bucket or endpoint never reads as a run of missing files. `object_key(prefix, day,
   venue)` builds keys as `<prefix>/<YYYY>/<MM>/<date>.csv.gz`, filling a `{venue}` template.
   The generator folds the four concrete futures overview prefixes into that template using
   `VENUES` (`cme`, `cbot`, `nymex`, `comex`, each with its reason) in `refresh/overrides.py`,
@@ -3315,12 +3334,27 @@ returns.
   - A proxy's refusal of the client's credentials (HTTP 407 to the tunnel request, which
     `net.retry.is_proxy_auth_failure` recognises). Repeating credentials the proxy refused can
     lock a corporate account; the `WireError` has status 407 and names `HTTPS_PROXY`.
-  - A failure partway through an object's body. Rows already handed on cannot be taken back,
-    so the read fails instead.
+  - A failure partway through an object's body. The reader has already handed blocks on, so
+    the client cannot repeat the request by itself: the read fails with a `WireError`, and the
+    file's `dropped` flag is set. `_ingest/flatfiles.py` keeps a file's rows to itself until
+    the file ends, so it reads such a file again from its start: it frees the file's partial
+    tables (it clears the frames the error's traceback holds, `_gather`'s and the batch
+    generator's, which keep the failed read's locals alive) and calls `wait_to_reread(error, retry, cancel)`, which waits on the shared
+    schedule (logged at INFO), and returns `False` once `MAX_RETRIES` rereads are spent (logged
+    at ERROR); the library then raises the failure. A wait whose `cancel` is already set, or on
+    a closed client, returns at once without a log line. `close()` ends such a wait at once by
+    setting `cancel`, as a failed or interrupted call does: `Clock.wait` waits on one event,
+    and the call's event is the one that stops the call. There is no `Range` resume: a
+    whole-file reread needs no byte bookkeeping and can repeat no row.
 - **`prefixes()`** lists the bucket's top-level prefixes, for `--check`.
 
 `FlatFile(body, key, location, host)` reads any binary stream whose failed reads raise
-`OSError`; the client wraps the response body so, and the reader imports no botocore.
+`OSError`; the client wraps the response body so, turning botocore's read errors and the
+urllib3 errors botocore lets through (a TLS failure while reading the body is urllib3's
+`SSLError`) into `OSError`, and the reader imports no botocore.
+`FlatFile.dropped` is `True` once a read of that stream has failed (the connection dropped or
+stalled part-way through the body). It tells a failed transfer from a broken file: only the
+first is worth reading again.
 `FlatFile.batches(plan)` yields one `(RecordBatch, DriftReport)` per block, in this order:
 (1) the futures session check; (2) the symbol filter (`is_in`); (3) `[start, end)` on
 `plan.to_ns(time column)`; (4) on the survivors, the rename to long-form names and list
@@ -4546,7 +4580,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 13 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/massive/net/test_codec.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
 | 14 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/datasets/test_history_source.py`: AUTO before and after the cutoff | `tests/ingest/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |
 | 15 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/massive/ws/test_client_integration.py`: subscribe both on a test key and record whether duplicates arrive |
-| 16 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): request a weekend key and record the status |
+| 16 | A missing flat-file key, requested through `files.massive.com`, answers HTTP 404 with S3's XML error and the code `NoSuchKey`, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`), and not a 404 page the front end rewrites (a wrong path gets an HTML "Massive 404 Not Found" page, which botocore reads as the code `404`). If it answers anything but `NoSuchKey`, the library raises on every range that holds a weekend | Only a 404 `NoSuchKey` is a missing file; any other 404 raises, naming the bucket and the endpoint settings; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: `NoSuchKey`, other-code, and HTML 404 replies, and 403 replies | `tests/massive/flatfiles/test_client_integration.py` (S3 credentials): request a weekend key and record the status, the error code, and the content type |
 | 17 | Retired: `poll()` results are no longer keyed `input_table`s but shapes of a publisher's blink table ([section 14](#14-publishers-fan-out-and-failure-semantics)), so no input-table attribute is involved | | | |
 | 18 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
 | 19 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/massive/ws/test_client_integration.py`: one raw `C` frame; record the form of `x` |
