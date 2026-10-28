@@ -80,6 +80,10 @@ def main() -> None:
         raise WheelCheckError(
             f"deephaven_massive was imported from {package_dir}, the checkout, not the wheel"
         )
+    if "site-packages" not in package_dir.parts:
+        raise WheelCheckError(
+            f"deephaven_massive was imported from {package_dir}, which is not an installed wheel"
+        )
     _report(f"deephaven_massive {deephaven_massive.__version__} from {package_dir}")
 
     # Port 0 asks the OS for an ephemeral port, so the check never clashes with a server.
@@ -137,7 +141,8 @@ def _exit(status: int) -> None:
 def _fail(kind: type[BaseException], value: BaseException, tb: TracebackType | None) -> None:
     """Print an exception that escaped `main` and leave with status 1.
 
-    Installed as `sys.excepthook`, so every failure, an interrupt included, fails the check.
+    Installed as `sys.excepthook`, and called for a `SystemExit`, which skips the hook, so every
+    failure, an interrupt or an exit included, fails the check.
     """
     traceback.print_exception(kind, value, tb)
     _exit(1)
@@ -145,5 +150,8 @@ def _fail(kind: type[BaseException], value: BaseException, tb: TracebackType | N
 
 if __name__ == "__main__":
     sys.excepthook = _fail
-    main()
+    try:
+        main()
+    except SystemExit as stop:
+        _fail(type(stop), stop, stop.__traceback__)
     _exit(0)
