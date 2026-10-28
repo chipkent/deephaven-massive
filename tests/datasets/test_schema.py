@@ -20,6 +20,7 @@ from deephaven_massive._datasets.schema import (
     pascal_case,
     rename,
     required_fields,
+    widen,
 )
 from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass
@@ -172,6 +173,21 @@ def test_iso_text_becomes_an_instant_to_the_nanosecond() -> None:
 
 
 # --- The lattice -----------------------------------------------------------------------------
+
+
+def test_widening_a_large_integer_to_a_double_rounds_it() -> None:
+    big = pa.array([2**53 + 1, None], pa.int64())
+    assert widen(big, pa.float64()).to_pylist() == [float(2**53), None]
+
+
+def test_widening_gives_each_column_its_merged_arrow_type() -> None:
+    # Checked on the arrays, before a batch is assembled, which on some pyarrow versions casts
+    # by itself.
+    longs = pa.array([100, None], pa.int64())
+    assert widen(longs, pa.float64()).type == pa.float64()
+    assert widen(longs, pa.list_(pa.int32())).to_pylist() == [[100], None]
+    lists = pa.array([[1], None], pa.list_(pa.int32()))
+    assert widen(lists, pa.list_(pa.int32())).to_pylist() == [[1], None]
 
 
 def test_join_widens_only_by_the_lattice() -> None:

@@ -264,16 +264,18 @@ class StreamRow:
 class StreamUpdate:
     """A change to one stream's diagnostics row, for `SessionCore.update_streams`.
 
-    Built by the WebSocket transport's flush thread after each flush; every field left as None
-    keeps the row's current value. It never changes `State`: only `SessionCore.fail_stream`
-    fails a stream, so an `error` here is a warning shown in the `Error` column, and
-    `clear_error=True` removes it again (for example once the options contract cap no longer
-    defers anything).
+    Built by the WebSocket transport's flush thread after each flush, and by a `poll()` table's
+    poller after each cycle; every field left as None keeps the row's current value. It never
+    changes `State`: only `SessionCore.fail_stream` fails a stream, so an `error` here is a warning
+    shown in the `Error` column, and `clear_error=True` removes it again (for example once the
+    options contract cap no longer defers anything).
 
     Attributes:
         rows_published: The stream's total rows published so far.
+        requests_per_cycle: The REST requests of the latest `poll()` cycle.
         deferred: Options contracts deferred by the contract cap.
         symbol_count: How many symbols the stream now covers.
+        symbols: The readable, truncated list of those symbols, as `describe_symbols` writes it.
         host: The serving host.
         path: The cluster path.
         error: Warning text for the `Error` column.
@@ -284,8 +286,10 @@ class StreamUpdate:
     """
 
     rows_published: int | None = None
+    requests_per_cycle: int | None = None
     deferred: int | None = None
     symbol_count: int | None = None
+    symbols: str | None = None
     host: str | None = None
     path: str | None = None
     error: str | None = None
@@ -305,8 +309,12 @@ class StreamUpdate:
             rows_published=row.rows_published
             if self.rows_published is None
             else self.rows_published,
+            requests_per_cycle=row.requests_per_cycle
+            if self.requests_per_cycle is None
+            else self.requests_per_cycle,
             deferred=row.deferred if self.deferred is None else self.deferred,
             symbol_count=row.symbol_count if self.symbol_count is None else self.symbol_count,
+            symbols=row.symbols if self.symbols is None else self.symbols,
             host=row.host if self.host is None else self.host,
             path=row.path if self.path is None else self.path,
             error=None if self.clear_error else row.error if self.error is None else self.error,

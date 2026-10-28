@@ -415,6 +415,7 @@ def _hand(
     units: Mapping[tuple[str, str], overrides.Unit] | None = None,
     tag_conflicts: Mapping[tuple[str, str], str] | None = None,
     type_fixes: Mapping[tuple[str, str], overrides.TypeFix] | None = None,
+    key_fixes: Mapping[tuple[str, str], overrides.KeyFix] | None = None,
     result_keys: Mapping[str, overrides.ResultKey] | None = None,
     param_units: Mapping[tuple[str, str], overrides.Unit] | None = None,
     exclusions: Sequence[exclusions_module.Exclusion] = (),
@@ -430,6 +431,7 @@ def _hand(
         units=units or {},
         tag_conflicts=tag_conflicts or {},
         type_fixes=type_fixes or {},
+        key_fixes=key_fixes or {},
         result_keys=result_keys or {},
         param_units=param_units or {},
         exclusions=exclusions,
@@ -1051,6 +1053,38 @@ def test_parameter_rules() -> None:
         ("as_of", ParamKind.DATE, (), False),
         ("cusip", ParamKind.STRING, (), False),
     ]
+
+
+def test_a_string_whose_description_gives_the_date_format_is_a_date() -> None:
+    # The vendor's financial statements type `period_end` and its range filters as bare
+    # strings, naming the date format only in the description.
+    stated = "Value must be formatted 'yyyy-mm-dd'."
+    params = [
+        {**_param("period_end", {"type": "string"}), "description": f"The last date. {stated}"},
+        {**_param("period_end.gte", {"type": "string"}), "description": f"Filter. {stated}"},
+        {**_param("period_end.any_of", {"type": "string"}), "description": stated},
+        {**_param("active_from", {"type": "string"}), "description": "A date (YYYY-MM-DD)."},
+        {**_param("fiscal_year", {"type": "integer"}), "description": stated},
+        {**_param("timeframe", {"type": "string"}), "description": "Annual or quarterly."},
+    ]
+    path = _one(_row(price={"type": "number"}), params=params)
+    assert [(p.name, p.kind) for p in path.params[1:]] == [
+        ("period_end", ParamKind.DATE),
+        ("period_end.gte", ParamKind.DATE),
+        ("period_end.any_of", ParamKind.LIST),
+        ("active_from", ParamKind.DATE),
+        ("fiscal_year", ParamKind.INTEGER),
+        ("timeframe", ParamKind.STRING),
+    ]
+
+
+def test_a_stated_date_format_does_not_replace_a_timestamp_unit() -> None:
+    # A timestamp filter that also accepts a date keeps the unit its entry gives.
+    stated = "Value must be an integer timestamp in nanoseconds, formatted 'yyyy-mm-dd'."
+    params = [{**_param("timestamp.gte", {"type": "string"}), "description": stated}]
+    hand = _hand(param_units={(_PATH, "timestamp"): overrides.Unit(unit=WireUnit.NS, reason="t")})
+    path = _one(_row(price={"type": "number"}), hand, params=params)
+    assert (path.params[1].kind, path.params[1].unit) == (ParamKind.TIMESTAMP, WireUnit.NS)
 
 
 def test_path_item_parameters_come_first() -> None:

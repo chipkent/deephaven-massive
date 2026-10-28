@@ -34,7 +34,7 @@ class FakeStreamTransport:
 
     def __init__(self, core: SessionCore) -> None:
         self._core = weakref.ref(core)
-        self.opened: list[tuple[str, str | None]] = []
+        self.opened: list[tuple[str, str]] = []
         self.publishers: dict[int, TablePublisher] = {}
         self.shutdown: dict[int, threading.Event] = {}
         self.shutdown_calls: dict[int, int] = {}
@@ -49,7 +49,7 @@ class FakeStreamTransport:
         self.shutdown[stream_id].set()
 
     def open_stream(
-        self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+        self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
     ) -> StreamHandle:
         core = self._core()
         assert core is not None  # a verb holds its session's core while it opens a stream
