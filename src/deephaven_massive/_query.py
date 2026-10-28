@@ -53,7 +53,7 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
-from deephaven_massive._datasets.symbols import SymbolTable, symbol_class, topic_problem
+from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import (
     HistorySource,
     PollMode,
@@ -394,8 +394,10 @@ class StreamQuery(QueryBase):
         copies no attributes, so describing the blink table first would lose them. The schema
         is read before the stream is acquired, so the result is built under no library lock.
         A reactive symbol table is read first, so a row that is not Massive's exact ticker
-        fails the call before any stream starts; so does a symbol whose WebSocket topic cannot
-        be built (a crypto pair whose quote is not one the library knows, `topic_problem`).
+        fails the call before any stream starts; so does a row whose WebSocket topic cannot be
+        built (a crypto pair whose quote is not one the library knows, `topic_problem`). A
+        static symbol whose topic cannot be built raises the same `ValueError` when the stream
+        builds its topics (`ws_symbol`), before any connection is made.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -403,10 +405,6 @@ class StreamQuery(QueryBase):
 
         Returns:
             The tracked live result.
-
-        Raises:
-            ValueError: If a static symbol cannot be streamed (`topic_problem` gives the
-                reason).
 
         A bad row of a symbol table raises the `ValueError` of `read_symbols` in
         `_tables/watchlist.py`.
@@ -416,11 +414,6 @@ class StreamQuery(QueryBase):
         if isinstance(symbols, SymbolTable):
             with entered(self._core.exec_ctx):
                 read_symbols(spec, symbols.table, for_stream=True)
-        elif isinstance(symbols, tuple):
-            for symbol in symbols:
-                problem = topic_problem(spec.asset_class, symbol)
-                if problem is not None:
-                    raise ValueError(problem)
         schema = self._core.dataset_schema(spec)
         return self._core.stream_result(
             spec,
