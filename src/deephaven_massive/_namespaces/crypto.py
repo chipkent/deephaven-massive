@@ -164,6 +164,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOTS,
     keys={(_R, _SNAPSHOTS): _keys(KeySpec("Ticker"))},
     symbol_param="tickers",
+    revision_keys=("Updated",),
 )
 """`m.crypto.snapshots`: the full-market snapshot, narrowed by `tickers` unless `dm.ALL`."""
 
@@ -173,6 +174,7 @@ MOVERS: Final = DatasetSpec(
     asset_class=AssetClass.CRYPTO,
     fetch_path=_MOVERS,
     keys={(_R, _MOVERS): _keys(KeySpec("Ticker"))},
+    revision_keys=("Updated",),
 )
 """`m.crypto.movers`: the gainers and losers snapshots."""
 

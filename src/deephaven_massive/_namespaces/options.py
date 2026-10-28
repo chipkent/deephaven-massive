@@ -183,6 +183,10 @@ FMV: Final = DatasetSpec(
     keys={(_WS, "options/FMV"): _keys("Ticker", "FmvLastUpdated")},
 )
 
+_SNAPSHOT_REVISION: Final = ("LastQuoteLastUpdated", "LastTradeSipTimestamp")
+"""The update times of a contract's snapshot: a new quote or trade is a new row of an explicit
+`poll(mode=PollMode.APPEND)`. The snapshot carries no single update time of its own."""
+
 CHAIN: Final = DatasetSpec(
     name="options.chain",
     summary="The snapshot of every contract in one underlying's option chain.",
@@ -190,6 +194,7 @@ CHAIN: Final = DatasetSpec(
     fetch_path=_CHAIN,
     keys={(_REST, _CHAIN): _keys("DetailsTicker", fanout="UnderlyingAssetTicker")},
     page_size=_SNAPSHOT_PAGE,
+    revision_keys=_SNAPSHOT_REVISION,
 )
 
 SNAPSHOTS: Final = DatasetSpec(
@@ -201,6 +206,7 @@ SNAPSHOTS: Final = DatasetSpec(
     symbol_param="ticker.any_of",
     symbols_per_request=_SNAPSHOT_PAGE,
     page_size=_SNAPSHOT_PAGE,
+    revision_keys=_SNAPSHOT_REVISION,
 )
 
 CONTRACTS: Final = DatasetSpec(

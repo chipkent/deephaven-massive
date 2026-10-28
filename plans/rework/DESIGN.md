@@ -801,9 +801,54 @@ dataset has `poll()`. Current state on every tier is `m.<class>.snapshots(symbol
 request per cycle.
 
 **`poll()`.** `mode=None` uses the catalog default: `PollMode.APPEND` for `reference.news`,
-`stocks.ipos`, every `stocks.filings.*` but the two taxonomies, and `partners.benzinga.news`;
-`PollMode.REPLACE` otherwise. `REPLACE` is a keyed table from which keys absent in the latest cycle are
-deleted. `UPSERT` is keyed and never deletes. `APPEND` is append-only. A reactive `Table` passed as
+every `stocks.filings.*` but the two taxonomies, and `partners.benzinga.news`;
+`PollMode.UPSERT` for `stocks.ipos`, whose records are revised in place as an offering moves
+through its statuses; `PollMode.REPLACE` otherwise, the two filing taxonomies included (a
+taxonomy is a reference list revised in place, not a feed of new rows).
+
+- `REPLACE` is a keyed table (`poll_keys`) from which keys absent in the latest cycle are
+  deleted, also when the cycle is empty.
+- `UPSERT` is keyed the same way and never deletes.
+- `APPEND` is append-only and appends only rows it has not seen before. A row's identity is
+  its `poll_keys` followed by its `revision_keys` (empty by default). Each cycle skips every
+  row whose identity the table already holds, and a second row with the same identity in one
+  cycle, and appends the rest. A later revision of an appended row that changes no identity
+  column (an article's corrected text) is therefore not appended; `UPSERT` follows revisions.
+  The poller remembers every identity it appended for as long as it runs, with no bound and no
+  eviction: each remembered identity is a row the append-only table already holds, so the
+  memory never outgrows the table, and a row the responses repeat, or that returns after any
+  absence (a symbol removed from a reactive table and added back hours later), is never
+  appended twice. Nothing is remembered from a cycle that fails to publish, so its rows are
+  appended by the next cycle that returns them.
+- `revision_keys` are what make an explicit `mode=APPEND` on a current-state dataset build a
+  history: every snapshot and movers dataset declares its update time, so each new state of a
+  symbol is a new row, while `REPLACE` and `UPSERT` stay keyed by `Symbol`. The stocks,
+  crypto, and forex snapshots and movers declare `Updated`; the forex conversion
+  `LastTimestamp`, the time of the quote it used; the indices snapshots `LastUpdated`; the
+  options snapshots and chain `LastQuoteLastUpdated` and `LastTradeSipTimestamp`; the unified
+  snapshots `LastUpdated`, `LastQuoteLastUpdated`, and `LastTradeLastUpdated`, which together
+  cover every asset class; the futures snapshots `LastQuoteLastUpdated` and
+  `LastTradeLastUpdated`; `futures.market_status` its `Timestamp`, the time of a product's
+  latest market event; and `reference.market_status`, a one-row dataset with no
+  `poll_keys`, its `ServerTime`. A null in a revision column is a value (a ticker not yet
+  updated). On a dataset with neither unique `poll_keys` nor `revision_keys` (the default
+  `Symbol`), an explicit `APPEND` appends one row per symbol.
+- A dataset may name poll-key columns the vendor leaves empty on some rows in
+  `nullable_poll_keys`, each with its reason from the vendor's description (the 13-F `PutCall`
+  is empty for common stock; the Form 3 and Form 4 exercise price and dates are set only for
+  derivatives, and their `NatureOfOwnership` only for indirect ownership; a Form 4 holding
+  record has no transaction columns; no futures key is nullable, since no vendor description or
+  fixture leaves one empty). A null there is a value. The catalog gate requires at
+  least one poll-key column outside that map, so no row is identified by nulls alone.
+- A null value in any other `poll_keys` column, or a NaN in a float one, fails the table in
+  every mode, as a missing required key does: it would otherwise merge unrelated rows into one
+  key. The `RowDataError` names the dataset, the key column, the row's position in the cycle,
+  and the row's non-null values, truncated.
+- Every dataset whose default is `APPEND` declares its own `poll_keys`, not the default
+  `Symbol` (a catalog gate). No gate can prove that a key is unique per row; each dataset's
+  tests check its key against its fixtures.
+
+A reactive `Table` passed as
 `symbols` is read once per cycle with `Table.snapshot()` on the poller thread, never inside a
 listener. Fan-out endpoints issue one request per symbol per cycle under `max_concurrency`;
 `m.streams()` shows `RequestsPerCycle`.
@@ -2016,7 +2061,8 @@ sees:
   drops that symbol, with one WARNING per symbol; every other error fails the call.
 - **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
   a data failure of [section 19.5](#195-runtime-drift) (a missing required key, an
-  unconvertible value, a timestamp out of bounds), or plans a request with a parameter the
+  unconvertible value, a timestamp out of bounds, or a null or NaN `poll_keys` value, in every
+  mode), or plans a request with a parameter the
   chosen path does not take (a reactive symbol table's new symbol routed to a path that lacks
   an explicit parameter; retrying cannot fix it) fails the table through `publish_failure`.
   `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
@@ -2185,14 +2231,17 @@ How a request is built from a `DatasetSpec` and a `Request`:
   created with the result in the result scope; every mode is shaped from its blink table, so
   `publish_failure` fails the table in every mode. (A keyed `input_table` cannot be failed:
   Deephaven notifies failures only inside an update cycle.) `APPEND` is
-  `blink_to_append_only(blink)`; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE` is that
-  `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone row for
-  every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`, so its
-  rows and its removals land in one update. The `last_by` state keeps a hidden row for every key
-  ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a churning
-  key set (an options chain, the day's movers) grows with the keys it has held. The `poll()`
-  docstring says so. The poller holds the session core only weakly, so a `poll()` table never
-  keeps an unclosed session alive.
+  `blink_to_append_only(blink)`, fed only the rows whose identity (`poll_keys`, then
+  `revision_keys`) the poller has not appended yet ([section 7](#7-query-classes-and-verbs)); the
+  poller thread alone owns that set of identities, so it needs no lock, and adds a cycle's
+  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE`
+  is that `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone
+  row for every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`,
+  so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
+  every key ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a
+  churning key set (an options chain, the day's movers) grows with the keys it has held. The
+  `poll()` docstring says so. The poller holds the session core only weakly, so a `poll()` table
+  never keeps an unclosed session alive.
 
 ## 15. Options contract cap
 
@@ -3372,10 +3421,10 @@ per source in a
   the stocks `filings.index`: a row without it keeps a null `Symbol` instead of failing the request
   as a missing required key. Only a `symbol` key read from a REST path's rows may set it
   False; flat files and streams filter and route rows by symbol, and the `time`, `fanout`,
-  and `session` keys are always required. A dataset with an optional symbol key cannot key a
-  `REPLACE` or `UPSERT` `poll()` on `Symbol` (`DatasetSpec` refuses it): every row without a
-  symbol would share the null key and collapse into one row, so such a dataset declares other
-  `poll_keys`.
+  and `session` keys are always required. A dataset with an optional symbol key cannot put
+  `Symbol` in its `poll_keys`, whatever its mode (`DatasetSpec` refuses it): a row without a
+  symbol would have a null poll key, which fails the `poll()` table in every mode, so such a
+  dataset declares other `poll_keys`.
 
 A key is `from_request` when the source does not carry it in its rows: the symbol of a source
 that takes it as a path parameter or holds it outside the result key
@@ -3447,6 +3496,17 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
   `(kind, group)`;
 - **Wire parameters:** every declared wire name (time-axis pair, symbol parameter, path
   placeholders) is a parameter of its `RestPath`;
+- **Append keys:** a dataset whose default `poll()` mode is `APPEND` declares its own
+  `poll_keys`, not the default `Symbol`. The gate checks only that the key is explicit; that it
+  is unique per row is checked by the dataset's own tests. (`DatasetSpec` refuses empty
+  `poll_keys` on an `APPEND` dataset, an empty identity (no `poll_keys` and no
+  `revision_keys`) on any dataset, since an explicit `APPEND` could not tell rows apart, and
+  `revision_keys` that repeat a poll key.)
+- **Nullable keys:** a dataset with `poll_keys` has at least one that is not in
+  `nullable_poll_keys` (`DatasetSpec` refuses a nullable key that is no poll key, or one without
+  a reason);
+- **Poll keys:** every `poll_keys` and `revision_keys` column is a column of the dataset's
+  schema;
 - **Generated sources:** every path, channel, and prefix a dataset uses is generated; a miss names
   the dataset and says "deprecated or removed in the snapshot";
 - **Coverage:** generated ⊆ used ∪ undeclared, and no namespace's undeclared file lists a source
@@ -4054,7 +4114,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 21 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
 | 22 | Where the futures snapshot carries a contract's ticker: the OpenAPI schema nests it as `details.ticker`, which the generator names `DetailsTicker` | `futures.snapshots` declares `DetailsTicker` as its `symbol` key; a row without it is a missing required key and fails loudly ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: a spec-shaped fixture fills `Symbol` from `details.ticker` | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for a current contract; record where the ticker appears and that `Symbol` is filled |
 | 23 | Key of the REST ticker events' event type (`/vX/reference/tickers/{id}/events`): the schema declares the required `event_type`, while the response example, the documentation sample, and Massive's Python client all use `type` | A `KEY_FIXES` entry reads the field as `type`, column `Type`; were the wire to send `event_type`, `Type` would be null and `event_type` would be reported as drift | `tests/massive/refresh/test_overrides.py`: the entry reads `event_type` as `type`, column `Type` | `tests/namespaces/test_reference_integration.py`: one `ticker_events` request; record which key the events carry |
-| 24 | Whether rows of the stocks `filings.index`, `filings.sections_10k`, `filings.text_8k`, and `filings.risk_factors` always carry `ticker`: no filings response schema marks it required, and the index documents it as present only "if available" | Each of the four declares its symbol key `KeySpec("Ticker", required=False)`: a row without `ticker` keeps a null `Symbol` instead of failing the request, and none keys a keyed `poll()` on `Symbol` | `tests/ingest/test_rest.py`: a row without its optional symbol keeps a null `Symbol`; `tests/datasets/test_catalog.py`: only a symbol key from REST rows may be optional; `tests/namespaces/test_stocks.py`: a row without `ticker` of each of the four keeps a null `Symbol` | `tests/namespaces/test_stocks_integration.py`: one request over a month of each of the four; record how many rows lack `ticker` |
+| 24 | Whether rows of the stocks `filings.index`, `filings.sections_10k`, `filings.text_8k`, and `filings.risk_factors` always carry `ticker`: no filings response schema marks it required, and the index documents it as present only "if available" | Each of the four declares its symbol key `KeySpec("Ticker", required=False)`: a row without `ticker` keeps a null `Symbol` instead of failing the request, and none keys a `poll()` on `Symbol`, in any mode | `tests/ingest/test_rest.py`: a row without its optional symbol keeps a null `Symbol`; `tests/datasets/test_catalog.py`: only a symbol key from REST rows may be optional; `tests/namespaces/test_stocks.py`: a row without `ticker` of each of the four keeps a null `Symbol` | `tests/namespaces/test_stocks_integration.py`: one request over a month of each of the four; record how many rows lack `ticker` |
 | 25 | Whether Massive reads a percent-encoded colon in a path segment (`/v2/aggs/ticker/I%3ASPX/prev`) as `I:SPX` | Every path value is percent-encoded whole; a value containing `/` is refused before sending, since Massive answers 404 for `%2F` | `tests/massive/rest/test_query.py`: `I:SPX` becomes `I%3ASPX`; a `/` raises | `tests/namespaces/test_indices_integration.py`: one `I:SPX` `/prev` call returns a row for `I:SPX` |
 | 26 | Spelling of an explicit forex pair topic: the WebSocket documentation gives `{from}-{to}` (`C.EUR-USD`), while quote and aggregate frames spell the pair `EUR/USD` | Topics use `EUR-USD`; frames of any spelling map back to `C:EURUSD` | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`: `C.EUR-USD` is subscribed and an `EUR/USD` frame reaches its stream | `tests/namespaces/test_forex_integration.py`: subscribe `C.EUR-USD` and `CA.EUR-USD`; record the acknowledgement and that frames arrive |
 | 27 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The reader assumes the canonical form: symbol pushdown compares the file's `ticker` column with canonical symbols, and `Symbol` holds the column as written. Were the files to write `X:EUR-USD`, a symbol request would match no row; that outcome becomes an owner decision | `tests/ingest/test_flatfiles.py`: symbol pushdown keeps the rows whose ticker equals a requested canonical symbol | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |

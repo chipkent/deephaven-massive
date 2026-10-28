@@ -192,6 +192,9 @@ SNAPSHOTS: Final = DatasetSpec(
     keys={(_REST, _SNAPSHOT_PATH): SourceKeys(symbol=KeySpec("DetailsTicker"))},
     symbol_param="ticker.any_of",
     page_size=50_000,
+    # The contract's last quote and trade times: an explicit APPEND poll appends each new
+    # state of a contract. The snapshot carries no single update time of its own.
+    revision_keys=("LastQuoteLastUpdated", "LastTradeLastUpdated"),
 )
 
 CONTRACTS: Final = DatasetSpec(
@@ -228,6 +231,9 @@ MARKET_STATUS: Final = DatasetSpec(
     fetch_path=_MARKET_STATUS_PATH,
     poll_keys=("ProductCode", "TradingVenue"),
     page_size=100,
+    # The time of the product's latest market event: an explicit APPEND poll appends each
+    # status change.
+    revision_keys=("Timestamp",),
 )
 
 SCHEDULES: Final = DatasetSpec(

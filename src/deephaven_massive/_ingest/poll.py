@@ -6,7 +6,12 @@ publishes its rows, and waits for the next cycle. Every mode publishes through o
 `table_publisher`, created with the result inside its result scope on the caller thread, so a
 failure can fail the table (`publish_failure`) in every mode:
 
-- `APPEND`: the publisher's blink table made append-only; every cycle's rows are appended.
+- `APPEND`: the publisher's blink table made append-only, fed only the rows not seen before. A
+  row's identity is its values of the poll keys and then the revision keys
+  (`DatasetSpec.poll_keys`, `DatasetSpec.revision_keys`); a cycle skips every row whose
+  identity the poller already appended, or that an earlier row of the same cycle carries. The
+  poller keeps every identity it appended for its whole life: each is a row the append-only
+  table holds, so the set never outgrows the table, and no row is ever appended twice.
 - `UPSERT`: the blink table's `last_by` on the dataset's poll keys (`DatasetSpec.poll_keys`):
   keyed, and a key never leaves.
 - `REPLACE`: the same `last_by`, plus one *tombstone* row for each key the previous cycle had
@@ -24,12 +29,12 @@ table's row of `m.streams()`: `RowsPublished`, `RequestsPerCycle`, `SymbolCount`
 table, and `SchemaDrift` from each page's drift.
 
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, `RowDataError` (a
-row that breaks the schema), or `UnsupportedParameterError` (a symbol of a reactive table
-routed to a path that lacks a parameter the caller set) fails the table through
-`publish_failure`, marks the row `FAILED` (`SessionCore.fail_stream`), and ends the poller. Any
-other error, also one while publishing, is logged at ERROR and shown in the row's `Error`; the
-table keeps its rows and the next cycle runs as scheduled, and clears the `Error` once it
-succeeds.
+row that breaks the schema, or, in any mode, has a null poll key, which would merge unrelated
+rows), or `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks
+a parameter the caller set) fails the table through `publish_failure`, marks the row `FAILED`
+(`SessionCore.fail_stream`), and ends the poller. Any other error, also one while publishing,
+is logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next cycle
+runs as scheduled, and clears the `Error` once it succeeds.
 
 **Lifetime.** The poller ends when its table is released (`m.release`, or garbage collection
 through the reaper), when the table's blink table shuts down, when it fails, or when the
@@ -52,6 +57,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
+import pyarrow.compute as pc
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
@@ -95,6 +101,9 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+_ROW_TEXT: Final = 300
+"""The longest rendering of a row in the error of a null poll key."""
+
 LIVE_COLUMN: Final = "__MassiveLive"
 """The hidden column of a `REPLACE` table's publisher: False marks a tombstone. Dataset columns
 are PascalCase wire names, so none can take this name."""
@@ -104,8 +113,9 @@ class RowDataError(MassiveError):
     """A REST row that breaks its dataset's schema.
 
     A row that lacks a key the dataset requires, a value that does not convert to its field's
-    type, or a timestamp outside 1990 to 2100. `fetch()` and `history()` raise it like any
-    `MassiveError`; a `poll()` table fails with it, since the next cycle would fail alike.
+    type, a timestamp outside 1990 to 2100, or, in a `poll()` cycle, a null or NaN value in
+    one of the dataset's poll keys. `fetch()` and `history()` raise it like any `MassiveError`;
+    a `poll()` table fails with it, since the next cycle would fail alike.
     """
 
 
@@ -261,7 +271,8 @@ class Poller:
     Created by `open_poll` on the caller thread, which builds the table (`build`), registers
     the poller, and then starts its thread (`start`). The thread enters the session's execution
     context for its whole life. Every other method is safe from any thread: `stop` and
-    `release` only set an event and update registries.
+    `release` only set an event and update registries. The key state of `REPLACE` and `APPEND`
+    belongs to the thread alone, so it takes no lock.
     """
 
     __slots__ = (
@@ -280,6 +291,7 @@ class Poller:
         "_read",
         "_request",
         "_schema",
+        "_seen",
         "_spec",
         "_stop",
         "_stream_id",
@@ -333,6 +345,8 @@ class Poller:
         self._stop = stop
         self._publisher = publisher
         self._keys: set[tuple[Hashable, ...]] = set()
+        # The identities an APPEND table holds; only the poller thread touches it.
+        self._seen: set[tuple[Hashable, ...]] = set()
         self._published = 0
         self._thread = threading.Thread(
             target=self._run, name=f"{core.label} poll #{stream_id}", daemon=True
@@ -443,8 +457,7 @@ class Poller:
         table, requests = self._read(symbols=symbols, record=record, executor=pool)
         if self._stop.is_set():
             return False
-        self._publish(table)
-        self._published += table.num_rows
+        self._published += self._publish(table)
         update = StreamUpdate(
             rows_published=self._published,
             requests_per_cycle=requests,
@@ -474,21 +487,90 @@ class Poller:
         core.update_streams({self._stream_id: StreamUpdate(error=str(error))})
         return True
 
-    def _publish(self, table: pa.Table) -> None:
-        """Publish one cycle's rows, with the tombstones of the keys it lost for `REPLACE`.
+    def _publish(self, table: pa.Table) -> int:
+        """Publish one cycle's rows as the mode shapes them.
+
+        `REPLACE` adds a tombstone for each key the cycle lost; `APPEND` keeps only the rows
+        not seen before (`_fresh`). `UPSERT` publishes the rows as they are.
 
         Args:
             table: The cycle's rows in the dataset's schema.
+
+        Returns:
+            How many of the cycle's rows were published (tombstones not counted).
         """
+        self._check_keys(table)
         keys = None
+        identities = None
+        published: int = table.num_rows
         if self._mode is PollMode.REPLACE:
             table, keys = self._replace(table)
+        elif self._mode is PollMode.APPEND:
+            table, identities = self._fresh(table)
+            published = table.num_rows
         if table.num_rows:
             self._publisher.add(dh_arrow.to_table(table))
+        # The key state changes only once the cycle is published: if it failed, the next
+        # cycle still tombstones the keys this one dropped, or appends the rows it skipped.
         if keys is not None:
-            # Only once the cycle is published: if it failed, the next cycle still tombstones
-            # the keys this one dropped.
             self._keys = keys
+        if identities is not None:
+            self._seen |= identities
+        return published
+
+    def _check_keys(self, table: pa.Table) -> None:
+        """Fail the cycle if any row has a null (or NaN) poll key, in every mode.
+
+        A null key would silently merge unrelated rows: one keyed row for all of them, or
+        every later row with the same null skipped by `APPEND`; a NaN never equals itself, so
+        `APPEND` would append its row again every cycle. Like a missing required key, it is a
+        data failure, so it fails the table. The dataset's nullable poll keys
+        (`DatasetSpec.nullable_poll_keys`, such as an option's `PutCall`, empty for common
+        stock) and its revision keys are not checked: a null there is a value.
+
+        Args:
+            table: The cycle's rows.
+
+        Raises:
+            RowDataError: Naming the dataset, the key column, the first such row's position in
+                the cycle, and that row's non-null values, truncated to `_ROW_TEXT`
+                characters, so the row can be found although it was never published.
+        """
+        nullable = self._spec.nullable_poll_keys
+        for name in (key for key in self._spec.poll_keys if key not in nullable):
+            missing = pc.is_null(table.column(name), nan_is_null=True)
+            row = pc.index(missing, True).as_py()
+            if row >= 0:
+                (values,) = table.slice(row, 1).to_pylist()
+                text = repr({k: v for k, v in values.items() if v is not None})
+                text = text if len(text) <= _ROW_TEXT else text[: _ROW_TEXT - 3] + "..."
+                raise RowDataError(
+                    f"{self._spec.name} poll(): row {row} of the cycle has a null poll key "
+                    f"{name!r}: {text}"
+                )
+
+    def _fresh(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
+        """Keep the rows of an `APPEND` cycle whose identity the poller has not appended yet.
+
+        A row's identity is its poll keys followed by its revision keys. A row whose identity
+        an earlier row of the same cycle carries is dropped too, so the first one wins. The
+        poller's set is left as is; `_publish` adds to it once the cycle is published.
+
+        Args:
+            table: The cycle's rows.
+
+        Returns:
+            The rows to append, and every identity of the cycle (those already held are
+            harmless to add again).
+        """
+        names = (*self._spec.poll_keys, *self._spec.revision_keys)
+        identities = zip(*(table.column(name).to_pylist() for name in names), strict=True)
+        taken: set[tuple[Hashable, ...]] = set()
+        keep = []
+        for identity in identities:
+            keep.append(identity not in self._seen and identity not in taken)
+            taken.add(identity)
+        return table.filter(pa.array(keep, pa.bool_())), taken
 
     def _replace(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
         """Mark a cycle's rows live and add one tombstone per key the last published cycle had.
