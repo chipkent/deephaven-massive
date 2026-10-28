@@ -315,6 +315,11 @@ def test_every_description_is_joined_into_its_field() -> None:
     for key, path in spec.sources(Transport.REST).items():
         for item in path.fields:
             assert item.description == described.get(key, {}).get(item.wire_key, ""), (key, item)
+    by_class = _committed_descriptions()["class_descriptions"]
+    assert isinstance(by_class, dict)
+    fields = {f.wire_key: f for f in spec.source(Transport.REST, "/v3/snapshot").fields}
+    for wire_key, texts in by_class["REST"]["/v3/snapshot"].items():
+        assert dict(fields[wire_key].class_descriptions) == texts
     trades = spec.source(Transport.REST, "/v3/trades/{stockTicker}")
     assert trades.field("Conditions").description == (
         "A list of condition codes. See Stocks Condition Codes "
@@ -361,6 +366,15 @@ def test_parse_joins_descriptions_and_leaves_the_rest_empty() -> None:
     assert [f.description for f in bare.fields] == ["", ""]
 
 
+def test_parse_joins_class_descriptions_sorted_by_asset_class() -> None:
+    by_class = {"stocks/T": {"p": {"options": "Per share.", "crypto": "Per coin."}}}
+    (value,) = spec.parse(
+        Transport.WS, _file(_DESCRIBED_ENTRY), {}, class_descriptions=by_class
+    ).values()
+    (price,) = value.fields
+    assert price.class_descriptions == (("crypto", "Per coin."), ("options", "Per share."))
+
+
 @pytest.mark.parametrize(
     ("descriptions", "message"),
     [
@@ -380,6 +394,13 @@ def test_parse_rejects_a_description_of_something_the_schema_lacks(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         spec.parse(Transport.WS, _file(_DESCRIBED_ENTRY), descriptions)
+    by_class = {
+        key: {wire_key: {"options": text}}
+        for key, texts in descriptions.items()
+        for wire_key, text in texts.items()
+    }
+    with pytest.raises(ValueError, match=f"class {message}"):
+        spec.parse(Transport.WS, _file(_DESCRIBED_ENTRY), class_descriptions=by_class)
 
 
 _URL = "https://massive.com/docs/rest/x.md"
@@ -391,6 +412,7 @@ def _descriptions(**change: object) -> str:
         "fetched": "2026-10-27",
         "urls": {"REST": {"/v1/x": [_URL]}},
         "descriptions": {"REST": {"/v1/x": {"price": "The price."}}},
+        "class_descriptions": {"REST": {"/v1/x": {"price": {"options": "Per share."}}}},
     }
     return json.dumps({**document, **change})
 
@@ -400,6 +422,8 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
     assert found.fetched == dt.date(2026, 10, 27)
     assert found.urls == {Transport.REST: {"/v1/x": (_URL,)}}
     assert found.texts == {Transport.REST: {"/v1/x": {"price": "The price."}}}
+    assert found.class_texts == {Transport.REST: {"/v1/x": {"price": {"options": "Per share."}}}}
+    assert isinstance(found.class_texts[Transport.REST]["/v1/x"]["price"], MappingProxyType)
     assert isinstance(found.urls, MappingProxyType)
     assert isinstance(found.urls[Transport.REST], MappingProxyType)
     assert isinstance(found.texts[Transport.REST], MappingProxyType)
@@ -441,6 +465,21 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
             ValueError,
             "missing member 'descriptions'",
         ),
+        (
+            _descriptions(class_descriptions={"REST": {"/v1/x": {"price": {"options": 1}}}}),
+            TypeError,
+            "class descriptions of '/v1/x' is .* not an object of strings",
+        ),
+        (
+            _descriptions(class_descriptions={"REST": {"/v1/x": ["price"]}}),
+            TypeError,
+            "class descriptions of '/v1/x' is .* not an object",
+        ),
+        (
+            json.dumps({"fetched": "2026-10-27", "urls": {}, "descriptions": {}}),
+            ValueError,
+            "missing member 'class_descriptions'",
+        ),
     ],
     ids=[
         "not an object",
@@ -455,6 +494,9 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
         "a transport's descriptions not an object",
         "no urls",
         "no descriptions",
+        "a class description not text",
+        "a field's class descriptions not an object",
+        "no class descriptions",
     ],
 )
 def test_parse_descriptions_coerces_nothing(

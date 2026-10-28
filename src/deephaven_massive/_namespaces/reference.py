@@ -134,8 +134,10 @@ MARKET_STATUS: Final = DatasetSpec(
     summary="Whether the markets are open now, by exchange, currency market, and index group.",
     fetch_path="/v1/marketstatus/now",
     # One row and no key: a `poll()` table keeps the latest status, never a row per
-    # `ServerTime`, which changes on every call.
+    # `ServerTime`, which changes on every call. An explicit APPEND poll appends one row per
+    # new `ServerTime`, a history of the status.
     poll_keys=(),
+    revision_keys=("ServerTime",),
 )
 MARKET_HOLIDAYS: Final = DatasetSpec(
     name="reference.market_holidays",
@@ -151,6 +153,9 @@ SNAPSHOTS: Final = DatasetSpec(
     symbol_param="ticker.any_of",
     page_size=250,
     symbols_per_request=250,
+    # The update times that cover every asset class: an index's own, and a ticker's last quote
+    # and trade. An explicit APPEND poll appends each new state of a ticker.
+    revision_keys=("LastUpdated", "LastQuoteLastUpdated", "LastTradeLastUpdated"),
 )
 """The unified snapshot, served by `MassiveSession.snapshots()`; at most 250 tickers a page."""
 

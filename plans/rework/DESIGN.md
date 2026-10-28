@@ -134,7 +134,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 | kind | A dataset kind: the datasets whose sources share one merged schema (trades, quotes, bars, …), defined in `KINDS` and recorded on each generated source as a `Membership`. |
 | shape | An object shape in a payload (an aggregate row, a snapshot `day` object, a WebSocket channel), which selects a lexicon. |
 | drift | A difference between a payload on the wire and its committed generated schema. |
-| column description | The plain-text meaning of one dataset column: the vendor's description of the wire field behind it, or fixed library text for a key column or a column only other members of the kind supply ([section 19.4](#194-generated-schemas)). |
+| column description | The plain-text meaning of one dataset column: the description of the wire field behind it (the vendor's, or the refresh's correction where the vendor's is clearly wrong), or fixed library text for a key column or a column only other members of the kind supply ([section 19.4](#194-generated-schemas)). |
 | column reference | The generated, committed pages `docs/datasets/<namespace>.md`, one section per dataset ([section 7.4](#74-column-descriptions)). |
 | UG thread | A thread of Deephaven's update graph (UG), which refreshes live tables while holding the UG lock. |
 | blink table | A Deephaven table whose rows exist for exactly one update cycle. `TablePublisher` produces one. |
@@ -801,9 +801,54 @@ dataset has `poll()`. Current state on every tier is `m.<class>.snapshots(symbol
 request per cycle.
 
 **`poll()`.** `mode=None` uses the catalog default: `PollMode.APPEND` for `reference.news`,
-`stocks.ipos`, every `stocks.filings.*` but the two taxonomies, and `partners.benzinga.news`;
-`PollMode.REPLACE` otherwise. `REPLACE` is a keyed table from which keys absent in the latest cycle are
-deleted. `UPSERT` is keyed and never deletes. `APPEND` is append-only. A reactive `Table` passed as
+every `stocks.filings.*` but the two taxonomies, and `partners.benzinga.news`;
+`PollMode.UPSERT` for `stocks.ipos`, whose records are revised in place as an offering moves
+through its statuses; `PollMode.REPLACE` otherwise, the two filing taxonomies included (a
+taxonomy is a reference list revised in place, not a feed of new rows).
+
+- `REPLACE` is a keyed table (`poll_keys`) from which keys absent in the latest cycle are
+  deleted, also when the cycle is empty.
+- `UPSERT` is keyed the same way and never deletes.
+- `APPEND` is append-only and appends only rows it has not seen before. A row's identity is
+  its `poll_keys` followed by its `revision_keys` (empty by default). Each cycle skips every
+  row whose identity the table already holds, and a second row with the same identity in one
+  cycle, and appends the rest. A later revision of an appended row that changes no identity
+  column (an article's corrected text) is therefore not appended; `UPSERT` follows revisions.
+  The poller remembers every identity it appended for as long as it runs, with no bound and no
+  eviction: each remembered identity is a row the append-only table already holds, so the
+  memory never outgrows the table, and a row the responses repeat, or that returns after any
+  absence (a symbol removed from a reactive table and added back hours later), is never
+  appended twice. Nothing is remembered from a cycle that fails to publish, so its rows are
+  appended by the next cycle that returns them.
+- `revision_keys` are what make an explicit `mode=APPEND` on a current-state dataset build a
+  history: every snapshot and movers dataset declares its update time, so each new state of a
+  symbol is a new row, while `REPLACE` and `UPSERT` stay keyed by `Symbol`. The stocks,
+  crypto, and forex snapshots and movers declare `Updated`; the forex conversion
+  `LastTimestamp`, the time of the quote it used; the indices snapshots `LastUpdated`; the
+  options snapshots and chain `LastQuoteLastUpdated` and `LastTradeSipTimestamp`; the unified
+  snapshots `LastUpdated`, `LastQuoteLastUpdated`, and `LastTradeLastUpdated`, which together
+  cover every asset class; the futures snapshots `LastQuoteLastUpdated` and
+  `LastTradeLastUpdated`; `futures.market_status` its `Timestamp`, the time of a product's
+  latest market event; and `reference.market_status`, a one-row dataset with no
+  `poll_keys`, its `ServerTime`. A null in a revision column is a value (a ticker not yet
+  updated). On a dataset with neither unique `poll_keys` nor `revision_keys` (the default
+  `Symbol`), an explicit `APPEND` appends one row per symbol.
+- A dataset may name poll-key columns the vendor leaves empty on some rows in
+  `nullable_poll_keys`, each with its reason from the vendor's description (the 13-F `PutCall`
+  is empty for common stock; the Form 3 and Form 4 exercise price and dates are set only for
+  derivatives, and their `NatureOfOwnership` only for indirect ownership; a Form 4 holding
+  record has no transaction columns; no futures key is nullable, since no vendor description or
+  fixture leaves one empty). A null there is a value. The catalog gate requires at
+  least one poll-key column outside that map, so no row is identified by nulls alone.
+- A null value in any other `poll_keys` column, or a NaN in a float one, fails the table in
+  every mode, as a missing required key does: it would otherwise merge unrelated rows into one
+  key. The `RowDataError` names the dataset, the key column, the row's position in the cycle,
+  and the row's non-null values, truncated.
+- Every dataset whose default is `APPEND` declares its own `poll_keys`, not the default
+  `Symbol` (a catalog gate). No gate can prove that a key is unique per row; each dataset's
+  tests check its key against its fixtures.
+
+A reactive `Table` passed as
 `symbols` is read once per cycle with `Table.snapshot()` on the poller thread, never inside a
 listener. Fan-out endpoints issue one request per symbol per cycle under `max_concurrency`;
 `m.streams()` shows `RequestsPerCycle`.
@@ -916,9 +961,9 @@ the documented way to convert text.
 ### 7.4 Column descriptions
 
 Each dataset column has one description, chosen by the rule of
-[section 19.4](#194-generated-schemas) from the vendor's field descriptions in
-`spec/descriptions.json`. It reaches users through three outlets, all generated from the same
-dataset schema, so they can never disagree.
+[section 19.4](#194-generated-schemas) from the field descriptions in `spec/descriptions.json`
+(the vendor's, corrected where they are clearly wrong). It reaches users through three outlets,
+all generated from the same dataset schema, so they can never disagree.
 
 **1. Every result is described.** Deephaven 42.7 stores column descriptions as the table
 attribute `ColumnDescriptions` and a table description as `TableDescription`, set through
@@ -2117,7 +2162,8 @@ sees:
   drops that symbol, with one WARNING per symbol; every other error fails the call.
 - **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
   a data failure of [section 19.5](#195-runtime-drift) (a missing required key, an
-  unconvertible value, a timestamp out of bounds), or plans a request with a parameter the
+  unconvertible value, a timestamp out of bounds, or a null or NaN `poll_keys` value, in every
+  mode), or plans a request with a parameter the
   chosen path does not take (a reactive symbol table's new symbol routed to a path that lacks
   an explicit parameter; retrying cannot fix it) fails the table through `publish_failure`.
   `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
@@ -2301,14 +2347,17 @@ How a request is built from a `DatasetSpec` and a `Request`:
   created with the result in the result scope; every mode is shaped from its blink table, so
   `publish_failure` fails the table in every mode. (A keyed `input_table` cannot be failed:
   Deephaven notifies failures only inside an update cycle.) `APPEND` is
-  `blink_to_append_only(blink)`; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE` is that
-  `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone row for
-  every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`, so its
-  rows and its removals land in one update. The `last_by` state keeps a hidden row for every key
-  ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a churning
-  key set (an options chain, the day's movers) grows with the keys it has held. The `poll()`
-  docstring says so. The poller holds the session core only weakly, so a `poll()` table never
-  keeps an unclosed session alive.
+  `blink_to_append_only(blink)`, fed only the rows whose identity (`poll_keys`, then
+  `revision_keys`) the poller has not appended yet ([section 7](#7-query-classes-and-verbs)); the
+  poller thread alone owns that set of identities, so it needs no lock, and adds a cycle's
+  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE`
+  is that `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone
+  row for every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`,
+  so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
+  every key ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a
+  churning key set (an options chain, the day's movers) grows with the keys it has held. The
+  `poll()` docstring says so. The poller holds the session core only weakly, so a `poll()` table
+  never keeps an unclosed session alive.
 
 ## 15. Options contract cap
 
@@ -3192,6 +3241,7 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
 | `KEY_FIXES` | `overrides.py` | `{(source, declared key): (wire key, reason)}`: a field the specification declares under one key while every documented sample (the response example and the documentation sample) sends it under another that nothing declares; the field is read under the samples' key, keeping its declared type and description, and every other hand entry names it by that key. Stale once the declared key is gone, or the example no longer sends the corrected key or sends the declared one; each goes into section 23 | ticker events `event_type` → `type` (column `Type`) |
+| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text or asset classes, reason)}`: a field whose vendor description is clearly wrong for its source (another asset class's or event's text copied onto it, or a statement the vendor's own documentation contradicts); the entry quotes the vendor's text (as plain text, after normalization) and gives the replacement, either `text` for every use of the source, or, for a source that serves several asset classes, `asset_classes`: the text a dataset of each listed class shows, every other class keeping the vendor's. The replacement is Massive's own wording for the same field of a sibling source wherever that is right and says what the field holds; it is written here only when no sibling text is adequate, and the reason says so. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once no generated field looks the entry up (its source or key is gone, or the key is one a `KEY_FIXES` entry replaces or only an example sends), or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | the crypto last trade's and trades flat file's `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated"; the futures trades' `price` ("100 contracts × $2.00 = $200.00", no multiplier) → the `futures/T` channel's text; the unified `/v3/snapshot` `last_trade.price` → the options trades' text, for `options` only |
 | `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
@@ -3269,12 +3319,15 @@ description for the reviewer. Every gate has a descriptive name, which is how th
   decided by the representation rules. A timestamp-like string REST parameter (by its base
   name) with no `PARAM_UNITS` entry fails the same gate;
 - **`stale-entry`:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict,
-  `TYPE_FIXES`, `KEY_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry
-  naming a source, field, or parameter the snapshot lacks, or claiming what the snapshot contradicts (a type fix
-  whose declared type the spec no longer gives, a key fix whose key the example no longer
-  sends in place of the declared one, a tag conflict the tag no longer contradicts,
-  a `NAMES` quote the description no longer matches, an exclusion of a path the spec already
-  marks deprecated or draft); an identity entry no generated object uses is stale too;
+  `TYPE_FIXES`, `KEY_FIXES`, `DESCRIPTION_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`,
+  `PARAM_UNITS`, or `EXCLUSIONS` entry naming a source, field, or parameter the snapshot lacks,
+  or claiming what the snapshot contradicts (a type fix whose declared type the spec no longer
+  gives, a key fix whose key the example no longer sends in place of the declared one, a tag
+  conflict the tag no longer contradicts, a `NAMES` or `DESCRIPTION_FIXES` quote the
+  description no longer matches, an exclusion of a path the spec already marks deprecated or
+  draft); an identity entry no generated object uses is stale too, and so is a
+  `DESCRIPTION_FIXES` entry no generated field looked up, which is checked against the keys the
+  generators looked up rather than every key a source declares or an example sends;
 - **`type-agreement`:** within one kind, one column name joins to one `WireType`, unless a
   `TYPE_FIXES` entry resolves it; the message prints both keys' descriptions, because a
   conflict is first treated as a possible naming error (stocks and futures `dv` are exactly
@@ -3312,8 +3365,9 @@ Descriptions differ across transports and change about twenty times as often as 
 `type-agreement` and `transport-agreement`, not description matching, are the mechanical
 checks.
 
-**Field descriptions.** The refresh also records the vendor's description of every field, so
-that users can read what each column means ([section 7.4](#74-column-descriptions)).
+**Field descriptions.** The refresh also records the vendor's description of every field
+(corrected where it is clearly wrong), so that users can read what each column means
+([section 7.4](#74-column-descriptions)).
 
 - **Where they come from.** REST: the OpenAPI `description` of each response property, after
   `$ref` and `allOf` are resolved, the description nearest the field winning (one written
@@ -3340,9 +3394,24 @@ that users can read what each column means ([section 7.4](#74-column-description
   specification do). `refresh/plain_text.py` is the one implementation, used by every
   generator. A test of the committed file fails when any link syntax survives, so a new vendor
   form shows on the refresh that brings it.
+- **Corrections.** Where Massive's description is clearly wrong for its source (another asset
+  class's or event's text copied onto it, or a statement Massive's own documentation of the
+  same field contradicts, such as a price total that leaves out the contract multiplier), a
+  `DESCRIPTION_FIXES` entry quotes the normalized text and replaces it for that
+  `(source, wire key)` alone, with its reason. The replacement is Massive's own text for the
+  same field of a sibling source wherever that text is right and says what the field holds;
+  only when no sibling text is adequate (right but saying nothing useful, like the crypto
+  WebSocket trade's "The price.", or wrong too) is it written in the entry, and the reason says
+  why. A source that serves several asset classes (the unified `/v3/snapshot`) can be corrected
+  per class: the entry gives the text for each listed class, and every other class keeps the
+  vendor's. A class text that no dataset of its class shows (no such dataset reads the source,
+  or an earlier source's text wins the column) fails a catalog test, since the refresh cannot
+  see the datasets. That is the only hand input on descriptions; a description that is merely
+  terse or imprecise is kept.
 - **No gate.** A field without a description gets `""`, and nothing stops the refresh.
   Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
-  changed description is an ordinary line in the refresh diff.
+  changed description is an ordinary line in the refresh diff, except where a
+  `DESCRIPTION_FIXES` entry quotes it, which the `stale-entry` gate then sends back for review.
 - **A separate generated file**, `spec/descriptions.json`, so that a refresh that only changes
   descriptions leaves `rest.json`, `ws.json`, and `flatfiles.json` byte for byte unchanged,
   and a reviewer sees at once that no schema moved. For the same reason the schema files record
@@ -3355,28 +3424,33 @@ that users can read what each column means ([section 7.4](#74-column-description
    "generated_by": "python -m deephaven_massive._massive.refresh",
    "fetched": "<the snapshot's fetch date, from the manifest>",
    "urls": {"<transport>": {"<source key>": ["<each vendor URL that documents the source>"]}},
-   "descriptions": {"<transport>": {"<source key>": {"<wire key>": "<plain text>"}}}
+   "descriptions": {"<transport>": {"<source key>": {"<wire key>": "<plain text>"}}},
+   "class_descriptions": {"<transport>": {"<source key>": {"<wire key>": {"<asset class>": "<plain text>"}}}}
   }
   ```
 
-  A field without a description has no entry, and a source with no described field has no
-  entry under `descriptions`. Every generated source has at least one URL, sorted and as
-  fetched: for REST, every documentation page that names its path (every generated path has
-  one, by the `docs` gate; a path several asset classes share, such as
+  A field without a description has no entry, and a source with no described field has no entry
+  under `descriptions`; `class_descriptions` holds only the fields corrected per asset class,
+  each asset class an `AssetClass` value. Every generated source has at least one URL, sorted
+  and as fetched: for REST, every documentation page that names its path (every generated path
+  has one, by the `docs` gate; a path several asset classes share, such as
   `/v3/reference/tickers`, has one page per asset class), as the snapshot's manifest records
   it. The entries are one per line, in generated order, so a reworded description is one
   changed line of the diff.
-- **Joined at load.** `Field` gains `description: str = ""`, and the `spec` loader fills it
-  from `descriptions.json` when it loads the schema files, under the same once-only lock. An
-  entry that names a source or wire key the schema files lack raises at load: the files are
-  generated together, so only a hand edit can cause it. The same load checks the URLs: a
-  source without one, or a URL of a source the schema lacks, raises, so `sources` and
-  `provenance` reject the same files. A description belongs to a `(source, wire key)`, so a
-  projected field keeps the description of its wire key. `provenance() -> Provenance(fetched:
-  date, urls: Mapping[tuple[Transport, str], tuple[str, ...]])` exposes the fetch date and the
-  URLs of each source, for the footer of the column reference; it loads every transport the
-  file gives URLs for. Each file is read once under the lock, whichever of `sources` and
-  `provenance` comes first. No other name is added to the interface.
+- **Joined at load.** `Field` gains `description: str = ""` and
+  `class_descriptions: tuple[tuple[str, str], ...] = ()` (asset class and text, sorted by
+  class), read through `Field.description_for(asset_class)`, which returns the class's own text
+  or `description`, and the `spec` loader fills both from `descriptions.json` when it loads the
+  schema files, under the same once-only lock. An entry that names a source or wire key the
+  schema files lack raises at load: the files are generated together, so only a hand edit can
+  cause it. The same load checks the URLs: a source without one, or a URL of a source the
+  schema lacks, raises, so `sources` and `provenance` reject the same files. A description
+  belongs to a `(source, wire key)`, so a projected field keeps the description of its wire
+  key.
+  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], tuple[str, ...]])`
+  exposes the fetch date and the URLs of each source, for the footer of the column reference;
+  it loads every transport the file gives URLs for. Each file is read once under the lock,
+  whichever of `sources` and `provenance` comes first. No other name is added to the interface.
 
 **Dataset schemas** are merged at run time, after the rename, never inferred from data.
 `dataset_schema` is a method of the `Catalog` (`_datasets/catalog.py`), and its cache lives on
@@ -3477,10 +3551,10 @@ per source in a
   the stocks `filings.index`: a row without it keeps a null `Symbol` instead of failing the request
   as a missing required key. Only a `symbol` key read from a REST path's rows may set it
   False; flat files and streams filter and route rows by symbol, and the `time`, `fanout`,
-  and `session` keys are always required. A dataset with an optional symbol key cannot key a
-  `REPLACE` or `UPSERT` `poll()` on `Symbol` (`DatasetSpec` refuses it): every row without a
-  symbol would share the null key and collapse into one row, so such a dataset declares other
-  `poll_keys`.
+  and `session` keys are always required. A dataset with an optional symbol key cannot put
+  `Symbol` in its `poll_keys`, whatever its mode (`DatasetSpec` refuses it): a row without a
+  symbol would have a null poll key, which fails the `poll()` table in every mode, so such a
+  dataset declares other `poll_keys`.
 
 A key is `from_request` when the source does not carry it in its rows: the symbol of a source
 that takes it as a path parameter or holds it outside the result key
@@ -3502,7 +3576,16 @@ the dataset's own sources that fill the column (a key filled from the request co
 order `REST`, `FLAT_FILES`, `WS`; `wire_keys` maps each of those transports to the distinct wire
 keys behind the column, before any projection, in source order. `dataset_schema` picks one
 description per column of each **dataset**, never per kind: a kind's union spans asset classes,
-and the stock text for `price` ("dollar value per whole share") is wrong for crypto.
+and one class's text is wrong for another (the stocks trades' `price`, "dollar value per whole
+share", for a crypto trade). Picking per dataset keeps another member's text off a dataset, but
+it cannot correct a dataset's own source when Massive copied the wrong text onto it: the crypto
+REST last trade and trades flat file carry that same stock `price` text. The refresh corrects
+those through `DESCRIPTION_FIXES` (the hand-input table above), so every source already carries
+a description right for it when the rules below pick one. Each field's description in the
+rules is the one for the dataset's asset class, `Field.description_for(spec.asset_class)`: a
+source that serves several classes may carry a per-class correction (`options.snapshots`
+shows the options text of the unified snapshot's last trade, as `options.chain` does), and
+a dataset with no asset class takes the field's own description.
 
 1. **A column the dataset's own sources supply** takes the first non-empty description among
    them, trying the transports in the order REST, flat files, WebSocket and, within one
@@ -3516,7 +3599,7 @@ and the stock text for `price` ("dollar value per whole share") is wrong for cry
    dataset, get a fixed library sentence ("The instrument,
    in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
    underlying instrument, in the library's canonical symbol form."), followed, per transport in
-   the order of rule 1, by the wire key each source renames and its quoted vendor description
+   the order of rule 1, by the wire key each source renames and its quoted field description
    (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``), or, for a key
    filled from the request, the request parameter it came from
    (`` REST: the request's `stocksTicker` parameter. ``).
@@ -3543,6 +3626,17 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
   `(kind, group)`;
 - **Wire parameters:** every declared wire name (time-axis pair, symbol parameter, path
   placeholders) is a parameter of its `RestPath`;
+- **Append keys:** a dataset whose default `poll()` mode is `APPEND` declares its own
+  `poll_keys`, not the default `Symbol`. The gate checks only that the key is explicit; that it
+  is unique per row is checked by the dataset's own tests. (`DatasetSpec` refuses empty
+  `poll_keys` on an `APPEND` dataset, an empty identity (no `poll_keys` and no
+  `revision_keys`) on any dataset, since an explicit `APPEND` could not tell rows apart, and
+  `revision_keys` that repeat a poll key.)
+- **Nullable keys:** a dataset with `poll_keys` has at least one that is not in
+  `nullable_poll_keys` (`DatasetSpec` refuses a nullable key that is no poll key, or one without
+  a reason);
+- **Poll keys:** every `poll_keys` and `revision_keys` column is a column of the dataset's
+  schema;
 - **Generated sources:** every path, channel, and prefix a dataset uses is generated; a miss names
   the dataset and says "deprecated or removed in the snapshot";
 - **Coverage:** generated ⊆ used ∪ undeclared, and no namespace's undeclared file lists a source
@@ -4079,7 +4173,8 @@ document already reflects them.
     `_datasets/column_reference.py`, which takes the catalog as an argument, so the name never
     collides with the `m.reference` namespace and the renderer needs nothing from the API.
 48. **Vendor descriptions in a separate generated file** (2026-10-26). `spec/descriptions.json`
-    holds every field's vendor description, normalized to plain text by fixed rules, with no
+    holds every field's vendor description (corrected where it is clearly wrong, decision 51),
+    normalized to plain text by fixed rules, with no
     gate on a missing one, and is joined into `Field.description` at load; one rule picks each
     dataset column's description ([section 19.4](#194-generated-schemas)).
 49. **Each table keeps its endpoint's spelling** (2026-10-27). One concept spelled two ways by
@@ -4092,7 +4187,7 @@ document already reflects them.
     paths have `order` but no `sort`, keep `order` alone ([section 9](#9-filters)). The whole family of every typed
     parameter is reserved from `filters` in one shared check. Instant axes are half-open
     (`.gte`/`.lt`), date axes whole days (`.gte`/`.lte`). Futures trades and quotes take the
-    `timestamp` range widened to whole Chicago sessions, as bars do (superseded by decision 51)
+    `timestamp` range widened to whole Chicago sessions, as bars do (superseded by decision 52)
     ([section 12](#12-timestamp-units-and-day-boundaries)). The REST transport fills path
     parameters from `Request.params`, fills the bars `{from}`/`{to}` from `history()`'s bounds,
     batches symbols by `DatasetSpec.symbols_per_request`, picks a path per symbol class by
@@ -4107,7 +4202,15 @@ document already reflects them.
     `adjusted: bool | None = None`: None sends nothing, an explicit value is sent where the
     chosen path declares `adjusted`, and raises `ValueError` on the crypto templates, which do
     not.
-51. **Date ranges: two kinds, whole bar windows, UTC days for forex and crypto** (2026-10-28).
+51. **Wrong vendor descriptions are corrected by hand input** (2026-10-28). Where Massive's
+    own description of a field is clearly wrong for its source (another asset class's or
+    event's text copied onto it, or a statement Massive's own documentation of the same field
+    contradicts), a reasoned `DESCRIPTION_FIXES` entry in `refresh/overrides.py` quotes it and
+    replaces it, per asset class for a source that serves several; a merely terse or imprecise
+    description is kept. The replacement is Massive's own sibling text wherever that is right
+    and adequate, and is written in the entry only otherwise. `spec/descriptions.json` changes
+    only through the refresh ([section 19.4](#194-generated-schemas)).
+52. **Date ranges: two kinds, whole bar windows, UTC days for forex and crypto** (2026-10-28).
     `history(start, end=None)` takes two dates (whole days, inclusive; for futures, whole
     sessions) or two aware datetimes (exact instants, half-open), never one of each, with no
     inclusive or exclusive option; `end=None` reads through now; a reversed range raises,
@@ -4144,7 +4247,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
-| 29 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, raises `MassiveError` naming the dataset, the source, and the other source. `AUTO` picks the source as for every dataset, so the check alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all raise, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time raise | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `Timestamp` and whether the OHLCV agree |
+| 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, raises `MassiveError` naming the dataset, the source, and the other source. `AUTO` picks the source as for every dataset, so the check alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all raise, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time raise | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `Timestamp` and whether the OHLCV agree |
 | 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path raises | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
 | 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_stocks_integration.py` (Business key): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
@@ -4168,7 +4271,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 22 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
 | 23 | Where the futures snapshot carries a contract's ticker: the OpenAPI schema nests it as `details.ticker`, which the generator names `DetailsTicker` | `futures.snapshots` declares `DetailsTicker` as its `symbol` key; a row without it is a missing required key and fails loudly ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: a spec-shaped fixture fills `Symbol` from `details.ticker` | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for a current contract; record where the ticker appears and that `Symbol` is filled |
 | 24 | Key of the REST ticker events' event type (`/vX/reference/tickers/{id}/events`): the schema declares the required `event_type`, while the response example, the documentation sample, and Massive's Python client all use `type` | A `KEY_FIXES` entry reads the field as `type`, column `Type`; were the wire to send `event_type`, `Type` would be null and `event_type` would be reported as drift | `tests/massive/refresh/test_overrides.py`: the entry reads `event_type` as `type`, column `Type` | `tests/namespaces/test_reference_integration.py`: one `ticker_events` request; record which key the events carry |
-| 25 | Whether rows of the stocks `filings.index`, `filings.sections_10k`, `filings.text_8k`, and `filings.risk_factors` always carry `ticker`: no filings response schema marks it required, and the index documents it as present only "if available" | Each of the four declares its symbol key `KeySpec("Ticker", required=False)`: a row without `ticker` keeps a null `Symbol` instead of failing the request, and none keys a keyed `poll()` on `Symbol` | `tests/ingest/test_rest.py`: a row without its optional symbol keeps a null `Symbol`; `tests/datasets/test_catalog.py`: only a symbol key from REST rows may be optional; `tests/namespaces/test_stocks.py`: a row without `ticker` of each of the four keeps a null `Symbol` | `tests/namespaces/test_stocks_integration.py`: one request over a month of each of the four; record how many rows lack `ticker` |
+| 25 | Whether rows of the stocks `filings.index`, `filings.sections_10k`, `filings.text_8k`, and `filings.risk_factors` always carry `ticker`: no filings response schema marks it required, and the index documents it as present only "if available" | Each of the four declares its symbol key `KeySpec("Ticker", required=False)`: a row without `ticker` keeps a null `Symbol` instead of failing the request, and none keys a `poll()` on `Symbol`, in any mode | `tests/ingest/test_rest.py`: a row without its optional symbol keeps a null `Symbol`; `tests/datasets/test_catalog.py`: only a symbol key from REST rows may be optional; `tests/namespaces/test_stocks.py`: a row without `ticker` of each of the four keeps a null `Symbol` | `tests/namespaces/test_stocks_integration.py`: one request over a month of each of the four; record how many rows lack `ticker` |
 | 26 | Whether Massive reads a percent-encoded colon in a path segment (`/v2/aggs/ticker/I%3ASPX/prev`) as `I:SPX` | Every path value is percent-encoded whole; a value containing `/` is refused before sending, since Massive answers 404 for `%2F` | `tests/massive/rest/test_query.py`: `I:SPX` becomes `I%3ASPX`; a `/` raises | `tests/namespaces/test_indices_integration.py`: one `I:SPX` `/prev` call returns a row for `I:SPX` |
 | 27 | Spelling of an explicit forex pair topic: the WebSocket documentation gives `{from}-{to}` (`C.EUR-USD`), while quote and aggregate frames spell the pair `EUR/USD` | Topics use `EUR-USD`; frames of any spelling map back to `C:EURUSD` | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`: `C.EUR-USD` is subscribed and an `EUR/USD` frame reaches its stream | `tests/namespaces/test_forex_integration.py`: subscribe `C.EUR-USD` and `CA.EUR-USD`; record the acknowledgement and that frames arrive |
 | 28 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The reader assumes the canonical form: symbol pushdown compares the file's `ticker` column with canonical symbols, and `Symbol` holds the column as written. Were the files to write `X:EUR-USD`, a symbol request would match no row; that outcome becomes an owner decision | `tests/ingest/test_flatfiles.py`: symbol pushdown keeps the rows whose ticker equals a requested canonical symbol | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |

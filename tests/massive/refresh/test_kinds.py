@@ -39,6 +39,7 @@ _EMPTY = HandInput(
     tag_conflicts={},
     type_fixes={},
     key_fixes={},
+    description_fixes={},
     result_keys={},
     param_units={},
     exclusions=(),

@@ -1569,12 +1569,18 @@ def test_a_failure_stops_the_reads_in_progress(
     # so the failure always lands while that read is in progress. The March 3 read then pauses
     # until the pool is shut down, which happens only once the failure has set the cancel event.
     first_block = threading.Event()
+    gate: list[bool] = []  # written once, by the thread answering March 4, before it fails
 
-    def pause(_key: str) -> None:
-        first_block.set()
-        pool.shut.wait(TIMEOUT)
+    def pause(key: str) -> None:
+        if key == TRADES_0303:
+            first_block.set()
+            pool.shut.wait(TIMEOUT)
 
-    fake_s3.before_answer = lambda key: first_block.wait(TIMEOUT) if key == TRADES_0304 else None
+    def hold(key: str) -> None:
+        if key == TRADES_0304 and not gate:
+            gate.append(first_block.wait(TIMEOUT))
+
+    fake_s3.before_answer = hold
     applied.hook = pause
     m = dm.MassiveSession(config(max_concurrency=2))
     try:
@@ -1583,8 +1589,9 @@ def test_a_failure_stops_the_reads_in_progress(
             query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04")
     finally:
         m.close()
+    assert gate == [True]  # the March 4 failure waited for the March 3 read's first block
     assert blocks > 10
-    assert applied.counts[TRADES_0303] == 1
+    assert applied.counts.get(TRADES_0303) == 1
 
 
 def test_an_interrupt_stops_every_read(

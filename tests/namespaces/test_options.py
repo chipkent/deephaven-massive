@@ -1123,3 +1123,21 @@ def test_a_flat_file_of_each_prefix_round_trips(
     (row,) = out  # the other contract's row is filtered out
     assert row["Symbol"] == PUT
     assert {name: row[name] for name in expected} == expected
+
+
+def test_the_snapshots_revise_on_a_new_quote_or_trade() -> None:
+    # An explicit APPEND poll of a snapshot appends each new state of a contract.
+    revision = ("LastQuoteLastUpdated", "LastTradeSipTimestamp")
+    revised = {spec.name: spec.revision_keys for spec in options.DATASETS if spec.revision_keys}
+    assert revised == {"options.chain": revision, "options.snapshots": revision}
+    for spec in (options.CHAIN, options.SNAPSHOTS):
+        assert set(revision) <= set(CATALOG.dataset_schema(spec).column_names)
+
+
+def test_the_options_snapshots_and_chain_describe_a_trade_alike() -> None:
+    by_name = CATALOG.by_name
+    snapshots = {c.name: c for c in CATALOG.dataset_schema(by_name["options.snapshots"]).columns}
+    chain = {c.name: c for c in CATALOG.dataset_schema(by_name["options.chain"]).columns}
+    for name in ("LastTradePrice", "LastTradeExchange"):
+        assert snapshots[name].description == chain[name].description
+    assert "AAPL" not in snapshots["LastTradeId"].description

@@ -880,3 +880,10 @@ def test_one_flat_file_round_trips(
         q, value = s3_session.indices.bars(["I:SPX"]), "Close"
     out = rows(q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES))
     assert [(r["Symbol"], r["Timestamp"], r[value]) for r in out] == expected
+
+
+def test_only_the_snapshots_revise_on_their_update_time() -> None:
+    # An explicit APPEND poll of the snapshots appends each new state of an index.
+    revised = {spec.name: spec.revision_keys for spec in indices.DATASETS if spec.revision_keys}
+    assert revised == {"indices.snapshots": ("LastUpdated",)}
+    assert "LastUpdated" in CATALOG.dataset_schema(indices.SNAPSHOTS).column_names

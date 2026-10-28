@@ -1,12 +1,12 @@
 """The hand input of the refresh, gathered into one value the generators and gates read.
 
 Everything the refresh does not read from the vendor's own files is hand input: the lexicons
-and identity keys (`lexicon`); the names, units, conversions, corrected wire keys, result
-keys, parameter units, dataset kinds and their projections, single-transport columns, and
-futures venues (`overrides`); and the excluded vendor items and disbelieved vendor samples
-(`exclusions`). Those modules hold the tables, each entry with its reason; this one only
-bundles them as `HandInput`, so a test can pass small tables of its own instead of the real
-ones.
+and identity keys (`lexicon`); the names, units, conversions, corrected wire keys, corrected
+descriptions, result keys, parameter units, dataset kinds and their projections,
+single-transport columns, and futures venues (`overrides`); and the excluded vendor items and
+disbelieved vendor samples (`exclusions`). Those modules hold the tables, each entry with its
+reason; this one only bundles them as `HandInput`, so a test can pass small tables of its own
+instead of the real ones.
 """
 
 from __future__ import annotations
@@ -55,6 +55,8 @@ class HandInput:
             samples its declared type does not fit.
         key_fixes: `(source, declared key)` to the wire key of a field whose declared key
             every documented sample contradicts.
+        description_fixes: `(source, wire key)` to the corrected description of a field whose
+            vendor description is wrong for its source, quoting the vendor's text.
         result_keys: Path to where its rows sit, when that is not `results`.
         param_units: `(path, base parameter)` to the unit of a timestamp parameter, or to
             "not an epoch".
@@ -84,6 +86,9 @@ class HandInput:
     )
     key_fixes: Mapping[tuple[str, str], overrides.KeyFix] = field(
         default_factory=lambda: overrides.KEY_FIXES
+    )
+    description_fixes: Mapping[tuple[str, str], overrides.DescriptionFix] = field(
+        default_factory=lambda: overrides.DESCRIPTION_FIXES
     )
     result_keys: Mapping[str, overrides.ResultKey] = field(
         default_factory=lambda: overrides.RESULT_KEYS

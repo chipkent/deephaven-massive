@@ -127,6 +127,7 @@ SNAPSHOTS: Final = DatasetSpec(
     symbol_param="ticker.any_of",
     symbols_per_request=_SNAPSHOT_PAGE,
     page_size=_SNAPSHOT_PAGE,
+    revision_keys=("LastUpdated",),
 )
 """`m.indices.snapshots`: the whole indices snapshot, one row per index."""
 

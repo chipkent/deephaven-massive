@@ -983,3 +983,15 @@ def test_a_conversion_poll_keeps_one_row(
     rows_when(table, changes({("C:AUDUSD", 73.14)}, "Converted"))
     next_cycle(poll_clock)
     rows_when(table, changes({("C:AUDUSD", 74.0)}, "Converted"))
+
+
+def test_the_current_state_datasets_revise_on_their_update_times() -> None:
+    # An explicit APPEND poll appends each new state of a pair, or each new conversion.
+    revised = {spec.name: spec.revision_keys for spec in forex.DATASETS if spec.revision_keys}
+    assert revised == {
+        "forex.snapshots": ("Updated",),
+        "forex.movers": ("Updated",),
+        "forex.conversion": ("LastTimestamp",),
+    }
+    for name, keys in revised.items():
+        assert set(keys) <= set(CATALOG.dataset_schema(CATALOG.by_name[name]).column_names)

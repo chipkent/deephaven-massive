@@ -159,6 +159,11 @@ def test_the_wire_details_of_the_specs() -> None:
     assert crypto.DAILY_OPEN_CLOSE.per_symbol
     assert not crypto.SNAPSHOTS.per_symbol
     assert all(spec.poll_mode is dm.PollMode.REPLACE for spec in crypto.DATASETS)
+    # An explicit APPEND poll of a snapshot appends each new update of a pair.
+    revised = {spec.name: spec.revision_keys for spec in crypto.DATASETS if spec.revision_keys}
+    assert revised == {"crypto.snapshots": ("Updated",), "crypto.movers": ("Updated",)}
+    for spec in (crypto.SNAPSHOTS, crypto.MOVERS):
+        assert "Updated" in CRYPTO.dataset_schema(spec).column_names
 
 
 # --- Schemas ---------------------------------------------------------------------------------
