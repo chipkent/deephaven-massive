@@ -492,11 +492,61 @@ def test_the_merge_puts_the_declared_keys_first() -> None:
     )
     schema = dataset_schema(dataset, (dataset,), lookup)
     names = schema.column_names
-    assert names[:3] == ("Symbol", "AdditionalUnderlyings", "Cfi")
+    assert names[:4] == ("Symbol", "OptionRoot", "AdditionalUnderlyings", "Cfi")
     assert schema.name == "options.contracts"
-    # Only Symbol and Timestamp lead; Underlying keeps its field's place in the source.
+    # Only Symbol and Timestamp lead, then the derived columns; Underlying keeps its field's
+    # place in the source.
     fields = [f.column for f in source(*contracts).fields if f.column != "Ticker"]
-    assert names[1:] == tuple("Underlying" if c == "UnderlyingTicker" else c for c in fields)
+    assert names[2:] == tuple("Underlying" if c == "UnderlyingTicker" else c for c in fields)
+
+
+def test_derived_columns_follow_the_leading_keys() -> None:
+    trades = (R, "/v3/trades/{optionsTicker}")
+    rows = (R, "/v3/reference/options/contracts")
+    by_request = spec(
+        "options.trades",
+        {trades: SourceKeys(KeySpec("optionsTicker", from_request=True), KeySpec("SipTimestamp"))},
+        asset_class=AssetClass.OPTIONS,
+    )
+    from_rows = spec(
+        "options.contracts",
+        {rows: SourceKeys(KeySpec("Ticker"))},
+        asset_class=AssetClass.OPTIONS,
+    )
+    plain = dataset_schema(by_request, (by_request,), lookup)
+    assert plain.column_names[:3] == ("Symbol", "Timestamp", "OptionRoot")
+    root = plain.columns[2]
+    assert root.type is ColumnType.STRING
+    assert root.description.startswith("The OCC option root, read from `Symbol`")
+    assert root.supplied_by == plain.columns[0].supplied_by
+    assert root.wire_keys == plain.columns[0].wire_keys
+    # RawSymbol exists only where a symbol is read from rows, and only when asked for.
+    assert dataset_schema(by_request, (by_request,), lookup, raw_symbol=True) == plain
+    kept = dataset_schema(from_rows, (from_rows,), lookup, raw_symbol=True)
+    assert kept.column_names[:3] == ("Symbol", "OptionRoot", "RawSymbol")
+    assert (
+        "Present only in a session whose `unknown_symbols` is `WARN`" in kept.columns[2].description
+    )
+    assert "RawSymbol" not in dataset_schema(from_rows, (from_rows,), lookup).column_names
+
+
+def test_only_options_datasets_have_an_option_root() -> None:
+    quotes = (R, "/v3/quotes/{stockTicker}")
+    stocks = spec(
+        "stocks.quotes",
+        {quotes: SourceKeys(KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp"))},
+        asset_class=AssetClass.STOCKS,
+    )
+    assert "OptionRoot" not in dataset_schema(stocks, (stocks,), lookup).column_names
+    unkeyed = DatasetSpec(
+        name="options.contracts",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.OPTIONS,
+        fetch_path="/v3/reference/options/contracts",
+    )
+    names = dataset_schema(unkeyed, (unkeyed,), lookup, raw_symbol=True).column_names
+    assert "OptionRoot" not in names
+    assert "RawSymbol" not in names
 
 
 def test_the_merge_follows_the_membership_positions() -> None:

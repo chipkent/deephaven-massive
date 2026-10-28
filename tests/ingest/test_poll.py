@@ -353,7 +353,7 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
-    watch.add(new_table([string_col("Symbol", ["msft", "AAPL", "not a symbol!"])]))
+    watch.add(new_table([string_col("Symbol", ["MSFT", "AAPL", None])]))
     script.drift = DriftReport(missing=frozenset({"ticker"}))  # every cycle: shown once
     script.rows()
     table = start(
@@ -368,6 +368,36 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     assert script.symbols[-1] == ("AAPL", "IBM", "MSFT")
     assert stream_rows()[0]["SchemaDrift"] == "REST:ticker-"
     del table
+
+
+def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    watch.add(new_table([string_col("Symbol", ["msft"])]))
+    until(lambda: watch.size == 2)
+    clock.advance(60)
+    poller_of(pollers).thread.join(TIMEOUT)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("stocks.dividends poll(): a symbol table holds 'msft'")
+    assert (
+        "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, on_error=dm.OnError.NULL)"
+        in (row["Error"])
+    )
+    assert script.symbols == [("AAPL",)]
 
 
 # --- Lifetime ------------------------------------------------------------------------------------
@@ -637,9 +667,15 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
     dh_to_pylist: ToPylist,
 ) -> None:
     fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}])))
-    watch = new_table([string_col("Symbol", ["aapl"])])
+    watch = new_table([string_col("Symbol", ["AAPL"])])
     q = build_query(rest_session._core, DIVIDENDS, symbols=watch)
     assert isinstance(q, Query)
+    bad = build_query(
+        rest_session._core, DIVIDENDS, symbols=new_table([string_col("Symbol", ["aapl"])])
+    )
+    assert isinstance(bad, Query)
+    with pytest.raises(ValueError, match=r"^a symbol table holds 'aapl'"):
+        bad.poll(60)
     table = q.poll(60, mode=PollMode.UPSERT)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25)])
     assert "ticker.any_of=AAPL" in fake_rest.requests[0].target

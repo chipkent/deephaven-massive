@@ -57,13 +57,14 @@ from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
 from deephaven.stream.table_publisher import table_publisher
 
-from deephaven_massive._datasets.symbols import SymbolTable, symbol_canonicalizer
+from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import PollMode
 from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.liveness import entered, make_result
+from deephaven_massive._tables.watchlist import read_symbols
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable
@@ -88,6 +89,7 @@ __all__ = [
     "Poller",
     "Pollers",
     "RowDataError",
+    "SymbolRowError",
     "UnsupportedParameterError",
     "build_table",
     "open_poll",
@@ -118,7 +120,21 @@ class UnsupportedParameterError(MassiveError):
     """
 
 
-_FATAL: Final = (AuthenticationError, EntitlementError, RowDataError, UnsupportedParameterError)
+class SymbolRowError(MassiveError):
+    """A row of a `poll()` table's reactive symbol table that is not Massive's exact ticker.
+
+    The table fails with it, since every later cycle would read the same row; its message
+    names `dm.canonicalize_symbols`, which converts such a table.
+    """
+
+
+_FATAL: Final = (
+    AuthenticationError,
+    EntitlementError,
+    RowDataError,
+    SymbolRowError,
+    UnsupportedParameterError,
+)
 """The errors that fail a `poll()` table: retrying the next cycle cannot fix them."""
 
 
@@ -321,7 +337,7 @@ class Poller:
         self._exec_ctx = core.exec_ctx
         self._label = core.label
         self._max_concurrency = core.config.max_concurrency
-        self._schema = core.catalog.dataset_schema(spec)
+        self._schema = core.dataset_schema(spec)
         self._spec = spec
         self._request = request
         self._interval = interval.total_seconds()
@@ -387,17 +403,20 @@ class Poller:
         """Return the cycle's symbols, reading a reactive table once.
 
         Returns:
-            The request's symbols, or for a reactive table the valid symbols it holds now,
-            canonical and sorted (rows that are no valid symbol of the class are ignored and
-            logged once at WARNING).
+            The request's symbols, or for a reactive table the symbols it holds now, sorted
+            (null rows are ignored).
+
+        Raises:
+            SymbolRowError: If a row of the reactive table is not Massive's exact ticker; the
+                table fails with it.
         """
         symbols = self._request.symbols
         if not isinstance(symbols, SymbolTable):
             return symbols
-        canonical = symbol_canonicalizer(self._spec.asset_class)
-        snapshot = symbols.table.snapshot()
-        found = {canonical(row[0]) for row in snapshot.iter_tuple(cols="Symbol")}
-        return tuple(sorted(symbol for symbol in found if symbol is not None))
+        try:
+            return read_symbols(self._spec.asset_class, symbols.table)
+        except ValueError as error:
+            raise SymbolRowError(f"{self._spec.name} poll(): {error}") from None
 
     def _cycle(self, pool: ThreadPoolExecutor) -> bool:
         """Run one cycle: read, publish, and update the table's row.
@@ -591,7 +610,7 @@ def _build(
         column descriptions in every mode; the poller writes only through the publisher.
     """
     built: list[TablePublisher] = []
-    schema = core.catalog.dataset_schema(spec)
+    schema = core.dataset_schema(spec)
 
     def shape() -> Table:
         table, publisher = build_table(spec, schema, mode, stream_id=stream_id, stop=stop)

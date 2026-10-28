@@ -22,7 +22,7 @@ keys of a keyed `poll()` table, and the page size, which is each endpoint's docu
 Columns, types, and descriptions come from the generated schemas, never from this module.
 
 Instruments. The Benzinga datasets that take tickers, the ETF Global datasets, and the TMX
-events take US-style stock symbols (`AAPL`, `brk.b`), so their specs carry
+events take Massive's stock tickers (`AAPL`, `BRK.B`), so their specs carry
 `AssetClass.STOCKS` and a symbol with another class's prefix (`X:BTCUSD`) is rejected when the
 query is built. Their rows each describe one instrument, which becomes the `Symbol` column (an
 ETF Global row's ETF, its `composite_ticker`; for consensus ratings, the symbol requested; for

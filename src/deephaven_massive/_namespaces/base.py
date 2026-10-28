@@ -5,7 +5,8 @@ module does the work they share when a dataset method is called:
 
 - `Namespace` is the base class of the namespace classes; it holds the session core, which
   each factory method passes to `build_query`.
-- `build_query` normalizes symbols (`normalize` in `_datasets/symbols.py`; a reactive
+- `build_query` checks symbols (`normalize` in `_datasets/symbols.py`, which takes only
+  Massive's exact tickers; a reactive
   `Table` is checked for its `Symbol` column and boxed in a `SymbolTable` here), rejects
   `dm.ALL` where the dataset cannot serve it (naming the alternative), parses the time-axis
   bounds, and normalizes the typed parameters and the `filters` mapping into a hashable

@@ -274,7 +274,7 @@ def test_flat_file_fixtures_have_the_generated_header(
 
 
 def test_values_query(m: dm.MassiveSession) -> None:
-    q = m.indices.values(["spx", "I:NDX", "I:SPX"])
+    q = m.indices.values(["I:SPX", "I:NDX", "I:SPX"])
     assert type(q) is StreamHistoryLatestQuery
     assert q._spec is indices.VALUES
     assert q._request.symbols == ("I:NDX", "I:SPX")
@@ -318,7 +318,7 @@ def test_values_history_from_flat_files_needs_credentials(
 )
 def test_bars_pick_their_class(m: dm.MassiveSession, case: tuple[dm.Timespan, int, type]) -> None:
     timespan, multiplier, expected = case
-    q = m.indices.bars("SPX", timespan, multiplier=multiplier)
+    q = m.indices.bars("I:SPX", timespan, multiplier=multiplier)
     assert type(q) is expected
     assert q._request.symbols == ("I:SPX",)
     assert q._request.timespan is timespan
@@ -376,7 +376,7 @@ def test_bar_flat_files_hold_only_minutes_and_days(m: dm.MassiveSession) -> None
 
 def test_snapshots_query(m: dm.MassiveSession) -> None:
     q = m.indices.snapshots(
-        ["I:SPX", "ndx"],
+        ["I:SPX", "I:NDX"],
         sort="ticker",
         order=dm.Order.DESC,
         limit=10,
@@ -419,7 +419,7 @@ def test_snapshots_check_their_list_parameters(m: dm.MassiveSession) -> None:
     ],
 )
 def test_daily_open_close_query(m: dm.MassiveSession, day: str | date) -> None:
-    q = m.indices.daily_open_close(["I:SPX", "NDX"], day)
+    q = m.indices.daily_open_close(["I:SPX", "I:NDX"], day)
     assert type(q) is Query
     assert q._request.symbols == ("I:NDX", "I:SPX")
     assert dict(q._request.params) == {"date": date(2025, 6, 2)}
@@ -444,8 +444,10 @@ def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
 def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
     method = cast("Callable[..., object]", getattr(m.indices, name))
     extra: tuple[object, ...] = ("2025-06-02",) if name == "daily_open_close" else ()
-    with pytest.raises(ValueError, match="carries the prefix of another asset class"):
+    with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker \(prefix X:\)"):
         method("X:BTCUSD", *extra)
+    with pytest.raises(ValueError, match=r"^'SPX' is not Massive's ticker; use 'I:SPX'"):
+        method("SPX", *extra)
     with pytest.raises(ValueError, match="no symbols"):
         method([], *extra)
 
@@ -515,7 +517,7 @@ def test_values_fetch_reads_the_snapshot_and_drops_error_rows(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     fake_rest.reply(SNAPSHOT, Reply(load_fixture(OWNER, "snapshot.json")))
-    q = rest_session.indices.values(["I:SPX", "NDX", "I:NOPE"])
+    q = rest_session.indices.values(["I:SPX", "I:NDX", "I:NOPE"])
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
         out = rows(q.fetch())
         again = rows(q.fetch())
@@ -609,7 +611,7 @@ def test_previous_day_bars_fetch_one_index_a_request(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(quote("/v2/aggs/ticker/I:SPX/prev"), Reply(load_fixture(OWNER, "prev.json")))
-    out = bar_rows(rest_session.indices.bars("SPX", dm.Timespan.DAY).fetch())
+    out = bar_rows(rest_session.indices.bars("I:SPX", dm.Timespan.DAY).fetch())
     assert sent(fake_rest) == [("/v2/aggs/ticker/I:SPX/prev", {})]
     assert out == [
         {
@@ -777,11 +779,11 @@ def test_a_frame_lands_in_blink(
     expected: dict[str, object],
 ) -> None:
     if topic.startswith("V."):
-        blink = ws_session.indices.values("SPX").blink()
+        blink = ws_session.indices.values("I:SPX").blink()
     elif topic.startswith("A."):
-        blink = ws_session.indices.bars("SPX", dm.Timespan.SECOND).blink()
+        blink = ws_session.indices.bars("I:SPX", dm.Timespan.SECOND).blink()
     else:
-        blink = ws_session.indices.bars("SPX").blink()
+        blink = ws_session.indices.bars("I:SPX").blink()
     seen = blink_to_append_only(blink)
     subscribed(fake_ws_server, topic)
     fake_ws_server.send(load_fixture(OWNER, fixture).decode())

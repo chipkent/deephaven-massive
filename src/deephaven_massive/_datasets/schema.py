@@ -48,6 +48,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.timestamps import TimeUnit, time_unit
+from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType
 
@@ -60,6 +61,8 @@ if TYPE_CHECKING:
 __all__ = [
     "COLUMN_TYPES",
     "KEY_COLUMNS",
+    "OPTION_ROOT",
+    "RAW_SYMBOL",
     "Column",
     "ColumnType",
     "Schema",
@@ -595,6 +598,28 @@ _KEY_SENTENCES: Final[Mapping[str, str]] = {
 """The library's own sentence for each renamed key column; its description goes on to name
 the wire key or request parameter behind it on each transport."""
 
+OPTION_ROOT: Final = "OptionRoot"
+"""The derived column of every options dataset with a `Symbol`: the OCC root of the symbol."""
+
+RAW_SYMBOL: Final = "RawSymbol"
+"""The derived column of a dataset that reads its symbol from rows, in a session whose
+`unknown_symbols` is `WARN`: the text of a symbol the library could not read."""
+
+_DERIVED_SENTENCES: Final[Mapping[str, str]] = {
+    OPTION_ROOT: (
+        "The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its "
+        "last 15 characters (expiry, type, and strike), such as `SPXW` for "
+        "`O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract "
+        "keeps its own root, such as `AAPL1`."
+    ),
+    RAW_SYMBOL: (
+        "The symbol exactly as Massive sent it, on a row whose spelling the library cannot "
+        "read as the dataset's class (its `Symbol` is then null); null on every other row. "
+        "Present only in a session whose `unknown_symbols` is `WARN`."
+    ),
+}
+"""The library's description of each derived column."""
+
 _Contribution = tuple[Transport, SourceColumn]
 """One column one source of a dataset contributes, with the source's transport."""
 
@@ -742,10 +767,57 @@ def widen(values: pa.Array, target: pa.DataType) -> pa.Array:
     return pc.cast(values, target, safe=not to_float)
 
 
+def _reads_symbol(spec: DatasetSpec) -> bool:
+    """Tell whether some source of a dataset carries its symbol in its rows.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        True when a declared `symbol` key is read from rows, not filled from the request: only
+        then can Massive send a spelling the library cannot read.
+    """
+    return any(
+        keys.symbol is not None and not keys.symbol.from_request for keys in spec.keys.values()
+    )
+
+
+def _derived(spec: DatasetSpec, symbol: Column | None, *, raw_symbol: bool) -> list[Column]:
+    """Return a dataset's derived columns, which no source carries and the transports compute.
+
+    Args:
+        spec: The dataset.
+        symbol: Its `Symbol` column, or None for a dataset without one.
+        raw_symbol: Whether the session keeps unreadable symbols in `RawSymbol`.
+
+    Returns:
+        `OptionRoot` for an options dataset with a `Symbol`, then `RawSymbol` when
+        `raw_symbol` is set and the dataset reads its symbol from rows. Each is a `String`
+        column with the transports and wire keys of `Symbol`, from which it is computed.
+    """
+    if symbol is None:
+        return []
+    names = [OPTION_ROOT] if spec.asset_class is AssetClass.OPTIONS else []
+    if raw_symbol and _reads_symbol(spec):
+        names.append(RAW_SYMBOL)
+    return [
+        Column(
+            name,
+            ColumnType.STRING,
+            _DERIVED_SENTENCES[name],
+            symbol.supplied_by,
+            symbol.wire_keys,
+        )
+        for name in names
+    ]
+
+
 def dataset_schema(
     spec: DatasetSpec,
     members: Sequence[DatasetSpec],
     source: Callable[[Transport, str], Source],
+    *,
+    raw_symbol: bool = False,
 ) -> Schema:
     """Merge the renamed columns of every member's sources into one dataset's schema.
 
@@ -779,12 +851,19 @@ def dataset_schema(
 
     A column whose sources carry no description gets `""`, and nothing fails.
 
+    Derived columns, which no source carries and every transport computes from `Symbol`, follow
+    the leading key columns, with the library's own description: `OptionRoot` on every options
+    dataset with a `Symbol` (`symbols.option_roots`), and `RawSymbol` when `raw_symbol` is set
+    and the dataset reads its symbol from rows.
+
     Args:
         spec: The dataset whose schema is built; it names the schema, decides the leading
             key columns, and is the dataset the descriptions are chosen for.
         members: The datasets whose sources merge, in member order: the datasets of the
             dataset's kind (`Catalog.members`), or the dataset alone when it is in no kind.
         source: Returns the generated source of a transport and key.
+        raw_symbol: True for a session whose `unknown_symbols` is `WARN`, which keeps the text
+            of an unreadable symbol in `RawSymbol`.
 
     Returns:
         The schema, named after the dataset.
@@ -817,17 +896,17 @@ def dataset_schema(
     leading = [name for name in _LEADING if name in declared]
     order = [*leading, *(name for name in types if name not in leading)]
     own = _own_contributions(spec, source)
-    return Schema(
-        spec.name,
-        tuple(
-            _column(
-                spec,
-                name,
-                column_type=COLUMN_TYPES[types[name]],
-                own=own.get(name, ()),
-                suppliers=suppliers[name],
-                is_key=name in declared,
-            )
-            for name in order
-        ),
-    )
+    columns = [
+        _column(
+            spec,
+            name,
+            column_type=COLUMN_TYPES[types[name]],
+            own=own.get(name, ()),
+            suppliers=suppliers[name],
+            is_key=name in declared,
+        )
+        for name in order
+    ]
+    symbol = next((c for c in columns if c.name == "Symbol" and "Symbol" in declared), None)
+    derived = _derived(spec, symbol, raw_symbol=raw_symbol)
+    return Schema(spec.name, (*columns[: len(leading)], *derived, *columns[len(leading) :]))

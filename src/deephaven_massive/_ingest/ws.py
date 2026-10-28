@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
 from deephaven_massive._datasets.request import HostDecision
-from deephaven_massive._datasets.symbols import SymbolTable, canonical
+from deephaven_massive._datasets.symbols import SymbolTable, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
 from deephaven_massive._ingest.subscriptions import (
@@ -667,12 +667,9 @@ class Connection:
             channel: The row's channel.
             reject: The rejected row, with its raw wire symbol.
         """
-        symbol = None
-        if reject.symbol is not None:
-            try:
-                symbol = canonical(self.asset_class, reject.symbol)
-            except ValueError:
-                symbol = None
+        symbol = (
+            None if reject.symbol is None else canonical_from_wire(self.asset_class, reject.symbol)
+        )
         if symbol is None:
             logger.error(
                 "%s%s: a %s row has no valid symbol; failing the channel's ALL streams: %s",
@@ -1069,13 +1066,14 @@ class WsConnections:
                 connection.start()
             opened = open_stream_tables(
                 plan,
-                core.catalog.dataset_schema(spec),
+                core.dataset_schema(spec),
                 symbols,
                 stream_id=stream_id,
                 host=decision.host,
                 path=connection.path,
                 on_shutdown=functools.partial(self._shut_down, stream_id),
                 on_symbols=functools.partial(self._symbols_changed, stream_id),
+                on_invalid=functools.partial(self._symbol_refused, stream_id),
             )
         except BaseException:
             self._abandon(connection, stream_id)
@@ -1106,7 +1104,9 @@ class WsConnections:
         with self._lock:
             plan = self._plans.get((spec, channel))
         if plan is None:
-            built = ChannelPlan.build(core.catalog, spec, channel)
+            built = ChannelPlan.build(
+                core.catalog, spec, channel, unknown_symbols=core.config.unknown_symbols
+            )
             with self._lock:
                 plan = self._plans.setdefault((spec, channel), built)
         return plan
@@ -1307,6 +1307,22 @@ class WsConnections:
             connection = self._streams.get(stream_id)
         if connection is not None:
             connection.post(connection.change_symbols, stream_id, added, removed)
+
+    def _symbol_refused(self, stream_id: int, message: str) -> None:
+        """A reactive symbol table holds a row that is not canonical: fail the stream.
+
+        Runs on an update-graph thread (or the caller thread for the initial replay), with the
+        update-graph lock held: it takes `registry_lock` only to find the connection, and the
+        flush thread fails the stream's table later (`Flusher.fail` never blocks).
+
+        Args:
+            stream_id: The stream.
+            message: Why the row is refused, naming `dm.canonicalize_symbols`.
+        """
+        with self._lock:
+            connection = self._streams.get(stream_id)
+        if connection is not None:
+            connection.flusher.fail([stream_id], MassiveError(message))
 
     # --- registry (connections call these) ------------------------------------------------------
 

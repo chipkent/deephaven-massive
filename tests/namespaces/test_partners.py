@@ -290,7 +290,7 @@ def test_every_poll_key_tells_fixture_rows_apart(
 
 @pytest.mark.parametrize("name", LIST_WITH_SYMBOLS)
 def test_list_factories_build_the_request(massive_session: dm.MassiveSession, name: str) -> None:
-    q = factory(massive_session, name)(["msft", "AAPL"], sort="date", order=Order.DESC, limit=10)
+    q = factory(massive_session, name)(["MSFT", "AAPL"], sort="date", order=Order.DESC, limit=10)
     assert type(q) is Query
     assert q._spec is spec_of(name)
     request = q._request
@@ -337,7 +337,7 @@ def test_all_is_refused_by_list_datasets(massive_session: dm.MassiveSession, nam
 
 @pytest.mark.parametrize("name", LIST_WITH_SYMBOLS)
 def test_stock_datasets_refuse_another_class(massive_session: dm.MassiveSession, name: str) -> None:
-    with pytest.raises(ValueError, match="prefix of another asset class"):
+    with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker \(prefix X:\)"):
         factory(massive_session, name)("X:BTCUSD")
 
 
@@ -358,7 +358,7 @@ def test_an_exhausted_generator_is_refused(massive_session: dm.MassiveSession, n
 
 
 def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.partners.benzinga.consensus_ratings(["msft", "AAPL"])
+    q = massive_session.partners.benzinga.consensus_ratings(["MSFT", "AAPL"])
     assert type(q) is Query
     assert q._request.symbols == ("AAPL", "MSFT")
     assert q._request.params == ()
@@ -607,7 +607,7 @@ def test_list_requests_send_symbols_sort_filters_and_page(
 ) -> None:
     fake_rest.reply("/benzinga/v1/ratings", Reply(envelope([])))
     rest_session.partners.benzinga.ratings(
-        ["msft", "AAPL"],
+        ["MSFT", "AAPL"],
         sort="date",
         order=Order.DESC,
         limit=10,
@@ -697,7 +697,7 @@ def test_consensus_ratings_send_one_request_per_symbol(
     for ticker, row in echoes.items():
         fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope([row])))
     table = rest_session.partners.benzinga.consensus_ratings(
-        ["msft", "brk.b"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
+        ["MSFT", "BRK.B"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
     ).fetch()
     window = {"date.gte": ["2024-10-01"], "date.lt": ["2025-01-01"], "limit": ["50000"]}
     assert sorted(sent(fake_rest)) == [

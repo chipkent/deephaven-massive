@@ -10,10 +10,14 @@ namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset
 (`CATALOG` in `_session.py`). A spec names the dataset's sources and key columns, never its
 columns: those come from the generated wire schemas.
 
-Option symbols are OCC symbols. Every method accepts them with or without the `O:` prefix
-(`AAPL250117C00150000` or `O:AAPL250117C00150000`), and the `Symbol` column always holds the
-prefixed form (`normalize` in `_datasets/symbols.py`). The rows of the chain, the snapshots,
-and the contract reference data also carry the contract's underlying instrument as `Underlying`.
+Option symbols are Massive's exact tickers: `O:` and the OCC symbol (`O:AAPL250117C00150000`).
+Every method takes only that form (`check_symbol` in `_datasets/symbols.py`), and
+`dm.canonical_symbol_option` converts the bare or space-padded OCC forms. Every options dataset
+also has `OptionRoot`, the OCC root read from the symbol (`SPXW`, `AAPL1`). The rows of the
+chain, the snapshots, and the contract reference data carry the instrument Massive links the
+contract to as `Underlying`, exactly as Massive sends it: it names the linked instrument, not
+the deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100
+shares of it. Neither column is ever mapped to the other.
 
 One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count topics
 against that cap and raise `ValueError` before subscribing a static list that would cross it.
@@ -26,6 +30,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import calendar_day
+from deephaven_massive._datasets.symbols import check_symbol, symbol_class
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -242,24 +247,26 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 
 
 def _underlying(value: object) -> str:
-    """Normalize an underlying ticker to the form Massive's options endpoints take.
+    """Check an `underlying` argument: Massive's exact ticker of a stock or an index.
 
     Args:
-        value: The `underlying` argument as passed, such as `"aapl"` or `"I:SPX"`.
+        value: The `underlying` argument as passed, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`.
 
     Returns:
-        The ticker, stripped and upper-cased.
+        The ticker, unchanged: case is kept (`KIMpL`), and nothing is converted.
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` is empty or only whitespace.
+        ValueError: If `value` is the ticker of an option, a currency pair, or a crypto pair,
+            or is not canonical; `check_symbol` names the canonical form when it can.
     """
     if not isinstance(value, str):
         raise TypeError(f"underlying must be a str, not {type(value).__name__}")
-    ticker = value.strip().upper()
-    if not ticker:
-        raise ValueError("underlying must not be empty")
-    return ticker
+    if symbol_class(value) not in {AssetClass.STOCKS, AssetClass.INDICES}:
+        raise ValueError(
+            f"underlying must be a stock or index ticker such as 'AAPL' or 'I:SPX', not {value!r}"
+        )
+    return check_symbol(None, value)
 
 
 def _contract_type(value: object) -> ContractType | None:
@@ -336,7 +343,7 @@ class _Options(Namespace):
         `TypeError` if `symbols` is of another type.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol)
                 (`"O:AAPL250117C00150000"`); one `str`, a sequence, a Deephaven table with a
                 `Symbol` column that the stream follows as rows are added and removed, or
                 `dm.ALL`.
@@ -377,7 +384,7 @@ class _Options(Namespace):
         `TypeError` if `symbols` is of another type.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
 
         Returns:
@@ -458,7 +465,7 @@ class _Options(Namespace):
         of another type.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
             timespan: The bar unit; `Timespan.MINUTE` by default. `Timespan.SESSION` is for
                 futures only.
@@ -510,7 +517,7 @@ class _Options(Namespace):
         `TypeError` if `symbols` is of another type.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
 
         Returns:
@@ -549,14 +556,24 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#chain,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if `underlying` is empty, `limit` is not
-        positive, a filter key is not a parameter of the endpoint or is `contract_type`, or a filter
-        value does not fit its parameter; `TypeError` if `underlying` or `sort` is not a `str`,
-        `contract_type` is not a `dm.ContractType`, `order` is not a `dm.Order`, `limit` is not an
-        `int`, or `filters` is not a mapping.
+        It raises at once, before any request: `ValueError` if `underlying` is not Massive's
+        exact stock or index ticker, `limit` is not positive, a filter key is not a parameter
+        of the endpoint or is `contract_type`, or a filter value does not fit its parameter;
+        `TypeError` if `underlying` or `sort` is not a `str`, `contract_type` is not a
+        `dm.ContractType`, `order` is not a `dm.Order`, `limit` is not an `int`, or `filters`
+        is not a mapping.
+
+        `Underlying` is the instrument Massive links each contract to, exactly as it sends it;
+        it names that instrument, not what the contract delivers. An adjusted contract (a root
+        such as `AAPL1` after a merger or a special dividend) may deliver another number of
+        shares, cash, or other securities, and is listed here beside the standard ones. The
+        chain carries only `DetailsSharesPerContract`; `m.options.contracts` adds
+        `SharesPerContract`, `AdditionalUnderlyings`, and `Correction`, so a chain row can be
+        kept only when its contract is standard by joining them on `Symbol` (see the example).
 
         Args:
-            underlying: The underlying's ticker, such as `"AAPL"`; case does not matter.
+            underlying: The underlying's exact Massive ticker, such as `"AAPL"`, `"BRK.B"`, or
+                `"I:SPX"`; case is kept, and nothing is converted.
             contract_type: Only calls or only puts; None, the default, returns both.
             sort: The field to sort by: `"ticker"`, `"expiration_date"`, or
                 `"strike_price"`; None for the endpoint's order.
@@ -577,6 +594,16 @@ class _Options(Namespace):
                     contract_type=dm.ContractType.CALL,
                     filters={"expiration_date_lte": "2025-01-17"},
                 ).fetch()
+                # Keep the contracts that deliver 100 shares and nothing else.
+                terms = m.options.contracts(underlying="AAPL").fetch()
+                standard = near.natural_join(
+                    terms, "Symbol", "SharesPerContract, AdditionalUnderlyings"
+                ).where(
+                    [
+                        "SharesPerContract == 100",
+                        "isNull(AdditionalUnderlyings) || AdditionalUnderlyings == `[]`",
+                    ]
+                )
         """
         params: dict[str, object] = {
             "underlyingAsset": _underlying(underlying),
@@ -622,7 +649,7 @@ class _Options(Namespace):
         not an `int`, or `filters` is not a mapping.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column (read again each `poll()`
                 cycle), or `dm.ALL`.
             sort: The field to sort by (`"ticker"`); None for the endpoint's order.
@@ -678,9 +705,18 @@ class _Options(Namespace):
         row); it is not the page size. `dm.ALL` is not accepted: leave `symbols` out to list
         every contract.
 
+        The deliverable: `Underlying` is the instrument Massive links the contract to, exactly
+        as sent, not what the contract delivers. `SharesPerContract` is the number of shares
+        one contract delivers (100 for a standard contract), `AdditionalUnderlyings` the
+        JSON text of any further deliverables (other securities or cash, as Massive lists
+        them; null or `[]` when there are none), and `Correction` Massive's correction number
+        of the contract record. An adjusted contract keeps its own root (`AAPL1`) and its
+        own `Symbol`; the library never maps it to `AAPL`.
+
         It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a
         symbol is not an OCC option symbol, a sequence is empty or an exhausted generator, a
-        table has no `Symbol` column, `underlying` is empty, `as_of` is a naive `datetime` or
+        table has no `Symbol` column, `underlying` is not Massive's exact stock or index
+        ticker, `as_of` is a naive `datetime` or
         not ISO-8601, `limit` is not positive, a filter key is not a parameter of the endpoints
         or is set by a typed argument, or a filter value does not fit its parameter;
         `TypeError` if `underlying` or `sort` is not a `str`, `contract_type` is not a
@@ -692,11 +728,11 @@ class _Options(Namespace):
         in the web UI's column tooltips, and by `columns()`.
 
         Args:
-            symbols: The contracts to describe, as OCC symbols with or without `O:`; one
+            symbols: The contracts to describe, as Massive's tickers (`O:` and the OCC symbol); one
                 `str`, a sequence, or a Deephaven table with a `Symbol` column. None, the
                 default, lists contracts instead.
-            underlying: Only contracts of this underlying ticker, such as `"AAPL"`; None for
-                every underlying.
+            underlying: Only contracts linked to this exact Massive ticker, such as `"AAPL"`
+                or `"I:SPX"`; None for every underlying.
             contract_type: Only calls or only puts; None for both.
             as_of: The day whose contracts to list, as an ISO-8601 date, a `date`, or an
                 aware `datetime` (its date in New York); None for today.
@@ -763,7 +799,7 @@ class _Options(Namespace):
         or `date` is of another type, or `adjusted` is not a `bool`.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, or a Deephaven table with a `Symbol` column.
             date: The trading day, as an ISO-8601 date, a `date`, or an aware `datetime` (its
                 date in New York).

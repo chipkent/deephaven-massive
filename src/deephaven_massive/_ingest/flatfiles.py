@@ -92,13 +92,25 @@ from deephaven.arrow import to_table
 
 from deephaven_massive._datasets.dates import FUTURES_HOLIDAY_MARGIN, TimeRange
 from deephaven_massive._datasets.history_source import within_publication_grace
-from deephaven_massive._datasets.schema import rename, required_fields, widen
+from deephaven_massive._datasets.schema import (
+    OPTION_ROOT,
+    RAW_SYMBOL,
+    rename,
+    required_fields,
+    widen,
+)
+from deephaven_massive._datasets.symbols import (
+    WireSymbols,
+    option_roots,
+    unknown_symbol_message,
+    wire_spellings,
+)
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
     to_epoch_ns_array,
 )
-from deephaven_massive._enums import AssetClass, FuturesVenue
+from deephaven_massive._enums import AssetClass, FuturesVenue, UnknownSymbols
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
@@ -254,6 +266,8 @@ class _Transform:
             fills it, or None for a column the files do not carry (null).
         arrow_schema: The dataset's Arrow schema.
         session_header: For futures, the header that holds the session date; None otherwise.
+        symbols: How the files' tickers become canonical (`WireSymbols`), and what a spelling
+            the library cannot read does.
     """
 
     dataset: str
@@ -261,6 +275,7 @@ class _Transform:
     columns: tuple[tuple[ColumnType, str, SourceColumn | None], ...]
     arrow_schema: pa.Schema
     session_header: str | None
+    symbols: WireSymbols
 
     @classmethod
     def build(
@@ -271,6 +286,7 @@ class _Transform:
         prefix: str,
         symbols: NormalizedSymbols | None,
         window: TimeRange | FuturesSessions,
+        unknown_symbols: UnknownSymbols,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
@@ -284,15 +300,19 @@ class _Transform:
             spec: The dataset.
             prefix: The dataset's prefix for the request; a futures prefix holds `{venue}`.
             symbols: The canonical symbols to keep, as a tuple; anything else (`dm.ALL`, or
-                None for a dataset without instruments) keeps every row.
+                None for a dataset without instruments) keeps every row. The files are
+                filtered on every spelling `symbols.canonical_from_wire` reads as one of them
+                (`wire_spellings`: a forex quotes file may write `X:EUR-USD`).
             window: The normalized `history()` bounds. Futures sessions given as two dates
                 keep every time, since their files hold exactly the requested sessions; with
                 an instant bound, rows are kept inside the request window.
+            unknown_symbols: The session's rule for a ticker spelling the library cannot
+                read; `WARN` also adds the `RawSymbol` column to the schema.
 
         Returns:
             The transform.
         """
-        schema = catalog.dataset_schema(spec)
+        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
         source = catalog.source(Transport.FLAT_FILES, prefix)
         renamed = rename(spec, source)
         by_column = {c.column: c for c in renamed}
@@ -316,7 +336,14 @@ class _Transform:
                 for c in renamed
             ),
             symbol_header=header["Symbol"],
-            symbols=pa.array(symbols, pa.string()) if isinstance(symbols, tuple) else None,
+            symbols=(
+                pa.array(
+                    [w for s in symbols for w in wire_spellings(spec.asset_class, s)],
+                    pa.string(),
+                )
+                if isinstance(symbols, tuple)
+                else None
+            ),
             time_header=header["Timestamp"],
             window_ns=_window_ns(window),
             to_ns=to_ns,
@@ -330,6 +357,7 @@ class _Transform:
             columns=tuple((c.type, c.name, by_column.get(c.name)) for c in schema.columns),
             arrow_schema=schema.arrow_schema(),
             session_header=session_header,
+            symbols=WireSymbols(spec.name, spec.asset_class, unknown_symbols),
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
@@ -362,9 +390,29 @@ class _Transform:
 
         A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
         `timestamps.instants`.
+
+        Raises:
+            MassiveError: If a row's ticker is a spelling the library cannot read and the
+                session's `unknown_symbols` is `FAIL` (`symbols.unknown_symbol_message`);
+                under `WARN` the row keeps a null `Symbol` and the text in `RawSymbol`.
         """
-        arrays = [self._column(batch, column) for column in self.columns]
-        return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
+        arrays: dict[str, pa.Array] = {}
+        raw = pa.nulls(batch.num_rows, pa.string())
+        for column in self.columns:
+            column_type, name, _ = column
+            if name == OPTION_ROOT:
+                values = option_roots(arrays["Symbol"])
+            elif name == RAW_SYMBOL:
+                values = raw
+            elif name == "Symbol":
+                read = self.symbols.read(batch["Symbol"])
+                if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
+                    raise MassiveError(unknown_symbol_message(self.dataset, read.unknown))
+                values, raw = read.symbols, read.raw
+            else:
+                values = self._column(batch, column)
+            arrays[name] = widen(values, column_type.arrow_type)
+        return pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
 
     def _column(
         self, batch: pa.RecordBatch, column: tuple[ColumnType, str, SourceColumn | None]
@@ -461,7 +509,12 @@ class FlatFileHistory:
         """
         prefix = spec.flat_file_prefixes[request.timespan]
         transform = _Transform.build(
-            self._core.catalog, spec, prefix=prefix, symbols=request.symbols, window=window
+            self._core.catalog,
+            spec,
+            prefix=prefix,
+            symbols=request.symbols,
+            window=window,
+            unknown_symbols=self._core.config.unknown_symbols,
         )
         keys = _keys(prefix, request.venue, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None

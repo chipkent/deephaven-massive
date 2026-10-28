@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 from deephaven.dherror import DHError
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
+from deephaven_massive._enums import UnknownSymbols
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import (
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
     from deephaven_massive._datasets.request import HostDecision, Request, StreamKey
+    from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode
     from deephaven_massive._massive import DriftReport
     from deephaven_massive._tables.liveness import StreamHandle
@@ -495,6 +497,23 @@ class SessionCore:
             closers=self._closers,
         )
         finalizer.atexit = False
+
+    def dataset_schema(self, spec: DatasetSpec) -> Schema:
+        """Return a dataset's schema in this session: `Catalog.dataset_schema` with `RawSymbol`.
+
+        Every result, `columns()` table, and transport plan of the session reads its columns
+        here, so they agree on whether the `RawSymbol` column exists: it does when the
+        session's `unknown_symbols` is `WARN` and the dataset reads its symbol from rows.
+
+        Args:
+            spec: The dataset.
+
+        Returns:
+            The cached schema. A bad dataset raises what `Catalog.dataset_schema` raises.
+        """
+        return self.catalog.dataset_schema(
+            spec, raw_symbol=self.config.unknown_symbols is UnknownSymbols.WARN
+        )
 
     @property
     def closed(self) -> bool:

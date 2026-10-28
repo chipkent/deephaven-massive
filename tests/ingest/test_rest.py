@@ -20,6 +20,7 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
+from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import CHICAGO, TimeRange, bounds
 from deephaven_massive._datasets.request import HostDecision, Request
@@ -34,6 +35,7 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
+from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._ingest import hosts, rest
 from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._massive import RestPath, Transport
@@ -663,7 +665,7 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
         Reply({"status": "success", "request_id": "r1", "symbol": "BTC-USD", "last": last}),
     )
     with caplog.at_level(logging.WARNING, LOGGER):
-        out = fetch(session, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD"])
+        out = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD"])
     assert sorted(path for path, _ in sent(fake_rest)) == [
         "/v1/last/crypto/BTC/USD",
         "/v1/last/crypto/ETH/USD",
@@ -816,7 +818,7 @@ def test_a_per_symbol_detail_path_serves_named_symbols(
 
 
 def test_row_symbols_are_canonical(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     body = {
         "status": "success",
@@ -831,20 +833,46 @@ def test_row_symbols_are_canonical(
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
     out = fetch(session, CONVERSION, params={"from": "AUD", "to": "USD", "amount": 100})
     assert [(r["Symbol"], r["Converted"]) for r in out] == [("C:AUDUSD", 65.5)]
+    assert "RawSymbol" not in out[0]
     assert sent(fake_rest)[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
-    with caplog.at_level(logging.WARNING, LOGGER):
-        odd = fetch(session, CONVERSION, params={"from": "AUD", "to": "XXX"})
-    assert odd[0]["Symbol"] == "not a pair"
-    assert "not a valid symbol of its class" in caplog.text
+    # A spelling the library cannot read fails the request by default, naming it.
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^forex\.conversion: Massive sent the symbol 'not a pair', a spelling the library "
+        r"cannot read as Massive's ticker\. Set MASSIVE_UNKNOWN_SYMBOLS=warn",
+    ):
+        fetch(session, CONVERSION, params={"from": "AUD", "to": "XXX"})
+
+
+def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_under_warn(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    monkeypatch.setattr(
+        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger(symbols.__name__), limit=5)
+    )
+    body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
+    fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
+    )
+    with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, symbols.__name__):
+        (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
+        q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
+        assert "RawSymbol" in [name for (name,) in q.columns().iter_tuple(cols="Name")]
+    assert (row["Symbol"], row["RawSymbol"]) == (None, "?")
+    assert "forex.conversion: Massive sent the symbol '?'" in caplog.text
 
 
 def test_a_reactive_symbol_table_is_read_once_for_fetch(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([])))
-    watch = new_table([string_col("Symbol", ["SPX", "I:NDX", "not a symbol!"])])
+    watch = new_table([string_col("Symbol", ["I:SPX", "I:NDX", None])])
     fetch(session, INDEX_SNAPSHOTS, symbols=watch)
     assert sent(fake_rest)[0][1]["ticker.any_of"] == ["I:NDX,I:SPX"]
+    with pytest.raises(ValueError, match=r"^a symbol table holds 'SPX' .*use 'I:SPX'"):
+        fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
 
 
 # --- Rows ----------------------------------------------------------------------------------------
@@ -985,7 +1013,7 @@ def test_a_failed_symbol_fails_the_whole_fan_out(
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"oops", status=500))
     with pytest.raises(dm.MassiveError, match="HTTP 500"):
-        fetch(session, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD", "SOL-USD"])
+        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD", "X:SOLUSD"])
 
 
 def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
@@ -1534,7 +1562,7 @@ def test_a_missing_symbol_and_a_dropped_row_warn_once_per_session(
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
-            assert fetch(session, CRYPTO_LAST, symbols=["ETH-USD"]) == []
+            assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
             assert fetch(session, INDEX_VALUES, symbols=["I:VIX"]) == []
     assert caplog.text.count("X:ETHUSD has no data") == 1
     assert caplog.text.count("for I:VIX: Not entitled; the row is dropped") == 1
@@ -1697,7 +1725,7 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
         Reply({"status": "success", "request_id": "r", "last": refused}),
     )
     with caplog.at_level(logging.WARNING, LOGGER):
-        (row,) = fetch(session, CRYPTO_LAST, symbols=["BTC-USD"])
+        (row,) = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
     assert row["Symbol"] == "X:BTCUSD"
     assert "Massive answered NOT_ENTITLED for X:BTCUSD: Not entitled" in caplog.text
 

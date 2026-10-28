@@ -10,8 +10,9 @@ catalog (`CATALOG` in `_session.py`). A spec names the generated sources that se
 dataset and the key columns of each; the columns, their types, and their timestamp units come
 from the generated schemas.
 
-A crypto pair is accepted as `BTC-USD`, `BTC/USD`, or `X:BTCUSD`, and every `Symbol` column
-holds the canonical REST form, `X:BTCUSD`, whatever form the transport sends. Crypto trades
+A crypto pair is Massive's REST ticker, `X:BTCUSD`: every factory takes only that form
+(`dm.canonical_symbol_crypto` converts `BTC-USD`), and every `Symbol` column holds it, whatever
+form the transport sends (`BTC-USD` in WebSocket frames, `X:BTC-USD` in FMV frames). Crypto trades
 around the clock, so a date-only bound is a whole UTC day.
 """
 
@@ -183,7 +184,7 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
     ),
     asset_class=AssetClass.CRYPTO,
     fetch_path=_OPEN_CLOSE,
-    # The body names the pair as `BTC-USD`; the transport canonicalizes it to `X:BTCUSD`.
+    # The body names the pair as `BTC-USD`; the transport reads it as `X:BTCUSD`.
     keys={(_R, _OPEN_CLOSE): _keys(KeySpec("Symbol"))},
     per_symbol=True,
 )
@@ -213,7 +214,7 @@ class _Crypto(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            btc = m.crypto.trades("BTC-USD").last_by()  # the latest trade, live
+            btc = m.crypto.trades("X:BTCUSD").last_by()  # the latest trade, live
             daily = m.crypto.bars(["X:BTCUSD", "ETH-USD"], dm.Timespan.DAY).history(
                 "2026-01-01", "2026-01-31"
             )
@@ -250,7 +251,7 @@ class _Crypto(Namespace):
         `TypeError`.
 
         Args:
-            symbols: The pairs, as `BTC-USD`, `BTC/USD`, or `X:BTCUSD`; one string, a
+            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, a Deephaven table with a `Symbol` column (followed live by the
                 stream verbs), or `dm.ALL`.
 
@@ -260,7 +261,7 @@ class _Crypto(Namespace):
         Example:
             ::
 
-                q = m.crypto.trades(["BTC-USD", "ETH-USD"])
+                q = m.crypto.trades(["X:BTCUSD", "X:ETHUSD"])
                 live = q.append_only()
                 day = q.history("2026-01-02", "2026-01-02")
         """
@@ -288,7 +289,7 @@ class _Crypto(Namespace):
         `TypeError`.
 
         Args:
-            symbols: The pairs, as `BTC-USD`, `BTC/USD`, or `X:BTCUSD`; one string, a
+            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, a Deephaven table with a `Symbol` column (followed live), or
                 `dm.ALL`.
 
@@ -298,7 +299,7 @@ class _Crypto(Namespace):
         Example:
             ::
 
-                book = m.crypto.quotes("BTC-USD").last_by(["Symbol", "Exchange"])
+                book = m.crypto.quotes("X:BTCUSD").last_by(["Symbol", "Exchange"])
         """
         return cast("StreamQuery", build_query(self._core, QUOTES, symbols=symbols))
 
@@ -384,7 +385,7 @@ class _Crypto(Namespace):
         table, or `dm.ALL` raises `TypeError`.
 
         Args:
-            symbols: The pairs, as `BTC-USD`, `BTC/USD`, or `X:BTCUSD`; one string, a
+            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
             timespan: The unit of the bar window, a `dm.Timespan`; `MINUTE` by default.
                 `Timespan.SESSION` is for futures only.
@@ -398,9 +399,9 @@ class _Crypto(Namespace):
         Example:
             ::
 
-                live = m.crypto.bars("BTC-USD").last_by()  # 1-minute bars
-                prev = m.crypto.bars("BTC-USD", dm.Timespan.DAY).fetch()  # yesterday's bar
-                hourly = m.crypto.bars("BTC-USD", dm.Timespan.HOUR, multiplier=4).history(
+                live = m.crypto.bars("X:BTCUSD").last_by()  # 1-minute bars
+                prev = m.crypto.bars("X:BTCUSD", dm.Timespan.DAY).fetch()  # yesterday's bar
+                hourly = m.crypto.bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=4).history(
                     "2026-01-01", "2026-01-07"
                 )
         """
@@ -438,7 +439,7 @@ class _Crypto(Namespace):
         `TypeError`.
 
         Args:
-            symbols: The pairs, as `BTC-USD`, `BTC/USD`, or `X:BTCUSD`; one string, a
+            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, a Deephaven table with a `Symbol` column (followed live), or
                 `dm.ALL`.
 
@@ -448,7 +449,7 @@ class _Crypto(Namespace):
         Example:
             ::
 
-                fair = m.crypto.fmv(["BTC-USD", "ETH-USD"]).last_by()
+                fair = m.crypto.fmv(["X:BTCUSD", "X:ETHUSD"]).last_by()
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
 
@@ -480,7 +481,7 @@ class _Crypto(Namespace):
         `TypeError`.
 
         Args:
-            symbols: The pairs, as `BTC-USD`, `BTC/USD`, or `X:BTCUSD`; one string, a
+            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, a Deephaven table with a `Symbol` column (read once per `poll()`
                 cycle), or `dm.ALL` for the whole market.
 
@@ -490,7 +491,7 @@ class _Crypto(Namespace):
         Example:
             ::
 
-                board = m.crypto.snapshots(["BTC-USD", "ETH-USD", "SOL-USD"]).poll(5)
+                board = m.crypto.snapshots(["X:BTCUSD", "X:ETHUSD", "X:SOLUSD"]).poll(5)
                 market = m.crypto.snapshots(dm.ALL).fetch()
         """
         return cast("Query", build_query(self._core, SNAPSHOTS, symbols=symbols))
@@ -556,7 +557,7 @@ class _Crypto(Namespace):
         that is not a `str`, `date`, or `datetime`, raises `TypeError`.
 
         Args:
-            symbols: The pairs, as `BTC-USD`, `BTC/USD`, or `X:BTCUSD`; one string, a
+            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, or a Deephaven table with a `Symbol` column (read once per
                 `poll()` cycle).
             date: The day, as `"YYYY-MM-DD"` or a `date`. A timezone-aware `datetime` (or ISO
@@ -568,7 +569,7 @@ class _Crypto(Namespace):
         Example:
             ::
 
-                q = m.crypto.daily_open_close(["BTC-USD", "ETH-USD"], "2026-01-02")
+                q = m.crypto.daily_open_close(["X:BTCUSD", "X:ETHUSD"], "2026-01-02")
                 opens = q.fetch().view(["Symbol", "Open", "Close"])
         """
         return cast(

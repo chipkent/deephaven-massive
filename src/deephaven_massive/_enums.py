@@ -6,13 +6,15 @@ value is the exact string Massive puts on the wire, so a member can be sent to t
 one spelling per value, tab completion in every IDE and in the Deephaven web console, and typo
 safety at type-check time. At run time `_require_enum` turns a plain string into a `TypeError` that
 names the member to use; `Timespan("minute")` is the documented way to convert text.
+An enum of a library setting that never reaches the wire (`HistorySource`, `SymbolConvention`,
+`OnError`, `UnknownSymbols`) takes its member names in lower case as values.
 
 Two further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
 data is) and `ChannelFamily` (which host a channel is served from). Both appear as values in
 the diagnostics tables, beside the wire package's `Transport`, which names WebSocket, REST, or
 flat files once for both sides of the wire boundary.
 
-The fifteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
+The eighteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
 private.
 """
 
@@ -32,14 +34,17 @@ __all__ = [
     "HistorySource",
     "Locale",
     "Market",
+    "OnError",
     "Order",
     "PollMode",
     "Recency",
     "SeriesType",
     "Sip",
+    "SymbolConvention",
     "TickerType",
     "Timeframe",
     "Timespan",
+    "UnknownSymbols",
 ]
 
 logger = logging.getLogger(__name__)
@@ -353,6 +358,79 @@ class Sip(StrEnum):
     CTA = "CTA"
     UTP = "UTP"
     OPRA = "OPRA"
+
+
+class SymbolConvention(StrEnum):
+    """A US stock ticker convention another source writes, which `canonical_symbol` converts.
+
+    Massive writes a share class as `.B` (`BRK.B`) and a preferred as a lower-case `p` and its
+    series (`KIMpL`), as the CTA's CQS convention does, so CQS text needs no conversion. Each
+    member names the exact grammar of one other convention; only plain tickers, share classes,
+    and preferreds convert, because Massive documents no spelling for warrants, units, rights,
+    or when-issued shares.
+
+    - `YAHOO`: Yahoo Finance; a class is `-B` (`BRK-B`), a preferred `-P` and its series
+      (`BAC-PL`).
+    - `NASDAQ`: the Nasdaq Integrated Platform symbology (the "NASDAQ Symbol" column of
+      `nasdaqtraded.txt`); a class is `.B`, a preferred `-` and its optional series (`KIM-L`).
+    - `CMS`: the root, a space, and a suffix, as many broker and FIX systems write it; a class
+      is ` B` (`BRK B`), a preferred ` PR` and its optional series (`BAC PRL`).
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            dm.canonical_symbol(
+                "BAC-PL", dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
+            )  # 'BACpL'
+    """
+
+    YAHOO = "yahoo"
+    NASDAQ = "nasdaq"
+    CMS = "cms"
+
+
+class OnError(StrEnum):
+    """What `canonicalize_symbols` does with a row it cannot convert.
+
+    - `RAISE`: fail. A static table raises `ValueError` naming the bad values; a refreshing
+      table fails when such a row arrives.
+    - `NULL`: write a null symbol for that row and log the value at WARNING, a bounded number
+      of times, so one typo in a watchlist does not stop it.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            assert dm.OnError("null") is dm.OnError.NULL
+    """
+
+    RAISE = "raise"
+    NULL = "null"
+
+
+class UnknownSymbols(StrEnum):
+    """What a session does with a symbol Massive sends in a spelling the library cannot read.
+
+    The setting of `MassiveConfig.unknown_symbols`, and of the `MASSIVE_UNKNOWN_SYMBOLS`
+    environment variable (`fail` or `warn`).
+
+    - `FAIL`: fail the request or the stream that received the row, naming the spelling.
+    - `WARN`: keep the row with a null `Symbol` and the text in an added `RawSymbol` column,
+      and log each spelling once at WARNING (a bounded number of spellings).
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            assert dm.UnknownSymbols("warn") is dm.UnknownSymbols.WARN
+    """
+
+    FAIL = "fail"
+    WARN = "warn"
 
 
 class Recency(StrEnum):

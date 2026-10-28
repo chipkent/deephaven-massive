@@ -419,7 +419,7 @@ def test_a_stream_publishes_only_its_symbols(
 
 def test_equal_queries_share_one_stream_and_one_connection(harness: Harness) -> None:
     first = harness.query(TRADES, ["AAPL"]).blink()
-    second = harness.query(TRADES, ["aapl"]).last_by()
+    second = harness.query(TRADES, "AAPL").last_by()
     quotes = harness.query(QUOTES, ["AAPL"]).blink()
     harness.subscribed("T.AAPL", "Q.AAPL")
     assert len(harness.urls) == 1
@@ -706,7 +706,7 @@ def test_a_reactive_table_follows_its_rows(
     rows_when: RowsWhen,
 ) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["aapl", "not a symbol!"])]))
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     result = harness.query(TRADES, watchlist).append_only()
     harness.subscribed("T.AAPL")
     harness.send(trade("AAPL"), trade("MSFT"))
@@ -714,15 +714,67 @@ def test_a_reactive_table_follows_its_rows(
     rows_when(result, lambda rows: len(rows) == 1)
     watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
     harness.subscribed("T.MSFT")
-    watchlist.delete(new_table([string_col("Symbol", ["aapl"])]))
+    watchlist.delete(new_table([string_col("Symbol", ["AAPL"])]))
     harness.unsubscribed("T.AAPL")
     harness.send(trade("AAPL", 2.0), trade("MSFT", 3.0))
     harness.flush()
     shown = rows_when(result, lambda rows: len(rows) == 2)
     assert [r["Symbol"] for r in shown] == ["AAPL", "MSFT"]
-    # The row that is no valid symbol never became a topic.
     sent = [json.loads(f)["params"] for f in fake_ws_server.frames()]
     assert sent == ["T.AAPL", "T.MSFT", "T.AAPL"]
+
+
+def failed_after_flush(harness: Harness, table: Table) -> bool:
+    # Flush the connections, so a failure the flush thread was handed is applied.
+    harness.flush()
+    return bool(table.j_table.isFailed())
+
+
+def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream(
+    harness: Harness,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    result = harness.query(TRADES, watchlist).append_only()
+    harness.subscribed("T.AAPL")
+    watchlist.add(new_table([string_col("Symbol", ["msft"])]))
+    wait_for(lambda: failed_after_flush(harness, result))
+    (row,) = streams_of(harness, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("a symbol table holds 'msft'")
+    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, " in row["Error"]
+    # The row that is not canonical never became a topic.
+    sent = {json.loads(f)["params"] for f in fake_ws_server.frames()}
+    assert sent == {"T.AAPL"}
+
+
+def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    every = harness.query(TRADES, dm.ALL).append_only()
+    harness.subscribed("T.*")
+    harness.send(trade("BRK/B"))
+    wait_for(lambda: failed_after_flush(harness, every))
+    (row,) = streams_of(harness, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("test.trades: Massive sent the symbol 'BRK/B', a spelling")
+
+
+def test_a_frame_symbol_the_library_cannot_read_is_kept_under_warn(
+    fake_ws_server: FakeMassiveServer, *, rows_when: RowsWhen
+) -> None:
+    warned = Harness(fake_ws_server, unknown_symbols=dm.UnknownSymbols.WARN)
+    try:
+        every = warned.query(TRADES, dm.ALL).append_only()
+        warned.subscribed("T.*")
+        warned.send(trade("BRK/B"), trade("AAPL"))
+        warned.flush()
+        shown = rows_when(every, lambda rows: len(rows) == 2)
+        assert [(r["Symbol"], r["RawSymbol"]) for r in shown] == [(None, "BRK/B"), ("AAPL", None)]
+    finally:
+        warned.close()
 
 
 def test_a_derived_table_keeps_following_the_watchlist(
@@ -1083,6 +1135,7 @@ def test_late_callbacks_of_an_unknown_stream_are_ignored(
     harness.on_loop(connection, lambda: connection.release_stream(999))
     harness.on_loop(connection, lambda: connection.change_symbols(999, frozenset(), frozenset()))
     harness.connections._symbols_changed(999, frozenset({"X"}), frozenset())
+    harness.connections._symbol_refused(999, "a symbol table holds 'x'")
     harness.on_loop(connection, connection._idle_close)  # a stream is open: it stays
     stale = Status(kind=StatusKind.REFUSED, topics=("T.AAPL",), message="not authorized")
     harness.on_loop(connection, lambda: connection._on_status(999, stale))  # an older socket's

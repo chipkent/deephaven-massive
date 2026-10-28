@@ -805,7 +805,7 @@ class Catalog:
         self._by_name: Final = MappingProxyType(by_name)
         self._sources: Final = source_tables
         self._lock: Final = threading.Lock()
-        self._schemas: dict[DatasetSpec, Schema] = {}
+        self._schemas: dict[tuple[DatasetSpec, bool], Schema] = {}
 
     @property
     def by_name(self) -> Mapping[str, DatasetSpec]:
@@ -859,8 +859,8 @@ class Catalog:
             ranked.append((ranks[str(spec.group)], min(positions, default=0), index, spec))
         return tuple(spec for *_, spec in sorted(ranked, key=lambda r: r[:3]))
 
-    def dataset_schema(self, spec: DatasetSpec) -> Schema:
-        """Return a dataset's merged schema, computed once and cached on the catalog.
+    def dataset_schema(self, spec: DatasetSpec, *, raw_symbol: bool = False) -> Schema:
+        """Return a dataset's merged schema, computed once per shape and cached on the catalog.
 
         The merge of `schema.dataset_schema` over the members of the dataset's kind, or over
         the dataset alone when it is in no kind. The first call for a dataset computes it
@@ -870,10 +870,13 @@ class Catalog:
 
         Args:
             spec: The dataset; a dataset in a kind must be in this catalog.
+            raw_symbol: True for a session whose `unknown_symbols` is `WARN`: a dataset that
+                reads its symbol from rows then has a `RawSymbol` column
+                (`schema.dataset_schema`).
 
         Returns:
             The schema: `Symbol` and `Timestamp` first where the dataset
-            declares them, then every other column of the kind.
+            declares them, then the derived columns, then every other column of the kind.
 
         Raises:
             LookupError: If `spec` has a kind but is not one of this catalog's datasets.
@@ -882,7 +885,7 @@ class Catalog:
         key, and an unknown source the `KeyError` of `source`.
         """
         with self._lock:
-            cached = self._schemas.get(spec)
+            cached = self._schemas.get((spec, raw_symbol))
         if cached is not None:
             return cached
         if spec.kind is None:
@@ -891,9 +894,9 @@ class Catalog:
             members = self.members(spec.kind)
             if spec not in members:
                 raise LookupError(f"{spec.name} is not in the catalog of its kind {spec.kind}")
-        schema = dataset_schema(spec, members, self.source)
+        schema = dataset_schema(spec, members, self.source, raw_symbol=raw_symbol)
         with self._lock:
-            return self._schemas.setdefault(spec, schema)
+            return self._schemas.setdefault((spec, raw_symbol), schema)
 
     def check_filters(
         self,

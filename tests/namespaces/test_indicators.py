@@ -65,7 +65,7 @@ def test_a_windowed_indicator_builds_its_query(
     massive_session: dm.MassiveSession, name: str, spec: DatasetSpec
 ) -> None:
     factory = getattr(massive_session.indicators, name)
-    query = factory(["x:btcusd", "aapl"], 20)
+    query = factory(["X:BTCUSD", "AAPL"], 20)
     assert type(query) is Query
     assert query._spec is spec
     assert query._request == Request(
@@ -144,7 +144,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         i.sma("AAPL", 20, filters={"adjusted": True})
     with pytest.raises(ValueError, match="timestamp_gte is set through start= and end="):
         i.sma("AAPL", 20, filters={"timestamp_gte": 1})
-    with pytest.raises(ValueError, match="carries the prefix"):
+    with pytest.raises(ValueError, match=r"^'Q:NOPE' is not a Massive stock ticker"):
         i.sma("Q:NOPE", 20)
 
 

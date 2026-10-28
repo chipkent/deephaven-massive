@@ -196,7 +196,7 @@ def test_tickers_query(massive_session: dm.MassiveSession) -> None:
     assert query._spec is reference.TICKERS
     assert query._request == Request(params=(("active", True),))
     full = ref.tickers(
-        symbols=["msft", "AAPL"],
+        symbols=["MSFT", "AAPL"],
         market=dm.Market.STOCKS,
         ticker_type=dm.TickerType.CS,
         exchange="XNAS",
@@ -285,7 +285,7 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
         limit=50,
     )
     assert ref.news()._request == Request()
-    assert ref.news(symbols=["aapl"])._request == Request(symbols=("AAPL",))
+    assert ref.news(symbols=["AAPL"])._request == Request(symbols=("AAPL",))
 
 
 def test_news_takes_one_symbol(massive_session: dm.MassiveSession) -> None:

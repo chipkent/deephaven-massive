@@ -243,7 +243,7 @@ def test_namespaces(massive_session: dm.MassiveSession) -> None:
 
 def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
     query = massive_session.snapshots(
-        ["X:BTCUSD", "aapl", "c:eurusd", "O:SPY251219C00600000"],
+        ["X:BTCUSD", "AAPL", "C:EURUSD", "O:SPY251219C00600000"],
         sort="ticker",
         order=dm.Order.DESC,
         limit=3,

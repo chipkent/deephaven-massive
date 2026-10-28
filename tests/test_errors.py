@@ -6,6 +6,7 @@ import pytest
 from deephaven_massive import _errors
 from deephaven_massive._errors import (
     AuthenticationError,
+    BoundedWarnings,
     EntitlementError,
     MassiveError,
     from_wire,
@@ -110,3 +111,18 @@ def test_log_once_is_once_across_threads(
         for thread in threads:
             thread.join(10.0)
     assert caplog.messages == ["once"]
+
+
+def test_bounded_warnings_report_each_value_once_up_to_the_limit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    warnings = BoundedWarnings(logging.getLogger("bounded"), limit=2)
+    with caplog.at_level(logging.WARNING, logger="bounded"):
+        for value in ("a", "a", "b", "c", "d", "a"):
+            warnings.warn(value, "bad %s", value)
+    assert [r.getMessage() for r in caplog.records] == [
+        "bad a",
+        "bad b",
+        "2 values were reported; further ones are not logged",
+    ]
+    assert {r.levelno for r in caplog.records} == {logging.WARNING}

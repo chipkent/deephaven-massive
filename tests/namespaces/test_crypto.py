@@ -258,11 +258,13 @@ def test_no_dataset_keeps_a_stand_in_for_its_keys() -> None:
 # --- Factories -------------------------------------------------------------------------------
 
 
-def test_trades_normalizes_every_pair_form(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.trades(["eth-usd", "BTC/USD", "X:BTCUSD"])
+def test_trades_take_massive_tickers_only(massive_session: dm.MassiveSession) -> None:
+    q = massive_session.crypto.trades(["X:ETHUSD", "X:BTCUSD", "X:BTCUSD"])
     assert type(q) is StreamHistoryLatestQuery
     assert request_of(q).symbols == ("X:BTCUSD", "X:ETHUSD")
-    assert massive_session.crypto.trades("BTC-USD") == massive_session.crypto.trades("X:BTCUSD")
+    for spelling in ("BTC-USD", "BTC/USD", "x:btcusd"):
+        with pytest.raises(ValueError, match=r"use 'X:BTCUSD' .*dm\.canonical_symbol_crypto"):
+            massive_session.crypto.trades(spelling)
 
 
 @pytest.mark.parametrize("method", ["trades", "quotes", "fmv", "snapshots"])
@@ -279,13 +281,13 @@ def test_the_streams_and_snapshots_accept_all(
 def test_the_single_class_factories(
     massive_session: dm.MassiveSession, method: str, expected: type
 ) -> None:
-    q: QueryBase = getattr(massive_session.crypto, method)("SOL-USD")
+    q: QueryBase = getattr(massive_session.crypto, method)("X:SOLUSD")
     assert type(q) is expected
     assert request_of(q).symbols == ("X:SOLUSD",)
 
 
 def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
-    watch = new_table([string_col("Symbol", ["BTC-USD"])])
+    watch = new_table([string_col("Symbol", ["X:BTCUSD"])])
     q = massive_session.crypto.quotes(watch)
     assert isinstance(request_of(q).symbols, SymbolTable)
 
@@ -306,7 +308,7 @@ def test_bars_pick_their_class(
     massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, type]
 ) -> None:
     timespan, multiplier, expected = case
-    q = massive_session.crypto.bars("BTC-USD", timespan, multiplier=multiplier)
+    q = massive_session.crypto.bars("X:BTCUSD", timespan, multiplier=multiplier)
     assert type(q) is expected
     request = request_of(q)
     assert (request.timespan, request.multiplier, request.adjusted) == (timespan, multiplier, None)
@@ -327,13 +329,13 @@ def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) ->
 def test_bar_arguments_are_checked(massive_session: dm.MassiveSession) -> None:
     bars = massive_session.crypto.bars
     with pytest.raises(ValueError, match=r"Timespan\.SESSION exists only for futures"):
-        bars("BTC-USD", dm.Timespan.SESSION)
+        bars("X:BTCUSD", dm.Timespan.SESSION)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        bars("BTC-USD", "minute")  # type: ignore[call-overload]  # a plain string is refused
+        bars("X:BTCUSD", "minute")  # type: ignore[call-overload]  # a plain string is refused
     with pytest.raises(ValueError, match="multiplier"):
-        bars("BTC-USD", dm.Timespan.HOUR, multiplier=0)
+        bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=0)
     with pytest.raises(TypeError, match="adjusted"):
-        bars("BTC-USD", adjusted=True)  # type: ignore[call-overload]  # crypto bars have none
+        bars("X:BTCUSD", adjusted=True)  # type: ignore[call-overload]  # crypto bars have none
 
 
 def test_movers(massive_session: dm.MassiveSession) -> None:
@@ -347,18 +349,18 @@ def test_movers(massive_session: dm.MassiveSession) -> None:
 
 
 def test_daily_open_close(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.daily_open_close(["BTC-USD", "ETH-USD"], "2026-01-02")
+    q = massive_session.crypto.daily_open_close(["X:BTCUSD", "X:ETHUSD"], "2026-01-02")
     assert type(q) is Query
     request = request_of(q)
     assert request.symbols == ("X:BTCUSD", "X:ETHUSD")
     assert request.params == (("date", date(2026, 1, 2)),)
     # Crypto has no corporate actions: no adjustment choice is stored or sent.
     assert request.adjusted is None
-    same = massive_session.crypto.daily_open_close("BTC-USD", date(2026, 1, 2))
+    same = massive_session.crypto.daily_open_close("X:BTCUSD", date(2026, 1, 2))
     assert request_of(same).params == (("date", date(2026, 1, 2)),)
     with pytest.raises(TypeError, match="adjusted"):
         massive_session.crypto.daily_open_close(
-            "BTC-USD",
+            "X:BTCUSD",
             "2026-01-02",
             adjusted=False,  # type: ignore[call-arg]  # crypto open/close has none
         )
@@ -374,7 +376,7 @@ def test_daily_open_close(massive_session: dm.MassiveSession) -> None:
 def test_daily_open_close_reads_a_time_as_its_utc_day(
     massive_session: dm.MassiveSession, moment: datetime | str
 ) -> None:
-    q = massive_session.crypto.daily_open_close("BTC-USD", moment)
+    q = massive_session.crypto.daily_open_close("X:BTCUSD", moment)
     assert request_of(q).params == (("date", date(2026, 1, 3)),)
 
 
@@ -389,11 +391,11 @@ def test_daily_open_close_arguments_are_checked(massive_session: dm.MassiveSessi
     ):
         daily(dm.ALL, "2026-01-02")
     with pytest.raises(ValueError, match="date"):
-        daily("BTC-USD", datetime(2026, 1, 2, 12))  # noqa: DTZ001  # a naive time is refused
+        daily("X:BTCUSD", datetime(2026, 1, 2, 12))  # noqa: DTZ001  # a naive time is refused
     with pytest.raises(ValueError, match="date"):
-        daily("BTC-USD", "January 2")
+        daily("X:BTCUSD", "January 2")
     with pytest.raises(TypeError):
-        daily("BTC-USD", 20260102)  # type: ignore[arg-type]  # not a date
+        daily("X:BTCUSD", 20260102)  # type: ignore[arg-type]  # not a date
 
 
 def exhausted() -> Iterator[str]:
@@ -429,7 +431,7 @@ def test_a_symbol_that_is_no_crypto_pair_is_refused(
 
 def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match="Symbol column"):
-        massive_session.crypto.fmv(new_table([string_col("Pair", ["BTC-USD"])]))
+        massive_session.crypto.fmv(new_table([string_col("Pair", ["X:BTCUSD"])]))
 
 
 # --- Verb-time errors that need no transport -------------------------------------------------
@@ -451,7 +453,7 @@ def test_rest_history_needs_explicit_symbols(massive_session: dm.MassiveSession)
 
 
 def test_flat_file_history_states_its_constraints(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.bars("BTC-USD", dm.Timespan.HOUR)
+    q = massive_session.crypto.bars("X:BTCUSD", dm.Timespan.HOUR)
     with pytest.raises(
         ValueError,
         match=r"crypto\.bars cannot be read from flat files: .*hold only 1-minute, 1-day bars",
@@ -564,7 +566,7 @@ def test_trades_fetch_reads_the_last_trade_of_each_pair(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, "/v1/last/crypto/BTC/USD", load_fixture(OWNER, "last_trade.json"))
-    out = rows(rest_session.crypto.trades("BTC-USD").fetch())
+    out = rows(rest_session.crypto.trades("X:BTCUSD").fetch())
     assert sent(fake_rest) == [("/v1/last/crypto/BTC/USD", {})]
     [row] = out
     supplied = {
@@ -586,7 +588,7 @@ def test_trades_history_over_rest_bounds_the_utc_day(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, "/v3/trades/X:BTCUSD", load_fixture(OWNER, "trades.json"))
-    q = rest_session.crypto.trades("BTC-USD")
+    q = rest_session.crypto.trades("X:BTCUSD")
     out = rows(q.history("2021-07-01", "2021-07-01", source=dm.HistorySource.REST))
     midnight = int(datetime(2021, 7, 1, tzinfo=UTC).timestamp()) * NS
     assert sent(fake_rest) == [
@@ -613,7 +615,7 @@ def test_daily_bars_fetch_reads_the_previous_day(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", load_fixture(OWNER, "prev.json"))
-    out = rows(rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY).fetch())
+    out = rows(rest_session.crypto.bars("X:BTCUSD", dm.Timespan.DAY).fetch())
     assert sent(fake_rest) == [("/v2/aggs/ticker/X:BTCUSD/prev", {})]
     assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Vwap"]) for r in out] == [
         ("X:BTCUSD", 1605416400000 * MS, 16035.9, 15954.2111)
@@ -627,7 +629,7 @@ def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
     end = start + 2 * 86_400_000 - 1
     path = f"/v2/aggs/ticker/X:BTCUSD/range/1/day/{start}/{end}"
     serve(fake_rest, path, load_fixture(OWNER, "range.json"))
-    q = rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY)
+    q = rest_session.crypto.bars("X:BTCUSD", dm.Timespan.DAY)
     out = rows(q.history("2020-06-01", "2020-06-02", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Transactions"]) for r in out] == [
@@ -655,7 +657,7 @@ def test_snapshots_send_the_pairs_or_nothing_for_all(
 ) -> None:
     path = "/v2/snapshot/locale/global/markets/crypto/tickers"
     serve(fake_rest, path, load_fixture(OWNER, "snapshots.json"))
-    out = rows(rest_session.crypto.snapshots(["FSN-USD", "BTC-USD"]).fetch())
+    out = rows(rest_session.crypto.snapshots(["X:FSNUSD", "X:BTCUSD"]).fetch())
     rows(rest_session.crypto.snapshots(dm.ALL).fetch())
     assert sent(fake_rest) == [(path, {"tickers": ["X:BTCUSD,X:FSNUSD"]}), (path, {})]
     [row] = out
@@ -684,7 +686,7 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
 ) -> None:
     path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
     serve(fake_rest, path, load_fixture(OWNER, "open_close.json"))
-    q = rest_session.crypto.daily_open_close("BTC-USD", "2020-10-09")
+    q = rest_session.crypto.daily_open_close("X:BTCUSD", "2020-10-09")
     [row] = rows(q.fetch())
     assert sent(fake_rest) == [(path, {})]
     # The body's `BTC-USD` is canonical in `Symbol`; the trades stay JSON text.
@@ -810,10 +812,10 @@ def test_a_documented_frame_lands_in_blink(
     expected: dict[str, object],
 ) -> None:
     channel = topic.split(".", 1)[0]
-    symbol = topic.split(".", 1)[1]
+    symbol = str(dm.canonical_symbol_crypto(topic.split(".", 1)[1]))
     namespace = ws_session.session.crypto
     if dataset == "bars_second":
-        query: StreamQuery = namespace.bars(symbol, dm.Timespan.SECOND)
+        query = cast("StreamQuery", namespace.bars(symbol, dm.Timespan.SECOND))
     else:
         query = getattr(namespace, dataset)(symbol)
     blink = query.blink()
@@ -858,7 +860,7 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
     ("make", "prefix", "expected"),
     [
         (
-            lambda c: c.trades(["BTC-USD", "ETH-USD"]),
+            lambda c: c.trades(["X:BTCUSD", "X:ETHUSD"]),
             "global_crypto/trades_v1",
             [
                 ("X:BTCUSD", 1679961600212544000, 27142.85),
@@ -867,7 +869,7 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
             ],
         ),
         (
-            lambda c: c.bars("BTC-USD"),
+            lambda c: c.bars("X:BTCUSD"),
             "global_crypto/minute_aggs_v1",
             [
                 ("X:BTCUSD", 1679961600000000000, 27139.64),

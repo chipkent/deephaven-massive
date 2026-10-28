@@ -74,16 +74,24 @@ from deephaven_massive._datasets.dates import (
     instant_bound,
 )
 from deephaven_massive._datasets.history_source import partition_dates
-from deephaven_massive._datasets.schema import rename, required_fields, widen
+from deephaven_massive._datasets.schema import (
+    OPTION_ROOT,
+    RAW_SYMBOL,
+    rename,
+    required_fields,
+    widen,
+)
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
-    canonical,
+    WireSymbols,
+    option_roots,
     symbol_class,
+    unknown_symbol_message,
     ws_symbol,
 )
 from deephaven_massive._datasets.timestamps import UnitMismatchError, instants
-from deephaven_massive._enums import AssetClass, Timespan
-from deephaven_massive._errors import MassiveError, from_wire, log_once
+from deephaven_massive._enums import AssetClass, Timespan, UnknownSymbols
+from deephaven_massive._errors import MassiveError, from_wire
 from deephaven_massive._ingest import hosts, poll
 from deephaven_massive._ingest.poll import Pollers, RowDataError, UnsupportedParameterError
 from deephaven_massive._massive import (
@@ -644,8 +652,8 @@ class _Converter:
         projected: True when the path joins the dataset through a projection of its kind
             membership (the indices snapshot as index values): a row that carries an `error`
             has no value to project, so it is dropped instead of kept.
-        asset_class: The dataset's asset class, by whose rules a symbol read from the rows is
-            canonicalized.
+        symbols: How a symbol read from the rows becomes canonical (`WireSymbols`), and
+            what a spelling the library cannot read does.
         symbol_key: The wire key of the rows' symbol field, or None when the symbol is filled
             from the request.
     """
@@ -657,22 +665,31 @@ class _Converter:
     required: frozenset[str]
     required_on_error: frozenset[str]
     projected: bool
-    asset_class: AssetClass | None
+    symbols: WireSymbols
     symbol_key: str | None
 
     @classmethod
-    def build(cls, catalog: Catalog, spec: DatasetSpec, rest_path: RestPath) -> _Converter:
+    def build(
+        cls,
+        catalog: Catalog,
+        spec: DatasetSpec,
+        rest_path: RestPath,
+        *,
+        unknown_symbols: UnknownSymbols,
+    ) -> _Converter:
         """Prepare the conversion from the path's generated fields and the dataset's schema.
 
         Args:
             catalog: The catalog, for the dataset's merged schema.
             spec: The dataset.
             rest_path: The path.
+            unknown_symbols: The session's rule for a symbol spelling the library cannot
+                read; `WARN` also adds the `RawSymbol` column to the schema.
 
         Returns:
             The converter.
         """
-        schema = catalog.dataset_schema(spec)
+        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
         renamed = {c.column: c for c in rename(spec, rest_path)}
         symbol = renamed.get("Symbol")
         # The rows' own symbol field, unless the key is filled from the request.
@@ -688,7 +705,7 @@ class _Converter:
                 m.kind == spec.kind and m.group == spec.group and m.projection is not None
                 for m in rest_path.memberships
             ),
-            asset_class=spec.asset_class,
+            symbols=WireSymbols(spec.name, spec.asset_class, unknown_symbols),
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
         )
 
@@ -741,56 +758,41 @@ class _Converter:
             symbol: The value of the keys taken from the request.
 
         Returns:
-            The batch in the dataset's schema.
+            The batch in the dataset's schema, with the derived columns (`OptionRoot`,
+            `RawSymbol`) computed from the symbols.
+
+        Raises:
+            RowDataError: If a row's symbol is a spelling the library cannot read and the
+                session's `unknown_symbols` is `FAIL`; under `WARN` such a row keeps a null
+                `Symbol` and the text in `RawSymbol`.
 
         A timestamp out of range raises the `UnitMismatchError` of `timestamps.instants`.
         """
         rows = batch.num_rows
-        arrays = []
+        arrays: dict[str, pa.Array] = {}
+        raw = pa.nulls(rows, pa.string())
         for column_type, name, source in self.columns:
             target = column_type.arrow_type
-            if source is None:
-                arrays.append(pa.nulls(rows, target))
+            if name == OPTION_ROOT:
+                values = option_roots(arrays["Symbol"])
+            elif name == RAW_SYMBOL:
+                values = raw
+            elif source is None:
+                values = pa.nulls(rows, target)
             elif source.field is None:
-                arrays.append(pa.array([symbol] * rows, target))
+                values = pa.array([symbol] * rows, target)
             else:
                 values = batch.column(source.field.column)
                 if name == "Symbol":
-                    values = pa.array(
-                        [self._canonical(value) for value in values.to_pylist()], pa.string()
-                    )
+                    read = self.symbols.read(values)
+                    if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
+                        raise RowDataError(unknown_symbol_message(self.dataset, read.unknown))
+                    values, raw = read.symbols, read.raw
                 if source.unit is not None:
                     label = f"{self.dataset}.{name}"
                     values = instants(label, source.unit, values, time_column=name == "Timestamp")
-                arrays.append(widen(values, target))
-        return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
-
-    def _canonical(self, value: str | None) -> str | None:
-        """Return a symbol read from the rows in its canonical form (`AUD/USD` as `C:AUDUSD`).
-
-        Args:
-            value: The row's symbol; None only where the dataset declares its symbol key
-                optional (`KeySpec.required` False) and the row has none.
-
-        Returns:
-            The canonical symbol, or None for a row without one; a value that is no valid
-            symbol of the class is kept as sent, and logged once per process at WARNING.
-        """
-        if value is None:
-            return None
-        try:
-            return canonical(self.asset_class, value)
-        except (TypeError, ValueError):
-            log_once(
-                logger,
-                f"row-symbol:{self.dataset}",
-                "%s: Massive sent the symbol %r, which is not a valid symbol of its class; it is "
-                "kept as sent",
-                self.dataset,
-                value,
-                level=logging.WARNING,
-            )
-            return value
+            arrays[name] = widen(values, target)
+        return pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
 
 
 def _keep(batch: pa.RecordBatch, window: TimeRange | FuturesSessions | None) -> pa.RecordBatch:
@@ -974,12 +976,15 @@ class RestReader:
         catalog: The dataset catalog.
         drift: The session's drift registry.
         max_concurrency: The most requests of one fan-out at a time.
+        unknown_symbols: The session's rule for a symbol spelling the library cannot read
+            (`MassiveConfig.unknown_symbols`).
     """
 
     state: RestState
     catalog: Catalog
     drift: DriftRegistry
     max_concurrency: int
+    unknown_symbols: UnknownSymbols
 
     def rest_path(self, template: str) -> RestPath:
         """Return a generated REST path.
@@ -1026,7 +1031,9 @@ class RestReader:
         Errors: the public error of each `WireError` (`_public`), and `RowDataError` for a row
         that breaks the schema. A closed session raises `MassiveError("... is closed")`.
         """
-        converter = _Converter.build(self.catalog, spec, rest_path)
+        converter = _Converter.build(
+            self.catalog, spec, rest_path, unknown_symbols=self.unknown_symbols
+        )
         run = functools.partial(
             self._call, converter, limit=limit, window=window, record=record, spec=spec
         )
@@ -1346,7 +1353,10 @@ class RestReader:
             tables.append(table)
             requests += made
         if not tables:
-            return self.catalog.dataset_schema(spec).arrow_schema().empty_table(), 0
+            schema = self.catalog.dataset_schema(
+                spec, raw_symbol=self.unknown_symbols is UnknownSymbols.WARN
+            )
+            return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
         if request.limit is not None:
             rows = rows.slice(0, request.limit)
@@ -1377,7 +1387,13 @@ class RestEndpoints:
     def _reader(self) -> RestReader:
         """Return a reader of the session's paths."""
         core = self._core
-        return RestReader(self._state, core.catalog, core.drift, core.config.max_concurrency)
+        return RestReader(
+            self._state,
+            core.catalog,
+            core.drift,
+            core.config.max_concurrency,
+            core.config.unknown_symbols,
+        )
 
     def _static(self, table: pa.Table) -> Table:
         """Convert rows to a static Deephaven table, inside the session's execution context.
