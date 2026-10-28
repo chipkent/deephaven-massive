@@ -1213,7 +1213,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
 | `quotes(symbols)` | StreamHistoryLatestQuery | `C` | fetch `/v1/last_quote/currencies/{from}/{to}`; history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, stamped 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, stamped 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, and any other stamp raises `MassiveError`, [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
 | `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
 | `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/forex/{gainers\|losers}` | |
@@ -1739,22 +1739,40 @@ them from `{from}`, the first whole period's bar is returned, and a partial buck
 before it is dropped. `{to}` is the last whole millisecond before the range's end. Rows outside
 the window are then dropped.
 
-**Day labels.** A stock, option, or index 1-day bar is its New York date. A futures bar is its
-`SessionEndDate`. A forex or crypto 1-day bar means the UTC day on every source, and is stamped
-at 00:00 UTC of that day (`history_source.stamp_rule`, `timestamps.utc_day_stamps`): the
-forex range already is, and the forex grouped daily and `/prev` (23:59:59.999 UTC in the
-samples) and the `day_aggs_v1` flat files (23:59:59.999 UTC) are moved to the day's start.
-Crypto's day cut is not verified: the documented range and `/prev` samples sit at midnight New
-York time and the grouped-daily samples at times such as 20:48 UTC, no day boundary at all.
-So a crypto 1-day bar stamped anywhere in its UTC day but its first or last millisecond, and a
-crypto REST bar of several days or longer not stamped at 00:00 UTC
-(`timestamps.check_utc_midnights`), raises `MassiveError` naming the dataset, the source, and
-the other source to try; it is never relabelled, since it would cover other days than its
-label. If live REST data follows those samples, crypto daily REST history, `dm.ALL` grouped
-daily, and `/prev` all raise until the owner decides after the live check
-([section 23](#23-open-verification-items) item 1). `AUTO` picks the source as for every other
-dataset ([section 16](#16-historysourceauto)): the check, not a fixed source, keeps both
-sources on the same UTC days.
+**Day labels and stamps.** A futures bar is its `SessionEndDate`, and its `Timestamp` is
+Massive's `window_start`, unchanged. Every other bar of a day or longer, of any multiplier,
+from every source (the aggregates range, grouped daily, `/prev`, and the `day_aggs_v1` flat
+files), is stamped at the start of its window: 00:00, in the class day zone, of the day it
+starts on, so New York midnight for stocks, options, and indices and UTC midnight for forex and
+crypto (`history_source.stamp_rule`, `timestamps.day_starts`). One call then returns the same
+rows whichever source answers it. Massive stamps the same bar differently by source, so each
+stamp it is known to use is moved back to 00:00 of the day it falls on, and any other stamp
+raises `MassiveError` naming the dataset, the source, the stamp, and the other source to try:
+it is never relabelled, since such a bar may cover other days than its label. The known stamps,
+all from the vendored samples, are wall-clock times of day in the day zone, compared to the
+millisecond, so a New York session close is 16:00 in winter and in summer:
+
+| Class | 1-day bars (`multiplier` 1) | Longer bars (several days, or a week or longer; REST range only) |
+|---|---|---|
+| Stocks | 00:00 (range); 16:00, the session close (grouped daily, `/prev`, `day_aggs_v1`) | 00:00 |
+| Options | 00:00 (range, `day_aggs_v1`); 16:00 (`/prev`) | 00:00 |
+| Indices | 00:00; 01:00, which is midnight in Chicago (range, `day_aggs_v1`); 16:00 (`/prev`) | 00:00; 01:00 |
+| Forex | 00:00 (range); 23:59:59.999, the day's last millisecond (grouped daily, `/prev`, `day_aggs_v1`) | 00:00 |
+| Crypto | 00:00; 23:59:59.999 (`day_aggs_v1`) | 00:00 |
+
+A time known for one class is not accepted for another, and every class's times apply to every
+source, since each class accepts 00:00 anyway. The indices longer bars' 01:00 is presumed from
+the range's 1-day bars; no sample shows one. A 1-day bar stamped at its day's end lies inside
+its day, so the whole-window rule above keeps or drops it exactly as it does the same bar
+stamped at the start. Crypto's day cut is not verified: the documented range and `/prev` samples
+sit at midnight New York time and the grouped-daily samples at times such as 20:48 UTC, no day
+boundary at all, so crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all raise if
+live REST data follows those samples, until the owner decides after the live check
+([section 23](#23-open-verification-items) item 1). A stock day that closes early (the day after
+Thanksgiving) may be stamped at its 13:00 close, which raises the same way until the live check
+of item 41 settles it. `AUTO` picks the source as for every other dataset
+([section 16](#16-historysourceauto)): the check, not a fixed source, keeps both sources on the
+same days.
 
 **One-day parameters.** A dataset parameter that names one calendar day (`daily_open_close`'s
 `date`, `options.contracts`' `as_of`, `reference.tickers`' and `ticker_details`' `date`)
@@ -2240,10 +2258,10 @@ How a request is built from a `DatasetSpec` and a `Request`:
   classes that do not trade then. A per-session or grouped-daily download of more than five
   requests logs its request count (for sessions, "at least") and estimated minutes at a Basic
   key's 5 requests a minute, once, at INFO, before the first request.
-- **1-day stamps.** Forex and crypto 1-day bars, from `/prev`, the range, and grouped daily,
-  are stamped at 00:00 UTC of their day; a crypto 1-day stamp elsewhere in its UTC day than
-  its first or last millisecond, or a crypto bar of several days or longer not stamped at
-  00:00 UTC, raises `MassiveError` naming the path and `source=dm.HistorySource.FLAT_FILES`
+- **Day stamps.** Bars of a day or longer from `/prev`, the range, and grouped daily, of every
+  class but futures, are stamped at 00:00 of their day in the class day zone: each stamp
+  Massive is known to use for the class is moved there, and any other raises `MassiveError`
+  naming the path and `source=dm.HistorySource.FLAT_FILES`
   ([section 12](#12-timestamp-units-and-day-boundaries)).
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
@@ -2415,13 +2433,14 @@ flat-file only.
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
 nothing is split between the sources. The partition dates are those of the rows the call keeps
 ([section 12](#12-timestamp-units-and-day-boundaries)): for bars, the days of the bars whose
-whole window fits, so the unfinished current day never needs a file. Crypto and forex 1-day bars
-follow the same rule as every other dataset: the two sources may serve one call or the next
-by symbol count or publication, and the loud UTC-cut check of
-[section 12](#12-timestamp-units-and-day-boundaries) keeps their data on the same UTC days. If
-live REST crypto bars turn out to be cut at midnight New York time, every REST crypto daily
-call raises loudly (the morning before yesterday's file is published included), and the
-owner decides the source rule after that live check ([section 23](#23-open-verification-items)
+whole window fits, so the unfinished current day never needs a file. Bars of a day or longer
+follow the same rule as every other dataset: the two sources may serve one call or the next by
+symbol count or publication, and the stamp check of
+[section 12](#12-timestamp-units-and-day-boundaries) stamps their bars alike and fails loudly on
+a stamp it does not know, so the choice never changes which day a bar is labelled with. If live
+REST crypto bars turn out to be cut at midnight New York time, every REST crypto daily call
+raises loudly (the morning before yesterday's file is published included), and the owner
+decides the source rule after that live check ([section 23](#23-open-verification-items)
 item 1). `source=` selects either source explicitly. A dataset without instruments counts as `ALL`.
 `HistoryQuery.history()` makes the choice (`choose_source` in `_datasets/history_source.py`) and then calls one
 transport; the transports only do I/O. The REST predicate depends only on the dataset's REST
@@ -2465,8 +2484,9 @@ to nanoseconds (for bars, the starts of the bars whose whole window fits; not ap
 futures trades, quotes, and session bars named by date, whose files hold exactly the requested
 sessions), and, on the surviving rows only, the rename to long-form names and
 parsing of the list columns (`Conditions`, `Indicators`). `_ingest/flatfiles.py` then applies
-`rename` in `_datasets/schema.py` and the `_datasets/timestamps.py` routine, and moves forex
-and crypto 1-day bar stamps to 00:00 UTC (`timestamps.utc_day_stamps`). No block is converted
+`rename` in `_datasets/schema.py` and the `_datasets/timestamps.py` routine, and moves each
+1-day bar's stamp to 00:00 of its day in the class day zone, refusing a stamp it does not know
+(`timestamps.day_starts`). No block is converted
 to Python objects. A
 file's surviving rows become one static Deephaven table per 16 blocks of data and at the end of
 the file (usually one table per file, since each table carries a fixed JVM-heap cost), and the
@@ -3598,8 +3618,14 @@ a dataset with no asset class takes the field's own description.
 3. **`Symbol`, `Timestamp`, and `Underlying`**, when they are declared key columns of the
    dataset, get a fixed library sentence ("The instrument,
    in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
-   underlying instrument, in the library's canonical symbol form."), followed, per transport in
-   the order of rule 1, by the wire key each source renames and its quoted field description
+   underlying instrument, in the library's canonical symbol form."; a bars dataset's
+   `Timestamp` instead gets "The start of the bar's window, as an Instant.", and for every class
+   but futures also "A bar of a day or longer is stamped at 00:00 New York time (UTC for forex
+   and crypto) of the day it starts on, on every source, whatever time of day the source
+   stamps it with.", since the library's stamp is not the end-of-day stamp some sources'
+   descriptions quote, [section 12](#12-timestamp-units-and-day-boundaries)), followed, per
+   transport in the order of rule 1, by the wire key each source renames and its quoted field
+   description
    (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``), or, for a key
    filled from the request, the request parameter it came from
    (`` REST: the request's `stocksTicker` parameter. ``).
@@ -4236,6 +4262,19 @@ document already reflects them.
     `end` on a list sends no upper bound, so future-dated rows such as an announced
     ex-dividend date appear ([section 12](#12-timestamp-units-and-day-boundaries),
     [section 16](#16-historysourceauto)).
+53. **Every bar of a day or longer is stamped at its window's start** (2026-10-28). One
+    `history()` call returns the same rows whichever source answers it, so a bar of a day or
+    longer of every class but futures, from every source, is stamped at 00:00 of the day it
+    starts on in the class day zone: New York for stocks, options, and indices, UTC for forex
+    and crypto. This extends decision 52's UTC stamping of forex and crypto 1-day bars to
+    stocks, options, and indices, whose grouped daily, `/prev`, and stock `day_aggs_v1` bars
+    Massive stamps at the 16:00 New York session close while the range stamps the day's start.
+    Only the stamps the vendored samples show for a class are moved (the table of
+    [section 12](#12-timestamp-units-and-day-boundaries)); any other stamp, forex included,
+    raises `MassiveError` naming the dataset, the source, and the other source, as decision
+    52's crypto check does, instead of being relabelled. Futures bars keep Massive's
+    `window_start` and their `SessionEndDate` label. A bars dataset's `Timestamp` is described
+    as the start of the bar's window ([section 19.4](#194-generated-schemas)).
 
 ## 23. Open verification items
 
@@ -4283,7 +4322,10 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 34 | Whether the aggregates range returns a partial bar for a period `{from}` falls inside | `{from}` is the first instant that belongs to the first bar that fits wholly (the Saturday before a stock week, the 1st of a month), so a partial bucket begun before it is dropped whatever it is stamped | `tests/ingest/test_rest.py`: the week and month requests start where the first whole period begins | `tests/namespaces/test_stocks_integration.py`: month bars with `{from}` in mid-month; record the first bar's stamp and volume against the whole month's |
 | 35 | How bars of `multiplier` above 1 are aligned: to clock and calendar boundaries, or to `{from}` | Aligned to boundaries (whole UTC units for intraday bars, period starts for longer ones); a bar spans `multiplier` units from its own start | `tests/datasets/test_dates.py`: five-minute and two-week bars fit by their full span | `tests/namespaces/test_stocks_integration.py`: five-minute and two-week bars from an odd `{from}`; record their stamps |
 | 36 | Whether a futures session can end on a Saturday or Sunday | Sessions are requested on weekdays only; Saturday and Sunday dates are skipped without a request | `tests/ingest/test_rest.py`: a range over a weekend requests only its weekday sessions | `tests/namespaces/test_futures_integration.py`: `schedules` over a month; record every `session_end_date`'s weekday |
-| 37 | The stamp of forex 1-day bars on every source: the range (00:00 UTC in the samples), grouped daily, `/prev`, and `global_forex/day_aggs_v1` | Every stamp is moved to 00:00 UTC of its UTC day, unchecked | `tests/datasets/test_timestamps.py`, `tests/ingest/test_rest.py`: range and grouped stamps map to 00:00 UTC | `tests/namespaces/test_forex_integration.py`: one 1-day bar of `C:EURUSD` from each source for one day; record each `Timestamp` and whether the OHLCV agree |
+| 37 | The stamp of forex 1-day bars on every source: the range (00:00 UTC in the samples), grouped daily, `/prev`, and `global_forex/day_aggs_v1` | A stamp at 00:00 or 23:59:59.999 UTC is moved to 00:00 UTC of its day; any other stamp raises `MassiveError` naming the dataset, the source, and the other source | `tests/datasets/test_timestamps.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_forex.py`: range, grouped, `/prev`, and flat-file stamps map to 00:00 UTC; a stamp at midnight New York time raises | `tests/namespaces/test_forex_integration.py`: one 1-day bar of `C:EURUSD` from each source for one day; record each `Timestamp` and whether the OHLCV agree |
 | 38 | Whether crypto range and `/prev` 1-day bars cover the UTC day: compare them with the same day rebuilt from 1-minute bars | Item 1's loud check: a stamp elsewhere than a UTC day boundary fails | `tests/namespaces/test_crypto.py`: as item 1 | `tests/namespaces/test_crypto_integration.py`: rebuild one day of `X:BTCUSD` from `minute_aggs_v1` over the UTC day and over the New York day; record which matches the range and `/prev` bars |
 | 39 | Whether grouped daily and `day_aggs_v1` hold the same pairs on a day, for forex and crypto | `AUTO` keeps one source for crypto 1-day bars; nothing assumes the sets match | `tests/datasets/test_history_source.py`: crypto 1-day bars keep one source whatever the symbol count | `tests/namespaces/test_forex_integration.py`, `tests/namespaces/test_crypto_integration.py`: one day of `dm.ALL` 1-day bars from both sources; record the pairs only one holds |
 | 40 | Which session a futures bar of several sessions or longer is labelled with (`SessionEndDate` of its first or last session), and how such bars are aligned | Futures bars of a session or longer with `multiplier` above 1 named by dates raise `ValueError` ("pass datetimes, or multiplier=1"); named by datetimes, they are kept by their own window | `tests/datasets/test_history_source.py`, `tests/namespaces/test_futures.py`: the refusal for 2-session, 2-week, and 2-month bars | `tests/namespaces/test_futures_integration.py`: 2-session and 2-month bars of ES over a quarter; record each bar's `Timestamp` and `SessionEndDate` |
+| 41 | The stamps of stock 1-day and longer bars on every source: the range (00:00 New York time in the samples), grouped daily, `/prev`, and `us_stocks_sip/day_aggs_v1` (16:00 New York time, the session close, in the samples), on a full day and on a day that closes early at 13:00 (2024-11-29), and of week and month bars from the range | A 1-day stamp at 00:00 or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar must be stamped 00:00 New York time, and any other stamp raises `MassiveError` naming the dataset, the source, and the other source | `tests/datasets/test_timestamps.py`, `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`, `tests/namespaces/test_stocks.py`: the documented stamps of every source map to 00:00 New York time; 13:00 and a longer bar at 16:00 raise | `tests/namespaces/test_stocks_integration.py`: one 1-day bar of AAPL for 2024-11-27 and 2024-11-29 from each of the four sources, and two weeks and two months of AAPL bars from the range; record each `Timestamp` and whether the OHLCV agree |
+| 42 | The stamps of option 1-day and longer bars on every source: the range and `us_options_opra/day_aggs_v1` (00:00 New York time in the samples) and `/prev` (16:00 New York time) | As item 41, for options | `tests/namespaces/test_options.py`: the documented stamps map to 00:00 New York time; another stamp raises | `tests/namespaces/test_options_integration.py`: one 1-day bar of a listed SPY contract from the range, `/prev`, and `day_aggs_v1` for one day, and its week bars from the range; record each `Timestamp` |
+| 43 | The stamps of index 1-day and longer bars on every source: the range and `us_indices/day_aggs_v1` (01:00 New York time, midnight in Chicago, in the samples) and `/prev` (16:00 New York time); whether a bar stamped 01:00 New York time covers the New York day, the Chicago day, or the trading session; and whether longer bars are stamped 01:00 too | A 1-day stamp at 00:00, 01:00, or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar stamped 00:00 or 01:00 New York time to 00:00, and any other stamp raises `MassiveError` naming the dataset, the source, and the other source | `tests/namespaces/test_indices.py`, `tests/ingest/test_flatfiles.py`: the documented stamps of every source map to 00:00 New York time; another stamp raises | `tests/namespaces/test_indices_integration.py`: one 1-day bar of `I:SPX` and of `I:AAVE100` (which updates around the clock) from the range, `/prev`, and `day_aggs_v1` for one day, rebuilt from minute bars over the New York and the Chicago day, and two weeks of week bars; record each `Timestamp` and which day the OHLC match |
