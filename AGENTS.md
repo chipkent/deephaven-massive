@@ -39,8 +39,8 @@ lexicon, `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_
 `TYPE_FIXES`, `KEY_FIXES`, `DESCRIPTION_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`,
 `PROJECTIONS`, `TRANSPORT_ONLY`, or `VENUES` entry (`overrides.py`); or an `EXCLUSIONS` or
 `SAMPLE_ERRORS` entry (`exclusions.py`). A vendor description that is clearly wrong for its
-source (another asset class's or event's text) is corrected the same way, by a
-`DESCRIPTION_FIXES` entry that quotes it.
+source (another asset class's or event's text, or a statement Massive's own documentation of the
+field contradicts) is corrected the same way, by a `DESCRIPTION_FIXES` entry that quotes it.
 
 `--check` downloads the live sources into a scratch directory and prints a Markdown report of
 what differs from the snapshot and the committed schemas, each item under the action that

@@ -1057,7 +1057,7 @@
     "last_quote.last_updated": "The time when the quote was generated at the exchange to nanosecond precision.",
     "last_quote.timeframe": "The timeliness of the data as determined by your subscription. One of REAL-TIME or DELAYED.",
     "last_trade.last_updated": "The time when the trade was generated at the exchange to nanosecond precision.",
-    "last_trade.price": "The price of the trade. This is the actual dollar value per whole contract of this trade. A trade of 100 contracts with a price of $2.00 would be worth a total dollar value of $200.00.",
+    "last_trade.price": "The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier.",
     "last_trade.size": "The total number of contracts exchanged between buyers and sellers on a given trade.",
     "last_trade.timeframe": "The timeliness of the data as determined by your subscription. One of REAL-TIME or DELAYED.",
     "session.change": "The change in price during this session.",
@@ -1075,7 +1075,7 @@
     "timestamp": "The time when the trade was generated at the exchange to nanosecond precision.",
     "sequence_number": "The unique sequence number assigned to this trade.",
     "report_sequence": "The reporting sequence number.",
-    "price": "The price of the trade. This is the actual dollar value per whole contract of this trade. A trade of 100 contracts with a price of $2.00 would be worth a total dollar value of $200.00.",
+    "price": "The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier.",
     "size": "The total number of contracts exchanged between buyers and sellers on a given trade.",
     "session_end_date": "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format.",
     "channel": "The CME multicast channel this event was sourced from."
@@ -2279,7 +2279,7 @@
     "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for Massive's mapping of exchange IDs.",
     "id": "The Trade ID which uniquely identifies a trade on the exchange that the trade happened on.",
     "participant_timestamp": "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the trade was generated at the exchange.",
-    "price": "The price of the trade in the base currency of the crypto pair.",
+    "price": "The price of the trade: the amount of the pair's second currency paid for one unit of its first (US dollars per bitcoin for X:BTCUSD).",
     "size": "The size of a trade (also known as volume).",
     "received_timestamp": "The nanosecond accuracy timestamp of when the tick was received by Massive."
    },
@@ -2699,7 +2699,7 @@
     "low": "The lowest price for the symbol in the given time period.",
     "close": "The close price for the symbol in the given time period.",
     "volume": "The trading volume of the symbol in the given time period.",
-    "dollar_volume": "The total dollar volume of the transactions that occurred within the timeframe.",
+    "dollar_volume": "The sum of price × size across all trades in the window, expressed in the contract's quoted price units, which are the same units as the bar's open, high, low, and close. Despite the field name, no contract multiplier is applied, so this is not a notional dollar value. See the Products endpoint (https://massive.com/docs/rest/futures/products) for contract multiplier details. Because dollar_volume is a raw sum, you can use it to compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume across the bars in the window and divide by the summed volume.",
     "transactions": "The number of transactions in the aggregate window.",
     "settlement_price": "The official settlement price set by the exchange for the contract at the end of the trading session."
    },
@@ -2713,7 +2713,7 @@
     "low": "The lowest price for the symbol in the given time period.",
     "close": "The close price for the symbol in the given time period.",
     "volume": "The trading volume of the symbol in the given time period.",
-    "dollar_volume": "The total dollar volume of the transactions that occurred within the timeframe.",
+    "dollar_volume": "The sum of price × size across all trades in the window, expressed in the contract's quoted price units, which are the same units as the bar's open, high, low, and close. Despite the field name, no contract multiplier is applied, so this is not a notional dollar value. See the Products endpoint (https://massive.com/docs/rest/futures/products) for contract multiplier details. Because dollar_volume is a raw sum, you can use it to compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume across the bars in the window and divide by the summed volume.",
     "transactions": "The number of transactions in the aggregate window."
    },
    "us_futures_{venue}/trades_v1": {
@@ -2721,7 +2721,7 @@
     "timestamp": "The time when the trade was generated at the exchange to nanosecond precision.",
     "sequence_number": "The sequence number represents the sequence in which trade events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). Values reset after each trading session/day.",
     "report_sequence": "The reporting sequence number.",
-    "price": "The price of the trade. This is the actual dollar value per whole contract of this trade. A trade of 100 contracts with a price of $2.00 would be worth a total dollar value of $200.00.",
+    "price": "The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier.",
     "size": "The total number of contracts exchanged between buyers and sellers on a given trade.",
     "correction": "The trade correction indicator.",
     "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs.",
@@ -2854,5 +2854,22 @@
     "trf_timestamp": "The nanosecond accuracy TRF (Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this quote."
    }
   }
+ },
+ "class_descriptions": {
+  "REST": {
+   "/v3/snapshot": {
+    "last_trade.exchange": {
+     "options": "The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs."
+    },
+    "last_trade.id": {
+     "options": "The trade ID. Options trades do not have a trade ID, so this field is returned as an empty string."
+    },
+    "last_trade.price": {
+     "options": "The price of the trade. This is the price per share of the underlying, so the total dollar value of a trade is the price multiplied by the size and by the contract multiplier, which is typically 100 shares per contract."
+    }
+   }
+  },
+  "WS": {},
+  "FLAT_FILES": {}
  }
 }

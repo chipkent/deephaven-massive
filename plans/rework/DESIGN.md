@@ -134,7 +134,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 | kind | A dataset kind: the datasets whose sources share one merged schema (trades, quotes, bars, …), defined in `KINDS` and recorded on each generated source as a `Membership`. |
 | shape | An object shape in a payload (an aggregate row, a snapshot `day` object, a WebSocket channel), which selects a lexicon. |
 | drift | A difference between a payload on the wire and its committed generated schema. |
-| column description | The plain-text meaning of one dataset column: the vendor's description of the wire field behind it, or fixed library text for a key column or a column only other members of the kind supply ([section 19.4](#194-generated-schemas)). |
+| column description | The plain-text meaning of one dataset column: the description of the wire field behind it (the vendor's, or the refresh's correction where the vendor's is clearly wrong), or fixed library text for a key column or a column only other members of the kind supply ([section 19.4](#194-generated-schemas)). |
 | column reference | The generated, committed pages `docs/datasets/<namespace>.md`, one section per dataset ([section 7.4](#74-column-descriptions)). |
 | UG thread | A thread of Deephaven's update graph (UG), which refreshes live tables while holding the UG lock. |
 | blink table | A Deephaven table whose rows exist for exactly one update cycle. `TablePublisher` produces one. |
@@ -910,8 +910,8 @@ the documented way to convert text.
 ### 7.4 Column descriptions
 
 Each dataset column has one description, chosen by the rule of
-[section 19.4](#194-generated-schemas) from the vendor's field descriptions in
-`spec/descriptions.json`. It reaches users through three outlets, all generated from the same
+[section 19.4](#194-generated-schemas) from the field descriptions in
+`spec/descriptions.json` (the vendor's, corrected where they are clearly wrong). It reaches users through three outlets, all generated from the same
 dataset schema, so they can never disagree.
 
 **1. Every result is described.** Deephaven 42.7 stores column descriptions as the table
@@ -3041,7 +3041,7 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
 | `KEY_FIXES` | `overrides.py` | `{(source, declared key): (wire key, reason)}`: a field the specification declares under one key while every documented sample (the response example and the documentation sample) sends it under another that nothing declares; the field is read under the samples' key, keeping its declared type and description, and every other hand entry names it by that key. Stale once the declared key is gone, or the example no longer sends the corrected key or sends the declared one; each goes into section 23 | ticker events `event_type` → `type` (column `Type`) |
-| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text, reason)}`: a field whose vendor description is wrong for its source, because Massive copied another asset class's or event's text onto it; the entry quotes the vendor's text (as plain text, after normalization) and gives the text the field gets in its place, Massive's own wording for the same field of a sibling source wherever one is right. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once the source or key is gone, or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | crypto trades `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated" |
+| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text or asset classes, reason)}`: a field whose vendor description is clearly wrong for its source (another asset class's or event's text copied onto it, or a statement the vendor's own documentation contradicts); the entry quotes the vendor's text (as plain text, after normalization) and gives the replacement, either `text` for every use of the source, or, for a source that serves several asset classes, `asset_classes`: the text a dataset of each listed class shows, every other class keeping the vendor's. The replacement is Massive's own wording for the same field of a sibling source wherever that is right and says what the field holds; it is written here only when no sibling text is adequate, and the reason says so. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once no generated field looks the entry up (its source or key is gone, or the key is one a `KEY_FIXES` entry replaces or only an example sends), or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | the crypto last trade's and trades flat file's `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated"; the futures trades' `price` ("100 contracts × $2.00 = $200.00", no multiplier) → the `futures/T` channel's text; the unified `/v3/snapshot` `last_trade.price` → the options trades' text, for `options` only |
 | `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
@@ -3125,7 +3125,9 @@ description for the reviewer. Every gate has a descriptive name, which is how th
   whose declared type the spec no longer gives, a key fix whose key the example no longer
   sends in place of the declared one, a tag conflict the tag no longer contradicts,
   a `NAMES` or `DESCRIPTION_FIXES` quote the description no longer matches, an exclusion of a path the spec already
-  marks deprecated or draft); an identity entry no generated object uses is stale too;
+  marks deprecated or draft); an identity entry no generated object uses is stale too, and so
+  is a `DESCRIPTION_FIXES` entry no generated field looked up, which is checked against the
+  keys the generators looked up rather than every key a source declares or an example sends;
 - **`type-agreement`:** within one kind, one column name joins to one `WireType`, unless a
   `TYPE_FIXES` entry resolves it; the message prints both keys' descriptions, because a
   conflict is first treated as a possible naming error (stocks and futures `dv` are exactly
@@ -3192,9 +3194,17 @@ that users can read what each column means ([section 7.4](#74-column-description
   generator. A test of the committed file fails when any link syntax survives, so a new vendor
   form shows on the refresh that brings it.
 - **Corrections.** Where Massive's description is clearly wrong for its source (another asset
-  class's or event's text, copied onto it), a `DESCRIPTION_FIXES` entry quotes the normalized
-  text and replaces it for that `(source, wire key)` alone, with its reason. That is the only
-  hand input on descriptions; a description that is merely terse or imprecise is kept.
+  class's or event's text copied onto it, or a statement Massive's own documentation of the
+  same field contradicts, such as a price total that leaves out the contract multiplier), a
+  `DESCRIPTION_FIXES` entry quotes the normalized text and replaces it for that
+  `(source, wire key)` alone, with its reason. The replacement is Massive's own text for the
+  same field of a sibling source wherever that text is right and says what the field holds;
+  only when no sibling text is adequate (right but saying nothing useful, like the crypto
+  WebSocket trade's "The price.", or wrong too) is it written in the entry, and the reason says
+  why. A source that serves several asset classes (the unified `/v3/snapshot`) can be
+  corrected per class: the entry gives the text for each listed class, and every other class
+  keeps the vendor's. That is the only hand input on descriptions; a description that is
+  merely terse or imprecise is kept.
 - **No gate.** A field without a description gets `""`, and nothing stops the refresh.
   Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
   changed description is an ordinary line in the refresh diff, except where a
@@ -3211,19 +3221,23 @@ that users can read what each column means ([section 7.4](#74-column-description
    "generated_by": "python -m deephaven_massive._massive.refresh",
    "fetched": "<the snapshot's fetch date, from the manifest>",
    "urls": {"<transport>": {"<source key>": ["<each vendor URL that documents the source>"]}},
-   "descriptions": {"<transport>": {"<source key>": {"<wire key>": "<plain text>"}}}
+   "descriptions": {"<transport>": {"<source key>": {"<wire key>": "<plain text>"}}},
+   "class_descriptions": {"<transport>": {"<source key>": {"<wire key>": {"<asset class>": "<plain text>"}}}}
   }
   ```
 
   A field without a description has no entry, and a source with no described field has no
-  entry under `descriptions`. Every generated source has at least one URL, sorted and as
+  entry under `descriptions`; `class_descriptions` holds only the fields corrected per asset
+  class, each asset class an `AssetClass` value. Every generated source has at least one URL, sorted and as
   fetched: for REST, every documentation page that names its path (every generated path has
   one, by the `docs` gate; a path several asset classes share, such as
   `/v3/reference/tickers`, has one page per asset class), as the snapshot's manifest records
   it. The entries are one per line, in generated order, so a reworded description is one
   changed line of the diff.
-- **Joined at load.** `Field` gains `description: str = ""`, and the `spec` loader fills it
-  from `descriptions.json` when it loads the schema files, under the same once-only lock. An
+- **Joined at load.** `Field` gains `description: str = ""` and `class_descriptions:
+  tuple[tuple[str, str], ...] = ()` (asset class and text, sorted by class), read through
+  `Field.description_for(asset_class)`, which returns the class's own text or `description`,
+  and the `spec` loader fills both from `descriptions.json` when it loads the schema files, under the same once-only lock. An
   entry that names a source or wire key the schema files lack raises at load: the files are
   generated together, so only a hand edit can cause it. The same load checks the URLs: a
   source without one, or a URL of a source the schema lacks, raises, so `sources` and
@@ -3363,7 +3377,11 @@ share", for a crypto trade). Picking per dataset keeps another member's text off
 it cannot correct a dataset's own source when Massive copied the wrong text onto it: the crypto
 REST last trade and trades flat file carry that same stock `price` text. The refresh corrects
 those through `DESCRIPTION_FIXES` (the hand-input table above), so every source already carries
-a description right for it when the rules below pick one.
+a description right for it when the rules below pick one. Each field's description in the
+rules is the one for the dataset's asset class, `Field.description_for(spec.asset_class)`: a
+source that serves several classes may carry a per-class correction (`options.snapshots`
+shows the options text of the unified snapshot's last trade, as `options.chain` does), and
+a dataset with no asset class takes the field's own description.
 
 1. **A column the dataset's own sources supply** takes the first non-empty description among
    them, trying the transports in the order REST, flat files, WebSocket and, within one
@@ -3377,7 +3395,7 @@ a description right for it when the rules below pick one.
    dataset, get a fixed library sentence ("The instrument,
    in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
    underlying instrument, in the library's canonical symbol form."), followed, per transport in
-   the order of rule 1, by the wire key each source renames and its quoted vendor description
+   the order of rule 1, by the wire key each source renames and its quoted field description
    (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``), or, for a key
    filled from the request, the request parameter it came from
    (`` REST: the request's `stocksTicker` parameter. ``).
@@ -3940,7 +3958,8 @@ document already reflects them.
     `_datasets/column_reference.py`, which takes the catalog as an argument, so the name never
     collides with the `m.reference` namespace and the renderer needs nothing from the API.
 48. **Vendor descriptions in a separate generated file** (2026-10-26). `spec/descriptions.json`
-    holds every field's vendor description, normalized to plain text by fixed rules, with no
+    holds every field's vendor description (corrected where it is clearly wrong, decision 51),
+    normalized to plain text by fixed rules, with no
     gate on a missing one, and is joined into `Field.description` at load; one rule picks each
     dataset column's description ([section 19.4](#194-generated-schemas)).
 49. **Each table keeps its endpoint's spelling** (2026-10-27). One concept spelled two ways by
@@ -3969,9 +3988,13 @@ document already reflects them.
     chosen path declares `adjusted`, and raises `ValueError` on the crypto templates, which do
     not.
 51. **Wrong vendor descriptions are corrected by hand input** (2026-10-28). Where Massive's
-    own description of a field is clearly wrong for its source, a reasoned `DESCRIPTION_FIXES`
-    entry in `refresh/overrides.py` quotes it and replaces it, and `spec/descriptions.json`
-    changes only through the refresh ([section 19.4](#194-generated-schemas)).
+    own description of a field is clearly wrong for its source (another asset class's or
+    event's text copied onto it, or a statement Massive's own documentation of the same field
+    contradicts), a reasoned `DESCRIPTION_FIXES` entry in `refresh/overrides.py` quotes it and
+    replaces it, per asset class for a source that serves several; a merely terse or imprecise
+    description is kept. The replacement is Massive's own sibling text wherever that is right
+    and adequate, and is written in the entry only otherwise. `spec/descriptions.json` changes
+    only through the refresh ([section 19.4](#194-generated-schemas)).
 
 ## 23. Open verification items
 

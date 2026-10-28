@@ -158,7 +158,15 @@ def test_render_descriptions_writes_the_documented_format() -> None:
     channel = Source(
         key="stocks/T",
         transport=Transport.WS,
-        fields=(Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE, description="P."),),
+        fields=(
+            Field(
+                wire_key="p",
+                column="Price",
+                wire_type=WireType.DOUBLE,
+                description="P.",
+                class_descriptions=(("options", "Per share."),),
+            ),
+        ),
     )
     text = render.render_descriptions(
         {Transport.REST: [_PATH], Transport.WS: [channel]},
@@ -175,6 +183,8 @@ def test_render_descriptions_writes_the_documented_format() -> None:
             "REST": {_PATH.key: {"price": "The price."}},
             "WS": {"stocks/T": {"p": "P."}},
         },
+        # Only a field with per-asset-class descriptions has an entry.
+        "class_descriptions": {"REST": {}, "WS": {"stocks/T": {"p": {"options": "Per share."}}}},
     }
     # One line per entry, so a reworded description is one changed line of the diff.
     assert '    "price": "The price."' in text.splitlines()

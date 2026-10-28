@@ -118,10 +118,49 @@ def test_a_description_fix_names_the_field_by_its_corrected_key() -> None:
         _fixed("Per whole share."),
         key_fixes={("us_x/trades_v1", "px"): overrides.KeyFix(wire_key="price", reason="test")},
     )
+    rules = _rules(hand)
     described = {"type": "number", "description": "Per whole share."}
-    item = _rules(hand).field(RawField("px", described, required=True))
+    item = rules.field(RawField("px", described, required=True))
     assert item is not None
     assert (item.wire_key, item.description) == ("price", "The price of one coin.")
+    assert rules.use().described_keys == {"price"}
+
+
+def test_a_description_fix_under_the_declared_key_of_a_key_fix_is_never_looked_up() -> None:
+    fix = overrides.DescriptionFix(vendor="Per whole share.", text="Per coin.", reason="test")
+    hand = dataclasses.replace(
+        _EMPTY,
+        key_fixes={("us_x/trades_v1", "px"): overrides.KeyFix(wire_key="price", reason="test")},
+        description_fixes={("us_x/trades_v1", "px"): fix},
+    )
+    rules = _rules(hand)
+    described = {"type": "number", "description": "Per whole share."}
+    item = rules.field(RawField("px", described, required=True))
+    assert item is not None
+    assert item.description == "Per whole share."
+    use = rules.use()
+    assert "px" in use.wire_keys
+    assert use.described_keys == frozenset()
+
+
+def test_a_description_fix_by_asset_class_keeps_the_vendor_text_for_the_rest() -> None:
+    fix = overrides.DescriptionFix(
+        vendor="Per whole share.",
+        asset_classes={"options": "Per share of the underlying.", "crypto": "Per coin."},
+        reason="test",
+    )
+    hand = dataclasses.replace(_EMPTY, description_fixes={("us_x/trades_v1", "price"): fix})
+    described = {"type": "number", "description": "Per whole share."}
+    item = _rules(hand).field(RawField("price", described, required=True))
+    assert item is not None
+    assert item.description == "Per whole share."
+    assert item.class_descriptions == (
+        ("crypto", "Per coin."),
+        ("options", "Per share of the underlying."),
+    )
+    assert item.description_for("options") == "Per share of the underlying."
+    assert item.description_for("stocks") == "Per whole share."
+    assert item.description_for(None) == "Per whole share."
 
 
 def test_a_field_documented_as_a_timestamp_needs_its_unit_whatever_its_name() -> None:

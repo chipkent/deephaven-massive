@@ -29,9 +29,11 @@ field gets one column and one type whichever transport serves it:
   the `example-type` gate stops the refresh, unless a `SAMPLE_ERRORS` entry says the sample
   is wrong.
 - **Descriptions.** Each field records the vendor's description as plain text (`plain_text`),
-  or the text of its `DESCRIPTION_FIXES` entry when the vendor's is wrong for the source; no
-  name, type, or gate depends on it, except that a `NAMES` entry quotes the one its name was
-  derived from and a `DESCRIPTION_FIXES` entry the one it replaces.
+  or the correction its `DESCRIPTION_FIXES` entry gives when the vendor's is clearly wrong for
+  the source: a replacement, or per-asset-class texts (`Field.class_descriptions`) for a source
+  that serves several classes. No name, type, or gate depends on it, except that a `NAMES`
+  entry quotes the one its name was derived from and a `DESCRIPTION_FIXES` entry the one it
+  replaces.
 
 Hand input is keyed by source: a REST path template, a WebSocket `"<cluster>/<channel>"`, or a
 flat-file prefix, so one table serves every transport. A `SourceFields` collects its problems
@@ -191,6 +193,8 @@ class SourceFields:
         self.example_keys: set[str] = set()
         # The declared key of each field a `KEY_FIXES` entry reads under another, by wire key.
         self.declared_keys: dict[str, str] = {}
+        # The wire keys whose `DESCRIPTION_FIXES` entry `description` looked up.
+        self.described_keys: set[str] = set()
 
     def use(self) -> PathUse:
         """Return what the source consumed so far, for the checks that span sources.
@@ -209,6 +213,7 @@ class SourceFields:
             converted=frozenset(self.converted),
             needed_conversions=frozenset(self.needed_conversions),
             example_keys=frozenset(self.example_keys),
+            described_keys=frozenset(self.described_keys),
         )
 
     def problem(self, gate: Gate, key: str, message: str, *, description: str = "") -> None:
@@ -359,6 +364,7 @@ class SourceFields:
             wire_type = WireType.EPOCH
         else:
             wire_type = fix.wire_type if fix is not None else spec_type
+        described, class_texts = self.description(raw.wire_key, description)
         column = naming.column_name(long_names)
         self.concepts[column] = ".".join(naming.snake(name) for name in long_names)
         self.columns[raw.wire_key] = column
@@ -369,34 +375,45 @@ class SourceFields:
             unit=unit,
             required=raw.required,
             conversion=fix,
-            description=self.description(raw.wire_key, description),
+            description=described,
+            class_descriptions=class_texts,
         )
 
-    def description(self, wire_key: str, vendor: str) -> str:
+    def description(self, wire_key: str, vendor: str) -> tuple[str, tuple[tuple[str, str], ...]]:
         """Return a field's description as plain text, corrected where the vendor's is wrong.
+
+        Records the key as looked up (`PathUse.described_keys`) when it has a
+        `DESCRIPTION_FIXES` entry, so an entry under any other key is reported stale.
 
         Args:
             wire_key: The field's wire key, after any `KEY_FIXES` entry.
             vendor: The vendor's description, as the specification gives it.
 
         Returns:
-            The vendor's description as plain text (`plain_text`), or the text of the field's
-            `DESCRIPTION_FIXES` entry when the entry quotes it. An entry that quotes anything
-            else is stale: the problem is recorded and the vendor's text kept.
+            The field's description and its per-asset-class descriptions
+            (`Field.class_descriptions`). Without an entry, the vendor's description as plain
+            text (`plain_text`) and no class descriptions. With an entry that quotes it, the
+            entry's `text`, or the vendor's text and the entry's `asset_classes` sorted by
+            class. An entry that quotes anything else is stale: the problem is recorded, with
+            both texts, and the vendor's text kept.
         """
         text = plain_text(vendor, origin=self.origin)
         entry = self.hand.description_fixes.get((self.source, wire_key))
         if entry is None:
-            return text
+            return text, ()
+        self.described_keys.add(wire_key)
         if " ".join(entry.vendor.split()) != text:
             self.problem(
                 Gate.STALE_ENTRY,
                 wire_key,
-                "DESCRIPTION_FIXES quotes a description the vendor no longer gives",
+                "DESCRIPTION_FIXES quotes a description the vendor no longer gives: "
+                f"{entry.vendor!r}",
                 description=text,
             )
-            return text
-        return entry.text
+            return text, ()
+        if entry.text is not None:
+            return entry.text, ()
+        return text, tuple(sorted((entry.asset_classes or {}).items()))
 
     def unit(
         self,

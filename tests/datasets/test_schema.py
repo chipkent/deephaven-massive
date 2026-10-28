@@ -677,6 +677,33 @@ def test_rest_text_wins_and_source_order_breaks_ties() -> None:
     assert dict(columns["Size"].wire_keys) == {R: ("size", "size_2"), W: ("s",)}
 
 
+def test_a_dataset_takes_its_asset_class_s_description_of_a_shared_source() -> None:
+    # One source serves several asset classes; its price text is corrected for options only.
+    price = Field(
+        wire_key="price",
+        column="Price",
+        wire_type=WireType.DOUBLE,
+        description="Per whole share.",
+        class_descriptions=(("options", "Per share of the underlying."),),
+    )
+    made = Source(key="/shared", transport=R, fields=(price,))
+    found = {}
+    for asset_class in (AssetClass.OPTIONS, AssetClass.STOCKS, None):
+        dataset = DatasetSpec(
+            name="reference.x",
+            summary="A dataset for the tests.",
+            asset_class=asset_class,
+            fetch_path="/shared",
+        )
+        (column,) = dataset_schema(dataset, (dataset,), lambda *_: made).columns
+        found[asset_class] = column.description
+    assert found == {
+        AssetClass.OPTIONS: "Per share of the underlying.",
+        AssetClass.STOCKS: "Per whole share.",
+        None: "Per whole share.",
+    }
+
+
 TRADES_KEYS = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
 STOCK_TRADES = DatasetSpec(
     name="stocks.trades",

@@ -5,7 +5,7 @@ against the same description and no schema is written by hand:
 
 - `spec.types` defines the value types: `Transport`, `Source` and `RestPath` (one REST path,
   WebSocket channel, or flat-file prefix), `Field` (one wire key, its long-form column, and
-  the vendor's description of it), `Param` and `ParamKind` (REST parameters), `Membership` (a
+  what it means), `Param` and `ParamKind` (REST parameters), `Membership` (a
   source's place in a dataset kind), `WireType` and `WireUnit` (a field's type and timestamp
   unit), `DriftReport` (what a payload had that its source did not, and the reverse), and
   `Provenance` (the vendor snapshot's date and each source's vendor URLs).
@@ -14,8 +14,10 @@ against the same description and no schema is written by hand:
   documentation pages by `python -m deephaven_massive._massive.refresh` and committed; they
   are never edited by hand. Each source there records its fields in its dataset kind's order
   and its memberships of the kinds (`Source.memberships`), so nothing at run time needs the
-  refresh. `descriptions.json`, generated beside them by the same command, holds the vendor's
-  description of each field, the snapshot's fetch date, and each source's vendor URLs. The
+  refresh. `descriptions.json`, generated beside them by the same command, holds each
+  field's description (the vendor's, or the refresh's correction where the vendor's is clearly
+  wrong, and for a source that serves several asset classes any per-class description), the
+  snapshot's fetch date, and each source's vendor URLs. The
   descriptions are kept out of the schema files so that a refresh that only rewords them
   leaves those byte for byte unchanged. All ship in the wheel as package data, while the
   refresh that writes them does not.
@@ -25,9 +27,9 @@ against the same description and no schema is written by hand:
   exactly (an ISO instant to integer nanoseconds, for example), for every JSON decoder,
   including a field's named conversion where the vendor's samples differ from its type.
 - `source(transport, key)` and `sources(transport)` read a transport's generated file into
-  those types the first time either is called, joining each field's description from
-  `descriptions.json` into `Field.description`, and return the same values ever after.
-  `provenance()` returns the fetch date and the URLs.
+  those types the first time either is called, joining each field's descriptions from
+  `descriptions.json` into `Field.description` and `Field.class_descriptions`, and return
+  the same values ever after. `provenance()` returns the fetch date and the URLs.
 
 Each file is read and parsed once, under one lock, so concurrent first calls from any number
 of threads (with or without the GIL) parse each file once and all receive the same objects.
@@ -87,6 +89,7 @@ _DESCRIPTIONS = "descriptions.json"
 
 # What `parse` joins when it is given no descriptions.
 _NO_DESCRIPTIONS: Mapping[str, Mapping[str, str]] = MappingProxyType({})
+_NO_CLASS_DESCRIPTIONS: Mapping[str, Mapping[str, Mapping[str, str]]] = MappingProxyType({})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -102,11 +105,14 @@ class DescriptionsFile:
         urls: Per transport, each source key mapped to the vendor URLs that document it.
         texts: Per transport, per source key, each described wire key mapped to its plain-text
             description. A field without a description has no entry.
+        class_texts: Per transport, per source key, each wire key with per-asset-class
+            descriptions mapped to them, by asset class. Only those fields have an entry.
     """
 
     fetched: dt.date
     urls: Mapping[Transport, Mapping[str, tuple[str, ...]]]
     texts: Mapping[Transport, Mapping[str, Mapping[str, str]]]
+    class_texts: Mapping[Transport, Mapping[str, Mapping[str, Mapping[str, str]]]]
 
 
 @dataclass
@@ -182,6 +188,7 @@ def _load(transport: Transport) -> Mapping[str, Source]:
             transport,
             _read(_FILES[transport]),
             described.texts.get(transport, _NO_DESCRIPTIONS),
+            class_descriptions=described.class_texts.get(transport, _NO_CLASS_DESCRIPTIONS),
         )
         urls = described.urls.get(transport, {})
         for what, keys in (
@@ -282,6 +289,8 @@ def parse(
     transport: Transport,
     text: str,
     descriptions: Mapping[str, Mapping[str, str]] = _NO_DESCRIPTIONS,
+    *,
+    class_descriptions: Mapping[str, Mapping[str, Mapping[str, str]]] = _NO_CLASS_DESCRIPTIONS,
 ) -> Mapping[str, Source]:
     """Turn the text of a generated file into its sources, joining their descriptions.
 
@@ -296,27 +305,38 @@ def parse(
         descriptions: For each source key, each described wire key mapped to its description
             (the transport's part of `DescriptionsFile.texts`). A field it does not name gets
             `""`; by default nothing is described.
+        class_descriptions: For each source key, each wire key with per-asset-class
+            descriptions mapped to them by asset class (the transport's part of
+            `DescriptionsFile.class_texts`), joined into `Field.class_descriptions`; by default
+            none.
 
     Returns:
         A read-only mapping from key to source, in file order.
 
     Raises:
         ValueError: If a member is missing, a value breaks a type's invariants, two sources
-            share a key, or a description names a source or a wire key the file lacks.
+            share a key, or a description or class description names a source or a wire key
+            the file lacks.
     """
     loaded: dict[str, Source] = {}
     for entry in _list(_member(_object(json.loads(text), "the schema file"), "sources")):
-        value = _source(transport, entry, descriptions)
+        value = _source(
+            transport, entry, descriptions=descriptions, class_descriptions=class_descriptions
+        )
         if value.key in loaded:
             raise ValueError(f"two generated {transport} sources share the key {value.key!r}")
         loaded[value.key] = value
-    for key, described in descriptions.items():
-        found = loaded.get(key)
-        if found is None:
-            raise ValueError(f"descriptions name the {transport} source {key!r}, which is absent")
-        unknown = sorted(set(described) - {f.wire_key for f in found.fields})
-        if unknown:
-            raise ValueError(f"descriptions of {transport} {key!r} name no field: {unknown}")
+    for what, named in (
+        ("descriptions", descriptions),
+        ("class descriptions", class_descriptions),
+    ):
+        for key, described in named.items():
+            found = loaded.get(key)
+            if found is None:
+                raise ValueError(f"{what} name the {transport} source {key!r}, which is absent")
+            unknown = sorted(set(described) - {f.wire_key for f in found.fields})
+            if unknown:
+                raise ValueError(f"{what} of {transport} {key!r} name no field: {unknown}")
     return MappingProxyType(loaded)
 
 
@@ -330,7 +350,9 @@ def parse_descriptions(text: str) -> DescriptionsFile:
     Args:
         text: The file's JSON text: `{"generated_by", "fetched": "<YYYY-MM-DD>", "urls":
             {<transport>: {<source key>: [<url>, ...]}}, "descriptions": {<transport>:
-            {<source key>: {<wire key>: <text>}}}}`, as the refresh writes it.
+            {<source key>: {<wire key>: <text>}}}, "class_descriptions": {<transport>:
+            {<source key>: {<wire key>: {<asset class>: <text>}}}}}`, as the refresh writes
+            it.
 
     Returns:
         The parsed values, every mapping read-only.
@@ -338,6 +360,7 @@ def parse_descriptions(text: str) -> DescriptionsFile:
     document = _object(json.loads(text), "the descriptions file")
     urls = _object(_member(document, "urls"), "urls")
     texts = _object(_member(document, "descriptions"), "descriptions")
+    by_class = _object(_member(document, "class_descriptions"), "class_descriptions")
     return DescriptionsFile(
         fetched=dt.date.fromisoformat(_text(document, "fetched")),
         urls=MappingProxyType(
@@ -362,6 +385,26 @@ def parse_descriptions(text: str) -> DescriptionsFile:
                     }
                 )
                 for transport, by_key in texts.items()
+            }
+        ),
+        class_texts=MappingProxyType(
+            {
+                Transport(transport): MappingProxyType(
+                    {
+                        key: MappingProxyType(
+                            {
+                                wire_key: _strings(texts_by_class, f"class descriptions of {key!r}")
+                                for wire_key, texts_by_class in _object(
+                                    described, f"class descriptions of {key!r}"
+                                ).items()
+                            }
+                        )
+                        for key, described in _object(
+                            by_key, f"class descriptions of {transport}"
+                        ).items()
+                    }
+                )
+                for transport, by_key in by_class.items()
             }
         ),
     )
@@ -442,7 +485,11 @@ def _string_list(value: object, what: str) -> tuple[str, ...]:
 
 
 def _source(
-    transport: Transport, entry: dict[str, object], descriptions: Mapping[str, Mapping[str, str]]
+    transport: Transport,
+    entry: dict[str, object],
+    *,
+    descriptions: Mapping[str, Mapping[str, str]],
+    class_descriptions: Mapping[str, Mapping[str, Mapping[str, str]]],
 ) -> Source:
     """Build one source from its entry in a generated file.
 
@@ -450,13 +497,16 @@ def _source(
         transport: The transport.
         entry: The decoded JSON object of the source.
         descriptions: The transport's descriptions, by source key and wire key.
+        class_descriptions: The transport's per-asset-class descriptions, by source key, wire
+            key, and asset class.
 
     Returns:
         A `RestPath` for REST, a `Source` otherwise.
     """
     key = _text(entry, "key")
     described = descriptions.get(key, {})
-    fields = tuple(_field(item, described) for item in _list(_member(entry, "fields")))
+    by_class = class_descriptions.get(key, {})
+    fields = tuple(_field(item, described, by_class) for item in _list(_member(entry, "fields")))
     memberships = tuple(_membership(item) for item in _list(_member(entry, "memberships")))
     if transport is not Transport.REST:
         return Source(key=key, transport=transport, fields=fields, memberships=memberships)
@@ -537,7 +587,11 @@ def _flag(item: dict[str, object], key: str) -> bool:
     return value
 
 
-def _field(item: dict[str, object], descriptions: Mapping[str, str]) -> Field:
+def _field(
+    item: dict[str, object],
+    descriptions: Mapping[str, str],
+    class_descriptions: Mapping[str, Mapping[str, str]],
+) -> Field:
     """Build a field from its JSON object.
 
     A conversion `spec.types.Conversion` does not name, or one that gives another type than
@@ -547,6 +601,8 @@ def _field(item: dict[str, object], descriptions: Mapping[str, str]) -> Field:
     Args:
         item: `{"wire_key", "column", "type", "unit", "required", "conversion"}`.
         descriptions: The source's descriptions by wire key; the field's is joined, or `""`.
+        class_descriptions: The source's per-asset-class descriptions by wire key; the
+            field's are joined, sorted by asset class, or none.
 
     Returns:
         The field.
@@ -562,6 +618,7 @@ def _field(item: dict[str, object], descriptions: Mapping[str, str]) -> Field:
         required=_flag(item, "required"),
         conversion=None if conversion is None else Conversion(conversion),
         description=descriptions.get(wire_key, ""),
+        class_descriptions=tuple(sorted(class_descriptions.get(wire_key, {}).items())),
     )
 
 
