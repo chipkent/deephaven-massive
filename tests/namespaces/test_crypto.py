@@ -3,28 +3,49 @@
 The specs are checked against the generated sources through a catalog of the crypto datasets
 alone, so the expected schemas do not depend on which other namespaces have declared members
 of the shared kinds. The fixtures under `tests/data/namespaces/crypto/` are shaped from the
-vendor's documented samples; here they are checked against the generated sources they stand
-for.
+vendor's documented samples; they are checked against the generated sources they stand for,
+then served end to end: through the fake REST server (the exact request and the decoded rows),
+the fake WebSocket server (one documented frame lands in `blink()` per channel), and the fake
+S3 server (one block of each flat-file prefix round-trips through `history()`).
 """
 
 import csv
 import io
 import json
-from collections.abc import Callable, Iterator
-from datetime import date, datetime, timedelta, timezone
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, cast
+from urllib.parse import parse_qs, unquote, urlsplit
 
+import pyarrow as pa
 import pytest
+from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
+from deephaven.table import Table
+from deephaven.table_listener import TableUpdate, listen
 
 import deephaven_massive as dm
+from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._datasets.schema import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import ChannelFamily
-from deephaven_massive._massive import RestPath, Transport, source, to_batch
+from deephaven_massive._enums import ChannelFamily, Recency
+from deephaven_massive._ingest import ws
+from deephaven_massive._massive import (
+    DriftReport,
+    Reject,
+    RestPath,
+    Source,
+    Status,
+    Transport,
+    WireError,
+    WsState,
+    source,
+    to_batch,
+)
 from deephaven_massive._namespaces import crypto
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import (
@@ -36,6 +57,15 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
+from deephaven_massive._tables.liveness import new_scope
+
+# The reply builder is a plain class of the fake, which no fixture can hand over; the servers
+# themselves come from the `fake_rest` and `fake_ws_server` fixtures.
+from tests._fakes.rest import FakeRestServer, Reply
+from tests._fakes.s3 import FakeS3
+from tests._fakes.ws import FakeMassiveServer
+
+Fixture = Callable[[str, str], bytes]
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 OWNER = "namespaces/crypto"
@@ -504,3 +534,379 @@ def test_flat_file_fixtures_have_the_generated_header(
     header = next(reader)
     assert header == [f.wire_key for f in source(F, prefix).fields]
     assert all(len(row) == len(header) for row in reader)
+
+
+# --- End to end: REST ----------------------------------------------------------------------------
+
+NS = 10**9
+MS = 10**6
+
+
+@pytest.fixture
+def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+def rows(table: Table) -> list[dict[str, Any]]:
+    # Instants become epoch nanoseconds, so assertions keep every digit.
+    data = dh_arrow.to_arrow(table)
+    columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
+    out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    return out
+
+
+def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
+    # Every GET the server received: its path and decoded query.
+    return [
+        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
+        for r in server.requests
+        if r.method == "GET"
+    ]
+
+
+def serve(server: FakeRestServer, target: str, fixture: bytes) -> None:
+    # The client percent-encodes the `:` of a crypto ticker in the path.
+    server.reply(target.replace(":", "%3A"), Reply(json.loads(fixture)))
+
+
+def test_trades_fetch_reads_the_last_trade_of_each_pair(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    serve(fake_rest, "/v1/last/crypto/BTC/USD", load_fixture(OWNER, "last_trade.json"))
+    out = rows(rest_session.crypto.trades("BTC-USD").fetch())
+    assert sent(fake_rest) == [("/v1/last/crypto/BTC/USD", {})]
+    assert out == [
+        {
+            "Symbol": "X:BTCUSD",
+            "Timestamp": 1605560885027 * MS,
+            "Conditions": [1],
+            "Exchange": 4,
+            "Id": None,
+            "Price": 16835.42,
+            "Size": 0.006909,
+            "ReceivedTimestamp": None,
+        }
+    ]
+
+
+def test_trades_history_over_rest_bounds_the_utc_day(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    serve(fake_rest, "/v3/trades/X:BTCUSD", load_fixture(OWNER, "trades.json"))
+    q = rest_session.crypto.trades("BTC-USD")
+    out = rows(q.history("2021-07-01", "2021-07-01", source=dm.HistorySource.REST))
+    midnight = int(datetime(2021, 7, 1, tzinfo=UTC).timestamp()) * NS
+    assert sent(fake_rest) == [
+        (
+            "/v3/trades/X:BTCUSD",
+            {
+                "timestamp.gte": [str(midnight)],
+                "timestamp.lt": [str(midnight + 86_400 * NS)],
+                "limit": ["50000"],
+            },
+        )
+    ]
+    assert [
+        (r["Symbol"], r["Timestamp"], r["Id"], r["Price"], r["ReceivedTimestamp"]) for r in out
+    ] == [
+        ("X:BTCUSD", 1625097600103000000, "191450340", 35060.0, 1625097600125000000),
+        ("X:BTCUSD", 1625097600368000000, "191450341", 35059.99, 1625097600390000000),
+    ]
+
+
+def test_daily_bars_fetch_reads_the_previous_day(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", load_fixture(OWNER, "prev.json"))
+    out = rows(rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY, adjusted=False).fetch())
+    assert sent(fake_rest) == [("/v2/aggs/ticker/X:BTCUSD/prev", {"adjusted": ["false"]})]
+    assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Vwap"]) for r in out] == [
+        ("X:BTCUSD", 1605416400000 * MS, 16035.9, 15954.2111)
+    ]
+
+
+def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    start = int(datetime(2020, 6, 1, tzinfo=UTC).timestamp()) * 1000
+    end = start + 2 * 86_400_000 - 1
+    path = f"/v2/aggs/ticker/X:BTCUSD/range/1/day/{start}/{end}"
+    serve(fake_rest, path, load_fixture(OWNER, "range.json"))
+    q = rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY)
+    out = rows(q.history("2020-06-01", "2020-06-02", source=dm.HistorySource.REST))
+    assert sent(fake_rest) == [(path, {"adjusted": ["true"], "limit": ["50000"]})]
+    assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Transactions"]) for r in out] == [
+        ("X:BTCUSD", 1590984000000 * MS, 9557.9, 1),
+        ("X:BTCUSD", 1591070400000 * MS, 10096.87, 1),
+    ]
+
+
+def test_every_pairs_daily_bars_read_the_grouped_day(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    path = "/v2/aggs/grouped/locale/global/market/crypto/2020-02-02"
+    serve(fake_rest, path, load_fixture(OWNER, "grouped.json"))
+    q = rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
+    out = rows(q.history("2020-02-02", "2020-02-02", source=dm.HistorySource.REST))
+    assert sent(fake_rest) == [(path, {"adjusted": ["true"]})]
+    assert [(r["Symbol"], r["Timestamp"], r["Transactions"]) for r in out] == [
+        ("X:ARDRUSD", 1580676480000 * MS, 18388),
+        ("X:NGCUSD", 1580674080000 * MS, 18),
+    ]
+
+
+def test_snapshots_send_the_pairs_or_nothing_for_all(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    path = "/v2/snapshot/locale/global/markets/crypto/tickers"
+    serve(fake_rest, path, load_fixture(OWNER, "snapshots.json"))
+    out = rows(rest_session.crypto.snapshots(["FSN-USD", "BTC-USD"]).fetch())
+    rows(rest_session.crypto.snapshots(dm.ALL).fetch())
+    assert sent(fake_rest) == [(path, {"tickers": ["X:BTCUSD,X:FSNUSD"]}), (path, {})]
+    [row] = out
+    assert (row["Symbol"], row["LastTradeId"], row["Updated"]) == (
+        "X:FSNUSD",
+        "413131",
+        1605330008999 * MS,
+    )
+    assert (row["LastMinuteWindowStart"], row["PrevDayVwap"]) == (1684427880000 * MS, 0.4076)
+
+
+def test_movers_read_their_direction(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    path = "/v2/snapshot/locale/global/markets/crypto/losers"
+    serve(fake_rest, path, load_fixture(OWNER, "movers.json"))
+    out = rows(rest_session.crypto.movers(dm.Direction.LOSERS).fetch())
+    assert sent(fake_rest) == [(path, {})]
+    assert [(r["Symbol"], r["LastTradeId"], r["TodaysChangePerc"]) for r in out] == [
+        ("X:DRNUSD", "517478762", 221.858864)
+    ]
+
+
+def test_daily_open_close_reads_one_pair_and_day_a_request(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
+    serve(fake_rest, path, load_fixture(OWNER, "open_close.json"))
+    q = rest_session.crypto.daily_open_close("BTC-USD", "2020-10-09", adjusted=False)
+    [row] = rows(q.fetch())
+    assert sent(fake_rest) == [(path, {"adjusted": ["false"]})]
+    # The body's `BTC-USD` is canonical in `Symbol`; the trades stay JSON text.
+    assert (row["Symbol"], row["Day"], row["Open"], row["Close"], row["IsUtc"]) == (
+        "X:BTCUSD",
+        date(2020, 10, 9),
+        10932.44,
+        11050.64,
+        True,
+    )
+    assert json.loads(row["OpenTrades"])[0]["i"] == "511235746"
+
+
+# --- End to end: WebSocket -----------------------------------------------------------------------
+
+TIMEOUT = 15.0
+
+
+class WsSession:
+    """A session whose WebSocket connections reach the fake Massive server."""
+
+    def __init__(self, server: FakeMassiveServer) -> None:
+        self.server = server
+        self.session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
+        core = self.session._core
+        connections = ws.WsConnections(
+            core,
+            resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "a test"),
+            record_verdict=lambda *_: None,
+            client_factory=self.client,
+        )
+        cast("Any", core._ports)._streams = connections
+        core.on_close(connections.close)
+
+    def client(
+        self,
+        url: str,
+        *,
+        sources: Sequence[Source],
+        on_open: Callable[[int], None],
+        on_status: Callable[[int, Status], None],
+        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
+        on_state: Callable[[WsState, float | WireError | None], None],
+    ) -> _massive.WsClient:
+        return _massive.WsClient(
+            self.server.url("/" + url.split("/", 3)[3]),
+            api_key="test-key",
+            sources=sources,
+            on_open=on_open,
+            on_status=on_status,
+            on_data=on_data,
+            on_state=on_state,
+            reconnect_backoff=0.05,
+            max_reconnect_backoff=0.1,
+        )
+
+    def subscribed(self, topic: str) -> None:
+        def named(server: FakeMassiveServer) -> bool:
+            if not server.connections or server.connections[-1].auth is None:
+                return False
+            frames = [json.loads(f) for f in server.connections[-1].frames]
+            return any(
+                f["action"] == "subscribe" and topic in f["params"].split(",") for f in frames
+            )
+
+        self.server.wait_for(named, TIMEOUT)
+
+
+@pytest.fixture
+def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[WsSession]:
+    harness = WsSession(fake_ws_server)
+    yield harness
+    harness.session.close()
+
+
+def landed(table: Table) -> tuple[Callable[[], list[dict[str, Any]]], Callable[[], None]]:
+    # Collect the rows each update-graph cycle adds to a blink table, before it clears them;
+    # the listener appends on the update-graph thread, the test reads a copy under the lock.
+    got: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def on_update(update: TableUpdate, is_replay: bool) -> None:
+        added = update.added()
+        names = list(added)
+        with lock:
+            got.extend(
+                dict(zip(names, values, strict=True))
+                for values in zip(*(added[n] for n in names), strict=True)
+            )
+
+    scope = new_scope()
+    with scope.open():
+        handle = listen(table, on_update)
+
+    def seen() -> list[dict[str, Any]]:
+        with lock:
+            return list(got)
+
+    def stop() -> None:
+        handle.stop()
+        scope.release()
+
+    return seen, stop
+
+
+@pytest.mark.parametrize(
+    ("dataset", "topic", "expected"),
+    [
+        ("trades", "XT.BTC-USD", {"Symbol": "X:BTCUSD", "Price": 33021.9, "Id": "14272084"}),
+        ("quotes", "XQ.BTC-USD", {"Symbol": "X:BTCUSD", "BidPrice": 33052.79, "AskSize": 0.601}),
+        ("bars", "XA.BCD-USD", {"Symbol": "X:BCDUSD", "Vwap": 0.7756, "AverageTradeSize": 73}),
+        ("bars_second", "XAS.BCD-USD", {"Symbol": "X:BCDUSD", "Close": 0.784}),
+        ("fmv", "FMV.BTC-USD", {"Symbol": "X:BTCUSD", "Fmv": 33021.9}),
+    ],
+    ids=["XT", "XQ", "XA", "XAS", "FMV"],
+)
+def test_a_documented_frame_lands_in_blink(
+    *,
+    ws_session: WsSession,
+    load_fixture: Fixture,
+    dataset: str,
+    topic: str,
+    expected: dict[str, object],
+) -> None:
+    channel = topic.split(".", 1)[0]
+    symbol = topic.split(".", 1)[1]
+    namespace = ws_session.session.crypto
+    if dataset == "bars_second":
+        query: StreamQuery = namespace.bars(symbol, dm.Timespan.SECOND)
+    else:
+        query = getattr(namespace, dataset)(symbol)
+    blink = query.blink()
+    seen, stop = landed(blink)
+    ws_session.subscribed(topic)
+    frames = json.loads(load_fixture(OWNER, "ws_frames.json"))[channel]
+    ws_session.server.send(json.dumps(frames))
+    wait_for(lambda: len(seen()) == 1)
+    stop()
+    [row] = seen()
+    assert {name: row[name] for name in expected} == expected
+    assert row["Timestamp"] is not None
+    ws_session.session.release(blink)
+
+
+def wait_for(condition: Callable[[], bool]) -> None:
+    pause = threading.Event()  # never set; only paces the loop
+    for _ in range(int(TIMEOUT / 0.02)):
+        if condition():
+            return
+        pause.wait(0.02)
+    assert condition()
+
+
+# --- End to end: flat files ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
+    # Test credentials for the fake S3 server, which accepts any.
+    settings: dict[str, Any] = {
+        "api_key": "test-key",
+        "s3_access_key_id": "AKIDFLATFILES",
+        "s3_secret_access_key": "flat-file-secret",
+    }
+    m = dm.MassiveSession(dm.MassiveConfig(**settings))
+    yield m
+    m.close()
+
+
+@pytest.mark.parametrize(
+    ("make", "prefix", "expected"),
+    [
+        (
+            lambda c: c.trades(["BTC-USD", "ETH-USD"]),
+            "global_crypto/trades_v1",
+            [
+                ("X:BTCUSD", 1679961600212544000, 27142.85),
+                ("X:BTCUSD", 1679961600591766000, 27140.12),
+                ("X:ETHUSD", 1679961600651891712, 1772.6),
+            ],
+        ),
+        (
+            lambda c: c.bars("BTC-USD", adjusted=False),
+            "global_crypto/minute_aggs_v1",
+            [
+                ("X:BTCUSD", 1679961600000000000, 27139.64),
+                ("X:BTCUSD", 1679961660000000000, 27169.39),
+            ],
+        ),
+        (
+            lambda c: c.bars(dm.ALL, dm.Timespan.DAY, adjusted=False),
+            "global_crypto/day_aggs_v1",
+            [
+                ("X:LINKUSD", 1680047999999000000, 6.947),
+                ("X:ADAUSD", 1680047999999000000, 0.36816),
+            ],
+        ),
+    ],
+    ids=["trades", "minute_bars", "day_bars"],
+)
+def test_one_flat_file_block_round_trips(
+    *,
+    s3_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Fixture,
+    make_csv_gz: Callable[[str], bytes],
+    make: Callable[[Any], HistoryQuery],
+    prefix: str,
+    expected: list[tuple[str, int, float]],
+) -> None:
+    name = prefix.replace("/", "_") + "_2023-03-28.csv"
+    fake_s3.put(
+        f"{prefix}/2023/03/2023-03-28.csv.gz", make_csv_gz(load_fixture(OWNER, name).decode())
+    )
+    q = make(s3_session.crypto)
+    table = q.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES)
+    price = "Price" if "trades" in prefix else "Close"
+    assert [(r["Symbol"], r["Timestamp"], r[price]) for r in rows(table)] == expected
