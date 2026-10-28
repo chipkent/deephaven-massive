@@ -48,8 +48,12 @@ A change that no test catches needs a test, or it is dead code to delete. Run ne
 tests several times, and on the free-threaded build when the code is threaded:
 
 ```bash
-PYTHON_GIL=0 uv run --python 3.14t pytest <the new test files> -q
+PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the new test files> -q
 ```
+
+`UV_PROJECT_ENVIRONMENT` keeps the free-threaded build in its own environment, `.venv-314t`
+(ignored by git). Without it, `uv run --python 3.14t` replaces the worktree's `.venv` with a
+free-threaded one, and the next plain `uv run` or `./scripts/check.sh` replaces it back.
 
 ## 3. Check the words
 

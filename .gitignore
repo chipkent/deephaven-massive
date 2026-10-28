@@ -243,3 +243,7 @@ vendor/massive-previous/
 # rows, so they are never committed.
 live-checks.log
 live-evidence.log
+
+# The free-threaded test environment (UV_PROJECT_ENVIRONMENT=.venv-314t), kept apart from .venv
+# so a free-threaded run never replaces the default one.
+.venv-314t/
