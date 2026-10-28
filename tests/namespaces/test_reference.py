@@ -566,12 +566,12 @@ def test_tickers_without_symbols_list_every_ticker_and_symbols_fan_out(
 ) -> None:
     fake_rest.reply("/v3/reference/tickers", Reply(envelope([])))
     rest_session.reference.tickers().fetch()
+    assert sent(fake_rest) == [("/v3/reference/tickers", {"active": ["true"], "limit": ["1000"]})]
     rest_session.reference.tickers(symbols=["MSFT", "AAPL"]).fetch()
-    assert sent(fake_rest) == [
-        ("/v3/reference/tickers", {"active": ["true"], "limit": ["1000"]}),
-        ("/v3/reference/tickers", {"ticker": ["AAPL"], "active": ["true"], "limit": ["1000"]}),
-        ("/v3/reference/tickers", {"ticker": ["MSFT"], "active": ["true"], "limit": ["1000"]}),
-    ]
+    # The per-symbol requests run concurrently, so they arrive in any order.
+    fanned = sorted(params["ticker"] for _, params in sent(fake_rest)[1:])
+    assert fanned == [["AAPL"], ["MSFT"]]
+    assert all(params["limit"] == ["1000"] for _, params in sent(fake_rest))
 
 
 def test_ticker_details_fetch_one_request_per_symbol(
