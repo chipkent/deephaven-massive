@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 import shutil
 import typing
 from pathlib import Path
@@ -22,6 +23,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.column_reference import (
+    _TRANSPORT_ORDER,
     COMMAND,
     SyncResult,
     anchor,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 DOCS = Path(__file__).resolve().parents[2] / "docs" / "datasets"
+SITE = "https://github.com/chipkent/deephaven-massive/blob/main/"
 # The wire interface names `Source.memberships` but exports no constructor for an element.
 MEMBERSHIP = type(source(R, "/v3/snapshot/indices").memberships[0])
 
@@ -59,13 +62,15 @@ def parity_message(directory: Path, pages: Mapping[str, str]) -> str | None:
         One message naming every stale, missing, and extra entry and the command that fixes
         them; None when the directory holds exactly the pages, byte for byte.
     """
-    present = {entry.name: entry for entry in directory.iterdir()} if directory.exists() else {}
+    if not directory.is_dir() or directory.is_symlink():
+        return f"docs/datasets/ is not a directory; run `{COMMAND}`"
+    present = {entry.name: entry for entry in directory.iterdir()}
     problems = [f"extra: {name}" for name in sorted(present.keys() - pages.keys())]
     for name, text in pages.items():
         entry = present.get(name)
         if entry is None:
             problems.append(f"missing: {name}")
-        elif not entry.is_file() or entry.read_bytes() != text.encode():
+        elif not entry.is_file() or entry.is_symlink() or entry.read_bytes() != text.encode():
             problems.append(f"stale: {name}")
     if not problems:
         return None
@@ -82,10 +87,41 @@ def test_the_committed_pages_are_the_rendered_pages() -> None:
 
 
 def test_every_namespace_with_datasets_has_a_page() -> None:
-    pages = rendered()
-    assert list(pages) == list(dict.fromkeys(f"{n.split('.')[0]}.md" for n in CATALOG.by_name))
-    assert "reference.md" in pages  # `m.snapshots` is documented on the reference page
-    assert '<a id="snapshots"></a>\n\n## `m.snapshots`\n' in pages["reference.md"]
+    assert list(rendered()) == [
+        "stocks.md",
+        "options.md",
+        "futures.md",
+        "indices.md",
+        "forex.md",
+        "crypto.md",
+        "reference.md",
+        "indicators.md",
+        "economy.md",
+        "partners.md",
+    ]
+
+
+def test_the_session_method_s_section_says_why_it_is_on_the_reference_page() -> None:
+    page = rendered()["reference.md"]
+    section = page.partition('<a id="snapshots"></a>\n\n## `m.snapshots`\n\n')[2]
+    note = (
+        "Called as `m.snapshots`, a method of the session itself rather than of "
+        "`m.reference`; its catalog record is `reference.snapshots`, so its columns are "
+        "documented on this page.\n\n| Column |"
+    )
+    assert section.split("\n\n", 1)[1].startswith(note)
+    # Only the session method has the note.
+    assert page.count("a method of the session itself") == 1
+
+
+def test_the_wire_columns_follow_the_order_of_every_supplied_by() -> None:
+    # The page orders the wire-field columns by transport; every column of the real catalog
+    # lists its transports in that same order.
+    rank = {transport: index for index, transport in enumerate(_TRANSPORT_ORDER)}
+    for spec in CATALOG.by_name.values():
+        for column in CATALOG.dataset_schema(spec).columns:
+            ranks = [rank[t] for t in column.supplied_by]
+            assert ranks == sorted(ranks), (spec.name, column.name)
 
 
 def _plant_stray(directory: Path) -> None:
@@ -131,6 +167,20 @@ def test_the_parity_test_fails_on_damage_that_the_command_repairs(
     assert parity_message(copy, pages) is None
 
 
+def test_the_parity_test_fails_on_a_linked_page_or_a_missing_directory(tmp_path: Path) -> None:
+    copy = tmp_path / "datasets"
+    shutil.copytree(DOCS, copy)
+    pages = rendered()
+    # A link to the right bytes is still no committed page: sync would replace it.
+    (tmp_path / "stocks.md").write_bytes((copy / "stocks.md").read_bytes())
+    (copy / "stocks.md").unlink()
+    (copy / "stocks.md").symlink_to(tmp_path / "stocks.md")
+    assert "stale: stocks.md" in str(parity_message(copy, pages))
+    gone = f"docs/datasets/ is not a directory; run `{COMMAND}`"
+    assert parity_message(tmp_path / "absent", pages) == gone
+    assert parity_message(tmp_path / "stocks.md", pages) == gone
+
+
 # --- The docstring rule: every dataset method links its own section ----------------------------
 
 
@@ -164,7 +214,8 @@ def link_problems(session: type, specs: Iterable[DatasetSpec]) -> list[str]:
 
     Returns:
         One message per dataset whose call path names no method, or whose method's docstring
-        lacks `docs/datasets/<namespace>.md#<anchor>`.
+        lacks the full GitHub URL of `docs/datasets/<namespace>.md#<anchor>`, ending at the
+        anchor (a longer anchor that merely starts with it does not count).
     """
     problems = []
     for spec in specs:
@@ -172,8 +223,8 @@ def link_problems(session: type, specs: Iterable[DatasetSpec]) -> list[str]:
         link = f"docs/datasets/{spec.name.split('.')[0]}.md#{anchor(spec)}"
         if method is None:
             problems.append(f"{spec.name}: no method at {call_path(spec)}")
-        elif link not in (method.__doc__ or ""):
-            problems.append(f"{spec.name}: the docstring must link {link}")
+        elif not re.search(re.escape(SITE + link) + r"(?![\w-])", method.__doc__ or ""):
+            problems.append(f"{spec.name}: the docstring must link {SITE}{link}")
     return problems
 
 
@@ -187,15 +238,30 @@ class _Linked(Namespace):
     def dividends(self) -> Query:
         """Cash dividends.
 
-        Columns: docs/datasets/stocks.md#dividends.
+        Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#dividends.
         """
         raise NotImplementedError
 
     def splits(self) -> Query:
-        """Splits; the link names another dataset: docs/datasets/stocks.md#dividends."""
+        """Splits; the link names another dataset.
+
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#dividends
+        """
         raise NotImplementedError
 
     def ipos(self) -> Query:
+        raise NotImplementedError
+
+    def financials(self) -> Query:
+        """Financials; the link names a longer anchor that starts with this one.
+
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-ratios
+        """
+        raise NotImplementedError
+
+    def news(self) -> Query:
+        """News; the link lacks the GitHub URL: docs/datasets/stocks.md#news."""
         raise NotImplementedError
 
 
@@ -220,14 +286,18 @@ def test_the_docstring_rule_reports_every_missing_link() -> None:
             "stocks.dividends",
             "stocks.splits",
             "stocks.ipos",
+            "stocks.financials",
+            "stocks.news",
             "stocks.missing",
             "reference.news",
             "stocks.dividends.more",  # `dividends` is a method, not a namespace
         )
     ]
     assert link_problems(_LinkedSession, specs) == [
-        "stocks.splits: the docstring must link docs/datasets/stocks.md#splits",
-        "stocks.ipos: the docstring must link docs/datasets/stocks.md#ipos",
+        f"stocks.splits: the docstring must link {SITE}docs/datasets/stocks.md#splits",
+        f"stocks.ipos: the docstring must link {SITE}docs/datasets/stocks.md#ipos",
+        f"stocks.financials: the docstring must link {SITE}docs/datasets/stocks.md#financials",
+        f"stocks.news: the docstring must link {SITE}docs/datasets/stocks.md#news",
         "stocks.missing: no method at m.stocks.missing",
         "reference.news: no method at m.reference.news",
         "stocks.dividends.more: no method at m.stocks.dividends.more",
@@ -367,8 +437,8 @@ _GUIDE = (
 _FOOTER = (
     "Generated by `uv run python scripts/render_reference.py` from Massive's documentation as "
     "fetched on 2026-10-27. The descriptions are Massive's, corrected where they are clearly "
-    "wrong; the library writes its own for the key columns and for the columns only other "
-    "datasets of a kind fill."
+    "wrong; the library writes its own for the key columns and for columns that only other "
+    "datasets of the same kind fill."
 )
 
 
@@ -528,6 +598,17 @@ def test_sync_never_follows_a_symbolic_link_out_of_its_directory(tmp_path: Path)
     assert sorted(p.name for p in target.iterdir()) == ["a.md"]
     assert (outside / "keep.md").read_text() == "keep\n"
     assert (outside / "file.md").read_text() == "outside\n"
+
+
+def test_sync_refuses_a_directory_that_is_a_symbolic_link(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "important.txt").write_text("keep\n")
+    link = tmp_path / "datasets"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(ValueError, match="is a symbolic link"):
+        sync(link, {"a.md": "A\n"})
+    assert [p.name for p in target.iterdir()] == ["important.txt"]
 
 
 @pytest.mark.parametrize("name", ["", ".", "..", "../escape.md", "sub/page.md", "/abs.md"])

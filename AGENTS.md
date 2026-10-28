@@ -54,8 +54,8 @@ check.
 The column reference, `docs/datasets/<namespace>.md`, is generated from the dataset schemas and
 committed. Never edit it by hand: the command below owns the whole directory, rewriting stale
 pages and deleting any file it did not render. Run it, and commit its output in the same pull
-request, whenever a dataset, a namespace, a summary, or a refresh that moves a column or a
-description changes; the parity test fails until you do.
+request, after any refresh (every page shows the snapshot's fetch date) and whenever a dataset,
+a namespace, a summary, or the description rule changes; the parity test fails until you do.
 
 ```bash
 uv run python scripts/render_reference.py                     # regenerate docs/datasets/

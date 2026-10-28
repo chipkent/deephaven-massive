@@ -77,9 +77,11 @@ dev = [
 
 [tool.hatch.build.targets.sdist]
 # The sdist carries the package and its tests; hatchling adds README.md, LICENSE, and
-# pyproject.toml itself. It leaves out vendor/: the snapshot there is Massive's published
-# content, kept only as input to the refresh, and the tests that read it skip without it.
-only-include = ["src", "tests"]
+# pyproject.toml itself. It also carries the generated column reference, docs/datasets/,
+# which the tests compare byte for byte with what the package renders. It leaves out vendor/:
+# the snapshot there is Massive's published content, kept only as input to the refresh, and
+# the tests that read it skip without it.
+only-include = ["src", "tests", "docs/datasets"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deephaven_massive"]

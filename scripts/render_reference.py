@@ -37,9 +37,10 @@ def main() -> None:
     Side effects: starts an embedded Deephaven server in this process, deletes and writes
     files under `docs/datasets/`, and writes one line per change to standard output.
     """
+    # Registered first, so a server start that fails after the JVM loaded still exits safely.
+    atexit.register(_exit)
     # Port 0 asks the OS for an ephemeral port, so the command never clashes with a server.
     Server(port=0, jvm_args=["-Xmx1g"]).start()
-    atexit.register(_exit)
     # Imported only once the server runs: the session module imports Deephaven.
     wire = importlib.import_module("deephaven_massive._massive")
     reference = importlib.import_module("deephaven_massive._datasets.column_reference")
