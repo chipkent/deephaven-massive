@@ -1,0 +1,20 @@
+{
+  "adjusted": true,
+  "queryCount": 1,
+  "request_id": "b2170df985474b6d21a6eeccfb6bee67",
+  "results": [
+    {
+      "T": "X:BTCUSD",
+      "c": 16035.9,
+      "h": 16180,
+      "l": 15639.2,
+      "o": 15937.1,
+      "t": 1605416400000,
+      "v": 95045.16897951,
+      "vw": 15954.2111
+    }
+  ],
+  "resultsCount": 1,
+  "status": "OK",
+  "ticker": "X:BTCUSD"
+}
