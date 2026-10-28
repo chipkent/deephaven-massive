@@ -148,6 +148,9 @@ def test_list_params() -> None:
         list_params(sort=cast("str", 1), order=None)
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         list_params(sort=None, order=cast("Order", "desc"))
+    # Most list endpoints take the direction as a suffix of `sort`, so it needs a sort field.
+    with pytest.raises(ValueError, match="order needs sort"):
+        list_params(sort=None, order=Order.DESC)
 
 
 def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSession) -> None:
@@ -764,3 +767,16 @@ def test_the_summary_rule_reports_every_mismatch() -> None:
         "stocks.splits: the docstring must start with 'Stock splits of US-listed stocks.'",
         "stocks.news: the docstring must start with 'News articles.'",
     ]
+
+
+def test_a_typed_parameter_is_reserved_from_filters(massive_session: dm.MassiveSession) -> None:
+    # Every typed parameter of the factory, set or not, and each of its suffixed forms.
+    for key in ("frequency", "frequency_gte", "frequency_any_of"):
+        with pytest.raises(ValueError, match=f"{key} is set through its own argument"):
+            build(
+                massive_session,
+                DIVIDENDS,
+                symbols=["AAPL"],
+                params={"frequency": None},
+                filters={key: 4},
+            )

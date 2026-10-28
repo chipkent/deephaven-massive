@@ -312,6 +312,20 @@ def test_bar_channels_and_prefixes_are_keyed_by_timespan() -> None:
 
 def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
     assert STOCK_TRADES.rest_paths == ("/v2/last/trade/{stocksTicker}", "/v3/trades/{stockTicker}")
+    by_class = DatasetSpec(
+        name="indicators.sma",
+        summary="A dataset for the tests.",
+        fetch_path="/v1/indicators/sma/{stockTicker}",
+        fetch_paths_by_class={
+            AssetClass.CRYPTO: "/v1/indicators/sma/{cryptoTicker}",
+            AssetClass.STOCKS: "/v1/indicators/sma/{stockTicker}",
+        },
+    )
+    # The per-class fetch paths follow the fetch path, each once.
+    assert by_class.rest_paths == (
+        "/v1/indicators/sma/{stockTicker}",
+        "/v1/indicators/sma/{cryptoTicker}",
+    )
     assert STOCK_TRADES.sources == (
         (R, "/v2/last/trade/{stocksTicker}"),
         (R, "/v3/trades/{stockTicker}"),

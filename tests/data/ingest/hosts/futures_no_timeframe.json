@@ -1,0 +1,15 @@
+{
+  "status": "OK",
+  "request_id": "6aeb7bcd9f2e0f0c4ed0d2a6b6a7d3c1",
+  "results": [
+    {
+      "details": {
+        "product_code": "ES",
+        "ticker": "ESZ5"
+      },
+      "session": {
+        "close": 5900.0
+      }
+    }
+  ]
+}

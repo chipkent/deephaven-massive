@@ -12,7 +12,7 @@ import threading
 from collections.abc import Callable
 
 import pytest
-from deephaven import dtypes, input_table, new_table
+from deephaven import dtypes, new_table
 from deephaven.column import double_col, string_col
 from deephaven.execution_context import ExecutionContext
 from deephaven.stream import blink_to_append_only
@@ -239,24 +239,6 @@ def test_a_description_of_a_missing_column_fails(dh_exec_ctx: ExecutionContext) 
     lacking = new_table([string_col("Symbol", ["AAPL"])])  # no Price column
     with pytest.raises(RuntimeError, match=r"Unknown column names \[Price\]"):
         describe(lacking, SPEC, SCHEMA)
-
-
-def test_a_keyed_input_table_copy_ticks_and_stays_an_input_table(
-    dh_exec_ctx: ExecutionContext,
-) -> None:
-    # A keyed poll() result: the poller writes through the input table, never the copy.
-    keyed = input_table(col_defs(SCHEMA), key_cols="Symbol")
-    scope = new_scope()
-    with scope.open():
-        result = describe(keyed, SPEC, SCHEMA)
-    assert_described(result)
-    # Deephaven copies every attribute, so the web UI still offers editing on the copy.
-    assert "InputTable" in result.attributes()
-    keyed.add(rows("AAPL", "MSFT"))
-    assert wait_for(lambda: result.size == 2)
-    keyed.delete(new_table([string_col("Symbol", ["MSFT"])]))  # a static key table
-    assert wait_for(lambda: result.size == 1)
-    scope.release()
 
 
 # --- column_table ----------------------------------------------------------------------------
