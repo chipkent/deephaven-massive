@@ -46,6 +46,7 @@ _EMPTY = HandInput(
     tag_conflicts={},
     type_fixes={},
     key_fixes={},
+    description_fixes={},
     result_keys={},
     param_units={},
     exclusions=(),
@@ -234,6 +235,9 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
             )
         },
         key_fixes={(_PATH, "declared"): overrides.KeyFix(wire_key="sent", reason="test")},
+        description_fixes={
+            ("/gone", "price"): overrides.DescriptionFix(vendor="x", text="y", reason="test")
+        },
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},
         param_units={(_PATH, "gone"): ms},
         sample_errors=(
@@ -251,6 +255,7 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
             ("stale-entry", _PATH, "gone"),  # tag conflicts
             ("stale-entry", _PATH, "gone"),  # type fixes
             ("stale-entry", _PATH, "declared"),  # key fixes
+            ("stale-entry", "/gone", "price"),  # description fixes
             ("stale-entry", "/gone", ""),  # result keys
             ("stale-entry", _PATH, "gone"),  # param units
             ("stale-entry", "", "zz"),  # identity

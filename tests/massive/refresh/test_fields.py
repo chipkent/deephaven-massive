@@ -36,6 +36,7 @@ _EMPTY = HandInput(
     tag_conflicts={},
     type_fixes={},
     key_fixes={},
+    description_fixes={},
     result_keys={},
     param_units={},
     exclusions=(),
@@ -84,6 +85,43 @@ def test_a_field_takes_its_name_type_and_plain_description() -> None:
     assert use.wire_keys == {"ask_price"}
     assert use.columns == {"ask_price": "AskPrice"}
     assert use.concepts == {"AskPrice": "ask_price"}
+
+
+def _fixed(vendor: str) -> HandInput:
+    fix = overrides.DescriptionFix(vendor=vendor, text="The price of one coin.", reason="test")
+    return dataclasses.replace(_EMPTY, description_fixes={("us_x/trades_v1", "price"): fix})
+
+
+def test_a_description_fix_replaces_the_vendor_text_it_quotes_as_plain_text() -> None:
+    # The quote is the plain text, the link already rewritten, with any line breaks.
+    rules = _rules(_fixed("Per whole\n  share. See Price (https://massive.com/docs/price)."))
+    described = {"type": "number", "description": "Per whole share. See [Price](/docs/price)."}
+    item = rules.field(RawField("price", described, required=True))
+    assert item is not None
+    assert item.description == "The price of one coin."
+    assert rules.problems == []
+
+
+def test_a_description_fix_is_stale_once_the_vendor_rewrites_the_text() -> None:
+    rules = _rules(_fixed("Per whole share."))
+    described = {"type": "number", "description": "The price of the trade."}
+    item = rules.field(RawField("price", described, required=True))
+    assert item is not None
+    assert item.description == "The price of the trade."
+    assert [(p.gate, p.source, p.key, p.description) for p in rules.problems] == [
+        ("stale-entry", "us_x/trades_v1", "price", "The price of the trade.")
+    ]
+
+
+def test_a_description_fix_names_the_field_by_its_corrected_key() -> None:
+    hand = dataclasses.replace(
+        _fixed("Per whole share."),
+        key_fixes={("us_x/trades_v1", "px"): overrides.KeyFix(wire_key="price", reason="test")},
+    )
+    described = {"type": "number", "description": "Per whole share."}
+    item = _rules(hand).field(RawField("px", described, required=True))
+    assert item is not None
+    assert (item.wire_key, item.description) == ("price", "The price of one coin.")
 
 
 def test_a_field_documented_as_a_timestamp_needs_its_unit_whatever_its_name() -> None:

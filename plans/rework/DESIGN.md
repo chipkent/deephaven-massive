@@ -2986,6 +2986,7 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
 | `KEY_FIXES` | `overrides.py` | `{(source, declared key): (wire key, reason)}`: a field the specification declares under one key while every documented sample (the response example and the documentation sample) sends it under another that nothing declares; the field is read under the samples' key, keeping its declared type and description, and every other hand entry names it by that key. Stale once the declared key is gone, or the example no longer sends the corrected key or sends the declared one; each goes into section 23 | ticker events `event_type` → `type` (column `Type`) |
+| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text, reason)}`: a field whose vendor description is wrong for its source, because Massive copied another asset class's or event's text onto it; the entry quotes the vendor's text (as plain text, after normalization) and gives the text the field gets in its place, Massive's own wording for the same field of a sibling source wherever one is right. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once the source or key is gone, or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | crypto trades `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated" |
 | `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
@@ -3063,11 +3064,12 @@ description for the reviewer. Every gate has a descriptive name, which is how th
   decided by the representation rules. A timestamp-like string REST parameter (by its base
   name) with no `PARAM_UNITS` entry fails the same gate;
 - **`stale-entry`:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict,
-  `TYPE_FIXES`, `KEY_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry
+  `TYPE_FIXES`, `KEY_FIXES`, `DESCRIPTION_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`,
+  `PARAM_UNITS`, or `EXCLUSIONS` entry
   naming a source, field, or parameter the snapshot lacks, or claiming what the snapshot contradicts (a type fix
   whose declared type the spec no longer gives, a key fix whose key the example no longer
   sends in place of the declared one, a tag conflict the tag no longer contradicts,
-  a `NAMES` quote the description no longer matches, an exclusion of a path the spec already
+  a `NAMES` or `DESCRIPTION_FIXES` quote the description no longer matches, an exclusion of a path the spec already
   marks deprecated or draft); an identity entry no generated object uses is stale too;
 - **`type-agreement`:** within one kind, one column name joins to one `WireType`, unless a
   `TYPE_FIXES` entry resolves it; the message prints both keys' descriptions, because a
@@ -3134,9 +3136,14 @@ that users can read what each column means ([section 7.4](#74-column-description
   specification do). `refresh/plain_text.py` is the one implementation, used by every
   generator. A test of the committed file fails when any link syntax survives, so a new vendor
   form shows on the refresh that brings it.
+- **Corrections.** Where Massive's description is clearly wrong for its source (another asset
+  class's or event's text, copied onto it), a `DESCRIPTION_FIXES` entry quotes the normalized
+  text and replaces it for that `(source, wire key)` alone, with its reason. That is the only
+  hand input on descriptions; a description that is merely terse or imprecise is kept.
 - **No gate.** A field without a description gets `""`, and nothing stops the refresh.
   Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
-  changed description is an ordinary line in the refresh diff.
+  changed description is an ordinary line in the refresh diff, except where a
+  `DESCRIPTION_FIXES` entry quotes it, which the `stale-entry` gate then sends back for review.
 - **A separate generated file**, `spec/descriptions.json`, so that a refresh that only changes
   descriptions leaves `rest.json`, `ws.json`, and `flatfiles.json` byte for byte unchanged,
   and a reviewer sees at once that no schema moved. For the same reason the schema files record
@@ -3286,7 +3293,12 @@ the dataset's own sources that fill the column (a key filled from the request co
 order `REST`, `FLAT_FILES`, `WS`; `wire_keys` maps each of those transports to the distinct wire
 keys behind the column, before any projection, in source order. `dataset_schema` picks one
 description per column of each **dataset**, never per kind: a kind's union spans asset classes,
-and the stock text for `price` ("dollar value per whole share") is wrong for crypto.
+and one class's text is wrong for another (the stocks trades' `price`, "dollar value per whole
+share", for a crypto trade). Picking per dataset keeps another member's text off a dataset, but
+it cannot correct a dataset's own source when Massive copied the wrong text onto it: the crypto
+REST last trade and trades flat file carry that same stock `price` text. The refresh corrects
+those through `DESCRIPTION_FIXES` (the hand-input table above), so every source already carries
+a description right for it when the rules below pick one.
 
 1. **A column the dataset's own sources supply** takes the first non-empty description among
    them, trying the transports in the order REST, flat files, WebSocket and, within one
@@ -3890,6 +3902,10 @@ document already reflects them.
     `adjusted: bool | None = None`: None sends nothing, an explicit value is sent where the
     chosen path declares `adjusted`, and raises `ValueError` on the crypto templates, which do
     not.
+51. **Wrong vendor descriptions are corrected by hand input** (2026-10-28). Where Massive's
+    own description of a field is clearly wrong for its source, a reasoned `DESCRIPTION_FIXES`
+    entry in `refresh/overrides.py` quotes it and replaces it, and `spec/descriptions.json`
+    changes only through the refresh ([section 19.4](#194-generated-schemas)).
 
 ## 23. Open verification items
 

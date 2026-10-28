@@ -10,11 +10,30 @@ def test_every_entry_has_a_reason() -> None:
     assert all(overrides.TAG_CONFLICTS.values())
     assert all(entry.reason for entry in overrides.TYPE_FIXES.values())
     assert all(entry.reason for entry in overrides.KEY_FIXES.values())
+    assert all(entry.reason for entry in overrides.DESCRIPTION_FIXES.values())
     assert all(entry.reason for entry in overrides.RESULT_KEYS.values())
     assert all(entry.reason for entry in overrides.PARAM_UNITS.values())
     assert all(entry.reason for entry in overrides.PROJECTIONS.values())
     assert all(overrides.TRANSPORT_ONLY.values())
     assert all(overrides.VENUES.values())
+
+
+def test_every_description_fix_replaces_its_quote_with_other_single_spaced_text() -> None:
+    for entry in overrides.DESCRIPTION_FIXES.values():
+        assert entry.text == " ".join(entry.text.split())
+        assert entry.vendor == " ".join(entry.vendor.split())
+        assert entry.text != entry.vendor
+
+
+def test_the_stock_texts_copied_onto_crypto_and_onto_a_last_trade_are_corrected() -> None:
+    fixes = overrides.DESCRIPTION_FIXES
+    for source in ("/v1/last/crypto/{from}/{to}", "global_crypto/trades_v1"):
+        assert "share" not in fixes[source, "price"].text
+    for path in CRYPTO_SNAPSHOTS:
+        assert fixes[path, "lastTrade.p"] is fixes["global_crypto/trades_v1", "price"]
+    participant = fixes["/v2/last/trade/{stocksTicker}", "y"]
+    assert "quote" in participant.vendor
+    assert "quote" not in participant.text
 
 
 def test_every_tag_conflict_has_a_unit() -> None:

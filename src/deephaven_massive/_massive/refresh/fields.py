@@ -28,9 +28,10 @@ field gets one column and one type whichever transport serves it:
 - **Examples.** Every documented example value must convert through its generated field, or
   the `example-type` gate stops the refresh, unless a `SAMPLE_ERRORS` entry says the sample
   is wrong.
-- **Descriptions.** Each field records the vendor's description as plain text (`plain_text`);
-  no name, type, or gate depends on it, except that a `NAMES` entry quotes the one its name
-  was derived from.
+- **Descriptions.** Each field records the vendor's description as plain text (`plain_text`),
+  or the text of its `DESCRIPTION_FIXES` entry when the vendor's is wrong for the source; no
+  name, type, or gate depends on it, except that a `NAMES` entry quotes the one its name was
+  derived from and a `DESCRIPTION_FIXES` entry the one it replaces.
 
 Hand input is keyed by source: a REST path template, a WebSocket `"<cluster>/<channel>"`, or a
 flat-file prefix, so one table serves every transport. A `SourceFields` collects its problems
@@ -368,8 +369,34 @@ class SourceFields:
             unit=unit,
             required=raw.required,
             conversion=fix,
-            description=plain_text(description, origin=self.origin),
+            description=self.description(raw.wire_key, description),
         )
+
+    def description(self, wire_key: str, vendor: str) -> str:
+        """Return a field's description as plain text, corrected where the vendor's is wrong.
+
+        Args:
+            wire_key: The field's wire key, after any `KEY_FIXES` entry.
+            vendor: The vendor's description, as the specification gives it.
+
+        Returns:
+            The vendor's description as plain text (`plain_text`), or the text of the field's
+            `DESCRIPTION_FIXES` entry when the entry quotes it. An entry that quotes anything
+            else is stale: the problem is recorded and the vendor's text kept.
+        """
+        text = plain_text(vendor, origin=self.origin)
+        entry = self.hand.description_fixes.get((self.source, wire_key))
+        if entry is None:
+            return text
+        if " ".join(entry.vendor.split()) != text:
+            self.problem(
+                Gate.STALE_ENTRY,
+                wire_key,
+                "DESCRIPTION_FIXES quotes a description the vendor no longer gives",
+                description=text,
+            )
+            return text
+        return entry.text
 
     def unit(
         self,
