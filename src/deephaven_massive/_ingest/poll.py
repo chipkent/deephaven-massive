@@ -7,11 +7,11 @@ publishes its rows, and waits for the next cycle. Every mode publishes through o
 failure can fail the table (`publish_failure`) in every mode:
 
 - `APPEND`: the publisher's blink table made append-only, fed only the rows not seen before. A
-  row is identified by its tuple of poll keys (`DatasetSpec.poll_keys`); a cycle skips every row
-  whose key the poller already appended, or that an earlier row of the same cycle carries. The
-  poller remembers a key for `APPEND_MEMORY` published cycles after the last cycle that
-  returned it, so a row every response repeats is appended once and the memory stays bounded
-  (see `APPEND_MEMORY` for the trade-off).
+  row's identity is its values of the poll keys and then the revision keys
+  (`DatasetSpec.poll_keys`, `DatasetSpec.revision_keys`); a cycle skips every row whose
+  identity the poller already appended, or that an earlier row of the same cycle carries. The
+  poller keeps every identity it appended for its whole life: each is a row the append-only
+  table holds, so the set never outgrows the table, and no row is ever appended twice.
 - `UPSERT`: the blink table's `last_by` on the dataset's poll keys (`DatasetSpec.poll_keys`):
   keyed, and a key never leaves.
 - `REPLACE`: the same `last_by`, plus one *tombstone* row for each key the previous cycle had
@@ -49,7 +49,6 @@ unclosed session from being collected (whose collection then stops the poller).
 from __future__ import annotations
 
 import functools
-import itertools
 import logging
 import threading
 import time
@@ -58,6 +57,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
+import pyarrow.compute as pc
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
@@ -87,7 +87,6 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.core import SessionCore
 
 __all__ = [
-    "APPEND_MEMORY",
     "CLOCK",
     "LIVE_COLUMN",
     "CycleReader",
@@ -102,6 +101,9 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+_ROW_TEXT: Final = 300
+"""The longest rendering of a row in the error of a null poll key."""
+
 LIVE_COLUMN: Final = "__MassiveLive"
 """The hidden column of a `REPLACE` table's publisher: False marks a tombstone. Dataset columns
 are PascalCase wire names, so none can take this name."""
@@ -111,9 +113,9 @@ class RowDataError(MassiveError):
     """A REST row that breaks its dataset's schema.
 
     A row that lacks a key the dataset requires, a value that does not convert to its field's
-    type, a timestamp outside 1990 to 2100, or, in a `poll()` cycle, a null value in one of
-    the dataset's poll keys. `fetch()` and `history()` raise it like any
-    `MassiveError`; a `poll()` table fails with it, since the next cycle would fail alike.
+    type, a timestamp outside 1990 to 2100, or, in a `poll()` cycle, a null or NaN value in
+    one of the dataset's poll keys. `fetch()` and `history()` raise it like any `MassiveError`;
+    a `poll()` table fails with it, since the next cycle would fail alike.
     """
 
 
@@ -171,20 +173,6 @@ class _SystemClock:
         """
         return event.wait(seconds)
 
-
-APPEND_MEMORY: int = 100
-"""How many published cycles an `APPEND` poller remembers a key after the last cycle that
-returned it; read once by each new poller, and replaced by tests.
-
-A window of cycles bounds the memory at this many times the largest cycle, and it never holds
-more keys than the table holds rows, since every remembered key was appended. It never forgets
-a key the latest cycle returned, so a row every response repeats is appended once. The
-trade-off: a row absent from this many consecutive published cycles that then returns is
-appended again. A cycle that fails publishes nothing and counts for nothing, so an outage
-forgets no key. A key-count limit would instead evict keys of the latest response whenever one
-response held more rows than the limit, and append them again every cycle; an age limit would
-depend on the interval.
-"""
 
 CLOCK: PollClock = _SystemClock()
 """The clock every new poller waits on; tests replace it so that no cycle waits for real."""
@@ -291,13 +279,11 @@ class Poller:
         "__weakref__",
         "_clock",
         "_core",
-        "_cycles",
         "_exec_ctx",
         "_interval",
         "_keys",
         "_label",
         "_max_concurrency",
-        "_memory",
         "_mode",
         "_pollers",
         "_published",
@@ -359,11 +345,8 @@ class Poller:
         self._stop = stop
         self._publisher = publisher
         self._keys: set[tuple[Hashable, ...]] = set()
-        # The APPEND key memory: each key appended, mapped to the last published cycle that
-        # returned it, oldest first. Only the poller thread touches it and `_cycles`.
-        self._seen: dict[tuple[Hashable, ...], int] = {}
-        self._cycles = 0
-        self._memory = APPEND_MEMORY
+        # The identities an APPEND table holds; only the poller thread touches it.
+        self._seen: set[tuple[Hashable, ...]] = set()
         self._published = 0
         self._thread = threading.Thread(
             target=self._run, name=f"{core.label} poll #{stream_id}", daemon=True
@@ -518,12 +501,12 @@ class Poller:
         """
         self._check_keys(table)
         keys = None
-        cycle_keys = None
+        identities = None
         published: int = table.num_rows
         if self._mode is PollMode.REPLACE:
             table, keys = self._replace(table)
         elif self._mode is PollMode.APPEND:
-            table, cycle_keys = self._fresh(table)
+            table, identities = self._fresh(table)
             published = table.num_rows
         if table.num_rows:
             self._publisher.add(dh_arrow.to_table(table))
@@ -531,72 +514,61 @@ class Poller:
         # cycle still tombstones the keys this one dropped, or appends the rows it skipped.
         if keys is not None:
             self._keys = keys
-        if cycle_keys is not None:
-            self._remember(cycle_keys)
+        if identities is not None:
+            self._seen |= identities
         return published
 
     def _check_keys(self, table: pa.Table) -> None:
-        """Fail the cycle if any row has a null poll key, in every mode.
+        """Fail the cycle if any row has a null (or NaN) poll key, in every mode.
 
         A null key would silently merge unrelated rows: one keyed row for all of them, or
-        every later row with the same null skipped by `APPEND`. Like a missing required key,
-        it is a data failure, so it fails the table.
+        every later row with the same null skipped by `APPEND`; a NaN never equals itself, so
+        `APPEND` would append its row again every cycle. Like a missing required key, it is a
+        data failure, so it fails the table. Revision keys are not checked: a null there is a
+        value.
 
         Args:
             table: The cycle's rows.
 
         Raises:
-            RowDataError: Naming the dataset, the key column, and the first such row's
-                position in the cycle.
+            RowDataError: Naming the dataset, the key column, the first such row's position in
+                the cycle, and that row's non-null values, truncated to `_ROW_TEXT`
+                characters, so the row can be found although it was never published.
         """
         for name in self._spec.poll_keys:
-            column = table.column(name)
-            if column.null_count:
-                row = column.is_null().to_pylist().index(True)
+            missing = pc.is_null(table.column(name), nan_is_null=True)
+            row = pc.index(missing, True).as_py()
+            if row >= 0:
+                (values,) = table.slice(row, 1).to_pylist()
+                text = repr({k: v for k, v in values.items() if v is not None})
+                text = text if len(text) <= _ROW_TEXT else text[: _ROW_TEXT - 3] + "..."
                 raise RowDataError(
-                    f"{self._spec.name} poll(): row {row} has a null poll key {name!r}"
+                    f"{self._spec.name} poll(): row {row} of the cycle has a null poll key "
+                    f"{name!r}: {text}"
                 )
 
-    def _fresh(self, table: pa.Table) -> tuple[pa.Table, list[tuple[Hashable, ...]]]:
-        """Keep the rows of an `APPEND` cycle whose key the poller has not appended yet.
+    def _fresh(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
+        """Keep the rows of an `APPEND` cycle whose identity the poller has not appended yet.
 
-        A row whose key an earlier row of the same cycle carries is dropped too. The memory is
-        left as is; `_publish` updates it once the cycle is published.
+        A row's identity is its poll keys followed by its revision keys. A row whose identity
+        an earlier row of the same cycle carries is dropped too, so the first one wins. The
+        poller's set is left as is; `_publish` adds to it once the cycle is published.
 
         Args:
             table: The cycle's rows.
 
         Returns:
-            The rows to append, and every row's key in the cycle's order.
+            The rows to append, and every identity of the cycle (those already held are
+            harmless to add again).
         """
-        names = self._spec.poll_keys
-        keys = list(zip(*(table.column(name).to_pylist() for name in names), strict=True))
+        names = (*self._spec.poll_keys, *self._spec.revision_keys)
+        identities = zip(*(table.column(name).to_pylist() for name in names), strict=True)
         taken: set[tuple[Hashable, ...]] = set()
-        fresh = []
-        for key in keys:
-            new = key not in self._seen and key not in taken
-            taken.add(key)
-            fresh.append(new)
-        return table.filter(pa.array(fresh, pa.bool_())), keys
-
-    def _remember(self, keys: list[tuple[Hashable, ...]]) -> None:
-        """Count a published `APPEND` cycle, refresh its keys, and forget the expired ones.
-
-        Each key of the cycle moves to the end of the memory with the cycle's number, so the
-        memory stays ordered by the last cycle that returned each key, and the keys not
-        returned in the last `APPEND_MEMORY` cycles are dropped from its front.
-
-        Args:
-            keys: Every row's key in the published cycle.
-        """
-        self._cycles += 1
-        for key in keys:
-            self._seen.pop(key, None)
-            self._seen[key] = self._cycles
-        oldest = self._cycles - self._memory
-        expired = list(itertools.takewhile(lambda item: item[1] <= oldest, self._seen.items()))
-        for key, _ in expired:
-            del self._seen[key]
+        keep = []
+        for identity in identities:
+            keep.append(identity not in self._seen and identity not in taken)
+            taken.add(identity)
+        return table.filter(pa.array(keep, pa.bool_())), taken
 
     def _replace(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
         """Mark a cycle's rows live and add one tombstone per key the last published cycle had.

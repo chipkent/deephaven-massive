@@ -2,40 +2,2410 @@
 
 Datasets: trades, quotes, bars, LULD bands, net order imbalances, fair market value,
 snapshots, movers, daily open/close, dividends, splits, IPOs, short interest and volume, share
-float, and the nested `financials` and `filings` namespaces.
+float, and the nested `m.stocks.financials` (`_StockFinancials`) and `m.stocks.filings`
+(`_StockFilings`) namespaces.
 
-Each dataset is one factory method on `_Stocks` that validates its arguments and returns a query;
-nothing touches the network until a verb is called on the query. This module owns the
-namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset
-catalog (`CATALOG` in `_session.py`).
+Each dataset is one factory method that validates its arguments and returns a query; nothing
+touches the network until a verb is called on the query. This module owns the namespace's
+`DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG` in
+`_session.py`). A spec names the dataset's generated sources, its key columns per source, the
+wire parameters behind `start`, `end`, and `symbols`, its `poll()` defaults, and the REST page
+size (the largest `limit` the endpoint documents); columns, types, and units come from the
+generated schemas.
 
-Status: no datasets are declared yet. `DATASETS` is empty and `_Stocks` has no dataset methods.
+The REST list datasets (dividends through the filings) share one shape: `symbols` is optional
+and only filters the request, `dm.ALL` is refused in favour of `symbols=None`, `start` and
+`end` bound the dataset's date axis where it has one, and the `sort`, `order`, `limit`, and
+`filters` block works as described in the package documentation. The rows of the three financial
+statements, Forms 3 and 4, and the 8-K disclosures each list several tickers, so those datasets
+have no `Symbol` column and keep `Tickers`.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, ClassVar, Final
+from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
-from deephaven_massive._namespaces.base import Namespace
+from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.dates import calendar_day
+from deephaven_massive._enums import (
+    AssetClass,
+    ChannelFamily,
+    Direction,
+    Order,
+    PollMode,
+    Timeframe,
+    Timespan,
+    _require_enum,
+)
+from deephaven_massive._massive import Transport
+from deephaven_massive._namespaces.base import (
+    Namespace,
+    build_query,
+    list_params,
+    optional_text,
+    require_bool,
+)
 
 if TYPE_CHECKING:
-    from deephaven_massive._datasets.catalog import DatasetSpec
+    from collections.abc import Mapping
 
-__all__ = ["DATASETS", "_Stocks"]
+    from deephaven_massive._query import (
+        HistoryLatestQuery,
+        HistoryQuery,
+        Query,
+        StreamHistoryLatestQuery,
+        StreamHistoryQuery,
+        StreamQuery,
+    )
+    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._types import DateLike, DaySpan, FilterValue, StreamSpan, Symbols
+
+__all__ = ["DATASETS", "_StockFilings", "_StockFinancials", "_Stocks"]
 
 logger = logging.getLogger(__name__)
 
-DATASETS: Final[tuple[DatasetSpec, ...]] = ()
+_R: Final = Transport.REST
+_W: Final = Transport.WS
+_F: Final = Transport.FLAT_FILES
+_STOCKS: Final = AssetClass.STOCKS
+
+_EVERY_TICKER: Final = "symbols=None, which returns every ticker"
+"""The alternative to `dm.ALL` that the REST list datasets name in their `ValueError`."""
+
+
+def _row(column: str) -> KeySpec:
+    """Return a key the source's rows carry in `column`."""
+    return KeySpec(column)
+
+
+def _request(parameter: str) -> KeySpec:
+    """Return a key filled from the request parameter `parameter`."""
+    return KeySpec(parameter, from_request=True)
+
+
+def _ticker_keys(time: str | None = None) -> SourceKeys:
+    """Return the keys of a source whose rows name their stock in `Ticker`."""
+    return SourceKeys(symbol=_row("Ticker"), time=None if time is None else _row(time))
+
+
+# --- Market data ------------------------------------------------------------------------------
+
+_LAST_TRADE: Final = "/v2/last/trade/{stocksTicker}"
+_TRADES: Final = "/v3/trades/{stockTicker}"
+_LAST_QUOTE: Final = "/v2/last/nbbo/{stocksTicker}"
+_QUOTES: Final = "/v3/quotes/{stockTicker}"
+_PREV: Final = "/v2/aggs/ticker/{stocksTicker}/prev"
+_RANGE: Final = "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"
+_GROUPED: Final = "/v2/aggs/grouped/locale/us/market/stocks/{date}"
+_MINUTE_FILES: Final = "us_stocks_sip/minute_aggs_v1"
+_DAY_FILES: Final = "us_stocks_sip/day_aggs_v1"
+
+TRADES: Final = DatasetSpec(
+    name="stocks.trades",
+    summary="Trades of US-listed stocks, tick by tick.",
+    asset_class=_STOCKS,
+    kind="trades",
+    fetch_path=_LAST_TRADE,
+    history_path=_TRADES,
+    channels={None: "T"},
+    flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+    keys={
+        (_R, _LAST_TRADE): _ticker_keys("SipTimestamp"),
+        (_R, _TRADES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
+        (_W, "stocks/T"): _ticker_keys("SipTimestamp"),
+        (_F, "us_stocks_sip/trades_v1"): _ticker_keys("SipTimestamp"),
+    },
+    time_axis=("timestamp.gte", "timestamp.lt"),
+    page_size=50_000,
+)
+QUOTES: Final = DatasetSpec(
+    name="stocks.quotes",
+    summary="National best bid and offer quotes of US-listed stocks, tick by tick.",
+    asset_class=_STOCKS,
+    kind="quotes",
+    fetch_path=_LAST_QUOTE,
+    history_path=_QUOTES,
+    channels={None: "Q"},
+    flat_file_prefixes={None: "us_stocks_sip/quotes_v1"},
+    keys={
+        (_R, _LAST_QUOTE): _ticker_keys("SipTimestamp"),
+        (_R, _QUOTES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
+        (_W, "stocks/Q"): _ticker_keys("SipTimestamp"),
+        (_F, "us_stocks_sip/quotes_v1"): _ticker_keys("SipTimestamp"),
+    },
+    time_axis=("timestamp.gte", "timestamp.lt"),
+    page_size=50_000,
+)
+BARS: Final = DatasetSpec(
+    name="stocks.bars",
+    summary="Aggregate bars (open, high, low, close, volume) of US-listed stocks.",
+    asset_class=_STOCKS,
+    is_bars=True,
+    kind="bars",
+    fetch_path=_PREV,
+    history_path=_RANGE,
+    grouped_daily_path=_GROUPED,
+    channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
+    flat_file_prefixes={Timespan.MINUTE: _MINUTE_FILES, Timespan.DAY: _DAY_FILES},
+    keys={
+        (_R, _PREV): _ticker_keys("WindowStart"),
+        (_R, _RANGE): SourceKeys(symbol=_request("stocksTicker"), time=_row("WindowStart")),
+        (_R, _GROUPED): _ticker_keys("WindowStart"),
+        (_W, "stocks/A"): _ticker_keys("WindowStart"),
+        (_W, "stocks/AM"): _ticker_keys("WindowStart"),
+        (_F, _MINUTE_FILES): _ticker_keys("WindowStart"),
+        (_F, _DAY_FILES): _ticker_keys("WindowStart"),
+    },
+    page_size=50_000,
+)
+LULD: Final = DatasetSpec(
+    name="stocks.luld",
+    summary="Limit up-limit down price bands of US-listed stocks, as they change.",
+    asset_class=_STOCKS,
+    kind="luld",
+    channels={None: "LULD"},
+    keys={(_W, "stocks/LULD"): _ticker_keys("UnixTimestamp")},
+)
+IMBALANCES: Final = DatasetSpec(
+    name="stocks.imbalances",
+    summary="Net order imbalances of US-listed stocks ahead of opening and closing auctions.",
+    asset_class=_STOCKS,
+    kind="imbalances",
+    channels={None: "NOI"},
+    keys={(_W, "stocks/NOI"): _ticker_keys("UnixTimestamp")},
+)
+FMV: Final = DatasetSpec(
+    name="stocks.fmv",
+    summary="Massive's fair market value estimate of US-listed stocks, as it updates.",
+    asset_class=_STOCKS,
+    kind="fmv",
+    channels={None: "FMV"},
+    family=ChannelFamily.FMV,
+    keys={(_W, "stocks/FMV"): _ticker_keys("FmvLastUpdated")},
+)
+
+# --- Snapshots and daily summaries -------------------------------------------------------------
+
+_SNAPSHOTS: Final = "/v2/snapshot/locale/us/markets/stocks/tickers"
+_MOVERS: Final = "/v2/snapshot/locale/us/markets/stocks/{direction}"
+_OPEN_CLOSE: Final = "/v1/open-close/{stocksTicker}/{date}"
+
+# The snapshots declare no time key: a ticker that has not traded can carry `updated` 0,
+# which as the declared time column would fail the whole response instead of reading as null.
+# The tickers travel comma-separated in the URL, so a long watchlist is split into requests of
+# 250 symbols, the size Massive's unified snapshot documents as its limit, to keep each URL
+# well under the lengths servers refuse.
+SNAPSHOTS: Final = DatasetSpec(
+    name="stocks.snapshots",
+    summary="Current market snapshots of US-listed stocks, one row per ticker.",
+    asset_class=_STOCKS,
+    fetch_path=_SNAPSHOTS,
+    keys={(_R, _SNAPSHOTS): _ticker_keys()},
+    symbol_param="tickers",
+    symbols_per_request=250,
+    revision_keys=("Updated",),
+)
+MOVERS: Final = DatasetSpec(
+    name="stocks.movers",
+    summary="The twenty US stocks with the largest percentage move today, up or down.",
+    asset_class=_STOCKS,
+    fetch_path=_MOVERS,
+    keys={(_R, _MOVERS): _ticker_keys()},
+    revision_keys=("Updated",),
+)
+DAILY_OPEN_CLOSE: Final = DatasetSpec(
+    name="stocks.daily_open_close",
+    summary="The open, close, and pre- and after-market prices of US stocks on one day.",
+    asset_class=_STOCKS,
+    fetch_path=_OPEN_CLOSE,
+    keys={(_R, _OPEN_CLOSE): SourceKeys(symbol=_row("Symbol"))},
+    per_symbol=True,
+)
+
+# --- Corporate actions and short data ----------------------------------------------------------
+
+_DIVIDENDS: Final = "/stocks/v1/dividends"
+_SPLITS: Final = "/stocks/v1/splits"
+_IPOS: Final = "/vX/reference/ipos"
+_SHORT_INTEREST: Final = "/stocks/v1/short-interest"
+_SHORT_VOLUME: Final = "/stocks/v1/short-volume"
+_FLOAT: Final = "/stocks/vX/float"
+
+DIVIDENDS: Final = DatasetSpec(
+    name="stocks.dividends",
+    summary="Cash dividends of US-listed stocks, one row per distribution.",
+    asset_class=_STOCKS,
+    fetch_path=_DIVIDENDS,
+    keys={(_R, _DIVIDENDS): _ticker_keys()},
+    time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
+    symbol_param="ticker.any_of",
+    poll_keys=("Id",),
+    page_size=5_000,
+)
+SPLITS: Final = DatasetSpec(
+    name="stocks.splits",
+    summary="Stock splits, reverse splits, and stock dividends of US-listed stocks.",
+    asset_class=_STOCKS,
+    fetch_path=_SPLITS,
+    keys={(_R, _SPLITS): _ticker_keys()},
+    time_axis=("execution_date.gte", "execution_date.lte"),
+    symbol_param="ticker.any_of",
+    poll_keys=("Id",),
+    page_size=5_000,
+)
+# The IPO path filters one `ticker` per request, so the REST layer sends one request per symbol.
+IPOS: Final = DatasetSpec(
+    name="stocks.ipos",
+    summary="Initial public offerings on US exchanges, upcoming and past, one row per offering.",
+    asset_class=_STOCKS,
+    fetch_path=_IPOS,
+    keys={(_R, _IPOS): _ticker_keys()},
+    time_axis=("listing_date.gte", "listing_date.lte"),
+    symbol_param="ticker",
+    poll_mode=PollMode.UPSERT,
+    page_size=1_000,
+)
+SHORT_INTEREST: Final = DatasetSpec(
+    name="stocks.short_interest",
+    summary="Short interest of US-listed stocks, one row per ticker and FINRA settlement date.",
+    asset_class=_STOCKS,
+    fetch_path=_SHORT_INTEREST,
+    keys={(_R, _SHORT_INTEREST): _ticker_keys()},
+    time_axis=("settlement_date.gte", "settlement_date.lte"),
+    symbol_param="ticker.any_of",
+    poll_keys=("Symbol", "SettlementDate"),
+    page_size=50_000,
+)
+SHORT_VOLUME: Final = DatasetSpec(
+    name="stocks.short_volume",
+    summary="Daily short sale volume of US-listed stocks, one row per ticker and trading day.",
+    asset_class=_STOCKS,
+    fetch_path=_SHORT_VOLUME,
+    keys={(_R, _SHORT_VOLUME): _ticker_keys()},
+    time_axis=("date.gte", "date.lte"),
+    symbol_param="ticker.any_of",
+    poll_keys=("Symbol", "Date"),
+    page_size=50_000,
+)
+SHARE_FLOAT: Final = DatasetSpec(
+    name="stocks.share_float",
+    summary="The free float of US-listed stocks: the latest count of shares the public can trade.",
+    asset_class=_STOCKS,
+    fetch_path=_FLOAT,
+    keys={(_R, _FLOAT): _ticker_keys()},
+    symbol_param="ticker.any_of",
+    page_size=5_000,
+)
+
+# --- Financials ---------------------------------------------------------------------------------
+
+_STATEMENT_KEYS: Final = ("Cik", "PeriodEnd", "Timeframe")
+"""One filer's statement for one period: the `poll()` key of the three statements."""
+
+
+def _statement(dataset: str, path: str, *, summary: str) -> DatasetSpec:
+    """Return the spec of one financial statement: no `Symbol`, axis `period_end`.
+
+    Args:
+        dataset: The dataset name below `stocks.financials`, such as `"balance_sheets"`.
+        path: The statement's REST path.
+        summary: The dataset's one-sentence summary.
+
+    Returns:
+        The spec.
+    """
+    return DatasetSpec(
+        name=f"stocks.financials.{dataset}",
+        summary=summary,
+        asset_class=_STOCKS,
+        fetch_path=path,
+        time_axis=("period_end.gte", "period_end.lte"),
+        symbol_param="tickers.any_of",
+        poll_keys=_STATEMENT_KEYS,
+        page_size=50_000,
+    )
+
+
+BALANCE_SHEETS: Final = _statement(
+    "balance_sheets",
+    "/stocks/financials/v1/balance-sheets",
+    summary="Balance sheets of US public companies, one row per filer and reporting period.",
+)
+INCOME_STATEMENTS: Final = _statement(
+    "income_statements",
+    "/stocks/financials/v1/income-statements",
+    summary="Income statements of US public companies, one row per filer and reporting period.",
+)
+CASH_FLOW_STATEMENTS: Final = _statement(
+    "cash_flow_statements",
+    "/stocks/financials/v1/cash-flow-statements",
+    summary="Cash flow statements of US public companies, one row per filer and reporting period.",
+)
+_RATIOS: Final = "/stocks/financials/v1/ratios"
+RATIOS: Final = DatasetSpec(
+    name="stocks.financials.ratios",
+    summary="Daily valuation, profitability, liquidity, and leverage ratios of US stocks.",
+    asset_class=_STOCKS,
+    fetch_path=_RATIOS,
+    keys={(_R, _RATIOS): _ticker_keys()},
+    symbol_param="ticker.any_of",
+    poll_keys=("Symbol", "Date"),
+    page_size=50_000,
+)
+
+# --- Filings ------------------------------------------------------------------------------------
+
+_FILING_AXIS: Final = ("filing_date.gte", "filing_date.lte")
+_INDEX: Final = "/stocks/filings/vX/index"
+_SECTIONS_10K: Final = "/stocks/filings/10-K/vX/sections"
+_TEXT_8K: Final = "/stocks/filings/8-K/vX/text"
+_DISCLOSURES_8K: Final = "/stocks/filings/8-K/vX/disclosures"
+_RISK_FACTORS: Final = "/stocks/filings/vX/risk-factors"
+_FORM_13F: Final = "/stocks/filings/vX/13-F"
+_FORM_3: Final = "/stocks/filings/vX/form-3"
+_FORM_4: Final = "/stocks/filings/vX/form-4"
+_RISK_TAXONOMY: Final = "/stocks/taxonomies/vX/risk-factors"
+_DISCLOSURE_TAXONOMY: Final = "/stocks/taxonomies/vX/disclosures"
+_CATEGORIES: Final = ("PrimaryCategory", "SecondaryCategory", "TertiaryCategory")
+_INSIDER_HOLDING: Final = (
+    "AccessionNumber",
+    "OwnerCik",
+    "SecurityType",
+    "SecurityTitle",
+    "DirectOrIndirect",
+    "NatureOfOwnership",
+)
+"""One owner's holding of one security in one Form 3 or Form 4 filing."""
+
+
+def _filing(
+    dataset: str,
+    path: str,
+    *,
+    summary: str,
+    symbol_param: str | None,
+    poll_keys: tuple[str, ...],
+    keys: SourceKeys | None = None,
+    page_size: int,
+) -> DatasetSpec:
+    """Return the spec of one filings dataset: axis `filing_date`, appended when polled.
+
+    Args:
+        dataset: The dataset name below `stocks.filings`, such as `"index"`.
+        path: The REST path.
+        summary: The dataset's one-sentence summary.
+        symbol_param: The parameter `symbols` is sent in, or None for a dataset without one.
+        poll_keys: The columns that identify one row, the key of a keyed `poll()` (a mode
+            other than the default).
+        keys: The source's keys; by default the optional `Ticker` of `_OPTIONAL_TICKER`.
+        page_size: The largest `limit` the path documents.
+
+    Returns:
+        The spec.
+    """
+    return DatasetSpec(
+        name=f"stocks.filings.{dataset}",
+        summary=summary,
+        asset_class=_STOCKS,
+        fetch_path=path,
+        keys={(_R, path): _OPTIONAL_TICKER if keys is None else keys},
+        time_axis=_FILING_AXIS,
+        symbol_param=symbol_param,
+        poll_mode=PollMode.APPEND,
+        poll_keys=poll_keys,
+        page_size=page_size,
+    )
+
+
+_NO_KEYS: Final = SourceKeys()
+
+_OPTIONAL_TICKER: Final = SourceKeys(symbol=KeySpec("Ticker", required=False))
+"""The symbol key of a filing whose rows carry one `ticker` that Massive does not promise.
+
+No filings response schema marks `ticker` required, and the index documents it as present
+only "if available": a filer with no listed security has none. Such a row keeps a null
+`Symbol` rather than failing the whole request."""
+
+FILINGS_INDEX: Final = _filing(
+    "index",
+    _INDEX,
+    symbol_param="ticker.any_of",
+    poll_keys=("AccessionNumber",),
+    page_size=10_000,
+    summary="The index of SEC EDGAR filings by US-listed companies, one row per filing.",
+)
+SECTIONS_10K: Final = _filing(
+    "sections_10k",
+    _SECTIONS_10K,
+    symbol_param="ticker.any_of",
+    poll_keys=("FilingUrl", "Section"),
+    page_size=100,
+    summary="The text of sections of 10-K annual reports, one row per filing and section.",
+)
+TEXT_8K: Final = _filing(
+    "text_8k",
+    _TEXT_8K,
+    symbol_param="ticker.any_of",
+    poll_keys=("AccessionNumber",),
+    page_size=100,
+    summary="The item text of 8-K current reports, one row per filing.",
+)
+DISCLOSURES_8K: Final = _filing(
+    "disclosures_8k",
+    _DISCLOSURES_8K,
+    symbol_param="tickers.any_of",
+    poll_keys=("AccessionNumber", *_CATEGORIES, "SupportingText"),
+    keys=_NO_KEYS,
+    page_size=1_000,
+    summary="Disclosures in 8-K current reports, classified by category, one row per disclosure.",
+)
+RISK_FACTORS: Final = _filing(
+    "risk_factors",
+    _RISK_FACTORS,
+    symbol_param="ticker.any_of",
+    poll_keys=("Cik", "FilingDate", *_CATEGORIES, "SupportingText"),
+    page_size=50_000,
+    summary="Risk factors disclosed in company filings, classified by category, one row each.",
+)
+INSTITUTIONAL_HOLDINGS: Final = _filing(
+    "institutional_holdings",
+    _FORM_13F,
+    symbol_param=None,
+    poll_keys=(
+        "AccessionNumber",
+        "Cusip",
+        "TitleOfClass",
+        "PutCall",
+        "InvestmentDiscretion",
+        "OtherManagers",
+    ),
+    keys=SourceKeys(fanout=KeySpec("FilerCik", instrument=False)),
+    page_size=1_000,
+    summary="Holdings that institutional managers report on Form 13-F, one row per position.",
+)
+INSIDER_HOLDINGS: Final = _filing(
+    "insider_holdings",
+    _FORM_3,
+    symbol_param="tickers.any_of",
+    poll_keys=(*_INSIDER_HOLDING, "ExercisePrice", "ExerciseDate"),
+    keys=_NO_KEYS,
+    page_size=10_000,
+    summary="Initial insider ownership statements (SEC Form 3), one row per reported holding.",
+)
+INSIDER_TRANSACTIONS: Final = _filing(
+    "insider_transactions",
+    _FORM_4,
+    symbol_param="tickers.any_of",
+    poll_keys=(
+        *_INSIDER_HOLDING,
+        "RecordType",
+        "TransactionDate",
+        "TransactionCode",
+        "TransactionShares",
+        "TransactionPricePerShare",
+        "ExercisePrice",
+        "ExpirationDate",
+    ),
+    keys=_NO_KEYS,
+    page_size=10_000,
+    summary="Insider transactions (SEC Form 4), one row per reported transaction or holding.",
+)
+RISK_FACTOR_TAXONOMY: Final = DatasetSpec(
+    name="stocks.filings.risk_factor_taxonomy",
+    summary="The taxonomy that classifies filing risk factors, one row per category.",
+    fetch_path=_RISK_TAXONOMY,
+    poll_keys=("Taxonomy", *_CATEGORIES),
+    page_size=1_000,
+)
+DISCLOSURE_TAXONOMY: Final = DatasetSpec(
+    name="stocks.filings.disclosure_taxonomy",
+    summary="The taxonomy that classifies 8-K disclosures, one row per category.",
+    fetch_path=_DISCLOSURE_TAXONOMY,
+    poll_keys=("Taxonomy", *_CATEGORIES),
+    page_size=1_000,
+)
+
+DATASETS: Final[tuple[DatasetSpec, ...]] = (
+    TRADES,
+    QUOTES,
+    BARS,
+    LULD,
+    IMBALANCES,
+    FMV,
+    SNAPSHOTS,
+    MOVERS,
+    DAILY_OPEN_CLOSE,
+    DIVIDENDS,
+    SPLITS,
+    IPOS,
+    SHORT_INTEREST,
+    SHORT_VOLUME,
+    SHARE_FLOAT,
+    BALANCE_SHEETS,
+    INCOME_STATEMENTS,
+    CASH_FLOW_STATEMENTS,
+    RATIOS,
+    FILINGS_INDEX,
+    SECTIONS_10K,
+    TEXT_8K,
+    DISCLOSURES_8K,
+    RISK_FACTORS,
+    INSTITUTIONAL_HOLDINGS,
+    INSIDER_HOLDINGS,
+    INSIDER_TRANSACTIONS,
+    RISK_FACTOR_TAXONOMY,
+    DISCLOSURE_TAXONOMY,
+)
 """Every dataset of `m.stocks`, one `DatasetSpec` each (for example `stocks.trades`)."""
+
+
+def _list_query(
+    core: SessionCore,
+    spec: DatasetSpec,
+    *,
+    symbols: Symbols | None = None,
+    start: DateLike | None = None,
+    end: DateLike | None = None,
+    params: Mapping[str, object] | None = None,
+    sort: str | None,
+    order: Order | None,
+    limit: int | None,
+    filters: Mapping[str, FilterValue] | None,
+) -> Query:
+    """Build the query of a REST list dataset, which refuses `dm.ALL` for `symbols=None`.
+
+    Args:
+        core: The session core.
+        spec: The dataset.
+        symbols: The tickers that filter the request, or None for every ticker.
+        start: The first day of the dataset's axis, or None.
+        end: The last day of the dataset's axis, or None.
+        params: The dataset's other typed parameters by wire name; None values are dropped.
+        sort: The field to sort by, or None.
+        order: The sort direction, or None.
+        limit: The cap on the total number of rows, or None.
+        filters: The `filters` mapping, or None.
+
+    Returns:
+        The `Query`.
+
+    Every `TypeError` and `ValueError` of `list_params` and `build_query` propagates.
+    """
+    query = build_query(
+        core,
+        spec,
+        symbols=symbols,
+        all_alternative=_EVERY_TICKER,
+        start=start,
+        end=end,
+        params={**list_params(sort=sort, order=order), **(params or {})},
+        filters=filters,
+        limit=limit,
+    )
+    return cast("Query", query)
+
+
+# --- Namespaces ---------------------------------------------------------------------------------
+
+
+class _StockFinancials(Namespace):
+    """`m.stocks.financials`: company financial statements and daily valuation ratios.
+
+    Created once per session by `_Stocks`; holds no state of its own, so it is safe to use from
+    any thread. Each method builds a query and never blocks.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            m = dm.MassiveSession()
+            sheets = m.stocks.financials.balance_sheets("AAPL", timeframe=dm.Timeframe.ANNUAL)
+            t = sheets.fetch()
+    """
+
+    __slots__ = ()
+    _path: ClassVar[str] = "stocks.financials"
+
+    def balance_sheets(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        timeframe: Timeframe | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Balance sheets of US public companies, one row per filer and reporting period.
+
+        Each row is a company's assets, liabilities, and equity at the end of a quarter or
+        fiscal year, as filed with the SEC. A filing can name several share classes, so a row
+        has no `Symbol`: its `Tickers` column holds the JSON list of tickers, and `symbols`
+        only selects the filings that list any of them. Served by REST
+        (`/stocks/financials/v1/balance-sheets`) through `fetch()` and `poll()`; `poll()`
+        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-balance_sheets,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type, such as a `str` timeframe; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
+            timeframe: `dm.Timeframe.ANNUAL` or `dm.Timeframe.QUARTERLY`; None for both.
+                A balance sheet is a position at the period's end, so it has no trailing
+                twelve months.
+            start: The first period end date to include (`period_end`), inclusive; None for
+                no lower bound.
+            end: The last period end date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"period_end"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Raises:
+            ValueError: If `timeframe` is `dm.Timeframe.TRAILING_TWELVE_MONTHS`, which the
+                balance sheets do not offer.
+
+        Example:
+            ::
+
+                q = m.stocks.financials.balance_sheets(
+                    ["AAPL", "MSFT"], timeframe=dm.Timeframe.QUARTERLY, start="2023-01-01"
+                )
+                t = q.fetch()
+        """
+        if timeframe is Timeframe.TRAILING_TWELVE_MONTHS:
+            raise ValueError(
+                "balance sheets have no trailing twelve months; "
+                "use dm.Timeframe.ANNUAL or dm.Timeframe.QUARTERLY"
+            )
+        return _statement_query(
+            self._core,
+            BALANCE_SHEETS,
+            symbols=symbols,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def income_statements(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        timeframe: Timeframe | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Income statements of US public companies, one row per filer and reporting period.
+
+        Each row is a company's revenue, expenses, earnings, and per-share figures for a
+        quarter or fiscal year, as filed with the SEC. A filing can name several share
+        classes, so a row has no `Symbol`: its `Tickers` column holds the JSON list of
+        tickers, and `symbols` only selects the filings that list any of them. Served by REST
+        (`/stocks/financials/v1/income-statements`) through `fetch()` and `poll()`; `poll()`
+        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-income_statements,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type, such as a `str` timeframe; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
+            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`;
+                None for every timeframe the endpoint holds.
+            start: The first period end date to include (`period_end`), inclusive; None for
+                no lower bound.
+            end: The last period end date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"period_end"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.financials.income_statements(
+                    "NVDA", timeframe=dm.Timeframe.ANNUAL
+                ).fetch()
+        """
+        return _statement_query(
+            self._core,
+            INCOME_STATEMENTS,
+            symbols=symbols,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def cash_flow_statements(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        timeframe: Timeframe | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Cash flow statements of US public companies, one row per filer and reporting period.
+
+        Each row is a company's operating, investing, and financing cash flows for a quarter
+        or fiscal year, as filed with the SEC. A filing can name several share classes, so a
+        row has no `Symbol`: its `Tickers` column holds the JSON list of tickers, and `symbols`
+        only selects the filings that list any of them. Served by REST
+        (`/stocks/financials/v1/cash-flow-statements`) through `fetch()` and `poll()`;
+        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-cash_flow_statements,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type, such as a `str` timeframe; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
+            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`;
+                None for every timeframe the endpoint holds.
+            start: The first period end date to include (`period_end`), inclusive; None for
+                no lower bound.
+            end: The last period end date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"period_end"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.financials.cash_flow_statements("AAPL", start="2024-01-01").fetch()
+        """
+        return _statement_query(
+            self._core,
+            CASH_FLOW_STATEMENTS,
+            symbols=symbols,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def ratios(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
+
+        Each row is one ticker's ratios (price to earnings, return on equity, debt to equity,
+        and so on) as of the row's `Date`, computed by Massive from the trailing twelve months
+        of filings and the daily close. The endpoint has no date filter, so the dataset has no
+        `start` or `end`. Served by REST (`/stocks/financials/v1/ratios`) through `fetch()` and
+        `poll()`; `symbols` is sent as one `ticker.any_of` list, and `poll()` replaces the
+        table each cycle, keyed by `Symbol` and `Date`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-ratios,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a filter
+        is unknown, reserved, or of the wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every ticker.
+            sort: The field to sort by, such as `"market_cap"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"price_to_earnings_lt": 15}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                cheap = m.stocks.financials.ratios(filters={"price_to_earnings_lt": 10}).fetch()
+        """
+        return _list_query(
+            self._core,
+            RATIOS,
+            symbols=symbols,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+
+def _statement_query(
+    core: SessionCore,
+    spec: DatasetSpec,
+    *,
+    symbols: Symbols | None,
+    timeframe: object,
+    start: DateLike | None,
+    end: DateLike | None,
+    sort: str | None,
+    order: Order | None,
+    limit: int | None,
+    filters: Mapping[str, FilterValue] | None,
+) -> Query:
+    """Build the query of one financial statement, checking its `timeframe`.
+
+    Args:
+        core: The session core.
+        spec: The statement's dataset.
+        symbols: The tickers that filter the request, or None.
+        timeframe: The `timeframe` argument as passed.
+        start: The first period end date, or None.
+        end: The last period end date, or None.
+        sort: The field to sort by, or None.
+        order: The sort direction, or None.
+        limit: The cap on the total number of rows, or None.
+        filters: The `filters` mapping, or None.
+
+    Returns:
+        The `Query`.
+
+    A `timeframe` that is not a `dm.Timeframe` raises the `TypeError` of `_require_enum`; the
+    errors of `_list_query` propagate.
+    """
+    frame = None if timeframe is None else _require_enum(timeframe, Timeframe, "timeframe")
+    return _list_query(
+        core,
+        spec,
+        symbols=symbols,
+        start=start,
+        end=end,
+        params={"timeframe": frame},
+        sort=sort,
+        order=order,
+        limit=limit,
+        filters=filters,
+    )
+
+
+class _StockFilings(Namespace):
+    """`m.stocks.filings`: SEC filings of US companies and their classification taxonomies.
+
+    Created once per session by `_Stocks`; holds no state of its own, so it is safe to use from
+    any thread. Each method builds a query and never blocks. By default `poll()` on a filings
+    dataset appends only the rows it has not seen before, while the two taxonomies replace
+    their table each cycle.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            m = dm.MassiveSession()
+            latest = m.stocks.filings.index(form_type="8-K", start="2025-06-02").fetch()
+    """
+
+    __slots__ = ()
+    _path: ClassVar[str] = "stocks.filings"
+
+    def index(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        form_type: str | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """The index of SEC EDGAR filings by US-listed companies, one row per filing.
+
+        Each row names a filing's form type, filer CIK, issuer, ticker, filing date, and the URL of
+        the document on EDGAR. Served by REST (`/stocks/filings/vX/index`) through `fetch()` and
+        `poll()`. By default `poll()` appends only the rows it has not seen before, telling rows
+        apart by the dataset's key columns. A filing whose company has no ticker keeps a null
+        `Symbol`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-index,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type, such as a non-`str` form type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds
+        an invalid ticker, a bound is naive or not ISO-8601, `end` is before `start`, or a filter is
+        unknown, reserved, or of the wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every filer.
+            form_type: The SEC form type, such as `"10-K"` or `"8-K"`; None for every form.
+            start: The first filing date to include, inclusive; None for no lower bound.
+            end: The last filing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"filing_date"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"cik": "0000320193"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                annual = m.stocks.filings.index("AAPL", form_type="10-K").fetch()
+        """
+        return _list_query(
+            self._core,
+            FILINGS_INDEX,
+            symbols=symbols,
+            start=start,
+            end=end,
+            params={"form_type": optional_text("form_type", form_type)},
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def sections_10k(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """The text of sections of 10-K annual reports, one row per filing and section.
+
+        Each row holds one section (the business description or the risk factors) of a company's
+        10-K, with its ticker, CIK, period end, and filing date. Served by REST
+        (`/stocks/filings/10-K/vX/sections`) through `fetch()` and `poll()`. By default `poll()`
+        appends only the rows it has not seen before, telling rows apart by the dataset's key
+        columns. A filing whose company has no ticker keeps a null `Symbol`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-sections_10k,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every filer.
+            start: The first filing date to include, inclusive; None for no lower bound.
+            end: The last filing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"filing_date"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"section": "risk_factors"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.filings.sections_10k("AAPL", filters={"section": "business"}).fetch()
+        """
+        return _list_query(
+            self._core,
+            SECTIONS_10K,
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def text_8k(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """The item text of 8-K current reports, one row per filing.
+
+        Each row holds the text of the items a company reported on an 8-K (or an amendment), with
+        its ticker, CIK, form type, and filing date. Served by REST (`/stocks/filings/8-K/vX/text`)
+        through `fetch()` and `poll()`. By default `poll()` appends only the rows it has not seen
+        before, telling rows apart by the dataset's key columns. A filing whose company has no
+        ticker keeps a null `Symbol`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-text_8k,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every filer.
+            start: The first filing date to include, inclusive; None for no lower bound.
+            end: The last filing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"filing_date"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"form_type": "8-K/A"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.filings.text_8k("TSLA", start="2025-01-01").fetch()
+        """
+        return _list_query(
+            self._core,
+            TEXT_8K,
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def disclosures_8k(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Disclosures in 8-K current reports, classified by category, one row per disclosure.
+
+        Each row is one disclosure of an 8-K, with its primary, secondary, and tertiary categories,
+        the supporting text, and the filing's accession number and date. A filing can name several
+        share classes, so a row has no `Symbol`: its `Tickers` column holds the JSON list of
+        tickers, and `symbols` only selects the filings that list any of them. Served by REST
+        (`/stocks/filings/8-K/vX/disclosures`) through `fetch()` and `poll()`. By default `poll()`
+        appends only the rows it has not seen before, telling rows apart by the dataset's key
+        columns.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-disclosures_8k,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is naive or not ISO-8601,
+        `end` is before `start`, or a filter is unknown, reserved, or of the wrong kind.
+
+        Args:
+            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
+            start: The first filing date to include, inclusive; None for no lower bound.
+            end: The last filing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"filing_date"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"tertiary_category": "Dividends"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.filings.disclosures_8k(["AAPL", "MSFT"], start="2025-01-01").fetch()
+        """
+        return _list_query(
+            self._core,
+            DISCLOSURES_8K,
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def risk_factors(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Risk factors disclosed in company filings, classified by category, one row each.
+
+        Each row is one risk factor a company disclosed, with its primary, secondary, and tertiary
+        categories (see `risk_factor_taxonomy()`), the supporting text, and the filing date. Served
+        by REST (`/stocks/filings/vX/risk-factors`) through `fetch()` and `poll()`. By default
+        `poll()` appends only the rows it has not seen before, telling rows apart by the dataset's
+        key columns. A filing whose company has no ticker keeps a null `Symbol`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-risk_factors,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every filer.
+            start: The first filing date to include, inclusive; None for no lower bound.
+            end: The last filing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"filing_date"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"cik": "0000320193"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.filings.risk_factors("AAPL").fetch()
+        """
+        return _list_query(
+            self._core,
+            RISK_FACTORS,
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def institutional_holdings(
+        self,
+        *,
+        filer_cik: str | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Holdings that institutional managers report on Form 13-F, one row per position.
+
+        Each row is one security an institutional investment manager held at the end of a quarter:
+        the issuer, CUSIP, share count, market value, and voting authority, with the filer's CIK
+        (`FilerCik`) and the filing's accession number and date. Rows name a CUSIP, not a ticker, so
+        the dataset takes no `symbols`. Served by REST (`/stocks/filings/vX/13-F`) through `fetch()`
+        and `poll()`. By default `poll()` appends only the rows it has not seen before, telling rows
+        apart by the dataset's key columns.
+
+        `limit` caps the total number of rows across pages; the page size is internal. No
+        `symbols` means `dm.ALL` does not apply. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-institutional_holdings,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type, such as an `int` CIK; `ValueError` if a bound is naive or not ISO-8601, `end` is
+        before `start`, or a filter is unknown, reserved, or of the wrong kind.
+
+        Args:
+            filer_cik: The SEC CIK of the filing manager, as text with its leading zeros,
+                such as `"0001067983"`; None for every filer.
+            start: The first filing date to include, inclusive; None for no lower bound.
+            end: The last filing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"filing_date"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.filings.institutional_holdings(
+                    filer_cik="0001067983", start="2025-01-01"
+                ).fetch()
+        """
+        return _list_query(
+            self._core,
+            INSTITUTIONAL_HOLDINGS,
+            start=start,
+            end=end,
+            params={"filer_cik": optional_text("filer_cik", filer_cik)},
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def insider_holdings(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        issuer_cik: str | None = None,
+        owner_cik: str | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Initial insider ownership statements (SEC Form 3), one row per reported holding.
+
+        Each row is a security an officer, director, or 10% owner held on becoming an insider: the
+        issuer and owner CIKs and names, the owner's role, the security, and the shares owned. A
+        filing can name several share classes, so a row has no `Symbol`: its `Tickers` column holds
+        the JSON list of tickers, and `symbols` only selects the filings that list any of them.
+        Served by REST (`/stocks/filings/vX/form-3`) through `fetch()` and `poll()`. By default
+        `poll()` appends only the rows it has not seen before, telling rows apart by the dataset's
+        key columns.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_holdings,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is naive
+        or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the wrong
+        kind.
+
+        Args:
+            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
+            issuer_cik: The SEC CIK of the issuing company, as text; None for every issuer.
+            owner_cik: The SEC CIK of the reporting owner, as text; None for every owner.
+            start: The first filing date to include, inclusive; None for no lower bound.
+            end: The last filing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"filing_date"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.filings.insider_holdings("NVDA", start="2024-01-01").fetch()
+        """
+        return _insider_query(
+            self._core,
+            INSIDER_HOLDINGS,
+            symbols=symbols,
+            issuer_cik=issuer_cik,
+            owner_cik=owner_cik,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def insider_transactions(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        issuer_cik: str | None = None,
+        owner_cik: str | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Insider transactions (SEC Form 4), one row per reported transaction or holding.
+
+        Each row is a purchase, sale, grant, or exercise an officer, director, or 10% owner
+        reported, or a holding reported beside them: the transaction code, date, shares, price, and
+        the shares owned afterwards, with the issuer and owner. A filing can name several share
+        classes, so a row has no `Symbol`: its `Tickers` column holds the JSON list of tickers, and
+        `symbols` only selects the filings that list any of them. Served by REST
+        (`/stocks/filings/vX/form-4`) through `fetch()` and `poll()`. By default `poll()` appends
+        only the rows it has not seen before, telling rows apart by the dataset's key columns.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_transactions,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is naive
+        or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the wrong
+        kind.
+
+        Args:
+            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
+            issuer_cik: The SEC CIK of the issuing company, as text; None for every issuer.
+            owner_cik: The SEC CIK of the reporting owner, as text; None for every owner.
+            start: The first filing date to include, inclusive; None for no lower bound.
+            end: The last filing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"filing_date"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"transaction_code": "P"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                buys = m.stocks.filings.insider_transactions(
+                    "AAPL", filters={"transaction_code": "P"}
+                ).fetch()
+        """
+        return _insider_query(
+            self._core,
+            INSIDER_TRANSACTIONS,
+            symbols=symbols,
+            issuer_cik=issuer_cik,
+            owner_cik=owner_cik,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def risk_factor_taxonomy(
+        self,
+        *,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """The taxonomy that classifies filing risk factors, one row per category.
+
+        Each row is one tertiary category of the risk-factor classification with its primary and
+        secondary parents, its description, and the taxonomy version; the categories of
+        `risk_factors()` come from it. Served by REST (`/stocks/taxonomies/vX/risk-factors`) through
+        `fetch()` and `poll()`. `poll()` replaces the table each cycle, keyed by `Taxonomy` and the
+        three categories.
+
+        `limit` caps the total number of rows across pages; the page size is internal. The
+        dataset takes no `symbols`, so `dm.ALL` does not apply. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-risk_factor_taxonomy,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if a filter is unknown, reserved, or of the wrong kind.
+
+        Args:
+            sort: The field to sort by, such as `"primary_category"`; None for the server
+                default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"primary_category": "Financial"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.filings.risk_factor_taxonomy().fetch()
+        """
+        return _list_query(
+            self._core,
+            RISK_FACTOR_TAXONOMY,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def disclosure_taxonomy(
+        self,
+        *,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """The taxonomy that classifies 8-K disclosures, one row per category.
+
+        Each row is one tertiary category of the 8-K disclosure classification with its primary and
+        secondary parents, its description, and the taxonomy version; the categories of
+        `disclosures_8k()` come from it. Served by REST (`/stocks/taxonomies/vX/disclosures`)
+        through `fetch()` and `poll()`. `poll()` replaces the table each cycle, keyed by `Taxonomy`
+        and the three categories.
+
+        `limit` caps the total number of rows across pages; the page size is internal. The
+        dataset takes no `symbols`, so `dm.ALL` does not apply. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-disclosure_taxonomy,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if a filter is unknown, reserved, or of the wrong kind.
+
+        Args:
+            sort: The field to sort by, such as `"primary_category"`; None for the server
+                default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"taxonomy": "1.0"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.filings.disclosure_taxonomy().fetch()
+        """
+        return _list_query(
+            self._core,
+            DISCLOSURE_TAXONOMY,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+
+def _insider_query(
+    core: SessionCore,
+    spec: DatasetSpec,
+    *,
+    symbols: Symbols | None,
+    issuer_cik: object,
+    owner_cik: object,
+    start: DateLike | None,
+    end: DateLike | None,
+    sort: str | None,
+    order: Order | None,
+    limit: int | None,
+    filters: Mapping[str, FilterValue] | None,
+) -> Query:
+    """Build the query of Form 3 or Form 4, checking the two CIK arguments.
+
+    Args:
+        core: The session core.
+        spec: The dataset.
+        symbols: The tickers that filter the request, or None.
+        issuer_cik: The `issuer_cik` argument as passed.
+        owner_cik: The `owner_cik` argument as passed.
+        start: The first filing date, or None.
+        end: The last filing date, or None.
+        sort: The field to sort by, or None.
+        order: The sort direction, or None.
+        limit: The cap on the total number of rows, or None.
+        filters: The `filters` mapping, or None.
+
+    Returns:
+        The `Query`.
+
+    A CIK that is not a `str` raises the `TypeError` of `optional_text`; the errors of
+    `_list_query` propagate.
+    """
+    return _list_query(
+        core,
+        spec,
+        symbols=symbols,
+        start=start,
+        end=end,
+        params={
+            "issuer_cik": optional_text("issuer_cik", issuer_cik),
+            "owner_cik": optional_text("owner_cik", owner_cik),
+        },
+        sort=sort,
+        order=order,
+        limit=limit,
+        filters=filters,
+    )
 
 
 class _Stocks(Namespace):
     """`m.stocks`: the US equities datasets of a session.
 
-    Created once by `MassiveSession` and reached as `m.stocks`. It holds no state of its own,
-    so it is safe to use from any thread; each method builds a query and never blocks.
+    Created once by `MassiveSession` and reached as `m.stocks`, together with its nested
+    `m.stocks.financials` and `m.stocks.filings` namespaces. It holds no mutable state, so it
+    is safe to use from any thread; each method builds a query and never blocks.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            m = dm.MassiveSession()
+            live = m.stocks.trades(["AAPL", "MSFT"]).last_by()
+            daily = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2025-01-02", "2025-06-30")
     """
 
-    __slots__ = ()
+    __slots__ = ("_filings", "_financials")
     _path: ClassVar[str] = "stocks"
+
+    def __init__(self, core: SessionCore) -> None:
+        """Create the namespace and its two nested namespaces.
+
+        Args:
+            core: The session's internal core.
+        """
+        super().__init__(core)
+        self._financials = _StockFinancials(core)
+        self._filings = _StockFilings(core)
+
+    @property
+    def financials(self) -> _StockFinancials:
+        """The financial statements and ratios datasets (`m.stocks.financials`)."""
+        return self._financials
+
+    @property
+    def filings(self) -> _StockFilings:
+        """The SEC filings and taxonomy datasets (`m.stocks.filings`)."""
+        return self._filings
+
+    def trades(self, symbols: Symbols) -> StreamHistoryLatestQuery:
+        """Trades of US-listed stocks, tick by tick.
+
+        Each row is one trade reported to the SIP: price, size, exchange, conditions, and the
+        SIP, participant, and TRF timestamps (`Timestamp` is the SIP time). Streams over the
+        WebSocket (`T`) through `blink()`, `append_only()`, `ring()`, and `last_by()`;
+        `history()` reads REST (`/v3/trades/{stockTicker}`) or the flat files
+        (`us_stocks_sip/trades_v1`); `fetch()` returns each symbol's last trade
+        (`/v2/last/trade/{stocksTicker}`), one request per symbol.
+
+        `history()` has no `limit`: it pages internally. `dm.ALL` streams every ticker and
+        reads every ticker from the flat files; REST `history()` and `fetch()` refuse it.
+        Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#trades,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
+        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
+        has no `Symbol` column.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
+                column (streams follow its rows), or `dm.ALL`.
+
+        Returns:
+            The query; nothing is requested or subscribed until a verb runs.
+
+        Example:
+            ::
+
+                q = m.stocks.trades(["AAPL", "MSFT"])
+                recent = q.ring(10_000)
+                friday = q.history("2025-06-06", "2025-06-06")
+        """
+        return cast("StreamHistoryLatestQuery", build_query(self._core, TRADES, symbols=symbols))
+
+    def quotes(self, symbols: Symbols) -> StreamHistoryLatestQuery:
+        """National best bid and offer quotes of US-listed stocks, tick by tick.
+
+        Each row is one NBBO update: bid and ask prices, sizes, and exchanges, conditions,
+        indicators, and the SIP and participant timestamps (`Timestamp` is the SIP time).
+        Streams over the WebSocket (`Q`) through `blink()`, `append_only()`, `ring()`, and
+        `last_by()`; `history()` reads REST (`/v3/quotes/{stockTicker}`) or the flat files
+        (`us_stocks_sip/quotes_v1`); `fetch()` returns each symbol's last NBBO
+        (`/v2/last/nbbo/{stocksTicker}`), one request per symbol.
+
+        `history()` has no `limit`: it pages internally. `dm.ALL` streams every ticker and
+        reads every ticker from the flat files; REST `history()` and `fetch()` refuse it.
+        Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#quotes,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
+        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
+        has no `Symbol` column.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
+                column (streams follow its rows), or `dm.ALL`.
+
+        Returns:
+            The query; nothing is requested or subscribed until a verb runs.
+
+        Example:
+            ::
+
+                top = m.stocks.quotes(["AAPL", "SPY"]).last_by()
+        """
+        return cast("StreamHistoryLatestQuery", build_query(self._core, QUOTES, symbols=symbols))
+
+    @overload
+    def bars(
+        self,
+        symbols: Symbols,
+        timespan: StreamSpan = Timespan.MINUTE,
+        *,
+        multiplier: Literal[1] = 1,
+        adjusted: bool = True,
+    ) -> StreamHistoryQuery: ...
+    @overload
+    def bars(
+        self,
+        symbols: Symbols,
+        timespan: DaySpan,
+        *,
+        multiplier: Literal[1] = 1,
+        adjusted: bool = True,
+    ) -> HistoryLatestQuery: ...
+    @overload
+    def bars(
+        self,
+        symbols: Symbols,
+        timespan: Timespan = Timespan.MINUTE,
+        *,
+        multiplier: int = 1,
+        adjusted: bool = True,
+    ) -> HistoryQuery: ...
+    def bars(
+        self,
+        symbols: Symbols,
+        timespan: Timespan = Timespan.MINUTE,
+        *,
+        multiplier: int = 1,
+        adjusted: bool = True,
+    ) -> HistoryQuery:
+        """Aggregate bars (open, high, low, close, volume) of US-listed stocks.
+
+        Each row is one bar of `multiplier` times `timespan` starting at `Timestamp`, with its
+        volume, VWAP, and trade count. The timespan picks the transports and the query
+        class: one-second and one-minute bars also stream over the WebSocket (`A`, `AM`) as a
+        `StreamHistoryQuery`; one-day bars add `fetch()` of the previous completed session
+        (`/v2/aggs/ticker/{stocksTicker}/prev`, one request per symbol) as a
+        `HistoryLatestQuery`; every other combination is history only. `history()` reads REST
+        (`/v2/aggs/ticker/{stocksTicker}/range/...`) or, for unadjusted one-minute and
+        one-day bars, the flat files (`us_stocks_sip/minute_aggs_v1`,
+        `us_stocks_sip/day_aggs_v1`); with `dm.ALL`, one-day REST history reads the grouped
+        daily bars (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), one request per day.
+
+        `history()` has no `limit`: it pages internally. `dm.ALL` streams every ticker and
+        works with `history()` where a flat file or the grouped daily path serves it;
+        `fetch()` refuses it. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#bars,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `timespan` is not a
+        `dm.Timespan`, `multiplier` is not an `int`, `adjusted` is not a `bool`, or `symbols` is not
+        an accepted form; `ValueError` if `timespan` is `SESSION`, `multiplier` is below 1, or
+        `symbols` is empty or holds an invalid ticker.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
+                column (streams follow its rows), or `dm.ALL`.
+            timespan: The bar unit, a `dm.Timespan` other than `SESSION`; defaults to
+                `MINUTE`.
+            multiplier: The number of `timespan` units per bar, a positive `int`; defaults to
+                1. Only 1 streams or has `fetch()`.
+            adjusted: True (the default) for bars adjusted for splits; False for unadjusted
+                bars, which the flat files can also serve.
+
+        Returns:
+            The query, of the class the timespan and multiplier give; nothing is requested
+            or subscribed until a verb runs.
+
+        Example:
+            ::
+
+                live = m.stocks.bars(["AAPL"]).append_only()  # one-minute bars, streamed
+                daily = m.stocks.bars(dm.ALL, dm.Timespan.DAY).history("2025-06-02", "2025-06-06")
+                hourly = m.stocks.bars("SPY", dm.Timespan.HOUR, multiplier=4).history(
+                    "2025-01-01", "2025-03-31"
+                )
+        """
+        query = build_query(
+            self._core,
+            BARS,
+            symbols=symbols,
+            timespan=timespan,
+            multiplier=multiplier,
+            adjusted=require_bool("adjusted", adjusted),
+        )
+        return cast("HistoryQuery", query)
+
+    def luld(self, symbols: Symbols) -> StreamQuery:
+        """Limit up-limit down price bands of US-listed stocks, as they change.
+
+        Each row is one band update from the SIP: the upper and lower price limits, the
+        indicators, and the tape. Streams over the WebSocket (`LULD`) through `blink()`,
+        `append_only()`, `ring()`, and `last_by()`; there is no REST or flat-file source, so
+        the query has no `fetch()` or `history()`.
+
+        No verb takes a `limit`. `dm.ALL` streams every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#luld,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
+        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
+        has no `Symbol` column.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
+                column (the stream follows its rows), or `dm.ALL`.
+
+        Returns:
+            The query; nothing is subscribed until a verb runs.
+
+        Example:
+            ::
+
+                bands = m.stocks.luld(dm.ALL).last_by()
+        """
+        return cast("StreamQuery", build_query(self._core, LULD, symbols=symbols))
+
+    def imbalances(self, symbols: Symbols) -> StreamQuery:
+        """Net order imbalances of US-listed stocks ahead of opening and closing auctions.
+
+        Each row is one imbalance message: the auction type and time, the imbalance and
+        paired quantities, the book clearing price, and the exchange. Streams over the
+        WebSocket (`NOI`) through `blink()`, `append_only()`, `ring()`, and `last_by()`;
+        there is no REST or flat-file source, so the query has no `fetch()` or `history()`.
+
+        No verb takes a `limit`. `dm.ALL` streams every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#imbalances,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
+        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
+        has no `Symbol` column.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
+                column (the stream follows its rows), or `dm.ALL`.
+
+        Returns:
+            The query; nothing is subscribed until a verb runs.
+
+        Example:
+            ::
+
+                closing = m.stocks.imbalances(["AAPL", "MSFT"]).append_only()
+        """
+        return cast("StreamQuery", build_query(self._core, IMBALANCES, symbols=symbols))
+
+    def fmv(self, symbols: Symbols) -> StreamQuery:
+        """Massive's fair market value estimate of US-listed stocks, as it updates.
+
+        Each row is one fair market value with the time it was computed. Streams over the
+        WebSocket (`FMV`) from the Business host (`business.massive.com/stocks`), which needs
+        a Business plan, through `blink()`, `append_only()`, `ring()`, and `last_by()`;
+        there is no REST or flat-file source, so the query has no `fetch()` or `history()`.
+
+        No verb takes a `limit`. `dm.ALL` streams every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#fmv,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
+        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
+        has no `Symbol` column.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
+                column (the stream follows its rows), or `dm.ALL`.
+
+        Returns:
+            The query; nothing is subscribed until a verb runs.
+
+        Example:
+            ::
+
+                fair = m.stocks.fmv(["AAPL"]).last_by()
+        """
+        return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
+
+    def snapshots(self, symbols: Symbols, *, include_otc: bool = False) -> Query:
+        """Current market snapshots of US-listed stocks, one row per ticker.
+
+        Each row is a ticker's state now: the day's and previous day's bars, the latest
+        minute bar, last trade, and last quote, today's change, and the fair market value
+        where the plan includes it. Served by REST
+        (`/v2/snapshot/locale/us/markets/stocks/tickers`) through `fetch()` and `poll()`, one
+        request for every symbol; `poll()` replaces the table each cycle, keyed by `Symbol`.
+        `snapshots(symbols).poll(n)` is the way to get current state on every plan.
+
+        `fetch()` and `poll()` take no `limit`: the endpoint returns one row per ticker.
+        `dm.ALL` returns the full market. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#snapshots,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `include_otc` is not a `bool`,
+        or `symbols` is not an accepted form; `ValueError` if `symbols` is empty or holds an invalid
+        ticker, or a `Table` has no `Symbol` column.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
+                column (re-read each `poll()` cycle), or `dm.ALL` for the full market.
+            include_otc: True to include OTC securities; False (the default) leaves them out.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                board = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).poll(5)
+        """
+        query = build_query(
+            self._core,
+            SNAPSHOTS,
+            symbols=symbols,
+            params={"include_otc": require_bool("include_otc", include_otc)},
+        )
+        return cast("Query", query)
+
+    def movers(self, direction: Direction, *, include_otc: bool = False) -> Query:
+        """The twenty US stocks with the largest percentage move today, up or down.
+
+        Each row is the full snapshot of one mover (as `snapshots()` returns it), for the
+        tickers with the largest gain or loss since the previous close. Served by REST
+        (`/v2/snapshot/locale/us/markets/stocks/{direction}`) through `fetch()` and `poll()`;
+        `poll()` replaces the table each cycle, keyed by `Symbol`, so tickers that leave the
+        list are removed.
+
+        `fetch()` and `poll()` take no `limit`: the endpoint returns at most twenty rows. The
+        dataset takes no `symbols`, so `dm.ALL` does not apply. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#movers,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `direction` is not a
+        `dm.Direction` or `include_otc` is not a `bool`.
+
+        Args:
+            direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
+            include_otc: True to include OTC securities; False (the default) leaves them out.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
+        """
+        query = build_query(
+            self._core,
+            MOVERS,
+            params={
+                "direction": _require_enum(direction, Direction, "direction"),
+                "include_otc": require_bool("include_otc", include_otc),
+            },
+        )
+        return cast("Query", query)
+
+    def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
+        """The open, close, and pre- and after-market prices of US stocks on one day.
+
+        Each row is one ticker's session on `date`: open, high, low, close, volume, and the
+        pre-market and after-hours prices. Served by REST (`/v1/open-close/{stocksTicker}/{date}`)
+        through `fetch()` and `poll()`, one request per symbol; a symbol with no session that
+        day (a holiday) is dropped with a warning. `poll()` replaces the table each cycle,
+        keyed by `Symbol`.
+
+        `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is
+        refused: use `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(date, date)`. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#daily_open_close,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `date` is not a `str`, `date`,
+        or `datetime`, `adjusted` is not a `bool`, or `symbols` is not an accepted form;
+        `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or `date` is naive
+        or not ISO-8601.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
+                column (re-read each `poll()` cycle).
+            date: The trading day: an ISO-8601 date, a `date`, or an aware `datetime`, whose
+                New York date is used.
+            adjusted: True (the default) for prices adjusted for splits; False for unadjusted.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.daily_open_close(["AAPL", "MSFT"], "2025-06-06").fetch()
+        """
+        query = build_query(
+            self._core,
+            DAILY_OPEN_CLOSE,
+            symbols=symbols,
+            all_alternative="m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(date, date)",
+            adjusted=require_bool("adjusted", adjusted),
+            params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+        )
+        return cast("Query", query)
+
+    def dividends(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Cash dividends of US-listed stocks, one row per distribution.
+
+        Each row is one dividend: its ex-dividend, record, pay, and declaration dates, the
+        cash amount (as declared and split-adjusted), the currency, frequency, and
+        distribution type. Served by REST (`/stocks/v1/dividends`) through `fetch()` and
+        `poll()`; `poll()` replaces the table each cycle, keyed by `Id`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#dividends,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every ticker.
+            start: The first ex-dividend date to include, inclusive; None for no lower bound.
+            end: The last ex-dividend date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"ex_dividend_date"`; None for the server
+                default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"distribution_type": "special"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.dividends(["AAPL", "MSFT"], start="2024-01-01").fetch()
+        """
+        return _list_query(
+            self._core,
+            DIVIDENDS,
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def splits(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Stock splits, reverse splits, and stock dividends of US-listed stocks.
+
+        Each row is one split: its execution date, the split ratio (`SplitFrom` to
+        `SplitTo`), the adjustment type, and the factor that adjusts earlier prices. Served
+        by REST (`/stocks/v1/splits`) through `fetch()` and `poll()`; `poll()` replaces the
+        table each cycle, keyed by `Id`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#splits,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every ticker.
+            start: The first execution date to include, inclusive; None for no lower bound.
+            end: The last execution date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"execution_date"`; None for the server
+                default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"adjustment_type": "reverse_split"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.splits(start="2025-01-01", end="2025-06-30").fetch()
+        """
+        return _list_query(
+            self._core,
+            SPLITS,
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def ipos(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Initial public offerings on US exchanges, upcoming and past, one row per offering.
+
+        Each row is one IPO: the issuer, ticker, listing and announcement dates, status (rumored,
+        pending, new, withdrawn, and so on), offer price range, final issue price, shares offered,
+        and the listing exchange. Served by REST (`/vX/reference/ipos`) through `fetch()` and
+        `poll()`; the endpoint filters one ticker per request, so a symbol list fans out to one
+        request per symbol. By default `poll()` appends only the rows it has not seen before,
+        telling rows apart by the dataset's key columns.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every offering. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#ipos,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every offering.
+            start: The first listing date to include, inclusive; None for no lower bound.
+            end: The last listing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"listing_date"`; None for the server default.
+            order: The sort direction, sent as the IPO path's own `order` parameter, so it works
+                with or without `sort`; None for the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"ipo_status": "pending"}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                upcoming = m.stocks.ipos(filters={"ipo_status": "pending"}).fetch()
+        """
+        return _list_query(
+            self._core,
+            IPOS,
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def short_interest(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Short interest of US-listed stocks, one row per ticker and FINRA settlement date.
+
+        Each row is the number of shares sold short and not yet covered on a settlement
+        date, with the average daily volume and the days to cover, as reported to FINRA
+        twice a month. Served by REST (`/stocks/v1/short-interest`) through `fetch()` and
+        `poll()`; `poll()` replaces the table each cycle, keyed by `Symbol` and
+        `SettlementDate`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#short_interest,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every ticker.
+            start: The first settlement date to include, inclusive; None for no lower bound.
+            end: The last settlement date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"settlement_date"`; None for the server
+                default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"days_to_cover_gte": 5}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.short_interest("GME", start="2024-01-01").fetch()
+        """
+        return _list_query(
+            self._core,
+            SHORT_INTEREST,
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def short_volume(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Daily short sale volume of US-listed stocks, one row per ticker and trading day.
+
+        Each row is a day's short volume, exempt and non-exempt volume, total volume, and
+        short volume ratio, with the per-venue breakdown FINRA publishes (NYSE, Nasdaq
+        Carteret and Chicago, and the ADF). Served by REST (`/stocks/v1/short-volume`)
+        through `fetch()` and `poll()`; `poll()` replaces the table each cycle, keyed by
+        `Symbol` and `Date`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#short_volume,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
+        naive or not ISO-8601, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every ticker.
+            start: The first trading day to include, inclusive; None for no lower bound.
+            end: The last trading day to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"date"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"short_volume_ratio_gte": 50}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.short_volume(["AAPL", "TSLA"], start="2025-06-01").fetch()
+        """
+        return _list_query(
+            self._core,
+            SHORT_VOLUME,
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def share_float(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """The free float of US-listed stocks: the latest count of shares the public can trade.
+
+        Each row is one ticker's most recent free float, its percentage of shares
+        outstanding, and the date it took effect (`EffectiveDate`). The endpoint has no date
+        filter, so the dataset has no `start` or `end`. Served by REST (`/stocks/vX/float`)
+        through `fetch()` and `poll()`; `poll()` replaces the table each cycle, keyed by
+        `Symbol`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#share_float,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a filter
+        is unknown, reserved, or of the wrong kind.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every ticker.
+            sort: The field to sort by, such as `"free_float_percent"`; None for the server
+                default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"free_float_percent_lt": 20}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.share_float(["AAPL", "MSFT"]).fetch()
+        """
+        return _list_query(
+            self._core,
+            SHARE_FLOAT,
+            symbols=symbols,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )

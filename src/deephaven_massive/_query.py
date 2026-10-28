@@ -309,11 +309,11 @@ class Query(QueryBase):
         Before the table exists it raises `ValueError` if a path does not take a parameter or
         filter the query set: with static symbols any path the call reads, and with a reactive
         table every fetch path of the dataset. Later, a cycle that fails with
-        `AuthenticationError`, `EntitlementError`, a row that breaks the dataset's schema, a
-        row with a null value in one of the dataset's poll keys (in every mode: a null key
-        would merge unrelated rows), or a parameter the path a reactive table's new symbol
-        routes to does not take, fails the table (its `m.streams()` row shows `FAILED`) and
-        ends the poller. Any other failure is
+        `AuthenticationError`, `EntitlementError`, a row that breaks the dataset's schema, a row
+        with a null or NaN value in one of the dataset's poll keys (in every mode: such a key
+        would merge unrelated rows; the error names the column and shows the row), or a
+        parameter the path a reactive table's new symbol routes to does not take, fails the
+        table (its `m.streams()` row shows `FAILED`) and ends the poller. Any other failure is
         logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next
         cycle runs.
 
@@ -322,23 +322,26 @@ class Query(QueryBase):
 
         Args:
             interval: Seconds between cycles, or a `timedelta`; must be positive.
-            mode: How cycles combine (`PollMode`); None uses the dataset's default, `APPEND`
-                for news, IPOs, and filings (not the filing taxonomies) and `REPLACE`
-                otherwise.
+            mode: How cycles combine (`PollMode`); None uses the dataset's default:
+                `APPEND` for news and filings (not the filing taxonomies), `UPSERT` for IPOs,
+                and `REPLACE` otherwise.
 
         Returns:
             A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`. A
             `REPLACE` table removes keys absent from the latest cycle, but its hidden state
             keeps every key it has ever held, as `last_by()` does; over a key set that keeps
             changing (an options chain, the day's movers) its memory grows with the keys seen.
-            An `APPEND` table adds only rows whose poll-key tuple it has not appended before
-            (a second row with the same key in one cycle is skipped too). It remembers a key
-            for 100 successful cycles after the last cycle that returned it, so a row every
-            response repeats is appended once, while a row absent from 100 consecutive cycles
-            that then returns is appended again; a failed cycle forgets nothing. The memory
-            is bounded by 100 times the largest cycle. On a dataset whose poll key is the
-            default `Symbol` (a snapshot), `APPEND` adds one row per symbol, not one per
-            cycle.
+            An `APPEND` table adds only rows whose identity it does not hold yet: the
+            dataset's poll keys, followed on the snapshot and movers datasets by their update
+            time, so an explicit `APPEND` on a snapshot records each new state of a symbol.
+            A second row with the same identity in one cycle is skipped too, and a row is
+            never appended twice, also after an absence (a symbol removed from a reactive
+            table and added back). A later revision of an appended row that changes none of
+            those columns is not appended; use `UPSERT` to follow revisions. The poller keeps
+            one identity per appended row, so its memory grows with the table and no faster.
+            A cycle that fails to publish appends nothing and remembers nothing. On a dataset
+            with neither unique poll keys nor an update time (one keyed by the default
+            `Symbol`), `APPEND` adds one row per symbol.
         """
         self._core.require_verb_thread()
         period = _interval(interval)

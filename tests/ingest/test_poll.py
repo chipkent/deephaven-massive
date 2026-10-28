@@ -1,5 +1,6 @@
 """Tests for `poll()` tables: the three modes, the cycle's failures, rows, and lifetime."""
 
+import dataclasses
 import functools
 import gc
 import logging
@@ -938,30 +939,60 @@ def test_append_skips_every_row_it_already_appended(
     assert len(fake_rest.requests) == 4
 
 
-def test_append_forgets_a_key_absent_from_its_memory_of_cycles(
+def test_append_never_appends_a_row_twice_after_an_absence(
     *,
     feed_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     clock: FakeClock,
     dh_to_pylist: ToPylist,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(poll, "APPEND_MEMORY", 2)
+    # A symbol removed from a reactive table and added back hours later returns its rows.
     fake_rest.reply(
         PATH,
         page(("b", 2.0), ("a", 1.0)),
-        page(("b", 2.0)),
-        page(("a", 1.0), ("b", 2.0)),  # a was absent for one cycle only: still remembered
-        page(("b", 2.0)),
-        page(("b", 2.0)),  # a has now been absent for two cycles: forgotten
-        page(("a", 1.0), ("b", 2.0)),  # b, returned every cycle, is still remembered
+        *[page(("b", 2.0))] * 5,
+        page(("a", 1.0), ("b", 2.0), ("c", 3.0)),
     )
     table = feed(feed_session)
     until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
-    for _ in range(5):
+    for _ in range(6):
         next_cycle(clock)
-    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("a", 1.0), ("b", 2.0)])
-    assert len(fake_rest.requests) == 6
+    until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0), ("c", 3.0)])
+    assert len(fake_rest.requests) == 7
+
+
+def test_append_appends_each_revision_of_a_keyed_row(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Keyed by symbol with a revision column, as a snapshot is: each new state is a new row,
+    # and a null revision is a value of its own.
+    snapshot = dataclasses.replace(
+        FEED, poll_mode=PollMode.REPLACE, poll_keys=("Symbol",), revision_keys=("PayDate",)
+    )
+
+    def state(pay_date: str | None, amount: float) -> dict[str, object]:
+        return {"id": "x", "ticker": "AAPL", "cash_amount": amount, "pay_date": pay_date}
+
+    fake_rest.reply(
+        PATH,
+        Reply(envelope([state(None, 1.0)])),
+        Reply(envelope([state(None, 9.0)])),  # the same state: skipped
+        Reply(envelope([state("2026-01-02", 2.0)])),
+        Reply(envelope([state("2026-01-02", 9.0)])),
+    )
+    q = build_query(feed_session._core, snapshot, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=PollMode.APPEND)
+    until(lambda: len(dh_to_pylist(table)) == 1)
+    for _ in range(3):
+        next_cycle(clock)
+    until(lambda: sorted(row["CashAmount"] for row in dh_to_pylist(table)) == [1.0, 2.0])
+    # The keyed modes ignore the revision column.
+    assert snapshot.poll_keys == ("Symbol",)
 
 
 def test_a_failed_append_remembers_nothing(
@@ -990,23 +1021,76 @@ def test_a_failed_append_remembers_nothing(
     until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
 
 
+NULL_ID = {"id": None, "ticker": "AAPL", "currency": "USD"}
+NULL_CURRENCY = {"id": "b", "ticker": "AAPL", "currency": None}
+
+
 @pytest.mark.parametrize("mode", list(PollMode))
+@pytest.mark.parametrize(
+    ("poll_keys", "bad", "message"),
+    [
+        (
+            ("Id",),
+            NULL_ID,
+            "row 1 of the cycle has a null poll key 'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}",
+        ),
+        # Every key column is checked, not only the first.
+        (
+            ("Id", "Currency"),
+            NULL_CURRENCY,
+            "row 1 of the cycle has a null poll key 'Currency': {'Symbol': 'AAPL', 'Id': 'b'}",
+        ),
+    ],
+    ids=["first column", "second column"],
+)
 def test_a_null_poll_key_fails_the_table_in_every_mode(
     *,
     feed_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     dh_to_pylist: ToPylist,
     mode: PollMode,
+    poll_keys: tuple[str, ...],
+    bad: dict[str, object],
+    message: str,
 ) -> None:
-    rows = [{"id": "a", "ticker": "AAPL"}, {"id": None, "ticker": "AAPL"}]
+    rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, bad]
     fake_rest.reply(PATH, Reply(envelope(rows)))
-    q = build_query(feed_session._core, FEED, symbols=["AAPL"])
+    spec = dataclasses.replace(FEED, poll_keys=poll_keys)
+    q = build_query(feed_session._core, spec, symbols=["AAPL"])
     assert isinstance(q, Query)
     table = q.poll(60, mode=mode)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(feed_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == (
-        "FAILED",
-        "stocks.dividends poll(): row 1 has a null poll key 'Id'",
-    )
+    assert (row["State"], row["Error"]) == ("FAILED", f"stocks.dividends poll(): {message}")
     assert row["RowsPublished"] == 0  # nothing of the cycle was published
+
+
+def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # A NaN never equals itself, so as a key it would append its row again every cycle.
+    script.rows(("x" * 400, float("nan")))
+    table = open_poll(
+        massive_session._core,
+        spec=dataclasses.replace(DIVIDENDS, poll_keys=("CashAmount",)),
+        request=Request(symbols=("AAPL",)),
+        interval=timedelta(seconds=60),
+        mode=PollMode.APPEND,
+        read=script,
+        pollers=pollers,
+        host="api.massive.com",
+        path=PATH,
+        clock=clock,
+    )
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    prefix = "stocks.dividends poll(): row 0 of the cycle has a null poll key 'CashAmount': "
+    assert row["Error"].startswith(prefix + "{'Symbol': 'xxx")
+    rendered = row["Error"].removeprefix(prefix)
+    assert len(rendered) == 300
+    assert rendered.endswith("xxx...")

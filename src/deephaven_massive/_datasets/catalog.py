@@ -270,8 +270,15 @@ class DatasetSpec:
             takes the symbol as a path parameter or the dataset has no symbols.
         poll_mode: The default `poll()` mode.
         poll_keys: The key columns of a keyed (`REPLACE`, `UPSERT`) `poll()` table, and the
-            columns that identify a row an `APPEND` table has already appended. A dataset
-            whose `poll_mode` is `APPEND` declares its own, unique per row (a catalog gate).
+            first columns of a row's identity in an `APPEND` table; never empty, and a null
+            value in one fails the `poll()` table. A dataset whose `poll_mode` is `APPEND`
+            declares its own (a catalog gate refuses the default), which its tests check is
+            unique per row.
+        revision_keys: Further columns of a row's identity in an `APPEND` table only, after
+            `poll_keys`: a current-state dataset's update time, such as `("Updated",)` on a
+            snapshot, so that an explicit `mode=APPEND` appends each new state of a symbol
+            while `REPLACE` and `UPSERT` stay keyed by `poll_keys`. A null in one is a value
+            (a ticker not yet updated). Empty by default.
         per_symbol: True when the endpoint takes one symbol per request, so a symbol list fans
             out to one request per symbol.
         fetch_paths_by_class: The REST path behind `fetch()` and `poll()` for the symbols of
@@ -307,6 +314,7 @@ class DatasetSpec:
     symbol_param: str | None = None
     poll_mode: PollMode = PollMode.REPLACE
     poll_keys: tuple[str, ...] = _DEFAULT_POLL_KEYS
+    revision_keys: tuple[str, ...] = ()
     per_symbol: bool = False
     fetch_paths_by_class: Mapping[AssetClass, str] = field(default_factory=dict)
     symbols_per_request: int | None = None
@@ -324,8 +332,8 @@ class DatasetSpec:
                 fills a `time` or `session` key from the request, marks a key other than
                 `fanout` as no instrument, or fills a non-instrument fan-out key from the
                 request, or makes a key optional other than a `symbol` key read from a REST
-                path's rows; a keyed (`REPLACE` or `UPSERT`) `poll()` keys on the `Symbol` of an
-                optional symbol key; a flat-file prefix does not
+                path's rows; `poll_keys` is empty, holds the `Symbol` of an optional symbol
+                key, or shares a column with `revision_keys`; a flat-file prefix does not
                 declare its `symbol` and `time` keys from its own columns (and, for futures,
                 its `session` key, against which every futures file is checked); or the
                 transports match no query class (see the class docstring and `_check_verbs`).
@@ -487,12 +495,16 @@ class DatasetSpec:
             declared.symbol is not None and not declared.symbol.required
             for declared in self.keys.values()
         )
-        keyed = self.poll_mode in (PollMode.REPLACE, PollMode.UPSERT)
-        if optional and keyed and "Symbol" in self.poll_keys:
+        if optional and "Symbol" in self.poll_keys:
             raise ValueError(
-                f"{self.name}: a keyed poll() cannot key on Symbol when the symbol is optional: "
-                "every row without one would share the null key; declare other poll_keys"
+                f"{self.name}: poll_keys cannot hold Symbol when the symbol is optional: a row "
+                "without one would have a null poll key, which fails the poll() table; declare "
+                "other poll_keys"
             )
+        if not self.poll_keys:
+            raise ValueError(f"{self.name}: poll_keys cannot be empty")
+        if repeated := sorted(set(self.poll_keys) & set(self.revision_keys)):
+            raise ValueError(f"{self.name}: revision_keys repeat poll_keys {repeated}")
 
     def _check_flat_files(self) -> None:
         """Check that every flat-file prefix can be filtered and checked.
@@ -1066,10 +1078,11 @@ class Catalog:
           of the fetch path when there is none), each key filled from the request, which
           names a parameter of its own path, and each `fixed_params` name, a query parameter
           of every REST path of the dataset.
-        - **append keys:** a dataset whose `poll_mode` is `APPEND` declares its own non-empty
-          `poll_keys`, not the default `("Symbol",)`: `APPEND` skips every row whose key it
-          has already appended, so its key must be unique per row.
-        - **poll keys:** every `poll_keys` column is a column of the dataset's schema.
+        - **append keys:** a dataset whose `poll_mode` is `APPEND` declares its own
+          `poll_keys`, not the default `("Symbol",)`. The gate checks only that the key is
+          explicit; the dataset's tests check that it is unique per row.
+        - **poll keys:** every `poll_keys` and `revision_keys` column is a column of the
+          dataset's schema.
 
         Returns:
             The failures, in dataset order and then gate order, each once; empty when every
@@ -1089,10 +1102,10 @@ class Catalog:
             found.extend(keys)
             found.extend(self._kind_problems(spec))
             found.extend(self._parameter_problems(spec))
-            if spec.poll_mode is PollMode.APPEND and spec.poll_keys in ((), _DEFAULT_POLL_KEYS):
+            if spec.poll_mode is PollMode.APPEND and spec.poll_keys == _DEFAULT_POLL_KEYS:
                 found.append(
-                    f"append keys: {spec.name}: an APPEND dataset declares poll_keys that are "
-                    f"unique per row, not {list(spec.poll_keys)}"
+                    f"append keys: {spec.name}: an APPEND dataset declares its own poll_keys, "
+                    "unique per row, not the default ['Symbol']"
                 )
             if keys:
                 continue  # the merge would only repeat them
@@ -1102,7 +1115,7 @@ class Catalog:
                 # A conflict, or another member's bad key, which that member also reports.
                 found.append(str(error))
                 continue
-            lacking = sorted(set(spec.poll_keys) - set(schema.column_names))
+            lacking = sorted({*spec.poll_keys, *spec.revision_keys} - set(schema.column_names))
             if lacking:
                 found.append(f"poll keys: {spec.name}: {lacking} are not columns")
         return tuple(dict.fromkeys(found))

@@ -105,11 +105,12 @@ class PollMode(StrEnum):
       deleted, including when the cycle returns no rows.
     - `UPSERT`: a keyed table that adds and updates rows but never deletes.
     - `APPEND`: an append-only table that adds only rows it has not seen before. A row is
-      identified by the dataset's poll keys (unique per row for every dataset whose default
-      mode is `APPEND`, such as a news article's id); a row whose key was already appended is
-      skipped. Keys are remembered for 100 published cycles after the last cycle that returned
-      them, so the memory stays bounded; a row absent from 100 consecutive cycles that then
-      returns is appended again.
+      identified by the dataset's poll keys (such as a news article's id), followed on a
+      current-state dataset by its update time (a snapshot's `Updated`), so an explicit
+      `APPEND` on a snapshot records each new state of a symbol. A row whose identity the
+      table already holds is skipped for as long as the table lives, also after any absence;
+      so a later revision of an appended row that changes none of those columns is not
+      appended (`UPSERT` follows revisions).
 
     Example:
         ::
@@ -173,7 +174,9 @@ class Direction(StrEnum):
 
             import deephaven_massive as dm
 
-            assert dm.Direction("gainers") is dm.Direction.GAINERS
+            m = dm.MassiveSession()
+            gainers = m.crypto.movers(dm.Direction.GAINERS).poll(60)
+            assert dm.Direction("losers") is dm.Direction.LOSERS
     """
 
     GAINERS = "gainers"
@@ -219,6 +222,10 @@ class SeriesType(StrEnum):
 class Timeframe(StrEnum):
     """The reporting period of the `m.stocks.financials` statements.
 
+    `ANNUAL` is a fiscal year and `QUARTERLY` a fiscal quarter. `TRAILING_TWELVE_MONTHS` sums
+    the four most recent quarters; the income and cash flow statements offer it, while a
+    balance sheet, a snapshot at the period's end, has no trailing form.
+
     Example:
         ::
 
@@ -229,6 +236,7 @@ class Timeframe(StrEnum):
 
     ANNUAL = "annual"
     QUARTERLY = "quarterly"
+    TRAILING_TWELVE_MONTHS = "trailing_twelve_months"
 
 
 class Order(StrEnum):
