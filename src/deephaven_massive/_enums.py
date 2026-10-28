@@ -2,18 +2,20 @@
 
 Every closed set of values that appears in a public signature is an enum defined here. Each member's
 value is the exact string Massive puts on the wire, so a member can be sent to the server unchanged:
-`Timespan.MINUTE == "minute"`. Signatures accept only the enum, never a plain string, which gives
-one spelling per value, tab completion in every IDE and in the Deephaven web console, and typo
-safety at type-check time. At run time `_require_enum` turns a plain string into a `TypeError` that
-names the member to use; `Timespan("minute")` is the documented way to convert text.
+`Timespan.MINUTE == "minute"`. `Subscription` never travels on the wire; its values are the
+lower-case names of Massive's subscriptions. Signatures accept only the enum, never a plain
+string, which gives one spelling per value, tab completion in every IDE and in the Deephaven web
+console, and typo safety at type-check time. At run time `_require_enum` turns a plain string
+into a `TypeError` that names the member to use; `Timespan("minute")` is the documented way to
+convert text.
 
 Two further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
 data is) and `ChannelFamily` (which host a channel is served from). Both appear as values in
 the diagnostics tables, beside the wire package's `Transport`, which names WebSocket, REST, or
 flat files once for both sides of the wire boundary.
 
-The fifteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
-private.
+The sixteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
+private. `subscription_of` maps an asset class to the subscription that covers it.
 """
 
 from __future__ import annotations
@@ -37,9 +39,11 @@ __all__ = [
     "Recency",
     "SeriesType",
     "Sip",
+    "Subscription",
     "TickerType",
     "Timeframe",
     "Timespan",
+    "subscription_of",
 ]
 
 logger = logging.getLogger(__name__)
@@ -359,6 +363,59 @@ class Sip(StrEnum):
     CTA = "CTA"
     UTP = "UTP"
     OPRA = "OPRA"
+
+
+class Subscription(StrEnum):
+    """One of Massive's five subscriptions, each bought, and rate-limited, on its own.
+
+    Massive sells market data as five subscriptions, one per asset class, with no bundle and
+    no account-wide plan; forex and crypto share one, `CURRENCIES`. Each is on a tier of its
+    own, and the tier sets its REST request limit: the free Basic tier allows 5 requests per
+    minute, and every paid tier has no request limit. All the API keys of an account share the
+    limits. Declare the subscriptions on Basic in `MassiveConfig.rest_basic_subscriptions` so
+    their requests are paced from the first one; otherwise the library learns it from
+    Massive's first refusal. `m.rate_limits()` shows each one's state. Datasets Massive assigns
+    to no subscription (cross-market reference data, economy, partner data, the unified
+    snapshot) are never paced.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            # Paid stocks; free options and currencies (forex and crypto).
+            cfg = dm.MassiveConfig(
+                rest_basic_subscriptions={dm.Subscription.OPTIONS, dm.Subscription.CURRENCIES}
+            )
+    """
+
+    STOCKS = "stocks"
+    OPTIONS = "options"
+    INDICES = "indices"
+    CURRENCIES = "currencies"
+    FUTURES = "futures"
+
+
+_SUBSCRIPTIONS: dict[AssetClass, Subscription] = {
+    AssetClass.STOCKS: Subscription.STOCKS,
+    AssetClass.OPTIONS: Subscription.OPTIONS,
+    AssetClass.INDICES: Subscription.INDICES,
+    AssetClass.FOREX: Subscription.CURRENCIES,
+    AssetClass.CRYPTO: Subscription.CURRENCIES,
+    AssetClass.FUTURES: Subscription.FUTURES,
+}
+
+
+def subscription_of(asset_class: AssetClass | None) -> Subscription | None:
+    """Return the subscription that covers an asset class's data.
+
+    Args:
+        asset_class: The class, or None for data of no single class.
+
+    Returns:
+        The class's subscription (`CURRENCIES` for forex and crypto), or None for None.
+    """
+    return None if asset_class is None else _SUBSCRIPTIONS[asset_class]
 
 
 class Recency(StrEnum):

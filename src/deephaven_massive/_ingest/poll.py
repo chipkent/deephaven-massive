@@ -41,7 +41,9 @@ through the reaper), when the table's blink table shuts down, when it fails, or 
 session closes: every live poller is registered with the session's `Pollers`, which the
 session's REST closer stops, and a poller can no longer be registered once that has run, so a
 `poll()` that races `close()` never starts a poller the session would not stop. A stopped poller
-finishes the request it is waiting on and publishes nothing more; the table keeps its rows. The
+finishes a request already on the wire, stops at once a request still waiting for the rate
+governor (its stop token is the cycle's `Cancel`), and publishes nothing more; the table keeps its
+rows. The
 poller holds the session core only through a weak reference, so a `poll()` table never keeps an
 unclosed session from being collected (whose collection then stops the poller).
 """
@@ -66,7 +68,7 @@ from deephaven.stream.table_publisher import table_publisher
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_canonicalizer
 from deephaven_massive._enums import PollMode
 from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
-from deephaven_massive._massive import Transport
+from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.liveness import entered, make_result
@@ -190,6 +192,7 @@ class CycleReader(Protocol):
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
+        cancel: Cancel,
     ) -> tuple[pa.Table, int]:
         """Request the dataset for the symbols and return the rows and the request count.
 
@@ -197,6 +200,8 @@ class CycleReader(Protocol):
             symbols: The cycle's static symbols: a sorted tuple, `ALL`, or None.
             record: Receives each page's drift, for the table's `SchemaDrift`.
             executor: The poller's pool for fan-out requests.
+            cancel: The poller's stop token: once set, the cycle's requests stop waiting for
+                the rate governor.
 
         Returns:
             The rows in the dataset's schema, and how many requests were made.
@@ -311,7 +316,7 @@ class Poller:
         pollers: Pollers,
         clock: PollClock,
         publisher: TablePublisher,
-        stop: threading.Event,
+        stop: Cancel,
     ) -> None:
         """Prepare the poller; nothing is requested, and the thread is not started yet.
 
@@ -327,7 +332,8 @@ class Poller:
             clock: The time source of the waits between cycles.
             publisher: The table's publisher (`build_table`).
             stop: Set to stop the poller; the publisher's blink table sets it when it shuts
-                down.
+                down. Each cycle's requests listen to it, so a stopped poller never waits for
+                a rate-limited slot.
         """
         self._core = weakref.ref(core)
         self._exec_ctx = core.exec_ctx
@@ -454,7 +460,9 @@ class Poller:
         """
         symbols = self._symbols()
         record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST.value)
-        table, requests = self._read(symbols=symbols, record=record, executor=pool)
+        table, requests = self._read(
+            symbols=symbols, record=record, executor=pool, cancel=self._stop
+        )
         if self._stop.is_set():
             return False
         self._published += self._publish(table)
@@ -615,7 +623,7 @@ class Poller:
 
 
 def build_table(
-    spec: DatasetSpec, schema: Schema, mode: PollMode, *, stream_id: int, stop: threading.Event
+    spec: DatasetSpec, schema: Schema, mode: PollMode, *, stream_id: int, stop: Cancel
 ) -> tuple[Table, TablePublisher]:
     """Create a `poll()` table's publisher and the result shaped from its blink table.
 
@@ -628,7 +636,7 @@ def build_table(
         schema: The dataset's schema.
         mode: How cycles combine.
         stream_id: The table's `StreamId`.
-        stop: The poller's stop event.
+        stop: The poller's stop token.
 
     Returns:
         The result (append-only for `APPEND`, the `last_by` of the poll keys for `UPSERT`,
@@ -656,7 +664,7 @@ def _build(
     *,
     mode: PollMode,
     stream_id: int,
-    stop: threading.Event,
+    stop: Cancel,
 ) -> tuple[tuple[Table, TablePublisher], LivenessScope]:
     """Create a `poll()` table in a new result scope (`make_result`).
 
@@ -665,7 +673,7 @@ def _build(
         spec: The dataset.
         mode: How cycles combine.
         stream_id: The table's `StreamId`.
-        stop: The poller's stop event.
+        stop: The poller's stop token.
 
     Returns:
         The result and its publisher (`build_table`), and the result scope. The result is the
@@ -725,7 +733,7 @@ def open_poll(
     `SessionCore.register_poll` or `Pollers.add`.
     """
     stream_id = core.next_stream_id()
-    stop = threading.Event()
+    stop = Cancel()
     with entered(core.exec_ctx):
         (result, publisher), scope = _build(core, spec, mode=mode, stream_id=stream_id, stop=stop)
     poller = Poller(

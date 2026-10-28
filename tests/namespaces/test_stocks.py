@@ -36,6 +36,7 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import ChannelFamily, Recency
 from deephaven_massive._ingest import ws
 from deephaven_massive._massive import (
+    RequestGovernor,
     RestClient,
     RestPath,
     Source,
@@ -650,9 +651,10 @@ def test_fixtures_decode_with_their_declared_keys_and_no_drift(
         **{k: v.isoformat() if isinstance(v, date) else v for k, v in placeholders.items()}
     )
     fake_rest.reply(target, Reply(body=body))
-    client = RestClient("test-key", base_url=fake_rest.url, max_concurrency=1)
+    governor = RequestGovernor(("stocks",))
+    client = RestClient("test-key", base_url=fake_rest.url, max_concurrency=1, governor=governor)
     try:
-        page = client.get(rest_path, placeholders, {})
+        page = client.get(rest_path, placeholders, {}, bucket="stocks")
     finally:
         client.close()
     spec = next(s for s in stocks.DATASETS if (R, path) in s.sources)

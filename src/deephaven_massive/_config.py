@@ -8,7 +8,9 @@ fails before any session exists.
 
 What is deliberately *not* configurable: the options contract cap (1,000 per connection), the
 evidence endpoints of the host decision, the plan tier (Massive offers no entitlement endpoint,
-so the library learns the tier from REST evidence instead), and the JSON codec. The wire
+so the library learns the tier from REST evidence instead), the REST rate of a Basic
+subscription (5 requests per minute, a wire constant; `rest_basic_subscriptions` only names the
+subscriptions on Basic), and the JSON codec. The wire
 package owns the codec: it uses `orjson` when the optional extra `deephaven-massive[orjson]` is
 installed and the standard library otherwise, and logs the choice once at INFO.
 """
@@ -19,11 +21,12 @@ import math
 import os
 import re
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import time
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._enums import AssetClass, _require_enum
+from deephaven_massive._enums import AssetClass, Subscription, _require_enum
 from deephaven_massive._errors import AuthenticationError
 from deephaven_massive._types import override
 
@@ -146,6 +149,16 @@ class MassiveConfig:
             is treated as not yet published (files land around 11:00 ET).
         max_concurrency: Maximum parallel REST requests of one `poll()` fan-out, and parallel
             S3 reads.
+        rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
+            free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
+            per subscription: Basic allows 5 requests per minute, and every paid tier has no
+            limit. The REST requests of a declared subscription are paced at 5 per minute
+            from the first one, shared with every other session of the process that uses the
+            same key. Any other subscription is unpaced until Massive refuses one of its
+            requests with HTTP 429: then its requests pause and resume, and when the refusal
+            says the per-minute maximum was exceeded, the library learns the subscription is
+            Basic and paces it from then on. Forex and crypto are one subscription,
+            `dm.Subscription.CURRENCIES`. `m.rate_limits()` shows each subscription's state.
         flush_interval: Seconds between WebSocket micro-batch flushes into the live tables.
         rest_base_url: The REST API base URL.
         s3_endpoint_url: The flat-file S3 endpoint URL.
@@ -162,17 +175,19 @@ class MassiveConfig:
     flat_file_symbol_threshold: int = 50
     flat_file_publish_cutoff: time = time(11, 30)
     max_concurrency: int = 8
+    rest_basic_subscriptions: AbstractSet[Subscription] = frozenset()
     flush_interval: float = 0.05
     rest_base_url: str = "https://api.massive.com"
     s3_endpoint_url: str = "https://files.massive.com"
     s3_bucket: str = "flatfiles"
 
     def __post_init__(self) -> None:
-        """Validate every field and freeze `ws_hosts` into a read-only, lower-cased copy.
+        """Validate every field; freeze `ws_hosts` and `rest_basic_subscriptions` into copies.
 
-        A `ws_hosts` key that is not a `dm.AssetClass`, a host that is not a `str`, or a
-        numeric field of a non-numeric type also raises `TypeError`, and a non-positive number
-        `ValueError` (`require_positive_number`, `require_positive_int`).
+        A `ws_hosts` key that is not a `dm.AssetClass`, a host that is not a `str`, a
+        `rest_basic_subscriptions` that is not a set of `dm.Subscription`, or a numeric field
+        of a non-numeric type also raises `TypeError`, and a non-positive number `ValueError`
+        (`require_positive_number`, `require_positive_int`).
 
         Raises:
             TypeError: If `api_key` is not a `str` or `flat_file_publish_cutoff` is not a
@@ -214,6 +229,8 @@ class MassiveConfig:
         if cutoff.tzinfo is not None:
             raise ValueError("flat_file_publish_cutoff is a New York wall-clock time; drop tzinfo")
         object.__setattr__(self, "ws_hosts", _validate_ws_hosts(self.ws_hosts))
+        basic = _validate_basic_subscriptions(self.rest_basic_subscriptions)
+        object.__setattr__(self, "rest_basic_subscriptions", basic)
 
 
 def require_positive_int(name: str, value: object, *, maximum: int | None = None) -> int:
@@ -272,6 +289,45 @@ def require_positive_number(name: str, value: object) -> float:
     if not (math.isfinite(number) and number > 0):
         raise ValueError(f"{name} must be positive, got {value!r}")
     return number
+
+
+_CURRENCY_CLASSES: Final = frozenset({"forex", "crypto"})
+"""The asset classes that share one subscription, `Subscription.CURRENCIES`."""
+
+
+def _validate_basic_subscriptions(value: object) -> frozenset[Subscription]:
+    """Validate `rest_basic_subscriptions` and return it as a frozen set.
+
+    Args:
+        value: The value passed as `MassiveConfig.rest_basic_subscriptions`.
+
+    Returns:
+        The subscriptions, as a `frozenset`.
+
+    Raises:
+        TypeError: If `value` is not a set (a `set`, a `frozenset`, or another
+            `collections.abc.Set`), or holds anything but `dm.Subscription` members. Forex
+            or crypto (as text or as a `dm.AssetClass`) is refused with a message naming
+            `dm.Subscription.CURRENCIES`, the one subscription that covers both; any other
+            text names the matching member, as `_require_enum` does.
+    """
+    if not isinstance(value, AbstractSet):
+        raise TypeError(
+            "rest_basic_subscriptions must be a set of dm.Subscription, such as "
+            f"{{dm.Subscription.STOCKS}}, not {type(value).__name__}"
+        )
+    for item in value:
+        if (
+            isinstance(item, str)
+            and not isinstance(item, Subscription)
+            and item.casefold() in _CURRENCY_CLASSES
+        ):
+            raise TypeError(
+                "rest_basic_subscriptions must hold dm.Subscription members; forex and crypto "
+                "are one subscription, dm.Subscription.CURRENCIES"
+            )
+        _require_enum(item, Subscription, "each rest_basic_subscriptions member")
+    return frozenset(value)
 
 
 def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:

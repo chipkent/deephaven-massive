@@ -27,18 +27,21 @@ def test_there_is_no_fourth_transient_wait() -> None:
         retry.transient_wait(3, 0.0)
 
 
-@pytest.mark.parametrize(("attempt", "wait"), [(0, 15.0), (1, 30.0), (2, 60.0)])
-def test_a_rate_limit_without_retry_after_waits_15_30_then_60(attempt: int, wait: float) -> None:
-    assert retry.rate_limit_wait(attempt, None) == wait
+@pytest.mark.parametrize(
+    ("refusal", "wait"), [(1, 15.0), (2, 30.0), (3, 60.0), (4, 60.0), (9, 60.0)]
+)
+def test_a_rate_limit_without_retry_after_pauses_15_30_then_60(refusal: int, wait: float) -> None:
+    assert retry.rate_limit_wait(refusal, None) == wait
 
 
-def test_a_rate_limit_waits_what_retry_after_asks() -> None:
+def test_a_rate_limit_pauses_what_retry_after_asks() -> None:
     assert retry.rate_limit_wait(2, 7.0) == 7.0
-    assert retry.rate_limit_wait(0, 0.0) == 0.0
+    assert retry.rate_limit_wait(1, 0.0) == 0.0
+    assert retry.rate_limit_wait(1, 3600.0) == 3600.0
 
 
-def test_the_longest_honoured_retry_after_is_60_seconds() -> None:
-    assert retry.MAX_RETRY_AFTER == 60.0
+def test_refusals_pause_and_resume_for_ten_minutes() -> None:
+    assert retry.RATE_LIMIT_PATIENCE == 600.0
 
 
 @pytest.mark.parametrize(

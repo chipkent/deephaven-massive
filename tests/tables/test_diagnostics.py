@@ -24,12 +24,16 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
+    RATE_LIMITS,
     SCHEMA_DRIFT_SHOWN,
     STREAMS,
     ConnectionRow,
     ConnectionState,
     Diagnostics,
     DriftRegistry,
+    RateLimitBasis,
+    RateLimitRow,
+    RateLimitState,
     StreamRow,
     StreamState,
     StreamUpdate,
@@ -105,6 +109,22 @@ def test_column_sets() -> None:
         "FAILED",
         "CLOSED",
     ]
+    assert RATE_LIMITS.column_names == (
+        "Subscription",
+        "State",
+        "RequestsPerMinute",
+        "LimitSource",
+        "InFlight",
+        "Waiting",
+        "RecentRequests",
+        "Requests",
+        "Refusals",
+        "PausedUntil",
+        "LastRefusal",
+        "UpdatedAt",
+    )
+    assert [s.value for s in RateLimitState] == ["READY", "PACED", "PAUSED", "REFUSED"]
+    assert [s.value for s in RateLimitBasis] == ["DECLARED", "LEARNED"]
 
 
 def test_stream_updates_set_only_the_given_fields() -> None:
@@ -608,3 +628,89 @@ def test_the_lock_makes_the_check_and_the_update_one_step(
             thread.join(TIMEOUT)
     assert drift_warnings(caplog) == [extra("stocks.trades", "FLAT_FILES", "halted")]
     assert sorted(texts, key=str) == [None, "REST:halted+"]
+
+
+# --- Rate limits ---------------------------------------------------------------------------------
+
+
+class _RateSource:
+    """A source of rate-limit rows that counts its pulls; `rows` is what the next pull returns."""
+
+    def __init__(self) -> None:
+        self.pulls = 0
+        self.rows: list[RateLimitRow] = []
+
+    def __call__(self) -> list[RateLimitRow]:
+        self.pulls += 1
+        return list(self.rows)
+
+
+def _rate_row(subscription: str, state: RateLimitState, **changes: object) -> RateLimitRow:
+    return dataclasses.replace(
+        RateLimitRow(subscription=subscription, state=state, updated_at=1),
+        **cast("dict[str, Any]", changes),
+    )
+
+
+def test_rate_limit_rows_are_pulled_from_their_source_when_told(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RateSource()
+    diagnostics.rate_limits_changed()  # no source yet: nothing is queued
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert source.pulls == 0
+    source.rows = [
+        _rate_row("stocks", RateLimitState.READY),
+        _rate_row("other", RateLimitState.READY),
+    ]
+    diagnostics.watch_rate_limits(source)  # pulls once
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert source.pulls == 1
+    source.rows = [
+        _rate_row(
+            "stocks",
+            RateLimitState.PAUSED,
+            requests_per_minute=5,
+            limit_source=RateLimitBasis.LEARNED,
+            paused_until=2 * 10**18,
+            last_refusal="HTTP 429",
+        )
+    ]
+    diagnostics.rate_limits_changed()
+    assert diagnostics.barrier().wait(TIMEOUT)
+    rows = {r["Subscription"]: r for r in dh_to_pylist(diagnostics.rate_limits)}
+    assert set(rows) == {"stocks", "other"}
+    stocks = rows["stocks"]
+    assert (stocks["State"], stocks["RequestsPerMinute"], stocks["LimitSource"]) == (
+        "PAUSED",
+        5,
+        "LEARNED",
+    )
+    assert stocks["LastRefusal"] == "HTTP 429"
+    assert rows["other"]["State"] == "READY"
+    with pytest.raises(RuntimeError, match="already have a source"):
+        diagnostics.watch_rate_limits(source)
+    diagnostics.release()
+    diagnostics.rate_limits_changed()  # after release: ignored
+    assert source.pulls == 2
+
+
+def test_many_changes_queue_one_pull(dh_exec_ctx: ExecutionContext) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RateSource()
+    started, go = threading.Event(), threading.Event()
+
+    def slow() -> list[RateLimitRow]:
+        started.set()
+        go.wait(TIMEOUT)
+        return source()
+
+    diagnostics.watch_rate_limits(slow)
+    assert started.wait(TIMEOUT)  # the writer is pulling; the marker is taken
+    for _ in range(50):
+        diagnostics.rate_limits_changed()  # one marker queued, the rest dropped
+    go.set()
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert source.pulls == 2
+    diagnostics.release()

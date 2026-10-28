@@ -1392,6 +1392,9 @@ _WIRE_VOCABULARY = frozenset(
 )
 _WIRE_CLIENTS = frozenset(
     {
+        "Cancel",
+        "RequestGovernor",
+        "BucketState",
         "RestClient",
         "Page",
         "to_batch",

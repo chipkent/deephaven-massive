@@ -100,6 +100,7 @@ def test_the_session_exposes_no_introspection_attributes(
         "indices",
         "options",
         "partners",
+        "rate_limits",
         "reference",
         "release",
         "snapshots",
@@ -389,6 +390,8 @@ def test_after_close(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(dm.MassiveError, match=message):
         massive_session.streams()
     with pytest.raises(dm.MassiveError, match=message):
+        massive_session.rate_limits()
+    with pytest.raises(dm.MassiveError, match=message):
         q.append_only()
     # Building queries and reaching namespaces never fail.
     assert isinstance(stream_query(massive_session), StreamQuery)
@@ -546,3 +549,18 @@ def test_every_per_class_description_is_shown_by_a_dataset_of_its_class() -> Non
         if text not in shown.get(asset_class, set())
     ]
     assert missing == []
+
+
+def test_rate_limits_show_one_ready_row_per_subscription_and_other(
+    massive_session: dm.MassiveSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    assert massive_session._core.diagnostics.barrier().wait(30)
+    rows = dh_to_pylist(massive_session.rate_limits())
+    assert sorted((r["Subscription"], r["State"], r["RequestsPerMinute"]) for r in rows) == [
+        ("currencies", "READY", None),
+        ("futures", "READY", None),
+        ("indices", "READY", None),
+        ("options", "READY", None),
+        ("other", "READY", None),
+        ("stocks", "READY", None),
+    ]

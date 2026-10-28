@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
@@ -36,7 +37,7 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
-from deephaven_massive._ingest import hosts, rest
+from deephaven_massive._ingest import hosts, poll, rate_limits, rest
 from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._massive import RestPath, Transport
 from deephaven_massive._namespaces.base import build_query
@@ -315,23 +316,6 @@ AAPL_DIVIDEND = {
     "frequency": 4,
     "id": "E1",
 }
-
-
-@pytest.fixture(autouse=True)
-def retry_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
-    """Give every session's REST client a fake clock, so retry waits never sleep.
-
-    The session reads `_massive.RestClient` when it creates its client, so the patch reaches
-    it. `setitem` keeps the lazily resolved name out of the module's attributes at teardown.
-
-    Returns:
-        The clock.
-    """
-    clock = FakeClock()
-    monkeypatch.setitem(
-        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=clock)
-    )
-    return clock
 
 
 @pytest.fixture
@@ -1004,13 +988,22 @@ def test_refusals_raise_their_public_errors(
 def test_a_lasting_rate_limit_names_itself_and_warns_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    fake_rest.reply(DIVIDENDS_PATH, Reply(b"{}", status=429, headers={"Retry-After": "1"}))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    # Massive asks for a pause beyond the ten minutes the library waits: it gives up at once.
+    refusal = {"status": "ERROR", "request_id": "r7", "message": "slow down"}
+    fake_rest.reply(DIVIDENDS_PATH, Reply(refusal, status=429, headers={"Retry-After": "700"}))
+    with caplog.at_level(logging.WARNING):
         for _ in range(2):
-            with pytest.raises(dm.MassiveError, match=r"^rate limited: ") as info:
+            with pytest.raises(dm.MassiveError, match=r"^rate limited: Massive refused stocks"):
                 fetch(session, DIVIDENDS, symbols=["AAPL"])
-            assert info.value.status == 429
-    assert caplog.text.count("Basic keys allow 5 requests per minute") == 1
+    # The second call failed without a request: the bucket's pause still stands.
+    assert len(sent(fake_rest)) == 1
+    warnings = [r.getMessage() for r in caplog.records if "with HTTP 429 (" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].startswith(
+        f"{session._core.label}: Massive refused stocks with HTTP 429 (HTTP 429 from GET "
+    )
+    assert warnings[0].endswith("send the request id to Massive's support")
+    assert "test-key" not in caplog.text
 
 
 def test_a_failed_symbol_fails_the_whole_fan_out(
@@ -1191,7 +1184,7 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
                 else [futures_trade(datetime(2024, 3, 28, hour, tzinfo=CHICAGO), day, ticker)]
             )
             fake_rest.reply(session_target(ticker, day), Reply(envelope(trades)))
-    with caplog.at_level(logging.INFO, LOGGER):
+    with caplog.at_level(logging.INFO):
         out = history(
             session,
             FUTURES_TRADES,
@@ -1209,9 +1202,9 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
         ("NQH5", date(2024, 4, 1)),
     ]
     assert (
-        "futures.trades history: at least 6 requests, one per session and symbol, more where a "
-        "session spans several pages; at a Basic key's 5 requests a minute that takes at least "
-        "1 minute"
+        "futures.trades history: 6 requests, one per session and symbol, more where a session "
+        "spans several pages; if the futures subscription is on the Basic tier (5 requests a "
+        "minute), that takes at least 1 min"
     ) in caplog.messages
 
 
@@ -1221,10 +1214,10 @@ def test_a_short_session_download_is_not_announced(
     # A weekend holds no session, and five requests are not announced.
     for day in ("2025-03-03", "2025-03-04", "2025-03-05", "2025-03-06", "2025-03-07"):
         fake_rest.reply(session_target("ESH5", day), Reply(envelope([])))
-    with caplog.at_level(logging.INFO, LOGGER):
+    with caplog.at_level(logging.INFO):
         history(session, FUTURES_TRADES, start="2025-03-01", end="2025-03-09", symbols=["ESH5"])
     assert len(sent(fake_rest)) == 5
-    assert "requests a minute that takes" not in caplog.text
+    assert "requests a minute" not in caplog.text
 
 
 def test_a_session_end_date_filter_needs_datetimes(
@@ -1923,7 +1916,7 @@ def test_a_long_grouped_daily_download_is_announced(
 ) -> None:
     for day in range(3, 18):
         fake_rest.reply(GROUPED_PATH.format(date=f"2025-03-{day:02d}"), Reply(envelope([])))
-    with caplog.at_level(logging.INFO, LOGGER):
+    with caplog.at_level(logging.INFO):
         history(
             session,
             BARS,
@@ -1938,8 +1931,8 @@ def test_a_long_grouped_daily_download_is_announced(
     assert len(days) == 11
     assert all(date.fromisoformat(day).weekday() < 5 for day in days)
     assert (
-        "stocks.bars history: 11 requests, one per day; at a Basic key's 5 requests a minute "
-        "that takes about 2 minutes"
+        "stocks.bars history: 11 requests, one per day; if the stocks subscription is on the "
+        "Basic tier (5 requests a minute), that takes at least 2 min"
     ) in caplog.text
 
 
@@ -1987,10 +1980,10 @@ def test_a_history_by_instants_is_not_announced_however_many_symbols(
     tickers = ["A", "B", "C", "D", "E", "F"]
     for ticker in tickers:
         fake_rest.reply(TRADES_PATH.format(stockTicker=ticker), Reply(envelope([])))
-    with caplog.at_level(logging.INFO, LOGGER):
+    with caplog.at_level(logging.INFO):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=tickers)
     assert len(sent(fake_rest)) == 6
-    assert "requests a minute that takes" not in caplog.text
+    assert "requests a minute" not in caplog.text
 
 
 def crypto_bars(
@@ -2050,3 +2043,149 @@ def test_forex_grouped_daily_keeps_its_weekend_days(
         "2025-03-08",
         "2025-03-09",
     ]
+
+
+# --- Rate limits ---------------------------------------------------------------------------------
+
+
+def governor_of(m: dm.MassiveSession) -> _massive.RequestGovernor:
+    return cast("rest.RestEndpoints", m._core.rest_transport())._state.client.governor
+
+
+def requests_by_bucket(m: dm.MassiveSession) -> dict[str, int]:
+    return {state.bucket: state.requests for state in governor_of(m).snapshot() if state.requests}
+
+
+def test_each_request_is_charged_to_its_subscription() -> None:
+    assert rest.call_bucket(DIVIDENDS, rest.Call({}, {"ticker.any_of": ("AAPL",)})) == "stocks"
+    assert rest.call_bucket(CRYPTO_LAST, rest.Call({}, {}, "X:BTCUSD")) == "currencies"
+    assert rest.call_bucket(CONVERSION, rest.Call({}, {}, "C:EURUSD")) == "currencies"
+    assert rest.call_bucket(NEWS, rest.Call({}, {})) == "other"  # no subscription: unpaced
+    # A dataset with a path per symbol class follows the class its request's symbols share.
+    assert rest.call_bucket(NEWS_BY_CLASS, rest.Call({}, {}, "C:EURUSD")) == "currencies"
+    assert rest.call_bucket(SMA, rest.Call({}, {}, "AAPL")) == "stocks"
+
+
+def test_a_session_charges_reads_and_host_decisions_to_their_buckets(
+    *, session: dm.MassiveSession, snapshots: FakeRestServer
+) -> None:
+    snapshots.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
+    snapshots.reply(NEWS_PATH, Reply(envelope([])))
+    fetch(session, DIVIDENDS, symbols=["AAPL"])
+    fetch(session, NEWS)
+    # The stocks host is decided from the unified snapshot, but for the stocks subscription.
+    session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    assert requests_by_bucket(session) == {"stocks": 2, "other": 1}
+
+
+def test_a_learned_basic_subscription_is_paced_and_shown(
+    *,
+    fake_rest: FakeRestServer,
+    rest_clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    basic = Reply({"message": "You've exceeded the maximum requests per minute"}, status=429)
+    fake_rest.reply(DIVIDENDS_PATH, basic, Reply(envelope([AAPL_DIVIDEND])))
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert [r["Symbol"] for r in fetch(m, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
+        assert rest_clock.waits == [61.0]
+        assert "that is the Basic tier's limit of 5 requests per minute" in caplog.text
+        assert m._core.diagnostics.barrier().wait(30)
+        stocks = next(r for r in dh_to_pylist(m.rate_limits()) if r["Subscription"] == "stocks")
+        assert (stocks["RequestsPerMinute"], stocks["LimitSource"]) == (5, "LEARNED")
+        assert (stocks["Requests"], stocks["Refusals"]) == (2, 1)
+    finally:
+        m.close()
+
+
+def test_a_paced_fetch_announces_how_long_it_takes(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        rest_basic_subscriptions={dm.Subscription.CURRENCIES},
+    )
+    m = dm.MassiveSession(config)
+    pairs = ["BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "XRP-USD", "DOT-USD"]
+    for pair in pairs:
+        fake_rest.reply(f"/v1/last/crypto/{pair.replace('-', '/')}", Reply(envelope([])))
+    try:
+        with caplog.at_level(logging.INFO):
+            fetch(m, CRYPTO_LAST, symbols=pairs)
+    finally:
+        m.close()
+    assert (
+        "crypto.last fetch: 6 requests; paced at 5 requests a minute (currencies), that takes "
+        "at least 1 min"
+    ) in caplog.messages
+
+
+def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A manual clock: a call waiting for a slot can only stop by being cancelled.
+    clock = FakeClock(manual=True)
+    create = functools.partial(_massive.RequestGovernor, rate_limits.BUCKETS, clock=clock)
+    monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        max_concurrency=3,
+        rest_basic_subscriptions={dm.Subscription.CURRENCIES},
+    )
+    m = dm.MassiveSession(config)
+    governor = governor_of(m)
+    for _ in range(4):  # one slot is left
+        governor.done(governor.acquire("currencies", _massive.Cancel()), answered=True)
+    refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    for pair in ("BTC/USD", "ETH/USD", "SOL/USD"):
+        fake_rest.reply(f"/v1/last/crypto/{pair}", refused)
+    try:
+        with pytest.raises(dm.EntitlementError, match="upgrade"):
+            fetch(m, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD", "SOL-USD"])
+        assert len(fake_rest.requests) == 1  # the others gave up their places unsent
+        assert next(s for s in governor.snapshot() if s.bucket == "currencies").waiting == 0
+    finally:
+        m.close()
+
+
+def test_a_poll_whose_cycles_outlast_their_interval_warns(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    monkeypatch.setattr(poll, "CLOCK", FakeClock(manual=True))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        rest_basic_subscriptions={dm.Subscription.STOCKS},
+    )
+    m = dm.MassiveSession(config)
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
+    q = query(m, DIVIDENDS, symbols=["A", "B", "C", "D", "E", "F"])
+    assert isinstance(q, Query)
+    try:
+        with caplog.at_level(logging.WARNING):
+            table = q.poll(30)
+            deadline = time.monotonic() + 30
+            while "cycles run late" not in caplog.text:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+        m.release(table)
+    finally:
+        m.close()
+    assert (
+        "stocks.dividends poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
+        "per minute, so a cycle takes at least 36 s, longer than the 30 s interval; cycles run "
+        "late"
+    ) in caplog.messages

@@ -18,6 +18,8 @@ from deephaven_massive._massive.rest import batch, client, response
 from deephaven_massive._massive.spec import types, values
 
 EXPECTED_INTERFACE = [
+    "BucketState",
+    "Cancel",
     "DriftReport",
     "Field",
     "FlatFile",
@@ -28,6 +30,7 @@ EXPECTED_INTERFACE = [
     "ReadColumn",
     "ReadPlan",
     "Reject",
+    "RequestGovernor",
     "RestClient",
     "RestPath",
     "Source",

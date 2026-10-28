@@ -548,12 +548,7 @@ NS = 10**9
 def rest_session(
     fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[dm.MassiveSession]:
-    # A session on the fake REST server whose retry waits never sleep. The session reads
-    # `_massive.RestClient` when it creates its client; `setitem` keeps the lazily resolved name
-    # out of the module's attributes at teardown.
-    monkeypatch.setitem(
-        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=FakeClock())
-    )
+    # A session on the fake REST server; its retry waits are on the `rest_clock` fake clock.
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
     yield m
     m.close()

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive import MassiveSession
+    from tests._fakes.clock import FakeClock
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
@@ -305,6 +306,29 @@ def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     core = importlib.import_module("deephaven_massive._tables.core")
     itertools = importlib.import_module("itertools")
     monkeypatch.setattr(core, "_stream_numbers", itertools.count(1))
+
+
+@pytest.fixture(autouse=True)
+def rest_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    """Give each test a registry of REST rate governors of its own, on a fake clock.
+
+    Sessions share one governor per API key through a process-wide registry, so without this
+    one test's pauses, learned limits, and held slots would carry over into the next. Every
+    governor of the test, and so every session's REST client, waits on the returned clock:
+    automatic by default (a wait returns at once and moves virtual time), so no rate-limit or
+    retry wait ever sleeps. A test that needs the manual mode replaces the registry itself.
+
+    Returns:
+        The clock.
+    """
+    clock_module = importlib.import_module("tests._fakes.clock")
+    functools = importlib.import_module("functools")
+    rate_limits = importlib.import_module("deephaven_massive._ingest.rate_limits")
+    wire = importlib.import_module("deephaven_massive._massive")
+    clock: FakeClock = clock_module.FakeClock()
+    create = functools.partial(wire.RequestGovernor, rate_limits.BUCKETS, clock=clock)
+    monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
+    return clock
 
 
 @pytest.fixture

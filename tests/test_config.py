@@ -11,7 +11,7 @@ import deephaven_massive as dm
 from deephaven_massive import _query, _session
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets.dates import NEW_YORK
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, Subscription
 
 ENV = (
     "MASSIVE_API_KEY",
@@ -79,6 +79,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.flat_file_symbol_threshold == 50
     assert base.flat_file_publish_cutoff == time(11, 30)
     assert base.max_concurrency == 8
+    assert base.rest_basic_subscriptions == frozenset()
     assert base.flush_interval == 0.05
     assert base.rest_base_url == "https://api.massive.com"
     assert base.s3_endpoint_url == "https://files.massive.com"
@@ -188,6 +189,46 @@ def test_ws_hosts_types(base: MassiveConfig) -> None:
         _replace(base, ws_hosts={AssetClass.STOCKS: 5})
     with pytest.raises(TypeError, match="ws_hosts must be a mapping"):
         _replace(base, ws_hosts=["delayed.massive.com"])
+
+
+def test_rest_basic_subscriptions_are_frozen_and_hashable(base: MassiveConfig) -> None:
+    declared = {Subscription.OPTIONS, Subscription.CURRENCIES}
+    cfg = _replace(base, rest_basic_subscriptions=declared)
+    declared.add(Subscription.STOCKS)  # the configuration keeps its own copy
+    assert cfg.rest_basic_subscriptions == frozenset(
+        {Subscription.OPTIONS, Subscription.CURRENCIES}
+    )
+    assert isinstance(cfg.rest_basic_subscriptions, frozenset)
+    same = _replace(base, rest_basic_subscriptions=frozenset(cfg.rest_basic_subscriptions))
+    assert cfg == same
+    assert hash(cfg) == hash(same)
+    assert _replace(base, rest_basic_subscriptions={}.keys()).rest_basic_subscriptions == set()
+
+
+def test_rest_basic_subscriptions_hold_subscriptions_only(base: MassiveConfig) -> None:
+    with pytest.raises(
+        TypeError,
+        match=r"^rest_basic_subscriptions must be a set of dm\.Subscription, such as "
+        r"\{dm\.Subscription\.STOCKS\}, not list$",
+    ):
+        _replace(base, rest_basic_subscriptions=[Subscription.STOCKS])
+    with pytest.raises(
+        TypeError,
+        match=r"^each rest_basic_subscriptions member must be dm\.Subscription, "
+        r"e\.g\. dm\.Subscription\.OPTIONS$",
+    ):
+        _replace(base, rest_basic_subscriptions={"options"})
+    # An asset class names the subscription that covers it.
+    with pytest.raises(TypeError, match=r"e\.g\. dm\.Subscription\.STOCKS$"):
+        _replace(base, rest_basic_subscriptions={AssetClass.STOCKS})
+    # Forex and crypto are one subscription, whichever way they are spelled.
+    for currency in (AssetClass.FOREX, AssetClass.CRYPTO, "forex", "Crypto"):
+        with pytest.raises(
+            TypeError,
+            match=r"^rest_basic_subscriptions must hold dm\.Subscription members; forex and "
+            r"crypto are one subscription, dm\.Subscription\.CURRENCIES$",
+        ):
+            _replace(base, rest_basic_subscriptions={currency})
 
 
 def test_publish_cutoff_is_a_wall_clock_time(base: MassiveConfig) -> None:

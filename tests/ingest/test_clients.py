@@ -12,7 +12,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import ChannelFamily, Recency
-from deephaven_massive._ingest import flatfiles, rest, ws
+from deephaven_massive._ingest import flatfiles, rate_limits, rest, ws
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._tables.core import SessionCore
 from tests._fakes.s3 import FakeS3
@@ -205,7 +205,9 @@ def test_racing_first_rest_calls_keep_one_client(
     assert len(built) == 2
     assert transport._state.client is built[1]
     with pytest.raises(_massive.WireError, match="closed"):
-        built[0].get(_massive.source(_massive.Transport.REST, "/v3/snapshot"), {}, {})
+        built[0].get(
+            _massive.source(_massive.Transport.REST, "/v3/snapshot"), {}, {}, bucket="other"
+        )
 
 
 def test_the_rest_state_does_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
@@ -293,3 +295,38 @@ def test_the_client_is_created_under_the_registry_lock(
     session._core.flat_file_transport()
     session._core.flat_file_transport()
     assert taken_elsewhere == [False]
+
+
+def test_sessions_of_one_key_share_a_governor_and_its_declarations(fake_s3: FakeS3) -> None:
+    first = dm.MassiveSession(config(rest_basic_subscriptions={dm.Subscription.OPTIONS}))
+    second = dm.MassiveSession(config())
+    other_key = dm.MassiveSession(config(api_key="other-key"))
+    try:
+        shared = clients_of(first)._lease.governor
+        assert clients_of(second)._lease.governor is shared
+        assert clients_of(other_key)._lease.governor is not shared
+        second._core.rest_transport()
+        rest_state = clients_of(second)._rest
+        assert rest_state is not None
+        assert rest_state.client.governor is shared  # the session's client uses it
+        assert {s.bucket for s in shared.snapshot() if s.declared} == {"options"}
+        first.close()  # the declaration leaves with its session
+        assert {s.bucket for s in shared.snapshot() if s.declared} == set()
+    finally:
+        for m in (first, second, other_key):
+            m.close()
+    entries = rate_limits.GOVERNORS._entries.values()
+    [entry] = [each for each in entries if each.governor is shared]
+    assert entry.holders == {}
+
+
+def test_a_collected_session_releases_its_lease(fake_s3: FakeS3) -> None:
+    m = dm.MassiveSession(config(rest_basic_subscriptions={dm.Subscription.STOCKS}))
+    governor = clients_of(m)._lease.governor
+    gc.disable()
+    try:
+        del m
+    finally:
+        gc.enable()
+    # The collected session's closers run on its reaper; its declaration goes with it.
+    assert _wait_for(lambda: not any(s.declared for s in governor.snapshot()))

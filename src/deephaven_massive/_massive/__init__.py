@@ -32,6 +32,10 @@ Interface:
       dataset's file for a day lives.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
+    - `RequestGovernor`, `BucketState`: when each REST request of a Massive subscription may
+      start (a Basic subscription's pace, the pause after a 429), shared by the clients of one
+      API key, and a snapshot of one subscription's state for diagnostics.
+    - `Cancel`: the cancellation token that ends a request's waits.
     - `encode_value`: the wire text of one REST parameter value, by its `ParamKind`. It is
       part of `spec` and loads no client: the REST client encodes every request with it, and
       the library's filter check calls it so a value it accepts always encodes.
@@ -60,6 +64,8 @@ from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
 __all__ = [
+    "BucketState",
+    "Cancel",
     "DriftReport",
     "Field",
     "FlatFile",
@@ -70,6 +76,7 @@ __all__ = [
     "ReadColumn",
     "ReadPlan",
     "Reject",
+    "RequestGovernor",
     "RestClient",
     "RestPath",
     "Source",
@@ -93,6 +100,9 @@ __all__ = [
 
 # Each name of the interface, and the module that defines it.
 _EXPORTS: dict[str, str] = {
+    "BucketState": "deephaven_massive._massive.rest.governor",
+    "Cancel": "deephaven_massive._massive.net.cancel",
+    "RequestGovernor": "deephaven_massive._massive.rest.governor",
     "FlatFile": "deephaven_massive._massive.flatfiles.reader",
     "FlatFileClient": "deephaven_massive._massive.flatfiles.client",
     "Page": "deephaven_massive._massive.rest.response",
@@ -130,6 +140,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.flatfiles.client import FlatFileClient
     from deephaven_massive._massive.flatfiles.layout import object_key
     from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
+    from deephaven_massive._massive.net.cancel import Cancel
     from deephaven_massive._massive.net.errors import (
         WireAuthError,
         WireEntitlementError,
@@ -137,6 +148,7 @@ if TYPE_CHECKING:
     )
     from deephaven_massive._massive.rest.batch import to_batch
     from deephaven_massive._massive.rest.client import RestClient
+    from deephaven_massive._massive.rest.governor import BucketState, RequestGovernor
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec import provenance, source, sources
     from deephaven_massive._massive.spec.types import (

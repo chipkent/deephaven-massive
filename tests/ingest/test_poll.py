@@ -1,7 +1,6 @@
 """Tests for `poll()` tables: the three modes, the cycle's failures, rows, and lifetime."""
 
 import dataclasses
-import functools
 import gc
 import logging
 import queue
@@ -20,14 +19,14 @@ from deephaven.column import string_col
 from deephaven.table import Table
 
 import deephaven_massive as dm
-from deephaven_massive import _massive, _session
+from deephaven_massive import _session
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode
 from deephaven_massive._ingest import poll
 from deephaven_massive._ingest.poll import LIVE_COLUMN, Pollers, RowDataError, open_poll
-from deephaven_massive._massive import DriftReport, Transport
+from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import Query
 from deephaven_massive._tables.liveness import ResultRegistry
@@ -73,8 +72,10 @@ class Script:
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
+        cancel: threading.Event,
     ) -> tuple[pa.Table, int]:
         self.symbols.append(symbols)
+        self.cancel = cancel
         if self.drift is not None:
             record(self.drift)
         outcome = self.outcomes.get(timeout=TIMEOUT)
@@ -483,7 +484,7 @@ def test_a_cycle_after_the_core_is_gone_ends_the_poller(
         pollers=pollers,
         clock=poll.CLOCK,
         publisher=cast("Any", None),
-        stop=threading.Event(),
+        stop=Cancel(),
     )
     poller._core = cast("Any", lambda: None)
     with ThreadPoolExecutor(1) as pool:
@@ -597,9 +598,6 @@ def rest_session(
 ) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS,)))
     monkeypatch.setattr(poll, "CLOCK", clock)
-    monkeypatch.setitem(
-        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=FakeClock())
-    )
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
     yield m
     m.close()
@@ -681,9 +679,6 @@ def routed_session(
 ) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
-    monkeypatch.setitem(
-        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=FakeClock())
-    )
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
     yield m
     m.close()
@@ -888,9 +883,6 @@ def feed_session(
 ) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
     monkeypatch.setattr(poll, "CLOCK", clock)
-    monkeypatch.setitem(
-        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=FakeClock())
-    )
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
     yield m
     m.close()
@@ -1010,7 +1002,9 @@ def test_a_failed_append_remembers_nothing(
     failures = [RuntimeError("conversion failed")]
 
     def flaky(data: pa.Table) -> Table:
-        if failures:
+        # Only the poller's conversion fails; the diagnostics writer's rows (each request
+        # updates `m.rate_limits()`) convert as usual.
+        if failures and "Subscription" not in data.column_names:
             raise failures.pop()
         return convert(data)
 

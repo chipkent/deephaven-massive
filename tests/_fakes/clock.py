@@ -13,13 +13,15 @@ calls `advance` (manual mode):
 
 In both modes a wait whose event is set ends at once and returns True, without moving time,
 as `threading.Event.wait` does; a blocked manual wait notices the event within 10 ms of real
-time. Every wait is recorded. All state sits behind one condition, so any thread may call any
-method.
+time, and from the moment its event is set it no longer counts as a sleeper, so a test that
+waits for sleepers sees the thread's next wait rather than the one it is leaving. Every
+wait is recorded. All state sits behind one condition, so any thread may call any method.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 
 _WAIT = 10.0
 """Seconds a test waits for sleepers before failing; real time, only on failure."""
@@ -42,7 +44,7 @@ class FakeClock:
         self._wall = wall
         self._now = 0.0
         self._sleeps: list[float] = []
-        self._deadlines: list[float] = []
+        self._sleepers: list[tuple[float, threading.Event]] = []
         self._changed = threading.Condition()
 
     def monotonic(self) -> float:
@@ -73,13 +75,14 @@ class FakeClock:
             if not self._manual:
                 self._now = max(self._now, deadline)
                 return False
-            self._deadlines.append(deadline)
+            sleeper = (deadline, event)
+            self._sleepers.append(sleeper)
             self._changed.notify_all()
             while not self._changed.wait_for(
                 lambda: self._now >= deadline or event.is_set(), _POLL
             ):
                 pass
-            self._deadlines.remove(deadline)
+            self._sleepers.remove(sleeper)
             self._changed.notify_all()
             return event.is_set()
 
@@ -94,7 +97,7 @@ class FakeClock:
             self._changed.notify_all()
 
     def wait_for_sleepers(self, count: int) -> list[float]:
-        """Wait until exactly `count` threads are blocked in a manual wait.
+        """Wait until exactly `count` threads are blocked in a manual wait whose event is unset.
 
         Args:
             count: The number of sleepers expected.
@@ -105,10 +108,31 @@ class FakeClock:
         Raises:
             AssertionError: If that many never sleep within 10 s of real time.
         """
+        give_up = time.monotonic() + _WAIT
         with self._changed:
-            if not self._changed.wait_for(lambda: len(self._deadlines) == count, _WAIT):
-                raise AssertionError(f"{len(self._deadlines)} sleepers, expected {count}")
-            return sorted(self._deadlines)
+            while True:
+                deadlines = self._asleep()
+                if len(deadlines) == count:
+                    return deadlines
+                if time.monotonic() > give_up:
+                    raise AssertionError(f"{len(deadlines)} sleepers, expected {count}")
+                self._changed.wait(_POLL)
+
+    def sleeping(self) -> list[float]:
+        """Return the deadlines of the threads blocked in a manual wait right now, sorted.
+
+        Unlike `wait_for_sleepers` it never waits, so a test that drives time itself (advancing
+        to the earliest deadline once every thread it runs is asleep) can poll it.
+
+        Returns:
+            The deadlines, in virtual monotonic seconds.
+        """
+        with self._changed:
+            return self._asleep()
+
+    def _asleep(self) -> list[float]:
+        """Return the sorted deadlines of the sleepers whose event is unset; the lock is held."""
+        return sorted(deadline for deadline, event in self._sleepers if not event.is_set())
 
     @property
     def waits(self) -> list[float]:

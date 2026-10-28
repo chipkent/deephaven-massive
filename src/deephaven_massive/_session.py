@@ -171,6 +171,7 @@ class MassiveSession:
             m.stocks  # <MassiveSession #1 stocks>, the namespace of stock datasets
             conns = m.connections()  # live diagnostics: connections and host decisions
             streams = m.streams()  # live diagnostics: one row per stream
+            limits = m.rate_limits()  # live diagnostics: REST pace and pauses per subscription
             m.close()  # live tables go static; verbs now raise MassiveError
 
             with dm.MassiveSession() as m2:  # closes on exit
@@ -403,6 +404,28 @@ class MassiveSession:
         self._core.require_open()
         return self._core.diagnostics.streams
 
+    def rate_limits(self) -> Table:
+        """Return the live diagnostics table of REST rate limits, one row per subscription.
+
+        Massive limits REST requests per subscription (5 per minute on the free Basic tier,
+        none on a paid one), counted across every key and session of the account. Each row
+        shows one subscription's bucket, or `other` for the datasets Massive assigns to none:
+        its `State` (`READY`, `PACED` while requests wait for a slot, `PAUSED` after a 429,
+        `REFUSED` while requests fail because Massive refused them for longer than the library
+        waits), `RequestsPerMinute` and `LimitSource` (`DECLARED` in
+        `MassiveConfig.rest_basic_subscriptions`, or `LEARNED` from Massive's refusal), the
+        requests in flight, waiting, and in the last window, totals of requests and refusals,
+        `PausedUntil`, and the latest refusal. Sessions of this process that use the same API
+        key share one governor, so their tables show the same rows. The table is the
+        session's; do not edit it. After `close()` this raises `MassiveError`.
+
+        Returns:
+            The `rate_limits` table, keyed by `Subscription`; its columns are `RATE_LIMITS`
+            in `_tables/diagnostics.py`.
+        """
+        self._core.require_open()
+        return self._core.diagnostics.rate_limits
+
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
@@ -430,7 +453,7 @@ class MassiveSession:
         Publishers are not failed, so live tables keep their rows and stop updating;
         `m.streams()` shows every stream `CLOSED` before the diagnostics tables are released.
         "session closed; N live tables are now static" is logged, at WARNING when N > 0. After
-        `close()`, verbs, `connections()`, and `streams()` raise
+        `close()`, verbs, `connections()`, `streams()`, and `rate_limits()` raise
         `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
         and `release()` keep working. On an update-graph thread it raises `ValueError`, even
         when the session is already closed.
