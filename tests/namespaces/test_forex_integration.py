@@ -364,7 +364,7 @@ def test_forex_week_bars_start_on_monday_or_sunday(
     kept = live_session.forex.bars(_PAIR, dm.Timespan.WEEK).history(
         date(2026, 3, 2), date(2026, 3, 15), source=dm.HistorySource.REST
     )
-    stamps = [instant_text(row["Timestamp"]) for row in table_rows(kept)]
+    stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history 2026-03-02..2026-03-15 keeps the bars stamped {stamps}")
     assert len(lines) > 1
 

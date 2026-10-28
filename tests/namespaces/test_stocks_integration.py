@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._massive import RestClient, Transport, WireError, source
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -44,6 +45,10 @@ _SYMBOL = "AAPL"
 _RANGE = "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"
 _MS = 1_000_000
 _NEW_YORK = ZoneInfo("America/New_York")
+_NVDA = (date(2024, 6, 7), date(2024, 6, 10))
+"""NVDA's last day before its 10-for-1 split, and the split's execution date."""
+_COST = (date(2023, 12, 22), date(2023, 12, 29))
+"""The days around COST's special dividend, ex-dividend on 2023-12-27."""
 _HALF_DAYS = (date(2025, 11, 28), date(2025, 12, 24))
 """US market half days, closing at 13:00 New York time."""
 _GROUPED = "/v2/aggs/grouped/locale/us/market/stocks/{date}"
@@ -198,7 +203,7 @@ def test_stock_week_bars_start_on_monday_or_sunday(
     kept = live_session.stocks.bars(_SYMBOL, dm.Timespan.WEEK).history(
         date(2026, 3, 2), date(2026, 3, 15), source=dm.HistorySource.REST
     )
-    stamps = [instant_text(row["Timestamp"]) for row in table_rows(kept)]
+    stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history 2026-03-02..2026-03-15 keeps the bars stamped {stamps}")
     assert len(lines) > 1
 
@@ -316,3 +321,227 @@ def test_half_day_stock_flat_files_and_their_stamps(
             stamps = [_new_york(int(str(r["window_start"]))) for r in (rows[:1] + rows[-1:])]
             evidence(f"{prefix} {day}: {len(rows)} rows; first and last window_start {stamps}")
     assert read
+
+
+def _days(
+    session: dm.MassiveSession,
+    symbol: str,
+    *,
+    span: tuple[date, date],
+    adjusted: bool,
+    table_rows: TableRows,
+) -> dict[str, dict[str, Any]]:
+    """Read a symbol's REST day bars on one split basis, by `Date`.
+
+    Returns:
+        Each day's bar.
+    """
+    table = session.stocks.bars(symbol, dm.Timespan.DAY, adjusted=adjusted).history(
+        span[0], span[1], source=dm.HistorySource.REST
+    )
+    return {str(row["Date"]): row for row in table_rows(table)}
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("44")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_nvda_split_basis_before_and_on_the_split(
+    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+) -> None:
+    """How NVDA's 10-for-1 split of 2024-06-10 shows in adjusted and as-traded REST bars.
+
+    Records NVDA's 2024-06-07 and 2024-06-10 day bars with `adjusted=true` and
+    `adjusted=false`. Reading it: an as-traded 2024-06-07 close near 1208 and an adjusted one
+    near 120.9, with the adjusted volume about ten times the other, confirm that `adjusted`
+    restates prices before a split; 2024-06-10, the execution date, is the control on which
+    both agree.
+    """
+    adjusted = _days(live_session, "NVDA", span=_NVDA, adjusted=True, table_rows=table_rows)
+    traded = _days(live_session, "NVDA", span=_NVDA, adjusted=False, table_rows=table_rows)
+    for day in ("2024-06-07", "2024-06-10"):
+        a, t = adjusted.get(day, {}), traded.get(day, {})
+        evidence(
+            f"NVDA {day}: adjusted close={a.get('Close')} volume={a.get('Volume')}; "
+            f"as traded close={t.get('Close')} volume={t.get('Volume')}"
+        )
+    assert adjusted
+    assert traded
+
+
+@pytest.mark.needs("stocks:starter", "s3")
+@pytest.mark.settles("44")
+@pytest.mark.timeout(100)
+def test_nvda_day_file_before_the_split(
+    flat_file_tickers: FlatFileTickers, *, evidence: Evidence
+) -> None:
+    """Whether the stock day file holds NVDA's 2024-06-07 bar as traded.
+
+    Records NVDA's `us_stocks_sip/day_aggs_v1` row of 2024-06-07. Reading it: a close near
+    1208 confirms that the flat files are as traded, so the library rightly serves only
+    `adjusted=False` from them.
+    """
+    result = flat_file_tickers("us_stocks_sip/day_aggs_v1", date(2024, 6, 7), ["NVDA"])
+    rows = [] if result is None else result[0]
+    evidence(f"NVDA day_aggs_v1 2024-06-07: {rows}")
+    assert rows
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("45")
+@pytest.mark.requests(4)
+@pytest.mark.timeout(100)
+def test_every_page_echoes_its_adjustment(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """Whether every aggregates page echoes `adjusted`, `next_url` pages and grouped daily too.
+
+    Pages through two weeks of AAPL minute bars with a small `limit`, so the range answers in
+    several pages, and reads two grouped-daily days, recording each page's `adjusted` echo.
+    Reading it: `True` on every page confirms the library's page-by-page check; a missing echo
+    on a later page means the check can only warn there.
+    """
+    range_path = source(Transport.REST, _RANGE)
+    params = {
+        "stocksTicker": _SYMBOL,
+        "multiplier": 1,
+        "timespan": "minute",
+        "from": date(2026, 3, 2),
+        "to": date(2026, 3, 13),
+    }
+    echoes = [
+        page.adjusted
+        for page, _ in zip(
+            live_rest.pages(range_path, params, {"adjusted": True, "limit": 5000}),
+            range(3),
+            strict=False,
+        )
+    ]
+    evidence(f"range pages' adjusted echoes: {echoes}")
+    grouped = source(Transport.REST, _GROUPED)
+    for day in (date(2026, 3, 2), date(2026, 3, 3)):
+        page = live_rest.get(grouped, {"date": day}, {"adjusted": False})
+        evidence(f"grouped daily {day}: adjusted echo {page.adjusted}")
+    assert echoes
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("46")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_cash_dividends_are_never_adjusted(
+    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+) -> None:
+    """Whether Massive's adjustment changes prices around COST's special dividend.
+
+    Records COST's day bars around its ex-dividend date 2023-12-27 (a $15 special dividend) with
+    `adjusted=true` and `adjusted=false`. Reading it: equal prices confirm that `adjusted`
+    concerns splits only, as the library documents; different prices before the ex-date mean
+    Massive adjusts for dividends too.
+    """
+    adjusted = _days(live_session, "COST", span=_COST, adjusted=True, table_rows=table_rows)
+    traded = _days(live_session, "COST", span=_COST, adjusted=False, table_rows=table_rows)
+    differ = sorted(
+        day for day in adjusted if day in traded and adjusted[day]["Close"] != traded[day]["Close"]
+    )
+    evidence(f"COST days whose adjusted close differs from the traded one: {differ}")
+    assert adjusted
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("47")
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_stock_dividend_events_and_the_adjustment(
+    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+) -> None:
+    """Whether `adjusted=true` applies a `stock_dividend` event of the splits dataset.
+
+    Finds one recent `stock_dividend` event and records its ticker's day bars on both bases
+    across its execution date. Reading it: prices before the date that differ by the event's
+    factor mean such events are adjusted like splits; equal prices mean they are not, and the
+    README's recipe should skip them.
+    """
+    events = table_rows(
+        live_session.stocks.splits(
+            start="2025-01-01", filters={"adjustment_type": "stock_dividend"}, limit=1
+        ).fetch()
+    )
+    evidence(f"a stock_dividend event: {events[:1]}")
+    if not events:
+        return
+    event = events[0]
+    day = date.fromisoformat(str(event["ExecutionDate"]))
+    first, last = date.fromordinal(day.toordinal() - 7), date.fromordinal(day.toordinal() + 3)
+    symbol = str(event["Symbol"])
+    adjusted = _days(live_session, symbol, span=(first, last), adjusted=True, table_rows=table_rows)
+    traded = _days(live_session, symbol, span=(first, last), adjusted=False, table_rows=table_rows)
+    for row_day in sorted(adjusted):
+        evidence(
+            f"{symbol} {row_day}: adjusted close={adjusted[row_day]['Close']} "
+            f"traded close={traded.get(row_day, {}).get('Close')}"
+        )
+    assert adjusted
+
+
+@pytest.mark.needs("stocks:basic", "currencies:basic")
+@pytest.mark.settles("52")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_daily_indicator_stamps(
+    live_session: dm.MassiveSession,
+    *,
+    table_rows: TableRows,
+    instant_text: Text,
+    evidence: Evidence,
+) -> None:
+    """At which time of day Massive stamps daily indicator values, for a stock and for crypto.
+
+    Records a week of daily SMA values of AAPL and `X:BTCUSD`: each value's `TimestampStart`
+    and `Date`, which the library takes from the stamp's day. Reading it: stamps at 00:00 New
+    York time (AAPL) and 00:00 UTC (crypto) mean the day labels are right; stamps elsewhere in
+    a day say which day each value belongs to, and the labels must follow.
+    """
+    found = 0
+    for symbol in ("AAPL", "X:BTCUSD"):
+        rows = table_rows(
+            live_session.indicators.sma(
+                symbol, 5, start="2026-03-02", end="2026-03-09", timespan=dm.Timespan.DAY
+            ).fetch()
+        )
+        found += len(rows)
+        stamps = [(instant_text(r["TimestampStart"]), r["Date"]) for r in rows]
+        evidence(f"{symbol} daily SMA (TimestampStart, Date): {stamps}")
+    assert found
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("53")
+@pytest.mark.requests(4)
+@pytest.mark.timeout(100)
+def test_unknown_ticker_statuses(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """What each endpoint answers for a ticker that does not exist.
+
+    Requests `ZZZZZQ` from `/prev`, the range, `/v3/trades`, and the ticker details, and
+    records each answer's status and row count. Reading it: an empty 200 or a 404 both return
+    no rows in the library; a 404 is the only way a symbol is dropped with a WARNING.
+    """
+    ticker = "ZZZZZQ"
+    requests = (
+        ("/v2/aggs/ticker/{stocksTicker}/prev", {"stocksTicker": ticker}),
+        (
+            _RANGE,
+            {"stocksTicker": ticker, "multiplier": 1, "timespan": "day"}
+            | {"from": date(2026, 3, 2), "to": date(2026, 3, 6)},
+        ),
+        ("/v3/trades/{stockTicker}", {"stockTicker": ticker}),
+        ("/v3/reference/tickers/{ticker}", {"ticker": ticker}),
+    )
+    answered = 0
+    for template, params in requests:
+        try:
+            page = live_rest.get(source(Transport.REST, template), params, {})
+        except WireError as error:
+            evidence(f"{template}: HTTP {error.status} {error.message[:120]}")
+        else:
+            evidence(f"{template}: HTTP 200, status {page.status}, {len(page.rows)} rows")
+        answered += 1
+    assert answered == len(requests)

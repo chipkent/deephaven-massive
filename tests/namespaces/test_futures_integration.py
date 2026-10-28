@@ -9,10 +9,13 @@ tests is in `docs/live-tests.md`.
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from collections import Counter
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -37,6 +40,8 @@ pytestmark = pytest.mark.integration
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
+WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
+Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 
 _CONTRACT = "ESH6"
 """The front E-mini S&P 500 contract in the first quarter of 2026."""
@@ -226,9 +231,9 @@ def test_futures_sessions_end_only_on_weekdays(
     """Whether a futures session can end on a Saturday or Sunday.
 
     Reads every schedule event of March 2026 for nine products across the four venues and
-    records the weekday count of `SessionEndDate` and every weekend session. Reading it: none
-    confirms that requesting weekday sessions only is complete; any weekend session means the
-    library's session iteration must include those days.
+    records the weekday count of `SessionEndDate` (ISO text) and every weekend session. Reading
+    it: none confirms that requesting weekday sessions only is complete; any weekend session
+    means the library's session iteration must include those days.
     """
     rows = table_rows(
         live_session.futures.schedules(
@@ -238,14 +243,13 @@ def test_futures_sessions_end_only_on_weekdays(
             limit=_SCHEDULE_LIMIT,
         ).fetch()
     )
-    days = Counter(row["SessionEndDate"].strftime("%a") for row in rows if row["SessionEndDate"])
-    weekend = sorted(
-        {
-            (row["ProductCode"], row["SessionEndDate"].isoformat())
-            for row in rows
-            if row["SessionEndDate"] and row["SessionEndDate"].weekday() >= 5
-        }
-    )
+    ended = [
+        (row["ProductCode"], date.fromisoformat(row["SessionEndDate"]))
+        for row in rows
+        if row["SessionEndDate"]
+    ]
+    days = Counter(day.strftime("%a") for _, day in ended)
+    weekend = sorted({(product, day.isoformat()) for product, day in ended if day.weekday() >= 5})
     cut = " (cut short at the limit)" if len(rows) == _SCHEDULE_LIMIT else ""
     evidence(f"schedules 2026-03 of {_PRODUCTS}: {len(rows)} events{cut}")
     evidence(f"session end weekdays {dict(days)}")
@@ -300,10 +304,11 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
             datetime(2026, 1, 1, tzinfo=UTC), end
         )
     )
-    evidence(
-        "library 2-session bars kept by their own window: "
-        f"{[(instant_text(r['Timestamp']), r['SessionEndDate']) for r in library]}"
-    )
+    windows = [
+        (instant_text(r["TimestampStart"]), instant_text(r["TimestampEnd"]), r["Date"])
+        for r in library
+    ]
+    evidence(f"library 2-session bars kept by their own window (start, end, Date): {windows}")
     assert shown
 
 
@@ -335,3 +340,104 @@ def test_shapes_of_futures_contract_tickers(
     library = table_rows(live_session.futures.contracts(product_code="NG", limit=20).fetch())
     evidence(f"library contracts(NG): Ticker {[r['Ticker'] for r in library]}")
     assert tickers
+
+
+_CHICAGO = ZoneInfo("America/Chicago")
+_STREAM_WAIT = 60.0
+"""Seconds a stream test waits for its first rows; futures trade nearly around the clock."""
+
+
+def _chicago(nanos: int) -> str:
+    """Write epoch nanoseconds as Chicago wall time with its weekday.
+
+    Returns:
+        Such as `"Mon 2026-03-02 16:45"`.
+    """
+    return f"{datetime.fromtimestamp(nanos / 1e9, UTC).astimezone(_CHICAGO):%a %Y-%m-%d %H:%M}"
+
+
+@pytest.mark.needs("futures:basic")
+@pytest.mark.settles("49")
+@pytest.mark.requests(4)
+@pytest.mark.timeout(100)
+def test_session_labels_around_the_roll_and_a_holiday(
+    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+) -> None:
+    """Which session Massive labels rows with around 17:00 Chicago time and after a holiday.
+
+    Records, per minute, the `Date` (Massive's `session_end_date`) of `ESH6` minute bars from
+    15:30 to 17:30 Chicago time on Monday 2026-03-02, of `ZCK6` (CBOT, whose pre-open starts at
+    16:45) over the same hour, and of `ESM6` around Good Friday 2026 (Thursday 2026-04-02 from
+    16:00 Chicago time to Monday 2026-04-06 09:00), beside the session the 17:00 Chicago rule
+    gives. Reading it: labels that change at 17:00 confirm the WebSocket rule; a label that
+    changes at 16:45 for ZC, or Thursday evening rows labelled Monday, are what the schedule
+    correction must catch.
+    """
+    windows = (
+        (
+            "ESH6",
+            datetime(2026, 3, 2, 21, 30, tzinfo=UTC),
+            datetime(2026, 3, 2, 23, 30, tzinfo=UTC),
+        ),
+        (
+            "ZCK6",
+            datetime(2026, 3, 2, 21, 30, tzinfo=UTC),
+            datetime(2026, 3, 2, 23, 30, tzinfo=UTC),
+        ),
+        ("ESM6", datetime(2026, 4, 2, 21, 0, tzinfo=UTC), datetime(2026, 4, 6, 14, 0, tzinfo=UTC)),
+    )
+    found = 0
+    for contract, start, end in windows:
+        rows = table_rows(
+            live_session.futures.bars(contract, dm.Timespan.MINUTE).history(start, end)
+        )
+        found += len(rows)
+        changes: list[str] = []
+        last = None
+        for row in rows:
+            label = row["Date"]
+            if label != last:
+                changes.append(f"{_chicago(row['TimestampStart'])} -> {label}")
+                last = label
+        evidence(f"{contract} {start:%Y-%m-%d}: {len(rows)} bars; label changes {changes}")
+    assert found
+
+
+@pytest.mark.needs("futures:starter")
+@pytest.mark.settles("49", "50")
+@pytest.mark.timeout(100)
+def test_streamed_futures_dates_and_one_second_ends(
+    live_session: dm.MassiveSession,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    wait_rows: WaitRows,
+    stream_report: Report,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Which session the library gives streamed futures rows, and how long a one-second bar is.
+
+    Streams `ESH6` trades and one-second bars until their first rows arrive, and records each
+    row's `Date`, the `m.streams()` errors (a schedule miss shows there), and the one-second
+    bars' `TimestampStart` and `TimestampEnd`, with the WARNING the library logs when Massive's
+    `e` is not the start plus one second. Reading it: no miss and one-second windows confirm the
+    calendar and the documented length; the WARNING means Massive's bars span more, as its
+    documented sample suggests, and the library keeps the later end.
+    """
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    trades = live_session.futures.trades(_CONTRACT).append_only()
+    seconds = live_session.futures.bars(_CONTRACT, dm.Timespan.SECOND).append_only()
+    deadline = time.monotonic() + _STREAM_WAIT
+    rows = wait_rows(live_session, trades, deadline)
+    bars = wait_rows(live_session, seconds, deadline)
+    for line in stream_report(live_session):
+        evidence(line)
+    live_session.release(trades)
+    live_session.release(seconds)
+    evidence(f"trade Dates: {sorted({str(r['Date']) for r in rows})}")
+    spans = [(r["TimestampStart"], (r["TimestampEnd"] - r["TimestampStart"]) / 1e9) for r in bars]
+    evidence(f"one-second bars (start, end - start in s): {spans[:5]}")
+    evidence(
+        f"end warnings: {[r.getMessage() for r in caplog.records if 'one-second' in r.message]}"
+    )
+    assert rows or bars, "no futures row arrived in 60 s"
