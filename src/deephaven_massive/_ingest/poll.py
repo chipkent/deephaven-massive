@@ -13,7 +13,10 @@ failure can fail the table (`publish_failure`) in every mode:
   poller keeps every identity it appended for its whole life: each is a row the append-only
   table holds, so the set never outgrows the table, and no row is ever appended twice.
 - `UPSERT`: the blink table's `last_by` on the dataset's poll keys (`DatasetSpec.poll_keys`):
-  keyed, and a key never leaves.
+  keyed, and a key never leaves. When the poll keys are every column
+  (`reference.related_companies`), `last_by` has nothing to aggregate, so the result is the
+  blink table's `select_distinct` on them instead: each distinct row once, accumulated over
+  every cycle, which is what that `last_by` would keep.
 - `REPLACE`: the same `last_by`, plus one *tombstone* row for each key the previous cycle had
   and this one lacks, marked in a hidden boolean column that the result filters on and drops;
   so a key absent from the latest cycle leaves the table, also when the cycle is empty. A cycle
@@ -651,8 +654,8 @@ def build_table(
 
     Returns:
         The result (append-only for `APPEND`, the `last_by` of the poll keys for `UPSERT`,
-        and for `REPLACE` that `last_by` without its tombstones and their hidden column) and
-        the publisher.
+        or their `select_distinct` when they are every column, and for `REPLACE` that
+        `last_by` without its tombstones and their hidden column) and the publisher.
     """
     definitions = col_defs(schema)
     replace = mode is PollMode.REPLACE
@@ -663,7 +666,11 @@ def build_table(
     )
     if mode is PollMode.APPEND:
         return blink_to_append_only(blink), publisher
-    keyed = blink.last_by(list(spec.poll_keys))
+    keys = list(spec.poll_keys)
+    # When every column is a key, `last_by` has no column to aggregate and Deephaven refuses
+    # it. Its rows would be the distinct key rows, which `select_distinct` of a blink table
+    # keeps across cycles. `REPLACE` never takes that branch: its hidden column is not a key.
+    keyed = blink.select_distinct(keys) if set(definitions) <= set(keys) else blink.last_by(keys)
     if not replace:
         return keyed, publisher
     return keyed.where(LIVE_COLUMN).drop_columns(LIVE_COLUMN), publisher
