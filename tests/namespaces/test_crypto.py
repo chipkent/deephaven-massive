@@ -13,7 +13,7 @@ import csv
 import io
 import json
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -27,14 +27,22 @@ from deephaven.table import Table
 from deephaven.table_listener import TableUpdate, listen
 
 import deephaven_massive as dm
+from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._datasets.schema import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import ChannelFamily
+from deephaven_massive._enums import ChannelFamily, Recency
+from deephaven_massive._ingest import ws
 from deephaven_massive._massive import (
+    DriftReport,
+    Reject,
     RestPath,
+    Source,
+    Status,
     Transport,
+    WireError,
+    WsState,
     source,
     to_batch,
 )
@@ -52,10 +60,10 @@ from deephaven_massive._query import (
 from deephaven_massive._tables.liveness import new_scope
 
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers
-# and the streaming session come from the `fake_rest`, `fake_s3`, and `ws_session` fixtures.
+# themselves come from the `fake_rest` and `fake_ws_server` fixtures.
 from tests._fakes.rest import FakeRestServer, Reply
 from tests._fakes.s3 import FakeS3
-from tests._fakes.ws_session import WsSession
+from tests._fakes.ws import FakeMassiveServer
 
 Fixture = Callable[[str, str], bytes]
 
@@ -746,6 +754,63 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
 TIMEOUT = 15.0
 
 
+class WsSession:
+    """A session whose WebSocket connections reach the fake Massive server."""
+
+    def __init__(self, server: FakeMassiveServer) -> None:
+        self.server = server
+        self.session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
+        core = self.session._core
+        connections = ws.WsConnections(
+            core,
+            resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "a test"),
+            record_verdict=lambda *_: None,
+            client_factory=self.client,
+        )
+        cast("Any", core._ports)._streams = connections
+        core.on_close(connections.close)
+
+    def client(
+        self,
+        url: str,
+        *,
+        sources: Sequence[Source],
+        on_open: Callable[[int], None],
+        on_status: Callable[[int, Status], None],
+        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
+        on_state: Callable[[WsState, float | WireError | None], None],
+    ) -> _massive.WsClient:
+        return _massive.WsClient(
+            self.server.url("/" + url.split("/", 3)[3]),
+            api_key="test-key",
+            sources=sources,
+            on_open=on_open,
+            on_status=on_status,
+            on_data=on_data,
+            on_state=on_state,
+            reconnect_backoff=0.05,
+            max_reconnect_backoff=0.1,
+        )
+
+    def subscribed(self, topic: str) -> None:
+        def named(server: FakeMassiveServer) -> bool:
+            if not server.connections or server.connections[-1].auth is None:
+                return False
+            frames = [json.loads(f) for f in server.connections[-1].frames]
+            return any(
+                f["action"] == "subscribe" and topic in f["params"].split(",") for f in frames
+            )
+
+        self.server.wait_for(named, TIMEOUT)
+
+
+@pytest.fixture
+def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[WsSession]:
+    harness = WsSession(fake_ws_server)
+    yield harness
+    harness.session.close()
+
+
 def landed(table: Table) -> tuple[Callable[[], list[dict[str, Any]]], Callable[[], None]]:
     # Collect the rows each update-graph cycle adds to a blink table, before it clears them;
     # the listener appends on the update-graph thread, the test reads a copy under the lock.
@@ -806,7 +871,7 @@ def test_a_documented_frame_lands_in_blink(
     seen, stop = landed(blink)
     ws_session.subscribed(topic)
     frames = json.loads(load_fixture(OWNER, "ws_frames.json"))[channel]
-    ws_session.publish(*frames)
+    ws_session.server.send(json.dumps(frames))
     wait_for(lambda: len(seen()) == 1)
     stop()
     [row] = seen()

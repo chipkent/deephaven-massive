@@ -61,7 +61,6 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
     from tests._fakes.ws import FakeMassiveServer
-    from tests._fakes.ws_session import WsSession
 
 _DATA_DIR = Path(__file__).parent / "data"
 
@@ -347,41 +346,6 @@ def fake_streams(
     fake: FakeStreamTransport = stream.FakeStreamTransport(massive_session._core)
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake)
     return fake
-
-
-@pytest.fixture
-def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[..., WsSession]]:
-    """Return a factory of `WsSession`s (`tests/_fakes/ws_session.py`) on the fake server.
-
-    Each session's streams connect, through real WebSocket clients, to the `fake_ws_server`
-    fixture's server. The factory takes `WsSession`'s keyword options (`decide`,
-    `flush_interval`, `backoff`, and further `MassiveConfig` options); every session it made is
-    closed at teardown, so a test may also close one itself.
-
-    Yields:
-        The factory.
-    """
-    module = importlib.import_module("tests._fakes.ws_session")
-    made: list[WsSession] = []
-
-    def make(**options: object) -> WsSession:
-        session: WsSession = module.WsSession(fake_ws_server, **options)
-        made.append(session)
-        return session
-
-    yield make
-    for session in made:
-        session.close()
-
-
-@pytest.fixture
-def ws_session(make_ws_session: Callable[..., WsSession]) -> WsSession:
-    """Return a `WsSession` with the default options: a fixed real-time host, manual flushes.
-
-    Returns:
-        The wrapper; its `session` is the `MassiveSession` to build queries from.
-    """
-    return make_ws_session()
 
 
 @pytest.fixture

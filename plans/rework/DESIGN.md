@@ -304,7 +304,7 @@ Supporting files outside the package:
 | `.github/workflows/spec-drift.yml` | The advisory weekly drift job ([section 20](#20-quality-gates)). |
 | `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag; created only when the owner turns publishing on ([section 20.1](#201-tooling-configuration)). |
 | `tests/data/` | Payload fixtures. |
-| `tests/_fakes/` | Fake REST server, WebSocket server, S3, clock, and stream helpers, and the shared streaming session harness ([section 4.2](#42-test-layout)). |
+| `tests/_fakes/` | Fake REST server, WebSocket server, S3, and stream helpers ([section 4.2](#42-test-layout)). |
 
 Deephaven is imported at module level where it is used at runtime. Type-only imports go under
 `TYPE_CHECKING`. The library imports nothing from `deephaven_server`;
@@ -372,10 +372,7 @@ others:
 - `tests/test_readme.py`: runs every example of [section 21](#21-examples) in the embedded JVM
   against the fakes. It mirrors `README.md`, not a source module.
 - `_` helper directories, of which there is one: `tests/_fakes/` (`__init__.py`, `rest.py`,
-  `ws.py`, `s3.py`, `stream.py`, `clock.py`, `gh.py`), protocol-faithful fakes, and
-  `ws_session.py`, the one streaming harness every WebSocket end-to-end test shares (a real
-  session whose connections reach the fake WebSocket server, offered by the `ws_session` and
-  `make_ws_session` fixtures). Only `tests/conftest.py` imports it;
+  `ws.py`, `s3.py`, `stream.py`), protocol-faithful fakes. Only `tests/conftest.py` imports it;
   test modules receive fakes through fixtures, and import a fake directly only when a fixture
   cannot provide it, saying why in a comment.
 
