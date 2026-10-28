@@ -45,6 +45,7 @@ _EMPTY = HandInput(
     units={},
     tag_conflicts={},
     type_fixes={},
+    key_fixes={},
     result_keys={},
     param_units={},
     exclusions=(),
@@ -232,6 +233,7 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
                 conversion=Conversion.TEXT_OR_INTEGER_ID, reason="test"
             )
         },
+        key_fixes={(_PATH, "declared"): overrides.KeyFix(wire_key="sent", reason="test")},
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},
         param_units={(_PATH, "gone"): ms},
         sample_errors=(
@@ -248,6 +250,7 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
             ("stale-entry", "/gone", "t"),  # units
             ("stale-entry", _PATH, "gone"),  # tag conflicts
             ("stale-entry", _PATH, "gone"),  # type fixes
+            ("stale-entry", _PATH, "declared"),  # key fixes
             ("stale-entry", "/gone", ""),  # result keys
             ("stale-entry", _PATH, "gone"),  # param units
             ("stale-entry", "", "zz"),  # identity

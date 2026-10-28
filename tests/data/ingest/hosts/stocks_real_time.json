@@ -1,0 +1,52 @@
+{
+  "status": "OK",
+  "request_id": "6aeb7bcd9f2e0f0c4ed0d2a6b6a7d3c1",
+  "results": [
+    {
+      "ticker": "SPY",
+      "type": "stocks",
+      "market_status": "open",
+      "name": "SPY",
+      "session": {
+        "close": 185.2,
+        "open": 182.1,
+        "volume": 1000
+      },
+      "last_trade": {
+        "price": 185.3,
+        "size": 100,
+        "sip_timestamp": 1704310200000000000,
+        "timeframe": "REAL-TIME"
+      },
+      "last_quote": {
+        "ask": 185.31,
+        "bid": 185.29,
+        "last_updated": 1704310200000000000,
+        "timeframe": "REAL-TIME"
+      }
+    },
+    {
+      "ticker": "AAPL",
+      "type": "stocks",
+      "market_status": "open",
+      "name": "AAPL",
+      "session": {
+        "close": 185.2,
+        "open": 182.1,
+        "volume": 1000
+      },
+      "last_trade": {
+        "price": 185.3,
+        "size": 100,
+        "sip_timestamp": 1704310200000000000,
+        "timeframe": "REAL-TIME"
+      },
+      "last_quote": {
+        "ask": 185.31,
+        "bid": 185.29,
+        "last_updated": 1704310200000000000,
+        "timeframe": "REAL-TIME"
+      }
+    }
+  ]
+}

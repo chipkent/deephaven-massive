@@ -6,6 +6,9 @@ schema, or one built from a documentation table), and whether the vendor marks i
 `SourceFields` turns it into a `spec.types.Field` by the same rules on every transport, so one
 field gets one column and one type whichever transport serves it:
 
+- **Wire keys.** A field is read under the key its source declares, unless a `KEY_FIXES`
+  entry gives the key every documented sample sends in its place; from then on the field is
+  that key, for its name and every other hand entry.
 - **Names.** Each segment of a wire key is translated to Massive's long form: the vendor's own
   long key as it is; a short key through the lexicon of the object it sits in (`SHAPES`),
   whose entries cite the endpoint that spells the same field out; else an identity entry. The
@@ -37,6 +40,7 @@ sources. It imports the standard library and other `_massive` modules only.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -184,6 +188,8 @@ class SourceFields:
         self.declared_types: dict[str, WireType] = {}
         self.needed_conversions: set[str] = set()
         self.example_keys: set[str] = set()
+        # The declared key of each field a `KEY_FIXES` entry reads under another, by wire key.
+        self.declared_keys: dict[str, str] = {}
 
     def use(self) -> PathUse:
         """Return what the source consumed so far, for the checks that span sources.
@@ -289,15 +295,21 @@ class SourceFields:
         return found
 
     def field(self, raw: RawField) -> Field | None:
-        """Name and type one field, checking its name, unit, and type fix.
+        """Name and type one field, checking its wire key, name, unit, and type fix.
 
         Args:
-            raw: The field.
+            raw: The field, under the key its source declares.
 
         Returns:
-            The generated field, or `None` when its type cannot be decided.
+            The generated field, under its `KEY_FIXES` key if it has one, or `None` when its
+            type cannot be decided.
         """
         self.wire_keys.add(raw.wire_key)
+        key_fix = self.hand.key_fixes.get((self.source, raw.wire_key))
+        if key_fix is not None:
+            self.declared_keys[key_fix.wire_key] = raw.wire_key
+            raw = dataclasses.replace(raw, wire_key=key_fix.wire_key)
+            self.wire_keys.add(raw.wire_key)
         long_names = self.long_names(raw)
         spec_type = self.wire_type(raw)
         if spec_type is None:
@@ -468,9 +480,10 @@ class SourceFields:
         once.
 
         It also records which fields' conversions some example value needs (a value the
-        field's declared type alone refuses), for the stale-entry check of `TYPE_FIXES`; and
-        it reports an example in which no value sits where the rows are, since the gate would
-        otherwise check nothing there without saying so.
+        field's declared type alone refuses), for the stale-entry check of `TYPE_FIXES`; it
+        reports an example in which no value sits where the rows are, since the gate would
+        otherwise check nothing there without saying so; and it reports a `KEY_FIXES` entry
+        as stale once no example row sends its key, or one sends the declared key.
 
         Args:
             fields: The source's generated fields.
@@ -490,6 +503,15 @@ class SourceFields:
                 f"the specification's example has no field values {where}, so none could be "
                 "checked",
             )
+        for wire_key, declared in sorted(self.declared_keys.items()):
+            sent = any(_example_value(row, wire_key) is not None for row in rows)
+            if not sent or any(_example_value(row, declared) is not None for row in rows):
+                self.problem(
+                    Gate.STALE_ENTRY,
+                    declared,
+                    f"KEY_FIXES reads {declared!r} as {wire_key!r}, but the specification's "
+                    f"example no longer sends {wire_key!r} instead",
+                )
         for item in fields:
             own = self.field_examples.get(item.wire_key)
             values = [v for v in [*found[item.wire_key], own] if v is not None]
