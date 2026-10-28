@@ -189,7 +189,7 @@ SNAPSHOTS: Final = DatasetSpec(
     summary="Snapshots of futures contracts: the latest trade, quote, minute bar, and session.",
     asset_class=AssetClass.FUTURES,
     fetch_path=_SNAPSHOT_PATH,
-    keys={(_REST, _SNAPSHOT_PATH): SourceKeys(symbol=KeySpec("DetailsTicker"))},
+    keys={(_REST, _SNAPSHOT_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
     page_size=50_000,
     # The contract's last quote and trade times: an explicit APPEND poll appends each new

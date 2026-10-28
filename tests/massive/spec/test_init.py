@@ -330,7 +330,7 @@ def test_every_description_is_joined_into_its_field() -> None:
 
 def test_a_field_the_vendor_does_not_describe_loads_as_empty() -> None:
     futures = spec.source(Transport.REST, "/futures/v1/snapshot")
-    assert futures.field("DetailsTicker").description == ""
+    assert futures.field("Ticker").description == ""
     assert futures.field("DetailsSettlementDate").description == (
         "The day that this contract is settled."
     )

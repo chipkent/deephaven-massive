@@ -26,9 +26,9 @@ events take US-style stock symbols (`AAPL`, `brk.b`), so their specs carry
 `AssetClass.STOCKS` and a symbol with another class's prefix (`X:BTCUSD`) is rejected when the
 query is built. Their rows each describe one instrument, which becomes the `Symbol` column (an
 ETF Global row's ETF, its `composite_ticker`; for consensus ratings, the symbol requested; for
-a TMX event of a company without a ticker, null). Benzinga news names several tickers per article,
-so it has no `Symbol`, keeps its `Tickers` column (JSON text), and uses `symbols` only to filter
-the request. Benzinga analysts and firms, and both Fable datasets, take no symbols at all.
+a TMX event or a Benzinga row without a ticker, null). Benzinga news names several tickers per
+article, so it has no `Symbol`, keeps its `Tickers` column (JSON text), and uses `symbols` only
+to filter the request. Benzinga analysts and firms, and both Fable datasets, take no symbols at all.
 """
 
 from __future__ import annotations
@@ -129,7 +129,11 @@ def _benzinga(
         path: The REST path template.
         summary: The dataset's one-sentence summary.
         page_size: The endpoint's documented maximum `limit`.
-        tickers: True when the endpoint filters by `ticker` and each row names one stock.
+        tickers: True when the endpoint filters by `ticker` and each row names at most one
+            stock. The vendor marks `ticker` optional on every such endpoint, and its own
+            analyst-insights sample has none, so a row without one keeps a null `Symbol`
+            instead of failing the request; the `poll()` key is `BenzingaId`, never `Symbol`,
+            so such rows stay apart.
 
     Returns:
         The spec, keyed for `poll()` by `BenzingaId`.
@@ -139,7 +143,7 @@ def _benzinga(
         path,
         summary=summary,
         asset_class=AssetClass.STOCKS if tickers else None,
-        symbol="Ticker" if tickers else None,
+        symbol=KeySpec("Ticker", required=False) if tickers else None,
         symbol_param="ticker.any_of" if tickers else None,
         poll_keys=("BenzingaId",),
         page_size=page_size,
@@ -474,6 +478,7 @@ class _Benzinga(Namespace):
         One row per insight: the stock, the firm, the rating and rating action, the price
         target, and the analyst's rationale as text, dated by `Date`. Narrow the dates through
         `filters` (`date_gte`, `date_lt`, ...), since the dataset has no `start` and `end`.
+        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
 
         Served by REST only, from `GET /benzinga/v1/analyst-insights`: `fetch()` reads every
         page into a static table, and `poll(interval)` re-reads it into a live table keyed by
@@ -536,6 +541,7 @@ class _Benzinga(Namespace):
         reiteration, or a price-target change, with the previous and new rating and target,
         dated by `Date`. Narrow the dates through `filters` (`date_gte`, `date_lt`, ...),
         since the dataset has no `start` and `end`.
+        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
 
         Served by REST only, from `GET /benzinga/v1/ratings`: `fetch()` reads every page into
         a static table, and `poll(interval)` re-reads it into a live table keyed by
@@ -650,6 +656,7 @@ class _Benzinga(Namespace):
 
         One row per summary: the stock, the bull case and the bear case as text, and when the
         summary was last updated (`LastUpdated`, filterable as `last_updated_gte` and so on).
+        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
 
         Served by REST only, from `GET /benzinga/v1/bulls-bears-say`: `fetch()` reads every
         page into a static table, and `poll(interval)` re-reads it into a live table keyed by
@@ -712,6 +719,7 @@ class _Benzinga(Namespace):
         one (`Positioning`), dated by
         `Date`. Narrow the dates through `filters` (`date_gte`, `date_lt`, ...), since the
         dataset has no `start` and `end`.
+        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
 
         Served by REST only, from `GET /benzinga/v1/guidance`: `fetch()` reads every page
         into a static table, and `poll(interval)` re-reads it into a live table keyed by
@@ -774,6 +782,7 @@ class _Benzinga(Namespace):
         announcement date and time and whether they are confirmed, and the estimated, actual,
         and previous EPS and revenue with their surprises. Narrow the dates through `filters`
         (`date_gte`, `date_lt`, ...), since the dataset has no `start` and `end`.
+        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
 
         Served by REST only, from `GET /benzinga/v1/earnings`: `fetch()` reads every page
         into a static table, and `poll(interval)` re-reads it into a live table keyed by

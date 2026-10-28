@@ -172,6 +172,39 @@ def test_filings_rows_without_a_ticker(
 
 
 @pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("41")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(60)
+def test_an_ipo_keeps_its_issuer_name(
+    live_session: dm.MassiveSession,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Whether an IPO's issuer name changes while the offering moves through its statuses.
+
+    Reads every IPO listed in 2025 and records each ticker whose rows carry more than one
+    `IssuerName`, with their statuses. Reading it: none means the `poll()` key `Symbol` and
+    `IssuerName` keeps one row per offering; a ticker whose names differ only in spelling
+    (a suffix, punctuation) means a renamed offering would leave a stale row, while wholly
+    different issuers are a recycled ticker, which the key keeps apart on purpose.
+    """
+    rows = table_rows(
+        live_session.stocks.ipos(start=date(2025, 1, 1), end=date(2025, 12, 31)).fetch()
+    )
+    names: dict[str, set[tuple[str, str]]] = {}
+    for row in rows:
+        names.setdefault(str(row["Symbol"]), set()).add(
+            (str(row["IssuerName"]), str(row["IpoStatus"]))
+        )
+    several = {symbol: seen for symbol, seen in names.items() if len({n for n, _ in seen}) > 1}
+    evidence(f"2025 IPOs: {len(rows)} rows, {len(names)} tickers, {len(several)} with >1 name")
+    for symbol, seen in sorted(several.items())[:10]:
+        evidence(f"    {symbol}: {sorted(seen)}")
+    assert rows
+
+
+@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("33")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
