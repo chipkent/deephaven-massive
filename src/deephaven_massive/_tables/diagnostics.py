@@ -13,7 +13,7 @@ All three are keyed Deephaven `input_table`s that the library writes and users r
   snapshot from its source whenever it was told the state changed (`rate_limits_changed`),
   and a row can never be overtaken by an older one.
   The writer also pulls again when the state changes with time alone (a pause ends, a slot
-  frees), at the moment the source names, through a timer that only queues the marker.
+  frees): it waits on its queue no longer than until the moment the source names.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
 thread and released by `m.close()`. One daemon writer thread per session applies every row: the
@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, fields, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, TypeAlias, cast
@@ -633,10 +634,10 @@ class Diagnostics:
 
     __slots__ = (
         "_connections",
+        "_rate_due",
         "_rate_limits",
         "_rate_pending",
         "_rate_source",
-        "_rate_timer",
         "_release_lock",
         "_released",
         "_scope",
@@ -659,8 +660,9 @@ class Diagnostics:
         # Set once by `watch_rate_limits`; read by the writer. Guarded by `_release_lock`.
         self._rate_source: RateLimitSource | None = None
         self._rate_pending = False
-        # The timer that queues the next time-driven pull; only the writer replaces it.
-        self._rate_timer: threading.Timer | None = None
+        # When the rate-limit rows next change with time alone (`time.monotonic()`), or None;
+        # read and written only by the writer thread.
+        self._rate_due: float | None = None
         self._scope = new_scope()
         try:
             with self._scope.open():
@@ -674,7 +676,12 @@ class Diagnostics:
                     col_defs(RATE_LIMITS), key_cols=list(RATE_LIMIT_KEYS)
                 )
             self._writer: QueueWorker[_Item] = QueueWorker(
-                exec_ctx, name, handle=self._apply, on_exit=self._scope.release
+                exec_ctx,
+                name,
+                handle=self._apply,
+                on_exit=self._scope.release,
+                timeout=self._rate_wait,
+                on_timeout=self._rate_due_now,
             )
         except BaseException:  # also KeyboardInterrupt: the scope must not leak
             self._scope.release()
@@ -718,9 +725,9 @@ class Diagnostics:
         Args:
             source: Returns the current row of every bucket and the seconds until they change
                 with time alone (None when they do not). The writer calls it, on its own
-                thread and without any lock of this object, and pulls again at that moment
-                through a daemon timer that only queues the marker; it must not block or call
-                Deephaven.
+                thread and without any lock of this object, and pulls again at that moment if
+                nothing woke it sooner (its queue wait times out then); it must not block or
+                call Deephaven.
 
         Raises:
             RuntimeError: If a source is already set.
@@ -766,10 +773,10 @@ class Diagnostics:
     def stop(self) -> None:
         """Ask the writer to apply the queued rows, release the tables, and exit; no wait.
 
-        Takes no lock, so the session's finalizer can call it from garbage collection. A
-        pending rate-limit timer is cancelled.
+        Takes no lock, so the session's finalizer can call it from garbage collection. Later
+        rows and rate-limit notices are not queued, as after `release()`.
         """
-        self._cancel_rate_timer()
+        self._released = True  # one attribute store; `write` and the rest read it under a lock
         self._writer.stop()
 
     def release(self) -> None:
@@ -779,7 +786,6 @@ class Diagnostics:
         """
         with self._release_lock:
             self._released = True
-        self._cancel_rate_timer()
         self._writer.stop()
         self._writer.thread.join()
 
@@ -817,9 +823,9 @@ class Diagnostics:
                 barrier.set()
 
     def _pull_rate_limits(self) -> list[RateLimitRow]:
-        """Take the pending marker, pull the rate-limit rows, and time the next pull.
+        """Take the pending marker, pull the rate-limit rows, and note when they next change.
 
-        Runs on the writer thread, the only one that replaces the timer.
+        Runs on the writer thread, the only one that touches `_rate_due`.
 
         Returns:
             The source's rows. A marker is queued only once the source is set, and the source
@@ -829,19 +835,23 @@ class Diagnostics:
             self._rate_pending = False
             source = cast("RateLimitSource", self._rate_source)
         rows, change = source()
-        self._cancel_rate_timer()
-        if change is not None:
-            timer = threading.Timer(change, self.rate_limits_changed)
-            timer.daemon = True
-            self._rate_timer = timer
-            timer.start()
+        self._rate_due = None if change is None else time.monotonic() + change
         return list(rows)
 
-    def _cancel_rate_timer(self) -> None:
-        """Cancel the pending time-driven pull, if any; safe without a lock (a no-op twice)."""
-        timer = self._rate_timer
-        if timer is not None:
-            timer.cancel()
+    def _rate_wait(self) -> float | None:
+        """Return how long the writer may wait for an item: until the rows next change.
+
+        Returns:
+            Seconds until the rate-limit rows change with time alone, or None to wait for an
+            item however long.
+        """
+        due = self._rate_due
+        return None if due is None else due - time.monotonic()
+
+    def _rate_due_now(self) -> None:
+        """Pull the rate-limit rows again: their time-driven change has come."""
+        self._rate_due = None
+        self._apply([_RATE_LIMITS_CHANGED])
 
     @staticmethod
     def _add(

@@ -2261,9 +2261,9 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   and origin for the life of the process, so a governor created again starts paced.
 - **Pacing.** A paced bucket lets a request start only while fewer than 5 slots are held; a
   slot is held by a request in flight, and by a finished one until 61 s (the minute plus one
-  second of margin) after its response arrived. A request that never left (the connection
-  could not be made, or its read was cancelled just as it was admitted) frees its slot at
-  once. Waiting for a slot never times out: a 250-request history at 5 per minute takes about
+  second of margin) after its response arrived. A request that never reached Massive (the
+  connection or its TLS handshake failed, also behind a proxy, the proxy refused the tunnel,
+  or its read was cancelled just as it was admitted) frees its slot at once. Waiting for a slot never times out: a 250-request history at 5 per minute takes about
   50 minutes, and the caller's interrupt, a failed sibling call of a fan-out, a stopped poller,
   or `close()` ends the wait (each read has a `Cancel` token of its own, set when a fan-out
   ends, following its poller's).
@@ -2688,7 +2688,8 @@ the writer pulls a fresh snapshot (`_ingest/rate_limits.rate_limit_source`) when
 governor signals a change, at most once per batch, instead of applying queued rows; a row can
 never be overtaken by an older one, and every sharing session shows the same rows. The state
 also changes with time alone (a pause ends, a slot frees), so each pull names when the rows
-next change and a daemon timer, which only queues the pull, reads them again then.
+next change, and the writer waits on its queue no longer than that before it pulls them
+again. No other thread or timer is involved, so nothing outlives `release()` or `stop()`.
 
 | Column | Meaning |
 |---|---|
@@ -2732,7 +2733,7 @@ without the GIL.
 | REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
-| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed | anything else |
+| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (under the registry lock: unmaps the key; deletes the record, or marks it for the last hold to delete); `call_soon_threadsafe` | sends; JVM calls; blocking |
 
@@ -3081,10 +3082,12 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   that repeats the target just fetched raises `WireError` rather than paging forever.
 - **The governor.** Every attempt, every page included, first takes a permit of its `bucket`
   from the `RequestGovernor` (`rest/governor.py`), in its lane (the caller's `cancel` token,
-  or the call itself when it has none), and reports how it ended, exactly once, in a `finally`
-  so no interruption can lose a permit: answered, not answered (a failure on the wire), never
-  sent (released: no connection was made), or refused with HTTP 429; the governor ignores any
-  report after the first. The refusal hook runs before the governor hears of a 429, and the
+  or the call itself when it has none), and reports how it ended, exactly once, in a
+  `finally`: answered, not answered (a failure on the wire), never sent (released: the
+  connection or TLS handshake failed, found anywhere in the error's chain, as a `ProxyError`
+  wraps it), or refused with HTTP 429; the governor ignores any report after the first. A slot
+  is released on cancellation, failure, and interrupts at wait points; an asynchronous
+  interrupt delivered inside a `with` block of a lock is beyond what Python can make safe. The refusal hook runs before the governor hears of a 429, and the
   governor hears of it even when the hook raises. The governor's rules are those of
   [section 13.4](#134-rest): per bucket, lanes in turn and first in, first out within a lane; a
   paced bucket (declared, or learned from a 429 whose message names the per-minute maximum)

@@ -40,7 +40,7 @@ import threading
 import weakref
 from dataclasses import dataclass, field
 from itertools import count
-from typing import TYPE_CHECKING, Final, Generic, TypeVar
+from typing import TYPE_CHECKING, Final, Generic, TypeVar, cast
 
 from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
@@ -192,11 +192,16 @@ class QueueWorker(Generic[_T]):
     stays referenced while the thread waits for more. After `stop()` the remaining items are
     handled, `on_exit` runs inside the execution context, and the thread ends.
 
-    The thread holds no reference to its owner beyond `handle` and `on_exit`, so owners pass
-    callables that do not keep a session alive.
+    An owner whose state also changes with time alone (the diagnostics writer's rate limits)
+    passes `timeout`, the seconds the thread may wait for an item before it calls `on_timeout`
+    on its own thread; an exception from `on_timeout` is logged like one from `handle`. No other
+    thread or timer is involved, so nothing outlives the worker.
+
+    The thread holds no reference to its owner beyond its callables, so owners pass callables
+    that do not keep a session alive.
     """
 
-    __slots__ = ("_exec_ctx", "_handle", "_on_exit", "_queue", "thread")
+    __slots__ = ("_exec_ctx", "_handle", "_on_exit", "_on_timeout", "_queue", "_timeout", "thread")
 
     def __init__(
         self,
@@ -205,6 +210,8 @@ class QueueWorker(Generic[_T]):
         *,
         handle: Callable[[list[_T]], None],
         on_exit: Callable[[], None] | None = None,
+        timeout: Callable[[], float | None] | None = None,
+        on_timeout: Callable[[], None] | None = None,
     ) -> None:
         """Create and start the worker thread.
 
@@ -213,10 +220,17 @@ class QueueWorker(Generic[_T]):
             name: The thread's name, for thread dumps.
             handle: Handles one batch of items, in queue order.
             on_exit: Runs once after the last batch, inside the execution context.
+            timeout: Asked, on the thread, before each wait: the seconds to wait for an item
+                (0 or less: not at all), or None to wait until one comes. None for no timed
+                waits.
+            on_timeout: Runs on the thread when a timed wait ends without an item; required
+                with `timeout`.
         """
         self._exec_ctx = exec_ctx
         self._handle = handle
         self._on_exit = on_exit
+        self._timeout = timeout
+        self._on_timeout = on_timeout
         self._queue: queue.SimpleQueue[_T | None] = queue.SimpleQueue()
         self.thread: Final = threading.Thread(target=self._run, name=name, daemon=True)
         self.thread.start()
@@ -257,11 +271,21 @@ class QueueWorker(Generic[_T]):
     def _next_batch(self) -> bool:
         """Wait for an item, take everything queued behind it, and handle the batch.
 
+        A timed wait (`timeout`) that ends without an item runs `on_timeout` instead.
+
         Returns:
             False once the stop request was reached, True otherwise.
         """
         batch: list[_T] = []
-        item = self._queue.get()
+        wait = None if self._timeout is None else self._timeout()
+        try:
+            item = self._queue.get(timeout=None if wait is None else max(wait, 0.0))
+        except queue.Empty:
+            try:
+                cast("Callable[[], None]", self._on_timeout)()
+            except Exception:
+                logger.exception("%s failed on a timed wake-up; continuing", self.thread.name)
+            return True
         while item is not None:
             batch.append(item)
             try:

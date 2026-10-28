@@ -42,6 +42,7 @@ from deephaven_massive._massive.net.retry import (
     TRANSIENT_STATUSES,
     is_proxy_auth_failure,
     is_tls_failure,
+    linked_errors,
     retry_after_seconds,
     transient_wait,
 )
@@ -503,6 +504,9 @@ class RestClient:
         """
         permit = self._permit(request, job, stop)
         try:
+            if stop.is_set():  # cancelled just as it was admitted: it is never sent
+                self._governor.release(permit)
+                raise self._stopped(request)
             return self._send(job, request, permit)
         finally:  # whatever escaped, the permit is reported; a report already made stands
             self._governor.done(permit, answered=False)
@@ -530,7 +534,7 @@ class RestClient:
                 redirect=False,
             )
         except urllib3.exceptions.HTTPError as error:
-            if isinstance(error, urllib3.exceptions.ConnectTimeoutError):
+            if _never_sent(error):
                 self._governor.release(permit)  # no connection, so nothing reached Massive
             return self._unanswered(request, error)
         elapsed = self._clock.monotonic() - started
@@ -575,29 +579,26 @@ class RestClient:
             The attempt's permit.
 
         Raises:
-            WireError: If `stop` is set before or during the wait, or just as the attempt was
-                admitted (its permit is released unused): "the REST client is closed" when the
-                client closed, "cancelled" otherwise. With status 429 when the bucket's pause
-                outlasts the governor's patience, quoting the latest refusal.
+            WireError: If `stop` is set before or during the wait: "the REST client is
+                closed" when the client closed, "cancelled" otherwise (`_attempt` releases a
+                permit granted just as `stop` was set). With status 429 when the bucket has
+                given up on a run of refusals, quoting the latest refusal.
         """
-        if not stop.is_set():
-            try:
-                lane = job if job.cancel is None else job.cancel
-                permit = self._governor.acquire(job.bucket, stop, lane=lane)
-            except WireError as error:
-                if error.status is None:  # the wait was cancelled
-                    raise self._stopped(request) from None
-                raise WireError(
-                    error.message,
-                    status=error.status,
-                    host=self._host,
-                    path=request.target,
-                    request_id=error.request_id,
-                ) from None
-            if not stop.is_set():
-                return permit
-            self._governor.release(permit)
-        raise self._stopped(request)
+        if stop.is_set():
+            raise self._stopped(request)
+        lane = job if job.cancel is None else job.cancel
+        try:
+            return self._governor.acquire(job.bucket, stop, lane=lane)
+        except WireError as error:
+            if error.status is None:  # the wait was cancelled
+                raise self._stopped(request) from None
+            raise WireError(
+                error.message,
+                status=error.status,
+                host=self._host,
+                path=request.target,
+                request_id=error.request_id,
+            ) from None
 
     def _stopped(self, request: Request) -> WireError:
         """Return the error of a request whose client closed or whose caller cancelled.
@@ -711,6 +712,29 @@ class RestClient:
             given_up.__cause__ = failure
             return given_up
         return None
+
+
+_UNSENT: Final = (urllib3.exceptions.ConnectTimeoutError, urllib3.exceptions.SSLError)
+"""What urllib3 raises when no connection to Massive was made: a connection that could not be
+opened or timed out (`NewConnectionError` is one), or a TLS handshake that failed."""
+
+
+def _never_sent(error: BaseException) -> bool:
+    """Tell whether a failed attempt never reached Massive, so its slot can be freed at once.
+
+    The cause may be wrapped, as a `ProxyError` wraps the failure to reach or tunnel through
+    the proxy, so the whole chain is searched (`net.retry.linked_errors`). A proxy's refusal
+    of its credentials (HTTP 407 to the tunnel request) never reached Massive either.
+
+    Args:
+        error: What urllib3 raised.
+
+    Returns:
+        True when the connection or its TLS handshake failed, or the proxy refused the tunnel.
+    """
+    return is_proxy_auth_failure(error) or any(
+        isinstance(item, _UNSENT) for item in linked_errors(error)
+    )
 
 
 def _http_time(value: str | None) -> float | None:

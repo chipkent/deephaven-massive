@@ -50,6 +50,7 @@ __all__ = [
     "SystemClock",
     "is_proxy_auth_failure",
     "is_tls_failure",
+    "linked_errors",
     "rate_limit_wait",
     "retry_after_seconds",
     "transient_wait",
@@ -222,7 +223,7 @@ def is_tls_failure(error: BaseException) -> bool:
         True when an `ssl.SSLCertVerificationError` is found among `error`, its arguments, its
         `__cause__`, and its `__context__`, recursively.
     """
-    return any(isinstance(item, ssl.SSLCertVerificationError) for item in _linked(error))
+    return any(isinstance(item, ssl.SSLCertVerificationError) for item in linked_errors(error))
 
 
 _PROXY_AUTH_REFUSED = "Tunnel connection failed: 407 "
@@ -247,11 +248,11 @@ def is_proxy_auth_failure(error: BaseException) -> bool:
     """
     return any(
         isinstance(item, OSError) and str(item).startswith(_PROXY_AUTH_REFUSED)
-        for item in _linked(error)
+        for item in linked_errors(error)
     )
 
 
-def _linked(error: BaseException) -> Iterator[BaseException]:
+def linked_errors(error: BaseException) -> Iterator[BaseException]:
     """Yield `error` and every exception linked to it, each once.
 
     Args:

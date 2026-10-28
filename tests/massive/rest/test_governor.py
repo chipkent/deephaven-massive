@@ -21,6 +21,8 @@ from deephaven_massive._massive.rest.governor import (
     BucketState,
     Permit,
     RequestGovernor,
+    _Bucket,
+    _Waiter,
     is_basic_refusal,
 )
 from tests._fakes.clock import FakeClock
@@ -78,7 +80,7 @@ class _Waiting:
         self.started: float | None = None
         self._governor = governor
         self._bucket = bucket
-        self.thread = threading.Thread(target=self._run)
+        self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
     def _run(self) -> None:
@@ -557,7 +559,7 @@ def test_16_threads_never_start_more_than_five_requests_in_a_window() -> None:
         with lock:
             return running[0]
 
-    threads = [threading.Thread(target=worker) for _ in range(16)]
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(16)]
     for thread in threads:
         thread.start()
     _drive(clock, alive)
@@ -631,7 +633,7 @@ class _Lanes:
         with self._lock:
             self._running += 1
             running = self._running
-        thread = threading.Thread(target=run)
+        thread = threading.Thread(target=run, daemon=True)
         self.threads.append(thread)
         thread.start()
         self.clock.wait_for_sleepers(running)
@@ -875,3 +877,35 @@ def test_a_request_leaving_its_lane_keeps_the_lane_and_its_turn() -> None:
     clock.advance(61.0)
     head.join()
     assert head.started == 61.0
+
+
+def test_a_late_shorter_refusal_leaves_a_longer_pause_alone() -> None:
+    clock = FakeClock(wall=1_800_000_000.0)
+    governor = _governor(clock)
+    slow = governor.acquire("stocks", Cancel())  # in flight before the pause
+    _refuse(governor, governor.acquire("stocks", Cancel()), retry_after=100.0)
+    clock.advance(10.0)
+    _refuse(governor, slow, retry_after=5.0)  # stale, and ends sooner: changes nothing
+    assert _state(governor).paused_until == 1_800_000_100.0
+    _requests(governor, "stocks", 1)
+    assert clock.monotonic() == 100.0
+
+
+def test_an_interrupted_lane_change_leaves_a_state_the_bucket_repairs() -> None:
+    bucket = _Bucket("stocks requests")
+    first, second = _Waiter("a"), _Waiter("b")
+    bucket.join(first)
+    bucket.join(second)
+    # Lane "a" is empty but keeps the front turn, as `start_head` leaves it, or an
+    # interruption of `leave`. `head` drops it and serves "b".
+    bucket.lanes["a"].popleft()
+    assert bucket.head() is second
+    assert list(bucket.turns) == ["b"]
+    assert "a" not in bucket.lanes
+    # As if it struck between dropping a turn and its lane: lane "b" has no turn. A request
+    # joining it gives the lane a turn again, and the one already there is served first.
+    bucket.turns.clear()
+    third = _Waiter("b")
+    bucket.join(third)
+    assert bucket.head() is second
+    assert bucket.waiting == 2

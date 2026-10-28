@@ -4,7 +4,6 @@ import contextlib
 import dataclasses
 import logging
 import threading
-import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
@@ -641,9 +640,16 @@ class _RateSource:
         self.pulls = 0
         self.rows: list[RateLimitRow] = []
         self.change: float | None = None
+        # Answers given before `rows` and `change`, in order, so a test can script pulls the
+        # writer makes on its own, before the test could change anything.
+        self.script: list[tuple[list[RateLimitRow], float | None]] = []
+        self.pulled = threading.Semaphore(0)  # released once per pull
 
     def __call__(self) -> tuple[list[RateLimitRow], float | None]:
         self.pulls += 1
+        self.pulled.release()
+        if self.script:
+            return self.script.pop(0)
         return list(self.rows), self.change
 
 
@@ -724,23 +730,41 @@ def test_rate_limit_rows_are_pulled_again_when_time_alone_changes_them(
 ) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
     source = _RateSource()
-    source.rows = [_rate_row("stocks", RateLimitState.PAUSED)]
-    source.change = 0.05  # the pause ends in 50 ms
-    diagnostics.watch_rate_limits(source)
-    assert diagnostics.barrier().wait(TIMEOUT)
+    # The pause has already ended (change due now): the writer must not wait for an item.
+    source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.0)]
     source.rows = [_rate_row("stocks", RateLimitState.READY)]
-    source.change = None
-    deadline = time.monotonic() + TIMEOUT
-    while source.pulls < 2:  # the timer queued a pull with no change from the governor
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
+    diagnostics.watch_rate_limits(source)
+    assert source.pulled.acquire(timeout=TIMEOUT)
+    # Nothing is queued: only the writer's timed wait can pull the rows again.
+    assert source.pulled.acquire(timeout=TIMEOUT)
     assert diagnostics.barrier().wait(TIMEOUT)
     assert [r["State"] for r in dh_to_pylist(diagnostics.rate_limits)] == ["READY"]
-    source.change = 30.0
+    assert source.pulls == 2  # and with no change due, it waits for an item again
+    diagnostics.release()
+
+
+def test_a_release_right_after_a_change_leaves_no_thread_behind(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    before = set(threading.enumerate())
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RateSource()
+    source.change = 30.0  # a change due later
+    diagnostics.watch_rate_limits(source)
     diagnostics.rate_limits_changed()
-    assert diagnostics.barrier().wait(TIMEOUT)
-    timer = diagnostics._rate_timer
-    assert timer is not None
-    diagnostics.release()  # cancels the pending pull
-    assert not timer.is_alive() or timer.finished.is_set()
-    diagnostics.stop()  # nothing left to cancel or stop: harmless
+    diagnostics.release()
+    assert set(threading.enumerate()) <= before
+
+
+def test_after_stop_nothing_more_is_queued(dh_exec_ctx: ExecutionContext) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RateSource()
+    diagnostics.watch_rate_limits(source)
+    assert source.pulled.acquire(timeout=TIMEOUT)
+    diagnostics.stop()  # as a collected session's finalizer does
+    diagnostics.rate_limits_changed()
+    diagnostics.write(STREAM)
+    diagnostics.thread.join(TIMEOUT)
+    assert not diagnostics.thread.is_alive()
+    assert source.pulls == 1
+    assert diagnostics.barrier().is_set()  # nothing is queued for a writer that is gone

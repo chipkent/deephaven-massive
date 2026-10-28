@@ -172,9 +172,9 @@ class BucketState:
 
 
 class _Waiter:
-    """One waiting request: its lane and the event that wakes it."""
+    """One waiting request: its lane, the event that wakes it, and its grant once admitted."""
 
-    __slots__ = ("lane", "wake")
+    __slots__ = ("lane", "permit", "wake")
 
     def __init__(self, lane: Hashable | None) -> None:
         """Create the waiter.
@@ -184,6 +184,9 @@ class _Waiter:
         """
         self.lane: Hashable = self if lane is None else lane
         self.wake = threading.Event()
+        # Set, under the governor's lock, before anything else changes at the grant, so an
+        # interrupted `acquire` always knows what to hand back.
+        self.permit: Permit | None = None
 
 
 class _Bucket:
@@ -193,11 +196,11 @@ class _Bucket:
         "declared",
         "episode",
         "given_up",
-        "in_flight",
         "label",
         "lanes",
         "last_refusal",
         "learned",
+        "open",
         "pause_until",
         "refusals",
         "requests",
@@ -219,7 +222,9 @@ class _Bucket:
         # The waiting requests of each lane, first in first out, and the lanes' turns.
         self.lanes: dict[Hashable, deque[_Waiter]] = {}
         self.turns: deque[Hashable] = deque()
-        self.in_flight = 0
+        # The permits granted and not yet reported: the requests in flight. Adding one is the
+        # grant itself, a single step, so no interruption can leave a count out of step.
+        self.open: set[Permit] = set()
         # When each finished request's slot frees (monotonic seconds), oldest first.
         self.slots: deque[float] = deque()
         self.requests = 0
@@ -237,28 +242,43 @@ class _Bucket:
         return BASIC_REQUESTS_PER_MINUTE if self.declared or self.learned else None
 
     @property
+    def in_flight(self) -> int:
+        """How many granted requests have not been reported."""
+        return len(self.open)
+
+    @property
     def waiting(self) -> int:
         """How many requests wait, in every lane."""
         return sum(len(lane) for lane in self.lanes.values())
 
     def head(self) -> _Waiter | None:
-        """Return the request whose turn it is, or None when none waits."""
-        return self.lanes[self.turns[0]][0] if self.turns else None
+        """Return the request whose turn it is, or None when none waits.
+
+        A turn whose lane is empty or gone is dropped on the way: `start_head` leaves an
+        emptied lane's turn for this to drop, and an interruption between two steps of a lane
+        change can leave one too.
+        """
+        while self.turns:
+            lane = self.lanes.get(self.turns[0])
+            if lane:
+                return lane[0]
+            self.lanes.pop(self.turns.popleft(), None)
+        return None
 
     def join(self, waiter: _Waiter) -> None:
-        """Queue a request at the back of its lane; a new lane takes the last turn.
+        """Queue a request at the back of its lane; a lane without a turn takes the last one.
 
         Args:
             waiter: The request.
         """
-        lane = self.lanes.get(waiter.lane)
-        if lane is None:
-            lane = self.lanes[waiter.lane] = deque()
+        if waiter.lane not in self.turns:
             self.turns.append(waiter.lane)
-        lane.append(waiter)
+        self.lanes.setdefault(waiter.lane, deque()).append(waiter)
 
     def leave(self, waiter: _Waiter) -> None:
         """Take a request out of its lane (it gave up), and wake the head if that changed.
+
+        An emptied lane loses its turn when `head` next reaches it.
 
         Args:
             waiter: The request; one no longer queued (it started) is ignored.
@@ -268,24 +288,18 @@ class _Bucket:
             return
         was_head = self.head() is waiter
         lane.remove(waiter)
-        if not lane:
-            del self.lanes[waiter.lane]
-            self.turns.remove(waiter.lane)
         if was_head:
             self.wake_head()
 
     def start_head(self) -> None:
         """Remove the head, which starts now, and wake the next head.
 
-        The head's lane takes the last turn if it still has requests waiting.
+        The head's lane takes the last turn; once empty, it loses that turn when `head` next
+        reaches it. Each step leaves a state the others accept: the waiter leaves its lane
+        first, then the turn moves in one step.
         """
-        lane_key = self.turns.popleft()
-        lane = self.lanes[lane_key]
-        lane.popleft()
-        if lane:
-            self.turns.append(lane_key)
-        else:
-            del self.lanes[lane_key]
+        self.lanes[self.turns[0]].popleft()
+        self.turns.rotate(-1)
         self.wake_head()
 
     def wake_head(self) -> None:
@@ -354,18 +368,25 @@ class _Bucket:
             return None
         return max(start, self.slots[excess])
 
-    def finish(self, now: float, *, hold: bool) -> None:
-        """End a request's flight.
+    def finish(self, permit: Permit, now: float, *, hold: bool) -> bool:
+        """End a request's flight, if it has not ended already.
 
         Args:
+            permit: The request's permit.
             now: The monotonic time its response arrived (or its attempt failed).
             hold: True to keep its slot for a window (it may have reached Massive), False to
                 free it at once (it was never sent).
+
+        Returns:
+            True for the permit's first report, False (and no change) for any later one.
         """
-        self.in_flight -= 1
+        if permit not in self.open:
+            return False
+        self.open.remove(permit)
         if hold:
             self.slots.append(now + RATE_WINDOW)
         self.wake_head()
+        return True
 
 
 class RequestGovernor:
@@ -398,7 +419,7 @@ class RequestGovernor:
     RATE_WINDOW: ClassVar[float] = RATE_WINDOW
     """Seconds a finished request of a paced bucket holds its slot."""
 
-    __slots__ = ("_buckets", "_clock", "_listeners", "_lock", "_open")
+    __slots__ = ("_buckets", "_clock", "_listeners", "_lock")
 
     def __init__(
         self,
@@ -427,8 +448,6 @@ class RequestGovernor:
         self._lock = threading.Lock()
         self._buckets = {name: _Bucket(named.get(name, f"{name} requests")) for name in names}
         self._listeners: tuple[Callable[[], None], ...] = ()
-        # The permits granted and not yet reported; guarded by the lock.
-        self._open: set[Permit] = set()
 
     @property
     def clock(self) -> Clock:
@@ -479,9 +498,11 @@ class RequestGovernor:
 
         Blocks the calling thread, outside every lock, for as long as the bucket's lanes,
         pace, and pause demand; waiting for a slot never times out. Report the attempt's end
-        with `done`, `refused`, or `release`. If this thread is interrupted after the permit
-        was granted, the permit is released before the exception propagates. An unknown
-        `bucket` raises `ValueError`.
+        with `done`, `refused`, or `release`. A cancellation, a failure, or an interrupt at a
+        wait point (`KeyboardInterrupt` while the thread sleeps, or in a listener) releases a
+        permit already granted before the exception propagates. An interrupt delivered at an
+        arbitrary instruction, inside the governor's own `with` blocks, is beyond what any
+        Python lock can make safe. An unknown `bucket` raises `ValueError`.
 
         Args:
             bucket: The bucket the request is charged to.
@@ -500,23 +521,22 @@ class RequestGovernor:
         """
         state = self._bucket(bucket)
         waiter = _Waiter(lane)
-        granted: list[Permit] = []
         stop_listening = cancel.on_set(waiter.wake.set)
         try:
             with self._lock:
                 state.join(waiter)
             self._notify()
-            granted.append(self._wait(bucket, waiter, cancel))
+            permit = self._wait(bucket, waiter, cancel)
             self._notify()
         except BaseException:
-            for permit in granted:  # interrupted after the grant: hand it back
-                self.release(permit)
+            if waiter.permit is not None:  # interrupted after the grant: hand it back
+                self.release(waiter.permit)
             raise
         finally:
             stop_listening()
             with self._lock:
                 state.leave(waiter)
-        return granted[0]
+        return permit
 
     def _wait(self, bucket: str, waiter: _Waiter, cancel: Cancel) -> Permit:
         """Sleep until a queued request is admitted, and return its permit.
@@ -555,9 +575,8 @@ class RequestGovernor:
         """
         state = self._bucket(permit.bucket)
         with self._lock:
-            if not self._report(permit):
+            if not state.finish(permit, self._clock.monotonic(), hold=True):
                 return
-            state.finish(self._clock.monotonic(), hold=True)
             if answered and permit.episode == state.episode:
                 state.end_run()
         self._notify()
@@ -572,9 +591,8 @@ class RequestGovernor:
         """
         state = self._bucket(permit.bucket)
         with self._lock:
-            if not self._report(permit):
+            if not state.finish(permit, self._clock.monotonic(), hold=False):
                 return
-            state.finish(self._clock.monotonic(), hold=False)
         self._notify()
 
     def refused(
@@ -615,10 +633,9 @@ class RequestGovernor:
         asked = retry_after if retry_after is not None and retry_after > 0 else None
         give_up = None
         with self._lock:
-            if not self._report(permit):
-                return basic
             now = self._clock.monotonic()
-            state.finish(now, hold=True)
+            if not state.finish(permit, now, hold=True):
+                return basic
             state.refusals += 1
             state.last_refusal = message
             if basic:
@@ -743,7 +760,7 @@ class RequestGovernor:
             now = self._clock.monotonic()
             for bucket in self._buckets.values():
                 bucket.expire(now)
-                if bucket.in_flight or bucket.lanes or bucket.slots or bucket.pause_until > now:
+                if bucket.open or bucket.waiting or bucket.slots or bucket.pause_until > now:
                     return False
             return True
 
@@ -768,20 +785,6 @@ class RequestGovernor:
         """
         with self._lock:
             self._listeners = tuple(each for each in self._listeners if each != listener)
-
-    def _report(self, permit: Permit) -> bool:
-        """Mark a permit reported; the lock is held.
-
-        Args:
-            permit: The permit.
-
-        Returns:
-            True for its first report, False for any later one.
-        """
-        if permit not in self._open:
-            return False
-        self._open.remove(permit)
-        return True
 
     def _check(self, names: Iterable[str]) -> None:
         """Refuse bucket names the governor does not have.
@@ -847,11 +850,10 @@ class RequestGovernor:
                 return None, _IDLE_WAIT, None
             if start > now:
                 return None, start - now, None
-            state.start_head()
-            state.in_flight += 1
+            permit = waiter.permit = Permit(bucket, state.episode)
+            state.open.add(permit)  # the grant
             state.requests += 1
-            permit = Permit(bucket, state.episode)
-            self._open.add(permit)
+            state.start_head()
             return permit, 0.0, None
 
     @staticmethod

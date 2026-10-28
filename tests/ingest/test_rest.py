@@ -45,6 +45,7 @@ from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables.core import SessionCore
 from deephaven_massive._tables.diagnostics import Diagnostics
+from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -55,6 +56,8 @@ R = Transport.REST
 LOGGER = "deephaven_massive._ingest.rest"
 ToPylist = Callable[[Table], list[dict[str, Any]]]
 NS = 10**9
+TIMEOUT = 10.0
+"""Seconds of real time a test waits for an event before it fails."""
 
 DIVIDENDS_PATH = "/stocks/v1/dividends"
 DIVIDENDS = DatasetSpec(
@@ -2179,15 +2182,23 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
     q = query(m, DIVIDENDS, symbols=["A", "B", "C", "D", "E", "F"])
     assert isinstance(q, Query)
+    warned = threading.Event()
+
+    class _Late(logging.Handler):
+        @override
+        def emit(self, record: logging.LogRecord) -> None:
+            if "cycles run late" in record.getMessage():
+                warned.set()
+
+    late = _Late()
+    logging.getLogger(rate_limits.__name__).addHandler(late)
     try:
         with caplog.at_level(logging.WARNING):
             table = q.poll(30)
-            deadline = time.monotonic() + 30
-            while "cycles run late" not in caplog.text:
-                assert time.monotonic() < deadline
-                time.sleep(0.01)
+            assert warned.wait(TIMEOUT)  # logged by the poller's first cycle
         m.release(table)
     finally:
+        logging.getLogger(rate_limits.__name__).removeHandler(late)
         m.close()
     assert (
         "stocks.dividends poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
@@ -2248,54 +2259,66 @@ def test_a_released_poll_stops_waiting_for_a_slot(
         m.close()
 
 
-def _slow_msft_pages(fake_rest: FakeRestServer, pages: int) -> str:
-    """Script `pages` one-row pages of MSFT trades, each answered after 0.2 s of real time.
+class _HeldFanOut:
+    """A fan-out of AAPL and MSFT trades whose first MSFT page waits for the read's token.
 
-    Returns:
-        The MSFT path.
+    AAPL is answered only once MSFT's first page is on the wire, and that page only once the
+    token is set. The read's own `wait` is wrapped: its second call, the one that waits for
+    every call after a failure or an interrupt, comes after the token is set, and only then is
+    MSFT's first page let go. So whether MSFT asks for a second page depends on the token
+    alone, never on timing.
     """
-    msft = TRADES_PATH.format(stockTicker="MSFT")
-    start = epoch_ns(datetime(2025, 3, 3, 5, tzinfo=UTC))
-    row = {"sip_timestamp": start + 1, "price": 1.0, "size": 1}
-    fake_rest.reply(msft, Reply(envelope([row], next_url=f"{fake_rest.url}{msft}?cursor=1")))
-    for index in range(1, pages):
-        following = None if index == pages - 1 else f"{fake_rest.url}{msft}?cursor={index + 1}"
-        fake_rest.reply(f"{msft}?cursor={index}", Reply(envelope([row], next_url=following)))
 
-    def slow(received: Received) -> None:
-        if "MSFT" in received.target:
-            time.sleep(0.2)
+    def __init__(
+        self, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, *, interrupt: bool
+    ) -> None:
+        msft = TRADES_PATH.format(stockTicker="MSFT")
+        start = epoch_ns(datetime(2025, 3, 3, 5, tzinfo=UTC))
+        row = {"sip_timestamp": start + 1, "price": 1.0, "size": 1}
+        for index in range(15):  # fifteen pages, if nothing stopped them
+            target = msft if index == 0 else f"{msft}?cursor={index}"
+            following = None if index == 14 else f"{fake_rest.url}{msft}?cursor={index + 1}"
+            fake_rest.reply(target, Reply(envelope([row], next_url=following)))
+        self.paging = threading.Event()  # MSFT's first page was asked for
+        self.stopped = threading.Event()  # the read's token is set
+        fake_rest.on_request(self._hold)
+        real = futures_wait
 
-    fake_rest.on_request(slow)
-    return msft
+        def wait(futures: Sequence[Future[object]], return_when: str = ALL_COMPLETED) -> object:
+            if return_when == FIRST_EXCEPTION and interrupt:
+                assert self.paging.wait(TIMEOUT)
+                raise KeyboardInterrupt
+            if return_when == ALL_COMPLETED:  # called in the read's `finally`, token set
+                self.stopped.set()
+            return real(futures, return_when=return_when)
+
+        monkeypatch.setattr(rest, "wait", wait)
+
+    def _hold(self, received: Received) -> None:
+        if "AAPL" in received.target:
+            assert self.paging.wait(TIMEOUT)
+        else:
+            self.paging.set()
+            assert self.stopped.wait(TIMEOUT)
 
 
-def test_a_failed_symbol_stops_the_others_paging_after_at_most_one_more_page(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+def test_a_failed_symbol_stops_the_others_paging_after_the_page_on_the_wire(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _HeldFanOut(fake_rest, monkeypatch, interrupt=False)
     fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(b"{}", status=401))
-    _slow_msft_pages(fake_rest, 15)
     with pytest.raises(dm.AuthenticationError):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "MSFT"])
-    # The read's token is checked before every page: MSFT finishes the page on the wire, if
-    # any, and asks for no other.
-    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) <= 2
+    # The read's token is checked before every page: MSFT finishes the page on the wire and
+    # asks for no other.
+    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) == 1
 
 
 def test_an_interrupted_fan_out_stops_its_running_calls(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _slow_msft_pages(fake_rest, 15)
+    _HeldFanOut(fake_rest, monkeypatch, interrupt=True)
     fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope([])))
-    waited = futures_wait
-
-    def interrupted(futures: Sequence[Future[object]], return_when: str = ALL_COMPLETED) -> object:
-        if return_when == FIRST_EXCEPTION:
-            time.sleep(0.3)  # the calls are paging
-            raise KeyboardInterrupt
-        return waited(futures, return_when=return_when)
-
-    monkeypatch.setattr(rest, "wait", interrupted)
     with pytest.raises(KeyboardInterrupt):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "MSFT"])
-    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) <= 3
+    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) == 1

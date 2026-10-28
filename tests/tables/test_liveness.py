@@ -525,6 +525,34 @@ def test_queue_worker_runs_on_exit_and_logs_batch_failures(
     assert "test-worker failed on a batch" in caplog.text
 
 
+def test_queue_worker_wakes_on_its_timeout_and_logs_a_failing_wake_up(
+    dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
+) -> None:
+    waits = [0.0, 0.0, None]  # wake at once twice, then wait for an item
+    woken = threading.Semaphore(0)
+
+    def timeout() -> float | None:
+        return waits.pop(0) if waits else None
+
+    def wake_up() -> None:
+        woken.release()
+        if len(waits) == 1:  # the first wake-up fails, and the worker carries on
+            raise RuntimeError("wake-up broke")
+
+    handled: list[int] = []
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.liveness"):
+        worker: QueueWorker[int] = QueueWorker(
+            dh_exec_ctx, "timed-worker", handle=handled.extend, timeout=timeout, on_timeout=wake_up
+        )
+        assert woken.acquire(timeout=TIMEOUT)
+        assert woken.acquire(timeout=TIMEOUT)
+        worker.put(7)
+        worker.stop()
+        worker.thread.join(TIMEOUT)
+    assert handled == [7]
+    assert "timed-worker failed on a timed wake-up; continuing" in caplog.text
+
+
 def test_collection_removes_the_record_and_keeps_a_newer_one(
     dh_exec_ctx: ExecutionContext,
 ) -> None:

@@ -9,9 +9,10 @@ import logging
 import ssl
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.cancel import Cancel
@@ -645,10 +646,10 @@ def test_16_threads_wait_out_one_pause_together(fake_rest: FakeRestServer) -> No
         with lock:
             results.append(page)
 
-    first = threading.Thread(target=call)
+    first = threading.Thread(target=call, daemon=True)
     first.start()
     assert clock.wait_for_sleepers(1) == [30.0]
-    others = [threading.Thread(target=call) for _ in range(16)]
+    others = [threading.Thread(target=call, daemon=True) for _ in range(16)]
     for thread in others:
         thread.start()
     # The head waits for the pause and the rest for their turn; none has sent anything.
@@ -861,7 +862,7 @@ def test_16_threads_page_through_one_client_with_a_429_and_resets(
         with lock:
             got[ticker] = numbers
 
-    threads = [threading.Thread(target=page_through, args=(t,)) for t in expected]
+    threads = [threading.Thread(target=page_through, args=(t,), daemon=True) for t in expected]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -909,7 +910,7 @@ def test_close_ends_a_pause_at_once(fake_rest: FakeRestServer) -> None:
         except WireError as error:
             errors.append(error)
 
-    thread = threading.Thread(target=call)
+    thread = threading.Thread(target=call, daemon=True)
     thread.start()
     assert clock.wait_for_sleepers(1) == [60.0]
     rest.close()
@@ -932,7 +933,7 @@ def test_close_ends_a_transient_retry_wait_at_once(fake_rest: FakeRestServer) ->
         except WireError as error:
             errors.append(error)
 
-    thread = threading.Thread(target=call)
+    thread = threading.Thread(target=call, daemon=True)
     thread.start()
     assert clock.wait_for_sleepers(1) == [pytest.approx(0.55)]
     rest.close()
@@ -950,7 +951,7 @@ class _Call:
         self.error: WireError | None = None
         self._rest = rest
         self._cancel = cancel
-        self.thread = threading.Thread(target=self._run)
+        self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
     def _run(self) -> None:
@@ -1165,4 +1166,51 @@ def test_a_call_without_a_token_is_a_lane_of_its_own_and_a_token_shares_one(
     assert third is not None
     assert third is not shared
     assert third is not fourth
+    rest.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        urllib3.exceptions.ProxyError(
+            "Unable to connect to proxy",
+            urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"),
+        ),
+        urllib3.exceptions.ProxyError(
+            "Unable to connect to proxy", urllib3.exceptions.SSLError("handshake failed")
+        ),
+        urllib3.exceptions.SSLError(ssl.SSLError("handshake failed")),
+    ],
+)
+def test_an_attempt_that_never_connected_frees_its_slot_even_behind_a_proxy(
+    *,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    error: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    governor = _governor(clock)
+    governor.declare({"stocks"})
+    rest = _client(fake_rest, governor=governor)
+
+    def unreachable(*_: object, **__: object) -> None:
+        raise error
+
+    monkeypatch.setattr(rest._pool, "request", unreachable)
+    with pytest.raises(WireError):
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    state = governor.snapshot()[0]
+    assert (state.in_flight, state.recent) == (0, 0)  # nothing reached Massive: no slot held
+    rest.close()
+
+
+def test_an_attempt_that_failed_on_the_wire_keeps_its_slot(
+    fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    governor = _governor(clock)
+    rest = _client(fake_rest, governor=governor)
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"", reset=True))
+    with pytest.raises(WireError):
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert governor.snapshot()[0].recent == 4  # each attempt may have reached Massive
     rest.close()
