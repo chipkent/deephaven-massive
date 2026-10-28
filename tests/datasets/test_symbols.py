@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING, cast
 
 import pyarrow as pa
 import pytest
-from deephaven import new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
+from deephaven.dherror import DHError
 from deephaven.table import Table
 
 import deephaven_massive as dm
@@ -25,6 +26,7 @@ from deephaven_massive._datasets.symbols import (
     normalize,
     option_roots,
     symbol_class,
+    topic_problem,
     unknown_symbol_message,
     wire_spellings,
     ws_symbol,
@@ -62,13 +64,21 @@ CANONICAL = [
     (FUT, "ESZ5"),
     (FUT, "6CH5"),
     (FUT, "0NGH39"),
-    (FUT, "ESZ25"),  # a year is never rewritten
+    (FUT, "ESZ25"),  # a year is never rewritten (and ESZ25 is not ESZ5)
+    (FUT, "10YN6-10YQ6"),  # spreads, as Massive's CBOT, COMEX, NYMEX, and CME files write them
+    (FUT, "GCQ6-GCZ6"),
+    (FUT, "BOB 02-01 U6"),
+    (FUT, "CL:BF Q6-U6-V6"),
+    (FUT, "CL:BZ U6-V6"),
+    (FUT, "6A:XF:AUDUSD:Q6"),
     (IDX, "I:SPX"),
     (IDX, "I:AAVE10RP"),
     (IDX, "I:APy"),
+    (IDX, "I:spx"),  # Massive's pattern allows lower case
     (FX, "C:EURUSD"),
     (CRY, "X:BTCUSD"),
     (CRY, "X:1INCHUSDT"),
+    (CRY, "X:BTCDAI"),  # a quote the library does not know: canonical, though not streamable
 ]
 
 NOT_CANONICAL = [
@@ -79,6 +89,8 @@ NOT_CANONICAL = [
     (STK, "BRK/B"),
     (STK, "BRK B"),
     (STK, " AAPL"),
+    (STK, "AAPL\n"),  # a trailing newline never passes
+    (FX, "C:EURUSD\n"),
     (STK, "BRK."),
     (STK, "BRK..B"),
     (STK, "X:BTCUSD"),
@@ -89,19 +101,23 @@ NOT_CANONICAL = [
     (OPT, "O:AAPL251301C00150000"),
     (OPT, "O:AAPL250229C00150000"),  # 2025 is no leap year
     (OPT, "O:AAPL250117X00150000"),
-    (FUT, "esz5"),
+    (FUT, ""),
+    (FUT, "esz5"),  # nothing is re-cased
     (FUT, "1234"),
     (FUT, "ES-Z5"),
+    (FUT, "BOB 2-1 U6"),
+    (FUT, " ESZ5"),
+    (FUT, "ESZ5\n"),
+    (FUT, "X:ESZ5"),
     (IDX, "SPX"),
-    (IDX, "I:spx"),
     (IDX, "i:SPX"),
     (IDX, "I:"),
     (FX, "C:EURUS1"),
     (FX, "C:EUR/USD"),
     (FX, "EURUSD"),
-    (CRY, "X:BTCXYZ"),
     (CRY, "X:BTC-USD"),
-    (CRY, "X:USD"),
+    (CRY, "X:"),
+    (CRY, "x:BTCUSD"),
 ]
 
 
@@ -118,7 +134,7 @@ def test_canonical_text_is_canonical_and_converts_to_itself(
 @pytest.mark.parametrize(("asset_class", "text"), NOT_CANONICAL)
 def test_other_text_is_not_canonical(asset_class: AssetClass, text: str) -> None:
     assert not is_canonical(asset_class, text)
-    with pytest.raises(ValueError, match="Massive"):
+    with pytest.raises(ValueError, match=r"Massive|ticker"):
         check_symbol(asset_class, text)
 
 
@@ -145,7 +161,6 @@ CONVERSIONS = [
     (dm.canonical_symbol_option, "o:spxw251219p05000000", "O:SPXW251219P05000000"),
     (dm.canonical_symbol_option, "BRKB  250117C00400000", "O:BRKB250117C00400000"),
     (dm.canonical_symbol_option, "SPXW  251219P05000000", "O:SPXW251219P05000000"),
-    (dm.canonical_symbol_future, "esz5", "ESZ5"),
     (dm.canonical_symbol_index, "SPX", "I:SPX"),
     (dm.canonical_symbol_index, "NDX", "I:NDX"),
     (dm.canonical_symbol_forex, "EUR/USD", "C:EURUSD"),
@@ -159,11 +174,17 @@ CONVERSIONS = [
     (dm.canonical_symbol_crypto, "x:btc-usd", "X:BTCUSD"),
     (dm.canonical_symbol_crypto, "doge-usdt", "X:DOGEUSDT"),
     (dm.canonical_symbol_crypto, "1INCH-USD", "X:1INCHUSD"),
+    (dm.canonical_symbol_crypto, "BTC-DAI", "X:BTCDAI"),
+    (dm.canonical_symbol_future, "ESZ5", "ESZ5"),
+    (dm.canonical_symbol_future_spread, "10YN6-10YQ6", "10YN6-10YQ6"),
+    (dm.canonical_symbol_future_spread, "TEX 07-05 U6", "TEX 07-05 U6"),
+    (dm.canonical_symbol_future_spread, "CL:BF Z6-H7-M7", "CL:BF Z6-H7-M7"),
+    (dm.canonical_symbol_future_spread, "6A:XF:AUDUSD:U6", "6A:XF:AUDUSD:U6"),  # any quote currency
+    (dm.canonical_symbol_crypto, "ABCUS-DT", "X:ABCUSDT"),  # the codes joined as written
     (dm.canonical_symbol_stock_yahoo, "BRK-B", "BRK.B"),
     (dm.canonical_symbol_stock_yahoo, "BAC-PL", "BACpL"),
     (dm.canonical_symbol_stock_yahoo, "KIM-PL", "KIMpL"),
     (dm.canonical_symbol_stock_yahoo, "AAPL", "AAPL"),
-    (dm.canonical_symbol_stock_yahoo, "KIMpL", "KIMpL"),  # canonical text is kept
     (dm.canonical_symbol_stock_nasdaq, "KIM-L", "KIMpL"),
     (dm.canonical_symbol_stock_nasdaq, "DCOM-", "DCOMp"),
     (dm.canonical_symbol_stock_nasdaq, "BRK.B", "BRK.B"),
@@ -180,7 +201,8 @@ def test_the_converters_convert_their_spellings(
     convert: Callable[[str | None], str | None], text: str, expected: str
 ) -> None:
     assert convert(text) == expected
-    assert convert(expected) == expected  # idempotent
+    if "_stock_" not in convert.__name__:  # a convention reads only its own grammar
+        assert convert(expected) == expected  # idempotent
     assert convert(None) is None
 
 
@@ -213,6 +235,10 @@ def test_canonical_symbol_takes_a_stock_convention(
         (SymbolConvention.NASDAQ, "CELG^"),
         (SymbolConvention.NASDAQ, "ABC#"),
         (SymbolConvention.NASDAQ, "ABC-LL"),
+        (SymbolConvention.NASDAQ, "ABC.U"),  # class U, never Massive's unit ABC.U
+        (SymbolConvention.NASDAQ, "KIMpL"),  # Massive's spelling is not Nasdaq's
+        (SymbolConvention.CMS, "BRK.B"),
+        (SymbolConvention.YAHOO, "KIMpL"),
         (SymbolConvention.NASDAQ, "BAC$L"),  # the ACT symbology, which is ambiguous
         (SymbolConvention.CMS, "AAC WS"),
         (SymbolConvention.CMS, "AAC U"),
@@ -225,6 +251,25 @@ def test_a_convention_converts_only_its_plain_class_and_preferred_spellings(
 ) -> None:
     with pytest.raises(ValueError, match=rf"of the {convention.name} convention\. Massive"):
         dm.canonical_symbol(text, STK, convention=convention)
+
+
+@pytest.mark.parametrize("text", ["VOD.L", "SHOP.TO", "BMW.DE", "BRK.B"])
+def test_a_yahoo_ticker_with_a_dot_is_a_foreign_listing(text: str) -> None:
+    with pytest.raises(ValueError, match=rf"^'{text}' is a Yahoo ticker of a listing outside"):
+        dm.canonical_symbol_stock_yahoo(text)
+
+
+def test_class_u_converts_under_no_convention() -> None:
+    # CQS and CMS write units as U, so a class U would read as a unit.
+    for convention, text in (
+        (SymbolConvention.YAHOO, "ABC-U"),
+        (SymbolConvention.NASDAQ, "ABC.U"),
+        (SymbolConvention.CMS, "ABC U"),
+    ):
+        with pytest.raises(ValueError, match="is not a plain, class, or preferred ticker"):
+            dm.canonical_symbol(text, STK, convention=convention)
+    assert dm.canonical_symbol("ABC.T", STK, convention=SymbolConvention.NASDAQ) == "ABC.T"
+    assert dm.canonical_symbol("ABC.V", STK, convention=SymbolConvention.NASDAQ) == "ABC.V"
 
 
 def test_a_convention_refuses_another_class_prefix() -> None:
@@ -250,6 +295,7 @@ def test_converter_enums_reject_text() -> None:
         dm.canonical_symbol_stock,
         dm.canonical_symbol_option,
         dm.canonical_symbol_future,
+        dm.canonical_symbol_future_spread,
         dm.canonical_symbol_index,
         dm.canonical_symbol_forex,
         dm.canonical_symbol_crypto,
@@ -282,8 +328,9 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
             dm.canonical_symbol_stock,
             "kimpl",
             (
-                r"^'kimpl' is not a Massive stock ticker: tickers are case-sensitive \(KIMpL is a "
-                r"preferred\); did you mean 'KIMPL'\?$"
+                r"^'kimpl' is not a Massive stock ticker: tickers are case-sensitive, with an "
+                r"upper-case root and possibly a lower-case suffix \(KIMpL is a preferred\); "
+                r"write Massive's ticker exactly$"
             ),
         ),
         (
@@ -331,7 +378,31 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
         ),
         (dm.canonical_symbol_option, "O:AAPL250132C00150000", "with a real expiry date"),
         (dm.canonical_symbol_option, "BRKB 250117C00400000", "with a real expiry date"),
-        (dm.canonical_symbol_future, "ES-Z5", "letters and digits only"),
+        (dm.canonical_symbol_future, " ESZ5 ", r"^' ESZ5 ' has surrounding whitespace; write"),
+        (dm.canonical_symbol_future, "", r"^'' is not a Massive futures ticker: a contract is"),
+        (dm.canonical_symbol_future, "esz5", "a contract is upper-case letters and digits"),
+        (
+            dm.canonical_symbol_future,
+            "GCQ6-GCZ6",
+            (
+                r"^'GCQ6-GCZ6' is a futures spread, not a single contract; call "
+                r"dm\.canonical_symbol_future_spread$"
+            ),
+        ),
+        (
+            dm.canonical_symbol_future_spread,
+            "ESZ5",
+            (
+                r"^'ESZ5' is a single futures contract, not a spread; call "
+                r"dm\.canonical_symbol_future$"
+            ),
+        ),
+        (
+            dm.canonical_symbol_future_spread,
+            "BOB 2-1 U6",
+            r"^'BOB 2-1 U6' is not one of Massive's futures spread spellings: a calendar",
+        ),
+        (dm.canonical_symbol_future_spread, "X:BTCUSD", "is a crypto ticker"),
         (dm.canonical_symbol_future, "X:ESZ5", "is a crypto ticker"),
         (dm.canonical_symbol_index, "S P X", r"^'S P X' is not a Massive index ticker"),
         (dm.canonical_symbol_index, "C:EURUSD", "is a forex ticker"),
@@ -339,10 +410,8 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
         (dm.canonical_symbol_forex, "EURO/USD", "two three-letter codes"),
         (dm.canonical_symbol_forex, "EUR/USD/JPY", "two three-letter codes"),
         (dm.canonical_symbol_forex, "EUR USD", "two three-letter codes"),
-        (dm.canonical_symbol_crypto, "BTC-XYZ", "quote currency is one of USDT"),
-        (dm.canonical_symbol_crypto, "BTC.USD", "quote currency is one of USDT"),
-        (dm.canonical_symbol_crypto, "ABCUS-DT", "splits back unambiguously"),
-        (dm.canonical_symbol_crypto, "USD", "quote currency is one of USDT"),
+        (dm.canonical_symbol_crypto, "BTC.USD", r"^cannot read 'BTC.USD' as a crypto pair"),
+        (dm.canonical_symbol_crypto, "BTC--USD", r"^cannot read 'BTC--USD' as a crypto pair"),
     ],
 )
 def test_a_converter_refuses_with_a_reason(
@@ -371,12 +440,23 @@ def test_check_symbol_names_the_fix() -> None:
         r"exact tickers, and dm\.canonical_symbol_forex converts\)$",
     ):
         check_symbol(FX, "EUR/USD")
-    with pytest.raises(ValueError, match=r"did you mean 'AAPL'\?; symbols must be Massive's"):
+    with pytest.raises(
+        ValueError, match=r"tickers are case-sensitive.*; symbols must be Massive's"
+    ):
         check_symbol(STK, "aapl")
     with pytest.raises(ValueError, match=r"use 'I:SPX'"):
         check_symbol(IDX, "SPX")
-    with pytest.raises(ValueError, match="is a crypto ticker"):
+    # A canonical ticker of another class names the class the dataset takes, not a converter.
+    with pytest.raises(
+        ValueError, match=r"^'X:BTCUSD' is a crypto ticker; this dataset takes stock tickers$"
+    ):
         check_symbol(STK, "X:BTCUSD")
+    with pytest.raises(
+        ValueError, match=r"^'I:SPX' is an index ticker; this dataset takes stock tickers$"
+    ):
+        check_symbol(STK, "I:SPX")
+    with pytest.raises(ValueError, match=r"is a crypto ticker \(prefix X:\)"):
+        check_symbol(STK, "X:BTC-USD")  # not canonical crypto either: the converter's reason
     with pytest.raises(TypeError, match=r"^a symbol must be a str, not int$"):
         check_symbol(STK, 5)
 
@@ -419,13 +499,18 @@ def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
         (CRY, "X:BTC-USD", "X:BTCUSD"),  # FMV frames
         (CRY, "X:BTCUSD", "X:BTCUSD"),
         (CRY, "BTC/USD", "X:BTCUSD"),
-        (CRY, "BTC-XYZ", None),
-        (CRY, "X:BTCDAI", "X:BTCDAI"),  # Massive's own ticker, though DAI is no known quote
-        (CRY, "ABCUS-DT", None),
+        (CRY, "BTC-XYZ", "X:BTCXYZ"),  # any quote currency
+        (CRY, "X:BTC-DAI", "X:BTCDAI"),
+        (CRY, "X:BTCDAI", "X:BTCDAI"),
+        (CRY, "ABCUS-DT", "X:ABCUSDT"),
         (CRY, "BTC--USD", None),
         (IDX, "I:SPX", "I:SPX"),
         (IDX, "SPX", "I:SPX"),  # the endpoint's class adds the prefix
-        (IDX, "spx", None),
+        (IDX, "spx", "I:spx"),  # never re-cased
+        (IDX, "S P X", None),
+        (FUT, "BOB 02-01 U6", "BOB 02-01 U6"),
+        (FUT, "ZZ:NEW COMBO Z6", "ZZ:NEW COMBO Z6"),  # a row keeps a form not seen yet
+        (FUT, " ESZ5", None),
         (OPT, "O:AAPL250117C00150000", "O:AAPL250117C00150000"),
         (OPT, "AAPL250117C00150000", None),
         (STK, "KIMpL", "KIMpL"),
@@ -568,7 +653,9 @@ def test_symbol_class(symbol: str, asset_class: AssetClass) -> None:
 
 def test_the_unknown_symbol_message_names_the_spellings_and_the_switch() -> None:
     message = unknown_symbol_message("forex.quotes", ["b", "a"])
-    assert message.startswith("forex.quotes: Massive sent the symbol 'a', 'b', a spelling")
+    assert message.startswith("forex.quotes: Massive sent the symbols 'a', 'b', spellings the")
+    one = unknown_symbol_message("forex.quotes", ["a"])
+    assert one.startswith("forex.quotes: Massive sent the symbol 'a', a spelling the library")
     assert "MASSIVE_UNKNOWN_SYMBOLS=warn" in message
     assert "MassiveConfig(unknown_symbols=dm.UnknownSymbols.WARN)" in message
 
@@ -623,3 +710,75 @@ def test_wire_symbols_log_nothing_under_fail(caplog: pytest.LogCaptureFixture) -
     assert read.unknown == ("??",)
     assert read.symbols.to_pylist() == [None, "C:EURUSD"]
     assert caplog.records == []
+
+
+def test_a_crypto_ticker_streams_only_when_its_quote_is_known() -> None:
+    assert topic_problem(CRY, "X:BTCUSD") is None
+    assert topic_problem(None, "X:BTCUSD") is None
+    assert topic_problem(STK, "AAPL") is None
+    problem = topic_problem(None, "X:BTCDAI")
+    assert problem is not None
+    assert problem.startswith("'X:BTCDAI' cannot be streamed: its WebSocket topic needs")
+    assert "fetch(), poll(), and history() still serve it" in problem
+    with pytest.raises(ValueError, match=r"^'X:BTCDAI' cannot be streamed"):
+        ws_symbol(CRY, "X:BTCDAI")
+    assert wire_spellings(CRY, "X:BTCDAI") == ("X:BTCDAI", "BTCDAI")
+
+
+def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
+    for text in ("ERIC B", "7203", "VOD.L", "kimpl"):
+        assert is_canonical(STK, text, as_written=True)
+        assert check_symbol(STK, text, as_written=True) == text
+        assert canonical_from_wire(STK, text, as_written=True) == text
+    assert normalize(STK, ["ERIC B", "7203"], as_written=True) == ("7203", "ERIC B")
+    for bad in ("", " ERIC B", "X:BTCUSD", "A\tB"):
+        assert not is_canonical(STK, bad, as_written=True)
+        assert canonical_from_wire(STK, bad, as_written=True) is None
+        with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
+            check_symbol(STK, bad, as_written=True)
+    reader = WireSymbols("partners.tmx.corporate_events", STK, UnknownSymbols.FAIL, as_written=True)
+    read = reader.read(pa.array(["ERIC B", None, " x"]))
+    assert read.symbols.to_pylist() == ["ERIC B", None, None]
+    assert read.unknown == (" x",)
+
+
+CONVERTERS = [
+    ("canonical_symbol_stock", "KIMpL", "KIMpL"),
+    ("canonical_symbol_stock_yahoo", "BRK-B", "BRK.B"),
+    ("canonical_symbol_stock_nasdaq", "KIM-L", "KIMpL"),
+    ("canonical_symbol_stock_cms", "BAC PRL", "BACpL"),
+    ("canonical_symbol_option", "AAPL250117C00150000", "O:AAPL250117C00150000"),
+    ("canonical_symbol_future", "ESZ5", "ESZ5"),
+    ("canonical_symbol_future_spread", "BOB 02-01 U6", "BOB 02-01 U6"),
+    ("canonical_symbol_index", "SPX", "I:SPX"),
+    ("canonical_symbol_forex", "EUR/USD", "C:EURUSD"),
+    ("canonical_symbol_crypto", "BTC-USD", "X:BTCUSD"),
+]
+
+
+@pytest.mark.parametrize("case", CONVERTERS, ids=[c[0] for c in CONVERTERS])
+def test_each_converter_runs_in_a_query_string(
+    dh_exec_ctx: object, case: tuple[str, str, str]
+) -> None:
+    # Imported by bare name (here: a local name), the function makes a String column; a null
+    # stays null, and a bad row raises the converter's message through Deephaven.
+    name, text, expected = case
+    convert = getattr(dm, name)
+    assert convert.__name__ == name  # the formulas below find it as `convert`
+    table = new_table([string_col("P", [text, None])]).update(["S = convert(P)"])
+    (column,) = [c for c in table.columns if c.name == "S"]
+    assert column.data_type == dtypes.string
+    assert [row[0] for row in table.iter_tuple(cols="S")] == [expected, None]
+    bad = new_table([string_col("P", ["X:BTC-USD" if "crypto" not in name else "C:EURUSD"])])
+    with pytest.raises(DHError, match="ticker \\(prefix"):
+        bad.update(["S = convert(P)"])
+
+
+def test_a_converter_called_through_the_module_needs_a_cast(dh_exec_ctx: object) -> None:
+    pairs = new_table([string_col("P", ["EUR/USD"])])
+    plain = pairs.update(["S = dm.canonical_symbol_forex(P)"])
+    cast_ = pairs.update(["S = (String) dm.canonical_symbol_forex(P)"])
+    types = {t: next(c.data_type for c in t.columns if c.name == "S") for t in (plain, cast_)}
+    assert types[plain] != dtypes.string  # an Object column
+    assert types[cast_] == dtypes.string
+    assert [row[0] for row in cast_.iter_tuple(cols="S")] == ["C:EURUSD"]

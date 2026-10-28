@@ -233,7 +233,7 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
         build(massive_session, fx, symbols="EUR/USD")
     # A dataset without an asset class reads the class from each prefix; none is a stock.
     assert build(massive_session, INDICATOR, symbols="KIMpL")._request.symbols == ("KIMpL",)
-    with pytest.raises(ValueError, match=r"did you mean 'AAPL'\?"):
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
         build(massive_session, INDICATOR, symbols="aapl")
 
 

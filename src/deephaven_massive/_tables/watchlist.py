@@ -33,7 +33,12 @@ from deephaven import dtypes
 from deephaven.table import Table
 from deephaven.table_listener import TableListener, TableListenerHandle
 
-from deephaven_massive._datasets.symbols import canonical_symbol, check_symbol, is_canonical
+from deephaven_massive._datasets.symbols import (
+    canonical_symbol,
+    check_symbol,
+    is_canonical,
+    topic_problem,
+)
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention, _require_enum
 from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._types import override
@@ -42,6 +47,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
     from deephaven.table_listener import TableUpdate
+
+    from deephaven_massive._datasets.catalog import DatasetSpec
 
 __all__ = ["SymbolWatch", "canonicalize_symbols", "invalid_row_message", "read_symbols"]
 
@@ -54,54 +61,96 @@ _NULL_WARNINGS: Final = 20
 """The most bad values one `canonicalize_symbols` table logs under `OnError.NULL`."""
 
 
-def invalid_row_message(asset_class: AssetClass | None, symbol: str) -> str:
+def invalid_row_message(
+    asset_class: AssetClass | None, symbol: str, *, as_written: bool = False
+) -> str:
     """Say why a symbol table's row is refused, and how to convert such a table.
 
     Args:
         asset_class: The dataset's class, or None for a dataset that spans classes.
         symbol: The row's symbol, which `check_symbol` refuses.
+        as_written: True for a dataset whose symbols are kept as Massive writes them.
 
     Returns:
         The reason (with the canonical form when the class's converter gives one) and the
-        remedy: fix the row, or read the table through `dm.canonicalize_symbols` with
-        `on_error=dm.OnError.NULL`.
+        remedy: fix the row, or convert the table. For a dataset of one class the remedy is
+        `dm.canonicalize_symbols` with `on_error=dm.OnError.NULL`; for a dataset that spans
+        classes, whose rows may mix them, it is `dm.canonical_symbol` per row with each row's
+        class.
     """
     reason = ""
     try:
-        check_symbol(asset_class, symbol)
+        check_symbol(asset_class, symbol, as_written=as_written)
     except ValueError as error:
         reason = f" ({error})"
-    target = "dm.AssetClass.<class>" if asset_class is None else f"dm.AssetClass.{asset_class.name}"
-    return (
-        f"a symbol table holds {symbol!r}{reason}. Fix the row, or pass the table through "
-        f"dm.canonicalize_symbols(table, {target}, on_error=dm.OnError.NULL), which converts "
-        "what it can and nulls the rest"
-    )
+    if asset_class is None:
+        remedy = (
+            "convert each row with dm.canonical_symbol(text, asset_class) and the row's own "
+            "class, since this dataset's rows may mix classes"
+        )
+    else:
+        remedy = (
+            f"pass the table through dm.canonicalize_symbols(table, "
+            f"dm.AssetClass.{asset_class.name}, on_error=dm.OnError.NULL), which converts what "
+            "it can and nulls the rest"
+        )
+    return f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
 
 
-def read_symbols(asset_class: AssetClass | None, table: Table) -> tuple[str, ...]:
+def _stream_message(symbol: str, problem: str) -> str:
+    """Say that a symbol table's row cannot be streamed.
+
+    Args:
+        symbol: The row's symbol, canonical.
+        problem: Why its topic cannot be built (`topic_problem`).
+
+    Returns:
+        The message a stream fails with.
+    """
+    return f"a symbol table holds {symbol!r}: {problem}"
+
+
+_FAILED_TABLE: Final = (
+    "the symbol table failed, so the result can no longer follow it: {cause}. A table made by "
+    "dm.canonicalize_symbols fails on a row it cannot convert unless "
+    "on_error=dm.OnError.NULL"
+)
+"""The message of a result whose symbol table failed upstream, formatted with the cause."""
+
+
+def read_symbols(spec: DatasetSpec, table: Table, *, for_stream: bool = False) -> tuple[str, ...]:
     """Read a symbol table's current rows once, refusing any that is not canonical.
 
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
-    it reads, so the rows are one consistent snapshot. Runs on the caller thread, inside the
-    session's execution context, with no library lock held. Null rows are ignored.
+    it reads, so the rows are one consistent snapshot. Runs on the caller thread, or a poller's,
+    inside the session's execution context, with no library lock held. Null rows are ignored.
 
     Args:
-        asset_class: The dataset's class, or None for a dataset that spans classes.
+        spec: The dataset, whose class and `symbols_as_written` decide the grammar.
         table: The user's table with a `Symbol` column.
+        for_stream: True for a stream verb, whose symbols must also build a WebSocket topic
+            (`topic_problem`).
 
     Returns:
         The table's symbols, sorted and de-duplicated; empty for a table of no or only null
         rows.
 
     Raises:
-        ValueError: If a row is not Massive's exact ticker of the class
-            (`invalid_row_message`, for the first such row in sorted order).
+        ValueError: If the table has failed (a `canonicalize_symbols` table under
+            `OnError.RAISE` that met a bad row), or a row is not Massive's exact ticker of the
+            class (`invalid_row_message`, for the first such row in sorted order), or, for a
+            stream, a row's topic cannot be built.
     """
+    if table.j_table.isFailed():
+        raise ValueError(_FAILED_TABLE.format(cause="it is failed"))
     found = sorted({row[0] for row in table.iter_tuple(cols=_SYMBOL) if row[0] is not None})
+    written = spec.symbols_as_written
     for symbol in found:
-        if not is_canonical(asset_class, symbol):
-            raise ValueError(invalid_row_message(asset_class, symbol))
+        if not is_canonical(spec.asset_class, symbol, as_written=written):
+            raise ValueError(invalid_row_message(spec.asset_class, symbol, as_written=written))
+        problem = topic_problem(spec.asset_class, symbol) if for_stream else None
+        if problem is not None:
+            raise ValueError(_stream_message(symbol, problem))
     return tuple(found)
 
 
@@ -117,9 +166,12 @@ class SymbolWatch:
 
     `on_change(added, removed)` receives two disjoint frozensets of symbols: those the table
     now holds and did not before, and those it no longer holds. It is never called with both
-    empty. A row whose symbol is not Massive's exact ticker of the class is never counted:
-    `on_invalid(message)` receives `invalid_row_message` for it each time such a row arrives,
-    and its owner fails the stream. Both callbacks run on the replaying caller thread or an
+    empty. A row whose symbol is not Massive's exact ticker of the class, or whose WebSocket
+    topic cannot be built (`topic_problem`), is never counted: `on_invalid(message)` receives
+    the reason each time such a row arrives, and its owner fails the stream. When the watched
+    table itself fails (a `canonicalize_symbols` table under `OnError.RAISE` that met a bad
+    row), `on_invalid` receives that too, so the stream never follows a frozen table. Both
+    callbacks run on the replaying caller thread or an
     update-graph thread, with the update-graph lock held: they must not block, wait on a
     library thread, or make a table operation, and an exception one raises is logged at ERROR
     by the listener's error callback.
@@ -257,18 +309,23 @@ class _SymbolCounter(TableListener):
 
     @override
     def on_error(self, e: Exception) -> None:
-        """Log a failure of the listener at ERROR; the watch stops receiving updates.
+        """Fail the stream: the watched table failed (or the listener did) and stops updating.
+
+        A table made by `canonicalize_symbols` under `OnError.RAISE` fails on a later row it
+        cannot convert; following it no further would leave the stream on stale symbols, so the
+        failure reaches `on_invalid`, whose owner fails the stream. Logged at ERROR too.
 
         Args:
             e: What Deephaven reported.
         """
         logger.error("a symbol table's watch failed and stops following it: %s", e)
+        self._on_invalid(_FAILED_TABLE.format(cause=e))
 
     def _count(self, columns: Mapping[str, Iterable[object]], step: int) -> None:
         """Add `step` to the count of each canonical symbol, forgetting counts that reach zero.
 
-        A symbol that is not canonical is never counted: one that arrives is reported to
-        `on_invalid`, and one that leaves is ignored.
+        A symbol that is not canonical, or cannot be streamed, is never counted: one that
+        arrives is reported to `on_invalid`, and one that leaves is ignored.
 
         Args:
             columns: The `Symbol` values of some rows, as `TableUpdate` returns them: NumPy
@@ -277,9 +334,14 @@ class _SymbolCounter(TableListener):
         """
         for value in columns.get(_SYMBOL, ()):
             symbol = str(value)  # a plain str, not NumPy's subclass, leaves the listener
+            message = None
             if not is_canonical(self._asset_class, symbol):
+                message = invalid_row_message(self._asset_class, symbol)
+            elif (problem := topic_problem(self._asset_class, symbol)) is not None:
+                message = _stream_message(symbol, problem)
+            if message is not None:
                 if step > 0:
-                    self._on_invalid(invalid_row_message(self._asset_class, symbol))
+                    self._on_invalid(message)
                 continue
             count = self._counts[symbol] + step
             if count > 0:
@@ -322,14 +384,15 @@ def canonicalize_symbols(
     dataset accepts as `symbols=`. Each row converts as `canonical_symbol(value, asset_class,
     convention=convention)` would; a null stays null.
 
-    A static table is checked in Python first, one call per distinct value, so a bad value
-    raises a clean `ValueError` here; every table is then converted by a formula
-    (`Table.update`), on every row of a static table and every row that ticks in a refreshing
-    one. Under `OnError.RAISE` a bad row then fails the
-    table (and a bad initial row raises from this call); under `OnError.NULL` it gets a null
-    symbol, which every dataset ignores, and each bad value is logged once at WARNING, at most
-    20 per table. Call it on a thread with a Deephaven execution context, as any table
-    operation; the result belongs to the caller's liveness scope. The conversion is pure, so
+    The table's current rows are checked in Python first, one call per distinct value, so a
+    bad value raises a clean `ValueError` here, whether the table is static or refreshing;
+    every table is then converted by a formula (`Table.update`), on every row of a static
+    table and every row that ticks in a refreshing one. Under `OnError.RAISE` a later bad row
+    of a refreshing table fails the table, and a dataset reading it as a watchlist fails too;
+    under `OnError.NULL` a bad row gets a null symbol, which every dataset ignores, and each
+    bad value is logged once at WARNING, at most 20 per table. Call it on a thread with a
+    Deephaven execution context, as any table operation; the result belongs to the caller's
+    liveness scope. The conversion is pure, so
     Deephaven may run it on several threads at once.
 
     Example:
@@ -359,15 +422,13 @@ def canonicalize_symbols(
         nulls): static for a static table, refreshing for a refreshing one.
 
     Raises:
-        ValueError: Under `OnError.RAISE`, if a value of a static table does not convert (the
-            message lists up to five values and their reasons).
+        ValueError: Under `OnError.RAISE`, if a current value of the table does not convert
+            (the message lists up to five values and their reasons).
 
     A `table` that is not a Deephaven `Table`, a `column` that is not a `str`, or an
     `asset_class`, `convention`, or `on_error` of the wrong type raises `TypeError` (an enum's
     names the member to use); a `column` that is not a `String` column of the table, or a
-    `convention` for a class other than stocks, raises `ValueError`. A bad initial
-    row of a refreshing table under `OnError.RAISE` raises the `DHError` of `Table.update`,
-    which carries the converter's message.
+    `convention` for a class other than stocks, raises `ValueError`.
     """
     resolved, chosen, mode = _arguments(
         table, asset_class=asset_class, column=column, convention=convention, on_error=on_error
@@ -380,18 +441,18 @@ def canonicalize_symbols(
     def refuse(value: str, reason: str) -> None:
         warnings.warn(value, "canonicalize_symbols: %s; its rows get a null %s", reason, column)
 
-    if not table.is_refreshing:
-        # Converted in Python first, so a bad value raises here rather than inside Deephaven.
-        rows = table.select_distinct([column]).iter_tuple(cols=column)
-        refused = _refused((row[0] for row in rows if row[0] is not None), convert)
-        if refused and mode is OnError.RAISE:
-            shown = "; ".join(refused[value] for value in sorted(refused)[:_SHOWN])
-            raise ValueError(
-                f"{len(refused)} value(s) of {column} are not {resolved.value} symbols: "
-                f"{shown}. Pass on_error=dm.OnError.NULL to null them instead"
-            )
-        for value in sorted(refused):  # logged here, in order; the formula repeats none
-            refuse(value, refused[value])
+    # The current rows are converted in Python first, one consistent snapshot of their distinct
+    # values, so a bad one raises a clean ValueError here, static table or refreshing.
+    rows = table.select_distinct([column]).iter_tuple(cols=column)
+    refused = _refused((row[0] for row in rows if row[0] is not None), convert)
+    if refused and mode is OnError.RAISE:
+        shown = "; ".join(refused[value] for value in sorted(refused)[:_SHOWN])
+        raise ValueError(
+            f"{len(refused)} value(s) of {column} are not {resolved.value} symbols: "
+            f"{shown}. Pass on_error=dm.OnError.NULL to null them instead"
+        )
+    for value in sorted(refused):  # logged here, in sorted order; the formula repeats none
+        refuse(value, refused[value])
     massive_canonical_symbol = _row_converter(convert, refuse, mode)
     # Deephaven resolves the formula's function from this call's local variables, by the name
     # the helper gives it.

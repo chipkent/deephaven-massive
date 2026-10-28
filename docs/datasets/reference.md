@@ -107,7 +107,7 @@ The companies Massive relates to a ticker, from news and returns data, one row e
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "A ticker related to the requested ticker." | REST | `ticker` |
-| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. REST: the request's `ticker` parameter. | REST | request |
+| `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. REST: the request's `ticker` parameter. | REST | request |
 
 <a id="news"></a>
 

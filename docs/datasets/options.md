@@ -161,7 +161,7 @@ The snapshot of every contract in one underlying's option chain.
 | `UnderlyingAssetChangeToBreakEven` | double | The change in price for the contract to break even. | REST | `underlying_asset.change_to_break_even` |
 | `UnderlyingAssetLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. | REST | `underlying_asset.last_updated` |
 | `UnderlyingAssetPrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. | REST | `underlying_asset.price` |
-| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset." | REST | `underlying_asset.ticker` |
+| `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset." | REST | `underlying_asset.ticker` |
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. | REST | `underlying_asset.timeframe` |
 | `UnderlyingAssetValue` | double | The value of the underlying index. | REST | `underlying_asset.value` |
 
@@ -242,7 +242,7 @@ The current snapshot of each requested options contract, with its greeks.
 | `UnderlyingAssetChangeToBreakEven` | double | The change in price for the contract to break even. | REST | `underlying_asset.change_to_break_even` |
 | `UnderlyingAssetLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. | REST | `underlying_asset.last_updated` |
 | `UnderlyingAssetPrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. | REST | `underlying_asset.price` |
-| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset." | REST | `underlying_asset.ticker` |
+| `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset." | REST | `underlying_asset.ticker` |
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. | REST | `underlying_asset.timeframe` |
 | `UnderlyingAssetValue` | double | The value of the underlying index. | REST | `underlying_asset.value` |
 | `Value` | double | Value of Index. | REST | `value` |
@@ -266,7 +266,7 @@ Reference data on options contracts: type, exercise style, expiration, and strik
 | `PrimaryExchange` | String | The MIC code of the primary exchange that this contract is listed on. | REST | `primary_exchange` |
 | `SharesPerContract` | double | The number of shares per contract for this contract. | REST | `shares_per_contract` |
 | `StrikePrice` | double | The strike price of the option contract. | REST | `strike_price` |
-| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. REST `underlying_ticker`: "The underlying ticker that the option contract relates to." | REST | `underlying_ticker` |
+| `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. REST `underlying_ticker`: "The underlying ticker that the option contract relates to." | REST | `underlying_ticker` |
 
 <a id="daily_open_close"></a>
 

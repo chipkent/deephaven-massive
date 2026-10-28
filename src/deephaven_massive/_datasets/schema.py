@@ -593,7 +593,10 @@ first, because its descriptions are the most complete."""
 _KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The instrument, in the library's canonical symbol form.",
     "Timestamp": "The row's primary time, as an Instant.",
-    "Underlying": "The underlying instrument, in the library's canonical symbol form.",
+    "Underlying": (
+        "The instrument Massive links the row to, exactly as Massive sends it; for an option, "
+        "the linked instrument, not what the contract delivers."
+    ),
 }
 """The library's own sentence for each renamed key column; its description goes on to name
 the wire key or request parameter behind it on each transport."""

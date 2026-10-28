@@ -53,7 +53,7 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
-from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
+from deephaven_massive._datasets.symbols import SymbolTable, symbol_class, topic_problem
 from deephaven_massive._enums import (
     HistorySource,
     PollMode,
@@ -163,7 +163,7 @@ def _read_symbol_table(
     `dm.canonicalize_symbols`.
     """
     with entered(core.exec_ctx):
-        found = read_symbols(spec.asset_class, symbols.table)
+        found = read_symbols(spec, symbols.table)
     if not found:
         raise ValueError(f"{spec.name}: the symbol table holds no symbols")
     return found
@@ -348,7 +348,7 @@ class Query(QueryBase):
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")
         if isinstance(self._request.symbols, SymbolTable):
             with entered(self._core.exec_ctx):
-                read_symbols(self._spec.asset_class, self._request.symbols.table)
+                read_symbols(self._spec, self._request.symbols.table)
         return self._core.rest_transport().poll(
             self._spec, self._request, interval=period, mode=chosen
         )
@@ -394,7 +394,8 @@ class StreamQuery(QueryBase):
         copies no attributes, so describing the blink table first would lose them. The schema
         is read before the stream is acquired, so the result is built under no library lock.
         A reactive symbol table is read first, so a row that is not Massive's exact ticker
-        fails the call before any stream starts.
+        fails the call before any stream starts; so does a symbol whose WebSocket topic cannot
+        be built (a crypto pair whose quote is not one the library knows, `topic_problem`).
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -403,12 +404,23 @@ class StreamQuery(QueryBase):
         Returns:
             The tracked live result.
 
-        A bad row raises the `ValueError` of `read_symbols` in `_tables/watchlist.py`.
+        Raises:
+            ValueError: If a static symbol cannot be streamed (`topic_problem` gives the
+                reason).
+
+        A bad row of a symbol table raises the `ValueError` of `read_symbols` in
+        `_tables/watchlist.py`.
         """
         spec = self._spec
-        if isinstance(self._request.symbols, SymbolTable):
+        symbols = self._request.symbols
+        if isinstance(symbols, SymbolTable):
             with entered(self._core.exec_ctx):
-                read_symbols(spec.asset_class, self._request.symbols.table)
+                read_symbols(spec, symbols.table, for_stream=True)
+        elif isinstance(symbols, tuple):
+            for symbol in symbols:
+                problem = topic_problem(spec.asset_class, symbol)
+                if problem is not None:
+                    raise ValueError(problem)
         schema = self._core.dataset_schema(spec)
         return self._core.stream_result(
             spec,
@@ -702,7 +714,7 @@ class HistoryQuery(QueryBase):
             A static table with every column of the dataset and no row, described as a
             result is (`_described`).
         """
-        schema = self._core.catalog.dataset_schema(self._spec)
+        schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
             table = dh_arrow.to_table(schema.arrow_schema().empty_table())
         return self._described(table)

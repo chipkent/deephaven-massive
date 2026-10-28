@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import int_col, string_col
-from deephaven.dherror import DHError
 
 import deephaven_massive as dm
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention
+from deephaven_massive._namespaces import crypto, forex, partners
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.watchlist import (
     SymbolWatch,
@@ -48,10 +48,40 @@ def wait_for(condition: Callable[[], bool]) -> None:
 # --- read_symbols and the message ------------------------------------------------------------
 
 
+FOREX = forex.QUOTES
+CRYPTO = crypto.QUOTES
+
+
 def test_read_symbols_returns_the_rows_sorted_without_nulls(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["C:GBPUSD", None, "C:EURUSD", "C:GBPUSD"])])
-    assert read_symbols(AssetClass.FOREX, table) == ("C:EURUSD", "C:GBPUSD")
-    assert read_symbols(AssetClass.FOREX, new_table([string_col("Symbol", [None])])) == ()
+    assert read_symbols(FOREX, table) == ("C:EURUSD", "C:GBPUSD")
+    assert read_symbols(FOREX, new_table([string_col("Symbol", [None])])) == ()
+
+
+def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
+    table = new_table([string_col("Symbol", ["ERIC B", "7203"])])
+    assert read_symbols(partners.TMX_CORPORATE_EVENTS, table) == ("7203", "ERIC B")
+    with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
+        read_symbols(partners.TMX_CORPORATE_EVENTS, new_table([string_col("Symbol", [" x"])]))
+
+
+def test_read_symbols_for_a_stream_refuses_a_pair_it_cannot_stream(dh_exec_ctx: object) -> None:
+    table = new_table([string_col("Symbol", ["X:BTCUSD", "X:BTCDAI"])])
+    assert read_symbols(CRYPTO, table) == ("X:BTCDAI", "X:BTCUSD")  # fetch and history serve it
+    with pytest.raises(ValueError, match=r"^a symbol table holds 'X:BTCDAI': 'X:BTCDAI' cannot"):
+        read_symbols(CRYPTO, table, for_stream=True)
+
+
+def test_read_symbols_refuses_a_failed_table(dh_exec_ctx: object) -> None:
+    source = input_table({"Symbol": dtypes.string})
+    scope = new_scope()
+    with scope.open():
+        watch = dm.canonicalize_symbols(source, AssetClass.FOREX)
+    source.add(new_table([string_col("Symbol", ["no pe!"])]))
+    wait_for(lambda: bool(watch.j_table.isFailed()))
+    with pytest.raises(ValueError, match=r"^the symbol table failed, so the result can no longer"):
+        read_symbols(FOREX, watch)
+    scope.release()
 
 
 def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -> None:
@@ -63,13 +93,16 @@ def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -
         r"\(table, dm\.AssetClass\.FOREX, on_error=dm\.OnError\.NULL\), which converts what it "
         r"can and nulls the rest$",
     ):
-        read_symbols(AssetClass.FOREX, table)
+        read_symbols(FOREX, table)
 
 
 def test_the_message_of_a_dataset_that_spans_classes_names_no_class() -> None:
     message = invalid_row_message(None, "aapl")
-    assert "did you mean 'AAPL'?" in message
-    assert "dm.canonicalize_symbols(table, dm.AssetClass.<class>, " in message
+    assert "tickers are case-sensitive" in message
+    assert message.endswith(
+        "Fix the row, or convert each row with dm.canonical_symbol(text, asset_class) and the "
+        "row's own class, since this dataset's rows may mix classes"
+    )
 
 
 # --- SymbolWatch ---------------------------------------------------------------------------------
@@ -132,10 +165,44 @@ def test_an_empty_table_reports_nothing(dh_exec_ctx: object) -> None:
     assert seen == []
 
 
-def test_a_failing_watch_is_logged(caplog: pytest.LogCaptureFixture) -> None:
-    counter = _SymbolCounter(None, lambda *_: None, lambda _: None)
-    counter.on_error(RuntimeError("listener broke"))
-    assert "a symbol table's watch failed and stops following it: listener broke" in caplog.text
+def test_a_failing_watch_is_logged_and_refused(caplog: pytest.LogCaptureFixture) -> None:
+    refused: list[str] = []
+    counter = _SymbolCounter(None, lambda *_: None, refused.append)
+    counter.on_error(RuntimeError("table broke"))
+    assert "a symbol table's watch failed and stops following it: table broke" in caplog.text
+    assert refused == [
+        (
+            "the symbol table failed, so the result can no longer follow it: table broke. A table "
+            "made by dm.canonicalize_symbols fails on a row it cannot convert unless "
+            "on_error=dm.OnError.NULL"
+        )
+    ]
+
+
+def test_a_watch_over_a_failing_canonicalized_table_refuses_it(dh_exec_ctx: object) -> None:
+    source = input_table({"Symbol": dtypes.string})
+    source.add(new_table([string_col("Symbol", ["EUR/USD"])]))
+    scope = new_scope()
+    with scope.open():
+        watch_table = dm.canonicalize_symbols(source, AssetClass.FOREX)
+        watch, seen, refused = watching(watch_table)
+    watch.start()
+    assert seen == [(frozenset({"C:EURUSD"}), frozenset())]
+    source.add(new_table([string_col("Symbol", ["no pe!"])]))
+    wait_for(lambda: len(refused) == 1)
+    assert refused[0].startswith("the symbol table failed, so the result can no longer follow")
+    scope.release()
+
+
+def test_the_counter_refuses_a_pair_it_cannot_stream() -> None:
+    seen: list[Change] = []
+    refused: list[str] = []
+    counter = _SymbolCounter(AssetClass.CRYPTO, lambda a, r: seen.append((a, r)), refused.append)
+    update = _Update(added=["X:BTCDAI", "X:BTCUSD"])
+    counter.on_update(cast("TableUpdate", update), is_replay=False)
+    assert seen == [(frozenset({"X:BTCUSD"}), frozenset())]
+    assert len(refused) == 1
+    assert refused[0].startswith("a symbol table holds 'X:BTCDAI': 'X:BTCDAI' cannot be streamed")
 
 
 def test_a_watch_lives_as_long_as_its_keeper(dh_exec_ctx: object) -> None:
@@ -232,7 +299,8 @@ def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
     dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
 ) -> None:
     bad = [f"b{i:02}" for i in range(25)]
-    table = new_table([string_col("Symbol", ["EUR/USD", *bad, "b00"])])
+    # Out of order in the table: the values are logged sorted, before the formula runs.
+    table = new_table([string_col("Symbol", ["EUR/USD", *reversed(bad), "b00"])])
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.watchlist"):
         result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.NULL)
     assert values(result) == ["C:EURUSD", *[None] * 26]
@@ -254,16 +322,16 @@ def test_canonicalize_a_refreshing_table(dh_exec_ctx: object) -> None:
     source.add(new_table([string_col("Symbol", ["BTC-USD", None])]))
     wait_for(lambda: result.size == 2)
     assert values(result) == ["X:BTCUSD", None]
-    source.add(new_table([string_col("Symbol", ["nope"])]))  # a later bad row fails the table
+    source.add(new_table([string_col("Symbol", ["no pe!"])]))  # a later bad row fails the table
     wait_for(lambda: bool(result.j_table.isFailed()))
     scope.release()
 
 
 def test_a_bad_initial_row_of_a_refreshing_table_raises(dh_exec_ctx: object) -> None:
     source = input_table({"Symbol": dtypes.string})
-    source.add(new_table([string_col("Symbol", ["nope"])]))
+    source.add(new_table([string_col("Symbol", ["no pe!"])]))
     scope = new_scope()
-    with scope.open(), pytest.raises(DHError, match="cannot read 'nope' as a crypto pair"):
+    with scope.open(), pytest.raises(ValueError, match=r"^1 value\(s\) of Symbol are not crypto"):
         dm.canonicalize_symbols(source, AssetClass.CRYPTO)
     scope.release()
 
@@ -276,10 +344,10 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
     with scope.open():
         result = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.NULL)
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.watchlist"):
-        source.add(new_table([string_col("Symbol", ["BTC-USD", "nope", None, "nope"])]))
+        source.add(new_table([string_col("Symbol", ["BTC-USD", "no pe!", None, "no pe!"])]))
         wait_for(lambda: result.size == 4)
     assert values(result) == ["X:BTCUSD", None, None, None]
-    assert caplog.text.count("cannot read 'nope'") == 1
+    assert caplog.text.count("cannot read 'no pe!'") == 1
     assert not result.j_table.isFailed()
     scope.release()
 
@@ -322,9 +390,9 @@ def test_the_row_converter_raises_or_nulls() -> None:
     strict = _row_converter(convert, refuse, OnError.RAISE)
     assert strict(None) is None
     assert strict("EUR/USD") == "C:EURUSD"
-    with pytest.raises(ValueError, match="cannot read 'nope'"):
-        strict("nope")
+    with pytest.raises(ValueError, match="cannot read 'no pe!'"):
+        strict("no pe!")
     lenient = _row_converter(convert, refuse, OnError.NULL)
-    assert lenient("nope") is None
+    assert lenient("no pe!") is None
     assert lenient("GBP-USD") == "C:GBPUSD"
-    assert [value for value, _ in refused] == ["nope"]
+    assert [value for value, _ in refused] == ["no pe!"]

@@ -387,6 +387,33 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     del table
 
 
+def test_a_failing_upstream_watchlist_fails_the_poll(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    source = input_table({"Symbol": dtypes.string})
+    source.add(new_table([string_col("Symbol", ["AAPL"])]))
+    watch = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+    until(lambda: bool(watch.j_table.isFailed()))
+    clock.advance(60)
+    poller_of(pollers).thread.join(TIMEOUT)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    assert row["State"] == "FAILED"
+    assert "the symbol table failed, so the result can no longer follow it" in row["Error"]
+    assert script.symbols == [("AAPL",)]
+
+
 def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table(
     *,
     massive_session: dm.MassiveSession,

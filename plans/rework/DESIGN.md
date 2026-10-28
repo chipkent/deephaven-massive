@@ -144,7 +144,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 
 ## 3. Exports
 
-`deephaven_massive/__init__.py` exports exactly these 36 names and nothing else:
+`deephaven_massive/__init__.py` exports exactly these 37 names and nothing else:
 
 ```python
 import deephaven_massive as dm
@@ -166,7 +166,8 @@ dm.ALL                     # every symbol on the stream, in the flat file, or in
 dm.canonical_symbol              # (text, asset_class, *, convention=None) -> str | None
 dm.canonical_symbol_stock        # (text) -> str | None, one per class, for query strings
 dm.canonical_symbol_option
-dm.canonical_symbol_future
+dm.canonical_symbol_future        # a single futures contract
+dm.canonical_symbol_future_spread # a futures spread, as Massive writes it
 dm.canonical_symbol_index
 dm.canonical_symbol_forex
 dm.canonical_symbol_crypto
@@ -1553,34 +1554,59 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   `I:SPX`, `C:EURUSD`, `X:BTCUSD`. Anything else raises `ValueError` when the query is built
   (`check_symbol` in `_datasets/symbols.py`); the message names the canonical form when the
   class's converter gives one (`'EUR/USD' is not Massive's ticker; use 'C:EURUSD' (... and
-  dm.canonical_symbol_forex converts)`). Every `Symbol` column holds exactly that form.
+  dm.canonical_symbol_forex converts)`). A canonical ticker of another class says which class
+  the dataset takes (`'I:SPX' is an index ticker; this dataset takes stock tickers`). Every
+  `Symbol` column holds exactly that form.
 - **The grammar** of each class: a stock is an upper-case root of letters and digits followed
   by the CQS suffixes Massive keeps, `.X` (a class or another dotted suffix, `BRK.B`,
   `NTEST.Q`), `p` and an optional series (`KIMpL`), and the markers `r` and `w`; an option is
   `O:` and an OCC symbol whose root is 1 to 6 letters or digits (no dot) and whose `YYMMDD`
-  expiry is a real date; a futures contract is upper-case letters and digits with at least
-  one letter (`ESZ5`, `6CH5`, `0NGH39`; a year is never rewritten); an index is `I:` and a
-  root starting with an upper-case letter or a digit; a forex pair is `C:` and two
-  three-letter ISO 4217 codes; a crypto pair is `X:`, a base, and a quote of `CRYPTO_QUOTES`,
-  so its WebSocket form (`BTC-USD`) can always be recovered. A dataset that spans classes
+  expiry is a real date; a single futures contract is upper-case letters and digits with at
+  least one letter (`ESZ5`, `6CH5`, `0NGH39`; a year is never rewritten, and `ESZ25` is not
+  `ESZ5`); a futures spread is one of the spellings Massive's samples show, exactly as
+  written (below); an index is `I:` and letters and digits, as Massive's WebSocket pattern
+  `^(I:[a-zA-Z0-9]+)$` writes it, with dotted parts allowed; a forex pair is `C:` and two
+  three-letter ISO 4217 codes; a crypto pair is `X:` and the two codes joined, whatever the
+  quote. A crypto ticker streams only when its quote is one of `CRYPTO_QUOTES`, so the
+  WebSocket form (`BTC-USD`) can be built; a stream verb refuses any other with `ValueError`
+  (`topic_problem`), while `fetch()`, `poll()`, and `history()` serve it. Every grammar is
+  matched against the whole text, so a trailing newline never passes. A dataset that spans classes
   (indicators, reference data, the unified `m.snapshots()`) declares no class: the prefix
   selects the grammar (`O:`, `I:`, `C:`, `X:`), and a symbol without one is a stock.
+- **Futures spreads.** Massive documents no spread grammar (its contracts and products carry
+  only `type: 'combo'`), so the spellings taken are those its vendored samples show, each
+  exactly as written: a calendar spread of two contracts (`GCQ6-GCZ6`, `10YN6-10YQ6`,
+  `6AU7-6AU6`; `flat-files/futures/minute-aggregates/comex.md`, `cbot.md`,
+  `session-aggregates/cme.md`), a CBOT inter-commodity spread (`BOB 02-01 U6`, `TEX 07-05 U6`;
+  `minute-aggregates/cbot.md`, `session-aggregates/cbot.md`), a NYMEX strategy of one or two
+  products over months (the butterfly `CL:BF Q6-U6-V6`, the calendar `CL:BZ U6-V6`;
+  `minute-aggregates/nymex.md`, `session-aggregates/nymex.md`), and a CME currency cross
+  (`6A:XF:AUDUSD:Q6`; `session-aggregates/cme.md`). Every futures dataset takes both single
+  contracts and spreads as `symbols`; a futures row keeps whatever ticker Massive writes,
+  a form not yet listed included. No function builds a spread ticker from its legs: Massive's
+  grammar is unverified, so a builder waits for a live check
+  ([section 23](#23-open-verification-items)).
 - **The converters** are the public way to another spelling. `dm.canonical_symbol(text,
   asset_class, *, convention=None)` takes a required `AssetClass`: the class is never guessed,
-  so `SPX` becomes `I:SPX` only because the caller names the class. One function per class
-  (`canonical_symbol_stock`, `_option`, `_future`, `_index`, `_forex`, `_crypto`) and one per
+  so `SPX` becomes `I:SPX` only because the caller names the class; for `FUTURES` it takes a
+  contract or a spread. One function per class
+  (`canonical_symbol_stock`, `_option`, `_future`, `_index`, `_forex`, `_crypto`), the spread
+  function `canonical_symbol_future_spread`, and one per
   stock convention (`canonical_symbol_stock_yahoo`, `_nasdaq`, `_cms`) take only the text, for
   Deephaven query strings: a formula cannot pass a keyword argument, and imported by bare name
   (`from deephaven_massive import canonical_symbol_forex`) they make a `String` column and are
   vectorized; called through the module (`dm.canonical_symbol_forex(Pair)`) Deephaven types the
   column `Object`, so the docstrings say to cast `(String)`. Each maps None to None, returns
   canonical text unchanged, converts its spellings (options: no `O:`, the space-padded OSI form,
-  any case; futures: any case; indices: no `I:`; forex: `EUR/USD`, `EUR-USD`, `EURUSD`, with or
-  without `C:`, any case; crypto: `BTC-USD`, `BTC/USD`, `BTCUSD`, with or without `X:`, any
-  case), and raises `ValueError` with a hint for anything else. A ticker with another class's
-  prefix names that class's function (`'C:EURUSD' is a forex ticker (prefix C:), not a crypto
-  one; call dm.canonical_symbol_forex`). Stock and index text is never re-cased: `aapl` raises
-  with `did you mean 'AAPL'?`. The converters are pure and thread-safe.
+  any case; indices: no `I:`; forex: `EUR/USD`, `EUR-USD`, `EURUSD`, with or without `C:`, any
+  case; crypto: `BTC-USD`, `BTC/USD`, `BTCUSD`, with or without `X:`, any case, any quote;
+  futures: nothing), and raises `ValueError` with a hint for anything else.
+  `canonical_symbol_future` refuses a spread naming `canonical_symbol_future_spread`, and the
+  other way round. A ticker with another class's prefix names that class's function (`'C:EURUSD'
+  is a forex ticker (prefix C:), not a crypto one; call dm.canonical_symbol_forex`). Stock,
+  index, and futures text is never re-cased, and nothing is guessed: `aapl` raises saying that
+  tickers are case-sensitive, with an upper-case root and possibly a lower-case suffix. The
+  converters are pure and thread-safe.
 - **Stock conventions.** A stock spelling converts only from a named `SymbolConvention`,
   because `-` means a class in Yahoo's and a preferred in Nasdaq's; without one, `-`, `/`, and
   a space raise a hint naming the conventions. Each converts exactly its plain tickers, share
@@ -1594,14 +1620,19 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   | Preferred without a series | refused (`-P` also reads as class P) | `DCOM-` | `DCOM PR` | `DCOMp` |
   | Plain | `AAPL` | `AAPL` | `AAPL` | `AAPL` |
 
-  Class `U` is refused in every convention (CQS and CMS write units as `U`). CQS is not a
-  member: it is Massive's own spelling of classes and preferreds. Nasdaq's ACT symbology is not
+  Under a convention only its grammar applies: text that happens to be a Massive ticker is not
+  passed through, since the convention may mean something else by it. A Yahoo ticker with a
+  dot (`VOD.L`, `SHOP.TO`) is refused as a listing outside the US, and Nasdaq's `ABC.U` (class
+  U) is refused rather than read as Massive's unit `ABC.U`. Class `U` is refused in every
+  convention (CQS and CMS write units as `U`). CQS is not a member: it is Massive's own
+  spelling of classes and preferreds. Nasdaq's ACT symbology is not
   supported: it writes `.W` for warrants and `.V` for both a class and when-issued.
 - **`dm.canonicalize_symbols(table, asset_class, *, column="Symbol", convention=None,
-  on_error=dm.OnError.RAISE)`** is the table form and the only lenient path. A static table is
-  converted in Python first (one call per distinct value), so `RAISE` gives a clean
-  `ValueError` listing up to five values; a refreshing table is converted by `update`, so under
-  `RAISE` a bad initial row raises from the call and a later one fails the table. `OnError.NULL`
+  on_error=dm.OnError.RAISE)`** is the table form and the only lenient path. The table's
+  current rows are converted in Python first (one call per distinct value), static or
+  refreshing, so `RAISE` gives a clean `ValueError` listing up to five values; every table is
+  then converted by `update`, so under `RAISE` a later bad row of a refreshing table fails the
+  table. `OnError.NULL`
   writes a null symbol and logs each bad value once at WARNING, at most 20 per table. The
   result keeps every other column.
 - **A symbol table** must have a `Symbol` column, and every non-null row must be canonical.
@@ -1612,14 +1643,27 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   ignored. A **later** row that is not canonical is never subscribed or requested: it fails
   that result (the stream through `Flusher.fail`, a `poll()` table with `SymbolRowError`),
   with a message that names the row, the reason, and
-  `dm.canonicalize_symbols(table, dm.AssetClass.<CLASS>, on_error=dm.OnError.NULL)`.
-  `last_by()` filters with `where_in` against the table itself.
+  `dm.canonicalize_symbols(table, dm.AssetClass.<CLASS>, on_error=dm.OnError.NULL)` (for a
+  dataset that spans classes, `dm.canonical_symbol` per row with each row's class). A stream
+  also refuses a row whose topic cannot be built. A symbol table that **fails** (a
+  `canonicalize_symbols` table under `RAISE` that met a bad row) fails the result too: the
+  watch's error callback fails the stream, and `read_symbols` refuses a failed table, so a
+  `poll()` table fails on its next cycle. `last_by()` filters with `where_in` against the table
+  itself.
+- **Datasets kept as written.** A dataset whose symbols are a third party's global tickers
+  rather than Massive's US-market ones declares `DatasetSpec.symbols_as_written`: its
+  `symbols`, the rows of its symbol table, and its rows' symbols are taken exactly as Massive
+  writes them (not empty, no surrounding whitespace, no control character, no class prefix).
+  Only `partners.tmx.corporate_events` does: it is Wall Street Horizon's global events calendar,
+  whose events name their venue's MIC and an ISIN (`rest/partners/tmx/corporate-events.md`).
+  Benzinga covers US-listed companies and ETF Global US-listed ETFs, so both keep the stock
+  grammar; ETF Global's `ConstituentTicker`, which may name a foreign holding, is not a key and
+  is never checked.
 - **Wire spellings.** Massive writes some symbols differently per transport: `EUR/USD` in
   WebSocket forex frames, `EUR-USD` in forex topics, `BTC-USD` in crypto frames, `X:BTC-USD`
   in FMV frames, `X:EUR-USD` in the forex quotes flat-file sample. `canonical_from_wire` reads
-  every spelling the library knows, without folding case (a prefixed crypto ticker such as
-  `X:BTCDAI` is read as written even when its quote is not in `CRYPTO_QUOTES`, which only a
-  topic needs); topics use `ws_symbol`
+  every spelling the library knows, without folding case, any crypto quote included; a futures
+  row keeps its ticker as written; topics use `ws_symbol`
   (`C.EUR-USD`, as the WebSocket documentation gives every forex channel's `ticker`
   parameter). A flat-file filter holds every spelling of each requested symbol
   (`wire_spellings`), so a file that writes `X:EUR-USD` still matches `C:EURUSD`, and its rows
@@ -1631,8 +1675,8 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
 - **Unknown wire spellings.** A symbol Massive sends that `canonical_from_wire` cannot read
   fails by default, naming the spelling (`MassiveConfig.unknown_symbols = UnknownSymbols.FAIL`):
   a REST request raises `RowDataError` (a `poll()` table fails), a flat-file read raises
-  `MassiveError`, and a WebSocket row fails the channel's `dm.ALL` streams (a symbol stream
-  could not have received it). `UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`) keeps
+  `MassiveError`, and a WebSocket row fails every stream of the dataset on the channel (it
+  cannot be routed to one, so no symbol stream may starve on it silently). `UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`) keeps
   the row with a null `Symbol` and the text in an added `RawSymbol` column, and logs each
   spelling once at WARNING.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
@@ -3709,7 +3753,8 @@ a dataset with no asset class takes the field's own description.
 3. **`Symbol`, `Timestamp`, and `Underlying`**, when they are declared key columns of the
    dataset, get a fixed library sentence ("The instrument,
    in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
-   underlying instrument, in the library's canonical symbol form."), followed, per transport in
+   instrument Massive links the row to, exactly as Massive sends it; for an option, the linked
+   instrument, not what the contract delivers."), followed, per transport in
    the order of rule 1, by the wire key each source renames and its quoted field description
    (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``), or, for a key
    filled from the request, the request parameter it came from
@@ -3787,7 +3832,7 @@ routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/strea
 | **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | in `_datasets/timestamps.py` | Loud failure naming the dataset, the column, the unit, and the value. |
 | **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
-| **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails the channel's `ALL` streams | `MassiveError` naming the spelling | Under `UnknownSymbols.FAIL`, the default, a loud failure whose message names the switch; under `WARN`, the row is kept with a null `Symbol` and the text in `RawSymbol`, WARNING once per spelling (at most 100). |
+| **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails every stream of the dataset on the channel | `MassiveError` naming the spelling | Under `UnknownSymbols.FAIL`, the default, a loud failure whose message names the switch; under `WARN`, the row is kept with a null `Symbol` and the text in `RawSymbol`, WARNING once per spelling (at most 100). |
 
 **A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
 `MassiveError` through `from_wire`; `poll()` fails its table through `publish_failure`; a
@@ -4374,7 +4419,12 @@ document already reflects them.
     prefix is added only from an endpoint of the indices class, never from a name. Every
     options dataset gets `OptionRoot`; the contracts dataset exposes the raw deliverable fields
     and no derived flag; no security identifiers are added, since Massive has no universal one
-    ([section 10](#10-symbols-and-all)).
+    ([section 10](#10-symbols-and-all)). After review: futures spreads are Massive's tickers as
+    written, with their own converter `canonical_symbol_future_spread` and no builder from legs;
+    a dataset of global third-party tickers (TMX) keeps them as written; under a convention
+    only that convention's grammar applies; any `X:` ticker is canonical and only a stream
+    refuses one it cannot split; a failed symbol table fails the result; an unreadable
+    WebSocket spelling fails every stream of the channel.
 
 ## 23. Open verification items
 
@@ -4426,8 +4476,10 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 38 | Whether crypto range and `/prev` 1-day bars cover the UTC day: compare them with the same day rebuilt from 1-minute bars | Item 1's loud check: a stamp elsewhere than a UTC day boundary fails | `tests/namespaces/test_crypto.py`: as item 1 | `tests/namespaces/test_crypto_integration.py`: rebuild one day of `X:BTCUSD` from `minute_aggs_v1` over the UTC day and over the New York day; record which matches the range and `/prev` bars |
 | 39 | Whether grouped daily and `day_aggs_v1` hold the same pairs on a day, for forex and crypto | `AUTO` keeps one source for crypto 1-day bars; nothing assumes the sets match | `tests/datasets/test_history_source.py`: crypto 1-day bars keep one source whatever the symbol count | `tests/namespaces/test_forex_integration.py`, `tests/namespaces/test_crypto_integration.py`: one day of `dm.ALL` 1-day bars from both sources; record the pairs only one holds |
 | 40 | Which session a futures bar of several sessions or longer is labelled with (`SessionEndDate` of its first or last session), and how such bars are aligned | Futures bars of a session or longer with `multiplier` above 1 named by dates raise `ValueError` ("pass datetimes, or multiplier=1"); named by datetimes, they are kept by their own window | `tests/datasets/test_history_source.py`, `tests/namespaces/test_futures.py`: the refusal for 2-session, 2-week, and 2-month bars | `tests/namespaces/test_futures_integration.py`: 2-session and 2-month bars of ES over a quarter; record each bar's `Timestamp` and `SessionEndDate` |
-| 41 | Massive's spelling of every US stock ticker: the documentation shows `BRK.A` and `KIMpL` only; warrants, units, rights, when-issued, and test issues are undocumented, and Benzinga, ETF Global, and TMX rows may spell tickers otherwise | The canonical grammar is an upper-case root and the CQS suffixes `.X`, `pX`, `r`, and `w`; the conventions convert plain tickers, classes, and preferreds only; a row spelled otherwise follows `unknown_symbols` (fails by default) | `tests/datasets/test_symbols.py`: the grammar, each convention's table and refusals, and the unreadable spellings | `tests/namespaces/test_reference_integration.py`: `tickers(ticker_type=...)` for `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and one page of each partner dataset; record every spelling outside the grammar |
+| 41 | Massive's spelling of every US stock ticker: the documentation shows `BRK.A` and `KIMpL` only; warrants, units, rights, when-issued, and test issues are undocumented, and Benzinga and ETF Global rows may spell tickers otherwise (the TMX calendar is global and keeps its tickers as written) | The canonical grammar is an upper-case root and the CQS suffixes `.X`, `pX`, `r`, and `w`; the conventions convert plain tickers, classes, and preferreds only; a row spelled otherwise follows `unknown_symbols` (fails by default) | `tests/datasets/test_symbols.py`: the grammar, each convention's table and refusals, and the unreadable spellings | `tests/namespaces/test_reference_integration.py`: `tickers(ticker_type=...)` for `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and one page of each partner dataset; record every spelling outside the grammar |
 | 42 | Which endpoints of the indices class send an index without its `I:` prefix | Every dataset of the indices class reads a bare ticker as `I:` and the ticker; datasets of other classes and cross-class datasets never add it | `tests/datasets/test_symbols.py`: `canonical_from_wire` adds the prefix only for the indices class, and no conversion depends on the name | `tests/namespaces/test_indices_integration.py`: one request of each indices dataset, the unified snapshot, and an indicator for `I:SPX`; record the spelling of each row's ticker |
 | 43 | `Underlying` of the options datasets for `BRK.B`, `SPX`/`SPXW`, `NDX`/`NDXP`, `VIX`/`VIXW`, and an adjusted contract (`AAPL1`, `DELL1`), and whether the chain takes `I:SPX` as its underlying | `Underlying` is Massive's field as sent; `underlying=` is sent as given; nothing maps a root to an underlying | `tests/namespaces/test_options.py`: the chain's `Underlying` is the fixture's, `underlying=` keeps case and refuses other classes | `tests/namespaces/test_options_integration.py`: one chain and one contracts request for each; record `Underlying` and `OptionRoot` |
 | 44 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
-| 45 | The shapes of futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) and spreads | Upper-case letters and digits; a year is never rewritten; a spread or any other shape follows `unknown_symbols` | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `ES-Z5` is not | `tests/namespaces/test_futures_integration.py`: `contracts()` for one product over several years; record every ticker shape |
+| 45 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | Upper-case letters and digits; a year is never rewritten, and `ESZ25` is not `ESZ5`; spreads are item 46 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `esz5` and `ES-Z5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |
+| 46 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | `canonical_symbol_future_spread` accepts exactly those forms as written; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: each form is canonical and converts unchanged, a single contract and a spread refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
+| 47 | Which crypto quote currencies Massive's pairs use beyond `CRYPTO_QUOTES` | Any `X:` ticker is canonical; a stream refuses a pair whose quote it cannot split, and `fetch()`, `poll()`, and `history()` serve it | `tests/datasets/test_symbols.py`, `tests/namespaces/test_crypto.py`: `X:BTCDAI` is taken, and a stream verb refuses it | `tests/namespaces/test_crypto_integration.py`: `reference.tickers(market=dm.Market.CRYPTO)`; record every quote outside the list and widen it |

@@ -272,6 +272,17 @@ def test_trades_take_massive_tickers_only(massive_session: dm.MassiveSession) ->
             massive_session.crypto.trades(spelling)
 
 
+def test_a_pair_with_an_unknown_quote_is_taken_but_cannot_be_streamed(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # Any X: ticker is Massive's; only a stream needs the pair split for its topic.
+    q = massive_session.crypto.trades("X:BTCDAI")
+    assert request_of(q).symbols == ("X:BTCDAI",)
+    for verb in (q.blink, q.append_only, q.last_by):
+        with pytest.raises(ValueError, match=r"^'X:BTCDAI' cannot be streamed: its WebSocket"):
+            verb()
+
+
 @pytest.mark.parametrize("method", ["trades", "quotes", "fmv", "snapshots"])
 def test_the_streams_and_snapshots_accept_all(
     massive_session: dm.MassiveSession, method: str

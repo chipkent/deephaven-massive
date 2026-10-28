@@ -698,7 +698,9 @@ class _Converter:
                 m.kind == spec.kind and m.group == spec.group and m.projection is not None
                 for m in rest_path.memberships
             ),
-            symbols=WireSymbols(spec.name, spec.asset_class, unknown_symbols),
+            symbols=WireSymbols(
+                spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
+            ),
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
         )
 

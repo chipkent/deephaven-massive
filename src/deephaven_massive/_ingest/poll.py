@@ -428,7 +428,7 @@ class Poller:
         if not isinstance(symbols, SymbolTable):
             return symbols
         try:
-            return read_symbols(self._spec.asset_class, symbols.table)
+            return read_symbols(self._spec, symbols.table)
         except ValueError as error:
             raise SymbolRowError(f"{self._spec.name} poll(): {error}") from None
 

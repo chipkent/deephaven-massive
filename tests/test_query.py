@@ -899,3 +899,15 @@ def test_ring_accepts_its_lower_bound(
     result = trades(massive_session).ring(1)
     assert result.is_refreshing
     massive_session.release(result)
+
+
+def test_an_empty_window_in_a_warn_session_has_the_raw_symbol_column() -> None:
+    # The empty result of a window no row fits in has the session's columns, RawSymbol
+    # included, as every other result of a WARN session does.
+    config = dm.MassiveConfig(api_key="test-key", unknown_symbols=dm.UnknownSymbols.WARN)
+    with dm.MassiveSession(config) as session:
+        q = trades(session)
+        empty = q._empty()
+        names = [c.name for c in empty.columns]
+        assert "RawSymbol" in names
+        assert names == [name for (name,) in q.columns().iter_tuple(cols="Name")]

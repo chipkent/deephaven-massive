@@ -11,11 +11,11 @@ owns that grammar and three things built on it:
 - **The converters**, the public way to turn another spelling into Massive's:
   `canonical_symbol(text, asset_class, convention=)` for Python code, and one function per class
   (`canonical_symbol_stock`, `canonical_symbol_option`, `canonical_symbol_future`,
-  `canonical_symbol_index`, `canonical_symbol_forex`, `canonical_symbol_crypto`) plus one per
-  stock convention (`canonical_symbol_stock_yahoo`, `canonical_symbol_stock_nasdaq`,
-  `canonical_symbol_stock_cms`) for Deephaven query strings, which cannot pass an enum.
-  Each maps None to None, returns canonical text unchanged, converts the spellings its class or
-  convention defines, and raises `ValueError` with a hint for anything else.
+  `canonical_symbol_future_spread`, `canonical_symbol_index`, `canonical_symbol_forex`,
+  `canonical_symbol_crypto`) plus one per stock convention (`canonical_symbol_stock_yahoo`,
+  `canonical_symbol_stock_nasdaq`, `canonical_symbol_stock_cms`) for Deephaven query strings, which
+  cannot pass an enum. Each maps None to None, returns canonical text unchanged, converts the
+  spellings its class or convention defines, and raises `ValueError` with a hint for anything else.
 - **The wire spellings.** Massive itself writes a few symbols differently per transport:
   `EUR/USD` in WebSocket forex frames, `BTC-USD` in WebSocket crypto frames, `X:EUR-USD` in the
   forex quotes flat-file sample. `canonical_from_wire` reads every spelling the library knows
@@ -29,14 +29,20 @@ owns that grammar and three things built on it:
 |---------|----------------------------------------------------|--------------------------------|
 | stocks  | upper-case root; `.X`, `pX`, `r`, `w` (`KIMpL`)    | a named convention's spelling  |
 | options | `O:` + OCC (root of 1 to 6 characters, real date)  | no `O:`, padded OSI, any case  |
-| futures | upper-case letters and digits (`ESZ5`, `6CH5`)     | any case                       |
-| indices | `I:` + a root starting upper case or with a digit  | no `I:` (`SPX`)                |
+| futures | a contract (`ESZ5`) or a spread as Massive writes it | nothing                        |
+| indices | `I:` + letters and digits (`I:SPX`)                | no `I:` (`SPX`)                |
 | forex   | `C:` + two three-letter codes (`C:EURUSD`)         | `EUR/USD`, `EURUSD`, any case  |
-| crypto  | `X:` + base + a quote of `CRYPTO_QUOTES`           | `BTC-USD`, `BTCUSD`, any case  |
+| crypto  | `X:` + the joined pair (`X:BTCUSD`)                | `BTC-USD`, `BTCUSD`, any case  |
 
-A stock's case is meaningful (`KIMpL` is Kimco's series L preferred), so stock and index text is
-never re-cased; the other classes' grammars are all upper case, so folding case there loses
-nothing. Nothing maps one instrument to another: an option root (`SPXW`, `AAPL1`) is never
+A futures spread is one of the spellings Massive's samples show (`_SPREADS`: `GCQ6-GCZ6`, `BOB 02-01
+U6`, `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`); `canonical_symbol_future` takes single contracts and
+`canonical_symbol_future_spread` spreads, while a dataset takes both, and a futures row keeps
+whatever ticker Massive writes. A dataset whose symbols are a third party's global tickers
+(`DatasetSpec.symbols_as_written`) takes and keeps them as Massive writes them. A stock's case is
+meaningful (`KIMpL` is Kimco's series L preferred), so stock, index, and futures text is never
+re-cased; the option, forex, and crypto grammars are all upper case, so folding case there loses
+nothing. A crypto ticker streams only when its quote currency is one of `CRYPTO_QUOTES`
+(`topic_problem`). Nothing maps one instrument to another: an option root (`SPXW`, `AAPL1`) is never
 turned into its underlying, `BRKB` never into `BRK.B`, and a futures year is never rewritten.
 
 Every function here is pure and thread-safe, makes no Deephaven call, and imports Deephaven for
@@ -74,6 +80,7 @@ __all__ = [
     "canonical_symbol_crypto",
     "canonical_symbol_forex",
     "canonical_symbol_future",
+    "canonical_symbol_future_spread",
     "canonical_symbol_index",
     "canonical_symbol_option",
     "canonical_symbol_stock",
@@ -86,6 +93,7 @@ __all__ = [
     "normalize",
     "option_roots",
     "symbol_class",
+    "topic_problem",
     "unknown_symbol_message",
     "wire_spellings",
     "ws_symbol",
@@ -100,14 +108,42 @@ the lower-case markers `r` (rights) and `w` (when issued)."""
 _OCC: Final = re.compile(r"^O:(?P<root>[A-Z0-9]{1,6})(?P<expiry>\d{6})[CP]\d{8}$")
 """A canonical option symbol: `O:`, the OCC root (no dot), `YYMMDD`, `C` or `P`, and the strike
 in thousandths of a dollar, eight digits."""
+_WRITTEN: Final = re.compile(r"^(?![OICX]:)[^\x00-\x20\x7f](?:[^\x00-\x1f\x7f]*[^\x00-\x20\x7f])?$")
+"""Text kept exactly as Massive writes it: not empty, no control character, no surrounding
+whitespace, and no class prefix. How a futures row's ticker is read (a combo form not listed in
+`_SPREADS` still keeps its row), and the grammar of a dataset whose symbols are a third party's
+global tickers."""
 _FUTURE: Final = re.compile(r"^(?=[A-Z0-9]*[A-Z])[A-Z0-9]+$")
-"""A canonical futures contract ticker: upper-case letters and digits, at least one letter."""
-_INDEX: Final = re.compile(r"^I:[A-Z0-9][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)*$")
-"""A canonical index ticker: `I:` and a root that starts with an upper-case letter or digit."""
+"""A single futures contract: upper-case letters and digits, at least one letter (`ESZ5`,
+`6CH5`, `0NGH39`)."""
+_MONTH: Final = r"[FGHJKMNQUVXZ][0-9]{1,2}"
+_SPREADS: Final = (
+    # A calendar spread of two contracts: `GCQ6-GCZ6`, `10YN6-10YQ6`, `6AU7-6AU6`
+    # (vendor/massive/flat-files/futures/minute-aggregates/comex.md and cbot.md,
+    # session-aggregates/cme.md).
+    re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}-[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}$"),
+    # A CBOT inter-commodity spread: `BOB 02-01 U6`, `TEX 07-05 U6`
+    # (vendor/massive/flat-files/futures/minute-aggregates/cbot.md, session-aggregates/cbot.md).
+    re.compile(rf"^[A-Z0-9]{{3}} [0-9]{{2}}-[0-9]{{2}} {_MONTH}$"),
+    # A NYMEX strategy of one or two products over months: the butterfly `CL:BF Q6-U6-V6`,
+    # the calendar `CL:BZ U6-V6` (vendor/massive/flat-files/futures/minute-aggregates/nymex.md,
+    # session-aggregates/nymex.md).
+    re.compile(rf"^[A-Z0-9]+:[A-Z0-9]+ {_MONTH}(?:-{_MONTH})+$"),
+    # A CME currency cross: `6A:XF:AUDUSD:Q6` (vendor/massive/flat-files/futures/
+    # session-aggregates/cme.md).
+    re.compile(rf"^[A-Z0-9]+(?::[A-Z0-9]+)+:{_MONTH}$"),
+)
+"""Massive's spellings of a futures spread, each as written in its vendored samples. Massive
+documents no grammar for them (only `type: 'combo'`), so this list is what the samples show,
+and no ticker is ever built from its legs."""
+_INDEX: Final = re.compile(r"^I:[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
+"""A canonical index ticker: `I:` and letters and digits, as Massive's WebSocket specification
+writes the pattern (`^(I:[a-zA-Z0-9]+)$`), with dotted parts allowed."""
 _FOREX: Final = re.compile(r"^C:[A-Z]{3}[A-Z]{3}$")
 """A canonical forex ticker: `C:` and two three-letter ISO 4217 codes."""
 _CRYPTO: Final = re.compile(r"^X:[A-Z0-9]+$")
-"""A canonical crypto ticker's shape; its quote currency is checked against `CRYPTO_QUOTES`."""
+"""A canonical crypto ticker: `X:` and the pair's two codes joined, whatever the quote; only a
+WebSocket topic needs the quote to be one of `CRYPTO_QUOTES` (`topic_problem`)."""
 _FOREX_CURRENCY: Final = re.compile(r"^[A-Z]{3}$")
 _CURRENCIES: Final = re.compile(r"^[A-Z0-9]+$")
 _PAIR: Final = re.compile(r"^(?P<base>[A-Z0-9]+)[/-](?P<quote>[A-Z0-9]+)$")
@@ -214,7 +250,7 @@ def _occ_ok(symbol: str) -> bool:
     Returns:
         True for the OCC shape with a real `YYMMDD` date (`250229` is not one).
     """
-    match = _OCC.match(symbol)
+    match = _OCC.fullmatch(symbol)
     if match is None:
         return False
     expiry = match["expiry"]
@@ -225,16 +261,29 @@ def _occ_ok(symbol: str) -> bool:
     return True
 
 
-def _crypto_ok(symbol: str) -> bool:
-    """Tell whether text is a canonical crypto ticker that splits back unambiguously.
+def _is_future(text: str) -> bool:
+    """Tell whether text is a single futures contract ticker (`ESZ5`).
 
     Args:
-        symbol: The text, with its `X:` prefix.
+        text: The text.
 
     Returns:
-        True when the body ends in a quote of `CRYPTO_QUOTES` after a non-empty base.
+        True for upper-case letters and digits with at least one letter.
     """
-    return _CRYPTO.match(symbol) is not None and _split_crypto(symbol[2:]) is not None
+    return _FUTURE.fullmatch(text) is not None
+
+
+def _is_spread(text: str) -> bool:
+    """Tell whether text is one of Massive's futures spread spellings (`_SPREADS`).
+
+    Args:
+        text: The text.
+
+    Returns:
+        True for a calendar spread, a CBOT inter-commodity spread, a NYMEX strategy, or a CME
+        currency cross, each exactly as Massive writes it.
+    """
+    return any(pattern.fullmatch(text) is not None for pattern in _SPREADS)
 
 
 def _matches(pattern: re.Pattern[str]) -> Callable[[str], bool]:
@@ -246,16 +295,16 @@ def _matches(pattern: re.Pattern[str]) -> Callable[[str], bool]:
     Returns:
         A function from text to whether it matches.
     """
-    return lambda text: pattern.match(text) is not None
+    return lambda text: pattern.fullmatch(text) is not None
 
 
 _CANONICAL: Final[dict[AssetClass, Callable[[str], bool]]] = {
     AssetClass.STOCKS: _matches(_STOCK),
     AssetClass.OPTIONS: _occ_ok,
-    AssetClass.FUTURES: _matches(_FUTURE),
+    AssetClass.FUTURES: lambda text: _is_future(text) or _is_spread(text),
     AssetClass.INDICES: _matches(_INDEX),
     AssetClass.FOREX: _matches(_FOREX),
-    AssetClass.CRYPTO: _crypto_ok,
+    AssetClass.CRYPTO: _matches(_CRYPTO),
 }
 
 
@@ -272,17 +321,22 @@ def symbol_class(symbol: str) -> AssetClass:
     return _CLASS_BY_PREFIX.get(symbol[:2], AssetClass.STOCKS)
 
 
-def is_canonical(asset_class: AssetClass | None, text: str) -> bool:
+def is_canonical(asset_class: AssetClass | None, text: str, *, as_written: bool = False) -> bool:
     """Tell whether text is exactly a canonical Massive ticker of a class.
 
     Args:
         asset_class: The class whose grammar applies, or None for a dataset that spans
             classes: the prefix then selects the class, and text without one is a stock.
         text: The text to test.
+        as_written: True for a dataset whose symbols are a third party's global tickers,
+            kept as Massive writes them (`DatasetSpec.symbols_as_written`): any text of the
+            `_WRITTEN` grammar is canonical, whatever the class.
 
     Returns:
         True when the text is canonical, case and all.
     """
+    if as_written:
+        return _WRITTEN.fullmatch(text) is not None
     resolved = symbol_class(text) if asset_class is None else asset_class
     return _CANONICAL[resolved](text)
 
@@ -299,7 +353,7 @@ def is_forex_currency(code: str) -> bool:
     Returns:
         True for three letters `A` to `Z`.
     """
-    return _FOREX_CURRENCY.match(code) is not None
+    return _FOREX_CURRENCY.fullmatch(code) is not None
 
 
 # --- the converters ------------------------------------------------------------------------------
@@ -356,8 +410,8 @@ def _convert_stock(text: str) -> str:
 
     Raises:
         ValueError: Always. Separators of another convention (`-`, `/`, a space) name the
-            conventions that convert them; all lower-case text names the upper-case form as a
-            guess, since Massive's tickers are case-sensitive.
+            conventions that convert them; all lower-case text says that case matters, with no
+            guess at the ticker, since Massive's tickers are case-sensitive.
     """
     _refuse_other_prefix(AssetClass.STOCKS, text)
     if text.strip() and text != text.strip():
@@ -371,8 +425,9 @@ def _convert_stock(text: str) -> str:
         )
     if text == text.lower() != text.upper():
         raise ValueError(
-            f"{text!r} is not a Massive stock ticker: tickers are case-sensitive "
-            f"(KIMpL is a preferred); did you mean {text.upper()!r}?"
+            f"{text!r} is not a Massive stock ticker: tickers are case-sensitive, with an "
+            "upper-case root and possibly a lower-case suffix (KIMpL is a preferred); write "
+            "Massive's ticker exactly"
         )
     raise ValueError(f"{text!r} is not a Massive stock ticker such as 'AAPL', 'BRK.B', or 'KIMpL'")
 
@@ -395,13 +450,13 @@ def _convert_option(text: str) -> str:
     """
     _refuse_other_prefix(AssetClass.OPTIONS, text)
     body = text.upper().removeprefix("O:")
-    padded = _PADDED_OSI.match(body)
+    padded = _PADDED_OSI.fullmatch(body)
     if padded is not None and len(body) == _OSI_LENGTH:
         body = padded["root"] + padded["rest"]
     symbol = f"O:{body}"
     if _occ_ok(symbol):
         return symbol
-    if _STOCK.match(text) is not None:
+    if _STOCK.fullmatch(text) is not None:
         raise ValueError(
             f"{text!r} is an underlying, not an OCC option symbol such as 'O:AAPL250117C00150000'"
         )
@@ -412,25 +467,77 @@ def _convert_option(text: str) -> str:
 
 
 def _convert_future(text: str) -> str:
-    """Convert a futures contract ticker to Massive's form, upper case.
+    """Say why text is not a Massive futures ticker: a futures ticker converts from nothing.
+
+    Args:
+        text: Text that is neither a single contract nor a spread (the caller checked).
+
+    Returns:
+        Nothing: it always raises; the return type is the converters' common one.
+
+    Raises:
+        ValueError: Always, naming the reason: another class's prefix names that class's
+            function, surrounding whitespace names the stripped text, and lower case says the
+            ticker is upper case; nothing is re-cased.
+    """
+    _refuse_other_prefix(AssetClass.FUTURES, text)
+    if text.strip() and text != text.strip():
+        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+    raise ValueError(
+        f"{text!r} is not a Massive futures ticker: a contract is upper-case letters and digits "
+        "('ESZ5'), and a spread is written as Massive writes it ('GCQ6-GCZ6', 'BOB 02-01 U6', "
+        "'CL:BF Q6-U6-V6', '6A:XF:AUDUSD:Q6')"
+    )
+
+
+def _convert_single_future(text: str) -> str:
+    """Return a single futures contract ticker, refusing a spread with the function to use.
 
     Args:
         text: The text.
 
     Returns:
-        The ticker in upper case, such as `ESZ5`.
+        The ticker unchanged.
 
     Raises:
-        ValueError: If the text is not letters and digits, or names another class.
+        ValueError: If the text is a spread (`canonical_symbol_future_spread` takes it) or no
+            futures ticker at all (`_convert_future`).
     """
-    _refuse_other_prefix(AssetClass.FUTURES, text)
-    upper = text.upper()
-    if _FUTURE.match(upper) is None:
+    if _is_future(text):
+        return text
+    if _is_spread(text):
         raise ValueError(
-            f"{text!r} is not a Massive futures contract ticker such as 'ESZ5' (letters and "
-            "digits only)"
+            f"{text!r} is a futures spread, not a single contract; call "
+            "dm.canonical_symbol_future_spread"
         )
-    return upper
+    return _convert_future(text)
+
+
+def _convert_spread(text: str) -> str:
+    """Return a futures spread ticker, refusing a single contract with the function to use.
+
+    Args:
+        text: The text.
+
+    Returns:
+        The ticker unchanged.
+
+    Raises:
+        ValueError: If the text is a single contract (`canonical_symbol_future` takes it), or
+            none of Massive's spread spellings; the message lists them.
+    """
+    if _is_spread(text):
+        return text
+    if _is_future(text):
+        raise ValueError(
+            f"{text!r} is a single futures contract, not a spread; call dm.canonical_symbol_future"
+        )
+    _refuse_other_prefix(AssetClass.FUTURES, text)
+    raise ValueError(
+        f"{text!r} is not one of Massive's futures spread spellings: a calendar spread "
+        "'GCQ6-GCZ6', a CBOT inter-commodity spread 'BOB 02-01 U6', a NYMEX strategy "
+        "'CL:BF Q6-U6-V6' or 'CL:BZ U6-V6', or a CME currency cross '6A:XF:AUDUSD:Q6'"
+    )
 
 
 def _convert_index(text: str) -> str:
@@ -447,7 +554,7 @@ def _convert_index(text: str) -> str:
     """
     _refuse_other_prefix(AssetClass.INDICES, text)
     symbol = text if text.startswith("I:") else f"I:{text}"
-    if _INDEX.match(symbol) is None:
+    if _INDEX.fullmatch(symbol) is None:
         raise ValueError(f"{text!r} is not a Massive index ticker such as 'I:SPX'")
     return symbol
 
@@ -468,10 +575,10 @@ def _pair(text: str, prefixes: tuple[str, ...]) -> tuple[str, str] | None:
         if text.startswith(prefix):
             body = text[len(prefix) :]
             break
-    match = _PAIR.match(body)
+    match = _PAIR.fullmatch(body)
     if match is not None:
         return match["base"], match["quote"]
-    if _CURRENCIES.match(body) is not None:
+    if _CURRENCIES.fullmatch(body) is not None:
         return body, ""
     return None
 
@@ -498,23 +605,17 @@ def _forex(text: str, prefixes: tuple[str, ...]) -> str | None:
 
 
 def _crypto(text: str, prefixes: tuple[str, ...]) -> str | None:
-    """Read a crypto pair, without folding case.
+    """Read a crypto pair, without folding case: the two codes joined, whatever the quote.
 
     Args:
         text: The text.
         prefixes: The prefixes accepted.
 
     Returns:
-        `X:` and the joined pair, or None when no quote of `CRYPTO_QUOTES` ends it or the
-        joined pair would split back into other currencies (`ABCUS-DT`).
+        `X:` and the joined pair, or None for text that is no pair of letters and digits.
     """
     pair = _pair(text, prefixes)
-    if pair is None:
-        return None
-    symbol = f"X:{pair[0]}{pair[1]}"
-    if not _crypto_ok(symbol) or (pair[1] and _split_crypto(symbol[2:]) != pair):
-        return None
-    return symbol
+    return None if pair is None else f"X:{pair[0]}{pair[1]}"
 
 
 def _convert_forex(text: str) -> str:
@@ -545,9 +646,8 @@ def _convert_forex(text: str) -> str:
 def _convert_crypto(text: str) -> str:
     """Convert a crypto pair to Massive's `X:` form.
 
-    Accepts `BTC-USD`, `BTC/USD`, `BTCUSD`, each with or without `X:`, in any case. The quote
-    must be one of `CRYPTO_QUOTES`, and the joined pair must split back into the same two
-    currencies, so the WebSocket form can always be recovered.
+    Accepts `BTC-USD`, `BTC/USD`, `BTCUSD`, each with or without `X:`, in any case, and joins
+    the two codes, whatever the quote currency.
 
     Args:
         text: The text.
@@ -556,17 +656,12 @@ def _convert_crypto(text: str) -> str:
         `X:` and the joined pair, such as `X:BTCUSD`.
 
     Raises:
-        ValueError: If the pair does not end in a quote of `CRYPTO_QUOTES`, splits back
-            differently, or the text names another class.
+        ValueError: If the text is not a pair of letters and digits, or names another class.
     """
     _refuse_other_prefix(AssetClass.CRYPTO, text)
     symbol = _crypto(text.upper(), ("X:",))
     if symbol is None:
-        raise ValueError(
-            f"cannot read {text!r} as a crypto pair whose quote currency is one of "
-            f"{', '.join(CRYPTO_QUOTES)} and that splits back unambiguously; write it as "
-            "BASE-QUOTE"
-        )
+        raise ValueError(f"cannot read {text!r} as a crypto pair; write it as BASE-QUOTE")
     return symbol
 
 
@@ -610,6 +705,10 @@ as class P alike."""
 def _convert_stock_from(text: str, convention: SymbolConvention) -> str:
     """Convert a stock ticker written in a named convention to Massive's form.
 
+    Only the convention's own grammar applies: text that happens to be a Massive ticker is
+    not passed through, since the convention may mean something else by it (Nasdaq's `ABC.U`
+    is class U, Massive's is a unit; Yahoo's `VOD.L` is a London listing).
+
     Args:
         text: The ticker as the convention writes it, upper case.
         convention: The convention it comes from.
@@ -620,11 +719,17 @@ def _convert_stock_from(text: str, convention: SymbolConvention) -> str:
 
     Raises:
         ValueError: If the text is not one of the convention's plain, class, or preferred
-            spellings; the message says which suffixes the library does not convert.
+            spellings: a Yahoo ticker with a dot is named a foreign listing, and every other
+            refusal says which suffixes the library does not convert.
     """
     _refuse_other_prefix(AssetClass.STOCKS, text)
+    if convention is SymbolConvention.YAHOO and "." in text:
+        raise ValueError(
+            f"{text!r} is a Yahoo ticker of a listing outside the US (Yahoo's dot names the "
+            "exchange); Massive's US stock tickers have no such listing"
+        )
     for pattern, template in _STOCK_CONVENTIONS[convention]:
-        match = pattern.match(text)
+        match = pattern.fullmatch(text)
         if match is not None:
             return match.expand(template)
     raise ValueError(
@@ -656,11 +761,15 @@ def canonical_symbol(
     """Convert a symbol of a named asset class to Massive's exact REST ticker.
 
     Use it to turn symbols from another source into the form every dataset takes and every
-    `Symbol` column holds, before passing them as `symbols=`. Canonical text comes back
-    unchanged; another spelling of the class converts (`EUR/USD` to `C:EURUSD`, `SPX` to
-    `I:SPX`); anything else raises. The class is never guessed: `SPX` is an index only because
+    `Symbol` column holds, before passing them as `symbols=`. Without a convention, canonical
+    text comes back unchanged; another spelling of the class converts (`EUR/USD` to
+    `C:EURUSD`, `SPX` to `I:SPX`); anything else raises. With a convention, only that
+    convention's grammar applies, so text it does not spell raises even when it happens to be
+    a Massive ticker. The class is never guessed: `SPX` is an index only because
     the caller says so. In a Deephaven query string, call the per-class functions instead
-    (`canonical_symbol_forex`), which need no enum argument. Pure and thread-safe.
+    (`canonical_symbol_forex`), which need no enum argument; a function called through the
+    module (`dm.canonical_symbol(...)`) makes an `Object` column unless cast with `(String)`.
+    Pure and thread-safe.
 
     Example:
         ::
@@ -700,10 +809,10 @@ def canonical_symbol(
     value = _require_text(text)
     if value is None:
         return None
-    if _CANONICAL[resolved](value):
-        return value
     if convention is not None:
         return _convert_stock_from(value, convention)
+    if _CANONICAL[resolved](value):
+        return value
     return _CONVERTERS[resolved](value)
 
 
@@ -725,6 +834,10 @@ def canonical_symbol_stock(text: str | None) -> str | None:
             t = new_table([string_col("Ticker", ["AAPL", "KIMpL"])])
             t = t.update(["Symbol = canonical_symbol_stock(Ticker)"])
 
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_stock`) for a `String` column; called through the module it makes an `Object`
+    column unless cast: `(String) dm.canonical_symbol_stock(Col)`.
+
     Args:
         text: The ticker, or None.
 
@@ -744,13 +857,19 @@ def canonical_symbol_stock_yahoo(text: str | None) -> str | None:
     Yahoo writes a share class as `-X` and a preferred as `-P` and its series. Only plain
     tickers, classes, and preferreds with a series convert: Yahoo's bare `-P` is refused (a
     generic preferred and class P read alike), and warrants (`-WT`), units (`-UN`), and rights
-    (`-RI`) are refused, since Massive documents no spelling for them. Pure and thread-safe.
+    (`-RI`) are refused, since Massive documents no spelling for them, and so is a ticker with a
+    dot, Yahoo's mark of a listing outside the US (`VOD.L`). Pure and thread-safe.
+
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_stock_yahoo`) for a `String` column; called through the module it makes an
+    `Object` column unless cast: `(String) dm.canonical_symbol_stock_yahoo(Col)`.
 
     Args:
         text: The Yahoo ticker, or None.
 
     Returns:
-        Massive's ticker (canonical text also comes back unchanged), or None for None.
+        Massive's ticker, or None for None. Only the convention's grammar is read: text it
+        does not spell is refused even when it is a Massive ticker.
 
     Errors: `TypeError` if `text` is neither a `str` nor None, and `ValueError` if the text is not a
     plain, class, or preferred Yahoo ticker.
@@ -767,11 +886,16 @@ def canonical_symbol_stock_nasdaq(text: str | None) -> str | None:
     them. The ACT symbology of the same files writes `.W` for warrants and `.V` for both a
     class and when-issued, so it is ambiguous and not supported. Pure and thread-safe.
 
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_stock_nasdaq`) for a `String` column; called through the module it makes an
+    `Object` column unless cast: `(String) dm.canonical_symbol_stock_nasdaq(Col)`.
+
     Args:
         text: The Nasdaq ticker, or None.
 
     Returns:
-        Massive's ticker (canonical text also comes back unchanged), or None for None.
+        Massive's ticker, or None for None. Only the convention's grammar is read: text it
+        does not spell is refused even when it is a Massive ticker.
 
     Errors: `TypeError` if `text` is neither a `str` nor None, and `ValueError` if the text is not a
     plain, class, or preferred Nasdaq ticker.
@@ -787,11 +911,16 @@ def canonical_symbol_stock_cms(text: str | None) -> str | None:
     suffixes (` WS`, ` U`, ` RT`, ` WI`) are refused, since Massive documents no spelling for
     them. Pure and thread-safe.
 
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_stock_cms`) for a `String` column; called through the module it makes an
+    `Object` column unless cast: `(String) dm.canonical_symbol_stock_cms(Col)`.
+
     Args:
         text: The CMS ticker, or None.
 
     Returns:
-        Massive's ticker (canonical text also comes back unchanged), or None for None.
+        Massive's ticker, or None for None. Only the convention's grammar is read: text it
+        does not spell is refused even when it is a Massive ticker.
 
     Errors: `TypeError` if `text` is neither a `str` nor None, and `ValueError` if the text is not a
     plain, class, or preferred CMS ticker.
@@ -805,6 +934,10 @@ def canonical_symbol_option(text: str | None) -> str | None:
     Accepts the symbol with or without `O:` and the 21-character OSI form whose root is padded
     with spaces, in any case. The root is never changed: `SPXW` stays `SPXW` and an adjusted
     root such as `AAPL1` stays `AAPL1`. Pure and thread-safe.
+
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_option`) for a `String` column; called through the module it makes an `Object`
+    column unless cast: `(String) dm.canonical_symbol_option(Col)`.
 
     Args:
         text: The option symbol, or None.
@@ -820,19 +953,56 @@ def canonical_symbol_option(text: str | None) -> str | None:
 
 
 def canonical_symbol_future(text: str | None) -> str | None:
-    """Check a futures contract ticker (`ESZ5`), upper-casing it. Pure and thread-safe.
+    """Check a single futures contract ticker, which Massive's text is exactly: `ESZ5`.
+
+    A contract ticker is upper-case letters and digits, taken as written: nothing is converted
+    or re-cased. A spread is refused with the function that takes it
+    (`canonical_symbol_future_spread`). Beware the year: Massive writes it with one digit
+    (`ESZ5` is December 2025) unless the contract is ten or more years out (`0NGH39`), so
+    `ESZ25` is not `ESZ5`. Pure and thread-safe.
+
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_future`) for a `String` column; called through the module it makes an
+    `Object` column unless cast: `(String) dm.canonical_symbol_future(Col)`.
 
     Args:
         text: The contract ticker, or None.
 
     Returns:
-        The ticker in upper case, or None for None. A year is never rewritten: `ESZ25` stays
-        `ESZ25`.
+        The ticker unchanged, or None for None.
 
-    Errors: `TypeError` if `text` is neither a `str` nor None, and `ValueError` if the text is not
-    letters and digits, or carries another class's prefix.
+    Errors: `TypeError` if `text` is neither a `str` nor None, and `ValueError` if the text is
+    a spread, or not upper-case letters and digits.
     """
-    return canonical_symbol(text, AssetClass.FUTURES)
+    value = _require_text(text)
+    return None if value is None else _convert_single_future(value)
+
+
+def canonical_symbol_future_spread(text: str | None) -> str | None:
+    """Check a futures spread ticker, exactly as Massive writes it: `GCQ6-GCZ6`, `BOB 02-01 U6`.
+
+    Massive documents no grammar for spreads, so the spellings accepted are those its samples
+    show: a calendar spread of two contracts (`GCQ6-GCZ6`, `10YN6-10YQ6`), a CBOT
+    inter-commodity spread (`BOB 02-01 U6`), a NYMEX strategy of one or two products over
+    months (the butterfly `CL:BF Q6-U6-V6`, the calendar `CL:BZ U6-V6`), and a CME currency
+    cross (`6A:XF:AUDUSD:Q6`). Canonical text comes back unchanged; no ticker is built from its
+    legs. A single contract is refused with `canonical_symbol_future`. Pure and thread-safe.
+
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_future_spread`) for a `String` column; called through the module it makes
+    an `Object` column unless cast: `(String) dm.canonical_symbol_future_spread(Col)`.
+
+    Args:
+        text: The spread ticker, or None.
+
+    Returns:
+        The ticker unchanged, or None for None.
+
+    Errors: `TypeError` if `text` is neither a `str` nor None, and `ValueError` if the text is
+    a single contract, or none of the spread spellings (the message lists them).
+    """
+    value = _require_text(text)
+    return None if value is None else _convert_spread(value)
 
 
 def canonical_symbol_index(text: str | None) -> str | None:
@@ -840,6 +1010,10 @@ def canonical_symbol_index(text: str | None) -> str | None:
 
     The prefix is added because the caller names the class by calling this function; no
     ticker is ever recognized as an index by its name. Case is kept. Pure and thread-safe.
+
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_index`) for a `String` column; called through the module it makes an `Object`
+    column unless cast: `(String) dm.canonical_symbol_index(Col)`.
 
     Args:
         text: The index ticker, with or without `I:`, or None.
@@ -870,6 +1044,10 @@ def canonical_symbol_forex(text: str | None) -> str | None:
             pairs = new_table([string_col("Pair", ["EUR/USD", "GBP-USD"])])
             pairs = pairs.update(["Symbol = canonical_symbol_forex(Pair)"])
 
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_forex`) for a `String` column; called through the module it makes an `Object`
+    column unless cast: `(String) dm.canonical_symbol_forex(Col)`.
+
     Args:
         text: The pair, or None.
 
@@ -885,8 +1063,14 @@ def canonical_symbol_forex(text: str | None) -> str | None:
 def canonical_symbol_crypto(text: str | None) -> str | None:
     """Convert a crypto pair to Massive's ticker: `BTC-USD` to `X:BTCUSD`.
 
-    Accepts `BTC-USD`, `BTC/USD`, and `BTCUSD`, with or without `X:`, in any case. The quote
-    currency must be one of Massive's (`USD`, `USDT`, `EUR`, ...). Pure and thread-safe.
+    Accepts `BTC-USD`, `BTC/USD`, and `BTCUSD`, with or without `X:`, in any case, whatever the
+    quote currency. A pair whose quote is not one the library knows (`X:BTCDAI`) is a valid
+    ticker for every verb except the streams, which need the pair split for the topic. Pure and
+    thread-safe.
+
+    In a Deephaven query string, import it by bare name (`from deephaven_massive import
+    canonical_symbol_crypto`) for a `String` column; called through the module it makes an `Object`
+    column unless cast: `(String) dm.canonical_symbol_crypto(Col)`.
 
     Args:
         text: The pair, or None.
@@ -894,9 +1078,8 @@ def canonical_symbol_crypto(text: str | None) -> str | None:
     Returns:
         `X:` and the joined pair, or None for None.
 
-    Errors: `TypeError` if `text` is neither a `str` nor None, and `ValueError` if no known quote
-    currency ends the pair, the joined pair would split back differently, or the text carries
-    another class's prefix (`C:` is forex).
+    Errors: `TypeError` if `text` is neither a `str` nor None, and `ValueError` if the text is
+    not a pair of letters and digits, or carries another class's prefix (`C:` is forex).
     """
     return canonical_symbol(text, AssetClass.CRYPTO)
 
@@ -904,7 +1087,7 @@ def canonical_symbol_crypto(text: str | None) -> str | None:
 # --- checks when a query is built ----------------------------------------------------------------
 
 
-def check_symbol(asset_class: AssetClass | None, text: object) -> str:
+def check_symbol(asset_class: AssetClass | None, text: object, *, as_written: bool = False) -> str:
     """Return a symbol that must already be canonical, or raise with the fix.
 
     The check behind `symbols=`, `underlying=`, and every row of a symbol table: the library
@@ -914,21 +1097,38 @@ def check_symbol(asset_class: AssetClass | None, text: object) -> str:
         asset_class: The class whose grammar applies, or None for a dataset that spans classes
             (the prefix selects the class; text without one is a stock).
         text: The value as passed.
+        as_written: True for a dataset whose symbols are kept as Massive writes them
+            (`is_canonical`): any text of that grammar passes.
 
     Returns:
         The text, unchanged.
 
     Raises:
         TypeError: If the value is not a `str`.
-        ValueError: If the text is not canonical. The message names the canonical form when
-            the class's converter gives one (`'EUR/USD' is not Massive's ticker; use
-            'C:EURUSD'`), and otherwise the converter's reason.
+        ValueError: If the text is not canonical. A canonical ticker of another class says
+            the dataset takes the other class (`'I:SPX' is an index ticker; this dataset takes
+            stock tickers`); otherwise the message names the canonical form when the class's
+            converter gives one (`'EUR/USD' is not Massive's ticker; use 'C:EURUSD'`), and
+            the converter's reason when it gives none.
     """
     if not isinstance(text, str):
         raise TypeError(f"a symbol must be a str, not {type(text).__name__}")
+    if as_written:
+        if _WRITTEN.fullmatch(text) is not None:
+            return text
+        raise ValueError(
+            f"{text!r} is not a ticker as Massive writes it (not empty, no surrounding "
+            "whitespace, no control character, no class prefix)"
+        )
     resolved = symbol_class(text) if asset_class is None else asset_class
     if _CANONICAL[resolved](text):
         return text
+    other = symbol_class(text)
+    if other not in {resolved, AssetClass.STOCKS} and _CANONICAL[other](text):
+        raise ValueError(
+            f"{text!r} is a{'n' if other in _VOWEL_CLASSES else ''} {_CLASS_NAMES[other]} "
+            f"ticker; this dataset takes {_CLASS_NAMES[resolved]} tickers"
+        )
     try:
         fixed = _CONVERTERS[resolved](text)
     except ValueError as error:
@@ -940,7 +1140,10 @@ def check_symbol(asset_class: AssetClass | None, text: object) -> str:
 
 
 def normalize(
-    asset_class: AssetClass | None, symbols: str | Iterable[str] | _All
+    asset_class: AssetClass | None,
+    symbols: str | Iterable[str] | _All,
+    *,
+    as_written: bool = False,
 ) -> tuple[str, ...] | _All:
     """Check a `Symbols` argument other than a table when a query is built.
 
@@ -953,6 +1156,8 @@ def normalize(
     Args:
         asset_class: The class whose grammar applies, or None for a dataset that spans classes.
         symbols: The argument as the user passed it.
+        as_written: True for a dataset whose symbols are kept as Massive writes them
+            (`check_symbol`).
 
     Returns:
         A sorted tuple of canonical symbols, or `ALL`.
@@ -977,38 +1182,45 @@ def normalize(
             ) from None
     if not items:
         raise ValueError("no symbols")
-    return tuple(sorted({check_symbol(asset_class, item) for item in items}))
+    return tuple(sorted({check_symbol(asset_class, i, as_written=as_written) for i in items}))
 
 
 # --- the wire ------------------------------------------------------------------------------------
 
 
-def canonical_from_wire(asset_class: AssetClass | None, raw: str) -> str | None:
+def canonical_from_wire(
+    asset_class: AssetClass | None, raw: str, *, as_written: bool = False
+) -> str | None:
     """Read a symbol as a Massive transport sent it, in the canonical form.
 
     The spellings the library knows: forex pairs as `C:EURUSD`, `EUR/USD`, `EUR-USD`,
     `EURUSD`, or `X:EUR-USD` (the forex quotes flat-file sample); crypto pairs as `X:BTCUSD`,
-    `BTC-USD`, `BTC/USD`, or `X:BTC-USD` (FMV frames), and a prefixed pair without a separator
-    as written, even when its quote currency is not in `CRYPTO_QUOTES`; an index without its
-    prefix (`SPX`) on a dataset of the indices class, which then gets `I:` from the dataset's
-    class, never from the name. Every other class takes only its canonical text. Case is never
+    `BTC-USD`, `BTC/USD`, or `X:BTC-USD` (FMV frames), whatever the quote currency; an index
+    without its prefix (`SPX`) on a dataset of the indices class, which then gets `I:` from the
+    dataset's class, never from the name. A futures row keeps any ticker as Massive writes it,
+    spreads of a form not yet seen included, and so does a dataset kept as written; every other
+    class takes only its canonical text. Case is never
     folded.
 
     Args:
         asset_class: The dataset's class, or None for a dataset that spans classes: the prefix
             then selects the class, and text without one is read as a stock.
         raw: The wire text.
+        as_written: True for a dataset whose symbols are kept as Massive writes them
+            (`is_canonical`).
 
     Returns:
         The canonical ticker, or None for a spelling the library does not know.
     """
+    if as_written:
+        return raw if _WRITTEN.fullmatch(raw) is not None else None
     resolved = symbol_class(raw) if asset_class is None else asset_class
     if resolved is AssetClass.FOREX:
-        return _forex(raw, ("C:", "X:") if asset_class is AssetClass.FOREX else ("C:",))
+        return _forex(raw, ("C:", "X:"))
     if resolved is AssetClass.CRYPTO:
-        # Massive's own ticker is read as written even when its quote currency is missing
-        # from CRYPTO_QUOTES, which only a topic needs to split it.
-        return raw if _CRYPTO.match(raw) is not None else _crypto(raw, ("X:",))
+        return _crypto(raw, ("X:",))
+    if resolved is AssetClass.FUTURES:
+        return raw if _WRITTEN.fullmatch(raw) is not None else None
     if asset_class is AssetClass.INDICES and not raw.startswith("I:"):
         raw = f"I:{raw}"
     return raw if _CANONICAL[resolved](raw) else None
@@ -1026,7 +1238,8 @@ def wire_spellings(asset_class: AssetClass | None, symbol: str) -> tuple[str, ..
         symbol: A canonical symbol.
 
     Returns:
-        The spellings, each of which `canonical_from_wire(asset_class, spelling)` reads as `symbol`.
+        The spellings, each of which `canonical_from_wire(asset_class, spelling)` reads as
+        `symbol`.
     """
     resolved = symbol_class(symbol) if asset_class is None else asset_class
     prefixes: tuple[str, ...]
@@ -1034,8 +1247,11 @@ def wire_spellings(asset_class: AssetClass | None, symbol: str) -> tuple[str, ..
         base, quote = symbol[2:5], symbol[5:]
         prefixes = ("C:", "X:", "") if asset_class is AssetClass.FOREX else ("C:",)
     elif resolved is AssetClass.CRYPTO:
-        base, quote = ws_symbol(AssetClass.CRYPTO, symbol).split("-")
         prefixes = ("X:", "") if asset_class is AssetClass.CRYPTO else ("X:",)
+        split = _split_crypto(symbol[2:])
+        if split is None:  # a quote outside CRYPTO_QUOTES: only the joined forms are known
+            return tuple(f"{p}{symbol[2:]}" for p in prefixes)
+        base, quote = split
     elif asset_class is AssetClass.INDICES:
         return symbol, symbol[2:]
     else:
@@ -1056,10 +1272,14 @@ def ws_symbol(asset_class: AssetClass, symbol: str) -> str:
 
     Args:
         asset_class: The symbol's class.
-        symbol: A canonical symbol; a crypto one always splits (`is_canonical` requires it).
+        symbol: A canonical symbol; a crypto one must split (`topic_problem`).
 
     Returns:
         The WebSocket form.
+
+    Raises:
+        ValueError: If a crypto symbol's quote currency is not one of `CRYPTO_QUOTES`, so the
+            pair cannot be split for a topic (`topic_problem` gives the message).
     """
     if asset_class is AssetClass.FOREX:
         # The `ticker` parameter of every forex channel is "{from}-{to}": see
@@ -1068,9 +1288,34 @@ def ws_symbol(asset_class: AssetClass, symbol: str) -> str:
         body = symbol.removeprefix("C:")
         return f"{body[:_CURRENCY_CODE_LENGTH]}-{body[_CURRENCY_CODE_LENGTH:]}"
     if asset_class is AssetClass.CRYPTO:
-        base, quote = _split_crypto(symbol.removeprefix("X:")) or (symbol, "")
-        return f"{base}-{quote}"
+        split = _split_crypto(symbol.removeprefix("X:"))
+        if split is None:
+            raise ValueError(topic_problem(asset_class, symbol))
+        return f"{split[0]}-{split[1]}"
     return symbol
+
+
+def topic_problem(asset_class: AssetClass | None, symbol: str) -> str | None:
+    """Say why a canonical symbol cannot be streamed, or None when its topic can be built.
+
+    A crypto topic spells the pair `BASE-QUOTE`, and a joined ticker (`X:BTCDAI`) splits only
+    at a quote currency the library knows (`CRYPTO_QUOTES`); every other symbol streams.
+
+    Args:
+        asset_class: The stream's class, or None to read it from the prefix.
+        symbol: A canonical symbol.
+
+    Returns:
+        The reason, naming the known quotes and the verbs that still serve the symbol, or None.
+    """
+    resolved = symbol_class(symbol) if asset_class is None else asset_class
+    if resolved is not AssetClass.CRYPTO or _split_crypto(symbol.removeprefix("X:")) is not None:
+        return None
+    return (
+        f"{symbol!r} cannot be streamed: its WebSocket topic needs the pair split, and its quote "
+        f"currency is none of {', '.join(CRYPTO_QUOTES)}; fetch(), poll(), and history() still "
+        "serve it"
+    )
 
 
 def option_roots(symbols: pa.Array) -> pa.Array:
@@ -1105,10 +1350,12 @@ def unknown_symbol_message(dataset: str, spellings: Iterable[str]) -> str:
         The message a failed request or stream carries; it names the session setting that
         keeps such rows instead.
     """
-    listed = ", ".join(repr(s) for s in sorted(spellings))
+    texts = sorted(spellings)
+    listed = ", ".join(repr(s) for s in texts)
+    sent = f"the symbols {listed}, spellings" if texts[1:] else f"the symbol {listed}, a spelling"
     return (
-        f"{dataset}: Massive sent the symbol {listed}, a spelling the library cannot read as "
-        "Massive's ticker. Set MASSIVE_UNKNOWN_SYMBOLS=warn, or pass "
+        f"{dataset}: Massive sent {sent} the library cannot read as Massive's ticker. "
+        "Set MASSIVE_UNKNOWN_SYMBOLS=warn, or pass "
         "MassiveConfig(unknown_symbols=dm.UnknownSymbols.WARN), to keep such rows with a null "
         "Symbol and the text in RawSymbol"
     )
@@ -1148,11 +1395,14 @@ class WireSymbols:
             `UnknownSymbols.WARN` each new spelling is logged once at WARNING (a bounded
             number per process) and its rows keep the text in `ReadSymbols.raw`; under
             `FAIL` the caller fails the request or stream with `unknown_symbol_message`.
+        as_written: True for a dataset whose symbols are kept as Massive writes them
+            (`canonical_from_wire`).
     """
 
     dataset: str
     asset_class: AssetClass | None
     unknown: UnknownSymbols
+    as_written: bool = False
 
     def read(self, raw: pa.Array, cache: dict[str, str | None] | None = None) -> ReadSymbols:
         """Read a column of wire symbols, calling `canonical_from_wire` once per distinct text.
@@ -1172,7 +1422,9 @@ class WireSymbols:
         texts = distinct.to_pylist()
         for text in texts:
             if text is not None and text not in known:
-                known[text] = canonical_from_wire(self.asset_class, text)
+                known[text] = canonical_from_wire(
+                    self.asset_class, text, as_written=self.as_written
+                )
         mapped = pa.array([None if t is None else known[t] for t in texts], pa.string())
         index = pc.call_function("index_in", [raw], pc.SetLookupOptions(value_set=distinct))
         symbols = pc.take(mapped, index)

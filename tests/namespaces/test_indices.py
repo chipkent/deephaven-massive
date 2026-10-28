@@ -444,7 +444,7 @@ def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
 def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
     method = cast("Callable[..., object]", getattr(m.indices, name))
     extra: tuple[object, ...] = ("2025-06-02",) if name == "daily_open_close" else ()
-    with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker \(prefix X:\)"):
+    with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker; this dataset takes"):
         method("X:BTCUSD", *extra)
     with pytest.raises(ValueError, match=r"^'SPX' is not Massive's ticker; use 'I:SPX'"):
         method("SPX", *extra)

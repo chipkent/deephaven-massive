@@ -776,6 +776,36 @@ def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams(
     assert row["Error"].startswith("test.trades: Massive sent the symbol 'BRK/B', a spelling")
 
 
+def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # The row cannot be routed, so no symbol stream may starve on it silently.
+    one = harness.query(TRADES, ["AAPL"]).append_only()
+    harness.subscribed("T.AAPL")
+    harness.send(trade("BRK/B"))
+    wait_for(lambda: failed_after_flush(harness, one))
+    (row,) = streams_of(harness, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("test.trades: Massive sent the symbol 'BRK/B', a spelling")
+
+
+def test_a_failing_upstream_watchlist_fails_the_stream(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # A canonicalize_symbols table under RAISE fails on a bad row; the stream must fail with
+    # it rather than keep its old topics.
+    source = input_table({"Symbol": dtypes.string})
+    source.add(new_table([string_col("Symbol", ["AAPL"])]))
+    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS)
+    result = harness.query(TRADES, watchlist).append_only()
+    harness.subscribed("T.AAPL")
+    source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+    wait_for(lambda: failed_after_flush(harness, result))
+    (row,) = streams_of(harness, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("the symbol table failed, so the result can no longer follow")
+
+
 def test_a_frame_symbol_the_library_cannot_read_is_kept_under_warn(
     fake_ws_server: FakeMassiveServer, *, rows_when: RowsWhen
 ) -> None:

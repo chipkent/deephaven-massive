@@ -384,7 +384,9 @@ class _Transform:
             columns=tuple((c.type, c.name, by_column.get(c.name)) for c in schema.columns),
             arrow_schema=schema.arrow_schema(),
             session_header=session_header,
-            symbols=WireSymbols(spec.name, spec.asset_class, unknown_symbols),
+            symbols=WireSymbols(
+                spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
+            ),
             day_source=None if stamps is StampRule.KEEP else prefix,
             checked_days=stamps is StampRule.UTC_DAY_CHECKED,
         )

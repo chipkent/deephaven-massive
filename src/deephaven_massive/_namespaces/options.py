@@ -716,8 +716,9 @@ class _Options(Namespace):
         as sent, not what the contract delivers. `SharesPerContract` is the number of shares
         one contract delivers (100 for a standard contract), `AdditionalUnderlyings` the
         JSON text of any further deliverables (other securities or cash, as Massive lists
-        them; null or `[]` when there are none), and `Correction` Massive's correction number
-        of the contract record. An adjusted contract keeps its own root (`AAPL1`) and its
+        them; null or `[]` when there are none), `Cfi` the contract's six-letter ISO 10962
+        classification code, and `Correction` Massive's correction number of the contract
+        record. An adjusted contract keeps its own root (`AAPL1`) and its
         own `Symbol`; the library never maps it to `AAPL`.
 
         It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a

@@ -300,6 +300,11 @@ class DatasetSpec:
             of their own. Every REST path of the dataset must take each one (the catalog's
             `wire parameters` gate), so a request never carries a parameter its path lacks.
             Each is reserved, with its whole family, from `filters`.
+        symbols_as_written: True for a dataset whose symbols are a third party's global
+            tickers rather than Massive's US-market ones (the TMX corporate events, a global
+            calendar): `symbols=`, the rows of a symbol table, and the rows' symbols are then
+            taken exactly as Massive writes them (`symbols.is_canonical`), not through the
+            asset class's grammar.
     """
 
     name: str
@@ -327,6 +332,7 @@ class DatasetSpec:
     symbols_per_request: int | None = None
     page_size: int | None = None
     fixed_params: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+    symbols_as_written: bool = False
 
     def __post_init__(self) -> None:
         """Check the spec's internal consistency; nothing here reads the generated files.

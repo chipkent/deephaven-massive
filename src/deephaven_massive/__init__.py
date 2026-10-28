@@ -35,9 +35,13 @@ Public API:
       `C:EURUSD`, `X:BTCUSD`); these turn other spellings into it:
       `canonical_symbol(text, asset_class, convention=None)`, one function per class for query
       strings (`canonical_symbol_stock`, `canonical_symbol_option`, `canonical_symbol_future`,
+      `canonical_symbol_future_spread`,
       `canonical_symbol_index`, `canonical_symbol_forex`, `canonical_symbol_crypto`), one per
       stock convention (`canonical_symbol_stock_yahoo`, `canonical_symbol_stock_nasdaq`,
-      `canonical_symbol_stock_cms`), and the table form `canonicalize_symbols`.
+      `canonical_symbol_stock_cms`), and the table form `canonicalize_symbols`. In a query
+      string, import a converter by bare name for a `String` column
+      (`from deephaven_massive import canonical_symbol_forex`); called as `dm.…` it makes an
+      `Object` column unless cast, `(String) dm.canonical_symbol_forex(Pair)`.
     - The enums (all `StrEnum`s; a value is Massive's wire string where the enum reaches the
       wire): `AssetClass`, `Timespan`, `PollMode`, `HistorySource`, `FuturesVenue`,
       `Direction`, `ContractType`, `SeriesType`, `Timeframe`, `Order`, `Market`, `TickerType`,
@@ -101,6 +105,7 @@ __all__ = [
     "canonical_symbol_crypto",
     "canonical_symbol_forex",
     "canonical_symbol_future",
+    "canonical_symbol_future_spread",
     "canonical_symbol_index",
     "canonical_symbol_option",
     "canonical_symbol_stock",
@@ -139,6 +144,7 @@ _EXPORTS: dict[str, str] = {
     "canonical_symbol_crypto": "deephaven_massive._datasets.symbols",
     "canonical_symbol_forex": "deephaven_massive._datasets.symbols",
     "canonical_symbol_future": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_future_spread": "deephaven_massive._datasets.symbols",
     "canonical_symbol_index": "deephaven_massive._datasets.symbols",
     "canonical_symbol_option": "deephaven_massive._datasets.symbols",
     "canonical_symbol_stock": "deephaven_massive._datasets.symbols",
@@ -160,6 +166,7 @@ if TYPE_CHECKING:
         canonical_symbol_crypto,
         canonical_symbol_forex,
         canonical_symbol_future,
+        canonical_symbol_future_spread,
         canonical_symbol_index,
         canonical_symbol_option,
         canonical_symbol_stock,

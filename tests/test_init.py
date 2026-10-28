@@ -46,6 +46,7 @@ EXPECTED_EXPORTS = [
     "canonical_symbol_stock_cms",
     "canonical_symbol_option",
     "canonical_symbol_future",
+    "canonical_symbol_future_spread",
     "canonical_symbol_index",
     "canonical_symbol_forex",
     "canonical_symbol_crypto",
@@ -71,7 +72,7 @@ def test_version_is_the_installed_distribution_version() -> None:
 
 
 def test_all_is_exactly_the_public_api() -> None:
-    assert len(EXPECTED_EXPORTS) == 36
+    assert len(EXPECTED_EXPORTS) == 37
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 

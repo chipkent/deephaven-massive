@@ -349,7 +349,7 @@ def test_trades_quotes_and_fmv_take_massive_option_tickers(
             factory("AAPL250117C00150000")
         with pytest.raises(ValueError, match="is an underlying, not an OCC option symbol"):
             factory("AAPL")
-        with pytest.raises(ValueError, match=r"is a crypto ticker \(prefix X:\)"):
+        with pytest.raises(ValueError, match=r"is a crypto ticker; this dataset takes option"):
             factory("X:BTCUSD")
         with pytest.raises(ValueError, match="not an OCC option symbol with a real expiry"):
             factory("O:BRK.B250117C00400000")  # an OCC root has no dot
@@ -412,7 +412,7 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
         chain(cast("str", dm.ALL))
     with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
         chain("  ")
-    with pytest.raises(ValueError, match=r"did you mean 'AAPL'\?"):
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
         chain("aapl")
     with pytest.raises(ValueError, match=r"'i:SPX' is an index ticker \(prefix I:\)"):
         chain("i:SPX")

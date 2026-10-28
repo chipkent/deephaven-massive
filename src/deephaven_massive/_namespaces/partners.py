@@ -21,14 +21,17 @@ news, its time (`Timestamp`), the wire parameters behind `symbols`, `start`, and
 keys of a keyed `poll()` table, and the page size, which is each endpoint's documented maximum.
 Columns, types, and descriptions come from the generated schemas, never from this module.
 
-Instruments. The Benzinga datasets that take tickers, the ETF Global datasets, and the TMX
-events take Massive's stock tickers (`AAPL`, `BRK.B`), so their specs carry
+Instruments. The Benzinga datasets that take tickers and the ETF Global datasets take
+Massive's stock tickers (`AAPL`, `BRK.B`), so their specs carry
 `AssetClass.STOCKS` and a symbol with another class's prefix (`X:BTCUSD`) is rejected when the
 query is built. Their rows each describe one instrument, which becomes the `Symbol` column (an
 ETF Global row's ETF, its `composite_ticker`; for consensus ratings, the symbol requested; for
 a TMX event of a company without a ticker, null). Benzinga news names several tickers per article,
 so it has no `Symbol`, keeps its `Tickers` column (JSON text), and uses `symbols` only to filter
-the request. Benzinga analysts and firms, and both Fable datasets, take no symbols at all.
+the request. Benzinga analysts and firms, and both Fable datasets, take no symbols at all. The
+TMX corporate events come from Wall Street Horizon's global calendar, whose tickers are not
+US-market ones (each event names its venue's MIC and an ISIN), so that dataset takes and keeps
+its tickers exactly as Massive writes them (`DatasetSpec.symbols_as_written`).
 """
 
 from __future__ import annotations
@@ -77,6 +80,7 @@ def _list_spec(
     time_axis: tuple[str, str] | None = None,
     poll_mode: PollMode = PollMode.REPLACE,
     per_symbol: bool = False,
+    symbols_as_written: bool = False,
 ) -> DatasetSpec:
     """Declare one partner dataset served by a single REST list path.
 
@@ -95,6 +99,8 @@ def _list_spec(
         time_axis: The wire parameter pair behind `start` and `end`, or None.
         poll_mode: The default `poll()` mode.
         per_symbol: True when the path takes one ticker per request.
+        symbols_as_written: True when the symbols are a third party's global tickers, kept
+            as Massive writes them (`DatasetSpec.symbols_as_written`).
 
     Returns:
         The spec; `DatasetSpec` raises its `ValueError` for an inconsistent
@@ -116,6 +122,7 @@ def _list_spec(
         poll_keys=poll_keys,
         per_symbol=per_symbol,
         page_size=page_size,
+        symbols_as_written=symbols_as_written,
     )
 
 
@@ -279,6 +286,9 @@ TMX_CORPORATE_EVENTS: Final = _list_spec(
     symbol_param="ticker.any_of",
     time_axis=("date.gte", "date.lte"),
     poll_keys=("TmxRecordId",),
+    # Wall Street Horizon's calendar is global (each event names its venue's MIC and an
+    # ISIN), so its tickers are not US-market ones: they are kept as Massive writes them.
+    symbols_as_written=True,
     page_size=50_000,
 )
 

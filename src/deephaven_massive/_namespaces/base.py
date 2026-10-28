@@ -533,7 +533,7 @@ def build_query(
             raise ValueError("a symbol table must have a Symbol column")
         normalized = SymbolTable(symbols)
     elif symbols is not None:
-        normalized = normalize(spec.asset_class, symbols)
+        normalized = normalize(spec.asset_class, symbols, as_written=spec.symbols_as_written)
     if isinstance(normalized, _All) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; use {all_alternative}")
     if venue is not None:

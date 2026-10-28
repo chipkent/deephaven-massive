@@ -336,7 +336,7 @@ def test_conversion_rejects_bad_arguments(
     [
         ("EUR/US", "cannot read 'EUR/US' as a forex pair"),
         ("EUR/USD/JPY", "cannot read 'EUR/USD/JPY' as a forex pair"),
-        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker \(prefix X:\), not a forex one"),
+        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker; this dataset takes forex tickers"),
         ("EU1/USD", "cannot read 'EU1/USD' as a forex pair"),
         ([], "no symbols"),
     ],

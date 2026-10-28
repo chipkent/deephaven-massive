@@ -138,10 +138,14 @@ class RowFailure:
         symbol: The row's canonical symbol, or None when the row has none that is valid; then
             only the channel's `dm.ALL` streams would have received it.
         message: Why, naming the dataset, the column, the unit, and the value.
+        every_stream: True for a row whose symbol is a spelling the library cannot read:
+            since it cannot tell which symbol stream the row was meant for, it fails every
+            stream of the dataset on the channel, so none starves silently.
     """
 
     symbol: str | None
     message: str
+    every_stream: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +242,7 @@ class ChannelPlan:
         return cls(
             dataset=spec.name,
             asset_class=asset_class,
-            symbols=WireSymbols(spec.name, asset_class, unknown_symbols),
+            symbols=WireSymbols(spec.name, asset_class, unknown_symbols, spec.symbols_as_written),
             channel=channel,
             wire_schema=pa.schema(
                 [pa.field(f.column, _WIRE_ARROW[c.wire_type]) for c, f in fields.values()]
@@ -264,10 +268,10 @@ class ChannelPlan:
         epoch column runs through the masked timestamp routine, every column is widened to its
         dataset type, and the derived columns (`OptionRoot`, `RawSymbol`) are computed. A row
         with a timestamp that overflows or lies outside 1990 to 2100 is dropped and reported.
-        A row whose symbol is a spelling the library cannot read is dropped and reported too
-        (with no symbol, so it fails the channel's `dm.ALL` streams) when the session's
-        `unknown_symbols` is `FAIL`; under `WARN` it is kept with a null `Symbol` and the text
-        in `RawSymbol`.
+        A row whose symbol is a spelling the library cannot read is dropped and reported too,
+        failing every stream of the dataset on the channel (it cannot be routed to one), when
+        the session's `unknown_symbols` is `FAIL`; under `WARN` it is kept with a null
+        `Symbol` and the text in `RawSymbol`.
 
         Args:
             rows: The decoded rows, keyed by long-form column.
@@ -282,7 +286,7 @@ class ChannelPlan:
         wire = pa.Table.from_pylist(list(rows), schema=self.wire_schema)
         count = wire.num_rows
         failed: pa.Array | None = None
-        failures: list[tuple[int, str]] = []
+        failures: list[tuple[int, str, bool]] = []
         arrays: dict[str, pa.Array] = {}
         raw = pa.nulls(count, pa.string())
         for column_type, name, field, unit in self.columns:
@@ -309,8 +313,8 @@ class ChannelPlan:
         if failed is not None:
             canonical_symbols = batch.column(_SYMBOL)
             rejected = [
-                RowFailure(canonical_symbols[index].as_py(), message)
-                for index, message in sorted(failures)
+                RowFailure(canonical_symbols[index].as_py(), message, every)
+                for index, message, every in sorted(failures)
             ]
             batch = batch.filter(pc.call_function("invert", [failed]))
         distinct = pc.call_function("unique", [batch.column(_SYMBOL)]).to_pylist()
@@ -326,15 +330,16 @@ class ChannelPlan:
         column: pa.ChunkedArray,
         symbols: dict[str, str | None],
         *,
-        failures: list[tuple[int, str]],
+        failures: list[tuple[int, str, bool]],
     ) -> tuple[pa.Array, pa.Array, pa.Array | None]:
         """Read the rows' wire symbols; under `FAIL`, report the rows of unreadable ones.
 
         Args:
             column: The rows' symbols as sent.
             symbols: The flush thread's raw-to-canonical map (`convert`).
-            failures: Extended with `(row, message)` for each row whose spelling the library
-                cannot read, when the session's `unknown_symbols` is `FAIL`.
+            failures: Extended with `(row, message, True)` for each row whose spelling the
+                library cannot read, when the session's `unknown_symbols` is `FAIL`: such a
+                row fails every stream of the channel (`RowFailure.every_stream`).
 
         Returns:
             The canonical symbols, the `RawSymbol` values, and the mask of the rows to drop
@@ -346,7 +351,7 @@ class ChannelPlan:
         bad = pc.is_valid(read.raw)
         message = unknown_symbol_message(self.dataset, read.unknown)
         indices = pc.call_function("indices_nonzero", [bad]).to_pylist()
-        failures.extend((index, message) for index in indices)
+        failures.extend((index, message, True) for index in indices)
         return read.symbols, read.raw, bad
 
     def _instants(
@@ -355,7 +360,7 @@ class ChannelPlan:
         unit: TimeUnit,
         column: pa.ChunkedArray,
         *,
-        failures: list[tuple[int, str]],
+        failures: list[tuple[int, str, bool]],
     ) -> tuple[pa.Array, pa.Array | None]:
         """Convert an epoch column, reporting the rows whose value fails the bound.
 
@@ -363,7 +368,7 @@ class ChannelPlan:
             name: The column.
             unit: The epoch's unit.
             column: The rows' raw values.
-            failures: Extended with `(row, message)` for each failing row.
+            failures: Extended with `(row, message, False)` for each failing row.
 
         Returns:
             The values as nanoseconds, and the mask of the rows to drop (None when none fails).
@@ -374,7 +379,9 @@ class ChannelPlan:
             return nanos, None
         label = f"{self.dataset}.{name}"
         indices = pc.call_function("indices_nonzero", [bad]).to_pylist()
-        failures.extend((i, mismatch_message(label, unit, values[i].as_py())) for i in indices)
+        failures.extend(
+            (i, mismatch_message(label, unit, values[i].as_py()), False) for i in indices
+        )
         return nanos, bad
 
 
@@ -871,7 +878,7 @@ class Flusher:
         for failure in converted.failures:
             error = MassiveError(failure.message)
             for sink in readers:
-                if sink.receives(failure.symbol):
+                if failure.every_stream or sink.receives(failure.symbol):
                     sink.fail(core, error)
         if not converted.batch.num_rows:
             return
