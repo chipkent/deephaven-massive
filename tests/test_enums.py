@@ -33,7 +33,7 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
     dm.HistorySource: ["auto", "rest", "flat_files"],
     dm.FuturesVenue: ["cme", "cbot", "nymex", "comex"],
     dm.Direction: ["gainers", "losers"],
-    dm.ContractType: ["call", "put", "other"],
+    dm.ContractType: ["call", "put"],
     dm.SeriesType: ["open", "high", "low", "close"],
     dm.Timeframe: ["annual", "quarterly"],
     dm.Order: ["asc", "desc"],
@@ -53,12 +53,12 @@ REST_MIRRORS: dict[type[StrEnum], str] = {
     dm.SeriesType: "series_type",
     dm.Sip: "sip",
     dm.ConditionDataType: "data_type",
+    dm.ContractType: "contract_type",
 }
 # Not mirrors: dm.AssetClass (its values are the WebSocket cluster paths, with futures and
 # forex, while the REST asset_class parameters say "fx" and differ per path); dm.Timespan
 # (it adds SESSION, the futures resolution, and the indicators' timespan has no SECOND);
-# dm.ContractType (the specification lists call and put, and OTHER is documented on the
-# contracts' own pages); dm.Timeframe (the financials take it as free text).
+# dm.Timeframe (the financials take it as free text).
 
 
 @pytest.mark.parametrize(("enum", "values"), EXPECTED_VALUES.items())
@@ -260,6 +260,17 @@ ENUM_PARAMETERS = {
     "_Indices.bars.timespan": "namespaces/test_indices.py::test_bars_check_their_argument_types",
     "_Indices.snapshots.order": (
         "namespaces/test_indices.py::test_snapshots_check_their_list_parameters"
+    ),
+    **dict.fromkeys(
+        (
+            "_Options.bars.timespan",
+            "_Options.chain.contract_type",
+            "_Options.chain.order",
+            "_Options.snapshots.order",
+            "_Options.contracts.contract_type",
+            "_Options.contracts.order",
+        ),
+        "namespaces/test_options.py::test_enum_arguments_reject_plain_strings",
     ),
 }
 

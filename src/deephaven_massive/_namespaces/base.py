@@ -21,8 +21,9 @@ module does the work they share when a dataset method is called:
 
 Filter keys and value kinds are checked against the generated parameters of the dataset's REST
 paths (`Catalog.check_filters` in `_datasets/catalog.py`) synchronously at construction, so a
-bad filter fails before any verb runs. Everything here runs synchronously on the calling
-thread, makes no network call, and creates no table.
+bad filter fails before any verb runs, and the `Request` stores each value as the check parsed
+it (ISO-8601 text of a date parameter becomes a `date`), never the caller's text. Everything
+here runs synchronously on the calling thread, makes no network call, and creates no table.
 """
 
 from __future__ import annotations
@@ -179,10 +180,12 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
     Returns:
         The parameters that are set, by wire name.
 
+    Whether `order` may be given without `sort` depends on the dataset's paths, so
+    `build_query` decides it: a path with its own `order` parameter takes it as is, and only
+    a path without one needs `sort` to carry the direction as its `.asc` or `.desc` suffix.
+
     Raises:
         TypeError: If `sort` is not a `str`.
-        ValueError: If `order` is given without `sort`: most list endpoints take the direction
-            as the `.asc` or `.desc` suffix of `sort`, which the REST transport adds.
     """
     params: dict[str, ParamValue] = {}
     if sort is not None:
@@ -191,12 +194,19 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
         params["sort"] = sort
     if order is not None:
         params["order"] = _require_enum(order, Order, "order")
-        if sort is None:
-            raise ValueError(
-                "order needs sort: most list endpoints take the direction as a suffix of the "
-                "sort field"
-            )
     return params
+
+
+def _list_item(item: object) -> bool:
+    """Tell whether a sequence element is one a list parameter can take: text or a day.
+
+    Args:
+        item: The element.
+
+    Returns:
+        True for a `str` or a `date` that is not a `datetime`.
+    """
+    return isinstance(item, str) or (isinstance(item, date) and not isinstance(item, datetime))
 
 
 def _value(name: str, value: object) -> ParamValue:
@@ -207,12 +217,13 @@ def _value(name: str, value: object) -> ParamValue:
         value: The value as passed.
 
     Returns:
-        The value; a list or tuple of strings becomes a tuple.
+        The value; a list or tuple becomes a tuple, its strings as `str` and its dates (for a
+        list of dates, such as `date_any_of`) as given.
 
     Raises:
         TypeError: If the value is not a `str`, `int`, `float`, `bool`, `date`, `datetime`,
-            enum member, or a sequence of `str`; for a list or tuple, the message names the
-            first element that is not a `str`.
+            enum member, or a sequence of `str` and `date`; for a list or tuple, the message
+            names the first element that is neither (a `datetime` is not a day).
 
     A naive `datetime` raises the `ValueError` of `require_aware` in `_datasets/dates.py`, the
     same message as a naive time bound.
@@ -222,15 +233,15 @@ def _value(name: str, value: object) -> ParamValue:
     if isinstance(value, str | int | float | date | datetime):
         return value
     if isinstance(value, list | tuple):
-        bad = next(((i, item) for i, item in enumerate(value) if not isinstance(item, str)), None)
+        bad = next(((i, item) for i, item in enumerate(value) if not _list_item(item)), None)
         if bad is None:
-            return tuple(str(item) for item in value)
+            return tuple(item if isinstance(item, date) else str(item) for item in value)
         index, item = bad
         raise TypeError(
-            f"{name}: element {index} of the sequence is {type(item).__name__}, not str"
+            f"{name}: element {index} of the sequence is {type(item).__name__}, not str or date"
         )
     raise TypeError(
-        f"{name} must be a str, int, float, bool, date, datetime, or sequence of str; "
+        f"{name} must be a str, int, float, bool, date, datetime, or sequence of str or date; "
         f"got {type(value).__name__}"
     )
 
@@ -312,7 +323,10 @@ def build_query(
         params: The dataset's other typed parameters by wire name; None values are dropped,
             but every key, set or not, is reserved from `filters` with its suffixed forms.
         filters: The `filters` mapping, by key: a wire parameter name with its dots written
-            as underscores (`Catalog.check_filters`).
+            as underscores. `Catalog.check_filters` validates it and parses each value into
+            the form that is sent (ISO-8601 text of a date or timestamp parameter becomes a
+            `date` or an aware `datetime`, and a list parameter's value the tuple of its
+            comma-separated items); the `Request` holds those parsed values.
         limit: The cap on the total number of rows (`Request.limit`), or None for every row;
             a positive `int`.
 
@@ -323,7 +337,11 @@ def build_query(
     Raises:
         ValueError: If `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
             `Symbol` column, or `params` or `filters` holds `adjusted`, which has its own typed
-            argument.
+            argument; or if `params` sets `order` without `sort` and none of the dataset's
+            REST paths has an `order` parameter, so the direction could only travel as the
+            `.asc` or `.desc` suffix of `sort` (`Catalog.takes_param`). Where some path has
+            `order`, the REST transport sends it as is there, folds it into `sort` on a path
+            without it, and fails the verb on a chosen path that has neither.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
@@ -346,6 +364,12 @@ def build_query(
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     if params is not None and "adjusted" in params:
         raise ValueError("adjusted is set through build_query(adjusted=...), not params")
+    typed = {k: v for k, v in (params or {}).items() if v is not None}
+    if "order" in typed and "sort" not in typed and not core.catalog.takes_param(spec, "order"):
+        raise ValueError(
+            f"{spec.name}: order needs sort, since its paths take the direction as a suffix "
+            "of the sort field"
+        )
     cls = query_class(spec)
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")
@@ -355,6 +379,7 @@ def build_query(
     last = None if end is None else parse_date_like(end, "end")
     if first is not None and last is not None:
         check_order(first, last)
+    given = () if filters is None else _filters(spec, filters, typed=params or {})
     request = Request(
         symbols=normalized,
         timespan=timespan,
@@ -364,8 +389,7 @@ def build_query(
         start=first,
         end=last,
         params=tuple(sorted((k, _value(k, v)) for k, v in (params or {}).items() if v is not None)),
-        filters=() if filters is None else _filters(spec, filters, typed=params or {}),
+        filters=core.catalog.check_filters(spec, dict(given), typed=params or {}),
         limit=None if limit is None else require_positive_int("limit", limit),
     )
-    core.catalog.check_filters(spec, dict(request.filters))
     return cls(core, spec, request)

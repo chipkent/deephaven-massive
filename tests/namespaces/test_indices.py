@@ -121,7 +121,9 @@ def test_values_history_is_flat_files_only() -> None:
 
 
 def _schema(spec: DatasetSpec) -> list[tuple[str, str]]:
-    return [(c.name, c.type.value) for c in CATALOG.dataset_schema(spec).columns]
+    # The columns the dataset's own sources fill. A kind's schema also holds the columns only
+    # its other members supply, which this dataset always leaves null.
+    return [(c.name, c.type.value) for c in CATALOG.dataset_schema(spec).columns if c.supplied_by]
 
 
 def test_values_schema() -> None:
@@ -135,6 +137,9 @@ def test_values_schema() -> None:
 
 def test_bars_schema() -> None:
     # Index bars come from index values: no volume, no VWAP, no trade count.
+    columns = {c.name: c for c in CATALOG.dataset_schema(indices.BARS).columns}
+    for name in ("Volume", "Vwap", "Transactions"):
+        assert columns[name].supplied_by == ()
     assert _schema(indices.BARS) == [
         ("Symbol", "String"),
         ("Timestamp", "Instant"),
@@ -390,7 +395,7 @@ def test_snapshots_filters_are_the_snapshot_parameters(m: dm.MassiveSession) -> 
     for key in ("ticker", "ticker_any_of", "timestamp_gte"):
         with pytest.raises(ValueError, match=f"has no filter '{key}'"):
             m.indices.snapshots("I:SPX", filters={key: "I:A"})
-    with pytest.raises(ValueError, match="'ticker_lt' takes a string value"):
+    with pytest.raises(ValueError, match="'ticker_lt' takes text, not 5"):
         m.indices.snapshots("I:SPX", filters={"ticker_lt": 5})
 
 
@@ -482,6 +487,15 @@ def rows(table: Table) -> list[dict[str, Any]]:
     return out
 
 
+def bar_rows(table: Table) -> list[dict[str, Any]]:
+    # The columns index bars fill; every column only other asset classes' bars fill is null.
+    filled = {name for name, _ in _schema(indices.BARS)}
+    out = rows(table)
+    for row in out:
+        assert all(value is None for name, value in row.items() if name not in filled)
+    return [{name: value for name, value in row.items() if name in filled} for row in out]
+
+
 def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
     # Every GET the server received: its path and decoded query.
     return [
@@ -527,6 +541,17 @@ def test_the_snapshot_names_at_most_250_indices_a_request(
     # The batches are requested concurrently, so they arrive in either order.
     assert sorted(len(batch) for batch in batches) == [1, 250]
     assert sorted(batches[0] + batches[1]) == symbols
+
+
+def test_snapshots_order_alone_is_sent_as_is(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The snapshot has its own order parameter, so no sort is needed beside it.
+    fake_rest.reply(SNAPSHOT, Reply(envelope([])))
+    rest_session.indices.snapshots("I:SPX", order=dm.Order.DESC).fetch()
+    assert sent(fake_rest) == [
+        (SNAPSHOT, {"ticker.any_of": ["I:SPX"], "order": ["desc"], "limit": ["250"]})
+    ]
 
 
 def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
@@ -582,7 +607,7 @@ def test_previous_day_bars_fetch_one_index_a_request(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(quote("/v2/aggs/ticker/I:SPX/prev"), Reply(load_fixture(OWNER, "prev.json")))
-    out = rows(rest_session.indices.bars("SPX", dm.Timespan.DAY).fetch())
+    out = bar_rows(rest_session.indices.bars("SPX", dm.Timespan.DAY).fetch())
     assert sent(fake_rest) == [("/v2/aggs/ticker/I:SPX/prev", {})]
     assert out == [
         {
@@ -759,7 +784,7 @@ def test_a_frame_lands_in_blink(
     subscribed(fake_ws_server, topic)
     fake_ws_server.send(load_fixture(OWNER, fixture).decode())
     wait_for(lambda: seen.size == 1)
-    assert rows(seen) == [expected]
+    assert (rows(seen) if topic.startswith("V.") else bar_rows(seen)) == [expected]
 
 
 def test_a_refused_values_topic_names_the_indices_host_setting(

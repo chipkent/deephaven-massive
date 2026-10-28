@@ -13,7 +13,8 @@ The four datasets and what serves them:
   values, so `history()` reads flat files only.
 - `indices.bars`: OHLC bars from the `A` (1 second) and `AM` (1 minute) channels, the
   previous-session and range aggregates endpoints, and the minute and day aggregate flat files.
-  Index aggregates are computed from index values, so they have no volume and no `adjusted`.
+  Index aggregates are computed from index values, so their volume columns are always null
+  and they take no `adjusted`.
 - `indices.snapshots`: every field of the indices snapshot, one row per index.
 - `indices.daily_open_close`: one index's open, close, high, low, pre-market, and after-hours
   values for one day.
@@ -115,7 +116,7 @@ BARS: Final = DatasetSpec(
     },
     page_size=_AGGREGATES_PAGE,
 )
-"""`m.indices.bars`: OHLC bars of every timespan; no volume and no `adjusted`."""
+"""`m.indices.bars`: OHLC bars of every timespan; volume columns null, no `adjusted`."""
 
 SNAPSHOTS: Final = DatasetSpec(
     name="indices.snapshots",
@@ -236,9 +237,10 @@ class _Indices(Namespace):
         """Open, high, low, and close index levels over fixed windows of time.
 
         Each row is one bar of one index, keyed by `Symbol` and `Timestamp`, the start of the
-        window. Index bars are computed from index values, so they have no volume, no trade
-        count, and no `adjusted` parameter (Massive's endpoint has none). A window in which
-        the index did not change produces no bar.
+        window. Index bars are computed from index values, so they have no `adjusted`
+        parameter (Massive's endpoint has none), and the bar columns that only traded
+        instruments fill, such as `Volume`, `Vwap`, and `Transactions`, are always null. A
+        window in which the index did not change produces no bar.
 
         The timespan and multiplier decide the transports, and with them the query class:
 

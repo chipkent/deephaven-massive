@@ -77,7 +77,9 @@ text), so it is checked both against the real tree and against a synthetic tree 
 """
 
 import ast
+import json
 import re
+import subprocess
 import sys
 from collections import Counter
 from collections.abc import Iterable
@@ -1382,6 +1384,7 @@ _WIRE_VOCABULARY = frozenset(
         "Transport",
         "WireType",
         "WireUnit",
+        "encode_value",
         "provenance",
         "source",
         "sources",
@@ -1816,6 +1819,69 @@ def test_the_tree_keeps_the_layers() -> None:
 def test_the_wire_interface_splits_into_vocabulary_and_clients() -> None:
     assert _WIRE_VOCABULARY.isdisjoint(_WIRE_CLIENTS)
     assert _interface() == _WIRE_VOCABULARY | _WIRE_CLIENTS
+
+
+# The modules a vocabulary name must never load: the clients and the network stack under them,
+# which the datasets layer, importing only vocabulary, must not reach even indirectly.
+_CLIENT_AND_NETWORK_MODULES = (
+    f"{_WIRE}.rest",
+    f"{_WIRE}.ws",
+    f"{_WIRE}.flatfiles",
+    f"{_WIRE}.net.http",
+    "urllib3",
+    "certifi",
+    "websockets",
+    "boto3",
+    "botocore",
+    "ssl",
+    "socket",
+    "http.client",
+)
+
+
+def _modules_loaded_by(names: list[str]) -> list[str]:
+    """Read names of the wire interface in a fresh interpreter; report client modules loaded.
+
+    Args:
+        names: Attribute names to read from `deephaven_massive._massive`.
+
+    Returns:
+        The modules of `_CLIENT_AND_NETWORK_MODULES` that reading the names added to
+        `sys.modules`, sorted. Whatever importing the package itself loads is left out: the
+        library's front door reads its version through `importlib.metadata`, which on Python
+        before 3.13 imports `email` and with it `socket`, and no name of the interface is to
+        blame for that.
+    """
+    # The script is a literal and the data travels on stdin; `-P` keeps the working directory
+    # off `sys.path`.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            (
+                "import importlib, json, sys\n"
+                "names, watched = json.load(sys.stdin)\n"
+                "wire = importlib.import_module('deephaven_massive._massive')\n"
+                "before = set(sys.modules)\n"
+                "for name in names:\n"
+                "    getattr(wire, name)\n"
+                "print(json.dumps(sorted(set(watched) & (set(sys.modules) - before))))"
+            ),
+        ],
+        input=json.dumps([names, _CLIENT_AND_NETWORK_MODULES]),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded: list[str] = json.loads(result.stdout)
+    return loaded
+
+
+def test_the_wire_vocabulary_loads_no_client_or_network_module() -> None:
+    assert _modules_loaded_by(sorted(_WIRE_VOCABULARY)) == []
+    # The probe sees a client when one is read.
+    assert f"{_WIRE}.rest" in _modules_loaded_by(["RestClient"])
 
 
 def _layer_check(module: str, source: str) -> list[str]:
