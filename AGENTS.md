@@ -36,8 +36,8 @@ the `spec/*.json` diff, and any hand-input lines in one pull request. When a gat
 refresh it prints each problem (gate, source, key, vendor description); fix it with an entry
 and its reason in one of the hand-input tables, never by editing the generated file: a
 lexicon, `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_CONFLICTS`,
-`TYPE_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, or
-`VENUES` entry (`overrides.py`); or an `EXCLUSIONS` or `SAMPLE_ERRORS` entry
+`TYPE_FIXES`, `KEY_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`, `PROJECTIONS`,
+`TRANSPORT_ONLY`, or `VENUES` entry (`overrides.py`); or an `EXCLUSIONS` or `SAMPLE_ERRORS` entry
 (`exclusions.py`).
 
 `--check` downloads the live sources into a scratch directory and prints a Markdown report of
