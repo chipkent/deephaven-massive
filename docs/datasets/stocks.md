@@ -33,6 +33,13 @@ Trades of US-listed stocks, tick by tick.
 | `Channel` | long | Always null for `stocks.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `stocks.trades`; supplied by `crypto.trades`. |  |  |  |  |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/flat-files/stocks/trades.md>
+- <https://massive.com/docs/rest/stocks/trades-quotes/last-trade.md>
+- <https://massive.com/docs/rest/stocks/trades-quotes/trades.md>
+- <https://massive.com/docs/websocket/stocks/trades.md>
+
 <a id="quotes"></a>
 
 ## `m.stocks.quotes`
@@ -62,6 +69,13 @@ National best bid and offer quotes of US-listed stocks, tick by tick.
 | `Channel` | long | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `Exchange` | long | Always null for `stocks.quotes`; supplied by `futures.quotes`, `forex.quotes`, `crypto.quotes`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `stocks.quotes`; supplied by `crypto.quotes`. |  |  |  |  |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/flat-files/stocks/quotes.md>
+- <https://massive.com/docs/rest/stocks/trades-quotes/last-quote.md>
+- <https://massive.com/docs/rest/stocks/trades-quotes/quotes.md>
+- <https://massive.com/docs/websocket/stocks/quotes.md>
 
 <a id="bars"></a>
 
@@ -93,6 +107,16 @@ Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 | `SettlementPrice` | double | Always null for `stocks.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `Exchange` | long | Always null for `stocks.bars`; supplied by `futures.bars`. |  |  |  |  |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/flat-files/stocks/day-aggregates.md>
+- <https://massive.com/docs/flat-files/stocks/minute-aggregates.md>
+- <https://massive.com/docs/rest/stocks/aggregates/custom-bars.md>
+- <https://massive.com/docs/rest/stocks/aggregates/daily-market-summary.md>
+- <https://massive.com/docs/rest/stocks/aggregates/previous-day-bar.md>
+- <https://massive.com/docs/websocket/stocks/aggregates-per-minute.md>
+- <https://massive.com/docs/websocket/stocks/aggregates-per-second.md>
+
 <a id="luld"></a>
 
 ## `m.stocks.luld`
@@ -108,6 +132,10 @@ Limit up-limit down price bands of US-listed stocks, as they change.
 | `Indicators` | int[] | The Indicators. See Conditions and Indicators (https://massive.com/glossary/us/stocks/conditions-indicators) for a glossary (LULD indicators are located near the bottom). | WebSocket | `i` |
 | `Tape` | long | The tape. (1 = NYSE, 2 = AMEX, 3 = Nasdaq). | WebSocket | `z` |
 | `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). | WebSocket | `q` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/websocket/stocks/luld.md>
 
 <a id="imbalances"></a>
 
@@ -127,6 +155,10 @@ Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 | `PairedQuantity` | long | The paired quantity. | WebSocket | `p` |
 | `BookClearingPrice` | double | The book clearing price. | WebSocket | `b` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/websocket/stocks/imbalances.md>
+
 <a id="fmv"></a>
 
 ## `m.stocks.fmv`
@@ -138,6 +170,10 @@ Massive's fair market value estimate of US-listed stocks, as it updates.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/websocket/stocks/fair-market-value.md>
 
 <a id="snapshots"></a>
 
@@ -192,6 +228,10 @@ Current market snapshots of US-listed stocks, one row per ticker.
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/snapshots/full-market-snapshot.md>
+
 <a id="movers"></a>
 
 ## `m.stocks.movers`
@@ -245,6 +285,10 @@ The twenty US stocks with the largest percentage move today, up or down.
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/snapshots/top-market-movers.md>
+
 <a id="daily_open_close"></a>
 
 ## `m.stocks.daily_open_close`
@@ -263,6 +307,10 @@ The open, close, and pre- and after-market prices of US stocks on one day.
 | `Otc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST | `otc` |
 | `PreMarket` | double | The open price of the ticker symbol in pre-market trading. | REST | `preMarket` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST | `volume` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/aggregates/daily-ticker-summary.md>
 
 <a id="dividends"></a>
 
@@ -285,6 +333,10 @@ Cash dividends of US-listed stocks, one row per distribution.
 | `RecordDate` | LocalDate | Date when shareholders must be on record to be eligible for the dividend payment | REST | `record_date` |
 | `SplitAdjustedCashAmount` | double | Dividend amount adjusted for stock splits that occurred after the dividend was paid, expressed on a current share basis | REST | `split_adjusted_cash_amount` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/corporate-actions/dividends.md>
+
 <a id="splits"></a>
 
 ## `m.stocks.splits`
@@ -300,6 +352,10 @@ Stock splits, reverse splits, and stock dividends of US-listed stocks.
 | `Id` | String | Unique identifier for each stock split event | REST | `id` |
 | `SplitFrom` | double | Denominator of the split ratio (old shares) | REST | `split_from` |
 | `SplitTo` | double | Numerator of the split ratio (new shares) | REST | `split_to` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/corporate-actions/splits.md>
 
 <a id="ipos"></a>
 
@@ -330,6 +386,10 @@ Initial public offerings on US exchanges, upcoming and past, one row per offerin
 | `TotalOfferSize` | double | The total amount raised by the company for IPO. | REST | `total_offer_size` |
 | `UsCode` | String | This is a unique nine-character alphanumeric code that identifies a North American financial security for the purposes of facilitating clearing and settlement of trades. | REST | `us_code` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/corporate-actions/ipos.md>
+
 <a id="short_interest"></a>
 
 ## `m.stocks.short_interest`
@@ -343,6 +403,10 @@ Short interest of US-listed stocks, one row per ticker and FINRA settlement date
 | `DaysToCover` | double | Calculated as short_interest divided by avg_daily_volume, representing the estimated number of days it would take to cover all short positions based on average trading volume. | REST | `days_to_cover` |
 | `SettlementDate` | LocalDate | The date (formatted as YYYY-MM-DD) on which the short interest data is considered settled, typically based on exchange reporting schedules. | REST | `settlement_date` |
 | `ShortInterest` | long | The total number of shares that have been sold short but have not yet been covered or closed out. | REST | `short_interest` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/fundamentals/short-interest.md>
 
 <a id="short_volume"></a>
 
@@ -368,6 +432,10 @@ Daily short sale volume of US-listed stocks, one row per ticker and trading day.
 | `ShortVolumeRatio` | double | The percentage of total volume that was sold short. Calculated as (short_volume / total_volume) * 100. | REST | `short_volume_ratio` |
 | `TotalVolume` | double | Total reported volume across all venues for the ticker on the given date. | REST | `total_volume` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/fundamentals/short-volume.md>
+
 <a id="share_float"></a>
 
 ## `m.stocks.share_float`
@@ -380,6 +448,10 @@ The free float of US-listed stocks: the latest count of shares the public can tr
 | `EffectiveDate` | LocalDate | The effective date of the free float measurement. | REST | `effective_date` |
 | `FreeFloat` | long | Number of shares freely tradable in the market. Free float shares represent the portion of a company's outstanding shares that is freely tradable in the market, excluding any holdings considered strategic, controlling, or long term. This excludes insiders, directors, founders, 5 percent plus shareholders, cross holdings, government stakes except pensions, restricted or locked up shares, employee plans, and any entities with board influence, leaving only shares that are genuinely available for public trading. | REST | `free_float` |
 | `FreeFloatPercent` | double | Percentage of total shares outstanding that are available for public trading, rounded to two decimal places. | REST | `free_float_percent` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/fundamentals/float.md>
 
 <a id="financials-balance_sheets"></a>
 
@@ -428,6 +500,10 @@ Balance sheets of US public companies, one row per filer and reporting period.
 | `TotalLiabilitiesAndEquity` | double | Sum of total liabilities and total equity, which should equal total assets per the fundamental accounting equation. | REST | `total_liabilities_and_equity` |
 | `TreasuryStock` | double | Cost of the company's own shares that have been repurchased and are held in treasury, typically reported as a negative value. | REST | `treasury_stock` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/fundamentals/balance-sheets.md>
+
 <a id="financials-income_statements"></a>
 
 ## `m.stocks.financials.income_statements`
@@ -471,6 +547,10 @@ Income statements of US public companies, one row per filer and reporting period
 | `TotalOperatingExpenses` | double | Sum of all operating expenses including cost of revenue, SG&A, R&D, depreciation, and other operating expenses. | REST | `total_operating_expenses` |
 | `TotalOtherIncomeExpense` | double | Net total of all non-operating income and expenses including interest income, interest expense, and other items. | REST | `total_other_income_expense` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/fundamentals/income-statements.md>
+
 <a id="financials-cash_flow_statements"></a>
 
 ## `m.stocks.financials.cash_flow_statements`
@@ -512,6 +592,10 @@ Cash flow statements of US public companies, one row per filer and reporting per
 | `Tickers` | String | A list of ticker symbols under which the company is listed. Multiple symbols may indicate different share classes for the same company. | REST | `tickers` |
 | `Timeframe` | String | The reporting period type. Possible values include: quarterly, annual, trailing_twelve_months. | REST | `timeframe` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/fundamentals/cash-flow-statements.md>
+
 <a id="financials-ratios"></a>
 
 ## `m.stocks.financials.ratios`
@@ -544,6 +628,10 @@ Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 | `ReturnOnAssets` | double | Return on assets ratio, calculated as net income divided by total assets, measuring how efficiently a company uses its assets to generate profit. | REST | `return_on_assets` |
 | `ReturnOnEquity` | double | Return on equity ratio, calculated as net income divided by total shareholders' equity, measuring profitability relative to shareholders' equity. | REST | `return_on_equity` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/fundamentals/ratios.md>
+
 <a id="filings-index"></a>
 
 ## `m.stocks.filings.index`
@@ -559,6 +647,10 @@ The index of SEC EDGAR filings by US-listed companies, one row per filing.
 | `FilingUrl` | String | Direct URL to the filing on the SEC EDGAR website. | REST | `filing_url` |
 | `FormType` | String | SEC form type (e.g., '10-K', '10-Q', '8-K', 'S-1', '4', etc.). | REST | `form_type` |
 | `IssuerName` | String | Name of the company or entity that submitted the filing. | REST | `issuer_name` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/index.md>
 
 <a id="filings-sections_10k"></a>
 
@@ -576,6 +668,10 @@ The text of sections of 10-K annual reports, one row per filing and section.
 | `Section` | String | Standardized section identifier from the filing (e.g. 'business', 'risk_factors', etc.). | REST | `section` |
 | `Text` | String | Full raw text content of the section, including headers and formatting. | REST | `text` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/10-k-sections.md>
+
 <a id="filings-text_8k"></a>
 
 ## `m.stocks.filings.text_8k`
@@ -591,6 +687,10 @@ The item text of 8-K current reports, one row per filing.
 | `FilingUrl` | String | SEC URL source for the full filing. | REST | `filing_url` |
 | `FormType` | String | SEC form type (e.g., '8-K', '8-K/A' for amendments). | REST | `form_type` |
 | `ItemsText` | String | Parsed text content from the 8-K filing, including item numbers and descriptions. | REST | `items_text` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/8-k-text.md>
 
 <a id="filings-disclosures_8k"></a>
 
@@ -610,6 +710,10 @@ Disclosures in 8-K current reports, classified by category, one row per disclosu
 | `TertiaryCategory` | String | Most specific disclosure category (e.g., 'quarterly_results'). Filtering on this column must use an exact match. See the full taxonomy at /stocks/taxonomies/vX/disclosures. | REST | `tertiary_category` |
 | `Tickers` | String | A list of ticker symbols for the filing company. Multiple symbols may indicate different share classes; empty if no ticker is currently mapped to the filer. | REST | `tickers` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/8-k-disclosures.md>
+
 <a id="filings-risk_factors"></a>
 
 ## `m.stocks.filings.risk_factors`
@@ -625,6 +729,10 @@ Risk factors disclosed in company filings, classified by category, one row each.
 | `SecondaryCategory` | String | Mid-level risk category | REST | `secondary_category` |
 | `SupportingText` | String | Snippet of text to support the given label | REST | `supporting_text` |
 | `TertiaryCategory` | String | Most specific risk classification | REST | `tertiary_category` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/risk-factors.md>
 
 <a id="filings-institutional_holdings"></a>
 
@@ -654,6 +762,10 @@ Holdings that institutional managers report on Form 13-F, one row per position.
 | `VotingAuthorityNone` | long | Number of shares with no voting authority. | REST | `voting_authority_none` |
 | `VotingAuthorityShared` | long | Number of shares with shared voting authority. | REST | `voting_authority_shared` |
 | `VotingAuthoritySole` | long | Number of shares with sole voting authority. | REST | `voting_authority_sole` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/13-f-filings.md>
 
 <a id="filings-insider_holdings"></a>
 
@@ -692,6 +804,10 @@ Initial insider ownership statements (SEC Form 3), one row per reported holding.
 | `Tickers` | String | A list of ticker symbols for the issuer company. Multiple symbols may indicate different share classes. | REST | `tickers` |
 | `UnderlyingSecurityShares` | double | Number of underlying shares for derivative holdings. | REST | `underlying_security_shares` |
 | `UnderlyingSecurityTitle` | String | Title of the underlying security for derivative holdings. | REST | `underlying_security_title` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/form-3.md>
 
 <a id="filings-insider_transactions"></a>
 
@@ -742,6 +858,10 @@ Insider transactions (SEC Form 4), one row per reported transaction or holding.
 | `UnderlyingSecurityShares` | double | Number of underlying shares for derivative transactions. | REST | `underlying_security_shares` |
 | `UnderlyingSecurityTitle` | String | Title of the underlying security for derivative transactions. | REST | `underlying_security_title` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/form-4.md>
+
 <a id="filings-risk_factor_taxonomy"></a>
 
 ## `m.stocks.filings.risk_factor_taxonomy`
@@ -755,6 +875,10 @@ The taxonomy that classifies filing risk factors, one row per category.
 | `SecondaryCategory` | String | Mid-level risk category | REST | `secondary_category` |
 | `Taxonomy` | String | Version identifier (e.g., '1.0', '1.1') for the taxonomy | REST | `taxonomy` |
 | `TertiaryCategory` | String | Most specific risk classification | REST | `tertiary_category` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/risk-categories.md>
 
 <a id="filings-disclosure_taxonomy"></a>
 
@@ -770,50 +894,10 @@ The taxonomy that classifies 8-K disclosures, one row per category.
 | `Taxonomy` | String | Taxonomy version that defines this classification (e.g., '1.0'). | REST | `taxonomy` |
 | `TertiaryCategory` | String | Most specific disclosure category. | REST | `tertiary_category` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/disclosure-categories.md>
+
 ---
 
 Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-28. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and for columns that only other datasets of the same kind fill.
-
-Massive's documentation of these datasets:
-
-- <https://massive.com/docs/flat-files/stocks/day-aggregates.md>
-- <https://massive.com/docs/flat-files/stocks/minute-aggregates.md>
-- <https://massive.com/docs/flat-files/stocks/quotes.md>
-- <https://massive.com/docs/flat-files/stocks/trades.md>
-- <https://massive.com/docs/rest/stocks/aggregates/custom-bars.md>
-- <https://massive.com/docs/rest/stocks/aggregates/daily-market-summary.md>
-- <https://massive.com/docs/rest/stocks/aggregates/daily-ticker-summary.md>
-- <https://massive.com/docs/rest/stocks/aggregates/previous-day-bar.md>
-- <https://massive.com/docs/rest/stocks/corporate-actions/dividends.md>
-- <https://massive.com/docs/rest/stocks/corporate-actions/ipos.md>
-- <https://massive.com/docs/rest/stocks/corporate-actions/splits.md>
-- <https://massive.com/docs/rest/stocks/filings/10-k-sections.md>
-- <https://massive.com/docs/rest/stocks/filings/13-f-filings.md>
-- <https://massive.com/docs/rest/stocks/filings/8-k-disclosures.md>
-- <https://massive.com/docs/rest/stocks/filings/8-k-text.md>
-- <https://massive.com/docs/rest/stocks/filings/disclosure-categories.md>
-- <https://massive.com/docs/rest/stocks/filings/form-3.md>
-- <https://massive.com/docs/rest/stocks/filings/form-4.md>
-- <https://massive.com/docs/rest/stocks/filings/index.md>
-- <https://massive.com/docs/rest/stocks/filings/risk-categories.md>
-- <https://massive.com/docs/rest/stocks/filings/risk-factors.md>
-- <https://massive.com/docs/rest/stocks/fundamentals/balance-sheets.md>
-- <https://massive.com/docs/rest/stocks/fundamentals/cash-flow-statements.md>
-- <https://massive.com/docs/rest/stocks/fundamentals/float.md>
-- <https://massive.com/docs/rest/stocks/fundamentals/income-statements.md>
-- <https://massive.com/docs/rest/stocks/fundamentals/ratios.md>
-- <https://massive.com/docs/rest/stocks/fundamentals/short-interest.md>
-- <https://massive.com/docs/rest/stocks/fundamentals/short-volume.md>
-- <https://massive.com/docs/rest/stocks/snapshots/full-market-snapshot.md>
-- <https://massive.com/docs/rest/stocks/snapshots/top-market-movers.md>
-- <https://massive.com/docs/rest/stocks/trades-quotes/last-quote.md>
-- <https://massive.com/docs/rest/stocks/trades-quotes/last-trade.md>
-- <https://massive.com/docs/rest/stocks/trades-quotes/quotes.md>
-- <https://massive.com/docs/rest/stocks/trades-quotes/trades.md>
-- <https://massive.com/docs/websocket/stocks/aggregates-per-minute.md>
-- <https://massive.com/docs/websocket/stocks/aggregates-per-second.md>
-- <https://massive.com/docs/websocket/stocks/fair-market-value.md>
-- <https://massive.com/docs/websocket/stocks/imbalances.md>
-- <https://massive.com/docs/websocket/stocks/luld.md>
-- <https://massive.com/docs/websocket/stocks/quotes.md>
-- <https://massive.com/docs/websocket/stocks/trades.md>

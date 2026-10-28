@@ -101,7 +101,10 @@ _PROVENANCE: Final = (
     "its own for the key columns and for columns that only other datasets of the same kind "
     "fill."
 )
-"""The first sentence of every page's footer, formatted with the command and the fetch date."""
+"""Every page's footer, formatted with the command and the fetch date."""
+
+_LINKS_HEADING: Final = "Massive's documentation of this dataset:"
+"""The line that introduces the list of a dataset's vendor pages under its column table."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,9 +171,10 @@ def render(catalog: Catalog, provenance: Provenance) -> dict[str, str]:
     `flat files`, and `WebSocket`, empty for a column only other datasets of its kind fill),
     and one wire-field column per transport the dataset reads (`REST field`,
     `Flat-file field`, `WebSocket field`), each listing the distinct wire keys behind the
-    column in source order, or `request` for a key filled from the request. A footer gives
-    the date Massive's documentation was fetched and the sorted, distinct URLs of the
-    documentation of every source the page's datasets read.
+    column in source order, or `request` for a key filled from the request. Under the table
+    comes the sorted, distinct list of Massive's pages documenting the dataset's own sources
+    (`_dataset_urls`), omitted when they have none. A footer gives the generator command and
+    the date Massive's documentation was fetched.
 
     A `|` in a cell is escaped with a backslash, no line has trailing whitespace, and every
     page ends in exactly one newline, so the pages pass the repository's commit hooks
@@ -234,17 +238,19 @@ def _page(
             named = ", ".join([*kept[:-2], named.replace(" and ", ", and ")])
         lines.extend(("", _RAW_SYMBOL_NOTE.format(datasets=named)))
     for spec in specs:
-        lines.extend(("", *_section(spec, catalog)))
-    lines.extend(("", *_footer(specs, provenance)))
+        lines.extend(("", *_section(spec, catalog, provenance)))
+    fetched = provenance.fetched.isoformat()
+    lines.extend(("", "---", "", _PROVENANCE.format(command=COMMAND, fetched=fetched)))
     return "\n".join(lines) + "\n"
 
 
-def _section(spec: DatasetSpec, catalog: Catalog) -> list[str]:
-    """Render one dataset's section: its anchor, heading, summary, and column table.
+def _section(spec: DatasetSpec, catalog: Catalog, provenance: Provenance) -> list[str]:
+    """Render one dataset's section: anchor, heading, summary, column table, and vendor pages.
 
     Args:
         spec: The dataset.
         catalog: The catalog that merges its schema.
+        provenance: The URLs of each source, filtered by `_dataset_urls`.
 
     Returns:
         The section's lines, without a trailing blank line.
@@ -270,6 +276,10 @@ def _section(spec: DatasetSpec, catalog: Catalog) -> list[str]:
         _row(["---"] * len(header)),
     ]
     lines.extend(_row(_cells(column, wire)) for column in catalog.dataset_schema(spec).columns)
+    urls = _dataset_urls(spec, provenance)
+    if urls:
+        lines.extend(("", _LINKS_HEADING, ""))
+        lines.extend(f"- <{url}>" for url in urls)
     return lines
 
 
@@ -325,31 +335,47 @@ def _row(cells: Sequence[str]) -> str:
     return "| " + " | ".join(escaped) + " |"
 
 
-def _footer(specs: Sequence[DatasetSpec], provenance: Provenance) -> list[str]:
-    """Render a page's footer: the snapshot's fetch date and its sources' documentation URLs.
+def _dataset_urls(spec: DatasetSpec, provenance: Provenance) -> list[str]:
+    """Return the vendor pages that document one dataset's sources, sorted and distinct.
+
+    Massive documents a source several asset classes share (the unified snapshot
+    `/v3/snapshot`, `/v3/reference/tickers`) once per class, and its URLs name the class as a
+    path segment (`https://massive.com/docs/rest/options/snapshots/unified-snapshot.md`). A
+    dataset of one asset class keeps only the pages of a source whose path has a segment equal
+    to its class's value, so the options snapshot links the options page alone. When none of
+    a source's pages names the class, all of them are kept: a change in the vendor's URL
+    layout then lists more pages, never none. A dataset without an asset class, which spans
+    classes, keeps every page.
 
     Args:
-        specs: The page's datasets.
-        provenance: The fetch date and each source's URLs.
+        spec: The dataset.
+        provenance: Each source's URLs; a source without an entry adds none.
 
     Returns:
-        The footer's lines: a rule, the provenance sentence, and, when any source has URLs,
-        the sorted, distinct URLs as a list.
+        The URLs, sorted and distinct; empty when no source of the dataset has any.
     """
-    urls = sorted(
-        {
-            url
-            for spec in specs
-            for source in spec.sources
-            for url in provenance.urls.get(source, ())
-        }
-    )
-    fetched = provenance.fetched.isoformat()
-    lines = ["---", "", _PROVENANCE.format(command=COMMAND, fetched=fetched)]
-    if urls:
-        lines.extend(("", "Massive's documentation of these datasets:", ""))
-        lines.extend(f"- <{url}>" for url in urls)
-    return lines
+    urls: set[str] = set()
+    for source in spec.sources:
+        found = provenance.urls.get(source, ())
+        if spec.asset_class is not None:
+            own = [url for url in found if spec.asset_class.value in _segments(url)]
+            found = own or found
+        urls.update(found)
+    return sorted(urls)
+
+
+def _segments(url: str) -> list[str]:
+    """Return the slash-separated parts of a URL.
+
+    Args:
+        url: A URL, such as `"https://massive.com/docs/rest/options/trades.md"`.
+
+    Returns:
+        Its parts, such as `["https:", "", "massive.com", "docs", "rest", "options",
+        "trades.md"]`. The scheme and host are parts too; no asset class's value equals
+        either, so they never match one.
+    """
+    return url.split("/")
 
 
 def sync(directory: Path, pages: Mapping[str, str]) -> SyncResult:
