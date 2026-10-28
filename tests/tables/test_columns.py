@@ -9,7 +9,7 @@ stream's `on_shutdown_callback`, alive exactly as long as it lives.
 
 import threading
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from deephaven import dtypes, new_table
@@ -158,7 +158,11 @@ SHAPES: dict[str, Callable[[Table], Table]] = {
 
 
 @pytest.mark.parametrize("shape", SHAPES)
-def test_every_live_shape_is_described_and_ticks(dh_exec_ctx: ExecutionContext, shape: str) -> None:
+def test_every_live_shape_is_described_and_ticks(
+    dh_exec_ctx: ExecutionContext,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+    shape: str,
+) -> None:
     stream = Stream()
     scope = new_scope()
     with scope.open():
@@ -170,8 +174,10 @@ def test_every_live_shape_is_described_and_ticks(dh_exec_ctx: ExecutionContext, 
     assert result.is_refreshing
     assert result.is_blink == (shape == "blink")
     stream.publisher.add(rows("AAPL", "MSFT"))
-    expected = 1 if shape in {"last_by_where_in", "last_by_price"} else 2
-    assert wait_for(lambda: seen.size == expected)
+    # Every row has the same price, so the `last_by` on it keeps only the last row, MSFT.
+    only = {"last_by_where_in": ["AAPL"], "last_by_price": ["MSFT"]}
+    expected = only.get(shape, ["AAPL", "MSFT"])
+    rows_when(seen, lambda arrived: sorted(row["Symbol"] for row in arrived) == expected)
     scope.release()
     stream.scope.release()
     assert stream.shutdown.wait(TIMEOUT)
