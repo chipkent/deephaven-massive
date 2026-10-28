@@ -4299,7 +4299,7 @@ document already reflects them.
 29. **`refresh/` is not shipped** (2026-10-26). The wheel excludes all of `refresh/`, the
     snapshot included; `spec/*.json` ship ([section 19](#19-wire-clients-and-the-spec-snapshot)).
 30. **Wire behaviour settled in review** (2026-10-26; the REST 429 half revised 2026-10-28 by
-    decision 56). A REST 429 pauses its subscription's requests: without a usable
+    decision 57). A REST 429 pauses its subscription's requests: without a usable
     `Retry-After`, for a whole 61 s window when the subscription is paced and for 15, 30, then
     60 s when it is not; with one, for as long as it asks; and for at most 10 minutes from the
     run's first refusal; a TLS certificate failure is never
@@ -4335,7 +4335,7 @@ document already reflects them.
 39. **S3 follows the shared network rules:** the `net` CA bundle and proxy, botocore retries off
     in favour of the shared schedule, TLS never retried ([section 19.3](#193-the-flat-file-client)).
 40. **REST rate limits and host resolution are shared.** One `RequestGovernor` per API key and
-    REST origin, shared by the process's sessions (decision 56), and single-flight host
+    REST origin, shared by the process's sessions (decision 57), and single-flight host
     resolution through one future per (class, family)
     ([section 13.2](#132-host-decision), [section 19.1](#191-the-rest-client)).
 41. **Test layout:** every path component drops one leading underscore, `__init__.py` maps to
@@ -4452,7 +4452,7 @@ document already reflects them.
     asset class links only that class's page of a shared source; the footer keeps the fetch
     date ([section 7.4](#74-column-descriptions)).
 
-56. **A REST rate governor per subscription** (2026-10-28). Massive limits REST requests per
+57. **A REST rate governor per subscription** (2026-10-28). Massive limits REST requests per
     subscription (Basic: 5 per minute; paid: none), shared by every key of the account, so the
     library keeps one `RequestGovernor` per (API key digest, REST origin) in the process,
     shared by its sessions, with one bucket per `dm.Subscription` and an unpaced `other` bucket

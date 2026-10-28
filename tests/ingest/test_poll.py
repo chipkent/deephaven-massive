@@ -220,7 +220,7 @@ def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
     scope = new_scope()
     with scope.open():
         table, publisher = poll.build_table(
-            spec, schema, PollMode.UPSERT, stream_id=1, stop=threading.Event()
+            spec, schema, PollMode.UPSERT, stream_id=1, stop=Cancel()
         )
 
     def cycle(*pairs: tuple[str, str]) -> None:
