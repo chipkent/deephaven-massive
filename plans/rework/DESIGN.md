@@ -1404,7 +1404,7 @@ The generator knows every vendor extension it accepts, each with the reason in `
 an unknown one stops the refresh (`shape`).
 
 **Coverage.** Everything documented is generated or excluded, and everything generated is
-used:
+used or deferred:
 
 - **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft)**, tested against the
   pinned snapshot in `tests/massive/refresh/test_generate.py` (WebSocket channels and flat-file
@@ -3811,7 +3811,7 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   `_massive` boundary and layers of [section 19](#19-wire-clients-and-the-spec-snapshot).
 - **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
-  and `tests/datasets/test_catalog.py` passes (the catalog gates, generated = used) ([section
+  and `tests/datasets/test_catalog.py` passes (the catalog gates, generated = used ⊎ deferred) ([section
   19.4](#194-generated-schemas)). They read only vendored files, never the network.
 - **Column reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
   exactly the rendered pages, byte for byte, with no stale, missing, or extra file, and every
