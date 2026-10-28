@@ -446,7 +446,7 @@ def test_a_range_must_not_end_before_it_starts(
 def test_the_symbol_parameter_is_set_only_by_symbols(
     massive_session: dm.MassiveSession, name: str, reserved: str
 ) -> None:
-    with pytest.raises(ValueError, match="has no filter"):
+    with pytest.raises(ValueError, match="is set through symbols=, not filters"):
         factory(massive_session, name)(filters={reserved: "AAPL"})
 
 
@@ -524,6 +524,8 @@ def test_each_factory_links_its_column_reference(name: str) -> None:
     assert "\n" not in summary
     assert summary.endswith(".")
     assert "REST only" in doc
+    for key in spec_of(name).poll_keys:
+        assert f"`{key}`" in doc, key  # the keys of a keyed poll()
 
 
 # End to end: each dataset fetched through the fake REST server.
@@ -619,7 +621,7 @@ def test_list_requests_send_symbols_sort_filters_and_page(
                 "sort": ["date.desc"],  # the endpoint takes the direction as a suffix
                 "date.gte": ["2025-01-02"],
                 "rating_action.any_of": ["upgrades,downgrades"],
-                "limit": ["50000"],  # the page size; the row cap is the library's
+                "limit": ["10"],  # a row cap below the page size shrinks the page
             },
         )
     ]
@@ -725,3 +727,22 @@ def test_every_symbol_list_goes_in_one_request(
 def test_order_needs_sort(name: str, massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match="order needs sort"):
         factory(massive_session, name)(order=Order.ASC)
+
+
+def test_an_event_without_a_ticker_has_a_null_symbol(
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The calendar is global: an event of a company without a ticker still comes back.
+    rows = [
+        {"tmx_record_id": "A1", "ticker": "ROL", "isin": "US7757111049", "date": "2025-07-23"},
+        {"tmx_record_id": "B2", "isin": "CA0000000001", "date": "2025-07-24"},
+    ]
+    fake_rest.reply("/tmx/v1/corporate-events", Reply(envelope(rows)))
+    table = rest_session.partners.tmx.corporate_events().fetch()
+    out = dh_to_pylist(table.view(["Symbol", "Isin", "TmxRecordId"]))
+    assert out == [
+        {"Symbol": "ROL", "Isin": "US7757111049", "TmxRecordId": "A1"},
+        {"Symbol": None, "Isin": "CA0000000001", "TmxRecordId": "B2"},
+    ]

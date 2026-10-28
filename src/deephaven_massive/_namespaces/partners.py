@@ -25,7 +25,8 @@ Instruments. The Benzinga datasets that take tickers, the ETF Global datasets, a
 events take US-style stock symbols (`AAPL`, `brk.b`), so their specs carry
 `AssetClass.STOCKS` and a symbol with another class's prefix (`X:BTCUSD`) is rejected when the
 query is built. Their rows each describe one instrument, which becomes the `Symbol` column (an
-ETF Global row's ETF, its `composite_ticker`). Benzinga news names several tickers per article,
+ETF Global row's ETF, its `composite_ticker`; for consensus ratings, the symbol requested; for
+a TMX event of a company without a ticker, null). Benzinga news names several tickers per article,
 so it has no `Symbol`, keeps its `Tickers` column (JSON text), and uses `symbols` only to filter
 the request. Benzinga analysts and firms, and both Fable datasets, take no symbols at all.
 """
@@ -272,7 +273,9 @@ TMX_CORPORATE_EVENTS: Final = _list_spec(
     "/tmx/v1/corporate-events",
     summary="Corporate events from TMX: earnings dates, dividends, conferences, and more.",
     asset_class=AssetClass.STOCKS,
-    symbol="Ticker",
+    # The calendar is global and the vendor marks `ticker` optional: an event of a company
+    # without a ticker has a null `Symbol` instead of failing the request.
+    symbol=KeySpec("Ticker", required=False),
     symbol_param="ticker.any_of",
     time_axis=("date.gte", "date.lte"),
     poll_keys=("TmxRecordId",),
@@ -1321,10 +1324,11 @@ class _Tmx(Namespace):
     ) -> Query:
         """Corporate events from TMX: earnings dates, dividends, conferences, and more.
 
-        One row per event: the company's ticker, name, and ISIN, its trading venue, the
-        event's type, name, status (confirmed, unconfirmed, canceled, ...), scheduled `Date`,
-        and a link to its announcement. Events are dated by day, so `Date` is a calendar date
-        and the dataset has no `Timestamp`.
+        One row per event: the company's ticker (`Symbol`), name, and ISIN, its trading
+        venue, the event's type, name, status (confirmed, unconfirmed, canceled, ...),
+        scheduled `Date`, and a link to its announcement. The calendar is global, and a
+        company without a ticker has a null `Symbol`; its `Isin` still names it. Events are
+        dated by day, so `Date` is a calendar date and the dataset has no `Timestamp`.
 
         Served by REST only, from `GET /tmx/v1/corporate-events`: `fetch()` reads every page
         into a static table, and `poll(interval)` re-reads it into a live table keyed by
