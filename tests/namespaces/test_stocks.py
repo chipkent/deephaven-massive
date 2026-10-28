@@ -537,10 +537,10 @@ def test_start_and_end_bound_the_date_axis(
     ("name", "reserved"),
     [("dividends", "ticker_any_of"), ("financials.balance_sheets", "tickers_any_of")],
 )
-def test_the_symbol_parameter_is_no_filter(
+def test_the_symbol_parameter_is_set_through_symbols(
     massive_session: dm.MassiveSession, name: str, reserved: str
 ) -> None:
-    with pytest.raises(ValueError, match=f"has no filter '{reserved}'"):
+    with pytest.raises(ValueError, match=f"{reserved} is set through symbols="):
         factory(massive_session, name)(filters={reserved: ["AAPL"]})
 
 
@@ -734,6 +734,8 @@ def test_tick_history_over_rest_bounds_new_york_days(
             {
                 "timestamp.gte": str(new_york_midnight_ns(date(2018, 2, 2))),
                 "timestamp.lt": str(new_york_midnight_ns(date(2018, 2, 3))),
+                "sort": "timestamp",
+                "order": "asc",  # oldest first, as the flat files are
                 "limit": "50000",
             },
         )
@@ -759,7 +761,7 @@ def test_bars_history_over_rest_fills_the_range_path(
     serve(fake_rest, load_fixture, bars_range=RANGE_PATH)
     query = rest_session.stocks.bars("AAPL", dm.Timespan.DAY, adjusted=False)
     out = table_rows(query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(RANGE_PATH, {"adjusted": "false", "limit": "50000"})]
+    assert sent(fake_rest) == [(RANGE_PATH, {"adjusted": "false", "sort": "asc", "limit": "50000"})]
     assert [(r["Symbol"], r["Timestamp"], r["Close"]) for r in out] == [
         ("AAPL", 1577941200000 * 10**6, 75.0875),
         ("AAPL", 1578027600000 * 10**6, 74.3575),
@@ -1034,13 +1036,14 @@ def test_list_datasets_send_their_exact_request(
     assert ("Symbol" in out[0]) == CATALOG.takes_symbols(spec_of(name))
 
 
-def test_limit_caps_the_rows_and_never_the_page_size(
+def test_limit_caps_the_rows_and_never_raises_the_page_size(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     path = "/stocks/filings/vX/index"
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, "filings_index.json"))))
     out = table_rows(rest_session.stocks.filings.index(limit=1).fetch())
-    assert sent(fake_rest) == [(path, {"limit": "10000"})]
+    # A cap below the page size asks for no more rows than it keeps.
+    assert sent(fake_rest) == [(path, {"limit": "1"})]
     assert [r["Symbol"] for r in out] == ["AAPL"]
 
 
@@ -1075,14 +1078,19 @@ def test_ipos_send_their_own_order_without_sort(
 # --- End to end: WebSocket -----------------------------------------------------------------------
 
 
-def _wait_until(condition: Callable[[], bool]) -> None:
-    # Bounded wait for the flush thread and an update-graph cycle to apply a frame.
+def _rows_when(table: Table, count: int) -> list[dict[str, Any]]:
+    # Bounded wait for the flush thread and an update-graph cycle to apply a frame. It waits on
+    # a consistent snapshot of the rows, never on `size`: `size` can show a row that the cycle
+    # in progress is still adding, before a snapshot taken in that cycle contains it.
     pace = threading.Event()  # never set; only paces the loop
     for _ in range(500):
-        if condition():
-            return
+        rows = table_rows(table)
+        if len(rows) == count:
+            return rows
         pace.wait(0.02)
-    assert condition()
+    rows = table_rows(table)
+    assert len(rows) == count
+    return rows
 
 
 @pytest.fixture
@@ -1291,8 +1299,7 @@ def test_a_frame_lands_in_blink(
         )
     )
     fake_ws_server.send(json.dumps([frame]))
-    _wait_until(lambda: seen.size == 1)
-    (row,) = table_rows(seen)
+    (row,) = _rows_when(seen, 1)
     assert {k: row[k] for k in expected} == expected
     ws_session.release(result)
 
@@ -1455,3 +1462,43 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
     for index in range(len(spec.poll_keys)):
         fewer = {key[:index] + key[index + 1 :] for key in keyed}
         assert len(fewer) < len(rows), spec.poll_keys[index]
+
+
+# --- Filings without a ticker --------------------------------------------------------------------
+
+OPTIONAL_TICKER = [
+    "filings.index",
+    "filings.sections_10k",
+    "filings.text_8k",
+    "filings.risk_factors",
+]
+
+
+@pytest.mark.parametrize("name", OPTIONAL_TICKER)
+def test_a_filing_without_a_ticker_keeps_a_null_symbol(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+) -> None:
+    # No filings schema marks `ticker` required, and the index documents it "if available".
+    path = cast("str", spec_of(name).fetch_path)
+    body = json.loads(load_fixture(FIXTURES, SOURCES[path][0]))
+    first = body["results"][0]
+    body["results"] = [first, {k: v for k, v in first.items() if k != "ticker"}]
+    fake_rest.reply(path, Reply(body=body))
+    out = table_rows(cast("Query", factory(rest_session, name)()).fetch())
+    assert [row["Symbol"] for row in out] == [first["ticker"], None]
+    key = spec_of(name).keys_for(R, path).symbol
+    assert key is not None
+    assert not key.required
+
+
+@pytest.mark.parametrize(
+    "name", [n for n in ALL_NAMES if n not in OPTIONAL_TICKER and n not in STREAMED]
+)
+def test_every_other_symbol_key_is_required(name: str) -> None:
+    spec = spec_of(name)
+    symbols = [keys.symbol for keys in spec.keys.values() if keys.symbol is not None]
+    assert all(key.required for key in symbols)

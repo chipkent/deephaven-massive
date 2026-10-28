@@ -39,7 +39,13 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import (
+    Namespace,
+    build_query,
+    list_params,
+    optional_text,
+    require_bool,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -390,7 +396,7 @@ def _filing(
         symbol_param: The parameter `symbols` is sent in, or None for a dataset without one.
         poll_keys: The columns that identify one row, the key of a keyed `poll()` (a mode
             other than the default).
-        keys: The source's keys; by default its rows name their stock in `Ticker`.
+        keys: The source's keys; by default the optional `Ticker` of `_OPTIONAL_TICKER`.
         page_size: The largest `limit` the path documents.
 
     Returns:
@@ -401,7 +407,7 @@ def _filing(
         summary=summary,
         asset_class=_STOCKS,
         fetch_path=path,
-        keys={(_R, path): _ticker_keys() if keys is None else keys},
+        keys={(_R, path): _OPTIONAL_TICKER if keys is None else keys},
         time_axis=_FILING_AXIS,
         symbol_param=symbol_param,
         poll_mode=PollMode.APPEND,
@@ -411,6 +417,13 @@ def _filing(
 
 
 _NO_KEYS: Final = SourceKeys()
+
+_OPTIONAL_TICKER: Final = SourceKeys(symbol=KeySpec("Ticker", required=False))
+"""The symbol key of a filing whose rows carry one `ticker` that Massive does not promise.
+
+No filings response schema marks `ticker` required, and the index documents it as present
+only "if available": a filer with no listed security has none. Such a row keeps a null
+`Symbol` rather than failing the whole request."""
 
 FILINGS_INDEX: Final = _filing(
     "index",
@@ -543,45 +556,6 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
     DISCLOSURE_TAXONOMY,
 )
 """Every dataset of `m.stocks`, one `DatasetSpec` each (for example `stocks.trades`)."""
-
-
-# --- Argument checks ---------------------------------------------------------------------------
-
-
-def _require_bool(name: str, value: object) -> bool:
-    """Return a `bool` argument unchanged.
-
-    Args:
-        name: The parameter's name, for the message.
-        value: The argument.
-
-    Returns:
-        The value.
-
-    Raises:
-        TypeError: If `value` is not a `bool`.
-    """
-    if not isinstance(value, bool):
-        raise TypeError(f"{name} must be a bool, not {type(value).__name__}")
-    return value
-
-
-def _optional_text(name: str, value: object) -> str | None:
-    """Return an optional text argument unchanged.
-
-    Args:
-        name: The parameter's name, for the message.
-        value: The argument, or None.
-
-    Returns:
-        The value.
-
-    Raises:
-        TypeError: If `value` is neither None nor a `str`.
-    """
-    if value is not None and not isinstance(value, str):
-        raise TypeError(f"{name} must be a str, not {type(value).__name__}")
-    return value
 
 
 def _list_query(
@@ -1009,7 +983,8 @@ class _StockFilings(Namespace):
         Each row names a filing's form type, filer CIK, issuer, ticker, filing date, and the URL of
         the document on EDGAR. Served by REST (`/stocks/filings/vX/index`) through `fetch()` and
         `poll()`. By default `poll()` appends only the rows it has not seen before, telling rows
-        apart by the dataset's key columns.
+        apart by the dataset's key columns. A filing whose company has no ticker keeps a null
+        `Symbol`.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1048,7 +1023,7 @@ class _StockFilings(Namespace):
             symbols=symbols,
             start=start,
             end=end,
-            params={"form_type": _optional_text("form_type", form_type)},
+            params={"form_type": optional_text("form_type", form_type)},
             sort=sort,
             order=order,
             limit=limit,
@@ -1072,7 +1047,7 @@ class _StockFilings(Namespace):
         10-K, with its ticker, CIK, period end, and filing date. Served by REST
         (`/stocks/filings/10-K/vX/sections`) through `fetch()` and `poll()`. By default `poll()`
         appends only the rows it has not seen before, telling rows apart by the dataset's key
-        columns.
+        columns. A filing whose company has no ticker keeps a null `Symbol`.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1132,7 +1107,8 @@ class _StockFilings(Namespace):
         Each row holds the text of the items a company reported on an 8-K (or an amendment), with
         its ticker, CIK, form type, and filing date. Served by REST (`/stocks/filings/8-K/vX/text`)
         through `fetch()` and `poll()`. By default `poll()` appends only the rows it has not seen
-        before, telling rows apart by the dataset's key columns.
+        before, telling rows apart by the dataset's key columns. A filing whose company has no
+        ticker keeps a null `Symbol`.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1255,7 +1231,7 @@ class _StockFilings(Namespace):
         categories (see `risk_factor_taxonomy()`), the supporting text, and the filing date. Served
         by REST (`/stocks/filings/vX/risk-factors`) through `fetch()` and `poll()`. By default
         `poll()` appends only the rows it has not seen before, telling rows apart by the dataset's
-        key columns.
+        key columns. A filing whose company has no ticker keeps a null `Symbol`.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1355,7 +1331,7 @@ class _StockFilings(Namespace):
             INSTITUTIONAL_HOLDINGS,
             start=start,
             end=end,
-            params={"filer_cik": _optional_text("filer_cik", filer_cik)},
+            params={"filer_cik": optional_text("filer_cik", filer_cik)},
             sort=sort,
             order=order,
             limit=limit,
@@ -1635,7 +1611,7 @@ def _insider_query(
     Returns:
         The `Query`.
 
-    A CIK that is not a `str` raises the `TypeError` of `_optional_text`; the errors of
+    A CIK that is not a `str` raises the `TypeError` of `optional_text`; the errors of
     `_list_query` propagate.
     """
     return _list_query(
@@ -1645,8 +1621,8 @@ def _insider_query(
         start=start,
         end=end,
         params={
-            "issuer_cik": _optional_text("issuer_cik", issuer_cik),
-            "owner_cik": _optional_text("owner_cik", owner_cik),
+            "issuer_cik": optional_text("issuer_cik", issuer_cik),
+            "owner_cik": optional_text("owner_cik", owner_cik),
         },
         sort=sort,
         order=order,
@@ -1853,7 +1829,7 @@ class _Stocks(Namespace):
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
-            adjusted=_require_bool("adjusted", adjusted),
+            adjusted=require_bool("adjusted", adjusted),
         )
         return cast("HistoryQuery", query)
 
@@ -1983,7 +1959,7 @@ class _Stocks(Namespace):
             self._core,
             SNAPSHOTS,
             symbols=symbols,
-            params={"include_otc": _require_bool("include_otc", include_otc)},
+            params={"include_otc": require_bool("include_otc", include_otc)},
         )
         return cast("Query", query)
 
@@ -2021,7 +1997,7 @@ class _Stocks(Namespace):
             MOVERS,
             params={
                 "direction": _require_enum(direction, Direction, "direction"),
-                "include_otc": _require_bool("include_otc", include_otc),
+                "include_otc": require_bool("include_otc", include_otc),
             },
         )
         return cast("Query", query)
@@ -2065,7 +2041,7 @@ class _Stocks(Namespace):
             DAILY_OPEN_CLOSE,
             symbols=symbols,
             all_alternative="m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(date, date)",
-            adjusted=_require_bool("adjusted", adjusted),
+            adjusted=require_bool("adjusted", adjusted),
             params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
         )
         return cast("Query", query)
