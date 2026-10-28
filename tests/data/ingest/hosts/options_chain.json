@@ -1,0 +1,24 @@
+{
+  "status": "OK",
+  "request_id": "6aeb7bcd9f2e0f0c4ed0d2a6b6a7d3c1",
+  "next_url": "https://api.massive.com/v3/snapshot/options/SPY?cursor=YWN0aXZlPXRydWU",
+  "results": [
+    {
+      "break_even_price": 171.075,
+      "details": {
+        "contract_type": "call",
+        "ticker": "O:SPY250117C00600000"
+      },
+      "last_trade": {
+        "price": 0.05,
+        "sip_timestamp": 1675280958783136800,
+        "timeframe": "REAL-TIME"
+      },
+      "underlying_asset": {
+        "price": 585.1,
+        "ticker": "SPY",
+        "timeframe": "DELAYED"
+      }
+    }
+  ]
+}

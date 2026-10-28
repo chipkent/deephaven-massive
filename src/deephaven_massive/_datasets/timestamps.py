@@ -23,6 +23,12 @@ every unit confusion: milliseconds read as nanoseconds land in January 1970, and
 read as milliseconds overflow. `to_epoch_ns_array` is steps 2 and 3 alone, for converting a
 time column to filter on it.
 
+**The masked form** (`masked_instants`) runs the same three steps without raising: it returns
+the converted column with every failing value null, and a mask of the rows that failed. The
+WebSocket flush uses it, because a bad timestamp there fails only the streams that would have
+received its row, and the rest of the batch is still published; `mismatch_message` then gives
+each failing value the exact message the raising form would have.
+
 **The FMV magnitude rule.** The WebSocket `FMV` channel's `t` field is documented as
 nanoseconds but the documentation sample is in milliseconds, so `time_unit` gives it
 `TimeUnit.FMV_MAGNITUDE`: a value `>= 10**17` is nanoseconds, anything smaller is milliseconds.
@@ -60,6 +66,8 @@ __all__ = [
     "TimeUnit",
     "UnitMismatchError",
     "instants",
+    "masked_instants",
+    "mismatch_message",
     "time_unit",
     "to_epoch_ns",
     "to_epoch_ns_array",
@@ -181,9 +189,9 @@ def to_epoch_ns_array(label: str, unit: TimeUnit, values: pa.Array) -> pa.Array:
     """Convert a column of epoch integers to epoch nanoseconds, checked and bounded.
 
     Steps 2 and 3 of the timestamp routine: the checked multiply and the 1990 to 2100 bound,
-    vectorized in Arrow, so no value becomes a Python object. Nulls stay null. The flat-file
-    reader uses it on the time column to filter rows by the requested range, so a wrong unit
-    fails there already.
+    vectorized in Arrow (`masked_instants`), so no value becomes a Python object. Nulls stay
+    null. The flat-file reader uses it on the time column to filter rows by the requested
+    range, so a wrong unit fails there already.
 
     Args:
         label: The field, as `<dataset>.<column>`, for the error message.
@@ -194,29 +202,17 @@ def to_epoch_ns_array(label: str, unit: TimeUnit, values: pa.Array) -> pa.Array:
         An `int64` Arrow array of nanoseconds since the Unix epoch.
 
     A value that overflows 64-bit nanoseconds, or a converted value outside 1990 to 2100,
-    raises `UnitMismatchError("timestamp unit mismatch for <label>: ...")`, naming the unit and
-    the first offending value as Massive sent it.
+    raises the `UnitMismatchError` of `instants`.
     """
-    sent = pc.cast(values, pa.int64())
-    if unit is TimeUnit.FMV_MAGNITUDE:
-        is_ns = pc.call_function("greater_equal", [sent, FMV_NS_THRESHOLD])
-        any_ns = pc.call_function("any", [is_ns]).as_py()
-        if any_ns is not None:  # None: every value was null, so nothing was classified
-            _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
-        # Only the millisecond values are scaled; the nanosecond ones are masked to null.
-        millis = pc.call_function("if_else", [is_ns, None, sent])
-        scaled = _scale(label, TimeUnit.MILLISECONDS, millis)
-        nanos = pc.call_function("if_else", [is_ns, sent, scaled])
-    else:
-        nanos = _scale(label, unit, sent)
-    _bound(label, unit, sent=sent, nanos=nanos)
-    return nanos
+    return instants(label, unit, values, time_column=True)
 
 
 def instants(label: str, unit: TimeUnit, values: pa.Array, *, time_column: bool) -> pa.Array:
     """Run the timestamp routine on one column: epoch 0 to null, checked multiply, bound.
 
-    Every epoch-integer `Instant` column a transport delivers goes through here.
+    Every epoch-integer `Instant` column a transport delivers goes through here, or through
+    `masked_instants`, which this calls: the two forms are one implementation, and this one
+    raises for the column's first failure instead of masking it.
 
     Args:
         label: The field, as `<dataset>.<column>`, for the error message.
@@ -228,62 +224,131 @@ def instants(label: str, unit: TimeUnit, values: pa.Array, *, time_column: bool)
     Returns:
         An `int64` Arrow array of nanoseconds since the Unix epoch.
 
-    A value out of range fails with the `UnitMismatchError` of `to_epoch_ns_array`.
+    Raises:
+        UnitMismatchError: If a value overflows 64-bit nanoseconds or lies outside 1990 to
+            2100: `"timestamp unit mismatch for <label>: ..."`, naming the unit and, as Massive
+            sent it, the first value that overflows, or else the first value out of bounds.
     """
-    if not time_column:
-        values = pc.cast(values, pa.int64())
-        values = pc.if_else(pc.equal(values, 0), pa.scalar(None, pa.int64()), values)
-    return to_epoch_ns_array(label, unit, values)
+    nanos, failed = masked_instants(unit, values, time_column=time_column)
+    if pc.call_function("any", [failed]).as_py():
+        sent = pc.call_function("filter", [pc.cast(values, pa.int64()), failed]).to_pylist()
+        overflow = [v for v in sent if _overflows(unit, v)]
+        raise UnitMismatchError(mismatch_message(label, unit, (overflow or sent)[0]))
+    return nanos
 
 
-def _scale(label: str, unit: TimeUnit, values: pa.Array) -> pa.Array:
-    """Scale epoch integers of a fixed unit to nanoseconds, refusing to overflow.
+def masked_instants(
+    unit: TimeUnit, values: pa.Array, *, time_column: bool
+) -> tuple[pa.Array, pa.Array]:
+    """Run the timestamp routine on one column without raising: failing values become null.
+
+    The same steps as `instants` (epoch 0 to null outside the time column, the scale to
+    nanoseconds, the 1990 to 2100 bound), vectorized in Arrow, but a value that overflows or
+    lies outside the bound is reported in the returned mask instead of raised, so the caller
+    can drop exactly those rows and fail exactly the readers of those rows. A null stays null
+    and is not a failure.
 
     Args:
-        label: The field, for the error message.
-        unit: The values' unit; not `FMV_MAGNITUDE`.
-        values: An `int64` array; nulls stay null.
+        unit: The values' unit (`time_unit`).
+        values: An integer Arrow array of epoch values as Massive sent them.
+        time_column: True for the dataset's time column, whose `0` is kept and so fails the
+            bound; False for every other `Instant` column, whose `0` becomes null.
 
     Returns:
-        The `int64` nanoseconds.
-
-    Raises:
-        UnitMismatchError: If any value overflows 64-bit nanoseconds; the message names the first.
+        `(nanos, failed)`: an `int64` array of nanoseconds since the Unix epoch, null where
+        the value was null or failed; and a boolean array, true exactly where a value failed.
     """
-    factor = _NS_PER[unit]
-    if factor == 1:
-        return values
-    try:
-        return pc.call_function("multiply_checked", [values, factor])
-    except pa.ArrowInvalid:
-        limit = _INT64_MAX // factor
-        too_big = pc.or_(pc.greater(values, limit), pc.less(values, -limit))
-        first = pc.filter(values, too_big)[0].as_py()
-        raise UnitMismatchError(
-            f"timestamp unit mismatch for {label}: {first} {unit.value} overflows "
-            "64-bit nanoseconds"
-        ) from None
+    sent = pc.cast(values, pa.int64())
+    if not time_column:
+        sent = pc.call_function(
+            "if_else", [pc.call_function("equal", [sent, 0]), pa.scalar(None, pa.int64()), sent]
+        )
+    if unit is TimeUnit.FMV_MAGNITUDE:
+        is_ns = pc.call_function("greater_equal", [sent, FMV_NS_THRESHOLD])
+        any_ns = pc.call_function("any", [is_ns]).as_py()
+        if any_ns is not None:  # None: every value was null, so nothing was classified
+            _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
+        millis = _NS_PER[TimeUnit.MILLISECONDS]
+        factor = pc.call_function("if_else", [is_ns, 1, millis])
+        limit = pc.call_function("if_else", [is_ns, _INT64_MAX, _INT64_MAX // millis])
+    else:
+        factor = pa.scalar(_NS_PER[unit], pa.int64())
+        limit = pa.scalar(_INT64_MAX // _NS_PER[unit], pa.int64())
+    fits = pc.call_function(
+        "and",
+        [
+            pc.call_function("less_equal", [sent, limit]),
+            pc.call_function("greater_equal", [sent, pc.call_function("negate", [limit])]),
+        ],
+    )
+    nanos = pc.call_function(
+        "multiply", [pc.call_function("if_else", [fits, sent, pa.scalar(None, pa.int64())]), factor]
+    )
+    inside = pc.call_function(
+        "and",
+        [
+            pc.call_function("greater_equal", [nanos, MIN_INSTANT_NS]),
+            pc.call_function("less", [nanos, MAX_INSTANT_NS]),
+        ],
+    )
+    failed = pc.call_function(
+        "and",
+        [
+            pc.call_function("is_valid", [sent]),
+            pc.call_function("invert", [pc.fill_null(inside, fill_value=False)]),
+        ],
+    )
+    return pc.call_function("if_else", [failed, pa.scalar(None, pa.int64()), nanos]), failed
 
 
-def _bound(label: str, unit: TimeUnit, *, sent: pa.Array, nanos: pa.Array) -> None:
-    """Require every converted instant to lie in 1990 to 2100.
+def mismatch_message(label: str, unit: TimeUnit, value: int) -> str:
+    """Return the message the timestamp routine gives one failing epoch value.
+
+    For a value `masked_instants` reported as failed, so a failure reads the same whether the
+    routine raised or masked it.
 
     Args:
-        label: The field, for the error message.
-        unit: Its unit, for the error message.
-        sent: The values as Massive sent them, aligned with `nanos`.
-        nanos: The converted epoch nanoseconds; nulls are skipped.
+        label: The field, as `<dataset>.<column>`.
+        unit: The value's unit.
+        value: The epoch integer as Massive sent it, which failed the routine.
 
-    Raises:
-        UnitMismatchError: If any instant lies outside the bound; the message names the first
-            such value as Massive sent it.
+    Returns:
+        The `UnitMismatchError` text: `timestamp unit mismatch for <label>: <value> <unit>
+        overflows 64-bit nanoseconds`, or `... is outside 1990 to 2100`.
     """
-    bounds = pc.call_function("min_max", [nanos]).as_py()
-    low, high = bounds["min"], bounds["max"]
-    if low is None or (low >= MIN_INSTANT_NS and high < MAX_INSTANT_NS):
-        return
-    outside = pc.or_(pc.less(nanos, MIN_INSTANT_NS), pc.greater_equal(nanos, MAX_INSTANT_NS))
-    first = pc.filter(sent, outside)[0].as_py()
-    raise UnitMismatchError(
-        f"timestamp unit mismatch for {label}: {first} {unit.value} is outside 1990 to 2100"
-    )
+    if _overflows(unit, value):  # named in the unit it was scaled from
+        return (
+            f"timestamp unit mismatch for {label}: {value} {_fixed(unit, value).value} "
+            "overflows 64-bit nanoseconds"
+        )
+    return f"timestamp unit mismatch for {label}: {value} {unit.value} is outside 1990 to 2100"
+
+
+def _fixed(unit: TimeUnit, value: int) -> TimeUnit:
+    """Return the fixed unit one value counts in: the FMV magnitude rule picks one per value.
+
+    Args:
+        unit: The field's unit.
+        value: The epoch integer.
+
+    Returns:
+        `unit` itself, or for `FMV_MAGNITUDE` nanoseconds at or above `FMV_NS_THRESHOLD` and
+        milliseconds below it.
+    """
+    if unit is not TimeUnit.FMV_MAGNITUDE:
+        return unit
+    return TimeUnit.NANOSECONDS if value >= FMV_NS_THRESHOLD else TimeUnit.MILLISECONDS
+
+
+def _overflows(unit: TimeUnit, value: int) -> bool:
+    """Tell whether one epoch value overflows 64-bit nanoseconds in its unit.
+
+    Args:
+        unit: The value's unit; for `FMV_MAGNITUDE`, the magnitude picks nanoseconds or
+            milliseconds as `masked_instants` does.
+        value: The epoch integer.
+
+    Returns:
+        True when its nanoseconds do not fit a signed 64-bit integer.
+    """
+    return abs(value * _NS_PER[_fixed(unit, value)]) > _INT64_MAX

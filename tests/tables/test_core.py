@@ -23,6 +23,8 @@ from deephaven import arrow as dh_arrow
 from deephaven import new_table, time_table
 from deephaven.column import string_col
 from deephaven.dherror import DHError
+from deephaven.stream import blink_to_append_only
+from deephaven.table_factory import ring_table
 from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
@@ -101,7 +103,7 @@ class _Gated:
         self.calls = 0
 
     def open_stream(
-        self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+        self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
     ) -> StreamHandle:
         self.calls += 1
         if self.calls == 1:
@@ -236,7 +238,7 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
     class FailingDuringOpen:
         # The server's rejection arrives on the WebSocket thread before the open returns.
         def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
         ) -> StreamHandle:
             handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
             if stream_id == 1:
@@ -245,14 +247,16 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
 
     monkeypatch.setattr(core, "stream_transport", FailingDuringOpen)
     q = stream_query(massive_session)
-    first = q.blink()  # the failed table, as if the failure had come just after the open
+    # As if the failure had come just after the open: no result, and the hold is released.
+    with pytest.raises(dm.MassiveError, match=r"^test\.trades stream 1 failed: not authorized$"):
+        q.blink()
     second = q.blink()  # a fresh stream: the failed one is never reused
     rows = sorted(stream_rows(), key=lambda r: r["StreamId"])
-    assert [(r["StreamId"], r["State"], r["Error"]) for r in rows] == [
-        (1, "FAILED", "not authorized"),
-        (2, "RUNNING", None),
+    assert [(r["StreamId"], r["State"], r["Error"], r["HeldResults"]) for r in rows] == [
+        (1, "FAILED", "not authorized", 0),
+        (2, "RUNNING", None, 1),
     ]
-    massive_session.release(first)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
     massive_session.release(second)
     assert fake_streams.shutdown[2].wait(TIMEOUT)
 
@@ -353,7 +357,7 @@ def test_an_interrupt_before_the_opened_stream_is_stored_releases_it(
 
     class Arming:
         def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
         ) -> StreamHandle:
             handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
             armed.append(True)
@@ -420,7 +424,7 @@ def test_an_open_that_raises_leaves_no_row(
 
     class ReportThenRaise:
         def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
         ) -> StreamHandle:
             if report == "fail":
                 core.fail_stream(stream_id, "not authorized")
@@ -447,7 +451,7 @@ def test_an_update_made_during_the_open_is_kept(
 
     class UpdatingDuringOpen:
         def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
         ) -> StreamHandle:
             handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
             core.update_streams({stream_id: StreamUpdate(symbol_count=7, rows_published=3)})
@@ -1218,13 +1222,13 @@ def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
     monkeypatch: pytest.MonkeyPatch,
     drain: Callable[[], None],
 ) -> None:
-    # blink() returns the failed table; the other shapes raise Deephaven's DHError while
-    # deriving from it, and the hold is released either way.
+    # Every shape, blink() included, raises the MassiveError naming the failure, and the hold
+    # is released.
     core = massive_session._core
 
     class FailingDuringOpen:
         def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
         ) -> StreamHandle:
             handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
             fake_streams.publishers[stream_id].publish_failure(RuntimeError("entitlement"))
@@ -1233,12 +1237,48 @@ def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
             return handle
 
     monkeypatch.setattr(core, "stream_transport", FailingDuringOpen)
-    with pytest.raises(DHError, match="failed table"):
-        stream_query(massive_session).append_only()
+    for verb in ("blink", "append_only"):
+        with pytest.raises(dm.MassiveError, match="failed: entitlement"):
+            getattr(stream_query(massive_session), verb)()
     drain()
     assert core.results.held() == 0
     assert core._streams == {}
     assert core._stream_ids == {}
+
+
+def test_a_failure_while_the_shape_is_derived_is_named(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    drain: Callable[[], None],
+) -> None:
+    # The failure lands between the check and the shape: Deephaven's DHError is wrapped.
+    core = massive_session._core
+    q = stream_query(massive_session)
+
+    def failing_then_shaping(blink: Table) -> Table:
+        fake_streams.publishers[1].publish_failure(RuntimeError("entitlement"))
+        assert fake_streams.shutdown[1].wait(TIMEOUT)
+        core.fail_stream(1, "entitlement")
+        return blink_to_append_only(blink)
+
+    with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
+        core.stream_result(SPEC, q._request, channel="T", build=failing_then_shaping)
+    assert isinstance(raised.value.__cause__, DHError)
+    drain()
+    assert core.results.held() == 0
+
+
+def test_a_deephaven_error_of_a_live_stream_is_not_wrapped(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
+) -> None:
+    q = stream_query(massive_session)
+
+    def broken(blink: Table) -> Table:
+        # A shape Deephaven refuses for a reason of its own: ring() of a negative capacity.
+        return ring_table(blink, -1)
+
+    with pytest.raises(DHError):
+        massive_session._core.stream_result(SPEC, q._request, channel="T", build=broken)
 
 
 # --- The ingest ports and the catalog --------------------------------------------------------
@@ -1349,7 +1389,7 @@ def test_stream_drift_recorded_during_the_open_is_kept(
 
     class DriftingDuringOpen:
         def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
         ) -> StreamHandle:
             handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
             core.record_stream_drift(stream_id, "WS", HALTED)  # the row is not written yet

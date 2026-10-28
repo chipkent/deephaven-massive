@@ -12,6 +12,8 @@ can. This module holds the rest, each entry with its reason, and nothing else:
   (`x-polygon-go-type`), each with the reason the tag is wrong;
 - `TYPE_FIXES`: the named conversion of each field whose documented samples its declared
   type does not fit (a wrong type, or a second form the vendor sends), each with the sample;
+- `KEY_FIXES`: the wire key of each field whose declared key every documented sample
+  contradicts, each with the samples;
 - `RESULT_KEYS`: the paths whose rows do not sit under `results`;
 - `PARAM_UNITS`: the unit of every timestamp-like string parameter, and of any other string
   parameter that takes an epoch (or "sent as date or date-time text");
@@ -55,6 +57,7 @@ _V = TypeVar("_V")
 
 
 __all__ = [
+    "KEY_FIXES",
     "KINDS",
     "NAMES",
     "PARAM_UNITS",
@@ -65,6 +68,7 @@ __all__ = [
     "TYPE_FIXES",
     "UNITS",
     "VENUES",
+    "KeyFix",
     "Name",
     "Projection",
     "ResultKey",
@@ -125,6 +129,25 @@ class TypeFix:
     """
 
     conversion: Conversion
+    reason: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class KeyFix:
+    """The wire key of a field whose declared key every documented sample contradicts.
+
+    The specification declares the field under one key while its response example and the
+    documentation sample send it under another, and nothing declares that other key: the
+    field would be null on every row, and the key the wire sends would be dropped as drift.
+    The entry is keyed by the declared key and gives the key the samples send; the field keeps
+    its declared type and description, and every other hand entry names it by its wire key.
+
+    Attributes:
+        wire_key: The dotted key the samples send in place of the declared one (`"type"`).
+        reason: The evidence: the declared key and the samples that send the other key.
+    """
+
+    wire_key: str
     reason: str
 
 
@@ -710,6 +733,20 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
     }
 )
 """`(source, wire key)` to the named conversion of a field its declared type does not fit."""
+
+KEY_FIXES: Mapping[tuple[str, str], KeyFix] = MappingProxyType(
+    {
+        ("/vX/reference/tickers/{id}/events", "event_type"): KeyFix(
+            wire_key="type",
+            reason="The specification declares the event's type as the required `event_type`, "
+            'but its response example and the documentation sample send `"type": '
+            '"ticker_change"` on every event and never `event_type`. Massive\'s own Python '
+            "client builds each event from exactly the keys `type`, `date`, and "
+            "`ticker_change`, and would refuse an `event_type` key.",
+        ),
+    }
+)
+"""`(source, declared key)` to the wire key of a field every documented sample sends under it."""
 
 
 def _result_keys() -> dict[str, ResultKey]:

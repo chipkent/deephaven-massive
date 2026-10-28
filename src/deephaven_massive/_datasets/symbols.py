@@ -53,6 +53,7 @@ __all__ = [
     "canonical",
     "normalize",
     "symbol_canonicalizer",
+    "symbol_class",
     "underlying",
     "ws_symbol",
 ]
@@ -189,6 +190,19 @@ def canonical(asset_class: AssetClass | None, raw: object) -> str:
             raise ValueError(f"{raw!r} does not split back unambiguously; write it as BASE-QUOTE")
         return f"X:{base}{quote}"
     return f"{prefix}{body}"
+
+
+def symbol_class(symbol: str) -> AssetClass:
+    """Return the asset class a canonical symbol's prefix names.
+
+    Args:
+        symbol: A canonical symbol, such as `X:BTCUSD` or `AAPL`.
+
+    Returns:
+        The class of its prefix (`O:` options, `I:` indices, `C:` forex, `X:` crypto); stocks
+        for a symbol without one.
+    """
+    return _CLASS_BY_PREFIX.get(symbol[:2], AssetClass.STOCKS)
 
 
 def _class_and_body(asset_class: AssetClass | None, raw: str) -> tuple[AssetClass, str, str]:
