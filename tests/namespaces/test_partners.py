@@ -68,6 +68,12 @@ SYMBOL_PARAMS = {
     "partners.tmx.corporate_events": "ticker.any_of",
     "partners.benzinga.news": "tickers.any_of",
 }
+# The Benzinga datasets whose rows name a stock in an optional `ticker`.
+BENZINGA_TICKER_DATASETS = [
+    name
+    for name, (_, symbol) in DATASETS.items()
+    if name.startswith("partners.benzinga.") and symbol == "ticker"
+]
 WITHOUT_SYMBOLS = [
     "partners.benzinga.analysts",
     "partners.benzinga.firms",
@@ -749,3 +755,38 @@ def test_an_event_without_a_ticker_has_a_null_symbol(
         {"Symbol": "ROL", "Isin": "US7757111049", "TmxRecordId": "A1"},
         {"Symbol": None, "Isin": "CA0000000001", "TmxRecordId": "B2"},
     ]
+
+
+def test_the_vendor_analyst_insights_sample_without_a_ticker_has_a_null_symbol(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # Massive's only documented analyst-insights row, served unchanged, carries no `ticker`.
+    body = json.loads(load_fixture(FIXTURES, "benzinga_analyst_insights_vendor_sample.json"))
+    assert "ticker" not in body["results"][0]
+    fake_rest.reply("/benzinga/v1/analyst-insights", Reply(body))
+    table = rest_session.partners.benzinga.analyst_insights().fetch()
+    out = dh_to_pylist(table.view(["Symbol", "BenzingaId", "Firm"]))
+    assert out == [{"Symbol": None, "BenzingaId": "681363c1fd0258abcbedc074", "Firm": "Needham"}]
+
+
+@pytest.mark.parametrize("name", BENZINGA_TICKER_DATASETS)
+def test_a_benzinga_row_without_a_ticker_has_a_null_symbol(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    name: str,
+) -> None:
+    # The vendor marks `ticker` optional on every one of them; the row still comes back.
+    path, _ = DATASETS[name]
+    rows = fixture_rows(load_fixture, name)[:1]
+    rows = [{key: value for key, value in rows[0].items() if key != "ticker"}]
+    fake_rest.reply(path, Reply(envelope(rows)))
+    table = factory(rest_session, name)().fetch()
+    out = dh_to_pylist(table.view(["Symbol", "BenzingaId"]))
+    assert out == [{"Symbol": None, "BenzingaId": rows[0]["benzinga_id"]}]
