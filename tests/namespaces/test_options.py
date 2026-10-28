@@ -929,16 +929,6 @@ def streams(fake_ws_server: FakeMassiveServer) -> Iterator[Streams]:
     harness.session.close()
 
 
-def received(table: Table, count: int = 1) -> list[dict[str, Any]]:
-    # Waits, a bounded number of update-graph cycles, for the rows a frame published.
-    pause = threading.Event()  # never set; only paces the loop
-    for _ in range(300):
-        if table.size >= count:
-            break
-        pause.wait(0.02)
-    return rows(table)
-
-
 SPY = "O:SPY251219C00650000"
 TRADE_FRAME = {
     "ev": "T",
@@ -1001,6 +991,7 @@ def bar_frame(event: str) -> dict[str, object]:
 def test_a_frame_of_each_channel_lands_in_blink(
     *,
     streams: Streams,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
     dataset: str,
     topic: str,
     frame: dict[str, object],
@@ -1018,7 +1009,11 @@ def test_a_frame_of_each_channel_lands_in_blink(
     seen = blink_to_append_only(blink)
     streams.subscribed(f"{topic}.{SPY}")
     streams.send(frame)
-    (row,) = received(seen)
+    # Wait on a consistent snapshot, never on `size`: a size read in the middle of an update
+    # cycle can count a row that a snapshot taken right after does not hold yet. The view is
+    # append-only, so once a snapshot holds the row, every later one does too.
+    rows_when(seen, lambda arrived: len(arrived) == 1)
+    (row,) = rows(seen)
     assert row["Symbol"] == SPY
     assert {name: row[name] for name in expected} == expected
     family = ChannelFamily.FMV if topic == "FMV" else ChannelFamily.TICK
