@@ -373,9 +373,8 @@ class StreamQuery(QueryBase):
 
     A refreshing `Table` passed as symbols is reactive: the stream subscribes and unsubscribes
     as its rows change. A static (non-refreshing) `Table` is a fixed symbol list instead, read
-    once when the verb is called, as `fetch()`, `poll()`, and `history()` read one: the stream
-    is the one an equal symbol list opens, and a table with no valid symbol raises
-    `ValueError`.
+    once when the verb is called, as `fetch()` and `history()` read one: the stream is the one
+    an equal symbol list opens, and a table with no valid symbol raises `ValueError`.
 
     No namespace declares a dataset of this kind yet, so no query can be built and there is no
     example here yet.

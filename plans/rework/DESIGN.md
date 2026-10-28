@@ -2544,7 +2544,7 @@ table, so the queue stays bounded however fast rows arrive.
 | `Evidence` | the evidence string of [section 13.2](#132-host-decision) |
 | `State` | `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`, `RECONNECTING`, `FAILED`, `CLOSED` |
 | `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts; rewritten on every acknowledgement, refusal, and `NO_ACK`, also while a subscription step is in flight |
-| `BufferedRows` | WebSocket connections only (0 on `REST` rows): rows received and waiting for the connection's flush thread; every family row of a connection shows the same count. The row is rewritten at least once a second while the count is above zero. Rows are never dropped; above `BACKLOG_WARNING_ROWS` (1,000,000) a WARNING says the flushes are falling behind, logged again only after the backlog has fallen below half of it |
+| `BufferedRows` | WebSocket connections only (0 on `REST` rows): rows received that no flush of the connection has taken yet; every family row of a connection shows the same count. The row is rewritten at least once a second while the count is above zero. Rows are never dropped; above `BACKLOG_WARNING_ROWS` (1,000,000) a WARNING says the flushes are falling behind, logged again only after the backlog has fallen below half of it |
 | `Reconnects` | count |
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant`; `NextReconnectAt` is set only while the connection waits for its next attempt (`RECONNECTING`, `WAITING_SLOT`) |
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |

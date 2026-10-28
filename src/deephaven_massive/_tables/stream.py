@@ -642,7 +642,7 @@ class Flusher:
     nothing. Each flush enters the session's execution context through a fresh wrapper. An
     exception in a flush is logged at ERROR and the thread keeps flushing.
 
-    It counts the rows buffered and not yet published (`backlog`), under a leaf lock of its
+    It counts the rows buffered and not taken by a flush yet (`backlog`), under a leaf lock of its
     own, and logs a WARNING when the count passes `BACKLOG_WARNING_ROWS`. The buffers are
     unbounded on purpose: a slow flush delays rows but never drops them.
 
@@ -690,7 +690,7 @@ class Flusher:
 
     @property
     def backlog(self) -> int:
-        """Rows buffered and not yet published: received, and waiting for the next flush."""
+        """Rows buffered and not taken by a flush yet: received, and waiting for the next one."""
         with self._backlog_lock:
             return self._backlog
 

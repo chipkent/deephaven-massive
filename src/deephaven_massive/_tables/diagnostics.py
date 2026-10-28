@@ -189,9 +189,9 @@ class ConnectionRow:
         acked_topics: Topics the server acknowledged.
         pending_topics: Topics sent and awaiting acknowledgement.
         no_ack_topics: Topics never acknowledged after one re-send.
-        buffered_rows: Rows the connection received and has not published yet, waiting for
-            its flush thread; a WebSocket connection's family rows all show the connection's
-            count. Rewritten at least once a second while it is above zero.
+        buffered_rows: Rows the connection received that no flush has taken yet; every family
+            row of a WebSocket connection shows the connection's count. Rewritten at least
+            once a second while it is above zero.
         reconnects: Reconnects so far.
         last_message_at: When the last frame arrived.
         next_reconnect_at: When the next reconnect attempt is due.
