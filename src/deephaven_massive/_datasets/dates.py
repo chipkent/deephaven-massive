@@ -2,45 +2,62 @@
 
 Every time bound a user passes is a `DateLike`: an ISO-8601 string, a `date`, or a
 timezone-aware `datetime`. A bound with a time of day but no timezone is ambiguous across the
-three day zones Massive uses, so it is rejected with a `ValueError` that names the
-parameter, the value, and the fix (`require_aware`).
+three day zones Massive uses, so it is rejected with a `ValueError` that names the parameter,
+the value, and the fix (`require_aware`).
 
-A date-only bound means a whole day in the asset class's *day zone*:
+A range has two kinds of bounds, and one range never mixes them (`check_order`):
 
-- **America/New_York** for stocks, options, and indices;
-- **UTC** for forex and crypto;
-- **trading sessions** for futures: a date names the session whose `session_end_date` equals
-  it. The futures trading day rolls at 17:00 Chicago time, so an instant belongs to the
-  session of its Chicago date until 17:00 and to the next day's session from then on
-  (`futures_session`). An exchange holiday folds into the next session, which then opens
-  earlier: CME trades Martin Luther King Day, Monday 2025-01-20, from Sunday 17:00 under the
-  trade date 2025-01-21. So a date `start` is requested from its session's regular open
-  (`futures_session_open`) less `FUTURES_HOLIDAY_MARGIN`, a date `end` up to the regular open
-  of the next session, which is exact, and the rows are then filtered on `SessionEndDate`
-  (`futures_sessions`).
+- **Dates** are whole days, inclusive at both ends, so `history("2025-03-03", "2025-03-03")`
+  is the whole of March 3 (`DaySpan`). A day is a calendar day in the asset class's *day
+  zone*: America/New_York for stocks, options, and indices, UTC for forex and crypto. A
+  futures date names the trading session whose `session_end_date` equals it, since a session
+  is the futures trading day.
+- **Aware datetimes** are exact instants, a half-open range `[start, end)` (`TimeRange`).
+  Equal instants are an empty range, not an error.
 
-Ranges are half-open, `[start, end)`. A date `start` is that day's midnight; a date `end` is the
-*next* day's midnight, so `history("2025-03-03", "2025-03-03")` is the whole of March 3.
+A date and a datetime cannot be mixed: a date means a whole day or session, a datetime one
+instant, and a futures session's first instant moves with the holiday calendar, which the
+library does not have. An `end` before `start` raises. An `end` of None means "through now":
+the current instant for a datetime `start`, and for a date `start` the current day in the
+day zone (for futures, the session the current instant belongs to). `bounds` applies these
+rules to a dataset's `history()` arguments.
 
-`bounds` applies these rules to a dataset's `history()` arguments, and `day_start` and
-`instant_bound` to a date sent to a REST parameter that compares instants.
-`flat_file_published` decides whether a day's flat file can exist yet: files land "by
-approximately 11:00 AM ET the following day", so a day's file counts as published from the
-first configured cutoff (New York time) after the next day starts in the class's day zone.
+Bars are kept only when their whole window lies inside the range (`bar_starts`,
+`bar_sessions`): an intraday or 1-day bar's window is its own interval. For stocks, options,
+indices, and futures sessions, which do not trade at weekends, a week runs Monday to Friday
+and months, quarters, and years are calendar periods less their leading and trailing weekend
+days. Forex and crypto trade at weekends (forex from Sunday evening UTC), so their weeks run
+Monday to Sunday and their months, quarters, and years are whole calendar periods. A bar of
+several units spans that many. A bar whose window has not ended yet
+(the current month, say) is never returned. There is no holiday calendar: a week whose Friday
+is a holiday is still the Monday-to-Friday week.
+
+The futures trading day rolls at 17:00 Chicago time, so an instant belongs to the session of
+its Chicago date until 17:00 and to the next day's session from then on (`futures_session`).
+An exchange holiday folds into the next session, which then opens earlier: after Good Friday
+2024 the session of Monday 2024-04-01 opened on Thursday 2024-03-28 at 17:00. A request that
+must reach whole sessions by time (futures bars named by date) starts
+`FUTURES_HOLIDAY_MARGIN` before the first session's regular open (`futures_bar_request`), and
+its rows are kept by `SessionEndDate`.
+
+`day_start` and `instant_bound` turn a date sent to a REST parameter that compares instants
+into its instant. `flat_file_published` decides whether a day's flat file can exist yet: files
+land "by approximately 11:00 AM ET the following day", so a day's file counts as published
+from the first configured cutoff (New York time) after the next day starts in the class's day
+zone.
 
 Every function is pure (the current time is a parameter) and thread-safe.
 """
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo
 
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._massive import WireUnit
 
 if TYPE_CHECKING:
@@ -52,10 +69,14 @@ if TYPE_CHECKING:
 __all__ = [
     "CHICAGO",
     "DAY_ZONES",
+    "FUTURES_BAR_CLOSE",
     "FUTURES_HOLIDAY_MARGIN",
+    "MIXED_BOUNDS",
     "NEW_YORK",
-    "FuturesSessions",
+    "DaySpan",
     "TimeRange",
+    "bar_sessions",
+    "bar_starts",
     "bounds",
     "calendar_day",
     "check_order",
@@ -63,18 +84,17 @@ __all__ = [
     "day_start",
     "day_zone",
     "flat_file_published",
+    "futures_bar_request",
     "futures_session",
     "futures_session_before",
     "futures_session_open",
-    "futures_sessions",
-    "history_range",
     "instant_bound",
+    "intraday",
     "parse_date_like",
     "publish_time",
     "require_aware",
+    "trades_at_weekends",
 ]
-
-logger = logging.getLogger(__name__)
 
 NEW_YORK: Final = ZoneInfo("America/New_York")
 """The day zone of stocks, options, and indices, and the zone of the flat-file cutoff."""
@@ -93,8 +113,12 @@ Thursday 2024-03-28 at 17:00), exactly three days before the regular Sunday open
 day is slack for rows Massive stamps just before an open. The rows a widened request returns
 from earlier sessions are dropped by their `SessionEndDate`."""
 
-_FOLDED_WEEKDAYS: Final = 1
-"""The most weekday sessions a holiday folds into the next one (`futures_sessions`)."""
+FUTURES_BAR_CLOSE: Final = time(18)
+"""The Chicago wall-clock time up to which the futures bars of a last session are requested.
+
+The session of a date ends by 16:00 Chicago time and the next one opens at 17:00, so 18:00
+reaches every bar of the session; the bars of the next session the request also returns are
+dropped by their `SessionEndDate`."""
 
 DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
     AssetClass.STOCKS: NEW_YORK,
@@ -105,8 +129,14 @@ DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
 }
 """The zone whose midnights bound a date-only `start` or `end`, per asset class.
 
-Futures are absent: a futures date names a trading session, not a calendar day (see `bounds`
-and `futures_sessions`). Datasets without an asset class use New York."""
+Futures are absent: a futures date names a trading session, not a calendar day (see `bounds`).
+Datasets without an asset class use New York."""
+
+MIXED_BOUNDS: Final = (
+    "start and end must both be dates or both be datetimes: a date is a whole day (for "
+    "futures, a trading session) and a datetime an exact instant"
+)
+"""The message of a range that mixes a date and a datetime."""
 
 _DATE_ONLY: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # A fraction of a second finer than the microsecond, which `datetime.fromisoformat` truncates,
@@ -114,7 +144,27 @@ _DATE_ONLY: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # fraction of a second can hold a `.` or `,` in ISO-8601 text, so the separator marks it.
 _BELOW_MICROSECOND: Final = re.compile(r"[.,]\d{7,}")
 _ONE_DAY: Final = timedelta(days=1)
+_ONE_MICROSECOND: Final = timedelta(microseconds=1)
+_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _SATURDAY: Final = 5
+_DAYS_A_WEEK: Final = 7
+_WEEKEND_DAYS: Final = 2
+_WEEKEND_TRADING: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
+"""The classes that trade at weekends, whose bar periods keep their Saturdays and Sundays."""
+
+_INTRADAY_SECONDS: Final[Mapping[Timespan, int]] = {
+    Timespan.SECOND: 1,
+    Timespan.MINUTE: 60,
+    Timespan.HOUR: 3600,
+}
+"""The length of one intraday bar unit, in seconds; such bars sit on whole units of UTC time."""
+
+_PERIOD_MONTHS: Final[Mapping[Timespan, int]] = {
+    Timespan.MONTH: 1,
+    Timespan.QUARTER: 3,
+    Timespan.YEAR: 12,
+}
+"""The calendar months of one bar unit of a timespan longer than a week."""
 
 
 def parse_date_like(value: DateLike, name: str) -> date | datetime:
@@ -181,30 +231,30 @@ def require_aware(name: str, raw: object, moment: datetime) -> None:
 
 
 def check_order(start: date | datetime, end: date | datetime) -> None:
-    """Reject a time-axis range of a `…T` dataset whose end comes before its start.
+    """Reject a range whose bounds are of two kinds, or whose end comes before its start.
 
-    The same rule as `history()`, without a day zone (the dataset's API applies its own): two
-    dates are whole days, so `end` may equal `start`; two datetimes are a half-open range, so
-    `end` must be a later instant (compared in UTC, so the repeated hour of a daylight-saving
-    fall-back is ordered correctly); a date and a datetime compare by calendar day.
+    Shared by `history()` and the time axis of a `…T` dataset. Two dates are whole days, so
+    `end` may equal `start` (that one day); two datetimes are a half-open range, so equal
+    instants are an empty range, which is allowed. Datetimes are compared in UTC, so the
+    repeated hour of a daylight-saving fall-back is ordered correctly.
 
     Args:
         start: The parsed lower bound.
         end: The parsed upper bound.
 
     Raises:
-        ValueError: `start (...) must be before end (...)` if the range is empty.
+        ValueError: `MIXED_BOUNDS` if one bound is a date and the other a datetime, or
+            `start (...) must not be after end (...)` if the range is reversed.
     """
+    if isinstance(start, datetime) is not isinstance(end, datetime):
+        raise ValueError(f"{MIXED_BOUNDS}; got start={start!r}, end={end!r}")
     if isinstance(start, datetime) and isinstance(end, datetime):
-        # In UTC: two datetimes sharing one tzinfo compare by wall clock and ignore `fold`, which
-        # misorders the repeated hour of a daylight-saving fall-back.
-        empty = start.astimezone(UTC) >= end.astimezone(UTC)
+        # In UTC: two datetimes sharing one tzinfo compare by wall clock and ignore `fold`.
+        reversed_range = start.astimezone(UTC) > end.astimezone(UTC)
     else:
-        first = start.date() if isinstance(start, datetime) else start
-        last = end.date() if isinstance(end, datetime) else end
-        empty = first > last
-    if empty:
-        raise ValueError(f"start ({start!r}) must be before end ({end!r})")
+        reversed_range = start > end
+    if reversed_range:
+        raise ValueError(f"start ({start!r}) must not be after end ({end!r})")
 
 
 def _midnight(day: date, zone: tzinfo) -> datetime:
@@ -222,7 +272,9 @@ def _midnight(day: date, zone: tzinfo) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class TimeRange:
-    """A half-open interval of instants, `[start, end)`, in UTC.
+    """A half-open interval of instants, `[start, end)`, in UTC; empty when `end <= start`.
+
+    Frozen and hashable, so it is safe to share between threads.
 
     Attributes:
         start: The first instant included.
@@ -242,11 +294,16 @@ class TimeRange:
         """`end` as nanoseconds since the Unix epoch."""
         return _epoch_ns(self.end)
 
+    @property
+    def empty(self) -> bool:
+        """True when no instant lies in the range."""
+        return self.end <= self.start
+
     def partition_dates(self, zone: tzinfo) -> tuple[date, ...]:
         """Return the calendar dates the range touches in a zone, oldest first.
 
         These are the flat-file partitions to read: every date from the date of `start` to the
-        date of `end - 1 ns`, inclusive.
+        date of `end` less one microsecond, inclusive; none for an empty range.
 
         Args:
             zone: The asset class's day zone.
@@ -254,9 +311,52 @@ class TimeRange:
         Returns:
             The dates, oldest first.
         """
+        if self.empty:
+            return ()
         first = self.start.astimezone(zone).date()
-        last = (self.end - timedelta(microseconds=1)).astimezone(zone).date()
-        return tuple(first + timedelta(days=n) for n in range((last - first).days + 1))
+        last = (self.end - _ONE_MICROSECOND).astimezone(zone).date()
+        return DaySpan(first, last).days()
+
+
+@dataclass(frozen=True, slots=True)
+class DaySpan:
+    """Whole days, or whole futures sessions, from `first` to `last`, both inclusive.
+
+    Empty when `last` is before `first`. Made by `bounds` and the bar rules; frozen and hashable,
+    so it is safe to share between threads.
+
+    Attributes:
+        first: The first day (for futures, the first `session_end_date`) included.
+        last: The last day included.
+    """
+
+    first: date
+    last: date
+
+    @property
+    def empty(self) -> bool:
+        """True when the span holds no day."""
+        return self.last < self.first
+
+    def days(self) -> tuple[date, ...]:
+        """Return every day of the span, oldest first.
+
+        Returns:
+            The days; none for an empty span.
+        """
+        count = (self.last - self.first).days + 1
+        return tuple(self.first + timedelta(days=n) for n in range(count))
+
+    def instants(self, zone: tzinfo) -> TimeRange:
+        """Return the span's calendar days as instants: midnight of `first` to that after `last`.
+
+        Args:
+            zone: The day zone whose midnights bound the days.
+
+        Returns:
+            The half-open range, in UTC.
+        """
+        return TimeRange(_midnight(self.first, zone), _midnight(self.last + _ONE_DAY, zone))
 
 
 def _epoch_ns(moment: datetime) -> int:
@@ -268,112 +368,64 @@ def _epoch_ns(moment: datetime) -> int:
     Returns:
         The epoch nanoseconds.
     """
-    delta = moment - datetime(1970, 1, 1, tzinfo=UTC)
+    delta = moment - _EPOCH
     return (delta.days * 86_400 + delta.seconds) * 10**9 + delta.microseconds * 1_000
 
 
-def history_range(start: DateLike, end: DateLike, zone: tzinfo) -> TimeRange:
-    """Normalize the bounds of `history()` (or of a `…T` time axis) to a half-open range.
+def bounds(
+    spec: DatasetSpec,
+    start: DateLike,
+    end: DateLike | None,
+    *,
+    now: datetime,
+    classes: Iterable[AssetClass] = (),
+) -> TimeRange | DaySpan:
+    """Normalize the bounds of a dataset's `history()` call by their kind and day rules.
 
-    Each bound converts independently: a date `start` is that day's midnight in `zone`, a date
-    `end` is the next day's midnight (whole days are inclusive), and an aware `datetime` is
-    used as is.
+    Two dates give the `DaySpan` of the whole days (for futures, sessions) from `start` to
+    `end`; two datetimes give the half-open `TimeRange` between the instants. An `end` of None
+    reads through now: the current instant after a datetime `start`; after a date `start` the
+    current day in the day zone of the class `day_class` picks (New York without one), or for
+    futures the session the current instant belongs to.
 
     Args:
-        start: The first day or instant to include.
-        end: The last day to include, or the first instant to exclude.
-        zone: The asset class's day zone (`DAY_ZONES[asset_class]`).
+        spec: The dataset.
+        start: The first day or instant, as passed or already parsed by `parse_date_like`
+            (parsed bounds pass through unchanged).
+        end: The last day, the first instant excluded, or None for now.
+        now: The current instant, aware.
+        classes: The classes of the request's symbols, for `day_class`; empty by default.
 
     Returns:
-        The range in UTC.
+        The days or the instants.
 
     Raises:
-        ValueError: If a bound cannot be parsed (see `parse_date_like`), or the range is empty
-            (`start` is not before `end`).
+        ValueError: If a bound cannot be parsed or is naive (`parse_date_like`), the bounds
+            mix a date and a datetime, or `start` is after `end` (or after now, for an `end`
+            of None).
     """
     first = parse_date_like(start, "start")
-    last = parse_date_like(end, "end")
-    lower = first if isinstance(first, datetime) else _midnight(first, zone)
-    upper = last if isinstance(last, datetime) else _midnight(last + _ONE_DAY, zone)
-    lower, upper = lower.astimezone(UTC), upper.astimezone(UTC)
-    if lower >= upper:
-        raise ValueError(f"start ({start!r}) must be before end ({end!r})")
-    return TimeRange(lower, upper)
-
-
-@dataclass(frozen=True, slots=True)
-class FuturesSessions:
-    """The futures sessions a range with a date bound names, and the request window around them.
-
-    A row is kept when its `SessionEndDate` lies in `[first, last]`, a side that is None being
-    open, and, on a side given as an instant, its `Timestamp` lies inside `window` there.
-
-    Attributes:
-        first: The first `session_end_date` included, or None when `start` was an instant.
-        last: The last `session_end_date` included, or None when `end` was an instant.
-        window: The range of instants requested (`timestamp`, `window_start`, or the
-            aggregates' `{from}/{to}`): from the regular open of `first` less
-            `FUTURES_HOLIDAY_MARGIN`, so a session a holiday opened early is reached, or from
-            the `start` instant; to the regular open of the session after `last`, the first
-            instant of a later session, or to the `end` instant.
-    """
-
-    first: date | None
-    last: date | None
-    window: TimeRange
-
-
-def futures_sessions(start: date | datetime, end: date | datetime) -> FuturesSessions:
-    """Return the futures sessions a range names when at least one bound is a date.
-
-    A date names the trading session whose `session_end_date` equals it, and is filtered on
-    `SessionEndDate`; an aware `datetime` is an exact instant, filtered on `Timestamp`. The
-    request window runs from `futures_session_open(start) - FUTURES_HOLIDAY_MARGIN` (or the
-    `start` instant) to `futures_session_open(end + 1 day)` (or the `end` instant): a holiday
-    only ever moves a session's open earlier, so the upper bound is exact, while the lower one
-    reaches back far enough for a session a holiday opened early. Two instants are no sessions:
-    `bounds` gives them a `TimeRange`.
-
-    A date `start` with an `end` instant before that session's regular open is a range only
-    when a holiday opened the session early: the instant's own session, and every weekday
-    session after it up to `start`, must be one holiday at most (`_FOLDED_WEEKDAYS`).
-    `("2025-01-21", Monday 2025-01-20 10:00 CT)` holds the Martin Luther King Day trading of
-    the 2025-01-21 session; `("2025-01-22", the same instant)` would need two weekday sessions
-    folded into one and is refused.
-
-    Args:
-        start: The first session date, or the first instant included.
-        end: The last session date, or the first instant excluded.
-
-    Returns:
-        The sessions and the request window.
-
-    Raises:
-        ValueError: If the range is empty: `start` is after `end`, the window ends before
-            it starts, or an `end` instant lies before more weekday sessions ahead of a date
-            `start` than one holiday can fold into it.
-    """
-    first = None if isinstance(start, datetime) else start
-    last = None if isinstance(end, datetime) else end
-    if first is not None and last is not None and first > last:
-        raise ValueError(f"start ({start}) must not be after end ({end})")
-    lower = (
-        start
-        if isinstance(start, datetime)
-        else futures_session_open(start) - FUTURES_HOLIDAY_MARGIN
-    )
-    upper = end if isinstance(end, datetime) else futures_session_open(end + _ONE_DAY)
-    if lower >= upper:
-        raise ValueError(f"start ({start!r}) must be before end ({end!r})")
-    if first is not None and isinstance(end, datetime):
-        ends_in = futures_session_before(end)
-        skipped = (ends_in + timedelta(days=n) for n in range((first - ends_in).days))
-        if sum(day.weekday() < _SATURDAY for day in skipped) > _FOLDED_WEEKDAYS:
+    asset_class = day_class(spec, classes)
+    last: date | datetime
+    if end is not None:
+        last = parse_date_like(end, "end")
+    elif isinstance(first, datetime):
+        last = now
+    elif asset_class is AssetClass.FUTURES:
+        last = futures_session(now)
+    else:
+        last = now.astimezone(day_zone(asset_class)).date()
+    try:
+        check_order(first, last)
+    except ValueError:
+        if end is None:  # `last` is now, in `first`'s kind, so only the order can fail
             raise ValueError(
-                f"start ({start}) must be before end ({end!r}): the session of {start} cannot "
-                "open that early"
-            )
-    return FuturesSessions(first, last, TimeRange(lower.astimezone(UTC), upper.astimezone(UTC)))
+                f"start ({first!r}) must not be after now ({last!r}); end=None reads through now"
+            ) from None
+        raise
+    if isinstance(first, datetime) and isinstance(last, datetime):
+        return TimeRange(first.astimezone(UTC), last.astimezone(UTC))
+    return DaySpan(first, last)
 
 
 _SESSION_ROLL: Final = timedelta(hours=7)
@@ -383,7 +435,8 @@ _SESSION_ROLL: Final = timedelta(hours=7)
 def futures_session_open(session: date) -> datetime:
     """Return the instant a futures trading session opens: 17:00 Chicago on the day before.
 
-    The inverse of `futures_session` at the session's first instant, from the same roll.
+    The inverse of `futures_session` at the session's first instant, from the same roll; a
+    session a holiday folded into opens earlier (`FUTURES_HOLIDAY_MARGIN`).
 
     Args:
         session: The session's `session_end_date`.
@@ -426,7 +479,293 @@ def futures_session_before(end: datetime) -> date:
         The session's end date (`futures_session` of `end` less one microsecond, the finest
         step a `datetime` takes).
     """
-    return futures_session(end - timedelta(microseconds=1))
+    return futures_session(end - _ONE_MICROSECOND)
+
+
+def futures_bar_request(span: DaySpan) -> TimeRange:
+    """Return the `window_start` range that reaches every futures bar of whole sessions.
+
+    From the first session's regular open less `FUTURES_HOLIDAY_MARGIN`, so a session a holiday
+    opened early is reached, to `FUTURES_BAR_CLOSE` (18:00 Chicago time) on the last session
+    date. The rows of other sessions the range also returns are dropped by `SessionEndDate`.
+
+    Args:
+        span: The sessions.
+
+    Returns:
+        The instants to request, in UTC.
+    """
+    lower = futures_session_open(span.first) - FUTURES_HOLIDAY_MARGIN
+    upper = datetime.combine(span.last, FUTURES_BAR_CLOSE, tzinfo=CHICAGO)
+    return TimeRange(lower.astimezone(UTC), upper.astimezone(UTC))
+
+
+def trades_at_weekends(asset_class: AssetClass | None) -> bool:
+    """Tell whether an asset class trades at weekends, so its Saturdays and Sundays hold data.
+
+    Forex trades from Sunday evening UTC and crypto every day; stocks, options, indices,
+    futures sessions, and data of no class do not.
+
+    Args:
+        asset_class: The class, or None.
+
+    Returns:
+        True for forex and crypto.
+    """
+    return asset_class in _WEEKEND_TRADING
+
+
+def intraday(timespan: Timespan) -> bool:
+    """Tell whether a bar timespan is shorter than a day (second, minute, or hour).
+
+    Args:
+        timespan: The bar unit.
+
+    Returns:
+        True for `SECOND`, `MINUTE`, and `HOUR`.
+    """
+    return timespan in _INTRADAY_SECONDS
+
+
+@dataclass(frozen=True, slots=True)
+class _Periods:
+    """The bar periods of one asset class and timespan of a day or longer.
+
+    A period is named by its *anchor*, its first calendar day (a Monday for a week). A day
+    belongs to the period whose *membership* starts on or before it; a period's *window* is
+    the days its bar covers. For a class that does not trade at weekends (stocks, options,
+    indices, and futures sessions; not forex or crypto), the window of a week, month,
+    quarter, or year leaves out the period's leading and trailing weekend days
+    (a week runs Monday to Friday, and March 2024 from Friday the 1st to Friday the 29th), and
+    a week's Saturday and Sunday belong to the next week, so a bar Massive stamps on the Sunday
+    before a week still names that week. There is no holiday calendar: a holiday is a
+    weekday like any other.
+
+    Attributes:
+        asset_class: The class; futures days are trading sessions.
+        timespan: The bar unit: `DAY`, `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+    """
+
+    asset_class: AssetClass | None
+    timespan: Timespan
+
+    def day_of(self, moment: datetime) -> date:
+        """Return the day an instant belongs to: its session for futures, else its zone date.
+
+        Args:
+            moment: An aware instant.
+
+        Returns:
+            The day.
+        """
+        if self.asset_class is AssetClass.FUTURES:
+            return futures_session(moment)
+        return moment.astimezone(day_zone(self.asset_class)).date()
+
+    def day_start(self, day: date) -> datetime:
+        """Return the instant a day starts: its session's regular open for futures, else midnight.
+
+        Args:
+            day: The day.
+
+        Returns:
+            The instant, in UTC.
+        """
+        return day_start(self.asset_class, day).astimezone(UTC)
+
+    def anchor(self, day: date) -> date:
+        """Return the anchor of the period a day belongs to.
+
+        Args:
+            day: The day.
+
+        Returns:
+            The period's first day: for a week, the Monday on or before the day. (The Saturday
+            and Sunday before a Monday-to-Friday week still belong to it, through
+            `membership`, when bar starts are kept.)
+        """
+        span = self.timespan
+        if span is Timespan.WEEK:
+            return day - timedelta(days=day.weekday())
+        if span in _PERIOD_MONTHS:
+            size = _PERIOD_MONTHS[span]
+            return date(day.year, (day.month - 1) // size * size + 1, 1)
+        return day
+
+    def shift(self, anchor: date, count: int) -> date:
+        """Return the anchor `count` periods after another (before, when negative).
+
+        Args:
+            anchor: A period's anchor.
+            count: The number of periods.
+
+        Returns:
+            The anchor.
+        """
+        span = self.timespan
+        if span is Timespan.WEEK:
+            return anchor + timedelta(days=_DAYS_A_WEEK * count)
+        if span in _PERIOD_MONTHS:
+            months = anchor.year * 12 + anchor.month - 1 + _PERIOD_MONTHS[span] * count
+            return date(months // 12, months % 12 + 1, 1)
+        return anchor + timedelta(days=count)
+
+    def _weekdays_only(self) -> bool:
+        """Tell whether the period's window leaves out its leading and trailing weekend days.
+
+        Returns:
+            True for weeks, months, quarters, and years of every class but forex and
+            crypto, which trade at weekends.
+        """
+        longer = self.timespan is Timespan.WEEK or self.timespan in _PERIOD_MONTHS
+        return longer and not trades_at_weekends(self.asset_class)
+
+    def window_start(self, anchor: date) -> date:
+        """Return the first day of a period's window: its first weekday where weekends are out.
+
+        Args:
+            anchor: The period's anchor.
+
+        Returns:
+            The first day the period's bar covers.
+        """
+        day = anchor
+        while self._weekdays_only() and day.weekday() >= _SATURDAY:
+            day += _ONE_DAY
+        return day
+
+    def window_end(self, anchor: date) -> date:
+        """Return the day after a period's window: a Saturday for a Monday-to-Friday week.
+
+        Args:
+            anchor: The period's anchor.
+
+        Returns:
+            The first day after the window: the next period's anchor, moved back over the
+            period's trailing weekend days where weekends are out.
+        """
+        end = self.shift(anchor, 1)
+        while self._weekdays_only() and (end - _ONE_DAY).weekday() >= _SATURDAY:
+            end -= _ONE_DAY
+        return end
+
+    def membership(self, anchor: date) -> date:
+        """Return the first day that belongs to a period.
+
+        Args:
+            anchor: The period's anchor.
+
+        Returns:
+            The Saturday before a Monday-to-Friday week; otherwise the anchor.
+        """
+        if self._weekdays_only() and self.timespan is Timespan.WEEK:
+            return anchor - timedelta(days=_WEEKEND_DAYS)
+        return anchor
+
+    def admitted(self, first: date, last: date, multiplier: int) -> tuple[date, date]:
+        """Return the anchors of the first and last bars whose whole window lies in the days.
+
+        Args:
+            first: The first day of the range.
+            last: The last day of the range.
+            multiplier: How many periods one bar spans.
+
+        Returns:
+            The first and last anchors; the first is after the last when no bar fits.
+        """
+        low = self.anchor(first)
+        if self.window_start(low) < first:
+            low = self.shift(low, 1)
+        high = self.anchor(last)
+        if self.window_end(high) > last + _ONE_DAY:
+            high = self.shift(high, -1)
+        return low, self.shift(high, 1 - multiplier)
+
+
+def _round_to_unit(moment: datetime, seconds: int, *, up: bool) -> datetime:
+    """Round an instant to a whole number of units since the Unix epoch.
+
+    Args:
+        moment: An aware instant.
+        seconds: The unit, in seconds.
+        up: True to round up, False to round down.
+
+    Returns:
+        The rounded instant, in UTC.
+    """
+    micros = (moment - _EPOCH) // _ONE_MICROSECOND
+    unit = seconds * 1_000_000
+    whole = -(-micros // unit) if up else micros // unit
+    return _EPOCH + timedelta(microseconds=whole * unit)
+
+
+def bar_starts(
+    asset_class: AssetClass | None, span: TimeRange, *, timespan: Timespan, multiplier: int
+) -> TimeRange:
+    """Return the range of bar starts whose whole bar lies in a range.
+
+    A bar is kept only when its whole window lies inside `span`. An intraday bar sits on whole
+    units of UTC time (so on whole hours of every zone the library uses) and spans `multiplier`
+    units from its start. A bar of a day or longer spans `multiplier` periods from the period
+    its start belongs to (`_Periods`): days, futures sessions, weeks, or calendar months,
+    quarters, and years. Weeks run Monday to Friday and longer periods lose their leading and
+    trailing weekend days, except for forex and crypto, which trade at weekends and keep
+    whole calendar weeks and periods. Days are those of the class's day zone; for futures
+    they are sessions, which open at 17:00 Chicago time on the day before.
+
+    Args:
+        asset_class: The class whose days apply (`day_class`), or None for New York days.
+        span: The range the bars must lie in. Pass an end no later than now, so a bar that
+            has not finished yet is left out.
+        timespan: The bar unit.
+        multiplier: How many units one bar spans, at least 1.
+
+    Returns:
+        The half-open range of bar starts (`Timestamp`) to keep, empty when no bar fits. It
+        starts where the first fitting period's days begin to belong to it (the Saturday
+        before a Monday-to-Friday week, the 1st of a month even on a weekend), so a bar
+        stamped anywhere in that period counts; a request for the bars starts there too.
+    """
+    if timespan in _INTRADAY_SECONDS:
+        unit = _INTRADAY_SECONDS[timespan]
+        low = _round_to_unit(span.start, unit, up=True)
+        whole = timedelta(seconds=unit * (multiplier - 1))
+        high = _round_to_unit(span.end, unit, up=False) - whole
+        return TimeRange(low, max(low, high))
+    periods = _Periods(asset_class, timespan)
+    first = periods.day_of(span.start)
+    if periods.day_start(first) < span.start:
+        first += _ONE_DAY
+    last = periods.day_of(span.end - _ONE_MICROSECOND)
+    if periods.day_start(last + _ONE_DAY) > span.end:
+        last -= _ONE_DAY
+    first_period, last_period = periods.admitted(first, last, multiplier)
+    lower = periods.day_start(periods.membership(first_period))
+    upper = periods.day_start(periods.membership(periods.shift(last_period, 1)))
+    return TimeRange(lower, max(lower, upper))
+
+
+def bar_sessions(span: DaySpan, *, timespan: Timespan, multiplier: int) -> DaySpan:
+    """Return the `SessionEndDate`s of the futures bars whose whole window lies in sessions.
+
+    A futures bar of a session or longer is labelled with a session date. Its window is the
+    `multiplier` periods of sessions from the period that date belongs to: sessions, Monday to
+    Friday weeks, or calendar months, quarters, and years of session dates less their leading
+    and trailing weekend days.
+
+    Args:
+        span: The sessions the bars must lie in. End it no later than the last finished
+            session, so a bar that has not finished yet is left out.
+        timespan: The bar unit: `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+        multiplier: How many units one bar spans, at least 1.
+
+    Returns:
+        The session dates to keep; empty when no bar fits.
+    """
+    periods = _Periods(AssetClass.FUTURES, timespan)
+    low, high = periods.admitted(span.first, span.last, multiplier)
+    after = periods.membership(periods.shift(high, 1))
+    return DaySpan(periods.membership(low), after - _ONE_DAY)
 
 
 def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
@@ -474,44 +813,6 @@ def flat_file_published(partition: date, *, now: datetime, zone: tzinfo, cutoff:
     return now.astimezone(UTC) >= published.astimezone(UTC)
 
 
-def bounds(
-    spec: DatasetSpec,
-    start: DateLike,
-    end: DateLike,
-    *,
-    classes: Iterable[AssetClass] = (),
-) -> TimeRange | FuturesSessions:
-    """Normalize the bounds of a dataset's `history()` call by its day rules.
-
-    The rules are those of the class `day_class` picks: the dataset's own, or for a dataset
-    with a path per symbol class the class its symbols share. Futures with a date bound name
-    trading sessions and get `FuturesSessions`: a date side is filtered on `SessionEndDate`
-    and an instant side on `Timestamp` (`futures_sessions`). Every other case is a half-open
-    `TimeRange`: date bounds are midnights in the class day zone (New York without a class),
-    and futures with two instants filter on `Timestamp`. Unparseable, naive, or empty bounds
-    raise the `ValueError` of
-    `parse_date_like`, `history_range`, or `futures_sessions`.
-
-    Args:
-        spec: The dataset.
-        start: The first day or instant, as passed or already parsed by `parse_date_like`
-            (parsed bounds pass through unchanged).
-        end: The last day, or the first instant excluded, in the same forms.
-        classes: The classes of the request's symbols, for `day_class`; empty by default.
-
-    Returns:
-        The sessions for futures with a date bound, otherwise the instant range.
-    """
-    first = parse_date_like(start, "start")
-    last = parse_date_like(end, "end")
-    asset_class = day_class(spec, classes)
-    if asset_class is AssetClass.FUTURES:
-        if isinstance(first, datetime) and isinstance(last, datetime):
-            return history_range(first, last, CHICAGO)
-        return futures_sessions(first, last)
-    return history_range(first, last, day_zone(asset_class))
-
-
 def day_zone(asset_class: AssetClass | None) -> tzinfo:
     """Return the zone whose calendar days an asset class's dates and instants are read in.
 
@@ -556,29 +857,33 @@ def day_class(spec: DatasetSpec, classes: Iterable[AssetClass] = ()) -> AssetCla
 
 
 def calendar_day(spec: DatasetSpec, value: DateLike, name: str) -> date:
-    """Turn the single day a dataset's path takes into a calendar date in its day zone.
+    """Turn the single day a dataset's path or parameter takes into a calendar date.
 
-    Endpoints such as the daily open-close summary take one day in the request path. A date
-    or a `"YYYY-MM-DD"` string is that day as given. An aware `datetime` names the calendar day
-    it falls on in the dataset's day zone (`day_zone`: New York for stocks, options, indices,
-    and datasets without an asset class; UTC for forex and crypto; Chicago for futures), so
-    `datetime(2025, 3, 4, 2, 0, tzinfo=UTC)` is 2025-03-03 for a stock and 2025-03-04 for
-    crypto.
+    Endpoints such as the daily open-close summary take one calendar day (the day of the
+    dataset's day zone: New York for stocks, options, and indices, UTC for forex and crypto). A
+    date or a `"YYYY-MM-DD"` string is that day as given. A calendar date is a whole day, so a
+    `datetime` is refused, as on a calendar-date time axis: which day an instant names would
+    depend on a zone the caller did not state.
 
     Args:
-        spec: The dataset, whose asset class picks the zone.
-        value: The day, as an ISO-8601 string, a `date`, or an aware `datetime`.
+        spec: The dataset, for the message.
+        value: The day, as an ISO-8601 date string or a `date`.
         name: The parameter's name, used in error messages (`"date"`).
-
-    An unparseable or naive value raises the `TypeError` or `ValueError` of `parse_date_like`.
 
     Returns:
         The calendar date to put in the request.
+
+    Raises:
+        ValueError: If `value` is a `datetime`, or ISO-8601 text with a time
+            (`"<dataset>: <name> is a calendar date; pass a date"`).
+
+    Text that is not ISO-8601, or a value of another type, raises the `ValueError` or
+    `TypeError` of `parse_date_like`.
     """
     parsed = parse_date_like(value, name)
     if not isinstance(parsed, datetime):
         return parsed
-    return parsed.astimezone(day_zone(spec.asset_class)).date()
+    raise ValueError(f"{spec.name}: {name} is a calendar date; pass a date")
 
 
 _UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {

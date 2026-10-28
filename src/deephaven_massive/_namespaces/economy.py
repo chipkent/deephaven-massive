@@ -163,11 +163,10 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
-                its New York day; None for the start of the series.
-            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
-                `datetime`, which is exclusive and so names the New York day of the instant
-                just before it; None for the latest.
+            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
+                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
+            end: The last date, inclusive, in the same forms. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
@@ -179,7 +178,7 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A naive `datetime`, a range that ends before it starts, `order` without `sort`, or
+        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
         an unknown filter raises `ValueError`; an argument of the wrong type raises
         `TypeError`.
         """
@@ -212,11 +211,10 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
-                its New York day; None for the start of the series.
-            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
-                `datetime`, which is exclusive and so names the New York day of the instant
-                just before it; None for the latest.
+            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
+                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
+            end: The last date, inclusive, in the same forms. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
@@ -228,7 +226,7 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A naive `datetime`, a range that ends before it starts, `order` without `sort`, or
+        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
         an unknown filter raises `ValueError`; an argument of the wrong type raises
         `TypeError`.
         """
@@ -261,11 +259,10 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
-                its New York day; None for the start of the series.
-            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
-                `datetime`, which is exclusive and so names the New York day of the instant
-                just before it; None for the latest.
+            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
+                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
+            end: The last date, inclusive, in the same forms. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
@@ -277,7 +274,7 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A naive `datetime`, a range that ends before it starts, `order` without `sort`, or
+        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
         an unknown filter raises `ValueError`; an argument of the wrong type raises
         `TypeError`.
         """
@@ -310,11 +307,10 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
-                its New York day; None for the start of the series.
-            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
-                `datetime`, which is exclusive and so names the New York day of the instant
-                just before it; None for the latest.
+            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
+                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
+            end: The last date, inclusive, in the same forms. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
@@ -326,7 +322,7 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A naive `datetime`, a range that ends before it starts, `order` without `sort`, or
+        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
         an unknown filter raises `ValueError`; an argument of the wrong type raises
         `TypeError`.
         """
@@ -359,11 +355,10 @@ class _Economy(Namespace):
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            start: The first date: a `date`, `"YYYY-MM-DD"`, or an aware `datetime`, read as
-                its New York day; None for the start of the series.
-            end: The last date, inclusive: a `date` or `"YYYY-MM-DD"`, or an aware
-                `datetime`, which is exclusive and so names the New York day of the instant
-                just before it; None for the latest.
+            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
+                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
+            end: The last date, inclusive, in the same forms. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The wire column to sort by, such as `"date"`; None sorts by date.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
                 ascending. It needs `sort`.
@@ -375,7 +370,7 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A naive `datetime`, a range that ends before it starts, `order` without `sort`, or
+        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
         an unknown filter raises `ValueError`; an argument of the wrong type raises
         `TypeError`.
         """

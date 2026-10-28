@@ -1,4 +1,4 @@
-"""Tests for date parsing and the day rules."""
+"""Tests for date parsing, the kinds of bounds, the bar windows, and the day rules."""
 
 import re
 from datetime import UTC, date, datetime, time, timedelta
@@ -11,9 +11,12 @@ from deephaven_massive._datasets.dates import (
     CHICAGO,
     DAY_ZONES,
     FUTURES_HOLIDAY_MARGIN,
+    MIXED_BOUNDS,
     NEW_YORK,
-    FuturesSessions,
+    DaySpan,
     TimeRange,
+    bar_sessions,
+    bar_starts,
     bounds,
     calendar_day,
     check_order,
@@ -21,17 +24,20 @@ from deephaven_massive._datasets.dates import (
     day_start,
     day_zone,
     flat_file_published,
+    futures_bar_request,
     futures_session,
     futures_session_before,
     futures_session_open,
-    futures_sessions,
-    history_range,
     instant_bound,
+    intraday,
     parse_date_like,
     publish_time,
 )
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._massive import WireUnit
+
+NOW = datetime(2025, 6, 18, 15, tzinfo=UTC)
+"""A Wednesday afternoon, after every range of these tests unless a test says otherwise."""
 
 
 @pytest.mark.parametrize(
@@ -90,44 +96,54 @@ def test_day_zones() -> None:
 
 
 def test_whole_days_are_inclusive_in_new_york() -> None:
-    window = history_range("2025-03-03", "2025-03-03", NEW_YORK)
+    span = DaySpan(date(2025, 3, 3), date(2025, 3, 3))
+    window = span.instants(NEW_YORK)
     assert window.start == datetime(2025, 3, 3, 5, tzinfo=UTC)
     assert window.end == datetime(2025, 3, 4, 5, tzinfo=UTC)
     assert window.end_ns - window.start_ns == 86_400 * 10**9
+    assert span.days() == (date(2025, 3, 3),)
 
 
-def test_daylight_saving_days() -> None:
-    # 2025-03-09 is 23 hours long in New York.
-    window = history_range(date(2025, 3, 9), date(2025, 3, 9), NEW_YORK)
-    assert window.end - window.start == timedelta(hours=23)
+@pytest.mark.parametrize(
+    ("day", "hours"),
+    [(date(2025, 3, 9), 23), (date(2025, 11, 2), 25), (date(2025, 3, 10), 24)],
+)
+def test_daylight_saving_days(day: date, hours: int) -> None:
+    window = DaySpan(day, day).instants(NEW_YORK)
+    assert window.end - window.start == timedelta(hours=hours)
 
 
-def test_utc_days_and_datetimes() -> None:
-    window = history_range("2025-03-03", datetime(2025, 3, 3, 12, tzinfo=UTC), UTC)
-    assert window == TimeRange(
-        datetime(2025, 3, 3, tzinfo=UTC), datetime(2025, 3, 3, 12, tzinfo=UTC)
-    )
+def test_utc_days() -> None:
+    window = DaySpan(date(2025, 3, 3), date(2025, 3, 3)).instants(UTC)
+    assert window == TimeRange(datetime(2025, 3, 3, tzinfo=UTC), datetime(2025, 3, 4, tzinfo=UTC))
     assert window.start_ns == 1_740_960_000 * 10**9
 
 
-def test_empty_ranges_are_rejected() -> None:
-    with pytest.raises(ValueError, match="must be before end"):
-        history_range("2025-03-04", "2025-03-03", NEW_YORK)
-    moment = datetime(2025, 3, 3, 12, tzinfo=UTC)
-    with pytest.raises(ValueError, match="must be before end"):
-        history_range(moment, moment, NEW_YORK)
-
-
 def test_partition_dates() -> None:
-    window = history_range("2025-03-03", "2025-03-05", NEW_YORK)
+    window = DaySpan(date(2025, 3, 3), date(2025, 3, 5)).instants(NEW_YORK)
     assert window.partition_dates(NEW_YORK) == (
         date(2025, 3, 3),
         date(2025, 3, 4),
         date(2025, 3, 5),
     )
-    # An end at exactly midnight excludes that day.
+    # An end at exactly midnight excludes that day; an empty range has no dates.
     exact = TimeRange(datetime(2025, 3, 3, 5, tzinfo=UTC), datetime(2025, 3, 4, 5, tzinfo=UTC))
     assert exact.partition_dates(NEW_YORK) == (date(2025, 3, 3),)
+    moment = datetime(2025, 3, 3, 12, tzinfo=UTC)
+    assert TimeRange(moment, moment).empty
+    assert TimeRange(moment, moment).partition_dates(NEW_YORK) == ()
+    assert not exact.empty
+    assert DaySpan(date(2025, 3, 4), date(2025, 3, 3)).empty
+    assert DaySpan(date(2025, 3, 4), date(2025, 3, 3)).days() == ()
+
+
+def test_partition_dates_across_the_spring_dst_change() -> None:
+    window = DaySpan(date(2025, 3, 8), date(2025, 3, 10)).instants(NEW_YORK)
+    assert window.partition_dates(NEW_YORK) == (
+        date(2025, 3, 8),
+        date(2025, 3, 9),
+        date(2025, 3, 10),
+    )
 
 
 def test_epoch_ns_is_exact() -> None:
@@ -137,33 +153,25 @@ def test_epoch_ns_is_exact() -> None:
     assert window.start_ns % 10**9 == 1_000
 
 
-def test_futures_session_window() -> None:
-    sessions = futures_sessions(date(2025, 3, 3), date(2025, 3, 5))
-    assert (sessions.first, sessions.last) == (date(2025, 3, 3), date(2025, 3, 5))
-    # From the first session's 17:00 Chicago open (UTC-6 before March 9) less the holiday
-    # margin, to the regular open of the session after the last, which is exact.
+def test_futures_bar_request_reaches_a_session_a_holiday_opened_early() -> None:
+    # From the first session's 17:00 Chicago open (UTC-6 before March 9) less the four-day
+    # holiday margin, to 18:00 Chicago on the last session date.
     assert timedelta(days=4) == FUTURES_HOLIDAY_MARGIN
-    assert sessions.window.start == datetime(2025, 2, 26, 23, tzinfo=UTC)
-    assert sessions.window.end == datetime(2025, 3, 5, 23, tzinfo=UTC)
-    single = futures_sessions(date(2025, 3, 3), date(2025, 3, 3))
-    assert single.window.end - single.window.start == timedelta(days=5)
-
-
-def test_the_margin_covers_a_friday_holiday_folded_into_monday() -> None:
+    requested = futures_bar_request(DaySpan(date(2025, 3, 3), date(2025, 3, 5)))
+    assert requested.start == datetime(2025, 2, 26, 23, tzinfo=UTC)
+    assert requested.end == datetime(2025, 3, 5, 18, tzinfo=CHICAGO)
     # Good Friday 2024: the session of Monday 2024-04-01 opened on Thursday at 17:00 Chicago.
-    sessions = futures_sessions(date(2024, 4, 1), date(2024, 4, 1))
-    assert sessions.window.start < datetime(2024, 3, 28, 17, tzinfo=CHICAGO)
+    good_friday = futures_bar_request(DaySpan(date(2024, 4, 1), date(2024, 4, 1)))
+    assert good_friday.start < datetime(2024, 3, 28, 17, tzinfo=CHICAGO)
+    # Martin Luther King Day 2025: the session of 2025-01-21 opened on Sunday 17:00.
+    mlk = futures_bar_request(DaySpan(date(2025, 1, 21), date(2025, 1, 21)))
+    assert mlk.start <= datetime(2025, 1, 19, 17, tzinfo=CHICAGO) < mlk.end
 
 
-def test_a_session_after_a_holiday_is_inside_its_window() -> None:
-    # CME traded Martin Luther King Day (Monday 2025-01-20) from Sunday 17:00 Chicago time
-    # under the trade date 2025-01-21, a day before that session's regular open.
-    sessions = futures_sessions(date(2025, 1, 21), date(2025, 1, 21))
-    sunday_open = datetime(2025, 1, 19, 17, tzinfo=CHICAGO)
-    assert sessions.window.start <= sunday_open < sessions.window.end
-    assert sessions.window.end == datetime(2025, 1, 21, 17, tzinfo=CHICAGO)
-    with pytest.raises(ValueError, match="must not be after end"):
-        futures_sessions(date(2025, 3, 5), date(2025, 3, 3))
+def test_futures_bar_request_across_the_spring_dst_change() -> None:
+    requested = futures_bar_request(DaySpan(date(2025, 3, 8), date(2025, 3, 10)))
+    assert requested.start == datetime(2025, 3, 3, 23, tzinfo=UTC)  # CST, UTC-6
+    assert requested.end == datetime(2025, 3, 10, 23, tzinfo=UTC)  # 18:00 CDT, UTC-5
 
 
 CUTOFF = time(11, 30)
@@ -235,78 +243,77 @@ def _spec(asset_class: AssetClass | None) -> DatasetSpec:
     )
 
 
-def test_bounds_follow_the_class_day_zone() -> None:
-    stocks = bounds(_spec(AssetClass.STOCKS), "2025-03-03", "2025-03-03")
-    assert stocks == history_range("2025-03-03", "2025-03-03", NEW_YORK)
-    crypto = bounds(_spec(AssetClass.CRYPTO), "2025-03-03", "2025-03-03")
-    assert isinstance(crypto, TimeRange)
-    assert crypto.start == datetime(2025, 3, 3, tzinfo=UTC)
-    unclassed = bounds(_spec(None), "2025-03-03", "2025-03-03")
-    assert unclassed == stocks
+def test_dates_give_whole_days_and_datetimes_exact_instants() -> None:
+    stocks = bounds(_spec(AssetClass.STOCKS), "2025-03-03", date(2025, 3, 3), now=NOW)
+    assert stocks == DaySpan(date(2025, 3, 3), date(2025, 3, 3))
+    start = datetime(2025, 3, 3, 9, 30, tzinfo=NEW_YORK)
+    end = datetime(2025, 3, 3, 16, tzinfo=NEW_YORK)
+    exact = bounds(_spec(AssetClass.STOCKS), start, end.isoformat(), now=NOW)
+    assert exact == TimeRange(start.astimezone(UTC), end.astimezone(UTC))
+    assert exact.start.tzinfo is UTC
+    futures = bounds(_spec(AssetClass.FUTURES), "2025-03-03", "2025-03-05", now=NOW)
+    assert futures == DaySpan(date(2025, 3, 3), date(2025, 3, 5))
 
 
-def test_bounds_of_futures_dates_are_sessions() -> None:
-    sessions = bounds(_spec(AssetClass.FUTURES), "2025-03-03", date(2025, 3, 5))
-    assert isinstance(sessions, FuturesSessions)
-    assert (sessions.first, sessions.last) == (date(2025, 3, 3), date(2025, 3, 5))
-    assert sessions == futures_sessions(date(2025, 3, 3), date(2025, 3, 5))
+def test_equal_dates_are_one_day_and_equal_datetimes_an_empty_range() -> None:
+    one = bounds(_spec(AssetClass.STOCKS), "2025-03-03", "2025-03-03", now=NOW)
+    assert isinstance(one, DaySpan)
+    assert one.days() == (date(2025, 3, 3),)
+    moment = datetime(2025, 3, 3, 12, tzinfo=UTC)
+    empty = bounds(_spec(AssetClass.STOCKS), moment, moment, now=NOW)
+    assert isinstance(empty, TimeRange)
+    assert empty.empty
 
 
-def test_bounds_of_futures_datetimes_filter_timestamps() -> None:
-    moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
-    later = datetime(2025, 3, 4, 15, tzinfo=UTC)
-    assert bounds(_spec(AssetClass.FUTURES), moment, later) == TimeRange(moment, later)
-    assert CHICAGO.key == "America/Chicago"
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        ("2025-03-03", datetime(2025, 3, 3, 16, tzinfo=NEW_YORK)),
+        (datetime(2025, 3, 3, 9, tzinfo=NEW_YORK), date(2025, 3, 4)),
+        ("2025-03-03", "2025-03-04T00:00:00Z"),
+    ],
+)
+@pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.FUTURES])
+def test_mixed_bounds_are_refused(start: object, end: object, asset_class: AssetClass) -> None:
+    with pytest.raises(ValueError, match=f"^{re.escape(MIXED_BOUNDS)}; got start="):
+        bounds(_spec(asset_class), cast("str", start), cast("str", end), now=NOW)
 
 
-def test_mixed_futures_bounds_keep_the_session_rule_on_the_date_side() -> None:
-    # A date start names its whole session, the evening before its date included.
-    end = datetime(2024, 12, 17, 16, tzinfo=CHICAGO)
-    window = bounds(_spec(AssetClass.FUTURES), "2024-12-17", end)
-    assert window == FuturesSessions(
-        date(2024, 12, 17),
-        None,
-        TimeRange(
-            (datetime(2024, 12, 16, 17, tzinfo=CHICAGO) - FUTURES_HOLIDAY_MARGIN).astimezone(UTC),
-            end.astimezone(UTC),
-        ),
+def test_reversed_ranges_are_refused() -> None:
+    with pytest.raises(ValueError, match=r"^start \(.*\) must not be after end \(.*\)$"):
+        bounds(_spec(AssetClass.FUTURES), "2025-03-05", "2025-03-03", now=NOW)
+    later = datetime(2025, 3, 3, 12, 0, 0, 1, tzinfo=UTC)
+    with pytest.raises(ValueError, match="must not be after end"):
+        bounds(_spec(AssetClass.STOCKS), later, datetime(2025, 3, 3, 12, tzinfo=UTC), now=NOW)
+    with pytest.raises(ValueError, match=r"start='2025-03-03T09:30' needs a timezone"):
+        bounds(_spec(AssetClass.STOCKS), "2025-03-03T09:30", "2025-03-04", now=NOW)
+
+
+def test_an_open_end_reads_through_now() -> None:
+    # 2025-06-18 15:00 UTC: 11:00 in New York, 10:00 in Chicago (the session of 06-18).
+    stocks = bounds(_spec(AssetClass.STOCKS), "2025-06-16", None, now=NOW)
+    assert stocks == DaySpan(date(2025, 6, 16), date(2025, 6, 18))
+    late = datetime(2025, 6, 19, 1, tzinfo=UTC)  # 21:00 on 06-18 in New York, 06-19 in UTC
+    assert bounds(_spec(AssetClass.STOCKS), "2025-06-16", None, now=late) == DaySpan(
+        date(2025, 6, 16), date(2025, 6, 18)
     )
-    # A date end names its session up to the next session's regular open.
-    start = datetime(2024, 12, 16, 18, tzinfo=CHICAGO)
-    window = bounds(_spec(AssetClass.FUTURES), start, "2024-12-17")
-    assert window == FuturesSessions(
-        None,
-        date(2024, 12, 17),
-        TimeRange(start.astimezone(UTC), datetime(2024, 12, 17, 23, tzinfo=UTC)),
+    assert bounds(_spec(AssetClass.CRYPTO), "2025-06-16", None, now=late) == DaySpan(
+        date(2025, 6, 16), date(2025, 6, 19)
     )
-    with pytest.raises(ValueError, match="must be before end"):
-        bounds(_spec(AssetClass.FUTURES), datetime(2024, 12, 17, 18, tzinfo=CHICAGO), "2024-12-17")
+    # A Chicago evening belongs to the next session.
+    evening = datetime(2025, 6, 18, 23, tzinfo=UTC)  # 18:00 Chicago
+    futures = bounds(_spec(AssetClass.FUTURES), "2025-06-16", None, now=evening)
+    assert futures == DaySpan(date(2025, 6, 16), date(2025, 6, 19))
+    start = datetime(2025, 6, 18, 13, tzinfo=UTC)
+    assert bounds(_spec(AssetClass.STOCKS), start, None, now=NOW) == TimeRange(start, NOW)
+    assert bounds(_spec(AssetClass.STOCKS), NOW, None, now=NOW).empty
 
 
-def test_a_date_start_may_end_before_its_regular_open_only_after_a_holiday() -> None:
-    spec = _spec(AssetClass.FUTURES)
-    monday = datetime(2025, 1, 20, 10, tzinfo=CHICAGO)
-    # Martin Luther King Day folded into the 2025-01-21 session, which opened on Sunday.
-    folded = bounds(spec, "2025-01-21", monday)
-    assert isinstance(folded, FuturesSessions)
-    assert folded.first == date(2025, 1, 21)
-    # Two weekday sessions (01-20 and 01-21) cannot both fold into 01-22.
-    with pytest.raises(ValueError, match="the session of 2025-01-22 cannot open that early"):
-        bounds(spec, "2025-01-22", monday)
-    # Good Friday folded into Monday's session, which opened on Thursday 17:00.
-    friday = bounds(spec, "2024-04-01", datetime(2024, 3, 29, 9, tzinfo=CHICAGO))
-    assert isinstance(friday, FuturesSessions)
-    assert friday.first == date(2024, 4, 1)
-    with pytest.raises(ValueError, match="cannot open that early"):
-        bounds(spec, "2024-04-01", datetime(2024, 3, 28, 10, tzinfo=CHICAGO))
-
-
-def test_an_instant_start_at_the_next_sessions_open_is_empty() -> None:
-    # The session of 2025-01-21 ends where the next one opens: 17:00 Chicago on 01-21.
-    opens = datetime(2025, 1, 21, 17, tzinfo=CHICAGO)
-    with pytest.raises(ValueError, match="must be before end"):
-        futures_sessions(opens, date(2025, 1, 21))
-    assert futures_sessions(opens - timedelta(microseconds=1), date(2025, 1, 21)).last
+def test_a_start_after_now_with_an_open_end_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"must not be after now .*; end=None reads through now$"):
+        bounds(_spec(AssetClass.STOCKS), "2025-06-19", None, now=NOW)
+    with pytest.raises(ValueError, match="end=None reads through now"):
+        bounds(_spec(AssetClass.STOCKS), NOW + timedelta(microseconds=1), None, now=NOW)
 
 
 def test_futures_session_before_excludes_the_end() -> None:
@@ -315,37 +322,10 @@ def test_futures_session_before_excludes_the_end() -> None:
     assert futures_session_before(opens + timedelta(microseconds=1)) == date(2025, 1, 22)
 
 
-def test_bounds_reject_bad_ranges() -> None:
-    with pytest.raises(ValueError, match="must not be after end"):
-        bounds(_spec(AssetClass.FUTURES), "2025-03-05", "2025-03-03")
-    with pytest.raises(ValueError, match=r"start='2025-03-03T09:30' needs a timezone"):
-        bounds(_spec(AssetClass.STOCKS), "2025-03-03T09:30", "2025-03-04")
-
-
-def test_futures_window_across_the_spring_dst_change() -> None:
-    sessions = futures_sessions(date(2025, 3, 8), date(2025, 3, 10))
-    assert sessions.window.start == datetime(2025, 3, 3, 23, tzinfo=UTC)  # CST, UTC-6
-    assert sessions.window.end == datetime(2025, 3, 10, 22, tzinfo=UTC)  # CDT, UTC-5
-
-
 def test_publish_time_across_the_spring_dst_change() -> None:
     published = publish_time(date(2025, 3, 8), zone=UTC, cutoff=time(11, 30))
     assert published == datetime(2025, 3, 9, 11, 30, tzinfo=NEW_YORK)
     assert published.astimezone(UTC) == datetime(2025, 3, 9, 15, 30, tzinfo=UTC)
-
-
-def test_the_fall_dst_day_is_25_hours() -> None:
-    window = history_range("2025-11-02", "2025-11-02", NEW_YORK)
-    assert window.end - window.start == timedelta(hours=25)
-
-
-def test_partition_dates_across_the_spring_dst_change() -> None:
-    window = history_range("2025-03-08", "2025-03-10", NEW_YORK)
-    assert window.partition_dates(NEW_YORK) == (
-        date(2025, 3, 8),
-        date(2025, 3, 9),
-        date(2025, 3, 10),
-    )
 
 
 def test_publication_compares_instants_across_the_fall_back_hour() -> None:
@@ -375,8 +355,12 @@ def test_time_axis_order_compares_instants_across_the_fall_back_hour() -> None:
     first = datetime(2025, 11, 2, 1, 30, tzinfo=NEW_YORK)
     later = datetime(2025, 11, 2, 1, 15, fold=1, tzinfo=NEW_YORK)
     check_order(first, later)
-    with pytest.raises(ValueError, match="must be before end"):
+    check_order(first, first)  # equal instants are an empty range, not an error
+    check_order(date(2025, 3, 3), date(2025, 3, 3))
+    with pytest.raises(ValueError, match="must not be after end"):
         check_order(later, first)
+    with pytest.raises(ValueError, match=re.escape(MIXED_BOUNDS)):
+        check_order(date(2025, 3, 3), later)
 
 
 @pytest.mark.parametrize(
@@ -397,15 +381,14 @@ def test_futures_session_rolls_at_17_chicago(moment: datetime, session: date) ->
     assert futures_session(moment) == session
 
 
-def test_calendar_day_is_the_day_in_the_class_zone() -> None:
-    late = datetime(2025, 3, 4, 2, 0, tzinfo=UTC)  # 21:00 on 3 March in New York and Chicago
-    assert calendar_day(_spec(AssetClass.STOCKS), late, "date") == date(2025, 3, 3)
-    assert calendar_day(_spec(None), late, "date") == date(2025, 3, 3)
-    assert calendar_day(_spec(AssetClass.CRYPTO), late, "date") == date(2025, 3, 4)
-    assert calendar_day(_spec(AssetClass.FUTURES), late, "date") == date(2025, 3, 3)
-    early = datetime(2025, 3, 4, 5, 30, tzinfo=UTC)  # 23:30 in Chicago, 00:30 in New York
-    assert calendar_day(_spec(AssetClass.FUTURES), early, "date") == date(2025, 3, 3)
-    assert calendar_day(_spec(AssetClass.STOCKS), early, "date") == date(2025, 3, 4)
+def test_calendar_day_refuses_a_datetime() -> None:
+    # A calendar date is a whole day: which day an instant names would depend on a zone.
+    late = datetime(2025, 3, 4, 2, 0, tzinfo=UTC)
+    for asset_class in (AssetClass.STOCKS, AssetClass.CRYPTO, AssetClass.FUTURES, None):
+        with pytest.raises(ValueError, match=r"^x\.history: date is a calendar date; pass a date$"):
+            calendar_day(_spec(asset_class), late, "date")
+    with pytest.raises(ValueError, match="is a calendar date"):
+        calendar_day(_spec(AssetClass.STOCKS), "2025-03-03T09:30:00Z", "date")
 
 
 def test_calendar_day_keeps_a_date_as_given() -> None:
@@ -447,12 +430,16 @@ def test_only_a_dataset_with_a_path_per_class_follows_its_symbols_class() -> Non
 
 
 def test_history_bounds_follow_the_symbols_class_only_with_a_path_per_class() -> None:
-    crypto = bounds(_INDICATOR, "2025-03-03", "2025-03-03", classes=[AssetClass.CRYPTO])
-    assert crypto == TimeRange(datetime(2025, 3, 3, tzinfo=UTC), datetime(2025, 3, 4, tzinfo=UTC))
-    unclassed = bounds(_spec(None), "2025-03-03", "2025-03-03", classes=[AssetClass.CRYPTO])
-    assert unclassed == TimeRange(
-        datetime(2025, 3, 3, 5, tzinfo=UTC), datetime(2025, 3, 4, 5, tzinfo=UTC)
+    crypto = bounds(_INDICATOR, "2025-03-03", None, now=NOW, classes=[AssetClass.CRYPTO])
+    unclassed = bounds(_spec(None), "2025-03-03", None, now=NOW, classes=[AssetClass.CRYPTO])
+    late = datetime(2025, 6, 19, 1, tzinfo=UTC)  # 06-19 in UTC, still 06-18 in New York
+    assert bounds(_INDICATOR, "2025-03-03", None, now=late, classes=[AssetClass.CRYPTO]) == (
+        DaySpan(date(2025, 3, 3), date(2025, 6, 19))
     )
+    assert bounds(_spec(None), "2025-03-03", None, now=late, classes=[AssetClass.CRYPTO]) == (
+        DaySpan(date(2025, 3, 3), date(2025, 6, 18))
+    )
+    assert crypto == unclassed  # at NOW both zones are on 06-18
 
 
 def test_text_finer_than_a_microsecond_is_refused_not_cut() -> None:
@@ -490,3 +477,287 @@ def test_an_instant_bound_keeps_a_whole_day_and_steps_back_one_unit() -> None:
         instant_bound(None, "t.gt", day, unit=WireUnit.NS, upper=False)
     with pytest.raises(ValueError, match=r"^t\.lte takes ISO-8601 instants of no documented"):
         instant_bound(None, "t.lte", day, unit=None, upper=True)
+
+
+# --- Whole bar windows ---------------------------------------------------------------------------
+
+
+def ny(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, tzinfo=NEW_YORK).astimezone(UTC)
+
+
+def utc(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, tzinfo=UTC)
+
+
+def stock_bars(first: date, last: date, timespan: Timespan, *, multiplier: int = 1) -> TimeRange:
+    span = DaySpan(first, last).instants(NEW_YORK)
+    return bar_starts(AssetClass.STOCKS, span, timespan=timespan, multiplier=multiplier)
+
+
+def kept(starts: TimeRange, stamp: datetime) -> bool:
+    return starts.start <= stamp.astimezone(UTC) < starts.end
+
+
+def test_intraday_bars_must_end_inside_the_range() -> None:
+    assert intraday(Timespan.MINUTE)
+    assert not intraday(Timespan.DAY)
+    start = datetime(2025, 3, 3, 14, 30, 20, tzinfo=UTC)
+    end = datetime(2025, 3, 3, 14, 45, 30, tzinfo=UTC)
+    starts = bar_starts(
+        AssetClass.STOCKS, TimeRange(start, end), timespan=Timespan.MINUTE, multiplier=1
+    )
+    # The 14:30 bar starts before the range and the 14:45 bar ends after it.
+    assert starts == TimeRange(
+        datetime(2025, 3, 3, 14, 31, tzinfo=UTC), datetime(2025, 3, 3, 14, 45, tzinfo=UTC)
+    )
+    assert starts.start == datetime(2025, 3, 3, 14, 31, tzinfo=UTC)
+    # Five-minute bars: the last one to fit starts at 14:40.
+    five = bar_starts(
+        AssetClass.STOCKS, TimeRange(start, end), timespan=Timespan.MINUTE, multiplier=5
+    )
+    assert five.end == datetime(2025, 3, 3, 14, 41, tzinfo=UTC)
+    # A range shorter than one bar keeps none.
+    short = TimeRange(start, start + timedelta(seconds=30))
+    none = bar_starts(AssetClass.STOCKS, short, timespan=Timespan.MINUTE, multiplier=1)
+    assert none.empty
+    seconds = bar_starts(AssetClass.STOCKS, short, timespan=Timespan.SECOND, multiplier=1)
+    assert seconds == short
+
+
+def test_hour_bars_across_the_spring_dst_change() -> None:
+    # 2025-03-09 is 23 hours long in New York: its bars of one hour are 23.
+    starts = stock_bars(date(2025, 3, 9), date(2025, 3, 9), Timespan.HOUR)
+    assert starts.end - starts.start == timedelta(hours=23)
+
+
+@pytest.mark.parametrize(
+    ("day", "hours"), [(date(2025, 3, 9), 23), (date(2025, 11, 2), 25), (date(2025, 3, 3), 24)]
+)
+def test_day_bars_are_new_york_days_on_dst_days(day: date, hours: int) -> None:
+    starts = stock_bars(day, day, Timespan.DAY)
+    assert starts == TimeRange(ny(day), ny(day + timedelta(days=1)))
+    assert starts.end - starts.start == timedelta(hours=hours)
+    assert starts.start == ny(day)
+
+
+def test_day_bars_of_a_range_of_instants_must_be_whole_days() -> None:
+    # 09:30 Monday to 09:30 Wednesday holds only Tuesday whole.
+    span = TimeRange(
+        datetime(2025, 3, 3, 9, 30, tzinfo=NEW_YORK), datetime(2025, 3, 5, 9, 30, tzinfo=NEW_YORK)
+    )
+    starts = bar_starts(AssetClass.STOCKS, span, timespan=Timespan.DAY, multiplier=1)
+    assert starts == TimeRange(ny(date(2025, 3, 4)), ny(date(2025, 3, 5)))
+    assert starts.start == ny(date(2025, 3, 4))
+    # Crypto days are UTC days.
+    crypto = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.DAY, multiplier=1)
+    assert crypto == TimeRange(utc(date(2025, 3, 4)), utc(date(2025, 3, 5)))
+
+
+def test_week_bars_run_monday_to_friday_and_skip_weekends() -> None:
+    # The week of 2025-03-03 (Monday) to 03-07 (Friday).
+    week = stock_bars(date(2025, 3, 3), date(2025, 3, 7), Timespan.WEEK)
+    assert kept(week, ny(date(2025, 3, 3)))
+    # A bar Massive stamps on the Sunday before its week names that week.
+    assert kept(week, ny(date(2025, 3, 2)))
+    assert not kept(week, ny(date(2025, 3, 10)))
+    # A range from a Saturday to a Sunday holds the whole week between; the weekend days
+    # around it hold no bar of their own.
+    weekend = stock_bars(date(2025, 3, 1), date(2025, 3, 9), Timespan.WEEK)
+    assert weekend == week
+    # A range from Tuesday holds no whole week of the 3rd, nor a week ending on Thursday.
+    assert stock_bars(date(2025, 3, 4), date(2025, 3, 7), Timespan.WEEK).empty
+    assert stock_bars(date(2025, 3, 3), date(2025, 3, 6), Timespan.WEEK).empty
+    # The kept starts, and the request, begin on the Saturday before the first whole week.
+    assert stock_bars(date(2025, 3, 1), date(2025, 3, 21), Timespan.WEEK).start == ny(
+        date(2025, 3, 1)
+    )
+    # Two-week bars: the last one to fit starts a week before the range's last week.
+    two = stock_bars(date(2025, 3, 3), date(2025, 3, 21), Timespan.WEEK, multiplier=2)
+    assert kept(two, ny(date(2025, 3, 10)))
+    assert not kept(two, ny(date(2025, 3, 17)))
+
+
+def test_mlk_week_is_still_monday_to_friday() -> None:
+    # Martin Luther King Day (Monday 2025-01-20) closed the market; with no holiday calendar
+    # the week's bar still covers Monday to Friday, so a range from Tuesday excludes it.
+    assert kept(
+        stock_bars(date(2025, 1, 20), date(2025, 1, 24), Timespan.WEEK), ny(date(2025, 1, 21))
+    )
+    assert stock_bars(date(2025, 1, 21), date(2025, 1, 24), Timespan.WEEK).empty
+
+
+def test_good_friday_2024_months_and_weeks() -> None:
+    # Good Friday (2024-03-29) closed the stock market; March still ends on the 31st.
+    march = date(2024, 3, 1)
+    assert stock_bars(march, date(2024, 3, 28), Timespan.MONTH).empty
+    assert kept(stock_bars(march, date(2024, 3, 29), Timespan.MONTH), ny(march))
+    assert kept(stock_bars(march, date(2024, 3, 31), Timespan.MONTH), ny(march))
+    # Its week is still Monday 03-25 to Friday 03-29.
+    week = stock_bars(date(2024, 3, 25), date(2024, 3, 29), Timespan.WEEK)
+    assert kept(week, ny(date(2024, 3, 25)))
+    assert stock_bars(date(2024, 3, 25), date(2024, 3, 28), Timespan.WEEK).empty
+
+
+def test_crypto_weeks_run_monday_to_sunday() -> None:
+    span = DaySpan(date(2025, 3, 3), date(2025, 3, 8)).instants(UTC)  # Monday to Saturday
+    short = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.WEEK, multiplier=1)
+    assert short.empty
+    span = DaySpan(date(2025, 3, 3), date(2025, 3, 9)).instants(UTC)
+    week = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.WEEK, multiplier=1)
+    assert week == TimeRange(utc(date(2025, 3, 3)), utc(date(2025, 3, 10)))
+    assert week.start == utc(date(2025, 3, 3))
+
+
+@pytest.mark.parametrize(
+    ("timespan", "first", "last", "stamps", "outside"),
+    [
+        (
+            Timespan.MONTH,
+            date(2025, 1, 15),
+            date(2025, 4, 30),
+            [date(2025, 2, 1), date(2025, 4, 1)],
+            [date(2025, 1, 1), date(2025, 5, 1)],
+        ),
+        (
+            Timespan.QUARTER,
+            date(2024, 12, 31),
+            date(2025, 9, 30),
+            [date(2025, 1, 1), date(2025, 7, 1)],
+            [date(2024, 10, 1), date(2025, 10, 1)],
+        ),
+        (
+            Timespan.YEAR,
+            date(2023, 1, 1),
+            date(2024, 12, 30),
+            [date(2023, 1, 1)],
+            [date(2024, 1, 1), date(2022, 1, 1)],
+        ),
+    ],
+)
+def test_calendar_periods_must_lie_wholly_inside(
+    *, timespan: Timespan, first: date, last: date, stamps: list[date], outside: list[date]
+) -> None:
+    starts = stock_bars(first, last, timespan)
+    assert all(kept(starts, ny(day)) for day in stamps)
+    assert not any(kept(starts, ny(day)) for day in outside)
+
+
+def test_a_month_bar_needs_the_month_whole_from_its_first_day() -> None:
+    starts = stock_bars(date(2025, 3, 5), date(2025, 3, 20), Timespan.MONTH)
+    assert starts.empty
+    two = stock_bars(date(2025, 1, 1), date(2025, 4, 30), Timespan.MONTH, multiplier=2)
+    assert kept(two, ny(date(2025, 3, 1)))
+    assert not kept(two, ny(date(2025, 4, 1)))
+    assert stock_bars(date(2025, 1, 2), date(2025, 6, 30), Timespan.MONTH).start == ny(
+        date(2025, 2, 1)
+    )
+    assert starts.start == ny(date(2025, 4, 1))
+
+
+def test_an_unfinished_period_ends_after_now() -> None:
+    # A range that ends now leaves out the current month, week, and day.
+    now = datetime(2025, 6, 18, 15, tzinfo=UTC)
+    span = TimeRange(ny(date(2025, 5, 1)), now)
+    month = bar_starts(AssetClass.STOCKS, span, timespan=Timespan.MONTH, multiplier=1)
+    assert kept(month, ny(date(2025, 5, 1)))
+    assert not kept(month, ny(date(2025, 6, 1)))
+    day = bar_starts(AssetClass.STOCKS, span, timespan=Timespan.DAY, multiplier=1)
+    assert kept(day, ny(date(2025, 6, 17)))
+    assert not kept(day, ny(date(2025, 6, 18)))
+
+
+def test_futures_bars_by_instants_use_sessions() -> None:
+    # The session of 2025-03-04 runs from 17:00 Chicago on 03-03 to 17:00 on 03-04.
+    span = TimeRange(
+        datetime(2025, 3, 3, 17, tzinfo=CHICAGO).astimezone(UTC),
+        datetime(2025, 3, 4, 17, tzinfo=CHICAGO).astimezone(UTC),
+    )
+    starts = bar_starts(AssetClass.FUTURES, span, timespan=Timespan.SESSION, multiplier=1)
+    assert starts == span
+    assert starts.start == span.start
+    late = TimeRange(span.start + timedelta(minutes=1), span.end)
+    assert bar_starts(AssetClass.FUTURES, late, timespan=Timespan.SESSION, multiplier=1).empty
+    # A week of sessions opens on Sunday evening and ends at Friday's 17:00.
+    week = TimeRange(
+        datetime(2025, 3, 2, 17, tzinfo=CHICAGO).astimezone(UTC),
+        datetime(2025, 3, 7, 17, tzinfo=CHICAGO).astimezone(UTC),
+    )
+    weeks = bar_starts(AssetClass.FUTURES, week, timespan=Timespan.WEEK, multiplier=1)
+    assert kept(weeks, datetime(2025, 3, 2, 17, tzinfo=CHICAGO))
+    shorter = TimeRange(week.start, week.end - timedelta(hours=1))
+    assert bar_starts(AssetClass.FUTURES, shorter, timespan=Timespan.WEEK, multiplier=1).empty
+
+
+def test_futures_bar_sessions_keep_whole_periods_of_session_dates() -> None:
+    week = DaySpan(date(2025, 3, 3), date(2025, 3, 7))
+    assert bar_sessions(week, timespan=Timespan.SESSION, multiplier=1) == week
+    # A week bar is labelled with a session date of its week; Saturday and Sunday belong to
+    # the next week.
+    assert bar_sessions(week, timespan=Timespan.WEEK, multiplier=1) == DaySpan(
+        date(2025, 3, 1), date(2025, 3, 7)
+    )
+    assert bar_sessions(
+        DaySpan(date(2025, 3, 4), date(2025, 3, 7)), timespan=Timespan.WEEK, multiplier=1
+    ).empty
+    # Good Friday 2024 had no session; the week of 03-25 is still Monday to Friday.
+    good_friday = DaySpan(date(2024, 3, 25), date(2024, 3, 28))
+    assert bar_sessions(good_friday, timespan=Timespan.WEEK, multiplier=1).empty
+    months = bar_sessions(
+        DaySpan(date(2025, 1, 1), date(2025, 3, 31)), timespan=Timespan.MONTH, multiplier=2
+    )
+    assert months == DaySpan(date(2025, 1, 1), date(2025, 2, 28))
+
+
+def test_months_leave_out_their_leading_and_trailing_weekend_days() -> None:
+    # June 2025 starts on a Sunday: a range from Monday the 2nd holds it whole, and its bar
+    # is still requested from the 1st, where Massive stamps it.
+    starts = stock_bars(date(2025, 6, 2), date(2025, 6, 30), Timespan.MONTH)
+    assert kept(starts, ny(date(2025, 6, 1)))
+    assert starts.start == ny(date(2025, 6, 1))
+    # Crypto trades every day, so its June starts on the 1st.
+    span = DaySpan(date(2025, 6, 2), date(2025, 6, 30)).instants(UTC)
+    crypto = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.MONTH, multiplier=1)
+    assert crypto.empty
+    # Futures months are months of session dates, which are weekdays.
+    march = bar_sessions(
+        DaySpan(date(2024, 3, 1), date(2024, 3, 29)), timespan=Timespan.MONTH, multiplier=1
+    )
+    assert march == DaySpan(date(2024, 3, 1), date(2024, 3, 31))
+
+
+def forex_bars(first: date, last: date, timespan: Timespan) -> TimeRange:
+    span = DaySpan(first, last).instants(UTC)
+    return bar_starts(AssetClass.FOREX, span, timespan=timespan, multiplier=1)
+
+
+def test_forex_periods_keep_their_weekends() -> None:
+    # Forex trades from Sunday evening UTC: March 2024 ends on Sunday the 31st, so a range
+    # ending Friday the 29th leaves March out, and June 2025, which starts on Sunday the 1st,
+    # needs a range from the 1st.
+    assert forex_bars(date(2024, 3, 1), date(2024, 3, 29), Timespan.MONTH).empty
+    assert kept(
+        forex_bars(date(2024, 3, 1), date(2024, 3, 31), Timespan.MONTH), utc(date(2024, 3, 1))
+    )
+    assert forex_bars(date(2025, 6, 2), date(2025, 6, 30), Timespan.MONTH).empty
+    assert kept(
+        forex_bars(date(2025, 6, 1), date(2025, 6, 30), Timespan.MONTH), utc(date(2025, 6, 1))
+    )
+    # Weeks are calendar weeks, Monday to Sunday.
+    assert forex_bars(date(2025, 3, 3), date(2025, 3, 7), Timespan.WEEK).empty
+    week = forex_bars(date(2025, 3, 3), date(2025, 3, 9), Timespan.WEEK)
+    assert week == TimeRange(utc(date(2025, 3, 3)), utc(date(2025, 3, 10)))
+    quarters = forex_bars(date(2024, 1, 1), date(2024, 3, 29), Timespan.QUARTER)
+    assert quarters.empty
+
+
+def test_an_open_forex_month_is_unfinished_until_sunday_ends() -> None:
+    # history("2024-03-01") on Sunday 2024-03-31 at 12:00 UTC: Sunday evening's trading has
+    # not happened yet, so March is still unfinished.
+    now = datetime(2024, 3, 31, 12, tzinfo=UTC)
+    span = TimeRange(utc(date(2024, 3, 1)), now)
+    assert bar_starts(AssetClass.FOREX, span, timespan=Timespan.MONTH, multiplier=1).empty
+    # Stocks do not trade on Sunday: their March ended with Friday the 29th.
+    stocks = TimeRange(ny(date(2024, 3, 1)), now)
+    month = bar_starts(AssetClass.STOCKS, stocks, timespan=Timespan.MONTH, multiplier=1)
+    assert kept(month, ny(date(2024, 3, 1)))

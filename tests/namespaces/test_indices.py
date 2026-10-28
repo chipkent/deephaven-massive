@@ -413,9 +413,6 @@ def test_snapshots_check_their_list_parameters(m: dm.MassiveSession) -> None:
     [
         "2025-06-02",
         date(2025, 6, 2),
-        datetime(2025, 6, 2, 15, 30, tzinfo=UTC),
-        # 02:00 UTC on June 3 is still June 2 in New York.
-        "2025-06-03T02:00:00+00:00",
     ],
 )
 def test_daily_open_close_query(m: dm.MassiveSession, day: str | date) -> None:
@@ -431,6 +428,9 @@ def test_daily_open_close_rejects_all(m: dm.MassiveSession) -> None:
 
 
 def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
+    for moment in (datetime(2025, 6, 2, 15, 30, tzinfo=UTC), "2025-06-03T02:00:00+00:00"):
+        with pytest.raises(ValueError, match=r"date is a calendar date; pass a date"):
+            m.indices.daily_open_close("I:SPX", moment)
     naive = datetime(2025, 6, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     with pytest.raises(ValueError, match="needs a timezone"):
         m.indices.daily_open_close("I:SPX", naive)

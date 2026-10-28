@@ -372,14 +372,17 @@ def test_daily_open_close(massive_session: dm.MassiveSession) -> None:
 @pytest.mark.parametrize(
     "moment",
     [
-        datetime(2026, 1, 2, 23, 30, tzinfo=timezone(timedelta(hours=-5))),  # 04:30 UTC, Jan 3
+        datetime(2026, 1, 2, 23, 30, tzinfo=timezone(timedelta(hours=-5))),
         "2026-01-02T23:30:00-05:00",
     ],
 )
-def test_daily_open_close_reads_a_time_as_its_utc_day(
+def test_daily_open_close_refuses_a_time(
     massive_session: dm.MassiveSession, moment: datetime | str
 ) -> None:
-    q = massive_session.crypto.daily_open_close("BTC-USD", moment)
+    # The day is a calendar date: which UTC day an instant names is left to no guess.
+    with pytest.raises(ValueError, match=r"^crypto\.daily_open_close: date is a calendar date"):
+        massive_session.crypto.daily_open_close("BTC-USD", moment)
+    q = massive_session.crypto.daily_open_close("BTC-USD", "2026-01-03")
     assert request_of(q).params == (("date", date(2026, 1, 3)),)
 
 
@@ -614,30 +617,71 @@ def test_trades_history_over_rest_bounds_the_utc_day(
     ]
 
 
+def restamp(fixture: bytes, *stamps: int) -> bytes:
+    # The documented REST samples stamp 1-day bars at midnight New York time; restamp their
+    # bars, in order, to test the UTC day cut the library accepts.
+    body = json.loads(fixture)
+    for bar, stamp in zip(body["results"], stamps, strict=False):
+        bar["t"] = stamp
+    return json.dumps(body).encode()
+
+
+NOV_15 = int(datetime(2020, 11, 15, tzinfo=UTC).timestamp()) * 1000
+DAY_MS = 86_400_000
+
+
 def test_daily_bars_fetch_reads_the_previous_day(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
+    prev = load_fixture(OWNER, "prev.json")
+    for stamp in (NOV_15, NOV_15 + DAY_MS - 1):  # each request takes the next reply
+        serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", restamp(prev, stamp))
+    for _ in range(2):
+        out = rows(rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY).fetch())
+        # Either cut of the UTC day is stamped at its start.
+        assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Vwap"]) for r in out] == [
+            ("X:BTCUSD", NOV_15 * MS, 16035.9, 15954.2111)
+        ]
+
+
+def test_a_daily_bar_stamped_inside_its_utc_day_fails_loudly(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    # The documented sample sits at midnight New York time, 05:00 UTC: another day cut.
     serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", load_fixture(OWNER, "prev.json"))
-    out = rows(rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY).fetch())
-    assert sent(fake_rest) == [("/v2/aggs/ticker/X:BTCUSD/prev", {})]
-    assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Vwap"]) for r in out] == [
-        ("X:BTCUSD", 1605416400000 * MS, 16035.9, 15954.2111)
-    ]
+    q = rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY)
+    with pytest.raises(
+        dm.MassiveError,
+        match=(
+            r"^crypto\.bars: a 1-day bar from /v2/aggs/ticker/\{cryptoTicker\}/prev is "
+            r"stamped 2020-11-15T05:00:00"
+        ),
+    ):
+        q.fetch()
+    path = "/v2/aggs/grouped/locale/global/market/crypto/2020-02-02"
+    serve(fake_rest, path, load_fixture(OWNER, "grouped.json"))
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"/v2/aggs/grouped/locale/global/market/crypto/\{date\} is stamped 2020-02-02T20:48",
+    ):
+        rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY).history(
+            "2020-02-02", "2020-02-02", source=dm.HistorySource.REST
+        )
 
 
 def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     start = int(datetime(2020, 6, 1, tzinfo=UTC).timestamp()) * 1000
-    end = start + 2 * 86_400_000 - 1
+    end = start + 2 * DAY_MS - 1
     path = f"/v2/aggs/ticker/X:BTCUSD/range/1/day/{start}/{end}"
-    serve(fake_rest, path, load_fixture(OWNER, "range.json"))
+    serve(fake_rest, path, restamp(load_fixture(OWNER, "range.json"), start, start + DAY_MS))
     q = rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY)
     out = rows(q.history("2020-06-01", "2020-06-02", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Transactions"]) for r in out] == [
-        ("X:BTCUSD", 1590984000000 * MS, 9557.9, 1),
-        ("X:BTCUSD", 1591070400000 * MS, 10096.87, 1),
+        ("X:BTCUSD", start * MS, 9557.9, 1),
+        ("X:BTCUSD", (start + DAY_MS) * MS, 10096.87, 1),
     ]
 
 
@@ -645,13 +689,15 @@ def test_every_pairs_daily_bars_read_the_grouped_day(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     path = "/v2/aggs/grouped/locale/global/market/crypto/2020-02-02"
-    serve(fake_rest, path, load_fixture(OWNER, "grouped.json"))
+    day = int(datetime(2020, 2, 2, tzinfo=UTC).timestamp()) * 1000
+    last = day + DAY_MS - 1
+    serve(fake_rest, path, restamp(load_fixture(OWNER, "grouped.json"), last, day))
     q = rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
     out = rows(q.history("2020-02-02", "2020-02-02", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {})]
     assert [(r["Symbol"], r["Timestamp"], r["Transactions"]) for r in out] == [
-        ("X:ARDRUSD", 1580676480000 * MS, 18388),
-        ("X:NGCUSD", 1580674080000 * MS, 18),
+        ("X:ARDRUSD", day * MS, 18388),
+        ("X:NGCUSD", day * MS, 18),
     ]
 
 
@@ -883,8 +929,9 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
             lambda c: c.bars(dm.ALL, dm.Timespan.DAY),
             "global_crypto/day_aggs_v1",
             [
-                ("X:LINKUSD", 1680047999999000000, 6.947),
-                ("X:ADAUSD", 1680047999999000000, 0.36816),
+                # Stamped 23:59:59.999 UTC in the file, at the start of the UTC day here.
+                ("X:LINKUSD", 1679961600000000000, 6.947),
+                ("X:ADAUSD", 1679961600000000000, 0.36816),
             ],
         ),
     ],
@@ -908,3 +955,24 @@ def test_one_flat_file_block_round_trips(
     table = q.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES)
     price = "Price" if "trades" in prefix else "Close"
     assert [(r["Symbol"], r["Timestamp"], r[price]) for r in rows(table)] == expected
+
+
+def test_a_flat_file_day_bar_stamped_inside_its_utc_day_fails_loudly(
+    *,
+    s3_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    stamp = int(datetime(2023, 3, 28, 4, tzinfo=UTC).timestamp()) * 10**9  # New York midnight
+    csv_text = (
+        "ticker,volume,open,close,high,low,window_start,transactions\n"
+        f"X:BTCUSD,1,1.0,1.0,1.0,1.0,{stamp},1\n"
+    )
+    fake_s3.put("global_crypto/day_aggs_v1/2023/03/2023-03-28.csv.gz", make_csv_gz(csv_text))
+    q = s3_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^crypto\.bars: a 1-day bar from the flat files global_crypto/day_aggs_v1 is "
+        r"stamped 2023-03-28T04:00:00",
+    ):
+        q.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES)

@@ -13,12 +13,14 @@ from deephaven_massive._datasets.timestamps import (
     MIN_INSTANT_NS,
     TimeUnit,
     UnitMismatchError,
+    check_utc_midnights,
     instants,
     masked_instants,
     mismatch_message,
     time_unit,
     to_epoch_ns,
     to_epoch_ns_array,
+    utc_day_stamps,
 )
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType, WireUnit, source, sources
@@ -241,3 +243,67 @@ def test_a_masked_failure_reads_as_the_routine_would_raise_it() -> None:
         "timestamp unit mismatch for t.T: 4611686018427387904 ms|ns is outside 1990 to 2100"
     )
     assert mismatch_message("t.T", TimeUnit.SECONDS, 2**40).endswith("overflows 64-bit nanoseconds")
+
+
+DAY_NS = 86_400 * 10**9
+MARCH_3 = 1_740_960_000 * 10**9  # 2025-03-03T00:00Z
+
+
+def stamps(*values: int | None) -> pa.Array:
+    return pa.array(values, pa.timestamp("ns", "UTC"))
+
+
+def test_utc_day_stamps_move_each_bar_to_its_days_start() -> None:
+    # The aggregates' 00:00 UTC stays; day_aggs_v1's 23:59:59.999 UTC moves to its day's start.
+    last_ms = MARCH_3 + DAY_NS - 10**6
+    values = stamps(MARCH_3, last_ms, None)
+    for checked in (True, False):
+        moved = utc_day_stamps("crypto.bars", values, source="REST", checked=checked, remedy="r")
+        assert moved.type == values.type
+        assert moved.cast(pa.int64()).to_pylist() == [MARCH_3, MARCH_3, None]
+    # A stamp anywhere in the first or last millisecond counts as that boundary.
+    edge = stamps(MARCH_3 + 999_999, MARCH_3 + DAY_NS - 1)
+    assert utc_day_stamps("crypto.bars", edge, source="x", checked=True, remedy="r").cast(
+        pa.int64()
+    ).to_pylist() == [MARCH_3, MARCH_3]
+
+
+def test_forex_day_stamps_move_any_stamp_of_the_day() -> None:
+    new_york_midnight = MARCH_3 + 5 * 3600 * 10**9
+    moved = utc_day_stamps(
+        "forex.bars", stamps(new_york_midnight), source="x", checked=False, remedy="r"
+    )
+    assert moved.cast(pa.int64()).to_pylist() == [MARCH_3]
+
+
+@pytest.mark.parametrize("offset", [10**6, 5 * 3600 * 10**9, DAY_NS - 10**6 - 1])
+def test_a_crypto_stamp_inside_its_day_fails_loudly(offset: int) -> None:
+    with pytest.raises(
+        MassiveError, match=r"^crypto\.bars: a 1-day bar from /v2/aggs/x is stamped 2025-03-03T"
+    ) as caught:
+        utc_day_stamps(
+            "crypto.bars",
+            stamps(MARCH_3, MARCH_3 + offset),
+            source="/v2/aggs/x",
+            checked=True,
+            remedy="read the flat files",
+        )
+    message = str(caught.value)
+    assert "is not a UTC day boundary" in message
+    assert message.endswith(
+        "; read the flat files, and report the stamp so the day cut can be settled"
+    )
+
+
+def test_longer_crypto_bars_must_start_at_utc_midnight() -> None:
+    week = stamps(MARCH_3, MARCH_3 + 7 * DAY_NS, None)
+    check_utc_midnights("crypto.bars", week, source="x", remedy="r")  # no error
+    new_york = MARCH_3 + 5 * 3600 * 10**9
+    with pytest.raises(
+        MassiveError, match=r"^crypto\.bars: a bar from /v2/aggs/x is stamped 2025-03-03T05:00"
+    ):
+        check_utc_midnights(
+            "crypto.bars", stamps(MARCH_3, new_york), source="/v2/aggs/x", remedy="r"
+        )
+    with pytest.raises(MassiveError, match="is not a UTC day boundary"):
+        check_utc_midnights("crypto.bars", stamps(MARCH_3 + DAY_NS - 1), source="x", remedy="r")
