@@ -490,5 +490,6 @@ class _Forex(Namespace):
             raise TypeError(f"precision must be an int, not {type(precision).__name__}")
         if precision not in _PRECISIONS:
             raise ValueError(f"precision must be 0 to 4, got {precision}")
-        params = {"from": source, "to": target, "amount": value, "precision": precision}
+        # The endpoint's `precision` is an enum of the digits "0" to "4", so it is sent as text.
+        params = {"from": source, "to": target, "amount": value, "precision": str(precision)}
         return cast("Query", build_query(self._core, CONVERSION, params=params))

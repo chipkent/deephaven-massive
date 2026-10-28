@@ -5,20 +5,30 @@ responses; each is decoded against its generated path to prove it has the genera
 """
 
 import json
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
-from typing import cast
+from typing import Any, cast
+from urllib.parse import parse_qs, unquote, urlsplit
 
+import pyarrow as pa
 import pytest
+from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
+from deephaven.stream import blink_to_append_only
+from deephaven.table import Table
 
 import deephaven_massive as dm
+from deephaven_massive import _massive
+from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._massive import RestPath, Transport, source, to_batch
+from deephaven_massive._enums import Recency
+from deephaven_massive._ingest import ws
+from deephaven_massive._massive import RestPath, Source, Status, Transport, source, to_batch
 from deephaven_massive._namespaces import forex
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import (
@@ -31,8 +41,13 @@ from deephaven_massive._query import (
     StreamQuery,
 )
 from deephaven_massive._session import CATALOG
+from tests._fakes.rest import FakeRestServer, Reply
+from tests._fakes.s3 import FakeS3
+from tests._fakes.ws import FakeMassiveServer
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
+NS = 10**9
+MS = 10**6
 DOCS = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#"
 
 RANGE = "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}"
@@ -258,10 +273,10 @@ def test_conversion(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.conversion(" aud", "Usd ", amount=100, precision=4)
     assert type(query) is Query
     assert request(query) == Request(
-        params=(("amount", 100.0), ("from", "AUD"), ("precision", 4), ("to", "USD"))
+        params=(("amount", 100.0), ("from", "AUD"), ("precision", "4"), ("to", "USD"))
     )
     default = request(massive_session.forex.conversion("EUR", "USD"))
-    assert dict(default.params) == {"amount": 1.0, "from": "EUR", "precision": 2, "to": "USD"}
+    assert dict(default.params) == {"amount": 1.0, "from": "EUR", "precision": "2", "to": "USD"}
 
 
 @pytest.mark.parametrize(
@@ -396,3 +411,425 @@ def test_each_fixture_has_the_generated_shape(
     batch, drift = to_batch(rows, rest_path, required=required)
     assert batch.num_rows == len(rows) > 0
     assert (drift.extra, drift.missing) == (frozenset(), frozenset())
+
+
+# --- REST, end to end -------------------------------------------------------------------------
+
+
+@pytest.fixture
+def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+def rows(table: Table) -> list[dict[str, Any]]:
+    # Instants become epoch nanoseconds, so assertions keep every digit.
+    data = dh_arrow.to_arrow(table)
+    columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
+    out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    return out
+
+
+def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
+    # Every GET the server received: its path and decoded query.
+    return [
+        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
+        for r in server.requests
+        if r.method == "GET"
+    ]
+
+
+def epoch_ns(moment: datetime) -> int:
+    return int(moment.timestamp()) * NS
+
+
+def fixture_body(load_fixture: Callable[[str, str], bytes], name: str) -> dict[str, Any]:
+    body: dict[str, Any] = json.loads(load_fixture("namespaces/forex", name))
+    return body
+
+
+def pick(table: Table, *names: str) -> list[tuple[Any, ...]]:
+    return [tuple(row[name] for name in names) for row in rows(table)]
+
+
+def test_quotes_fetch_reads_the_last_quote_of_each_pair(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    body = fixture_body(load_fixture, "last_quote.json")
+    fake_rest.reply("/v1/last_quote/currencies/AUD/USD", Reply(body))
+    table = rest_session.forex.quotes("aud-usd").fetch()
+    # The pair goes out as two path segments, and the whole pair comes back as `Symbol`.
+    assert sent(fake_rest) == [("/v1/last_quote/currencies/AUD/USD", {})]
+    columns = ("Symbol", "Timestamp", "AskPrice", "BidPrice", "Exchange")
+    assert pick(table, *columns) == [("C:AUDUSD", 1_605_557_756_000 * MS, 0.73124, 0.73122, 48)]
+
+
+def test_quotes_history_reads_the_quote_history(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    body = fixture_body(load_fixture, "quotes.json")
+    del body["next_url"]  # the sample's next page is on Massive's host
+    fake_rest.reply("/v3/quotes/C%3AEURUSD", Reply(body))
+    query = rest_session.forex.quotes("EUR/USD")
+    table = query.history(date(2021, 7, 1), date(2021, 7, 1), source=dm.HistorySource.REST)
+    # A forex day is a UTC day, sent as nanosecond bounds of the half-open window.
+    day = epoch_ns(datetime(2021, 7, 1, tzinfo=UTC))
+    assert sent(fake_rest) == [
+        (
+            "/v3/quotes/C:EURUSD",
+            {
+                "limit": ["50000"],
+                "timestamp.gte": [str(day)],
+                "timestamp.lt": [str(day + 86_400 * NS)],
+            },
+        )
+    ]
+    columns = ("Symbol", "Timestamp", "AskPrice", "BidPrice", "AskExchange", "BidExchange")
+    assert pick(table, *columns) == [
+        ("C:EURUSD", 1_625_097_600_000_000_000, 1.18565, 1.18558, 48, 48),
+        ("C:EURUSD", 1_625_097_600_000_000_000, 1.18565, 1.18559, 48, 48),
+    ]
+
+
+BAR_COLUMNS = ("Symbol", "Timestamp", "Open", "High", "Low", "Close", "Volume", "Vwap")
+
+
+def test_daily_bars_fetch_reads_the_previous_session(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(
+        "/v2/aggs/ticker/C%3AEURUSD/prev", Reply(fixture_body(load_fixture, "prev.json"))
+    )
+    table = rest_session.forex.bars("EUR/USD", dm.Timespan.DAY, adjusted=False).fetch()
+    assert sent(fake_rest) == [("/v2/aggs/ticker/C:EURUSD/prev", {"adjusted": ["false"]})]
+    assert pick(table, *BAR_COLUMNS) == [
+        ("C:EURUSD", 1_651_708_799_999 * MS, 1.05252, 1.0631, 1.0505, 1.06206, 180300.0, 1.055)
+    ]
+
+
+def test_bars_history_reads_the_aggregate_range(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(
+        "/v2/aggs/ticker/C%3AEURUSD/range/1/hour/1626912000000/1626998399999",
+        Reply(fixture_body(load_fixture, "range.json")),
+    )
+    query = rest_session.forex.bars("C:EURUSD", dm.Timespan.HOUR)
+    table = query.history("2021-07-22", "2021-07-22", source=dm.HistorySource.REST)
+    # The UTC day goes out as millisecond path segments; `adjusted` and the page size as query.
+    assert sent(fake_rest) == [
+        (
+            "/v2/aggs/ticker/C:EURUSD/range/1/hour/1626912000000/1626998399999",
+            {"adjusted": ["true"], "limit": ["50000"]},
+        )
+    ]
+    assert pick(table, *BAR_COLUMNS) == [
+        ("C:EURUSD", 1_626_912_000_000 * MS, 1.17921, 1.18305, 1.1756, 1.17721, 125329.0, 1.1789)
+    ]
+
+
+def test_daily_bars_of_every_pair_read_the_grouped_day(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(
+        "/v2/aggs/grouped/locale/global/market/fx/2020-10-14",
+        Reply(fixture_body(load_fixture, "grouped_daily.json")),
+    )
+    query = rest_session.forex.bars(dm.ALL, dm.Timespan.DAY)
+    table = query.history("2020-10-14", "2020-10-14", source=dm.HistorySource.REST)
+    assert sent(fake_rest) == [
+        ("/v2/aggs/grouped/locale/global/market/fx/2020-10-14", {"adjusted": ["true"]})
+    ]
+    assert [row[0] for row in pick(table, "Symbol")] == ["C:ILSCHF", "C:GBPCAD", "C:DKKAUD"]
+
+
+SNAPSHOTS_PATH = "/v2/snapshot/locale/global/markets/forex/tickers"
+
+
+def test_snapshots_send_the_pairs_as_tickers(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(SNAPSHOTS_PATH, Reply(fixture_body(load_fixture, "snapshots.json")))
+    table = rest_session.forex.snapshots(["HKD/CHF", "EUR/USD"]).fetch()
+    assert sent(fake_rest) == [(SNAPSHOTS_PATH, {"tickers": ["C:EURUSD,C:HKDCHF"]})]
+    columns = ("Symbol", "DayClose", "LastQuoteAskPrice", "PrevDayClose", "Updated")
+    assert pick(table, *columns) == [
+        ("C:HKDCHF", 0.11778221, 0.11780678, 0.11797258, 1_605_280_919_000 * MS)
+    ]
+
+
+def test_snapshots_of_every_pair_send_no_tickers(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(SNAPSHOTS_PATH, Reply(fixture_body(load_fixture, "snapshots.json")))
+    assert rest_session.forex.snapshots(dm.ALL).fetch().size == 1
+    assert sent(fake_rest) == [(SNAPSHOTS_PATH, {})]
+
+
+def test_movers_put_the_direction_in_the_path(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    path = "/v2/snapshot/locale/global/markets/forex/losers"
+    fake_rest.reply(path, Reply(fixture_body(load_fixture, "movers.json")))
+    table = rest_session.forex.movers(dm.Direction.LOSERS).fetch()
+    assert sent(fake_rest) == [(path, {})]
+    assert pick(table, "Symbol", "TodaysChangePerc") == [("C:PLNILS", 5.13770674)]
+
+
+def test_conversion_sends_the_pair_amount_and_precision(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    body = fixture_body(load_fixture, "conversion.json")
+    fake_rest.reply("/v1/conversion/AUD/USD", Reply(body))
+    table = rest_session.forex.conversion("aud", "usd", amount=100, precision=4).fetch()
+    assert sent(fake_rest) == [
+        ("/v1/conversion/AUD/USD", {"amount": ["100.0"], "precision": ["4"]})
+    ]
+    columns = ("Symbol", "Converted", "InitialAmount", "LastAsk", "LastBid", "LastTimestamp")
+    # The vendor's `AUD/USD` becomes the canonical pair.
+    assert pick(table, *columns) == [
+        ("C:AUDUSD", 73.14, 100.0, 1.3673344, 1.3672596, 1_605_555_313_000 * MS)
+    ]
+
+
+# --- WebSocket, end to end --------------------------------------------------------------------
+
+REALTIME = HostDecision("socket.test", Recency.REALTIME, "a test host")
+WAIT = 15.0
+
+
+class Socket:
+    """A session whose WebSocket connections reach the fake server, counting decoded frames."""
+
+    def __init__(self, server: FakeMassiveServer) -> None:
+        self.server = server
+        self.frames = 0
+        self.cond = threading.Condition()
+        self.session = dm.MassiveSession(
+            dm.MassiveConfig(api_key="test-key", flush_interval=3600.0)
+        )
+        core = self.session._core
+        self.connections = ws.WsConnections(
+            core,
+            resolve_host=lambda *_: REALTIME,
+            record_verdict=lambda *_: None,
+            client_factory=self.client,
+        )
+        cast("Any", core._ports)._streams = self.connections
+        core.on_close(self.connections.close)
+
+    def client(
+        self,
+        url: str,
+        *,
+        sources: Sequence[Source],
+        on_open: Callable[[int], None],
+        on_status: Callable[[int, Status], None],
+        on_data: Callable[..., None],
+        on_state: Callable[..., None],
+    ) -> _massive.WsClient:
+        def data(*event: object) -> None:
+            on_data(*event)
+            with self.cond:
+                self.frames += 1
+                self.cond.notify_all()
+
+        return _massive.WsClient(
+            self.server.url("/" + url.split("/", 3)[3]),
+            api_key="test-key",
+            sources=sources,
+            on_open=on_open,
+            on_status=on_status,
+            on_data=data,
+            on_state=on_state,
+            reconnect_backoff=0.05,
+            max_reconnect_backoff=0.1,
+        )
+
+    def subscribed(self, topic: str) -> None:
+        def named(server: FakeMassiveServer) -> bool:
+            frames = [json.loads(f) for c in server.connections for f in c.frames]
+            return any(f["action"] == "subscribe" and topic in f["params"] for f in frames)
+
+        self.server.wait_for(named)
+
+    def send(self, frame: dict[str, object]) -> None:
+        with self.cond:
+            before = self.frames
+        self.server.send(json.dumps([frame]))
+        with self.cond:
+            assert self.cond.wait_for(lambda: self.frames > before, WAIT)
+        with self.session._core.registry_lock:
+            connections = list(self.connections._connections.values())
+        for connection in connections:
+            connection.flusher.flush()
+
+
+@pytest.fixture
+def socket(fake_ws_server: FakeMassiveServer) -> Iterator[Socket]:
+    harness = Socket(fake_ws_server)
+    yield harness
+    harness.session.close()
+
+
+def landed(blink: Table) -> Callable[[], list[dict[str, Any]]]:
+    # The blink table holds a row for one update cycle only; an append-only view keeps it.
+    kept = blink_to_append_only(blink)
+
+    def read() -> list[dict[str, Any]]:
+        pause = threading.Event()  # never set; only paces the wait for the update cycle
+        for _ in range(500):
+            if kept.size:
+                break
+            pause.wait(0.02)
+        return rows(kept)
+
+    return read
+
+
+def test_a_quote_frame_lands_in_blink(socket: Socket) -> None:
+    read = landed(socket.session.forex.quotes("C:EURUSD").blink())
+    socket.subscribed("C.EUR/USD")
+    socket.send(
+        {"ev": "C", "p": "EUR/USD", "x": 44, "a": 1.0832, "b": 1.0831, "t": 1_700_000_000_123}
+    )
+    columns = ("Symbol", "Timestamp", "AskPrice", "BidPrice", "Exchange")
+    assert [tuple(r[c] for c in columns) for r in read()] == [
+        ("C:EURUSD", 1_700_000_000_123 * MS, 1.0832, 1.0831, 44)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("timespan", "channel"), [(dm.Timespan.MINUTE, "CA"), (dm.Timespan.SECOND, "CAS")]
+)
+def test_a_bar_frame_lands_in_blink(socket: Socket, timespan: dm.Timespan, channel: str) -> None:
+    query = socket.session.forex.bars("EUR/USD", timespan)
+    assert isinstance(query, StreamHistoryQuery)
+    read = landed(query.blink())
+    socket.subscribed(f"{channel}.EUR/USD")
+    frame = {
+        "ev": channel,
+        "pair": "EUR/USD",
+        "o": 1.08,
+        "c": 1.09,
+        "h": 1.1,
+        "l": 1.07,
+        "v": 20,
+        "s": 1_700_000_040_000,
+        "e": 1_700_000_100_000,
+    }
+    socket.send(frame)
+    columns = ("Symbol", "Timestamp", "Open", "Close", "Volume", "EndTimestamp")
+    assert [tuple(r[c] for c in columns) for r in read()] == [
+        ("C:EURUSD", 1_700_000_040_000 * MS, 1.08, 1.09, 20.0, 1_700_000_100_000 * MS)
+    ]
+
+
+def test_a_fair_value_frame_lands_in_blink(socket: Socket) -> None:
+    read = landed(socket.session.forex.fmv("EUR/USD").blink())
+    socket.subscribed("FMV.EUR/USD")
+    socket.send({"ev": "FMV", "fmv": 1.0631, "sym": "C:EURUSD", "t": 1_678_220_098_130})
+    assert [(r["Symbol"], r["Timestamp"], r["Fmv"]) for r in read()] == [
+        ("C:EURUSD", 1_678_220_098_130 * MS, 1.0631)
+    ]
+
+
+# --- Flat files, end to end -------------------------------------------------------------------
+
+FILE_DAY = "2025-03-03"
+AFTER_PUBLICATION = datetime(2025, 3, 10, 16, tzinfo=UTC)
+
+
+@pytest.fixture
+def files_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
+    monkeypatch.setattr(history_source, "_now", lambda: AFTER_PUBLICATION)
+    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "flat-file-secret"}
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", **cast("Any", credentials)))
+    yield m
+    m.close()
+
+
+def file_key(prefix: str) -> str:
+    return f"{prefix}/2025/03/{FILE_DAY}.csv.gz"
+
+
+def test_quote_files_round_trip(*, files_session: dm.MassiveSession, fake_s3: FakeS3) -> None:
+    moment = epoch_ns(datetime(2025, 3, 3, 12, tzinfo=UTC))
+    header = (
+        "ticker",
+        "ask_exchange",
+        "ask_price",
+        "bid_exchange",
+        "bid_price",
+        "participant_timestamp",
+    )
+    fake_s3.put_csv(
+        file_key("global_forex/quotes_v1"),
+        header,
+        [
+            dict(zip(header, ("C:EURUSD", 48, 1.08066, 48, 1.08063, moment), strict=True)),
+            dict(zip(header, ("C:GBPUSD", 48, 1.2701, 48, 1.27, moment), strict=True)),
+        ],
+    )
+    query = files_session.forex.quotes("EUR/USD")
+    table = query.history(FILE_DAY, FILE_DAY, source=dm.HistorySource.FLAT_FILES)
+    assert fake_s3.requests == [("flatfiles", file_key("global_forex/quotes_v1"))]
+    columns = ("Symbol", "Timestamp", "AskPrice", "BidPrice", "AskExchange", "Exchange")
+    assert pick(table, *columns) == [("C:EURUSD", moment, 1.08066, 1.08063, 48, None)]
+
+
+BAR_HEADER = ("ticker", "volume", "open", "close", "high", "low", "window_start", "transactions")
+
+
+@pytest.mark.parametrize(
+    ("timespan", "prefix"),
+    [
+        (dm.Timespan.MINUTE, "global_forex/minute_aggs_v1"),
+        (dm.Timespan.DAY, "global_forex/day_aggs_v1"),
+    ],
+)
+def test_bar_files_round_trip(
+    *,
+    files_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    timespan: dm.Timespan,
+    prefix: str,
+) -> None:
+    start = epoch_ns(datetime(2025, 3, 3, tzinfo=UTC))
+    values = ("C:EURUSD", 120, 1.08063, 1.08033, 1.0807, 1.0803, start, 120)
+    fake_s3.put_csv(file_key(prefix), BAR_HEADER, [dict(zip(BAR_HEADER, values, strict=True))])
+    # Flat files hold unadjusted bars only, so the query asks for those.
+    query = files_session.forex.bars(dm.ALL, timespan, adjusted=False)
+    table = query.history(FILE_DAY, FILE_DAY, source=dm.HistorySource.FLAT_FILES)
+    assert fake_s3.requests == [("flatfiles", file_key(prefix))]
+    assert pick(table, *BAR_COLUMNS) == [
+        ("C:EURUSD", start, 1.08063, 1.0807, 1.0803, 1.08033, 120.0, None)
+    ]
