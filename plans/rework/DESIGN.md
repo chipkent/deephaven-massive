@@ -1455,7 +1455,7 @@ has the same value set as that parameter.
 | `HistorySource` | AUTO, REST, FLAT_FILES | `auto`, `rest`, `flat_files` | `history()` |
 | `FuturesVenue` | CME, CBOT, NYMEX, COMEX | `cme`, `cbot`, `nymex`, `comex` | futures factory methods; flat-file prefix only |
 | `Direction` | GAINERS, LOSERS | `gainers`, `losers` | `movers()` |
-| `ContractType` | CALL, PUT, OTHER | `call`, `put`, `other` | `options.chain`, `options.contracts` |
+| `ContractType` | CALL, PUT | `call`, `put` | `options.chain`, `options.contracts` |
 | `SeriesType` | OPEN, HIGH, LOW, CLOSE | `open`, `high`, `low`, `close` | `indicators.*` |
 | `Timeframe` | ANNUAL, QUARTERLY | `annual`, `quarterly` | `stocks.financials.*` |
 | `Order` | ASC, DESC | `asc`, `desc` | the `…F` block |

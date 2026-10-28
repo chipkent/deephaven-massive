@@ -224,6 +224,7 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     fetch_path=_OPEN_CLOSE,
     keys={(_REST, _OPEN_CLOSE): _keys("Symbol")},
+    # One contract a request, which makes this an instrument dataset: its `Symbol` is required.
     per_symbol=True,
 )
 
@@ -273,6 +274,23 @@ def _contract_type(value: object) -> ContractType | None:
     A value that is not a `dm.ContractType` raises the `TypeError` of `_require_enum`.
     """
     return None if value is None else _require_enum(value, ContractType, "contract_type")
+
+
+def _expired(value: object) -> bool | None:
+    """Check the optional `expired` argument of the contracts.
+
+    Args:
+        value: The argument as passed.
+
+    Returns:
+        The value: True, False, or None.
+
+    Raises:
+        TypeError: If the value is neither None nor a `bool`.
+    """
+    if value is not None and not isinstance(value, bool):
+        raise TypeError(f"expired must be a bool, not {type(value).__name__}")
+    return value
 
 
 class _Options(Namespace):
@@ -426,7 +444,8 @@ class _Options(Namespace):
         internally and returns the whole range.
 
         `dm.ALL` streams every contract and reads every contract of a day's flat file; `fetch()`
-        and REST `history()` take explicit contracts and raise `ValueError` for `dm.ALL`.
+        and REST `history()` take explicit contracts and raise `ValueError` for `dm.ALL`. One
+        `/options` connection carries at most 1,000 contract topics.
 
         The columns, their types, and what each holds are listed in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#bars,
@@ -583,8 +602,9 @@ class _Options(Namespace):
         details, the session's prices, the last quote, trade, and minute bar, the greeks, the
         implied volatility, the open interest, and the fair market value. It reads Massive's
         unified snapshot (`/v3/snapshot`) restricted to options, at most 250 contracts per
-        request; `poll()` re-reads it each interval, which is the current state of a contract
-        on every plan.
+        request; `poll()` re-reads it each interval. Massive includes this endpoint from the
+        Options Starter plan up, and the last-trade endpoint only from Options Developer,
+        so polling the snapshots follows a contract's current state on more plans.
 
         `dm.ALL` lists every options contract Massive has, paginated: that is millions of rows
         and many requests, so it is slow. `limit` caps the total number of rows across pages
@@ -658,13 +678,13 @@ class _Options(Namespace):
         row); it is not the page size. `dm.ALL` is not accepted: leave `symbols` out to list
         every contract.
 
-        Besides the `TypeError` below, it raises at once, before any request: `ValueError` if
-        `symbols` is `dm.ALL`, a symbol is not an OCC option symbol, a sequence is empty or an
-        exhausted generator, a table has no `Symbol` column, `underlying` is empty, `as_of` is
-        a naive `datetime` or not ISO-8601, `limit` is not positive, a filter key is not a
-        parameter of the endpoints or is set by a typed argument, or a filter value does not
-        fit its parameter; `TypeError` if `underlying` or `sort` is not a `str`,
-        `contract_type` is not a `dm.ContractType`, `order` is not a `dm.Order`, `limit` is
+        It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a
+        symbol is not an OCC option symbol, a sequence is empty or an exhausted generator, a
+        table has no `Symbol` column, `underlying` is empty, `as_of` is a naive `datetime` or
+        not ISO-8601, `limit` is not positive, a filter key is not a parameter of the endpoints
+        or is set by a typed argument, or a filter value does not fit its parameter;
+        `TypeError` if `underlying` or `sort` is not a `str`, `contract_type` is not a
+        `dm.ContractType`, `expired` is not a `bool`, `order` is not a `dm.Order`, `limit` is
         not an `int`, or `filters` is not a mapping.
 
         The columns, their types, and what each holds are listed in the column reference,
@@ -687,15 +707,11 @@ class _Options(Namespace):
             order: The sort direction; None for the endpoint's default.
             limit: The most rows to return, a positive `int`; None for every row.
             filters: Further parameters of the endpoints, by wire name with dots written as
-                underscores: `strike_price`, `expiration_date`, `underlying_ticker` range
-                forms, and their `_gt`, `_gte`, `_lt`, and `_lte` forms, such as
-                `{"expiration_date_lte": "2026-01-16"}`.
+                underscores: `strike_price`, `expiration_date`, and their `_gt`, `_gte`,
+                `_lt`, and `_lte` forms, such as `{"expiration_date_lte": "2026-01-16"}`.
 
         Returns:
             A query with `fetch()` and `poll()`.
-
-        Raises:
-            TypeError: If `expired` is not a `bool`.
 
         Example:
             ::
@@ -705,13 +721,11 @@ class _Options(Namespace):
                     filters={"strike_price_gte": 100, "expiration_date_lte": "2026-01-16"},
                 ).fetch()
         """
-        if expired is not None and not isinstance(expired, bool):
-            raise TypeError(f"expired must be a bool, not {type(expired).__name__}")
         params: dict[str, object] = {
             "underlying_ticker": None if underlying is None else _underlying(underlying),
             "contract_type": _contract_type(contract_type),
             "as_of": None if as_of is None else calendar_day(CONTRACTS, as_of, "as_of"),
-            "expired": expired,
+            "expired": _expired(expired),
         }
         params.update(list_params(sort=sort, order=order))
         return cast(

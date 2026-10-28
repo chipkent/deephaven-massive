@@ -104,6 +104,19 @@ def test_the_options_datasets_pass_every_catalog_gate() -> None:
 
 
 def test_each_dataset_reads_its_sources() -> None:
+    assert {spec.name: spec.kind for spec in options.DATASETS} == {
+        "options.trades": "trades",
+        "options.quotes": "quotes",
+        "options.bars": "bars",
+        "options.fmv": "fmv",
+        "options.chain": None,
+        "options.snapshots": None,
+        "options.contracts": None,
+        "options.daily_open_close": None,
+    }
+    # Every dataset but the chain, which takes its underlying instead, takes contracts.
+    takes = {spec.name for spec in options.DATASETS if CATALOG.takes_symbols(spec)}
+    assert takes == {spec.name for spec in options.DATASETS} - {"options.chain"}
     assert options.TRADES.sources == (
         (R, "/v2/last/trade/{optionsTicker}"),
         (R, "/v3/trades/{optionsTicker}"),
@@ -1060,21 +1073,30 @@ CALL = "O:IWM230327C00137000"
                 "ticker,ask_exchange,ask_price,ask_size,bid_exchange,bid_price,bid_size,"
                 "sequence_number,sip_timestamp"
             ),
-            [f"{PUT},309,326.77,1,309,321.77,1,81779,1678715620948000000"],
+            [
+                f"{PUT},309,326.77,1,309,321.77,1,81779,1678715620948000000",
+                f"{CALL},303,328.28,1,303,318.28,2,152697,1678716040304000000",
+            ],
             lambda m: m.options.quotes(PUT),
             {"Timestamp": 1678715620948000000, "AskPrice": 326.77, "SequenceNumber": 81779},
         ),
         (
             "us_options_opra/minute_aggs_v1",
             "ticker,volume,open,close,high,low,window_start,transactions",
-            [f"{PUT},1,11.82,11.82,11.82,11.82,1678715580000000000,1"],
+            [
+                f"{PUT},1,11.82,11.82,11.82,11.82,1678715580000000000,1",
+                f"{CALL},15,11.07,11.07,11.07,11.07,1678716000000000000,1",
+            ],
             lambda m: m.options.bars(PUT, adjusted=False),
             {"Timestamp": 1678715580000000000, "Close": 11.82, "Transactions": 1},
         ),
         (
             "us_options_opra/day_aggs_v1",
             "ticker,volume,open,close,high,low,window_start,transactions",
-            [f"{PUT},200,11.82,9.83,11.82,8.09,1678680000000000000,62"],
+            [
+                f"{PUT},200,11.82,9.83,11.82,8.09,1678680000000000000,62",
+                f"{CALL},1,35.77,35.77,35.77,35.77,1678680000000000000,1",
+            ],
             lambda m: m.options.bars(PUT, dm.Timespan.DAY, adjusted=False),
             {"Timestamp": 1678680000000000000, "Close": 9.83, "Volume": 200.0},
         ),
