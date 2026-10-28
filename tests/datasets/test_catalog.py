@@ -323,9 +323,13 @@ def test_no_poll_keys_on_an_optional_symbol(mode: PollMode) -> None:
     change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): optional}, poll_mode=mode)
 
 
-def test_poll_keys_are_never_empty_and_revisions_never_repeat_them() -> None:
-    with pytest.raises(ValueError, match=r"reference.exchanges: poll_keys cannot be empty"):
+def test_an_append_identity_is_never_empty_and_revisions_never_repeat_poll_keys() -> None:
+    with pytest.raises(ValueError, match=r"reference.exchanges: an APPEND dataset needs poll_keys"):
+        change(EXCHANGES, poll_keys=(), revision_keys=("Name",), poll_mode=PollMode.APPEND)
+    with pytest.raises(ValueError, match=r"an explicit APPEND poll\(\) needs a row identity"):
         change(EXCHANGES, poll_keys=())
+    # A one-row dataset keys on nothing, and appends by its revision.
+    assert change(EXCHANGES, poll_keys=(), revision_keys=("Name",)).poll_keys == ()
     with pytest.raises(ValueError, match=r"revision_keys repeat poll_keys \['Id'\]"):
         change(EXCHANGES, revision_keys=("Name", "Id"))
     assert change(EXCHANGES, revision_keys=("Name",)).revision_keys == ("Name",)

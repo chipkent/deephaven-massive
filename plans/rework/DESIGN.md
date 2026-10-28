@@ -821,12 +821,15 @@ taxonomy is a reference list revised in place, not a feed of new rows).
   appended twice. Nothing is remembered from a cycle that fails to publish, so its rows are
   appended by the next cycle that returns them.
 - `revision_keys` are what make an explicit `mode=APPEND` on a current-state dataset build a
-  history: the snapshot and movers datasets declare their update time (`Updated`, or for the
-  options snapshots and chain `LastQuoteLastUpdated` and `LastTradeSipTimestamp`), so each new
-  state of a symbol is a new row, while `REPLACE` and `UPSERT` stay keyed by `Symbol`. A null
-  in a revision column is a value (a ticker not yet updated). On a dataset with neither unique
-  `poll_keys` nor `revision_keys` (the default `Symbol`), an explicit `APPEND` appends one row
-  per symbol.
+  history: every snapshot and movers dataset declares its update time, so each new state of a
+  symbol is a new row, while `REPLACE` and `UPSERT` stay keyed by `Symbol`. The stocks and
+  crypto snapshots and movers declare `Updated`; the indices snapshots `LastUpdated`; the
+  options snapshots and chain `LastQuoteLastUpdated` and `LastTradeSipTimestamp`; the unified
+  snapshots `LastUpdated`, `LastQuoteLastUpdated`, and `LastTradeLastUpdated`, which together
+  cover every asset class; and `reference.market_status`, a one-row dataset with no
+  `poll_keys`, its `ServerTime`. A null in a revision column is a value (a ticker not yet
+  updated). On a dataset with neither unique `poll_keys` nor `revision_keys` (the default
+  `Symbol`), an explicit `APPEND` appends one row per symbol.
 - A null value in a `poll_keys` column, or a NaN in a float one, fails the table in every mode,
   as a missing required key does: it would otherwise merge unrelated rows into one key. The
   `RowDataError` names the dataset, the key column, the row's position in the cycle, and the
@@ -3444,7 +3447,9 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
 - **Append keys:** a dataset whose default `poll()` mode is `APPEND` declares its own
   `poll_keys`, not the default `Symbol`. The gate checks only that the key is explicit; that it
   is unique per row is checked by the dataset's own tests. (`DatasetSpec` refuses empty
-  `poll_keys` in every mode, and `revision_keys` that repeat a poll key.)
+  `poll_keys` on an `APPEND` dataset, an empty identity (no `poll_keys` and no
+  `revision_keys`) on any dataset, since an explicit `APPEND` could not tell rows apart, and
+  `revision_keys` that repeat a poll key.)
 - **Poll keys:** every `poll_keys` and `revision_keys` column is a column of the dataset's
   schema;
 - **Generated sources:** every path, channel, and prefix a dataset uses is generated; a miss names

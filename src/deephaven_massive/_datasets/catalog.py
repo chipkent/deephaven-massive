@@ -270,10 +270,11 @@ class DatasetSpec:
             takes the symbol as a path parameter or the dataset has no symbols.
         poll_mode: The default `poll()` mode.
         poll_keys: The key columns of a keyed (`REPLACE`, `UPSERT`) `poll()` table, and the
-            first columns of a row's identity in an `APPEND` table; never empty, and a null
-            value in one fails the `poll()` table. A dataset whose `poll_mode` is `APPEND`
-            declares its own (a catalog gate refuses the default), which its tests check is
-            unique per row.
+            first columns of a row's identity in an `APPEND` table; a null value in one fails
+            the `poll()` table. Empty only for a one-row dataset (the latest market status),
+            which then declares `revision_keys`, and never on an `APPEND` dataset. A dataset
+            whose `poll_mode` is `APPEND` declares its own (a catalog gate refuses the
+            default), which its tests check is unique per row.
         revision_keys: Further columns of a row's identity in an `APPEND` table only, after
             `poll_keys`: a current-state dataset's update time, such as `("Updated",)` on a
             snapshot, so that an explicit `mode=APPEND` appends each new state of a symbol
@@ -332,8 +333,9 @@ class DatasetSpec:
                 fills a `time` or `session` key from the request, marks a key other than
                 `fanout` as no instrument, or fills a non-instrument fan-out key from the
                 request, or makes a key optional other than a `symbol` key read from a REST
-                path's rows; `poll_keys` is empty, holds the `Symbol` of an optional symbol
-                key, or shares a column with `revision_keys`; a flat-file prefix does not
+                path's rows; `poll_keys` holds the `Symbol` of an optional symbol key, is empty
+                on an `APPEND` dataset, is empty together with `revision_keys`, or shares a
+                column with `revision_keys`; a flat-file prefix does not
                 declare its `symbol` and `time` keys from its own columns (and, for futures,
                 its `session` key, against which every futures file is checked); or the
                 transports match no query class (see the class docstring and `_check_verbs`).
@@ -501,8 +503,13 @@ class DatasetSpec:
                 "without one would have a null poll key, which fails the poll() table; declare "
                 "other poll_keys"
             )
-        if not self.poll_keys:
-            raise ValueError(f"{self.name}: poll_keys cannot be empty")
+        if not self.poll_keys and self.poll_mode is PollMode.APPEND:
+            raise ValueError(f"{self.name}: an APPEND dataset needs poll_keys")
+        if not (*self.poll_keys, *self.revision_keys):
+            raise ValueError(
+                f"{self.name}: an explicit APPEND poll() needs a row identity: declare "
+                "poll_keys or revision_keys"
+            )
         if repeated := sorted(set(self.poll_keys) & set(self.revision_keys)):
             raise ValueError(f"{self.name}: revision_keys repeat poll_keys {repeated}")
 
