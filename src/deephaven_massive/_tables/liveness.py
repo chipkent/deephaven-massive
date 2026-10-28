@@ -6,8 +6,9 @@ therefore never lets a live result fall into that scope. Every live result is cr
 library-owned *result scope*, a `LivenessScope` that holds exactly that one table, and is tracked by
 a `ResultRecord`:
 
-1. `make_result` opens a fresh scope on the caller thread, builds the table inside it, and, for
-   a new wrapper of an existing Java table (`blink()`), manages the wrapper explicitly.
+1. `make_result` opens a fresh scope on the caller thread and builds the table inside it, so
+   the scope manages it. Every result is a new table, `blink()` included (a described copy of
+   the stream's blink table).
 2. `ResultRegistry.track` records the result under the session's registry lock, keyed by
    `id(result)`, with a `weakref.finalize` that fires when the Python wrapper is
    garbage-collected.
@@ -99,7 +100,7 @@ def new_scope() -> LivenessScope:
     return _LIVENESS_SCOPE()
 
 
-def make_result(build: Callable[[], Table], *, wrap: bool = False) -> tuple[Table, LivenessScope]:
+def make_result(build: Callable[[], Table]) -> tuple[Table, LivenessScope]:
     """Build one live result inside its own new result scope.
 
     Must run on the caller thread: Deephaven's liveness scope stack is thread-local, and the
@@ -109,10 +110,9 @@ def make_result(build: Callable[[], Table], *, wrap: bool = False) -> tuple[Tabl
     propagates.
 
     Args:
-        build: Creates the result, for example `lambda: blink_to_append_only(stream.blink)`.
-        wrap: True when `build` returns a new Python wrapper of an existing Java table
-            (`Table(j_table=...)`, as `blink()` does). Creating a wrapper creates no liveness
-            reference, so the scope then manages the wrapper explicitly.
+        build: Creates the result, a new table, for example
+            `lambda: blink_to_append_only(stream.blink)`. A wrapper of an existing Java table
+            creates no liveness reference, so `build` never returns one.
 
     Returns:
         `(result, scope)`; the scope holds the only library reference to the result.
@@ -121,8 +121,6 @@ def make_result(build: Callable[[], Table], *, wrap: bool = False) -> tuple[Tabl
     try:
         with scope.open():
             result = build()
-        if wrap:
-            scope.manage(result)
     except BaseException:  # also KeyboardInterrupt: the scope must not leak
         scope.release()
         raise
@@ -142,8 +140,8 @@ class StreamHandle:
     Attributes:
         stream_id: The stream's identifier, minted by the session before the open and unique
             within the process (the `StreamId` column of `m.streams()`).
-        blink: The stream's own blink-table wrapper. It is never handed to users: `blink()`
-            returns a new wrapper of the same Java table.
+        blink: The stream's own blink table. It is never handed to users: `blink()`
+            returns a described copy of it.
         scope: The stream scope that manages `blink` and the publisher.
         host: The WebSocket host serving the stream.
         path: The cluster path, such as `/stocks`.
@@ -379,7 +377,7 @@ class ResultRegistry:
 
         Args:
             result: The result, as returned to the user. It must be a distinct Python object
-                per result (each `blink()` call returns its own wrapper).
+                per result (each `blink()` call returns its own described copy).
             scope: The result scope `make_result` created for it.
             on_released: The owner's callback, run on the reaper after the scope is released.
 

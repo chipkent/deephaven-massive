@@ -39,12 +39,17 @@ from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
+    from typing import TypeAlias
 
     from deephaven.table import Table
 
     from deephaven_massive._massive import DriftReport, Reject, Source, WireError
     from tests._fakes.ws import FakeMassiveServer
 
+
+RowsWhen: TypeAlias = (
+    "Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]"
+)
 TIMEOUT = 15.0
 W = Transport.WS
 
@@ -369,12 +374,6 @@ def wait_for(condition: Callable[[], bool]) -> None:
     assert condition()
 
 
-def column(
-    table: Table, name: str, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
-) -> list[object]:
-    return [row[name] for row in dh_to_pylist(table)]
-
-
 def streams_of(
     harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
@@ -401,16 +400,16 @@ def test_the_channel_keys_are_declared_before_its_first_subscribe(harness: Harne
 
 
 def test_a_stream_publishes_only_its_symbols(
-    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]], *, rows_when: RowsWhen
 ) -> None:
     aapl = harness.query(TRADES, ["AAPL"]).append_only()
     every = harness.query(TRADES, dm.ALL).append_only()
     harness.subscribed("T.AAPL", "T.*")
     harness.send(trade("AAPL", 1.5), trade("MSFT", 2.0))
     harness.flush()
-    wait_for(lambda: aapl.size == 1 and every.size == 2)
-    assert column(aapl, "Price", dh_to_pylist) == [1.5]
-    assert sorted(cast("list[str]", column(every, "Symbol", dh_to_pylist))) == ["AAPL", "MSFT"]
+    assert [r["Price"] for r in rows_when(aapl, lambda rows: len(rows) == 1)] == [1.5]
+    every_rows = rows_when(every, lambda rows: len(rows) == 2)
+    assert sorted(r["Symbol"] for r in every_rows) == ["AAPL", "MSFT"]
     rows = streams_of(harness, dh_to_pylist)
     assert [(r["Symbols"], r["RowsPublished"], r["Host"], r["Path"]) for r in rows] == [
         ("AAPL", 1, "socket.test", "/stocks"),
@@ -431,32 +430,34 @@ def test_equal_queries_share_one_stream_and_one_connection(harness: Harness) -> 
 
 
 def test_wire_symbols_become_canonical(
-    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]], *, rows_when: RowsWhen
 ) -> None:
     result = harness.query(FOREX, ["C:EURUSD"]).append_only()
     harness.subscribed("C.EUR-USD")
     harness.send({"ev": "C", "p": "EUR/USD", "a": 1.1, "b": 1.0, "t": 1_700_000_000_000, "x": 1})
     harness.connection("wss://socket.test/forex").flusher.flush()
-    wait_for(lambda: result.size == 1)
-    assert column(result, "Symbol", dh_to_pylist) == ["C:EURUSD"]
+    shown = rows_when(result, lambda rows: len(rows) == 1)
+    assert [r["Symbol"] for r in shown] == ["C:EURUSD"]
 
 
 def test_an_fmv_frame_in_the_canonical_spelling_reaches_its_forex_stream(
-    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+    harness: Harness, *, rows_when: RowsWhen
 ) -> None:
     # FMV frames name the pair `C:EURUSD`, while the topic spells it `EUR-USD`.
     result = harness.query(FOREX_FMV, ["C:EURUSD"]).append_only()
     harness.subscribed("FMV.EUR-USD")
     harness.send({"ev": "FMV", "sym": "C:EURUSD", "fmv": 1.1, "t": 1_700_000_000_000_000_000})
     harness.connection(harness.urls[-1]).flusher.flush()
-    wait_for(lambda: result.size == 1)
-    assert column(result, "Symbol", dh_to_pylist) == ["C:EURUSD"]
+    shown = rows_when(result, lambda rows: len(rows) == 1)
+    assert [r["Symbol"] for r in shown] == ["C:EURUSD"]
 
 
 def test_a_refused_topic_fails_only_its_streams(
     harness: Harness,
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    rows_when: RowsWhen,
 ) -> None:
     fake_ws_server.refuse["Q.AAPL"] = "not authorized to access Q.AAPL"
     trades = harness.query(TRADES, ["AAPL"]).append_only()
@@ -470,12 +471,12 @@ def test_a_refused_topic_fails_only_its_streams(
     assert "MassiveConfig.ws_hosts[AssetClass.STOCKS]" in rows[1]["Error"]
     harness.send(trade("AAPL"))
     harness.flush()
-    wait_for(lambda: trades.size == 1)  # the connection kept running
+    rows_when(trades, lambda rows: len(rows) == 1)  # the connection kept running
     del quotes
 
 
 def test_a_rejected_row_fails_only_the_streams_of_its_symbol(
-    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]], *, rows_when: RowsWhen
 ) -> None:
     aapl = harness.query(TRADES, ["AAPL"]).append_only()
     msft = harness.query(TRADES, ["MSFT"]).blink()
@@ -485,7 +486,7 @@ def test_a_rejected_row_fails_only_the_streams_of_its_symbol(
     del bad["t"]  # a required key
     harness.send(bad, trade("AAPL"))
     harness.flush()
-    wait_for(lambda: aapl.size == 1)
+    rows_when(aapl, lambda rows: len(rows) == 1)
     rows = streams_of(harness, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED", "FAILED"]
     assert "no SipTimestamp" in rows[1]["Error"]
@@ -514,14 +515,14 @@ def test_a_row_without_a_symbol_fails_only_the_all_streams(
 
 
 def test_a_timestamp_out_of_bounds_fails_only_its_streams(
-    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]], *, rows_when: RowsWhen
 ) -> None:
     aapl = harness.query(TRADES, ["AAPL"]).append_only()
     msft = harness.query(TRADES, ["MSFT"]).blink()
     harness.subscribed("T.AAPL", "T.MSFT")
     harness.send(trade("MSFT", t=5), trade("AAPL"))
     harness.flush()
-    wait_for(lambda: aapl.size == 1)
+    rows_when(aapl, lambda rows: len(rows) == 1)
     rows = streams_of(harness, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
     assert "timestamp unit mismatch for test.trades.Timestamp: 5 ms" in rows[1]["Error"]
@@ -558,7 +559,7 @@ def test_releasing_the_last_result_unsubscribes(harness: Harness) -> None:
 
 
 def test_a_derived_table_keeps_the_stream_alive(
-    harness: Harness, fake_ws_server: FakeMassiveServer
+    harness: Harness, fake_ws_server: FakeMassiveServer, rows_when: RowsWhen
 ) -> None:
     result = harness.query(TRADES, ["AAPL"]).append_only()
     harness.subscribed("T.AAPL")
@@ -570,7 +571,7 @@ def test_a_derived_table_keeps_the_stream_alive(
     gc.collect()
     harness.send(trade("AAPL"))
     harness.flush()
-    wait_for(lambda: derived[0].size == 1)
+    rows_when(derived[0], lambda rows: len(rows) == 1)
     assert not any(json.loads(f)["action"] == "unsubscribe" for f in fake_ws_server.frames())
     derived.clear()
     scope.release()
@@ -701,6 +702,8 @@ def test_a_reactive_table_follows_its_rows(
     harness: Harness,
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    rows_when: RowsWhen,
 ) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["aapl", "not a symbol!"])]))
@@ -708,21 +711,23 @@ def test_a_reactive_table_follows_its_rows(
     harness.subscribed("T.AAPL")
     harness.send(trade("AAPL"), trade("MSFT"))
     harness.flush()
-    wait_for(lambda: result.size == 1)
+    rows_when(result, lambda rows: len(rows) == 1)
     watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
     harness.subscribed("T.MSFT")
     watchlist.delete(new_table([string_col("Symbol", ["aapl"])]))
     harness.unsubscribed("T.AAPL")
     harness.send(trade("AAPL", 2.0), trade("MSFT", 3.0))
     harness.flush()
-    wait_for(lambda: result.size == 2)
-    assert column(result, "Symbol", dh_to_pylist) == ["AAPL", "MSFT"]
+    shown = rows_when(result, lambda rows: len(rows) == 2)
+    assert [r["Symbol"] for r in shown] == ["AAPL", "MSFT"]
     # The row that is no valid symbol never became a topic.
     sent = [json.loads(f)["params"] for f in fake_ws_server.frames()]
     assert sent == ["T.AAPL", "T.MSFT", "T.AAPL"]
 
 
-def test_a_derived_table_keeps_following_the_watchlist(harness: Harness) -> None:
+def test_a_derived_table_keeps_following_the_watchlist(
+    harness: Harness, rows_when: RowsWhen
+) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     result = harness.query(TRADES, watchlist).append_only()
@@ -735,7 +740,7 @@ def test_a_derived_table_keeps_following_the_watchlist(harness: Harness) -> None
     harness.subscribed("T.MSFT")
     harness.send(trade("MSFT"))
     harness.flush()
-    wait_for(lambda: derived.size == 1)
+    rows_when(derived, lambda rows: len(rows) == 1)
 
 
 def test_static_options_beyond_the_cap_raise(
@@ -946,13 +951,15 @@ def test_a_failing_shutdown_is_logged(
     assert "the shutdown of stream 42 failed" in caplog.text
 
 
-def test_the_flush_thread_publishes_by_itself(fake_ws_server: FakeMassiveServer) -> None:
+def test_the_flush_thread_publishes_by_itself(
+    fake_ws_server: FakeMassiveServer, rows_when: RowsWhen
+) -> None:
     harness = Harness(fake_ws_server, flush_interval=0.01)
     try:
         result = harness.query(TRADES, ["AAPL"]).append_only()
         harness.subscribed("T.AAPL")
         harness.send(trade("AAPL"))
-        wait_for(lambda: result.size == 1)
+        rows_when(result, lambda rows: len(rows) == 1)
     finally:
         harness.close()
 
@@ -1293,6 +1300,7 @@ def test_the_documented_trade_frame_is_published(
     *,
     load_fixture: Callable[[str, str], bytes],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    rows_when: RowsWhen,
 ) -> None:
     # The frame of Massive's WebSocket quickstart: no `q`, `ds`, or `trfi`, which read as null.
     result = harness.query(TRADES, ["MSFT"]).append_only()
@@ -1301,8 +1309,7 @@ def test_the_documented_trade_frame_is_published(
     fake_ws_server.send(load_fixture("ingest/ws", "stocks_trades.json").decode())
     harness.wait(lambda h: h.frames > before)
     harness.flush()
-    wait_for(lambda: result.size == 2)
-    rows = dh_to_pylist(result)
+    rows = rows_when(result, lambda rows: len(rows) == 2)
     assert [(r["Symbol"], r["Price"], r["Size"], r["Conditions"]) for r in rows] == [
         ("MSFT", 215.9721, 100, None),
         ("MSFT", 215.989, 1, [37]),
@@ -1584,7 +1591,7 @@ def test_a_move_whose_old_loop_ended_releases_the_successor(
 
 
 def test_a_hand_over_applies_what_the_old_flusher_queued(
-    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]], *, rows_when: RowsWhen
 ) -> None:
     refused = harness.query(TRADES, ["AAPL"]).blink()
     published = harness.query(TRADES, ["MSFT"]).append_only()
@@ -1600,7 +1607,7 @@ def test_a_hand_over_applies_what_the_old_flusher_queued(
 
     harness.on_loop(old, queue_then_hand_over)
     assert old.join(TIMEOUT)  # its last flush applied the failure and published the row
-    wait_for(lambda: published.size == 1)
+    rows_when(published, lambda rows: len(rows) == 1)
     states = [r["State"] for r in streams_of(harness, dh_to_pylist)]
     assert states == ["FAILED", "RUNNING"]
     successor.close()
