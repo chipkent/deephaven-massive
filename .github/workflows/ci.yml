@@ -194,7 +194,8 @@ jobs:
         # PyPI, in a fresh virtual environment next to deephaven-server. The script starts a
         # server, imports every module the wheel ships, renders the column reference from the
         # installed catalog and compares it with docs/datasets/, and opens a session. -I keeps
-        # the checkout off sys.path, so the wheel is what gets imported.
+        # PYTHONPATH and the script's directory off sys.path, and the script fails if the
+        # package is imported from the checkout's src/ rather than the wheel.
         run: |
           uv venv --python 3.11 "$RUNNER_TEMP/smoke"
           uv pip install --python "$RUNNER_TEMP/smoke/bin/python" dist/*.whl deephaven-server
