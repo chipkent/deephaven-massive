@@ -248,6 +248,17 @@ class StreamQuery(QueryBase):
     returns a new, distinct table held in its own liveness scope. The stream stays subscribed
     while any result, or any table derived from one, is alive.
 
+    The first verb of a stream decides its host (one REST request the first time a class and
+    channel family streams in the session), connects if no connection to that host exists, and
+    subscribes; the verb returns once the stream's tables exist, without waiting for the
+    server's acknowledgement. A failure the server reports later (a refused topic, a rejected
+    key, a row that does not decode) fails the stream's tables and shows in `m.streams()`; a
+    verb whose stream fails while the verb opens it raises `MassiveError` naming the failure,
+    and once a stream has failed the next verb of an equal query opens a fresh one. Explicit
+    options contracts that would put more than 1,000 topics on the session's `/options`
+    connection raise `ValueError` at once; those of a reactive symbol table are deferred
+    instead (`Deferred` in `m.streams()`).
+
     No namespace declares a dataset of this kind yet, so no query can be built and there is no
     example here yet.
     """

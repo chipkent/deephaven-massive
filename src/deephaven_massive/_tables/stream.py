@@ -78,8 +78,9 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-    from deephaven_massive._datasets.schema import ColumnType, Schema, SourceColumn
+    from deephaven_massive._datasets.schema import ColumnType, Schema
     from deephaven_massive._datasets.symbols import NormalizedSymbols
+    from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._enums import AssetClass
     from deephaven_massive._massive import DriftReport
     from deephaven_massive._tables.core import SessionCore
@@ -143,8 +144,9 @@ class ChannelPlan:
         channel: The channel, such as `"T"`.
         wire_schema: The Arrow schema of the decoded rows: one field per column of the
             channel's source that the dataset keeps, named by its long-form column.
-        columns: Per dataset column, in order: its type, its name, and the source column that
-            fills it, or None for a column the channel does not carry (null).
+        columns: Per dataset column, in order: its type, its name, the long-form column of the
+            rows that fills it (None for a column the channel does not carry, which is null), and
+            the unit of an epoch column (None for any other).
         arrow_schema: The dataset's Arrow schema.
         symbol_field: The long-form column of the rows that holds the raw symbol.
         required: The long-form columns a row must carry: the dataset's keys for the channel's
@@ -155,7 +157,7 @@ class ChannelPlan:
     asset_class: AssetClass
     channel: str
     wire_schema: pa.Schema
-    columns: tuple[tuple[ColumnType, str, SourceColumn | None], ...]
+    columns: tuple[tuple[ColumnType, str, str | None, TimeUnit | None], ...]
     arrow_schema: pa.Schema
     symbol_field: str
     required: frozenset[str]
@@ -198,7 +200,9 @@ class ChannelPlan:
                 [pa.field(f.column, _WIRE_ARROW[c.wire_type]) for c, f in fields.values()]
             ),
             columns=tuple(
-                (c.type, c.name, fields[c.name][0] if c.name in fields else None)
+                (c.type, c.name, None, None)
+                if c.name not in fields
+                else (c.type, c.name, fields[c.name][1].column, fields[c.name][0].unit)
                 for c in schema.columns
             ),
             arrow_schema=schema.arrow_schema(),
@@ -232,20 +236,20 @@ class ChannelPlan:
         failed: pa.Array | None = None
         failures: list[tuple[int, str]] = []
         arrays = []
-        for column_type, name, source in self.columns:
-            if source is None or source.field is None:
+        for column_type, name, field, unit in self.columns:
+            if field is None:
                 arrays.append(pa.nulls(count, column_type.arrow_type))
                 continue
-            values = wire.column(source.field.column).combine_chunks()
+            values = wire.column(field).combine_chunks()
             if name == _SYMBOL:
                 values = self._canonical(values, symbols)
-            elif source.unit is not None:
-                nanos, bad = masked_instants(source.unit, values, time_column=name == _TIMESTAMP)
+            elif unit is not None:
+                nanos, bad = masked_instants(unit, values, time_column=name == _TIMESTAMP)
                 if pc.any(bad).as_py():
                     label = f"{self.dataset}.{name}"
                     for index in pc.indices_nonzero(bad).to_pylist():
                         sent = values[index].as_py()
-                        failures.append((index, mismatch_message(label, source.unit, sent)))
+                        failures.append((index, mismatch_message(label, unit, sent)))
                     failed = bad if failed is None else pc.or_(failed, bad)
                 values = nanos
             arrays.append(conform(values, column_type))
@@ -543,6 +547,7 @@ class Flusher:
     __slots__ = (
         "_control",
         "_core",
+        "_final",
         "_flush_lock",
         "_interval",
         "_stop",
@@ -565,24 +570,26 @@ class Flusher:
         self._control: queue.SimpleQueue[_Fail | _Drift] = queue.SimpleQueue()
         self._flush_lock = threading.Lock()
         self._stop = threading.Event()
+        self._final = threading.Event()
         # Flush-lock state: the raw-to-canonical symbol map of each plan.
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
-
-    @property
-    def thread(self) -> threading.Thread:
-        """The flush thread."""
-        return self._thread
 
     def start(self) -> None:
         """Start the flush thread. Call it once."""
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, *, final: bool = False) -> None:
         """Ask the flush thread to end after its current flush. Never waits; idempotent.
 
-        Rows still buffered are not published: a closed session's tables go static.
+        Args:
+            final: True to have the thread flush once more before it ends, so the failures
+                queued last (a connection's fatal failure fails every stream) are applied.
+                False when the session closes: what is still buffered is not published, and
+                no stream is failed, since a closed session's tables go static.
         """
+        if final:
+            self._final.set()
         self._stop.set()
 
     def join(self, timeout: float) -> bool:
@@ -633,16 +640,23 @@ class Flusher:
     def _run(self) -> None:
         """Flush every interval until `stop()`; a failing flush is logged and the next one runs."""
         while not self._stop.wait(self._interval):
-            try:
-                self.flush()
-            except Exception:
-                logger.exception("%s: a flush failed; continuing", self._thread.name)
+            self._flush_logged()
+        if self._final.is_set():
+            self._flush_logged()
+
+    def _flush_logged(self) -> None:
+        """Flush once, logging a failure at ERROR instead of raising it."""
+        try:
+            self.flush()
+        except Exception:
+            logger.exception("%s: a flush failed; continuing", self._thread.name)
 
     def flush(self) -> None:
-        """Publish every buffered row, then apply the queued failures and drift.
+        """Apply the queued failures, publish every buffered row, then report the queued drift.
 
-        Runs under the flush lock, inside the session's execution context, with no other
-        library lock held: it calls Deephaven (`to_table`, `where_in`, `add`,
+        Failures come first, so a stream that failed gets no row published after its failure
+        was reported. Runs under the flush lock, inside the session's execution context, with
+        no other library lock held: it calls Deephaven (`to_table`, `where_in`, `add`,
         `publish_failure`) and then the core once (`update_streams`). Does nothing once the
         session's core is gone.
         """
@@ -652,6 +666,10 @@ class Flusher:
         with self._flush_lock, entered(core.exec_ctx):
             controls = _drain(self._control)
             routes, buffers = self.routes.snapshot()
+            for item in controls:
+                if isinstance(item, _Fail):
+                    failing = [s for s in self.routes.sinks() if s.stream_id in item.stream_ids]
+                    self._fail(core, failing, item.error)
             updates: dict[int, StreamUpdate] = {}
             for channel, buffer in buffers.items():
                 frames = _drain(buffer)
@@ -660,13 +678,7 @@ class Flusher:
                     rows = [row for frame in frames for row in frame]
                     self._publish(core, rows, sinks, updates=updates)
             for item in controls:
-                if isinstance(item, _Fail):
-                    self._fail(
-                        core,
-                        [s for s in self.routes.sinks() if s.stream_id in item.stream_ids],
-                        item.error,
-                    )
-                else:
+                if isinstance(item, _Drift):
                     self._report_drift(core, routes.get(item.channel, ()), item.drift)
             if updates:
                 core.update_streams(updates)

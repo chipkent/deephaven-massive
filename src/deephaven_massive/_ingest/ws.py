@@ -750,7 +750,9 @@ class Connection:
     @property
     def key(self) -> tuple[str, str, str]:
         """The connection's owner key in the drift registry: transport, class, and family."""
-        return Transport.WS.value, self.asset_class.value, min(self.families).value
+        with self._lock:
+            family = min(self.families)
+        return Transport.WS.value, self.asset_class.value, family.value
 
     # --- lifecycle (any thread) ----------------------------------------------------------------
 
@@ -920,8 +922,15 @@ class Connection:
         self._settled()
 
     def _settled(self) -> None:
-        """After a change of streams or topics: reconcile, publish the cap, maybe go idle."""
+        """After a change of streams or topics: reconcile, publish the cap, maybe go idle.
+
+        The options cap is published here too, not only after a step: with no generation open
+        nothing is sent, but a stream's static topics must still count as in use (they are
+        admitted when the connection opens, unless the cap defers them), or a verb in between
+        would pass the cap check on a stale count.
+        """
         self.subscriptions.reconcile()
+        self._show_deferred()
         if not self._streams and self._idle is None:
             self._idle = self._client.loop.call_later(IDLE_GRACE, self._idle_close)
 
@@ -1057,7 +1066,7 @@ class Connection:
         logger.error("%s", public)
         self.flusher.fail(list(self._streams), public)
         self._transport.retire(self, idle=False)
-        self.flusher.stop()
+        self.flusher.stop(final=True)  # the failures above are applied before it ends
 
     # --- loop thread: failures and drift -------------------------------------------------------
 
@@ -1121,10 +1130,12 @@ class Connection:
             running); False when the refusal fails the step's streams.
         """
         decision = self.decision
+        with self._lock:
+            tick = ChannelFamily.TICK in self.families
         if (
             not status.realtime_verdict
             or decision.recency is not Recency.UNKNOWN
-            or ChannelFamily.TICK not in self.families
+            or not tick
             or not decision.host.startswith("socket.")
         ):
             return False
@@ -1149,8 +1160,7 @@ class Connection:
 
     def _changed(self) -> None:
         """Publish the options-cap state and rewrite the row after a subscription change."""
-        if self.subscriptions.generation is not None or self._streams:
-            self._show_deferred()
+        self._show_deferred()
         self._write_row()
 
     def _show_deferred(self) -> None:
@@ -1570,6 +1580,14 @@ class WsConnections:
                 candidate.close()
         return connection, created
 
+    def _is_closed(self) -> bool:
+        """Tell whether `close()` has run; `registry_lock` is held.
+
+        Returns:
+            True once the transport is closed.
+        """
+        return self._closed
+
     def _check_open(self) -> None:
         """Refuse a stream once the transport is closed; `registry_lock` is held.
 
@@ -1736,10 +1754,10 @@ class WsConnections:
         )
         url = f"wss://{decision.host}{connection.path}"
         with self._lock:
-            if self._closed or key in self._verdicts:
+            if self._is_closed() or key in self._verdicts:
                 return False
             self._verdicts[key] = decision
-        successor = Connection(
+        candidate = Connection(
             self,
             core,
             url=url,
@@ -1748,17 +1766,27 @@ class WsConnections:
             decision=decision,
             client_factory=self._factory,
         )
+        successor: Connection | None
         with self._lock:
-            if self._connections.get(connection.url) is connection:
-                del self._connections[connection.url]
-            connection.retired = True
-            self._connections[url] = successor
-            self._row_owners[key] = successor
-            for stream_id, owner in list(self._streams.items()):
-                if owner is connection:
-                    self._streams[stream_id] = successor
-                    successor.leases += 1
-                    connection.leases -= 1
+            if self._is_closed():  # the session closed meanwhile: its connections are closing
+                successor = None
+            else:
+                # A stream of the class may already have opened the delayed host's connection.
+                successor = self._connections.setdefault(url, candidate)
+                successor.families.add(ChannelFamily.TICK)
+                if self._connections.get(connection.url) is connection:
+                    del self._connections[connection.url]
+                connection.retired = True
+                self._row_owners[key] = successor
+                for stream_id, owner in list(self._streams.items()):
+                    if owner is connection:
+                        self._streams[stream_id] = successor
+                        successor.leases += 1
+                        connection.leases -= 1
+        if successor is not candidate:
+            candidate.close()
+        if successor is None:
+            return False
         logger.warning(
             "%s refused real-time data (%s); moving its streams to %s in %.0f s",
             connection.url,
@@ -1766,7 +1794,7 @@ class WsConnections:
             url,
             self._reconnect_backoff,
         )
-        successor.start(delay=self._reconnect_backoff)
+        successor.start(delay=self._reconnect_backoff)  # does nothing if it already started
         connection.hand_over(successor)
         return True
 

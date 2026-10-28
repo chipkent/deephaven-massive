@@ -74,11 +74,11 @@ class SymbolWatch:
     """The live set of canonical symbols a reactive symbol table holds, reported as it changes.
 
     Created by the WebSocket transport when a stream's symbols are a `Table`, on the caller
-    thread, inside the stream's liveness scope, which then manages the canonical view and the
-    listener. The watch starts reporting only when `start()` is called, so its owner can first
-    make ready whatever receives the changes. `start()` replays the table's current rows as one
-    change of added symbols; every later change of the table is reported from the update-graph
-    thread that delivers it.
+    thread, inside the stream's liveness scope, which then manages the canonical view (without
+    its null rows) and the listener. The watch starts reporting only when `start()` is called,
+    so its owner can first make ready whatever receives the changes. `start()` replays the
+    table's current rows as one change of added symbols; every later change of the table is
+    reported from the update-graph thread that delivers it.
 
     `on_change(added, removed)` receives two disjoint frozensets of canonical symbols: those the
     table now holds and did not before, and those it no longer holds. It is never called with
@@ -129,15 +129,12 @@ class SymbolWatch:
             table: The user's refreshing table with a `Symbol` column.
             on_change: Receives each change of the set of symbols; see the class documentation.
         """
-        self._view = canonical_view(asset_class, table)
+        # Without its null rows (symbols not valid for the class): `TableUpdate` hands a String
+        # column over as NumPy text, in which a null reads as the text "None".
+        self._view = canonical_view(asset_class, table).where(f"!isNull({_SYMBOL})")
         self._handle = TableListenerHandle(
             self._view, _SymbolCounter(on_change), description="deephaven_massive symbol watch"
         )
-
-    @property
-    def view(self) -> Table:
-        """The canonical view the watch listens to."""
-        return self._view
 
     def start(self) -> None:
         """Report the table's current symbols, then every later change.
@@ -214,12 +211,12 @@ class _SymbolCounter(TableListener):
         """Add `step` to the count of each valid symbol, forgetting counts that reach zero.
 
         Args:
-            columns: The `Symbol` values of some rows, as `TableUpdate` returns them.
+            columns: The `Symbol` values of some rows, as `TableUpdate` returns them: NumPy
+                text, never null (the watched view has no null row).
             step: 1 for rows that now exist, -1 for rows that no longer do.
         """
-        for symbol in columns.get(_SYMBOL, ()):
-            if not isinstance(symbol, str):  # null: not a valid symbol of the class
-                continue
+        for value in columns.get(_SYMBOL, ()):
+            symbol = str(value)  # a plain str, not NumPy's subclass, leaves the listener
             count = self._counts[symbol] + step
             if count > 0:
                 self._counts[symbol] = count
