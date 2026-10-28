@@ -1,0 +1,14 @@
+{
+  "request_id": "445ebfcfe5bb4b688b7971e1600c952d",
+  "results": [
+    {
+      "market_event": "open",
+      "name": "ERCOT North 345 kV Hub Day-Ahead 5 MW Off-Peak Futures",
+      "product_code": "ERL",
+      "session_end_date": "2025-12-05",
+      "timestamp": "2025-12-04T23:00:00+00:00",
+      "trading_venue": "XNYM"
+    }
+  ],
+  "status": "OK"
+}

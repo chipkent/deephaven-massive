@@ -283,6 +283,8 @@ def test_literal_detection_ignores_enum_members() -> None:
 # plain string through `_require_enum`, and each has a test that says so (named alongside). A new
 # enum parameter fails `test_enum_parameters_are_the_allowlist` until it is added here together
 # with its own rejection test.
+_FUTURES_ENUMS = "namespaces/test_futures.py::test_enum_parameters_reject_plain_strings"
+
 ENUM_PARAMETERS = {
     "MassiveConfig.__init__.ws_hosts": "test_config.py::test_ws_hosts_types",
     "MassiveSession.snapshots.order": "test_session.py::test_unified_snapshots",
@@ -320,6 +322,13 @@ ENUM_PARAMETERS = {
     "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
     "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
+    "_Futures.trades.venue": _FUTURES_ENUMS,
+    "_Futures.quotes.venue": _FUTURES_ENUMS,
+    "_Futures.bars.venue": _FUTURES_ENUMS,
+    "_Futures.snapshots.order": _FUTURES_ENUMS,
+    "_Futures.contracts.order": _FUTURES_ENUMS,
+    "_Futures.products.order": _FUTURES_ENUMS,
+    "_Futures.schedules.order": _FUTURES_ENUMS,
     "_Forex.bars.timespan": "namespaces/test_forex.py::test_bars_reject_bad_arguments",
     "_Forex.movers.direction": "namespaces/test_forex.py::test_movers",
     "_Indices.bars.timespan": "namespaces/test_indices.py::test_bars_check_their_argument_types",
