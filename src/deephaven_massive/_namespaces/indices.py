@@ -261,10 +261,12 @@ class _Indices(Namespace):
 
         A bar of a day or longer is stamped at 00:00 New York time of the day it starts on,
         whatever the source: the range and the day files stamp a 1-day bar at 01:00 New York
-        time (midnight in Chicago) and `/prev` at the 16:00 session close, and both are moved
-        to the day's start; a longer bar stamped at 01:00 is moved too. A bar stamped at any
-        other time of day fails the call with `MassiveError` naming the source, since it may
-        cover other days than its label.
+        time (midnight in Chicago) and `/prev` at the 16:00 session close (13:00 on a short
+        trading day), and each is moved to the day's start. A longer bar must be stamped at
+        00:00 or 01:00 on the day its period starts: a week on its Monday or the Saturday or
+        Sunday before, a month, quarter, or year on its 1st. Any other stamp fails the call
+        with `MassiveError` naming the source, since the bar may cover other days than its
+        label.
 
         `dm.ALL` is accepted by the stream verbs and by `history()` from flat files (1-minute
         and 1-day bars). `history()` over REST and `fetch()` take one index per request, so

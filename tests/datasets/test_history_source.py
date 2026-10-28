@@ -14,6 +14,7 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import (
     CHICAGO,
+    DAY_ZONES,
     DaySpan,
     TimeRange,
     futures_bar_request,
@@ -275,31 +276,50 @@ def test_futures_bars_by_instants_request_them_exactly() -> None:
 
 
 def test_stamp_rule() -> None:
-    # 1-day bars accept each class's documented vendor stamps; longer bars only the start.
+    # 1-day bars accept each class's known closes; longer bars only their period's start.
     day = request(timespan=Timespan.DAY)
-    close, chicago, last_ms = time(16), time(1), time(23, 59, 59, 999_000)
-    closes = frozenset({time(13), close})  # a short trading day closes at 13:00
+    close, early, chicago = time(16), time(13), time(1)
+    last_ms = time(23, 59, 59, 999_000)
     options_bars = replace(STOCK_BARS, asset_class=AssetClass.OPTIONS)
-    assert stamp_rule(STOCK_BARS, day) == StampRule(NEW_YORK, closes, "1-day bar")
-    assert stamp_rule(options_bars, day) == StampRule(NEW_YORK, closes, "1-day bar")
+    stock_closes = frozenset({early, close})
+    option_closes = frozenset({early, close, time(13, 15), time(16, 15)})
+    assert stamp_rule(STOCK_BARS, day) == StampRule(NEW_YORK, stock_closes, "1-day bar")
+    assert stamp_rule(options_bars, day) == StampRule(NEW_YORK, option_closes, "1-day bar")
     assert stamp_rule(INDEX_BARS, day) == StampRule(
-        NEW_YORK, frozenset({chicago, close}), "1-day bar"
+        NEW_YORK, frozenset({chicago, early, close}), "1-day bar"
     )
     assert stamp_rule(FOREX_BARS, day) == StampRule(UTC, frozenset({last_ms}), "1-day bar")
     assert stamp_rule(CRYPTO_BARS, day) == StampRule(UTC, frozenset({last_ms}), "1-day bar")
-    for timespan, multiplier in (
-        (Timespan.DAY, 2),
-        (Timespan.WEEK, 1),
-        (Timespan.MONTH, 1),
-        (Timespan.QUARTER, 1),
-        (Timespan.YEAR, 3),
+    # Several days: only 00:00 (01:00 for indices), on any day.
+    two_days = request(timespan=Timespan.DAY, multiplier=2)
+    assert stamp_rule(STOCK_BARS, two_days) == StampRule(NEW_YORK, frozenset(), "bar")
+    assert stamp_rule(options_bars, two_days) == StampRule(NEW_YORK, frozenset(), "bar")
+    assert stamp_rule(INDEX_BARS, two_days) == StampRule(NEW_YORK, frozenset({chicago}), "bar")
+    assert stamp_rule(FOREX_BARS, two_days) == StampRule(UTC, frozenset(), "bar")
+    # A week on its Monday, or for the classes closed at weekends the Saturday or Sunday before.
+    for multiplier in (1, 2):
+        week = request(timespan=Timespan.WEEK, multiplier=multiplier)
+        weekend = frozenset({5, 6, 0})
+        assert stamp_rule(STOCK_BARS, week) == StampRule(
+            NEW_YORK, frozenset(), "bar", weekdays=weekend
+        )
+        assert stamp_rule(INDEX_BARS, week) == StampRule(
+            NEW_YORK, frozenset({chicago}), "bar", weekdays=weekend
+        )
+        monday = frozenset({0})
+        assert stamp_rule(FOREX_BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=monday)
+        assert stamp_rule(CRYPTO_BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=monday)
+    # A month, quarter, or year on its 1st.
+    for timespan, months in (
+        (Timespan.MONTH, frozenset(range(1, 13))),
+        (Timespan.QUARTER, frozenset({1, 4, 7, 10})),
+        (Timespan.YEAR, frozenset({1})),
     ):
-        longer = request(timespan=timespan, multiplier=multiplier)
-        assert stamp_rule(STOCK_BARS, longer) == StampRule(NEW_YORK, frozenset(), "bar")
-        assert stamp_rule(options_bars, longer) == StampRule(NEW_YORK, frozenset(), "bar")
-        assert stamp_rule(INDEX_BARS, longer) == StampRule(NEW_YORK, frozenset({chicago}), "bar")
-        assert stamp_rule(FOREX_BARS, longer) == StampRule(UTC, frozenset(), "bar")
-        assert stamp_rule(CRYPTO_BARS, longer) == StampRule(UTC, frozenset(), "bar")
+        longer = request(timespan=timespan, multiplier=3)
+        assert stamp_rule(options_bars, longer) == StampRule(
+            NEW_YORK, frozenset(), "bar", months=months
+        )
+        assert stamp_rule(CRYPTO_BARS, longer) == StampRule(UTC, frozenset(), "bar", months=months)
     # Intraday bars, futures bars, and datasets that are not bars keep their stamps.
     assert stamp_rule(CRYPTO_BARS, request(timespan=Timespan.HOUR)) is None
     assert stamp_rule(STOCK_BARS, request(timespan=Timespan.MINUTE, multiplier=5)) is None
@@ -309,18 +329,27 @@ def test_stamp_rule() -> None:
     assert stamp_rule(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day) is None
 
 
+def test_every_class_with_a_day_zone_has_its_stamps() -> None:
+    # The column descriptions call a class stamped when it has a day zone; so does the rule.
+    tables = (history_source._ONE_DAY_STAMPS, history_source._LONGER_STAMPS)
+    assert all(set(table) == set(DAY_ZONES) for table in tables)
+
+
 def test_a_stamp_rule_stamps_through_the_timestamp_routine() -> None:
     rule = stamp_rule(STOCK_BARS, request(timespan=Timespan.DAY))
     assert rule is not None
+    rule = replace(rule, remedy="try the other source")
     # The 16:00 close, and the 13:00 close of a short day (July 3), move to the day's start.
     close = datetime(2025, 7, 1, 16, tzinfo=NEW_YORK)
     early = datetime(2025, 7, 3, 13, tzinfo=NEW_YORK)
     values = pa.array([close, early], pa.timestamp("ns", "UTC"))
-    moved = rule.stamp("stocks.bars", values, source="s", remedy="r").to_pylist()
+    moved = rule.stamp("stocks.bars", values, source="s").to_pylist()
     assert moved == [datetime(2025, 7, 1, tzinfo=NEW_YORK), datetime(2025, 7, 3, tzinfo=NEW_YORK)]
     afternoon = close.replace(hour=14, minute=30)
-    with pytest.raises(dm.MassiveError, match=r"^stocks\.bars: a 1-day bar from s is stamped"):
-        rule.stamp("stocks.bars", pa.array([afternoon], values.type), source="s", remedy="r")
+    with pytest.raises(
+        dm.MassiveError, match=r"^stocks\.bars: a 1-day bar from s is stamped .*; try the other"
+    ):
+        rule.stamp("stocks.bars", pa.array([afternoon], values.type), source="s")
 
 
 def test_published_reads_the_class_zone_and_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:

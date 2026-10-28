@@ -1986,7 +1986,8 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
     with pytest.raises(
         dm.MassiveError,
         match=r"^forex\.bars: a 1-day bar from /v2/aggs/grouped/locale/global/market/fx/\{date\} "
-        r"is stamped 2025-03-03T05:00:00\+00:00 \(2025-03-03T05:00:00\+00:00 in UTC\)",
+        r"is stamped 2025-03-03T05:00:00\+00:00, which .*; read the 1-day flat files with "
+        r"source=dm\.HistorySource\.FLAT_FILES if S3 credentials are configured, and report",
     ):
         history(
             session,
@@ -2037,17 +2038,42 @@ def test_longer_crypto_bars_must_start_at_utc_midnight(
     with pytest.raises(
         dm.MassiveError,
         match=r"^crypto\.bars: a bar from /v2/aggs/ticker/\{cryptoTicker\}/range/.* is stamped "
-        r"2025-03-03T05:00:00\+00:00 \(2025-03-03T05:00:00\+00:00 in UTC\), which is not a "
-        r"time of day Massive is known to stamp such a bar at \(00:00:00\.000 in UTC\).*"
-        r"source=dm\.HistorySource\.FLAT_FILES",
+        r"2025-03-03T05:00:00\+00:00, which is not a stamp Massive is known to use for such a "
+        r"bar \(00:00:00\.000 in UTC\).*; request 1-day bars; no other source serves these, "
+        r"and report",
     ):
         crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
     # A week bar at 00:00 UTC Monday is kept as stamped.
     monday, after = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 10))
     week = f"/v2/aggs/ticker/X:BTCUSD/range/1/week/{monday}/{after - 1}".replace(":", "%3A")
-    fake_rest.reply(week, Reply(envelope([{"t": monday, "c": 2.0}])))
+    sunday = monday - 86_400_000
+    fake_rest.reply(
+        week,
+        Reply(envelope([{"t": monday, "c": 2.0}])),
+        Reply(envelope([{"t": sunday, "c": 2.0}])),
+    )
     out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
     assert [(r["Timestamp"], r["Close"]) for r in out] == [(monday * 10**6, 2.0)]
+    # A week bar stamped on the Sunday before would be placed in the week before: it fails.
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"is stamped 2025-03-02T00:00:00\+00:00, which is not a stamp Massive is known to "
+        r"use for such a bar \(00:00:00\.000 in UTC, on a Monday\)",
+    ):
+        crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
+    # A month bar must be stamped on its 1st.
+    first, april = utc_ms(date(2025, 3, 1)), utc_ms(date(2025, 4, 1))
+    month = f"/v2/aggs/ticker/X:BTCUSD/range/1/month/{first}/{april - 1}".replace(":", "%3A")
+    second = first + 86_400_000
+    fake_rest.reply(
+        month,
+        Reply(envelope([{"t": first, "c": 3.0}])),
+        Reply(envelope([{"t": second, "c": 3.0}])),
+    )
+    out = crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
+    assert [(r["Timestamp"], r["Close"]) for r in out] == [(first * 10**6, 3.0)]
+    with pytest.raises(dm.MassiveError, match=r"is stamped 2025-03-02T00:00:00.*on the 1st of"):
+        crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
 
 
 def test_forex_grouped_daily_keeps_its_weekend_days(

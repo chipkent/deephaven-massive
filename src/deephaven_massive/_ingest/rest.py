@@ -61,7 +61,7 @@ import logging
 import threading
 import time
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
@@ -1106,6 +1106,8 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol)
+                # Stamp before keeping: an unknown stamp outside the window must still raise,
+                # not be dropped unseen by `_keep`.
                 if stamps is not None:
                     batches = [_stamped(spec, template, batch, rule=stamps) for batch in batches]
                 kept.extend(_keep(batch, window) for batch in batches)
@@ -1343,7 +1345,7 @@ class RestReader:
                 rest_path,
                 calls,
                 limit=request.limit,
-                stamps=stamp_rule(spec, request),
+                stamps=_with_remedy(stamp_rule(spec, request), _FETCH_REMEDY),
                 record=record,
                 executor=executor,
             )
@@ -1548,10 +1550,11 @@ class RestEndpoints:
         other request covers the window's instants (`HistoryWindow.requested`): on the
         dataset's time axis, or as the aggregates' `{from}/{to}` millisecond epochs, one
         request series per symbol where the path takes one. Rows outside the window are
-        dropped (`_keep`), and forex and crypto 1-day bars are stamped at 00:00 UTC of their
-        day. A grouped-daily or per-session download of more than five requests first logs, at
-        INFO, how many requests it makes and about how long a Basic key's 5 requests a minute
-        make it last. Logs `source=REST requests=<n>` at INFO.
+        dropped (`_keep`), and bars of a day or longer are stamped at 00:00 of their day in the
+        class day zone (`_stamped`, `timestamps.day_starts`). A grouped-daily or per-session
+        download of more than five requests first logs, at INFO, how many requests it makes
+        and about how long a Basic key's 5 requests a minute make it last. Logs
+        `source=REST requests=<n>` at INFO.
 
         Args:
             spec: The dataset; `history()` has checked that REST can serve the request.
@@ -1562,8 +1565,8 @@ class RestEndpoints:
             A static table in the dataset's schema.
 
         Raises:
-            MassiveError: As `fetch` raises it, logged at ERROR first, and for a crypto 1-day
-                bar stamped elsewhere in its UTC day than its first or last millisecond.
+            MassiveError: As `fetch` raises it, logged at ERROR first, and for a bar of a day or
+                longer stamped at a time or on a day Massive is not known to use for its class.
         """
         reader = self._reader()
         if isinstance(request.symbols, _All):
@@ -1589,7 +1592,7 @@ class RestEndpoints:
                 calls,
                 limit=None,
                 window=window,
-                stamps=stamp_rule(spec, request),
+                stamps=_with_remedy(stamp_rule(spec, request), _history_remedy(request)),
             )
         except MassiveError as error:
             _report(error)
@@ -1829,11 +1832,45 @@ def _waited(future: Future[HostDecision]) -> HostDecision:
         raise type(error)(str(error), status=error.status, request_id=error.request_id) from None
 
 
-_REST_REMEDY: Final = (
+_FLAT_FILES_REMEDY: Final = (
     "read the 1-day flat files with source=dm.HistorySource.FLAT_FILES if S3 credentials are "
     "configured"
 )
-"""What a caller can do when Massive's REST bars are stamped at an unknown time of day."""
+"""What a `history()` caller of 1-day bars can do when a REST stamp is refused."""
+
+_LONGER_REMEDY: Final = "request 1-day bars; no other source serves these"
+"""What a `history()` caller of longer or multiplied bars can do: only REST serves them."""
+
+_FETCH_REMEDY: Final = "use history() for that day"
+"""What a `fetch()` or `poll()` caller can do when `/prev`'s stamp is refused."""
+
+
+def _history_remedy(request: Request) -> str:
+    """Return what a REST `history()` caller can do when a bar's stamp is refused.
+
+    Args:
+        request: The normalized arguments.
+
+    Returns:
+        Reading the 1-day flat files for 1-day bars; asking for 1-day bars otherwise, since no
+        flat file holds longer or multiplied bars.
+    """
+    if request.timespan is Timespan.DAY and request.multiplier == 1:
+        return _FLAT_FILES_REMEDY
+    return _LONGER_REMEDY
+
+
+def _with_remedy(rule: StampRule | None, remedy: str) -> StampRule | None:
+    """Give a stamp rule the remedy of the verb that applies it.
+
+    Args:
+        rule: The request's rule (`history_source.stamp_rule`), or None.
+        remedy: What the caller can do instead when a stamp is refused.
+
+    Returns:
+        The rule with `remedy`, or None for None.
+    """
+    return None if rule is None else replace(rule, remedy=remedy)
 
 
 def _stamped(
@@ -1845,14 +1882,15 @@ def _stamped(
         spec: The dataset, for the message.
         source: The REST path template the bars came from, for the message.
         batch: Rows in the dataset's schema.
-        rule: The day zone and the stamps Massive is known to use besides 00:00.
+        rule: The day zone, the stamps Massive is known to use besides 00:00, and the
+            remedy of the verb that reads the bars.
 
     Returns:
         The batch, with its `Timestamp` at 00:00 of each bar's day in the class day zone.
 
-    A stamp at another time of day raises the `MassiveError` of `timestamps.day_starts`, which
-    names `source=dm.HistorySource.FLAT_FILES` as the way around it.
+    A stamp at another time or on another day raises the `MassiveError` of
+    `timestamps.day_starts`, which ends with the rule's remedy.
     """
     index = batch.schema.get_field_index("Timestamp")
-    moved = rule.stamp(spec.name, batch.column(index), source=source, remedy=_REST_REMEDY)
+    moved = rule.stamp(spec.name, batch.column(index), source=source)
     return batch.set_column(index, "Timestamp", moved)

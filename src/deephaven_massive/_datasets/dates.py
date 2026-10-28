@@ -69,6 +69,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CHICAGO",
     "DAY_ZONES",
+    "DAY_ZONE_NAMES",
     "FUTURES_BAR_CLOSE",
     "FUTURES_HOLIDAY_MARGIN",
     "MIXED_BOUNDS",
@@ -131,6 +132,9 @@ DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
 
 Futures are absent: a futures date names a trading session, not a calendar day (see `bounds`).
 Datasets without an asset class use New York."""
+
+DAY_ZONE_NAMES: Final[Mapping[tzinfo, str]] = {NEW_YORK: "New York time", UTC: "UTC"}
+"""How user-facing text names each zone of `DAY_ZONES`."""
 
 MIXED_BOUNDS: Final = (
     "start and end must both be dates or both be datetimes: a date is a whole day (for "

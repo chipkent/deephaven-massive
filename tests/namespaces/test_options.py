@@ -706,7 +706,8 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_fails(
     with pytest.raises(
         dm.MassiveError,
         match=r"^options\.bars: a 1-day bar from /v2/aggs/ticker/\{optionsTicker\}/prev is "
-        r"stamped 2024-11-29T19:30:00\+00:00 \(2024-11-29T14:30:00-05:00 in America/New_York\)",
+        r"stamped 2024-11-29T19:30:00\+00:00 \(2024-11-29T14:30:00-05:00 in America/New_York\)"
+        r".*; use history\(\) for that day, and report",
     ):
         rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch()
 

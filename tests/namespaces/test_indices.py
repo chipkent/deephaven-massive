@@ -931,6 +931,26 @@ def test_one_flat_file_round_trips(
     assert [(r["Symbol"], r["Timestamp"], r[value]) for r in out] == expected
 
 
+def test_every_index_from_a_day_file_names_explicit_symbols_as_the_way_out(
+    *,
+    s3_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    # REST has no grouped daily for indices, so `dm.ALL` cannot simply switch to REST.
+    odd = (MIDNIGHT_MS + 2 * 3_600_000) * MS  # 02:00 New York time
+    text = f"ticker,open,close,high,low,window_start\nI:SPX,1,2,3,0.5,{odd}\n"
+    fake_s3.put("us_indices/day_aggs_v1/2025/06/2025-06-02.csv.gz", make_csv_gz(text))
+    q = s3_session.indices.bars(dm.ALL, dm.Timespan.DAY)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^indices\.bars: a 1-day bar from the flat files us_indices/day_aggs_v1 is "
+        r"stamped .*; pass explicit symbols to read REST with source=dm\.HistorySource\.REST, "
+        r"and report",
+    ):
+        q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES)
+
+
 def test_only_the_snapshots_revise_on_their_update_time() -> None:
     # An explicit APPEND poll of the snapshots appends each new state of an index.
     revised = {spec.name: spec.revision_keys for spec in indices.DATASETS if spec.revision_keys}

@@ -367,7 +367,8 @@ class _Crypto(Namespace):
         time, grouped daily at times such as 20:48 UTC), which would be another day cut, so a
         1-day bar stamped anywhere in its UTC day but its first or last millisecond fails the
         call with `MassiveError` naming the source, rather than being relabelled; so does a
-        REST bar of several days or longer not stamped at 00:00 UTC. The day cut of live REST
+        REST bar of several days or longer not stamped at 00:00 UTC, or a week not stamped on
+        its Monday or a month, quarter, or year not on its 1st. The day cut of live REST
         data is not verified yet: if it follows those samples, crypto 1-day bars come only from
         the flat files (`source=dm.HistorySource.FLAT_FILES`). `HistorySource.AUTO` picks the
         source as for every other dataset; the check keeps the bars of both sources the same

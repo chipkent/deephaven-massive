@@ -70,6 +70,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "FMV_NS_THRESHOLD",
+    "ISSUES_URL",
     "MAX_INSTANT_NS",
     "MIN_INSTANT_NS",
     "TimeUnit",
@@ -367,6 +368,34 @@ def _overflows(unit: TimeUnit, value: int) -> bool:
 _MS_NS: Final = 10**6
 
 
+ISSUES_URL: Final = "https://github.com/chipkent/deephaven-massive/issues"
+"""Where a refused bar stamp is reported, so its day cut can be settled."""
+
+_WEEKDAY_NAMES: Final = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+_MONTH_NAMES: Final = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+
 def day_starts(
     label: str,
     values: pa.Array,
@@ -376,6 +405,8 @@ def day_starts(
     source: str,
     what: str,
     remedy: str,
+    weekdays: Collection[int] = (),
+    months: Collection[int] = (),
 ) -> pa.Array:
     """Stamp each bar at 00:00 of the day it falls on, refusing a stamp of an unknown form.
 
@@ -383,9 +414,13 @@ def day_starts(
     day on the aggregates range, at the session close (16:00 New York time) on the stock
     grouped daily and `/prev`, at the day's last millisecond in the forex day files. Each
     stamp whose wall-clock time of day in `zone`, to the millisecond, is 00:00 or one of
-    `known` moves to 00:00 of its date there, so every source labels a bar alike. Any other
-    stamp raises: the bar may cover other days than the one it would be labelled with, so it
-    is never relabelled.
+    `known`, on a day `weekdays` and `months` allow, moves to 00:00 of its date there, so
+    every source labels a bar alike. Any other stamp raises: the bar may cover other days
+    than the one it would be labelled with, so it is never relabelled.
+
+    The zone's offsets come from `zoneinfo`, one conversion per distinct stamp (a batch of
+    daily bars holds about one per day), applied to the column with Arrow's `take`; Arrow's
+    own time-zone database is not used.
 
     Args:
         label: The dataset, for the message, such as `"stocks.bars"`.
@@ -399,23 +434,64 @@ def day_starts(
         what: The kind of bar, for the message, such as `"1-day bar"`.
         remedy: What the caller can do instead, for the message, such as reading the other
             source.
+        weekdays: The weekdays (Monday is 0) a stamp's date in `zone` may fall on; empty for
+            any day.
+        months: The months whose 1st a stamp's date in `zone` must be; empty for any day.
 
     Returns:
         The stamps at 00:00 of their day in `zone`, in the type of `values`; nulls stay null.
 
-    A stamp at any other time of day raises the `MassiveError` of `_refuse`, naming the
-    dataset, the source, the stamp in UTC and in `zone`, the accepted times, and `remedy`.
+    A stamp at any other time of day or on any other day raises the `MassiveError` of
+    `_refuse`, naming the dataset, the source, the stamp, the accepted stamps, and `remedy`.
     """
-    name = str(zone)
-    local = pc.local_timestamp(values.cast(pa.timestamp("ns", name)))
-    midnight = pc.floor_temporal(local, unit="day")
-    # Both are wall-clock nanoseconds of the same day, so the difference is positive and the
-    # integer division floors it to the millisecond.
-    offset = pc.divide(pc.subtract(local.cast(pa.int64()), midnight.cast(pa.int64())), _MS_NS)
-    accepted = pa.array(sorted({0, *(_millisecond_of_day(moment) for moment in known)}), pa.int64())
-    odd = pc.and_(pc.is_valid(offset), pc.invert(pc.is_in(offset, value_set=accepted)))
-    _refuse(label, values, odd, zone=zone, known=known, source=source, what=what, remedy=remedy)
-    return pc.assume_timezone(midnight, timezone=name).cast(values.type)
+    ns = values.cast(pa.int64())
+    distinct = pc.unique(ns)
+    accepted = {0, *(_millisecond_of_day(moment) for moment in known)}
+    starts: list[int | None] = []
+    refused: list[bool] = []
+    for value in distinct.to_pylist():
+        if value is None:
+            starts.append(None)
+            refused.append(False)
+            continue
+        local = _instant(value).astimezone(zone)
+        day = local.date()
+        on_day = (not weekdays or day.weekday() in weekdays) and (
+            not months or (day.day == 1 and day.month in months)
+        )
+        refused.append(not on_day or _millisecond_of_day(local.time()) not in accepted)
+        starts.append(_epoch_ns(datetime.combine(day, time(), zone)))
+    index = pc.index_in(ns, value_set=distinct)
+    odd = pa.array(refused, pa.bool_()).take(index)
+    expected = _expected(zone, known, weekdays=weekdays, months=months)
+    _refuse(
+        label, values, odd, zone=zone, expected=expected, source=source, what=what, remedy=remedy
+    )
+    return pa.array(starts, pa.int64()).take(index).cast(values.type)
+
+
+def _instant(ns: int) -> datetime:
+    """Return an epoch-nanosecond instant as an aware UTC `datetime`, to the microsecond.
+
+    Args:
+        ns: Epoch nanoseconds; bar stamps are positive, so the division floors.
+
+    Returns:
+        The instant, in UTC.
+    """
+    return _EPOCH + timedelta(microseconds=ns // 1000)
+
+
+def _epoch_ns(moment: datetime) -> int:
+    """Return an aware `datetime` as epoch nanoseconds.
+
+    Args:
+        moment: The instant; a whole number of microseconds.
+
+    Returns:
+        The nanoseconds since the Unix epoch.
+    """
+    return (moment - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
 def _millisecond_of_day(moment: time) -> int:
@@ -432,25 +508,51 @@ def _millisecond_of_day(moment: time) -> int:
     )
 
 
+def _expected(
+    zone: tzinfo, known: Collection[time], *, weekdays: Collection[int], months: Collection[int]
+) -> str:
+    """Describe the stamps a check accepts, for its message.
+
+    Args:
+        zone: The day zone.
+        known: The accepted times of day besides 00:00.
+        weekdays: The accepted weekdays, or empty for any.
+        months: The months whose 1st is accepted, or empty for any day.
+
+    Returns:
+        Such as `"00:00:00.000, 16:00:00.000 in America/New_York"` or
+        `"00:00:00.000 in UTC, on a Monday"`.
+    """
+    times = ", ".join(t.isoformat("milliseconds") for t in sorted({time(0), *known}))
+    text = f"{times} in {zone}"
+    if weekdays:
+        text += ", on a " + " or ".join(_WEEKDAY_NAMES[day] for day in sorted(weekdays))
+    if months:
+        every = len(months) == len(_MONTH_NAMES)
+        named = "a month" if every else " or ".join(_MONTH_NAMES[m - 1] for m in sorted(months))
+        text += f", on the 1st of {named}"
+    return text
+
+
 def _refuse(
     label: str,
     values: pa.Array,
     odd: pa.Array,
     *,
     zone: tzinfo,
-    known: Collection[time],
+    expected: str,
     source: str,
     what: str,
     remedy: str,
 ) -> None:
-    """Raise for the first bar a mask marks as stamped at an unknown time of day, if any.
+    """Raise for the first bar a mask marks as stamped at an unknown time or day, if any.
 
     Args:
         label: The dataset, for the message.
         values: The stamps, an Arrow `timestamp("ns", "UTC")` array.
         odd: True for each refused stamp; False for an accepted or null one.
         zone: The class day zone.
-        known: The accepted times of day besides 00:00.
+        expected: The accepted stamps, described (`_expected`).
         source: Where the bars came from, for the message.
         what: The kind of bar, for the message, such as `"1-day bar"`.
         remedy: What the caller can do instead, for the message.
@@ -460,13 +562,11 @@ def _refuse(
     """
     if not pc.any(odd).as_py():
         return
-    bad_ns = pc.filter(values.cast(pa.int64()), odd)[0].as_py()
-    bad = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=bad_ns // 1000)
-    times = ", ".join(t.isoformat("milliseconds") for t in sorted({time(0), *known}))
+    bad = _instant(pc.filter(values.cast(pa.int64()), odd)[0].as_py())
+    local = "" if zone is UTC else f" ({bad.astimezone(zone).isoformat()} in {zone})"
     raise MassiveError(
-        f"{label}: a {what} from {source} is stamped {bad.isoformat()} "
-        f"({bad.astimezone(zone).isoformat()} in {zone}), which is not a time of day Massive is "
-        f"known to stamp such a bar at ({times} in {zone}), so it may cover other days than the "
-        f"one it would be labelled with; {remedy}, and report the stamp so the day cut can be "
-        "settled"
+        f"{label}: a {what} from {source} is stamped {bad.isoformat()}{local}, which is not a "
+        f"stamp Massive is known to use for such a bar ({expected}), so it may cover other days "
+        f"than the one it would be labelled with; {remedy}, and report the stamp at "
+        f"{ISSUES_URL} so the day cut can be settled"
     )

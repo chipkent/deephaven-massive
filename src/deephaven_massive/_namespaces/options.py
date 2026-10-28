@@ -452,10 +452,12 @@ class _Options(Namespace):
 
         A bar of a day or longer is stamped at 00:00 New York time of the day it starts on,
         whatever the source: the range and the day files stamp a 1-day bar there, while
-        `/prev` stamps it at the 16:00 session close (13:00 on a short trading day), which is
-        moved to the day's start. A bar stamped at any other time of day, or a longer bar
-        stamped elsewhere than 00:00, fails the call with `MassiveError` naming the source,
-        since it may cover other days than its label.
+        `/prev` stamps it at the 16:00 session close (13:00 on a short trading day; 16:15 or
+        13:15 for index options such as SPXW), which is moved to the day's start. A longer bar
+        must be stamped at 00:00 on the day its period starts: a week on its Monday or the
+        Saturday or Sunday before, a month, quarter, or year on its 1st. Any other stamp fails
+        the call with `MassiveError` naming the source, since the bar may cover other days
+        than its label.
 
         `dm.ALL` streams every contract and reads every contract of a day's flat file; `fetch()`
         and REST `history()` take explicit contracts and raise `ValueError` for `dm.ALL`. One

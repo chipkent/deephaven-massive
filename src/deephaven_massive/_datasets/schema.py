@@ -39,7 +39,7 @@ import logging
 import re
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from datetime import UTC, date, datetime, tzinfo
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive._datasets.dates import DAY_ZONES, NEW_YORK
+from deephaven_massive._datasets.dates import DAY_ZONE_NAMES, DAY_ZONES
 from deephaven_massive._datasets.timestamps import TimeUnit, time_unit
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType
@@ -613,9 +613,6 @@ _BAR_START: Final = "The start of the bar's window, as an Instant."
 """The library's sentence for a bars dataset's `Timestamp`, which is never a bar's end, even
 where a source's own description of its stamp says so."""
 
-_ZONE_NAMES: Final[Mapping[tzinfo, str]] = {NEW_YORK: "New York time", UTC: "UTC"}
-"""How a key sentence names each class day zone (`dates.DAY_ZONES`)."""
-
 
 def _key_sentence(spec: DatasetSpec, name: str) -> str:
     """Return the library's sentence for one of a dataset's renamed key columns.
@@ -630,14 +627,15 @@ def _key_sentence(spec: DatasetSpec, name: str) -> str:
     """
     if name != "Timestamp" or not spec.is_bars:
         return _KEY_SENTENCES[name]
-    # The classes with a day zone are those whose bars of a day or longer the library stamps
-    # at midnight (`history_source.stamp_rule`); futures bars keep Massive's own stamps.
+    # `history_source.stamp_rule` stamps the bars of a day or longer of exactly the classes
+    # with a day zone at its midnight; futures bars keep Massive's own stamps.
     zone = DAY_ZONES.get(spec.asset_class) if spec.asset_class is not None else None
     if zone is None:
         return _BAR_START
     return (
-        f"{_BAR_START} A bar of a day or longer is stamped at 00:00 {_ZONE_NAMES[zone]} of the "
-        "day it starts on, on every source, whatever time of day the source stamps it with."
+        f"{_BAR_START} A bar of a day or longer is stamped at 00:00 {DAY_ZONE_NAMES[zone]} of "
+        "the day it starts on, whichever source serves it; each source's own stamp, quoted "
+        "next, is moved to that time."
     )
 
 

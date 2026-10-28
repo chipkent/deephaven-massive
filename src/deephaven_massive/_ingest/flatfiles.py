@@ -130,6 +130,7 @@ from deephaven_massive._massive import (
     object_key,
 )
 from deephaven_massive._tables.liveness import entered
+from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -282,7 +283,7 @@ class _Transform:
     columns: tuple[tuple[ColumnType, str, SourceColumn | None], ...]
     arrow_schema: pa.Schema
     session_header: str | None
-    prefix: str = ""
+    prefix: str
     stamps: StampRule | None = None
 
     @classmethod
@@ -422,9 +423,37 @@ class _Transform:
                 self.dataset,
                 values,
                 source=f"the flat files {self.prefix}",
-                remedy="read REST with source=dm.HistorySource.REST",
             )
         return values
+
+
+def _flat_file_stamps(spec: DatasetSpec, request: Request) -> StampRule | None:
+    """Return the stamp rule of a flat-file read, with the remedy its refusal names.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments.
+
+    Returns:
+        The rule (`history_source.stamp_rule`), whose remedy is reading REST, or, for `dm.ALL`
+        of a dataset without a grouped-daily path (indices), passing explicit symbols to read
+        REST; None when the bars keep their stamps.
+    """
+    rule = stamp_rule(spec, request)
+    if rule is None:
+        return None
+    every = isinstance(request.symbols, _All) and not spec.has_grouped_daily
+    remedy = _EXPLICIT_REST_REMEDY if every else _REST_REMEDY
+    return replace(rule, remedy=remedy)
+
+
+_REST_REMEDY: Final = "read REST with source=dm.HistorySource.REST"
+"""What a flat-file caller can do when a day file's stamp is refused."""
+
+_EXPLICIT_REST_REMEDY: Final = (
+    "pass explicit symbols to read REST with source=dm.HistorySource.REST"
+)
+"""The remedy for `dm.ALL` where REST has no grouped daily, so it takes explicit symbols."""
 
 
 class _CancelledError(Exception):
@@ -504,7 +533,7 @@ class FlatFileHistory:
             prefix=prefix,
             symbols=request.symbols,
             window=window,
-            stamps=stamp_rule(spec, request),
+            stamps=_flat_file_stamps(spec, request),
         )
         keys = _keys(prefix, request.venue, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None

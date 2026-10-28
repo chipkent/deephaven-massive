@@ -901,7 +901,8 @@ def test_a_bars_timestamp_is_described_as_the_window_start(
     if zone is not None:
         sentence += (
             f" A bar of a day or longer is stamped at 00:00 {zone} of the day it starts on, "
-            "on every source, whatever time of day the source stamps it with."
+            "whichever source serves it; each source's own stamp, quoted next, is moved to "
+            "that time."
         )
     assert described.startswith(f"{sentence} From REST `")
     assert timestamp_description(stocks.TRADES).startswith(

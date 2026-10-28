@@ -53,6 +53,7 @@ from deephaven_massive._datasets.dates import (
     futures_session_before,
     intraday,
     publish_time,
+    trades_at_weekends,
 )
 from deephaven_massive._datasets.timestamps import day_starts
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
@@ -302,20 +303,29 @@ class StampRule:
     """How the transports stamp the bars of a request of a day or longer (`stamp_rule`).
 
     Made per request on the calling thread and only read afterwards, so reader threads may
-    share it.
+    share it. A transport sets `remedy` for its own verb (`dataclasses.replace`) before
+    stamping.
 
     Attributes:
         zone: The class day zone; every bar is stamped at 00:00 there of the day it starts on.
         known: The other wall-clock times of day, in `zone`, at which Massive is known to stamp
             the class's bars of this length on some source; each moves to 00:00 of its day.
         what: The kind of bar, for messages: `"1-day bar"` or `"bar"`.
+        weekdays: For week bars, the weekdays (Monday is 0) a bar may be stamped on in `zone`;
+            empty for every other timespan.
+        months: For month, quarter, and year bars, the months whose 1st a bar may be stamped
+            on in `zone`; empty for every other timespan.
+        remedy: What the caller can do instead when a stamp is refused, for the message.
     """
 
     zone: tzinfo
     known: frozenset[time]
     what: str
+    weekdays: frozenset[int] = frozenset()
+    months: frozenset[int] = frozenset()
+    remedy: str = ""
 
-    def stamp(self, label: str, values: pa.Array, *, source: str, remedy: str) -> pa.Array:
+    def stamp(self, label: str, values: pa.Array, *, source: str) -> pa.Array:
         """Stamp a column of bars at 00:00 of their days (`timestamps.day_starts`).
 
         Args:
@@ -323,22 +333,24 @@ class StampRule:
             values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
             source: Where the bars came from, for the message: a REST path template or a
                 flat-file prefix.
-            remedy: What the caller can do instead, for the message.
 
         Returns:
             The stamps at the start of their days, in the same type; nulls stay null.
 
-        A stamp at another time of day than 00:00 or one of `known` raises the `MassiveError`
-        of `timestamps.day_starts`.
+        A stamp at another time of day than 00:00 or one of `known`, or on a day `weekdays`
+        or `months` rules out, raises the `MassiveError` of `timestamps.day_starts`, which
+        ends with `remedy`.
         """
         return day_starts(
             label,
             values,
             zone=self.zone,
             known=self.known,
+            weekdays=self.weekdays,
+            months=self.months,
             source=source,
             what=self.what,
-            remedy=remedy,
+            remedy=self.remedy,
         )
 
 
@@ -348,8 +360,13 @@ stock, option, or index 1-day bar there."""
 
 _EARLY_CLOSE: Final = time(13)
 """The 13:00 New York close of a short trading day (the day after Thanksgiving, Christmas Eve,
-July 3), presumed to be where the sources that stamp a stock or option 1-day bar at its
-session close stamp such a day."""
+July 3), presumed to be where a source that stamps a 1-day bar at its close stamps such a
+day. It lies inside its own New York day, so accepting it on any date never changes which day
+a bar is labelled with."""
+
+_INDEX_OPTION_CLOSES: Final = frozenset({time(13, 15), time(16, 15)})
+"""The closes of index options such as SPX and SPXW, 15 minutes after the stock market's on
+full and short days, presumed to be where `/prev` may stamp such a contract's 1-day bar."""
 
 _CHICAGO_MIDNIGHT: Final = time(1)
 """Midnight in Chicago, as New York time (the two zones change clocks together): the indices
@@ -361,14 +378,14 @@ day files stamp their 1-day bars there."""
 
 _ONE_DAY_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
     AssetClass.STOCKS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE}),
-    AssetClass.OPTIONS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE}),
-    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT, _SESSION_CLOSE}),
+    AssetClass.OPTIONS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE, *_INDEX_OPTION_CLOSES}),
+    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT, _EARLY_CLOSE, _SESSION_CLOSE}),
     AssetClass.FOREX: frozenset({_LAST_MILLISECOND}),
     AssetClass.CRYPTO: frozenset({_LAST_MILLISECOND}),
 }
-"""Per class, the times of day besides 00:00 at which some source stamps a 1-day bar: those of
-Massive's documented samples, and for stocks and options the 13:00 close of a short trading
-day. Futures bars keep their own stamps and session labels."""
+"""Per class with a day zone (`dates.DAY_ZONES`), the times of day besides 00:00 at which some
+source stamps a 1-day bar: those of Massive's documented samples, and the closes of a short
+trading day and of index options, each of which lies inside its own New York day."""
 
 _LONGER_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
     AssetClass.STOCKS: frozenset(),
@@ -377,9 +394,23 @@ _LONGER_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
     AssetClass.FOREX: frozenset(),
     AssetClass.CRYPTO: frozenset(),
 }
-"""Per class, the times of day besides 00:00 accepted for a bar of several days, a week, or
-longer, which only the aggregates range serves. No sample shows one; the indices range's
-midnight in Chicago is presumed from its 1-day bars."""
+"""Per class with a day zone, the times of day besides 00:00 accepted for a bar of several
+days, a week, or longer, which only the aggregates range serves. No sample shows one; the
+indices range's midnight in Chicago is presumed from its 1-day bars."""
+
+_WEEK_STAMP_DAYS: Final = frozenset({5, 6, 0})
+"""The days a week bar of a class that does not trade at weekends may be stamped on: the
+Saturday or Sunday before its Monday-to-Friday week, which belong to it, or that Monday."""
+
+_MONDAY: Final = frozenset({0})
+"""The day a forex or crypto week bar must be stamped on: the Monday its calendar week starts."""
+
+_PERIOD_MONTHS: Final[Mapping[Timespan, frozenset[int]]] = {
+    Timespan.MONTH: frozenset(range(1, 13)),
+    Timespan.QUARTER: frozenset({1, 4, 7, 10}),
+    Timespan.YEAR: frozenset({1}),
+}
+"""The months whose 1st a month, quarter, or year bar may be stamped on."""
 
 _DAYS_OR_LONGER: Final = frozenset(
     {Timespan.DAY, Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR}
@@ -390,35 +421,44 @@ def stamp_rule(spec: DatasetSpec, request: Request) -> StampRule | None:
     """Return how the transports stamp a request's bars, or None to keep the stamps as sent.
 
     One `history()` call returns the same rows whichever source answers it, so every bar of a
-    day or longer, of every class but futures, is stamped at 00:00 of the day it starts on in
-    the class day zone (New York for stocks, options, and indices; UTC for forex and crypto).
-    Massive stamps a 1-day bar at the day's start on the aggregates range but at the session
-    close (stocks, options, indices; 13:00 New York time on a short stock trading day) or the
-    day's last millisecond (forex, crypto) on other
-    sources, and the indices range and day files at midnight in Chicago; those stamps move to
-    the day's start, and any other stamp fails, since such a bar may cover other days than its
-    label (the documented crypto REST samples sit at midnight New York time, another day cut).
+    day or longer of a class with a day zone (`dates.DAY_ZONES`: every class but futures) is
+    stamped at 00:00 of the day it starts on in that zone (New York for stocks, options, and
+    indices; UTC for forex and crypto). Massive stamps a 1-day bar at the day's start on the
+    aggregates range but at the session close (stocks, options, indices) or the day's last
+    millisecond (forex, crypto) on other sources, and the indices range and day files at
+    midnight in Chicago; those stamps move to the day's start, and any other stamp fails,
+    since such a bar may cover other days than its label (the documented crypto REST samples
+    sit at midnight New York time, another day cut). A week, month, quarter, or year bar must
+    also be stamped on the day its period starts, or the whole-window rule would place it in
+    another period.
 
     Args:
         spec: The dataset.
         request: The normalized arguments.
 
     Returns:
-        The rule for bars of a day or longer of stocks, options, indices, forex, and crypto;
-        None for intraday bars, futures bars, and every dataset that is not bars.
+        The rule, with no `remedy` yet, for bars of a day or longer of stocks, options,
+        indices, forex, and crypto; None for intraday bars, futures bars, and every dataset
+        that is not bars.
     """
     asset_class = spec.asset_class
+    # `is None` first narrows the type for the lookups below.
     if (
         not spec.is_bars
         or request.timespan not in _DAYS_OR_LONGER
         or asset_class is None
-        or asset_class not in _ONE_DAY_STAMPS
+        or asset_class not in DAY_ZONES
     ):
         return None
     zone = DAY_ZONES[asset_class]
-    if request.timespan is Timespan.DAY and request.multiplier == 1:
+    timespan = request.timespan
+    if timespan is Timespan.DAY and request.multiplier == 1:
         return StampRule(zone, _ONE_DAY_STAMPS[asset_class], "1-day bar")
-    return StampRule(zone, _LONGER_STAMPS[asset_class], "bar")
+    known = _LONGER_STAMPS[asset_class]
+    if timespan is Timespan.WEEK:
+        weekdays = _MONDAY if trades_at_weekends(asset_class) else _WEEK_STAMP_DAYS
+        return StampRule(zone, known, "bar", weekdays=weekdays)
+    return StampRule(zone, known, "bar", months=_PERIOD_MONTHS.get(timespan, frozenset()))
 
 
 def within_publication_grace(

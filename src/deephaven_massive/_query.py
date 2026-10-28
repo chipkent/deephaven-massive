@@ -600,16 +600,16 @@ class HistoryQuery(QueryBase):
         the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
         daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
         or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
-        `dm.ALL`); otherwise it uses REST. A bar of a day or longer stamped at a time of day
-        Massive is not known to use for its class fails loudly, whichever source serves it, so
-        the source never changes which day a bar is labelled with; `source=` picks a source
-        explicitly. A reactive symbol table
-        is read once, when the verb is called, and every source receives the same sorted
-        canonical symbols; rows that are not valid symbols of the class are ignored with a
-        WARNING. Flat-file reads skip a missing weekend file silently and a missing weekday
-        file (a holiday) with a WARNING. Futures trades and quotes named by session dates are
-        read over REST one request series per weekday session and symbol; a long
-        one-request-per-day download logs its request count first, at INFO.
+        `dm.ALL`); otherwise it uses REST. A bar of a day or longer stamped at a time of day,
+        or on a day, Massive is not known to use for its class fails loudly, whichever source
+        serves it, so the source never changes which day a bar is labelled with; `source=`
+        picks a source explicitly. A reactive symbol table is read once, when the verb is
+        called, and every source receives the same sorted canonical symbols; rows that are not
+        valid symbols of the class are ignored with a WARNING. Flat-file reads skip a missing
+        weekend file silently and a missing weekday file (a holiday) with a WARNING. Futures
+        trades and quotes named by session dates are read over REST one request series per
+        weekday session and symbol; a long one-request-per-day download logs its request count
+        first, at INFO.
 
         Side effects: network requests on the calling thread, and for flat files a pool of up
         to `max_concurrency` reader threads that end before the call returns. It blocks until
@@ -647,9 +647,10 @@ class HistoryQuery(QueryBase):
         that the day is skipped with a WARNING, as a holiday); when a futures range named by
         instants ends on a holiday and the next session's file, which holds the holiday's
         hours, is not published yet or does not exist within 7 days; when a bar of a day or
-        longer is stamped at a time of day Massive is not known to use for its class (a crypto
-        1-day bar at midnight New York time, say), naming the dataset, the source, and the
-        other source; or once the session is closed.
+        longer is stamped at a time of day, or on a day, Massive is not known to use for its
+        class (a crypto 1-day bar at midnight New York time, or a crypto week bar on a
+        Sunday), naming the dataset, the source, and what to do instead; or once the session
+        is closed.
 
         Example:
             ::
@@ -769,8 +770,17 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
 class HistoryLatestQuery(HistoryQuery):
     """Daily bars: `history()` plus `fetch()` of the previous completed session's bar.
 
-    No namespace declares a dataset of this kind yet, so no query can be built and there is no
-    example here yet.
+    The `bars()` of stocks, options, indices, forex, and crypto return this class for 1-day
+    bars with `multiplier=1`. A query is built by the namespace method, holds no state of its
+    own beyond its arguments, and may be used from any thread but a Deephaven update-graph
+    thread.
+
+    Example:
+        ::
+
+            daily = m.stocks.bars("AAPL", dm.Timespan.DAY)
+            last = daily.fetch()  # the previous session's bar
+            month = daily.history("2025-03-03", "2025-03-28")
     """
 
     __slots__ = ()
@@ -779,7 +789,11 @@ class HistoryLatestQuery(HistoryQuery):
         """Return one row per symbol: the bar of the previous completed session.
 
         Massive documents the endpoint as "the prior session's open, high, low, close, and
-        volume". A failed request raises `MassiveError` (`EntitlementError` on HTTP 403).
+        volume". The bar is stamped at 00:00 of its day in the class day zone (New York for
+        stocks, options, and indices; UTC for forex and crypto), whatever time Massive stamps
+        it at. A stamp at a time of day Massive is not known to use for the class raises
+        `MassiveError`, naming the dataset and `/prev`. A failed request raises `MassiveError`
+        (`EntitlementError` on HTTP 403).
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
