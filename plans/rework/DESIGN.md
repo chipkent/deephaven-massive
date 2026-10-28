@@ -1603,16 +1603,21 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   listed can be passed back as `symbols`, while the two converters check their own grammar; an index is `I:` and letters and digits, as Massive's WebSocket pattern
   `^(I:[a-zA-Z0-9]+)$` writes it, with dotted parts allowed; a forex pair is `C:` and two
   three-letter ISO 4217 codes; a crypto pair is `X:` and the two codes joined, whatever the
-  quote. A stream needs the WebSocket form (`BTC-USD`), so it splits the pair without a
-  guess: where exactly one quote of `CRYPTO_QUOTES` ends the ticker, that quote splits it;
-  where none does (`X:BTCXYZ`) or several do (`X:DOTUSD`: `DOT-USD` or `DO-TUSD`), the
-  stream looks the ticker up in Massive's reference data (`/v3/reference/tickers`, its
-  `base_currency_symbol` and `currency_symbol`) when it starts or when a symbol table adds the
-  ticker, through the session's REST client, and keeps the answer for the life of the
-  session. A failed lookup, or a ticker Massive does not list, refuses the stream with the
-  lookup's `MassiveError` (or a `ValueError` naming the ticker); it never falls back to a
-  guess. `fetch()`, `poll()`, and `history()` need no split, except the crypto last-trade
-  endpoint, whose path holds both codes and takes the same split. The list holds the
+  quote. A stream needs the WebSocket form (`BTC-USD`), and two REST paths take the pair as
+  two codes (`/v1/last/crypto/{from}/{to}` and `/v1/open-close/crypto/{from}/{to}/{date}`), so
+  the library splits a pair without a guess: where exactly one quote of `CRYPTO_QUOTES` ends
+  the ticker, that quote splits it; where none does (`X:BTCXYZ`) or several do (`X:DOTUSD`:
+  `DOT-USD` or `DO-TUSD`), the split comes from Massive's list of crypto tickers
+  (`/v3/reference/tickers?market=crypto`, every page, each row's `base_currency_symbol` and
+  `currency_symbol`, whose join must be the ticker). The session reads that list once, on first
+  need, through its REST client, and keeps it for its life; a failed read is not kept, so the
+  next need reads it again. A stream needs it when it starts or when a symbol table adds such a
+  ticker (on the session's `crypto pairs` worker, section 18.1). A failed read refuses the
+  stream with the read's `MassiveError`, and a ticker the list does not hold, or whose
+  currencies do not join to it, refuses it with a `MassiveError` naming the ticker; nothing
+  falls back to a guess. On the two REST paths the same refusal raises from `fetch()`, and
+  fails a `poll()` table, since every later cycle would read the same list. Every other REST
+  path and every flat file needs no split. The list holds the
   stablecoin quotes (`TUSD`, `PYUSD`, `FDUSD`, `BUSD`, `USDE`, `EURC`, `DAI`) so such a clash
   is seen and resolved rather than mis-split, and a flat-file filter looks for a crypto pair
   split at every point. Every grammar is
@@ -1728,7 +1733,9 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   `MassiveError`, and a WebSocket row fails every stream of the dataset on the channel (it
   cannot be routed to one, so no symbol stream may starve on it silently). `UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`) keeps
   the row with a null `Symbol` and the text in an added `RawSymbol` column, and logs each
-  spelling once at WARNING.
+  spelling once at WARNING. A `poll()` table keyed on `Symbol` then keys on `Symbol` and
+  `RawSymbol` together, so each unreadable spelling is its own row: it neither fails the
+  null-key check nor merges with another, and `REPLACE` removes it when it leaves.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
   instrument, it is `Underlying`, exactly as Massive sends it: on the options rows that carry
   one (the chain and the snapshots from `underlying_asset.ticker`, the contracts from
@@ -2777,6 +2784,7 @@ without the GIL.
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
+| crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (a REST request, once per session) for a ticker a symbol table added that the quote list cannot split; then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | take `registry_lock` across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (under the registry lock: unmaps the key; deletes the record, or marks it for the last hold to delete); `call_soon_threadsafe` | sends; JVM calls; blocking |
 
@@ -4506,8 +4514,9 @@ document already reflects them.
     a futures dataset takes any ticker as written; a dataset of global third-party tickers
     (TMX) keeps them as written; under a convention only that convention's grammar applies;
     any `X:` ticker is canonical, and a stream splits it by the quote list or, where that list
-    gives no single split, by Massive's reference data, kept per session, refusing a ticker
-    Massive does not list rather than guessing; a failed symbol table fails the result; an unreadable
+    gives no single split, by Massive's crypto ticker list, read once per session, refusing a
+    ticker the list does not hold rather than guessing; under `WARN` a keyed `poll()` adds
+    `RawSymbol` to its key, so an unreadable row is kept by its text; a failed symbol table fails the result; an unreadable
     WebSocket spelling fails every stream of the channel.
 
 ## 23. Open verification items

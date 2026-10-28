@@ -1078,10 +1078,11 @@ class WsConnections:
         asset_class = cast("AssetClass", spec.asset_class)
         plan = self._plan(core, spec, channel)
         symbols = request.symbol_key()
-        if isinstance(symbols, SymbolTable):
-            self.resolve_pairs(asset_class, read_symbols(spec, symbols.table))
-        elif isinstance(symbols, tuple):
-            self.resolve_pairs(asset_class, symbols)
+        if asset_class is AssetClass.CRYPTO:
+            if isinstance(symbols, SymbolTable):
+                self.resolve_pairs(read_symbols(spec, symbols.table))
+            elif isinstance(symbols, tuple):
+                self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
         decision = self._resolve(asset_class, spec.family)
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
@@ -1329,12 +1330,15 @@ class WsConnections:
         """
         with self._lock:
             connection = self._streams.get(stream_id)
-            if connection is not None and connection.asset_class is AssetClass.CRYPTO:
-                # A closed transport holds no stream, so nothing is submitted after shutdown.
-                self._lookups.submit(self._change_pairs, stream_id, added, removed)
-                return
-        if connection is not None:
+        if connection is None:
+            return
+        if connection.asset_class is not AssetClass.CRYPTO:
             connection.post(connection.change_symbols, stream_id, added, removed)
+            return
+        try:
+            self._lookups.submit(self._change_pairs, stream_id, added, removed)
+        except RuntimeError:
+            return  # close() shut the worker down meanwhile: the stream is gone with it
 
     def _change_pairs(self, stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
         """Resolve a crypto stream's added pairs, then post the change; fail it if one fails.
@@ -1348,9 +1352,12 @@ class WsConnections:
             removed: Canonical symbols it no longer holds.
         """
         try:
-            self.resolve_pairs(AssetClass.CRYPTO, added)
+            self.resolve_pairs(added)
         except MassiveError as error:
             failure: MassiveError | None = error
+        except Exception as error:  # a defect: logged with its trace, and it fails the stream
+            logger.exception("%s: looking up crypto pairs failed", self._label)
+            failure = MassiveError(f"looking up the crypto pairs {sorted(added)} failed: {error!r}")
         else:
             failure = None
         with self._lock:
@@ -1362,24 +1369,22 @@ class WsConnections:
         else:
             connection.post(connection.change_symbols, stream_id, added, removed)
 
-    def resolve_pairs(self, asset_class: AssetClass, symbols: Iterable[str]) -> None:
+    def resolve_pairs(self, symbols: Iterable[str]) -> None:
         """Look up, once per session, the split of each crypto symbol the quote list cannot split.
 
         A joined ticker that no listed quote ends, or that several end (`X:DOTUSD` is `DOT-USD`
-        or `DO-TUSD`), takes its base and quote from Massive's reference data; a topic is never
-        built from a guess. Blocks the calling thread for each lookup, with no lock held, so it
-        runs on the caller thread before a stream starts, or on the lookup worker.
+        or `DO-TUSD`), takes its base and quote from Massive's crypto ticker list, which the
+        session reads once; a topic is never built from a guess. May block the calling thread
+        for that read, with no lock held, so it runs on the caller thread before a stream
+        starts, or on the lookup worker.
 
         Args:
-            asset_class: The stream's class; only crypto symbols are looked up.
-            symbols: Canonical symbols.
+            symbols: Canonical crypto symbols.
 
         A failed lookup, or a ticker Massive does not list, raises the `MassiveError` (or its
         `AuthenticationError` or `EntitlementError`) of `crypto_pair`, its message prefixed
         with `cannot stream '<ticker>'`.
         """
-        if asset_class is not AssetClass.CRYPTO:
-            return
         for symbol in sorted(symbols):
             with self._lock:
                 known = symbol in self._pairs

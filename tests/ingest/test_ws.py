@@ -180,8 +180,9 @@ class Harness:
         self.backoff = backoff
         self.decisions: list[tuple[AssetClass, ChannelFamily]] = []
         # What Massive's reference data says of each crypto ticker, and every lookup made.
-        self.pair_answers: dict[str, tuple[str, str]] = {}
+        self.pair_answers: dict[str, tuple[str, str] | Exception] = {}
         self.lookups: list[str] = []
+        self.lookup_threads: list[str] = []
         self.verdicts: list[tuple[AssetClass, ChannelFamily, HostDecision]] = []
         self._decide = decide or (lambda *_: REALTIME)
         self.cond = threading.Condition()
@@ -221,12 +222,16 @@ class Harness:
         # The REST transport's lookup of a crypto ticker's currencies.
         with self.cond:
             self.lookups.append(symbol)
+            self.lookup_threads.append(threading.current_thread().name)
         if symbol not in self.pair_answers:
             raise dm.MassiveError(
                 f"{symbol!r} cannot be split into its two currencies: Massive's reference data "
                 "does not list it"
             )
-        return self.pair_answers[symbol]
+        answer = self.pair_answers[symbol]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     def record_verdict(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
@@ -1781,6 +1786,9 @@ def test_a_watchlist_row_of_an_ambiguous_pair_is_looked_up_off_the_update_graph(
     harness.subscribed("XT.SHIB-USD")  # the current row, looked up before the stream started
     watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
     harness.subscribed("XT.DOT-USD")  # a later row, looked up on the lookup worker
+    caller, worker = harness.lookup_threads
+    assert caller == threading.current_thread().name
+    assert worker.startswith(f"{harness.session._core.label} crypto pairs")
     watchlist.add(new_table([string_col("Symbol", ["X:ETHTUSD"])]))  # Massive does not list it
     wait_for(lambda: failed_after_flush(harness, result))
     (row,) = streams_of(harness, dh_to_pylist)
@@ -1802,3 +1810,48 @@ def test_closing_the_transport_stops_the_lookup_worker(harness: Harness) -> None
     harness.connections.close()
     with pytest.raises(RuntimeError, match="after shutdown"):
         harness.connections._lookups.submit(print)
+
+
+def test_a_watchlist_whose_first_row_massive_does_not_list_is_refused(harness: Harness) -> None:
+    watchlist = new_table([string_col("Symbol", ["X:ETHTUSD"])])
+    with pytest.raises(dm.MassiveError, match=r"^cannot stream 'X:ETHTUSD': 'X:ETHTUSD' cannot"):
+        harness.query(CRYPTO, watchlist).append_only()
+    assert harness.urls == []  # no connection opened
+
+
+def test_an_unexpected_lookup_failure_fails_the_stream(
+    harness: Harness,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness.pair_answers["X:DOTUSD"] = RuntimeError("the lookup broke")
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["X:BTCUSD"])]))
+    result = harness.query(CRYPTO, watchlist).append_only()
+    harness.subscribed("XT.BTC-USD")
+    watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    wait_for(lambda: failed_after_flush(harness, result))
+    (row,) = streams_of(harness, dh_to_pylist)
+    assert row["Error"] == (
+        "looking up the crypto pairs ['X:DOTUSD'] failed: RuntimeError('the lookup broke')"
+    )
+    assert "looking up crypto pairs failed" in caplog.text
+
+
+def test_a_watchlist_change_racing_close_is_dropped(harness: Harness) -> None:
+    # close() shuts the lookup worker down; a change that reaches it after that is dropped,
+    # since the stream goes with the transport, and nothing is raised on the update graph.
+    result = harness.query(CRYPTO, ["X:BTCUSD"]).append_only()
+    harness.subscribed("XT.BTC-USD")
+    (stream_id,) = harness.connections._streams
+    harness.connections._lookups.shutdown()
+    harness.connections._symbols_changed(stream_id, frozenset({"X:ETHUSD"}), frozenset())
+    assert harness.lookups == []
+    harness.session.release(result)
+
+
+def test_every_crypto_pair_streams_without_a_lookup(harness: Harness) -> None:
+    result = harness.query(CRYPTO, dm.ALL).blink()
+    harness.subscribed("XT.*")
+    assert harness.lookups == []
+    harness.session.release(result)

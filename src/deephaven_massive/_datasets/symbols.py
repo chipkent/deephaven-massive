@@ -1363,8 +1363,9 @@ def topic_problem(asset_class: AssetClass | None, symbol: str) -> str | None:
     A crypto topic spells the pair `BASE-QUOTE`, and the quote list splits a joined ticker only
     where exactly one quote currency it knows (`CRYPTO_QUOTES`) ends it. A ticker no quote ends
     (`X:BTCXYZ`) or several do (`X:DOTUSD`: `DOT-USD` or `DO-TUSD`) needs Massive's reference
-    data to say where it splits; the WebSocket transport looks it up when the stream starts and
-    refuses the stream if the lookup fails, so a wrong topic is never subscribed. Every other
+    data to say where it splits; the WebSocket transport finds it in Massive's crypto ticker
+    list when the stream starts and refuses the stream if the list does not give it, so a wrong
+    topic is never subscribed. Every other
     symbol needs nothing.
 
     Args:
@@ -1402,7 +1403,8 @@ def option_roots(symbols: pa.Array) -> pa.Array:
     Returns:
         A string array of the roots; null where the symbol is null.
     """
-    return pc.utf8_slice_codeunits(symbols, start=2, stop=-_OCC_TAIL)
+    slicing = pc.SliceOptions(start=2, stop=-_OCC_TAIL)
+    return pc.call_function("utf8_slice_codeunits", [symbols], slicing)
 
 
 _UNKNOWN_LIMIT: Final = 100
@@ -1500,8 +1502,9 @@ class WireSymbols:
         index = pc.call_function("index_in", [raw], pc.SetLookupOptions(value_set=distinct))
         symbols = pc.take(mapped, index)
         unknown = tuple(sorted(t for t in texts if t is not None and known[t] is None))
-        unread = pc.and_(pc.is_null(symbols), pc.is_valid(raw))
-        kept = pc.if_else(unread, raw, pa.scalar(None, pa.string()))
+        missing = pc.call_function("is_null", [symbols])
+        unread = pc.call_function("and", [missing, pc.call_function("is_valid", [raw])])
+        kept = pc.call_function("if_else", [unread, raw, pa.scalar(None, pa.string())])
         if self.unknown is UnknownSymbols.WARN:
             for text in unknown:
                 _unknown_spellings.warn(

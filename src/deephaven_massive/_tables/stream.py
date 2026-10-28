@@ -348,7 +348,7 @@ class ChannelPlan:
         read = self.symbols.read(column.combine_chunks(), symbols)
         if not read.unknown or self.symbols.unknown is UnknownSymbols.WARN:
             return read.symbols, read.raw, None
-        bad = pc.is_valid(read.raw)
+        bad = pc.call_function("is_valid", [read.raw])
         message = unknown_symbol_message(self.dataset, read.unknown)
         indices = pc.call_function("indices_nonzero", [bad]).to_pylist()
         failures.extend((index, message, True) for index in indices)

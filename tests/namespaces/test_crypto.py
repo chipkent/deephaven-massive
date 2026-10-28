@@ -674,19 +674,26 @@ def test_a_daily_bar_stamped_inside_its_utc_day_fails_loudly(
         )
 
 
+# X:BTCXYZ no listed quote ends: this path's {from}/{to} are the range, not the pair's two
+# currencies, so it needs no split and reads no ticker list.
+@pytest.mark.parametrize("symbol", ["X:BTCUSD", "X:BTCXYZ"])
 def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    symbol: str,
 ) -> None:
     start = int(datetime(2020, 6, 1, tzinfo=UTC).timestamp()) * 1000
     end = start + 2 * DAY_MS - 1
-    path = f"/v2/aggs/ticker/X:BTCUSD/range/1/day/{start}/{end}"
+    path = f"/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}"
     serve(fake_rest, path, restamp(load_fixture(OWNER, "range.json"), start, start + DAY_MS))
-    q = rest_session.crypto.bars("X:BTCUSD", dm.Timespan.DAY)
+    q = rest_session.crypto.bars(symbol, dm.Timespan.DAY)
     out = rows(q.history("2020-06-01", "2020-06-02", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Transactions"]) for r in out] == [
-        ("X:BTCUSD", start * MS, 9557.9, 1),
-        ("X:BTCUSD", (start + DAY_MS) * MS, 10096.87, 1),
+        (symbol, start * MS, 9557.9, 1),
+        (symbol, (start + DAY_MS) * MS, 10096.87, 1),
     ]
 
 
@@ -729,7 +736,7 @@ def test_a_long_snapshot_list_is_split_into_requests_of_250(
     path = "/v2/snapshot/locale/global/markets/crypto/tickers"
     serve(fake_rest, path, load_fixture(OWNER, "snapshots.json"))
     codes = ["".join(letters) for letters in itertools.product(string.ascii_uppercase, repeat=3)]
-    rest_session.crypto.snapshots([f"{code}-USD" for code in codes[:251]]).fetch()
+    rest_session.crypto.snapshots([f"X:{code}USD" for code in codes[:251]]).fetch()
     sizes = sorted(len(query["tickers"][0].split(",")) for _, query in sent(fake_rest))
     assert sizes == [1, 250]
 
@@ -1041,6 +1048,4 @@ def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed(
         r"Massive's reference data does not list it$",
     ):
         q.blink()
-    assert sent(fake_rest) == [
-        ("/v3/reference/tickers", {"ticker": ["X:BTCXYZ"], "market": ["crypto"]})
-    ]
+    assert sent(fake_rest) == [("/v3/reference/tickers", {"market": ["crypto"], "limit": ["1000"]})]

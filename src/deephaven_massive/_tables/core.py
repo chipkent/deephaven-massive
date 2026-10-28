@@ -212,8 +212,9 @@ class RestTransport(Protocol):
         """Return a crypto ticker's base and quote, looking them up in Massive if needed.
 
         Called by the WebSocket transport for a ticker the quote list cannot split, before a
-        stream starts or on its lookup worker. It blocks for one request to Massive's reference
-        data until a lookup of the ticker succeeds; the answer is then kept for the session.
+        stream starts or on its lookup worker. The first such call of the session blocks while
+        it reads Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every
+        page), which the session then keeps; a failed read is read again by the next call.
 
         Args:
             symbol: A canonical crypto ticker.
@@ -221,8 +222,8 @@ class RestTransport(Protocol):
         Returns:
             `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`.
 
-        A failed request, or a ticker Massive does not list, raises a `MassiveError` naming
-        the ticker.
+        A failed read, or a ticker the list does not hold, raises a `MassiveError` naming the
+        ticker.
         """
         ...
 

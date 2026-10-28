@@ -38,12 +38,13 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._ingest import hosts, rest
-from deephaven_massive._ingest.poll import RowDataError
+from deephaven_massive._ingest.poll import RowDataError, UnlistedPairError
 from deephaven_massive._massive import RestPath, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables.core import SessionCore
 from deephaven_massive._tables.diagnostics import Diagnostics
+from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -606,11 +607,21 @@ def _ticker(symbol: str, base: str, quote: str) -> dict[str, object]:
     }
 
 
-def test_an_ambiguous_crypto_pair_takes_its_split_from_massive_once(
+LIST_QUERY = {"market": ["crypto"], "limit": ["1000"]}
+"""The query of the first page of Massive's crypto ticker list."""
+
+
+def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # X:DOTUSD ends in USD and in TUSD: the reference data says where it splits, never a guess.
-    fake_rest.reply("/v3/reference/tickers", Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    # The whole list is read once, every page, and serves every later pair of the session.
+    second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
+    first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
+    fake_rest.reply("/v3/reference/tickers?market=crypto&limit=1000", Reply(first_page))
+    fake_rest.reply(
+        "/v3/reference/tickers?cursor=two", Reply(envelope([_ticker("X:SHIBUSD", "SHIB", "USD")]))
+    )
     body = {"symbol": "DOT-USD", "isUTC": True, "day": "2025-03-03T00:00:00Z", "open": 4.5}
     fake_rest.reply("/v1/open-close/crypto/DOT/USD/2025-03-03", Reply(body), Reply(body))
     for _ in range(2):
@@ -618,10 +629,13 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_massive_once(
             session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": date(2025, 3, 3)}
         )
         assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
+    reader = cast("Any", session._core.rest_transport())._reader()
+    assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
     assert sent(fake_rest) == [
-        ("/v3/reference/tickers", {"ticker": ["X:DOTUSD"], "market": ["crypto"]}),
+        ("/v3/reference/tickers", LIST_QUERY),
+        ("/v3/reference/tickers", {"cursor": ["two"]}),
         ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),
-        ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),  # the split is cached
+        ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),  # the list is kept
     ]
 
 
@@ -638,6 +652,7 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_massive_once(
             [_ticker("X:OTHER", "DOT", "USD"), _ticker("X:DOTUSD", "DO", "TUSD")],
             None,
         ),
+        ([{"market": "crypto", "base_currency_symbol": "DOT"}], "Massive's reference data does"),
     ],
 )
 def test_a_crypto_pair_lookup_never_guesses(
@@ -652,22 +667,126 @@ def test_a_crypto_pair_lookup_never_guesses(
     if message is None:  # the row of the ticker itself decides
         assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
         return
-    with pytest.raises(dm.MassiveError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
+    with pytest.raises(UnlistedPairError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
         reader.crypto_pair("X:DOTUSD")
 
 
-def test_a_failed_crypto_pair_lookup_keeps_its_public_error(
+def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_retried(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    fake_rest.reply("/v3/reference/tickers", Reply({"status": "ERROR"}, status=403))
+    fake_rest.reply(
+        "/v3/reference/tickers",
+        Reply({"status": "ERROR"}, status=403),
+        Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
+    )
     reader = cast("Any", session._core.rest_transport())._reader()
     with pytest.raises(
-        dm.EntitlementError, match=r"^'X:DOTUSD' cannot be split into its two currencies: looking"
+        dm.EntitlementError,
+        match=r"^'X:DOTUSD' cannot be split into its two currencies: reading Massive's crypto",
     ) as raised:
         reader.crypto_pair("X:DOTUSD")
     assert raised.value.status == 403
     assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")  # the quote list: no request
-    assert len(sent(fake_rest)) == 1
+    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the failure was not kept
+    assert len(sent(fake_rest)) == 2
+
+
+def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = cast("Any", session._core.rest_transport())._reader()
+    claimed: list[Future[Any]] = []
+
+    def pages(*_: object, **__: object) -> Iterator[Any]:
+        future, created = reader.state.crypto_future()  # what a waiter would get meanwhile
+        assert not created
+        claimed.append(future)
+        raise RuntimeError("the reader broke")
+
+    monkeypatch.setattr(reader.state.client, "pages", pages)
+    with pytest.raises(RuntimeError, match="the reader broke"):  # the reader's own error
+        reader.crypto_pair("X:DOTUSD")
+    (future,) = claimed
+    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError"):
+        future.result()  # the waiters get a MassiveError
+    assert reader.state.crypto_future()[1]  # and the failure is forgotten
+
+
+class _WatchedFuture(Future[rest.CryptoTickers]):
+    # A future that says when a caller starts waiting on it.
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = threading.Event()
+
+    @override
+    def result(self, timeout: float | None = None) -> rest.CryptoTickers:
+        self.waiting.set()
+        return super().result(timeout)
+
+
+def _wait_for_pair(
+    reader: rest.RestReader, future: _WatchedFuture
+) -> tuple[list[object], threading.Thread]:
+    # Call crypto_pair on another thread while `future` is the list being read: the thread
+    # waits on it, and puts what the call returned or raised in the list once it completes.
+    reader.state._crypto = future  # the read another thread has claimed
+    results: list[object] = []
+
+    def wait() -> None:
+        try:
+            results.append(reader.crypto_pair("X:DOTUSD"))
+        except dm.MassiveError as error:
+            results.append(error)
+
+    waiter = threading.Thread(target=wait)
+    waiter.start()
+    assert future.waiting.wait(30)
+    return results, waiter
+
+
+@pytest.mark.parametrize("outcome", ["fails", "succeeds"])
+def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
+    *, session: dm.MassiveSession, outcome: str
+) -> None:
+    reader = cast("Any", session._core.rest_transport())._reader()
+    future = _WatchedFuture()
+    results, waiter = _wait_for_pair(reader, future)
+    if outcome == "fails":
+        future.set_exception(dm.EntitlementError("refused", status=403))
+    else:
+        future.set_result({"X:DOTUSD": ("DOT", "USD")})
+    waiter.join(30)
+    (result,) = results
+    if outcome == "fails":
+        assert isinstance(result, dm.EntitlementError)
+        assert str(result).endswith("reading Massive's crypto tickers failed: refused")
+    else:
+        assert result == ("DOT", "USD")
+
+
+def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Static symbols are planned at the call; a symbol table's are planned each cycle, and
+    # since every later cycle would read the same list, the table fails at its first cycle.
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope([])))
+    params = {"date": date(2025, 3, 3)}
+    static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+    assert isinstance(static, Query)
+    with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
+        static.poll(60)
+    watch = new_table([string_col("Symbol", ["X:DOTUSD"])])
+    q = query(session, CRYPTO_OPEN_CLOSE, symbols=watch, params=params)
+    assert isinstance(q, Query)
+    table = q.poll(60)
+    failed = threading.Event()
+    for _ in range(3000):
+        if table.j_table.isFailed():
+            failed.set()
+            break
+        failed.wait(0.01)
+    assert failed.is_set()
+    assert sent(fake_rest) == [("/v3/reference/tickers", LIST_QUERY)]
 
 
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(

@@ -1215,3 +1215,45 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
     rendered = row["Error"].removeprefix(prefix)
     assert len(rendered) == 300
     assert rendered.endswith("xxx...")
+
+
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+) -> None:
+    # Under WARN a row Massive spelled in a way the library cannot read keeps a null Symbol
+    # and its text in RawSymbol; keyed on Symbol, it neither fails the null-key check nor
+    # merges with another such row, and REPLACE removes it by its text.
+    monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    spec = dataclasses.replace(FEED, poll_keys=("Symbol",))
+    rows = [
+        {"id": "a", "ticker": "AAPL"},
+        {"id": "b", "ticker": "@@1"},
+        {"id": "c", "ticker": "@@2"},
+    ]
+    fake_rest.reply(PATH, Reply(envelope(rows)), Reply(envelope(rows[:2])))
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
+    )
+    with dm.MassiveSession(config) as m:
+        q = build_query(m._core, spec, symbols=["AAPL"])
+        assert isinstance(q, Query)
+        table = q.poll(60, mode=mode)
+        expected = [("a", "AAPL", None), ("b", None, "@@1"), ("c", None, "@@2")]
+
+        def held() -> list[tuple[str, str | None, str | None]]:
+            return sorted((r["Id"], r["Symbol"], r["RawSymbol"]) for r in dh_to_pylist(table))
+
+        until(lambda: held() == expected)
+        next_cycle(clock)  # @@2 leaves: REPLACE removes its row alone; the others keep it
+        until(lambda: len(fake_rest.requests) == 2)
+        until(lambda: held() == (expected[:2] if mode is PollMode.REPLACE else expected))
+        assert m._core.diagnostics.barrier().wait(30.0)
+        assert held() == (expected[:2] if mode is PollMode.REPLACE else expected)
+        assert not table.j_table.isFailed()

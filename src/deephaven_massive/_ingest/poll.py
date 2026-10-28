@@ -33,8 +33,9 @@ table, and `SchemaDrift` from each page's drift.
 
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, `RowDataError` (a
 row that breaks the schema, or, in any mode, has a null poll key, which would merge unrelated
-rows), or `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks
-a parameter the caller set) fails the table through `publish_failure`, marks the row `FAILED`
+rows), `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks
+a parameter the caller set), or `UnlistedPairError` (a crypto pair whose currencies Massive's
+reference data does not give) fails the table through `publish_failure`, marks the row `FAILED`
 (`SessionCore.fail_stream`), and ends the poller. Any other error, also one while publishing,
 is logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next cycle
 runs as scheduled, and clears the `Error` once it succeeds.
@@ -66,6 +67,7 @@ from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
 from deephaven.stream.table_publisher import table_publisher
 
+from deephaven_massive._datasets.schema import RAW_SYMBOL
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import PollMode
 from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
@@ -141,11 +143,22 @@ class SymbolRowError(MassiveError):
     """
 
 
+class UnlistedPairError(MassiveError):
+    """A crypto ticker whose two currencies Massive's reference data does not give.
+
+    A path that takes the pair as two currencies (`/v1/open-close/crypto/{from}/{to}/...`)
+    needs the split, and the quote list cannot decide it; the session's crypto ticker list,
+    read once, does not list the ticker, or gives currencies that do not join to it. A
+    `poll()` table fails with it, since every later cycle would read the same list.
+    """
+
+
 _FATAL: Final = (
     AuthenticationError,
     EntitlementError,
     RowDataError,
     SymbolRowError,
+    UnlistedPairError,
     UnsupportedParameterError,
 )
 """The errors that fail a `poll()` table: retrying the next cycle cannot fix them."""
@@ -300,6 +313,7 @@ class Poller:
         "_core",
         "_exec_ctx",
         "_interval",
+        "_key_names",
         "_keys",
         "_label",
         "_max_concurrency",
@@ -354,6 +368,7 @@ class Poller:
         self._max_concurrency = core.config.max_concurrency
         self._schema = core.dataset_schema(spec)
         self._spec = spec
+        self._key_names = key_columns(spec, self._schema)
         self._request = request
         self._interval = interval.total_seconds()
         self._mode = mode
@@ -548,7 +563,10 @@ class Poller:
         `APPEND` would append its row again every cycle. Like a missing required key, it is a
         data failure, so it fails the table. The dataset's nullable poll keys
         (`DatasetSpec.nullable_poll_keys`, such as an option's `PutCall`, empty for common
-        stock) and its revision keys are not checked: a null there is a value.
+        stock) and its revision keys are not checked: a null there is a value. Nor is `Symbol`
+        in a `WARN` session (`key_columns`): the reader refuses a row with no symbol, so a null
+        `Symbol` there is a row Massive spelled in a way the library cannot read, keyed by its
+        `RawSymbol`.
 
         Args:
             table: The cycle's rows.
@@ -559,7 +577,13 @@ class Poller:
                 characters, so the row can be found although it was never published.
         """
         nullable = self._spec.nullable_poll_keys
-        for name in (key for key in self._spec.poll_keys if key not in nullable):
+        # In a WARN session the key holds RawSymbol (`key_columns`): a row's Symbol is null
+        # exactly when its RawSymbol holds the unreadable text, so neither is checked.
+        warn = RAW_SYMBOL in self._key_names
+        checked = (
+            k for k in self._key_names if k not in nullable and not (warn and k in _SYMBOL_KEYS)
+        )
+        for name in checked:
             missing = pc.is_null(table.column(name), nan_is_null=True)
             row = pc.index(missing, True).as_py()
             if row >= 0:
@@ -585,7 +609,7 @@ class Poller:
             The rows to append, and every identity of the cycle (those already held are
             harmless to add again).
         """
-        names = (*self._spec.poll_keys, *self._spec.revision_keys)
+        names = (*self._key_names, *self._spec.revision_keys)
         identities = zip(*(table.column(name).to_pylist() for name in names), strict=True)
         taken: set[tuple[Hashable, ...]] = set()
         keep = []
@@ -605,7 +629,7 @@ class Poller:
         Returns:
             The rows with the live column, then the tombstones; and the cycle's key set.
         """
-        names = self._spec.poll_keys
+        names = self._key_names
         keys = set(zip(*(table.column(name).to_pylist() for name in names), strict=True))
         gone = self._keys - keys
         rows = table.append_column(LIVE_COLUMN, pa.array([True] * table.num_rows, pa.bool_()))
@@ -634,6 +658,32 @@ class Poller:
         logger.error("%s poll() failed: %s", self._spec.name, error)
         self._publisher.publish_failure(error)
         core.fail_stream(self._stream_id, str(error))
+
+
+_SYMBOL_KEYS: Final = frozenset({"Symbol", RAW_SYMBOL})
+"""The key columns of a row's symbol in a `WARN` session: one of the two is always set."""
+
+
+def key_columns(spec: DatasetSpec, schema: Schema) -> tuple[str, ...]:
+    """Return the columns that identify a row of a `poll()` table: its key in every mode.
+
+    They are the dataset's poll keys (`DatasetSpec.poll_keys`), plus `RawSymbol` when they hold
+    `Symbol` and the schema has a `RawSymbol` column (a session whose `unknown_symbols` is
+    `WARN`). Such a session keeps a row whose symbol Massive spelled in a way the library cannot
+    read, with a null `Symbol` and the text in `RawSymbol`; keyed on `Symbol` alone, every such
+    row would merge into one, or fail the null-key check. With `RawSymbol` in the key, a readable
+    row is keyed by its `Symbol` (its `RawSymbol` is null) and an unreadable one by its text.
+
+    Args:
+        spec: The dataset.
+        schema: The dataset's schema in the session.
+
+    Returns:
+        The key columns, in order.
+    """
+    if "Symbol" in spec.poll_keys and RAW_SYMBOL in schema.column_names:
+        return (*spec.poll_keys, RAW_SYMBOL)
+    return spec.poll_keys
 
 
 def build_table(
@@ -666,7 +716,7 @@ def build_table(
     )
     if mode is PollMode.APPEND:
         return blink_to_append_only(blink), publisher
-    keys = list(spec.poll_keys)
+    keys = list(key_columns(spec, schema))
     # When every column is a key, `last_by` has no column to aggregate and Deephaven refuses
     # it. Its rows would be the distinct key rows, which `select_distinct` of a blink table
     # keeps across cycles. `REPLACE` never takes that branch: its hidden column is not a key.
