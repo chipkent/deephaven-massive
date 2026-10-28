@@ -289,7 +289,7 @@ class MassiveSession:
 
     @property
     def crypto(self) -> _Crypto:
-        """Crypto pairs: trades, quotes, bars, snapshots, and movers."""
+        """Crypto pairs: trades, quotes, bars, FMV, snapshots, movers, and daily open/close."""
         return self._crypto
 
     @property
