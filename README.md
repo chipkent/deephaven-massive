@@ -27,6 +27,17 @@ uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once p
 Always go through `uv run`: bare `python`, `pytest`, `ruff`, and `mypy` use the wrong
 environment. [`AGENTS.md`](AGENTS.md) has the full command list and the contribution rules.
 
+### Live integration tests
+
+The tests in `tests/**/test_*_integration.py` call Massive itself. They carry the `integration`
+marker, which the default run deselects, and they skip without `MASSIVE_API_KEY` and under CI,
+so neither `./scripts/check.sh` nor CI ever reaches Massive. `uv run pytest -m integration_smoke`
+checks every dataset and verb once, unattended; tests that deliberately exceed Massive's limits
+run only with `-m integration_limits`. Declare the plans the key holds in `MASSIVE_LIVE_PLANS`,
+and each test runs or skips, naming the plan it needs. [`docs/live-tests.md`](docs/live-tests.md)
+says how to run them, in which order, what each plan can verify, and how to get the S3
+credentials; each test's docstring says what its evidence means.
+
 ## License
 
 Apache License 2.0. See [`LICENSE`](LICENSE).
