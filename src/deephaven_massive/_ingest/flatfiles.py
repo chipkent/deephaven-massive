@@ -51,6 +51,19 @@ publication time (`within_publication_grace` in `_datasets/history_source.py`) i
 `MassiveError` naming both causes, and after that it is skipped with a WARNING like any other
 weekday.
 
+A missing file is one S3 answers with HTTP 404 and the S3 error code `NoSuchKey`. Any other
+404 (another S3 code, or a page that is not S3's at all, such as the HTML "404 Not Found" page
+Massive's front end serves for a path it does not route) raises `MassiveError` naming the
+object and the settings to check (`MassiveConfig.s3_bucket` and `s3_endpoint_url`). A range
+with no file at all is no error: it returns an empty table, with a WARNING per missing
+weekday, whatever the reason.
+
+A connection that drops part-way through a file does not fail the call: a file's rows stay
+with its reader until the file ends, so the reader discards them and reads the file again
+from its start, at most three more times on the shared retry schedule
+(`FlatFileClient.wait_to_reread`), and raises `MassiveError` naming the file if the last
+attempt fails too.
+
 Columns are matched by header name, never by position, so a file whose columns are reordered
 reads identically. Every `Instant` column goes through the timestamp routine of
 `_datasets/timestamps.py`: Massive writes `0` where a timestamp has no value (`trf_timestamp` of
@@ -91,9 +104,11 @@ import functools
 import logging
 import threading
 import time
+import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
@@ -526,21 +541,25 @@ class FlatFileHistory:
         Returns:
             A static table in the dataset's schema: the files' rows in date order (and, for
             futures, venue order within a date), each file's rows in file order. A range
-            without rows gives an empty table with every column.
+            without rows, or without any file, gives an empty table with every column.
 
         Errors, all raised on the calling thread: `AuthenticationError` when S3 rejects the S3
         credentials; `EntitlementError` when S3 answers HTTP 403 for a file otherwise, naming
         the venue and the `venue=` parameter for futures; `MassiveError` when the file for the
         last requested date is missing on a trading day within a day after its publication time
         (`"... is not yet published (flat files land ~11:00 ET next day), or was a market
-        holiday"`), when the S3 client cannot be created, the bucket is unreachable or answers
-        another error, a file is not the expected gzip CSV (for example, it lacks the symbol or
-        time header, or a value does not parse as its type), a timestamp overflows or lies
-        outside 1990 to 2100 (`"timestamp unit mismatch for <dataset>.<header>: ..."`, then
-        the file), a futures file holds another session, or the session is closed during the
-        call. Errors that come from S3 carry its `x-amz-request-id` as `request_id`. An extra
-        or missing documented header is not an error: it logs a WARNING once per header and
-        session.
+        holiday"`), when the S3 client cannot be created, the bucket is unreachable, answers
+        a 404 that is not S3's `NoSuchKey` (a wrong bucket or endpoint: `"cannot read
+        s3://<bucket>/<key> at <endpoint>: HTTP 404 (404: Not Found); check MassiveConfig
+        s3_bucket and s3_endpoint_url"`), or answers another error, a file's connection drops
+        part-way on its first read and on each of its three rereads, a file is not the
+        expected gzip CSV (for example, it lacks the symbol or time header, or a value does
+        not parse as its type), a timestamp
+        overflows or lies outside 1990 to 2100 (`"timestamp unit mismatch for
+        <dataset>.<header>: ..."`, then the file), a futures file holds another session, or
+        the session is closed during the call. Errors that come from S3 carry its
+        `x-amz-request-id` as `request_id`. An extra or missing documented header is not an
+        error: it logs a WARNING once per header and session.
         """
         prefix = spec.flat_file_prefixes[request.timespan]
         transform = _Transform.build(
@@ -747,29 +766,70 @@ class FlatFileHistory:
         merged into one, so the per-batch overhead never grows with the file. The file, and
         its batch generator, are closed however the read ends.
 
+        No table leaves this method before the file ends, so a connection that drops part-way
+        through (`FlatFile.dropped`) costs only this file's progress: its tables are discarded,
+        the body is closed, and the file is requested again and read from its start, after the
+        wait of `FlatFileClient.wait_to_reread` (at most three rereads, 0.5, 1, then 2 seconds
+        apart plus jitter). The wait ends early when the call is cancelled or the session
+        closes, and the next check then stops the read.
+
         Args:
             transform: The request's block transform.
             key: The file to read.
             cancel: The call's cancel event, checked before the request and after each block.
 
+        Errors: `MassiveError` if converting or gathering the file's rows fails in Arrow (out of
+        memory, say): `"cannot read <location>: <Arrow's message>"`; if a timestamp fails the
+        timestamp routine: its text, then `"(in <location>)"`. A failed request or read (for
+        example, a file that is not the expected gzip CSV) raises the public error of
+        `_public`: `MassiveError`, `AuthenticationError`, or `EntitlementError`; a dropped
+        connection raises it once the rereads are spent. A closed session raises the
+        `MassiveError` of `_check_open`, and a cancelled call `_CancelledError`.
+
         Returns:
             The file's tables, or None if the file does not exist.
+        """
+        plan = transform.plan_for(key)
+        retry = 0
+        while True:
+            outcome = self._read_once(transform, key, plan, cancel=cancel)
+            if not isinstance(outcome, WireError):
+                return outcome
+            # The body is closed by now, so no connection idles through the wait.
+            if not self._client.wait_to_reread(outcome, retry, cancel):
+                public = _public(outcome, key)
+                raise public from outcome
+            retry += 1
+
+    def _read_once(
+        self, transform: _Transform, key: _Key, plan: ReadPlan, *, cancel: threading.Event
+    ) -> list[Table] | WireError | None:
+        """Request one file and read it from its start once; `_read_key` reads it again.
+
+        Args:
+            transform: The request's block transform.
+            key: The file to read.
+            plan: The file's read plan.
+            cancel: The call's cancel event, checked before the request and after each block.
+
+        Returns:
+            The file's tables; None if the file does not exist; or, when the connection dropped
+            part-way through the body (`FlatFile.dropped`), the read's error, with the body
+            closed and the frames its traceback holds cleared, so the tables gathered so far
+            are freed before the wait and the next read.
 
         Raises:
-            MassiveError: If converting or gathering the file's rows fails in Arrow (out of
-                memory, say): `"cannot read <location>: <Arrow's message>"`; if a timestamp
-                fails the timestamp routine: its text, then `"(in <location>)"`. A failed request
-                or read (for example, a file that is not the expected gzip CSV) raises the
-                public error of `_public`: `MassiveError`, `AuthenticationError`, or
-                `EntitlementError`. A closed session raises the `MassiveError` of
-                `_check_open`, and a cancelled call `_CancelledError`.
+            MassiveError: Every failure `_read_key` describes except a dropped connection,
+                including its subclasses `AuthenticationError` and `EntitlementError`. A
+                cancelled call raises `_CancelledError` instead, which is not a
+                `MassiveError`.
         """
         self._check(cancel)
+        file = None
         try:
             file = self._client.open(key.key)
             if file is None:
                 return None
-            plan = transform.plan_for(key)
             with file, contextlib.closing(file.batches(plan)) as batches:
                 self._check(cancel)
                 try:
@@ -782,6 +842,12 @@ class FlatFileHistory:
                     # The routine knows the field, not the file: name the file too.
                     raise MassiveError(f"{error} (in {file.location})") from error
         except WireError as error:
+            if file is not None and file.dropped:
+                # None of the tables gathered so far was handed on, so reading the file again
+                # from its start repeats no row. The error's traceback still holds them, in
+                # the frames it passed through; clearing those frames frees them now rather
+                # than after the next read.
+                return _released(error)
             public = _public(error, key)
             raise public from error
 
@@ -870,13 +936,35 @@ class FlatFileHistory:
             )
 
 
+def _released(error: WireError) -> WireError:
+    """Clear the local variables of the finished frames a dropped read's traceback holds.
+
+    The reader raises the error in the batch generator's frame, and it passes through
+    `_gather`'s frame on its way to `_read_once`, so this one traceback holds both: the
+    gathered tables and pending batches in `_gather`'s locals, and the Arrow reader and its
+    current block in the generator's. Clearing those frames releases the values; the error
+    keeps its message and its traceback's file and line entries, so a final failure reads the
+    same. Its cause, the stream's `OSError`, was raised below the generator and holds none of
+    the file's rows. A frame that is still running (`_read_once`'s own) is left alone.
+
+    Args:
+        error: The error of a failed read.
+
+    Returns:
+        The same error.
+    """
+    traceback.clear_frames(error.__traceback__)
+    return error
+
+
 def _public(error: WireError, key: _Key) -> MassiveError:
     """Return the public error for a wire error of one file, with the user's remedy.
 
     A rejected credential names the settings to check; a refusal names the plan and, for a
-    futures file, the venue and the `venue=` parameter. Every other wire error becomes its
-    public counterpart through `_errors.from_wire`. Each keeps the wire error's status and
-    request id.
+    futures file, the venue and the `venue=` parameter; a 404 (a missing bucket, since a
+    missing file is no error) names the bucket and endpoint settings. Every other wire error
+    becomes its public counterpart through `_errors.from_wire`. Each keeps the wire error's
+    status and request id.
 
     Args:
         error: The wire error.
@@ -902,6 +990,14 @@ def _public(error: WireError, key: _Key) -> MassiveError:
         return EntitlementError(
             f"the plan does not include {key.venue.name} futures flat files: {error.message}; "
             "pass venue=dm.FuturesVenue.<VENUE> for a venue the plan includes",
+            status=error.status,
+            request_id=error.request_id,
+        )
+    if error.status == HTTPStatus.NOT_FOUND:
+        # S3 answers a missing file with `NoSuchKey`, which the client reports as no file; any
+        # other 404 means the bucket or endpoint is not the one that holds the files.
+        return MassiveError(
+            f"{error.message}; check MassiveConfig s3_bucket and s3_endpoint_url",
             status=error.status,
             request_id=error.request_id,
         )

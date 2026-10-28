@@ -177,6 +177,39 @@ def test_filings_rows_without_a_ticker(
 
 
 @pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("41")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(60)
+def test_an_ipo_keeps_its_issuer_name(
+    live_session: dm.MassiveSession,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Whether an IPO's issuer name changes while the offering moves through its statuses.
+
+    Reads every IPO listed in 2025 and records each ticker whose rows carry more than one
+    `IssuerName`, with their statuses. Reading it: none means the `poll()` key `Symbol` and
+    `IssuerName` keeps one row per offering; a ticker whose names differ only in spelling
+    (a suffix, punctuation) means a renamed offering would leave a stale row, while wholly
+    different issuers are a recycled ticker, which the key keeps apart on purpose.
+    """
+    rows = table_rows(
+        live_session.stocks.ipos(start=date(2025, 1, 1), end=date(2025, 12, 31)).fetch()
+    )
+    names: dict[str, set[tuple[str, str]]] = {}
+    for row in rows:
+        names.setdefault(str(row["Symbol"]), set()).add(
+            (str(row["IssuerName"]), str(row["IpoStatus"]))
+        )
+    several = {symbol: seen for symbol, seen in names.items() if len({n for n, _ in seen}) > 1}
+    evidence(f"2025 IPOs: {len(rows)} rows, {len(names)} tickers, {len(several)} with >1 name")
+    for symbol, seen in sorted(several.items())[:10]:
+        evidence(f"    {symbol}: {sorted(seen)}")
+    assert rows
+
+
+@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("33")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -343,7 +376,7 @@ def _days(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("44")
+@pytest.mark.settles("45")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_nvda_split_basis_before_and_on_the_split(
@@ -370,7 +403,7 @@ def test_nvda_split_basis_before_and_on_the_split(
 
 
 @pytest.mark.needs("stocks:starter", "s3")
-@pytest.mark.settles("44")
+@pytest.mark.settles("45")
 @pytest.mark.timeout(100)
 def test_nvda_day_file_before_the_split(
     flat_file_tickers: FlatFileTickers, *, evidence: Evidence
@@ -388,7 +421,7 @@ def test_nvda_day_file_before_the_split(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("45")
+@pytest.mark.settles("46")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_every_page_echoes_its_adjustment(live_rest: RestClient, *, evidence: Evidence) -> None:
@@ -424,7 +457,7 @@ def test_every_page_echoes_its_adjustment(live_rest: RestClient, *, evidence: Ev
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("46")
+@pytest.mark.settles("47")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_cash_dividends_are_never_adjusted(
@@ -447,7 +480,7 @@ def test_cash_dividends_are_never_adjusted(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("47")
+@pytest.mark.settles("48")
 @pytest.mark.requests(3)
 @pytest.mark.timeout(100)
 def test_stock_dividend_events_and_the_adjustment(
@@ -483,7 +516,7 @@ def test_stock_dividend_events_and_the_adjustment(
 
 
 @pytest.mark.needs("stocks:basic", "currencies:basic")
-@pytest.mark.settles("52")
+@pytest.mark.settles("53")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_daily_indicator_stamps(
@@ -514,7 +547,7 @@ def test_daily_indicator_stamps(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("53")
+@pytest.mark.settles("54")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_unknown_ticker_statuses(live_rest: RestClient, *, evidence: Evidence) -> None:

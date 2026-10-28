@@ -398,7 +398,7 @@ def test_snapshots_name_the_contract_symbol_and_have_no_single_time() -> None:
     schema = CATALOG.dataset_schema(_spec("snapshots"))
     assert schema.column_names[0] == "Symbol"
     assert "Timestamp" not in schema.column_names
-    assert "DetailsTicker" not in schema.column_names
+    assert "Ticker" not in schema.column_names
     assert {"LastTradePrice", "LastQuoteBid", "SessionSettlementPrice"} <= set(schema.column_names)
 
 
@@ -697,7 +697,7 @@ def test_snapshots_over_rest(
     assert len(out) == 1
     row = out[0]
     assert row["Symbol"] == "CBN5"
-    assert row["DetailsProductCode"] == "CB"
+    assert row["ProductCode"] == "CB"
     assert row["DetailsSettlementDate"] == 1753851600000000000
     assert row["LastMinuteLastUpdated"] == 1746045300000 * 10**6  # sent in milliseconds
     assert row["LastTradeLastUpdated"] == 1746045242858242600  # sent in nanoseconds

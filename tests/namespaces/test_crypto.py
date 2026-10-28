@@ -11,7 +11,9 @@ S3 server (one block of each flat-file prefix round-trips through `history()`).
 
 import csv
 import io
+import itertools
 import json
+import string
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -735,6 +737,17 @@ def test_snapshots_send_the_pairs_or_nothing_for_all(
         1605330008999 * MS,
     )
     assert (row["LastMinuteWindowStart"], row["PrevDayVwap"]) == (1684427880000 * MS, 0.4076)
+
+
+def test_a_long_snapshot_list_is_split_into_requests_of_250(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    path = "/v2/snapshot/locale/global/markets/crypto/tickers"
+    serve(fake_rest, path, load_fixture(OWNER, "snapshots.json"))
+    codes = ["".join(letters) for letters in itertools.product(string.ascii_uppercase, repeat=3)]
+    rest_session.crypto.snapshots([f"{code}-USD" for code in codes[:251]]).fetch()
+    sizes = sorted(len(query["tickers"][0].split(",")) for _, query in sent(fake_rest))
+    assert sizes == [1, 250]
 
 
 def test_movers_read_their_direction(

@@ -1398,9 +1398,9 @@
     {"in_path": false, "kind": "string", "name": "sort", "unit": null, "values": []}
    ],
    "fields": [
-    {"column": "DetailsProductCode", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "details.product_code"},
+    {"column": "ProductCode", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "product_code"},
     {"column": "DetailsSettlementDate", "conversion": "date-as-epoch", "required": false, "type": "epoch", "unit": "ns", "wire_key": "details.settlement_date"},
-    {"column": "DetailsTicker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "details.ticker"},
+    {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
     {"column": "LastMinuteClose", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.close"},
     {"column": "LastMinuteHigh", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.high"},
     {"column": "LastMinuteLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "last_minute.last_updated"},

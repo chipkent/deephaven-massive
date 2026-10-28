@@ -956,7 +956,7 @@
     "settlement_price": "The price the contract settled at for this session. Included for session, week, month, quarter, and year candles; for multi-session candles it is the settlement of the final session in the period. Not returned for intraday candles (sec, min, hour)."
    },
    "/futures/v1/contracts": {
-    "active": "Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date >= last_trade_date) and false otherwise.",
+    "active": "Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date <= last_trade_date) and false otherwise.",
     "date": "A date string in the format YYYY-MM-DD. This parameter will return point-in-time information about contracts for the specified day.",
     "days_to_maturity": "The number of calendar days between the 'date' and the contract's final settlement date.",
     "first_trade_date": "The first day on which the contract was tradeable.",
@@ -998,7 +998,7 @@
     "asset_class": "The asset class to which the product belongs.",
     "asset_sub_class": "The asset sub-class to which the product belongs.",
     "clearing_symbol": "The clearing symbol assigned to this product by the exchange's clearing house.",
-    "clearing_venue": "The trading venue (MIC) for the clearing house that clears this product's contracts.",
+    "clearing_venue": "The exchange identifier for the clearing house that clears this product's contracts.",
     "date": "A date string in the format YYYY-MM-DD. This parameter will return point-in-time information about products for the specified day.",
     "last_updated": "The date and time at which this product was last updated.",
     "name": "The full name of the product.",
@@ -1009,7 +1009,7 @@
     "settlement_currency_code": "The currency in which this product settles.",
     "settlement_method": "The method of settlement for this product (Financially Settled or Deliverable).",
     "settlement_type": "The type of settlement for this product.",
-    "strategy_type": "The strategy type for combo products (e.g. spread, strip, pack). Null for single products.",
+    "strategy_type": "The strategy type for combo products (e.g. calendar, butterfly, strip). Null for single products.",
     "sub_sector": "The sub-sector to which the product belongs.",
     "trade_currency_code": "The currency in which this product's contracts trade.",
     "trading_venue": "The trading venue (MIC) for the exchange on which this product's contracts trade.",
@@ -1040,7 +1040,7 @@
     "trading_venue": "The trading venue (MIC) for the exchange on which this schedule's product trades."
    },
    "/futures/v1/snapshot": {
-    "details.product_code": "The identifier for the contract's product.",
+    "product_code": "The identifier for the contract's product.",
     "details.settlement_date": "The day that this contract is settled.",
     "last_minute.close": "The price at the end of the minute bar.",
     "last_minute.high": "The highest price reached in the minute bar.",
