@@ -16,6 +16,7 @@ from deephaven_massive._ingest.hosts import (
     SNAPSHOT_PROBES,
     SnapshotProbe,
     decide,
+    is_error_row,
 )
 from deephaven_massive._massive import Transport, source
 
@@ -196,3 +197,16 @@ def test_other_errors_propagate_unchanged() -> None:
 def test_a_nested_timeframe_under_a_scalar_is_absent() -> None:
     fetch = Snapshot([{"ticker": "SPY", "last_trade": 3}])
     assert run(AssetClass.STOCKS, fetch).recency is Recency.DELAYED
+
+
+@pytest.mark.parametrize(
+    ("row", "flagged"),
+    [
+        ({"ticker": "SPY", "error": "NOT_ENTITLED", "message": "no"}, True),
+        ({"ticker": "SPY", "message": "a note"}, False),
+        ({"ticker": "SPY", "error": None}, False),
+        ({"ticker": "SPY"}, False),
+    ],
+)
+def test_an_error_row_is_one_whose_error_is_set(row: dict[str, object], flagged: bool) -> None:
+    assert is_error_row(row) is flagged

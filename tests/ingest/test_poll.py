@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import pyarrow as pa
 import pytest
+from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
@@ -765,3 +766,77 @@ def test_a_failure_while_publishing_keeps_the_poller(
     script.rows(("AAPL", 2.0))
     next_cycle(clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 2.0)])
+
+
+def test_a_failed_publish_still_evicts_the_keys_it_dropped(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script.rows(("AAPL", 1.0), ("MSFT", 2.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
+    convert = dh_arrow.to_table
+    failures = [RuntimeError("conversion failed")]
+
+    def flaky(data: pa.Table) -> Table:
+        if failures:
+            raise failures.pop()
+        return convert(data)
+
+    monkeypatch.setattr(dh_arrow, "to_table", flaky)
+    script.rows(("AAPL", 3.0))  # drops MSFT, but this cycle's publish fails
+    next_cycle(clock)
+    assert pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)]
+    script.rows(("AAPL", 4.0))  # the next cycle still tombstones MSFT
+    next_cycle(clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 4.0)])
+
+
+def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
+    *,
+    routed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # The default path lacks `adjusted`; only the stock symbols' path takes it.
+    crypto_first = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="indicators.crypto_first",
+        fetch_path=SMA_CRYPTO,
+        fetch_paths_by_class={AssetClass.STOCKS: SMA_STOCK},
+        poll_keys=("Symbol", "Timestamp"),
+        keys=SMA.keys,
+    )
+    fake_rest.reply(
+        "/v1/indicators/sma/AAPL",
+        Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 1.0}]})),
+    )
+    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    q = build_query(routed_session._core, crypto_first, symbols=watch, adjusted=False)
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=PollMode.REPLACE)
+    until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
+    watch.delete(new_table([string_col("Symbol", ["AAPL"])]))
+    until(lambda: watch.size == 0)
+    next_cycle(clock)
+    until(lambda: symbols_of(table, dh_to_pylist) == [])
+    assert not table.j_table.isFailed()
+
+
+def test_the_path_column_names_the_paths_static_symbols_read(
+    *, routed_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToPylist
+) -> None:
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
+    q = build_query(routed_session._core, SMA, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.poll(60)
+    (row,) = streams_of(routed_session, dh_to_pylist)
+    assert row["Path"] == SMA_STOCK
+    del table

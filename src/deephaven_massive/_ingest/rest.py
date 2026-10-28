@@ -62,7 +62,12 @@ import pyarrow.compute as pc
 from deephaven import arrow as dh_arrow
 
 from deephaven_massive._datasets.catalog import filter_key
-from deephaven_massive._datasets.dates import CHICAGO, DAY_ZONES, NEW_YORK, FuturesSessions
+from deephaven_massive._datasets.dates import (
+    DAY_ZONES,
+    NEW_YORK,
+    FuturesSessions,
+    futures_session_open,
+)
 from deephaven_massive._datasets.history_source import partition_dates
 from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import (
@@ -129,8 +134,6 @@ endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built.
 
 _ONE_DAY: Final = timedelta(days=1)
 
-_SESSION_OPEN_HOUR: Final = 17
-"""The Chicago hour a futures trading session opens, on the day before its session date."""
 
 _UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {
     WireUnit.S: timedelta(seconds=1),
@@ -167,7 +170,7 @@ def _day_start(spec: DatasetSpec, day: date) -> datetime:
 
     A calendar day starts at midnight in the asset class's day zone (New York for a dataset
     without a class). A futures date names a trading session, which opens at 17:00 Chicago time
-    on the day before its `session_end_date` (`dates.futures_session`).
+    on the day before its `session_end_date` (`dates.futures_session_open`).
 
     Args:
         spec: The dataset.
@@ -177,8 +180,7 @@ def _day_start(spec: DatasetSpec, day: date) -> datetime:
         The aware instant.
     """
     if spec.asset_class is AssetClass.FUTURES:
-        eve = day - _ONE_DAY
-        return datetime(eve.year, eve.month, eve.day, _SESSION_OPEN_HOUR, tzinfo=CHICAGO)
+        return futures_session_open(day)
     zone = NEW_YORK if spec.asset_class is None else DAY_ZONES[spec.asset_class]
     return datetime(day.year, day.month, day.day, tzinfo=zone)
 
@@ -577,6 +579,8 @@ class _Converter:
             has no value to project, so it is dropped instead of kept.
         asset_class: The dataset's asset class, by whose rules a symbol read from the rows is
             canonicalized.
+        symbol_key: The wire key of the rows' symbol field, or None when the symbol is filled
+            from the request.
     """
 
     dataset: str
@@ -587,6 +591,7 @@ class _Converter:
     required_on_error: frozenset[str]
     projected: bool
     asset_class: AssetClass | None
+    symbol_key: str | None
 
     @classmethod
     def build(cls, catalog: Catalog, spec: DatasetSpec, rest_path: RestPath) -> _Converter:
@@ -617,6 +622,7 @@ class _Converter:
                 for m in rest_path.memberships
             ),
             asset_class=spec.asset_class,
+            symbol_key=None if symbol_field is None else symbol_field.wire_key,
         )
 
     def convert(
@@ -826,6 +832,21 @@ class RestState:
             future = self._hosts[key] = Future()
             return future, True
 
+    def replace_host(self, key: tuple[AssetClass, ChannelFamily], decision: HostDecision) -> None:
+        """Cache a decision for a (class, family) in place of any earlier one.
+
+        A caller already waiting on an earlier decision still gets that one; every later
+        caller gets this one.
+
+        Args:
+            key: The asset class and channel family.
+            decision: The new decision.
+        """
+        future: Future[HostDecision] = Future()
+        future.set_result(decision)
+        with self._lock:
+            self._hosts[key] = future
+
     def forget_host(
         self, key: tuple[AssetClass, ChannelFamily], future: Future[HostDecision]
     ) -> None:
@@ -1008,7 +1029,7 @@ class RestReader:
                 self.drift.report(spec.name, Transport.REST, drift)
                 if record is not None:
                     record(drift)
-                self._warn_error_rows(converter, flagged)
+                self._warn_error_rows(converter, flagged, call.symbol)
                 kept.extend(_keep(batch, window) for batch in batches)
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
@@ -1024,7 +1045,7 @@ class RestReader:
         return _Outcome(tuple(kept), requests)
 
     def _warn_error_rows(
-        self, converter: _Converter, flagged: Sequence[Mapping[str, object]]
+        self, converter: _Converter, flagged: Sequence[Mapping[str, object]], symbol: str | None
     ) -> None:
         """Log each ticker of an error row once per session, naming Massive's message.
 
@@ -1034,11 +1055,13 @@ class RestReader:
         Args:
             converter: The path's conversion.
             flagged: The page's error rows.
+            symbol: The request's one symbol, for a path whose rows do not carry it.
         """
         dataset = converter.dataset
         fate = "dropped" if converter.projected else "kept with its Error and Message columns"
         for row in flagged:
-            ticker = str(row.get("ticker"))
+            key = converter.symbol_key
+            ticker = str(symbol if key is None else row.get(key))
             if self.state.first("error-row", dataset, ticker):
                 logger.warning(
                     "%s: Massive answered %s for %s: %s; the row is %s",
@@ -1167,10 +1190,13 @@ class RestReader:
             symbols: The static symbols.
 
         Returns:
-            Each path the cycle reads (`fetch_paths`) with its calls.
+            Each path the cycle reads (`fetch_paths`) with its calls; none for an empty symbol
+            tuple (a reactive table with no valid row), which reads nothing.
 
         A parameter a path does not take raises the `ValueError` of `_base`.
         """
+        if symbols == ():
+            return []  # an emptied symbol table asks for nothing, whatever the paths take
         planned = []
         for template, own in fetch_paths(spec, symbols):
             rest_path = self.rest_path(template)
@@ -1222,7 +1248,7 @@ class RestReader:
         Args:
             spec: The dataset.
             request: The normalized arguments.
-            planned: Each path with its calls (`plan_fetch`); never empty.
+            planned: Each path with its calls (`plan_fetch`); empty for no symbols.
             record: Receives each page's drift, or None.
             executor: A pool for fan-out requests, or None for one of each read's own.
 
@@ -1239,6 +1265,8 @@ class RestReader:
             )
             tables.append(table)
             requests += made
+        if not tables:
+            return self.catalog.dataset_schema(spec).arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
         if request.limit is not None:
             rows = rows.slice(0, request.limit)
@@ -1339,6 +1367,46 @@ class RestEndpoints:
             raise
         # Completed first, so no later step can leave the waiters of this pair blocked.
         future.set_result(decision)
+        self._write_decision(asset_class, family, decision)
+        return decision
+
+    def record_verdict(
+        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
+    ) -> None:
+        """Replace the cached host decision of a (class, family) with a server's verdict.
+
+        The WebSocket transport calls it when the explicit-verdict rule re-routes a
+        connection. Every later `resolve_host` for the pair returns `decision` without a
+        request, and the pair's `Transport=REST` row of `m.connections()` is rewritten with
+        its host, recency, and evidence. Thread-safe: the cache changes under its leaf lock,
+        and the row is only queued for the diagnostics writer; nothing blocks.
+
+        Args:
+            asset_class: The asset class of the connection.
+            family: The channel family.
+            decision: The new decision, such as the delayed host with `Recency.DELAYED` and
+                evidence `"server verdict: <message>"`.
+        """
+        self._state.replace_host((asset_class, family), decision)
+        logger.warning(
+            "%s %s WebSocket host is now %s (%s)",
+            asset_class.value,
+            family.value,
+            decision.host,
+            decision.evidence,
+        )
+        self._write_decision(asset_class, family, decision)
+
+    def _write_decision(
+        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
+    ) -> None:
+        """Queue the pair's `Transport=REST` row of `m.connections()` for a decision.
+
+        Args:
+            asset_class: The asset class.
+            family: The channel family.
+            decision: The decision the row shows.
+        """
         self._core.diagnostics.write(
             ConnectionRow(
                 transport=Transport.REST,
@@ -1352,7 +1420,6 @@ class RestEndpoints:
                 updated_at=time.time_ns(),
             )
         )
-        return decision
 
     def fetch(self, spec: DatasetSpec, request: Request) -> Table:
         """Return every row the dataset's fetch path returns for the request, as a static table.
@@ -1468,11 +1535,13 @@ class RestEndpoints:
         reader = self._reader()
         if isinstance(request.symbols, SymbolTable):
             reader.check_parameters(spec, request)
+            # The table's symbols choose among every fetch path at each cycle.
+            candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
+            used = [path for path in candidates if path is not None]
         else:
-            reader.plan_fetch(spec, request, request.symbols)
+            used = [path.template for path, _ in reader.plan_fetch(spec, request, request.symbols)]
         host = urlsplit(self._core.config.rest_base_url).hostname
-        candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
-        paths = ", ".join(dict.fromkeys(path for path in candidates if path is not None))
+        paths = ", ".join(dict.fromkeys(used))
         return poll.open_poll(
             self._core,
             spec=spec,

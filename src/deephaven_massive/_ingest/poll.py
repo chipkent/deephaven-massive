@@ -480,27 +480,33 @@ class Poller:
         Args:
             table: The cycle's rows in the dataset's schema.
         """
+        keys = None
         if self._mode is PollMode.REPLACE:
-            table = self._replace(table)
+            table, keys = self._replace(table)
         if table.num_rows:
             self._publisher.add(dh_arrow.to_table(table))
+        if keys is not None:
+            # Only once the cycle is published: if it failed, the next cycle still tombstones
+            # the keys this one dropped.
+            self._keys = keys
 
-    def _replace(self, table: pa.Table) -> pa.Table:
-        """Mark a cycle's rows live and add one tombstone per key the previous cycle had.
+    def _replace(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
+        """Mark a cycle's rows live and add one tombstone per key the last published cycle had.
+
+        The poller's key set is left as is; `_publish` replaces it once the cycle is published.
 
         Args:
             table: The cycle's rows.
 
         Returns:
-            The rows with the live column, then the tombstones.
+            The rows with the live column, then the tombstones; and the cycle's key set.
         """
         names = self._spec.poll_keys
-        keys = list(zip(*(table.column(name).to_pylist() for name in names), strict=True))
-        gone = self._keys - set(keys)
-        self._keys = set(keys)
+        keys = set(zip(*(table.column(name).to_pylist() for name in names), strict=True))
+        gone = self._keys - keys
         rows = table.append_column(LIVE_COLUMN, pa.array([True] * table.num_rows, pa.bool_()))
         if not gone:
-            return rows
+            return rows, keys
         ordered = sorted(gone, key=repr)
         columns = []
         for column in rows.schema:
@@ -512,7 +518,7 @@ class Poller:
             else:
                 columns.append(pa.nulls(len(ordered), column.type))
         tombstones = pa.Table.from_arrays(columns, schema=rows.schema)
-        return pa.concat_tables([rows, tombstones])
+        return pa.concat_tables([rows, tombstones]), keys
 
     def _fail(self, core: SessionCore, error: MassiveError) -> None:
         """Fail the table with `error`, mark its row `FAILED`, and log it at ERROR.

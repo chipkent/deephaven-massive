@@ -1044,7 +1044,8 @@ Notation:
   placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
   Every path is a generated REST source (`_massive.source(Transport.REST, template)`,
   [section 19.4](#194-generated-schemas)). Each dataset names its paths by role (`fetch_path`,
-  `history_path`, `grouped_daily_path`, `extra_paths`), and declares the key columns of each
+  `detail_path`, `fetch_paths_by_class`, `history_path`, `grouped_daily_path`, `extra_paths`),
+  and declares the key columns of each
   source it reads as `KeySpec`s ([section 19.4](#194-generated-schemas), "Keys are declared
   per source"): the `symbol`, `time`, and instrument `fanout` keys become `Symbol`,
   `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column. A
@@ -1596,7 +1597,13 @@ life, and resolution is **single-flight**: the cache holds one future per (class
 created under the transport's own leaf lock (never `registry_lock`); the first caller makes
 the REST call and completes the future, and later callers wait on it outside every lock. A
 failed resolution completes the future with the error and removes it, so nothing is cached.
-Each new decision writes the pair's `Transport=REST` row of `m.connections()`.
+Each new decision writes the pair's `Transport=REST` row of `m.connections()`. The cache is
+the one place a decision lives: the explicit-verdict rule of
+[section 13.3](#133-connection-and-subscription-protocol) records its re-routed decision there
+through `RestTransport.record_verdict(asset_class, family, decision)`, which replaces the cached
+decision under the same leaf lock (a caller already waiting on the earlier decision still gets
+that one) and rewrites the pair's row with the new host, `Recency=DELAYED`, and evidence
+`"server verdict: <message>"`.
 
 ```
 resolve(asset_class, family) -> HostDecision(host, recency, evidence)
@@ -1889,7 +1896,8 @@ sees:
   chosen path does not take (a reactive symbol table's new symbol routed to a path that lacks
   an explicit parameter; retrying cannot fix it) fails the table through `publish_failure`.
   `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
-  every path, with a reactive table each parameter against all of the dataset's fetch paths.
+  every path, with a reactive table the parameters against the dataset's fetch paths, at
+  least one of which must take every one of them. An emptied symbol table plans no request.
   Any other error is logged at ERROR, sets the stream's `Error` in `m.streams()`, keeps the
   previous rows, and the next cycle runs as scheduled.
 - **Drift.** `to_batch` returns each page's `DriftReport`; the transport routes it to the
@@ -1930,10 +1938,10 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - **Only declared parameters are sent.** A request carries only the parameters its chosen
   path declares in its generated parameters. A typed parameter the chosen path lacks raises
   `ValueError` naming the parameter and the path, rather than being dropped silently.
-- **Per-symbol detail paths.** A dataset with both a list path and a per-symbol detail path in
-  `extra_paths` (`options.contracts`: `/v3/reference/options/contracts` and
-  `/v3/reference/options/contracts/{o}`) calls the detail path once per symbol when symbols
-  are given and the list path when they are not. The choice follows from the spec's role
+- **Per-symbol detail paths.** A dataset with both a list path (`fetch_path`) and a per-symbol
+  detail path (`DatasetSpec.detail_path`; `options.contracts`:
+  `/v3/reference/options/contracts` and `/v3/reference/options/contracts/{o}`) calls the
+  detail path once per symbol when symbols are given and the list path when they are not. The choice follows from the spec's role
   paths, never from the dataset's name.
 - **Row symbols are canonical.** A `symbol` key read from the rows, not from the request,
   goes through `canonical(spec.asset_class, value)`, exactly as WebSocket rows do, so forex

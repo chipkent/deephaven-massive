@@ -205,6 +205,24 @@ class RestTransport(Protocol):
         """
         ...
 
+    def record_verdict(
+        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
+    ) -> None:
+        """Replace the cached host decision of a (class, family) with a server's verdict.
+
+        Called by the WebSocket transport when the explicit-verdict rule re-routes a
+        connection (for example to the delayed host, with `Recency.DELAYED` and evidence
+        `"server verdict: <message>"`). Every later `resolve_host` for the pair returns this
+        decision, and the pair's `Transport=REST` row of `m.connections()` is rewritten with
+        it. No request is made and nothing blocks.
+
+        Args:
+            asset_class: The asset class of the connection.
+            family: The channel family.
+            decision: The new decision.
+        """
+        ...
+
     def fetch(self, spec: DatasetSpec, request: Request) -> Table:
         """Return every row the dataset's `fetch` endpoint returns for the request, static.
 

@@ -5,7 +5,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -20,13 +20,15 @@ import deephaven_massive as dm
 from deephaven_massive import _massive, _session
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import CHICAGO, TimeRange, bounds
-from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.request import HostDecision, Request
+from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
     Direction,
     HistorySource,
     Order,
+    PollMode,
     Recency,
     Timespan,
 )
@@ -1162,3 +1164,70 @@ def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
     with pytest.raises(ValueError, match=r"does not take \['bogus'\]"):
         q.poll(60)
     assert fake_rest.requests == []
+
+
+def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> None:
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
+    assert reader.plan_fetch(DIVIDENDS, request, ()) == []
+    table, requests = reader.read_fetch(DIVIDENDS, request, symbols=())
+    assert (table.num_rows, requests) == (0, 0)
+    assert table.schema.names[0] == "Symbol"
+
+
+def test_an_error_row_of_a_request_symbol_names_that_symbol(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    refused = {"error": "NOT_ENTITLED", "message": "Not entitled"}
+    fake_rest.reply(
+        "/v1/last/crypto/BTC/USD",
+        Reply({"status": "success", "request_id": "r", "last": refused}),
+    )
+    with caplog.at_level(logging.WARNING, LOGGER):
+        (row,) = fetch(session, CRYPTO_LAST, symbols=["BTC-USD"])
+    assert row["Symbol"] == "X:BTCUSD"
+    assert "Massive answered NOT_ENTITLED for X:BTCUSD: Not entitled" in caplog.text
+
+
+def test_a_nanosecond_inclusive_axis_fails_a_reactive_poll_at_once(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    path = "/futures/v1/trades/{ticker}"
+    spec = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="futures.inclusive",
+        asset_class=AssetClass.FUTURES,
+        fetch_path=path,
+        time_axis=("timestamp.gte", "timestamp.lte"),
+        keys={(R, path): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
+    )
+    transport = cast("rest.RestEndpoints", session._core.rest_transport())
+    watch = SymbolTable(new_table([string_col("Symbol", ["ESZ5"])]))
+    request = Request(symbols=watch, end=date(2025, 3, 4))
+    with pytest.raises(ValueError, match=r"timestamp\.lte counts nanoseconds"):
+        transport.poll(spec, request, interval=timedelta(seconds=60), mode=PollMode.REPLACE)
+    assert fake_rest.requests == []
+
+
+def test_a_server_verdict_replaces_the_cached_decision(
+    *, session: dm.MassiveSession, snapshots: FakeRestServer, dh_to_pylist: ToPylist
+) -> None:
+    transport = session._core.rest_transport()
+    first = transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    verdict = HostDecision("delayed.massive.com", Recency.DELAYED, "server verdict: real-time")
+    transport.record_verdict(AssetClass.STOCKS, ChannelFamily.TICK, verdict)
+    later = session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    assert later is verdict
+    assert later is not first
+    assert len(snapshots.requests) == 1  # the verdict needed no request
+    (row,) = connection_rows(session, dh_to_pylist)
+    assert (row["Host"], row["Recency"], row["Evidence"], row["State"]) == (
+        "delayed.massive.com",
+        "DELAYED",
+        "server verdict: real-time",
+        "CONNECTED",
+    )
+    # A pair never decided before takes the verdict too, with no request.
+    fmv = HostDecision("business.massive.com", Recency.DELAYED, "server verdict: x")
+    transport.record_verdict(AssetClass.OPTIONS, ChannelFamily.FMV, fmv)
+    assert transport.resolve_host(AssetClass.OPTIONS, ChannelFamily.FMV) is fmv

@@ -218,6 +218,13 @@ class Query(QueryBase):
         401 raises `AuthenticationError`, HTTP 403 `EntitlementError`, and any other failure
         `MassiveError`; a symbol the endpoint answers with HTTP 404 is left out with a WARNING.
 
+        Before any request it raises `ValueError` if a path the call reads does not take a
+        parameter or filter the query set (an explicit `adjusted` on a path without it), or a
+        reactive symbol table holds no valid symbol. A failed request raises
+        `AuthenticationError` on HTTP 401, `EntitlementError` on HTTP 403, and `MassiveError`
+        for a rate limit that outlived the retries, a row that breaks the dataset's schema, or
+        any other failure.
+
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -235,6 +242,15 @@ class Query(QueryBase):
         time. Releasing the table (`m.release`, garbage collection) stops its poller. A
         non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a
         non-positive `interval` raises `ValueError`.
+
+        Before the table exists it raises `ValueError` if a path does not take a parameter or
+        filter the query set: with static symbols any path the call reads, and with a reactive
+        table every fetch path of the dataset. Later, a cycle that fails with
+        `AuthenticationError`, `EntitlementError`, a row that breaks the dataset's schema, or
+        a parameter the path a reactive table's new symbol routes to does not take, fails the
+        table (its `m.streams()` row shows `FAILED`) and ends the poller. Any other failure is
+        logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next
+        cycle runs.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
