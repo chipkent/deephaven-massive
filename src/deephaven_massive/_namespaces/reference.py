@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
-__all__ = ["DATASETS", "SNAPSHOTS", "_Reference", "own_order_params"]
+__all__ = ["DATASETS", "SNAPSHOTS", "_Reference"]
 
 logger = logging.getLogger(__name__)
 
@@ -207,29 +207,6 @@ def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | N
     return _REST_ASSET_CLASS[member]
 
 
-def own_order_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValue]:
-    """Validate `sort` and `order` for a path that has an `order` parameter of its own.
-
-    The tickers, news, conditions, and unified snapshot endpoints take `order` as a parameter,
-    which the REST transport sends as is, so, unlike `list_params`, `order` needs no `sort`:
-    alone it orders by the endpoint's default sort field.
-
-    Args:
-        sort: The field to sort by, or None for the endpoint's default.
-        order: The sort direction, or None for the endpoint's default.
-
-    Returns:
-        The parameters that are set, by wire name.
-
-    A `sort` that is not a `str` or an `order` that is not a `dm.Order` raises `TypeError`
-    (`list_params`, `_require_enum`).
-    """
-    params = list_params(sort=sort, order=None)
-    if order is not None:
-        params["order"] = _require_enum(order, Order, "order")
-    return params
-
-
 def _text(name: str, value: object) -> str | None:
     """Check an optional text argument.
 
@@ -361,7 +338,7 @@ class _Reference(Namespace):
             "date": None if date is None else calendar_day(TICKERS, date, "date"),
             "active": active,
             "search": _text("search", search),
-            **own_order_params(sort=sort, order=order),
+            **list_params(sort=sort, order=order),
         }
         query = build_query(
             self._core,
@@ -558,7 +535,7 @@ class _Reference(Namespace):
             all_alternative="symbols=None for every article",
             start=start,
             end=end,
-            params=own_order_params(sort=sort, order=order),
+            params=list_params(sort=sort, order=order),
             filters=filters,
             limit=limit,
         )
@@ -646,7 +623,7 @@ class _Reference(Namespace):
             else _require_enum(data_type, ConditionDataType, "data_type"),
             "id": condition_id,
             "sip": None if sip is None else _require_enum(sip, Sip, "sip"),
-            **own_order_params(sort=sort, order=order),
+            **list_params(sort=sort, order=order),
         }
         query = build_query(self._core, CONDITIONS, params=params, filters=filters, limit=limit)
         return cast("Query", query)

@@ -181,10 +181,8 @@ def test_each_series_fetches_its_vendor_sample(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     series: Series,
 ) -> None:
-    # The documentation samples write `request_id` as the number 1; the client needs text.
-    body = json.loads(load_fixture(OWNER, f"{series.method}.json"))
-    body["request_id"] = str(body["request_id"])
-    fake_rest.reply(series.path, Reply(body))
+    # The vendor sample as is: its `request_id` is the number 1, which is kept as text.
+    fake_rest.reply(series.path, Reply(load_fixture(OWNER, f"{series.method}.json")))
     factory = getattr(rest_session.economy, series.method)
     out = dh_to_pylist(
         factory(

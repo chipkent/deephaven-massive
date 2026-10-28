@@ -287,3 +287,25 @@ def test_macd_returns_its_three_lines(
         ("X:BTCUSD", 145.3613333333, 106.9811666667, 38.3801666667),
         ("X:BTCUSD", 143.8374874833, 102.7386283473, 41.098859136),
     ]
+
+
+def test_a_date_bound_is_a_day_in_the_symbols_zone(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    empty = Reply(envelope({"values": []}))
+    fake_rest.reply("/v1/indicators/sma/AAPL", empty)
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", empty)
+    day = date(2025, 1, 2)
+    rest_session.indicators.sma(["AAPL", "X:BTCUSD"], 20, start=day, end=day).fetch()
+    requests = sent(fake_rest)
+    # A crypto day is a UTC day; a stock day is a New York day (UTC-5 in January).
+    crypto = requests["/v1/indicators/sma/X:BTCUSD"]
+    assert (crypto["timestamp.gte"], crypto["timestamp.lt"]) == (
+        [str(int(datetime(2025, 1, 2, tzinfo=UTC).timestamp() * 1000))],
+        [str(int(datetime(2025, 1, 3, tzinfo=UTC).timestamp() * 1000))],
+    )
+    stock = requests["/v1/indicators/sma/AAPL"]
+    assert (stock["timestamp.gte"], stock["timestamp.lt"]) == (
+        [str(int(datetime(2025, 1, 2, 5, tzinfo=UTC).timestamp() * 1000))],
+        [str(int(datetime(2025, 1, 3, 5, tzinfo=UTC).timestamp() * 1000))],
+    )

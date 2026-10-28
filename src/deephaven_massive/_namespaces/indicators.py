@@ -28,7 +28,7 @@ from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, Order, SeriesType, Timespan, _require_enum
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query
+from deephaven_massive._namespaces.base import Namespace, build_query, list_params
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -180,8 +180,7 @@ class _Indicators(Namespace):
             name: require_positive_int(name, value) for name, value in windows.items()
         }
         params["series_type"] = _require_enum(series_type, SeriesType, "series_type")
-        # The paths have their own `order` and no `sort`, so `order` stands alone.
-        params["order"] = None if order is None else _require_enum(order, Order, "order")
+        params.update(list_params(sort=None, order=order))
         query = build_query(
             self._core,
             spec,
@@ -229,10 +228,11 @@ class _Indicators(Namespace):
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
-            start: The first bar start (a date is its 00:00 in New York, or an aware
-                `datetime`, for every asset class); None for the endpoint's default range.
-            end: The end of the range: a date includes that whole New York day, a
-                `datetime` is exclusive; None for the latest.
+            start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
+                for crypto and forex, New York otherwise), a `datetime` is used as is;
+                None for the endpoint's default range.
+            end: The end of the range: a date includes that whole day in the same zone,
+                a `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
@@ -293,10 +293,11 @@ class _Indicators(Namespace):
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
-            start: The first bar start (a date is its 00:00 in New York, or an aware
-                `datetime`, for every asset class); None for the endpoint's default range.
-            end: The end of the range: a date includes that whole New York day, a
-                `datetime` is exclusive; None for the latest.
+            start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
+                for crypto and forex, New York otherwise), a `datetime` is used as is;
+                None for the endpoint's default range.
+            end: The end of the range: a date includes that whole day in the same zone,
+                a `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
@@ -357,10 +358,11 @@ class _Indicators(Namespace):
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
-            start: The first bar start (a date is its 00:00 in New York, or an aware
-                `datetime`, for every asset class); None for the endpoint's default range.
-            end: The end of the range: a date includes that whole New York day, a
-                `datetime` is exclusive; None for the latest.
+            start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
+                for crypto and forex, New York otherwise), a `datetime` is used as is;
+                None for the endpoint's default range.
+            end: The end of the range: a date includes that whole day in the same zone,
+                a `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
@@ -426,10 +428,11 @@ class _Indicators(Namespace):
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
-            start: The first bar start (a date is its 00:00 in New York, or an aware
-                `datetime`, for every asset class); None for the endpoint's default range.
-            end: The end of the range: a date includes that whole New York day, a
-                `datetime` is exclusive; None for the latest.
+            start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
+                for crypto and forex, New York otherwise), a `datetime` is used as is;
+                None for the endpoint's default range.
+            end: The end of the range: a date includes that whole day in the same zone,
+                a `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The

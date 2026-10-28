@@ -636,8 +636,9 @@ def test_news_fetch(
     assert params["ticker"] == ["UBS"]
     assert params["order"] == ["desc"]
     assert params["limit"] == ["1000"]
-    assert params["published_utc.gte"] == ["2024-06-24"]
-    assert params["published_utc.lt"] == ["2024-06-25"]
+    # `published_utc` is an instant: a date bound is its New York midnight, end exclusive.
+    assert params["published_utc.gte"] == ["2024-06-24T04:00:00Z"]
+    assert params["published_utc.lt"] == ["2024-06-25T04:00:00Z"]
     assert "Symbol" not in out[0]
     assert out[0]["Tickers"] == '["UBS"]'
     assert out[0]["PublishedUtc"] == datetime(2024, 6, 24, 18, 33, 53, tzinfo=UTC)
