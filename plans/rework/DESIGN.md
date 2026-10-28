@@ -693,7 +693,7 @@ Six classes, defined in `_query.py`. Nothing touches the network until a verb is
 are immutable, hashable, and reusable. A query's repr names its class, its dataset, and the
 arguments that differ from their defaults, for example
 `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
-reactive table as `<reactive table>`. Queries have no other attributes: the verbs and `columns()`
+symbol table, static or refreshing, as `<symbol table>`. Queries have no other attributes: the verbs and `columns()`
 are their whole API (§ 22, “Sessions and queries expose no introspection attributes” and
 “`columns()` on every query”).
 
@@ -2567,7 +2567,7 @@ table, so the queue stays bounded however fast rows arrive.
 | `Recency` | `REALTIME`, `DELAYED`, `UNKNOWN` |
 | `Evidence` | the evidence string of [section 13.2](#132-host-decision) |
 | `State` | `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`, `RECONNECTING`, `FAILED`, `CLOSED` |
-| `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts; rewritten on every acknowledgement, refusal, and `NO_ACK`, also while a subscription step is in flight |
+| `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts; rewritten after every frame of acknowledgements and refusals and every `NO_ACK`, also while a subscription step is in flight |
 | `BufferedRows` | WebSocket connections only (0 on `REST` rows): rows received that no flush of the connection has taken yet; every family row of a connection shows the same count. The row is rewritten at least once a second while the count is above zero. Rows are never dropped; above `BACKLOG_WARNING_ROWS` (1,000,000) a WARNING says the flushes are falling behind, logged again only after the backlog has fallen below half of it |
 | `Reconnects` | count |
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant`; `NextReconnectAt` is set only while the connection waits for its next attempt (`RECONNECTING`, `WAITING_SLOT`) |

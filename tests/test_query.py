@@ -209,7 +209,7 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
     )
     watchlist = new_table([string_col("Symbol", ["A"])])
     assert repr(trades(massive_session, watchlist)) == (
-        "<StreamHistoryLatestQuery stocks.trades symbols=<reactive table>>"
+        "<StreamHistoryLatestQuery stocks.trades symbols=<symbol table>>"
     )
     assert repr(make(massive_session, NEWS_SPEC)) == "<Query economy.inflation>"
     bars = make(

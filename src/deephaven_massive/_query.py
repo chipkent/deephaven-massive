@@ -145,7 +145,10 @@ def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
 def _read_symbol_table(
     core: SessionCore, spec: DatasetSpec, symbols: SymbolTable
 ) -> tuple[str, ...]:
-    """Read a reactive symbol table once, for a static result (`fetch()` or `history()`).
+    """Read a symbol table once, as the fixed list of the symbols it holds now.
+
+    `fetch()` and `history()` read any symbol table this way; the stream verbs read a static
+    one (a refreshing one stays reactive).
 
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
     it reads, so the symbols are one consistent snapshot. Runs on the caller thread, inside the
@@ -156,7 +159,7 @@ def _read_symbol_table(
     Args:
         core: The session core, for its execution context.
         spec: The dataset, whose asset class canonicalizes the symbols.
-        symbols: The boxed reactive table.
+        symbols: The boxed table, static or refreshing.
 
     Returns:
         The table's valid symbols, canonical, sorted, and de-duplicated.
@@ -250,10 +253,10 @@ class QueryBase:
             return describe(table, spec, schema)
 
     def _static_request(self) -> Request:
-        """Return the request with a reactive symbol table read once, for a static verb.
+        """Return the request with a symbol table read once, for a static verb.
 
         Returns:
-            The request; for a reactive table, with its valid symbols (`_read_symbol_table`).
+            The request; for a symbol table, with its valid symbols (`_read_symbol_table`).
         """
         request = self._request
         if isinstance(request.symbols, SymbolTable):

@@ -1119,6 +1119,31 @@ def test_last_message_rows_are_throttled(harness: Harness, monkeypatch: pytest.M
     harness.session.release(result)
 
 
+def test_one_acknowledgement_frame_rewrites_the_row_once(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Massive answers a subscribe frame with one status per topic, all in one frame. Each
+    # status changes the counts, but the row reads every topic, so it is rewritten once for
+    # the frame, not once per status: per status, a large subscription costs O(topics²) and
+    # stalls the loop for seconds.
+    written: list[int] = []
+    write = ws.Connection._write_row
+
+    def counting(connection: ws.Connection) -> None:
+        written.append(1)
+        write(connection)
+
+    monkeypatch.setattr(ws.Connection, "_write_row", counting)
+    symbols = [f"S{i:04}" for i in range(1000)]
+    result = harness.query(TRADES, symbols).blink()
+    harness.wait(lambda h: sum(s.message.startswith("subscribed to:") for s in h.statuses) == 1000)
+    connection = harness.connection()
+    counts = harness.on_loop(connection, connection.subscriptions.counts)  # after the publish
+    assert counts == (1000, 1000, 0, 0)
+    assert len(written) <= 4  # the connecting, connected, and subscribing rows, then the frame
+    harness.session.release(result)
+
+
 def test_an_index_value_refusal_names_the_business_host(harness: Harness) -> None:
     connection = ws.Connection(
         harness.connections,

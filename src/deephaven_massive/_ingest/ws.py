@@ -297,6 +297,7 @@ class Connection:
         self._drift: str | None = None
         self._moving = False
         self._backlog_timer: Timer | None = None
+        self._change_scheduled = False
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -765,7 +766,23 @@ class Connection:
     # --- loop thread: diagnostics --------------------------------------------------------------
 
     def _changed(self) -> None:
-        """Publish the options-cap state and rewrite the row after a subscription change."""
+        """Schedule one publication of the subscription state for this turn of the loop.
+
+        `Subscriptions` reports a change after every acknowledgement, refusal, and `NO_ACK`,
+        and one frame from Massive can carry a status for each of thousands of topics.
+        Publishing reads every topic, so doing it per status would cost O(topics²) per step
+        and stall the loop for seconds on a large subscription. Instead the first change of
+        a loop turn schedules `_publish_change` with `call_soon`, and later changes in the
+        same turn ride on it: the row is still rewritten after each frame's statuses.
+        """
+        if self._change_scheduled:
+            return
+        self._change_scheduled = True
+        self._client.loop.call_soon(self._publish_change)
+
+    def _publish_change(self) -> None:
+        """Publish the options-cap state and rewrite the row for the changes of a loop turn."""
+        self._change_scheduled = False
         self._show_deferred()
         self._write_row()
 
