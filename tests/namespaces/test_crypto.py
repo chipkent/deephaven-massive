@@ -596,6 +596,8 @@ def test_trades_history_over_rest_bounds_the_utc_day(
                 "timestamp.gte": [str(midnight)],
                 "timestamp.lt": [str(midnight + 86_400 * NS)],
                 "limit": ["50000"],
+                "sort": ["timestamp"],
+                "order": ["asc"],
             },
         )
     ]
@@ -627,7 +629,7 @@ def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
     serve(fake_rest, path, load_fixture(OWNER, "range.json"))
     q = rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY)
     out = rows(q.history("2020-06-01", "2020-06-02", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(path, {"limit": ["50000"]})]
+    assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Transactions"]) for r in out] == [
         ("X:BTCUSD", 1590984000000 * MS, 9557.9, 1),
         ("X:BTCUSD", 1591070400000 * MS, 10096.87, 1),

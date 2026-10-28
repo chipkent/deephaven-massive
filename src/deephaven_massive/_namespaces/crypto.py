@@ -58,7 +58,10 @@ _MINUTE_FILES: Final = "global_crypto/minute_aggs_v1"
 _DAY_FILES: Final = "global_crypto/day_aggs_v1"
 
 _MAX_PAGE: Final = 50_000
-"""The largest page `/v3/trades` and the aggregates range endpoint serve (their `limit` maximum)."""
+"""The largest `limit` `/v3/trades` and the aggregates range endpoint accept.
+
+On `/v3/trades` it is rows per page; on the range endpoint it counts the base aggregates
+a page is built from, not the bars it returns."""
 
 
 def _keys(symbol: KeySpec, time: str | None = None) -> SourceKeys:
@@ -333,8 +336,9 @@ class _Crypto(Namespace):
         """Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
         Each row is one bar of one pair: open, high, low, close, volume, and, where the
-        transport supplies them, the volume-weighted average price and the trade count; the
-        bar's start is the row's `Timestamp`.
+        transport supplies them, the volume-weighted average price and the trade count. The
+        row's `Timestamp` is the bar's window time as the source stamps it: the start of the
+        window for the streams, the minute bars, and the REST bars; see below for 1-day bars.
 
         The timespan and multiplier decide the transports and so the query's class:
 
@@ -349,15 +353,24 @@ class _Crypto(Namespace):
         `history()` reads the aggregates range endpoint over REST, one pair at a time, or the
         `global_crypto/minute_aggs_v1` and `global_crypto/day_aggs_v1` flat files for 1-minute
         and 1-day bars. Crypto has no splits or other corporate actions, so there is no
-        `adjusted` choice: REST, flat files, and the stream serve the same bars, and the
-        library sends Massive's `adjusted` parameter on no request. There is no `limit`:
-        `history()` pages internally (the endpoint's own `limit` counts base aggregates, not
-        rows, so it cannot cap rows) and `fetch()` returns one row per pair.
+        `adjusted` choice and the library sends Massive's `adjusted` parameter on no request.
+        There is no `limit`: `history()` pages internally (the endpoint's own `limit` counts
+        base aggregates, not rows, so it cannot cap rows) and `fetch()` returns one row per
+        pair.
 
-        `dm.ALL` streams every pair and reads every pair's flat files; with 1-day bars,
-        `history()` over REST reads the grouped-daily endpoint, one request per day. `fetch()`
-        with `dm.ALL` raises `ValueError`, as does `history(source=dm.HistorySource.REST)`
-        with `dm.ALL` on any other timespan.
+        1-day bars are stamped differently by source, as Massive documents them: the REST
+        bars of `/prev` and the range endpoint are stamped at midnight New York time in every
+        documented sample, while a `global_crypto/day_aggs_v1` bar covers the UTC day
+        and is stamped at its last millisecond (23:59:59.999 UTC). With
+        `HistorySource.AUTO` the source, and so the stamp, can change with the number of
+        symbols; pass `source=` to keep one. `history()` keeps the rows whose `Timestamp`
+        falls in the requested UTC range.
+
+        `dm.ALL` streams every pair. Its `history()` reads the flat files for 1-minute and
+        1-day bars, and the grouped-daily endpoint, one request per day, for 1-day bars over
+        REST; every other timespan raises `ValueError` with `dm.ALL` (no flat file holds those
+        bars, and the range endpoint takes one pair per request). `fetch()` with `dm.ALL`
+        raises `ValueError` too.
 
         Columns: `columns()` on the query, the web UI's column tooltips, or
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#bars.
@@ -408,10 +421,12 @@ class _Crypto(Namespace):
         Each row is one fair-market-value update of one pair: Massive's proprietary estimate
         of its price and the time of the estimate, which is the row's `Timestamp`.
 
-        Transports: the WebSocket `FMV` channel only, served from `business.massive.com` and
-        available on Business plans; a key without it gets `EntitlementError` from the stream
-        verbs (`blink()`, `append_only()`, `ring()`, `last_by()`). There is no history, no
-        `fetch()`, and no `limit`. `dm.ALL` subscribes to every pair.
+        Transports: the WebSocket `FMV` channel only, through the stream verbs (`blink()`,
+        `append_only()`, `ring()`, `last_by()`), served from `business.massive.com/crypto`
+        and available on Business plans. The verbs themselves never raise for a missing plan:
+        when Massive refuses the topic, the stream's table fails with `EntitlementError`, and
+        when it rejects the key on that host, with `AuthenticationError`. There is no history,
+        no `fetch()`, and no `limit`. `dm.ALL` subscribes to every pair.
 
         Columns: `columns()` on the query, the web UI's column tooltips, or
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#fmv.
@@ -449,8 +464,9 @@ class _Crypto(Namespace):
         `/v2/snapshot/locale/global/markets/crypto/tickers`, with the pairs in `tickers`.
         `fetch()` returns every row of that one response and `poll(interval)` repeats it,
         keyed by `Symbol` (`PollMode.REPLACE` by default). The endpoint is not paginated and
-        there is no `limit`. This is the plan-independent way to read the current state of
-        pairs; the streams' `last_by()` never seeds from REST.
+        there is no `limit`. It needs a Currencies Starter plan or above, as the crypto
+        streams do. The streams' `last_by()` never seeds from REST; poll this dataset for the
+        current state of pairs instead.
 
         `dm.ALL` returns every traded pair.
 
