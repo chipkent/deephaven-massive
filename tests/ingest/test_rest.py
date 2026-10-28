@@ -1,5 +1,6 @@
 """Tests for the REST transport: requests, pages, conversion, errors, history, and hosts."""
 
+import dataclasses
 import functools
 import logging
 import threading
@@ -8,6 +9,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
+from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
@@ -202,6 +204,29 @@ RATINGS = DatasetSpec(
     fetch_path=RATINGS_PATH,
     keys={(R, RATINGS_PATH): SourceKeys()},
 )
+NEWS_TICKERS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="reference.news_tickers",
+    fetch_path=NEWS_PATH,
+    symbol_param="ticker",
+    time_axis=("published_utc.gte", "published_utc.lt"),
+    keys={(R, NEWS_PATH): SourceKeys()},
+)
+# A path per symbol class makes each request follow its symbols' class, as the indicators do.
+NEWS_BY_CLASS = dataclasses.replace(
+    NEWS_TICKERS,
+    name="reference.news_by_class",
+    fetch_paths_by_class={AssetClass.FOREX: NEWS_PATH},
+)
+CRYPTO_OPEN_CLOSE_PATH = "/v1/open-close/crypto/{from}/{to}/{date}"
+CRYPTO_OPEN_CLOSE = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="crypto.daily_open_close",
+    asset_class=AssetClass.CRYPTO,
+    fetch_path=CRYPTO_OPEN_CLOSE_PATH,
+    per_symbol=True,
+    keys={(R, CRYPTO_OPEN_CLOSE_PATH): SourceKeys(symbol=KeySpec("Symbol"))},
+)
 MIXED = DatasetSpec(
     summary="A dataset for the tests.",
     name="stocks.mixed",
@@ -229,6 +254,9 @@ SPECS = (
     CONSTITUENTS,
     NEWS,
     RATINGS,
+    NEWS_TICKERS,
+    NEWS_BY_CLASS,
+    CRYPTO_OPEN_CLOSE,
 )
 
 AAPL_DIVIDEND = {
@@ -370,7 +398,7 @@ def test_every_filter_kind_reaches_the_wire_as_the_check_parsed_it(
         "underlying_ticker": ["NVDA"],
         "contract_type": ["put"],
         "expiration_date.lte": ["2026-01-16"],
-        "as_of": ["2025-09-18T09:30:00-04:00"],
+        "as_of": ["2025-09-18T13:30:00Z"],  # an instant goes out in UTC
         "strike_price.gte": ["100"],
         "strike_price.lt": ["150.5"],
         "expired": ["false"],
@@ -396,8 +424,8 @@ def test_a_date_on_an_instant_filter_is_sent_as_its_days_bound(
     ((_, sent_query),) = sent(fake_rest)
     # `last_updated` is an instant field behind a date-typed filter: its days start in New
     # York. `date` is a calendar date and keeps the day.
-    assert sent_query["last_updated.gte"] == ["2025-06-02T00:00:00-04:00"]
-    assert sent_query["last_updated.lt"] == ["2025-06-04T00:00:00-04:00"]
+    assert sent_query["last_updated.gte"] == ["2025-06-02T04:00:00Z"]
+    assert sent_query["last_updated.lt"] == ["2025-06-04T04:00:00Z"]
     assert sent_query["date.gte"] == ["2025-06-01"]
     assert sent_query["ticker.any_of"] == ["AAPL,MSFT"]
     with pytest.raises(ValueError, match=r"last_updated\.lte has no exact unit to end a day"):
@@ -442,11 +470,81 @@ def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> Non
         "timestamp.lte": datetime(2025, 3, 3, 23, 59, 59, 999000, tzinfo=UTC),
     }
     # An instant the caller gave is exact already; a calendar date parameter keeps its day.
-    assert rest._filter_days(path, {"timestamp.gte": instant}, None) == {"timestamp.gte": instant}
+    # An instant given by the caller is sent as given, even on an inclusive or exclusive
+    # bound that a date would move by one unit.
+    given = {"timestamp.gte": instant, "timestamp.lte": instant, "timestamp.gt": instant}
+    assert rest._filter_days(path, given, None) == given
     dividends = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
     assert rest._filter_days(dividends, {"ex_dividend_date.gte": day}, None) == {
         "ex_dividend_date.gte": day
     }
+
+
+def test_an_aware_datetime_on_an_inclusive_instant_filter_is_sent_as_given(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(RATINGS_PATH, Reply(envelope([])))
+    noon = datetime(2025, 6, 2, 12, 30, tzinfo=ZoneInfo("America/New_York"))
+    fetch(session, RATINGS, filters={"last_updated_lte": noon, "last_updated_gt": noon})
+    ((_, sent_query),) = sent(fake_rest)
+    assert sent_query["last_updated.lte"] == ["2025-06-02T16:30:00Z"]
+    assert sent_query["last_updated.gt"] == ["2025-06-02T16:30:00Z"]
+
+
+def test_a_list_of_dates_takes_date_items(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(RATINGS_PATH, Reply(envelope([])))
+    fetch(session, RATINGS, filters={"date_any_of": [date(2025, 6, 2), "2025-06-03"]})
+    ((_, sent_query),) = sent(fake_rest)
+    assert sent_query["date.any_of"] == ["2025-06-02,2025-06-03"]
+    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes text items"):
+        query(session, RATINGS, filters={"ticker_any_of": [date(2025, 6, 2)]})
+
+
+def test_each_ticker_takes_its_own_class_days_on_a_dataset_with_a_path_per_class(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # 2025-03-09 is the day New York moves its clocks forward: its day is 23 hours long.
+    fake_rest.reply(NEWS_PATH, Reply(envelope([])))
+    fetch(
+        session, NEWS_BY_CLASS, symbols=["X:BTCUSD", "AAPL"], start="2025-03-09", end="2025-03-09"
+    )
+    bounds = sorted(
+        (q["ticker"][0], q["published_utc.gte"][0], q["published_utc.lt"][0])
+        for _, q in sent(fake_rest)
+    )
+    assert bounds == [
+        ("AAPL", "2025-03-09T05:00:00Z", "2025-03-10T04:00:00Z"),
+        ("X:BTCUSD", "2025-03-09T00:00:00Z", "2025-03-10T00:00:00Z"),
+    ]
+
+
+def test_any_other_dataset_without_a_class_keeps_new_york_days(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(NEWS_PATH, Reply(envelope([])))
+    fetch(session, NEWS_TICKERS, symbols=["X:BTCUSD", "AAPL"], start="2025-03-09", end="2025-03-09")
+    assert {q["published_utc.gte"][0] for _, q in sent(fake_rest)} == {"2025-03-09T05:00:00Z"}
+
+
+def test_a_currency_pair_path_fills_from_and_to_from_each_symbol(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The rows carry their own symbol, so no key fills the pair from the request.
+    body = {
+        "symbol": "BTC-USD",
+        "isUTC": True,
+        "day": "2025-03-03T00:00:00Z",
+        "open": 90000.5,
+        "close": 91000.25,
+        "openTrades": [],
+        "closingTrades": [],
+    }
+    fake_rest.reply("/v1/open-close/crypto/BTC/USD/2025-03-03", Reply(body))
+    out = fetch(session, CRYPTO_OPEN_CLOSE, symbols=["X:BTCUSD"], params={"date": date(2025, 3, 3)})
+    assert [path for path, _ in sent(fake_rest)] == ["/v1/open-close/crypto/BTC/USD/2025-03-03"]
+    assert [(r["Symbol"], r["Open"]) for r in out] == [("X:BTCUSD", 90000.5)]
 
 
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
@@ -457,8 +555,8 @@ def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
     # `published_utc` is an instant field, so its date-typed filter gets the half-open
     # instants of the whole day in New York (the zone of a dataset without a class).
     ((_, sent_query),) = sent(fake_rest)
-    assert sent_query["published_utc.gte"] == ["2025-06-02T00:00:00-04:00"]
-    assert sent_query["published_utc.lt"] == ["2025-06-03T00:00:00-04:00"]
+    assert sent_query["published_utc.gte"] == ["2025-06-02T04:00:00Z"]
+    assert sent_query["published_utc.lt"] == ["2025-06-03T04:00:00Z"]
 
 
 def test_a_list_symbol_parameter_without_a_limit_takes_every_symbol_at_once(

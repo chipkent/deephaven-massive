@@ -197,6 +197,18 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
     return params
 
 
+def _list_item(item: object) -> bool:
+    """Tell whether a sequence element is one a list parameter can take: text or a day.
+
+    Args:
+        item: The element.
+
+    Returns:
+        True for a `str` or a `date` that is not a `datetime`.
+    """
+    return isinstance(item, str) or (isinstance(item, date) and not isinstance(item, datetime))
+
+
 def _value(name: str, value: object) -> ParamValue:
     """Normalize one parameter or filter value to its hashable stored form.
 
@@ -205,12 +217,13 @@ def _value(name: str, value: object) -> ParamValue:
         value: The value as passed.
 
     Returns:
-        The value; a list or tuple of strings becomes a tuple.
+        The value; a list or tuple becomes a tuple, its strings as `str` and its dates (for a
+        list of dates, such as `date_any_of`) as given.
 
     Raises:
         TypeError: If the value is not a `str`, `int`, `float`, `bool`, `date`, `datetime`,
-            enum member, or a sequence of `str`; for a list or tuple, the message names the
-            first element that is not a `str`.
+            enum member, or a sequence of `str` and `date`; for a list or tuple, the message
+            names the first element that is neither (a `datetime` is not a day).
 
     A naive `datetime` raises the `ValueError` of `require_aware` in `_datasets/dates.py`, the
     same message as a naive time bound.
@@ -220,15 +233,15 @@ def _value(name: str, value: object) -> ParamValue:
     if isinstance(value, str | int | float | date | datetime):
         return value
     if isinstance(value, list | tuple):
-        bad = next(((i, item) for i, item in enumerate(value) if not isinstance(item, str)), None)
+        bad = next(((i, item) for i, item in enumerate(value) if not _list_item(item)), None)
         if bad is None:
-            return tuple(str(item) for item in value)
+            return tuple(item if isinstance(item, date) else str(item) for item in value)
         index, item = bad
         raise TypeError(
-            f"{name}: element {index} of the sequence is {type(item).__name__}, not str"
+            f"{name}: element {index} of the sequence is {type(item).__name__}, not str or date"
         )
     raise TypeError(
-        f"{name} must be a str, int, float, bool, date, datetime, or sequence of str; "
+        f"{name} must be a str, int, float, bool, date, datetime, or sequence of str or date; "
         f"got {type(value).__name__}"
     )
 
@@ -312,8 +325,8 @@ def build_query(
         filters: The `filters` mapping, by key: a wire parameter name with its dots written
             as underscores. `Catalog.check_filters` validates it and parses each value into
             the form that is sent (ISO-8601 text of a date or timestamp parameter becomes a
-            `date` or an aware `datetime`, a bare `str` for a list parameter a one-item
-            tuple); the `Request` holds those parsed values.
+            `date` or an aware `datetime`, and a list parameter's value the tuple of its
+            comma-separated items); the `Request` holds those parsed values.
         limit: The cap on the total number of rows (`Request.limit`), or None for every row;
             a positive `int`.
 

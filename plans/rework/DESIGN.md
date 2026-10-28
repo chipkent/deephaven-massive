@@ -417,7 +417,8 @@ gone; the transports it builds hold the core itself, never the weak reference.
   `selectors`, and read neither `threading.Thread` nor `threading.Timer`, by attribute, import,
   or literal `getattr` (`threading` itself stays allowed, for leaf locks);
 - `_massive.__all__` splits into vocabulary names (the three errors, the spec names, and the
-  pure parameter encoder `encode_value`) and
+  pure parameter encoder `encode_value`; a subprocess test checks that reading every one of
+  them loads no client and no network module) and
   client names (`RestClient`, `Page`, `to_batch`, `WsClient`, `WsState`, `Status`,
   `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`,
   `object_key`); under `src/`, only `_ingest` uses a client name (by import, attribute,
@@ -1334,8 +1335,9 @@ m.options.contracts(underlying="NVDA",
 The mapping is mechanical and one to one: a key ending in `_gt`, `_gte`, `_lt`, `_lte`, or
 `_any_of` is sent as `<field>.<suffix>` exactly when the spec lists that dotted parameter for the
 path; every other key is sent unchanged. `Sequence[str]` values of an `.any_of` parameter are
-joined with commas; dates are ISO-8601; an aware `datetime` becomes the parameter's documented
-form (an exact integer count of the parameter's `unit` for a timestamp parameter, ISO-8601
+joined with commas (a `date` item of a list of dates, such as `date_any_of`, as its ISO-8601
+day); dates are ISO-8601; an aware `datetime` becomes the parameter's documented form (an exact
+integer count of the parameter's `unit` for a timestamp parameter, ISO-8601 in UTC with a `Z`
 otherwise), and a naive one raises `ValueError` (§ 11).
 
 Validation is synchronous at query construction, against the generated parameters of the
@@ -1361,7 +1363,10 @@ with commas, so no item can hold one); an empty item (`"a,,b"`) raises `ValueErr
 runs the wire package's own encoder (`encode_value`) on that value, so everything the encoder
 refuses (a non-finite number, an empty list, an instant finer than a timestamp parameter's
 unit) fails here, at construction, with the encoder's message. `Request.filters` holds the
-parsed values, never the caller's text, so validation and encoding cannot disagree.
+parsed values, never the caller's text, so validation and encoding cannot disagree. Every path
+of the dataset that declares the key checks the value, since any of them may send it: one that
+cannot encode it fails the check and is named in the message, and paths that read it as
+different values (a date parameter on one, a text one on another) fail it too.
 
 A `date` on a range filter (`_gt`, `_gte`, `_lt`, `_lte`) of a parameter that compares
 instants (a timestamp parameter, or a date-typed one over an instant field, such as
@@ -1499,7 +1504,9 @@ sides of the boundary.
 naive `datetime`, or an ISO string with a time but no offset, raises a `ValueError` that names
 the parameter, the value, and the fix, for example `start=datetime.datetime(2025, 1, 2, 9, 30)
 needs a timezone: pass an aware datetime or a date`. The same rule and message apply to a naive
-`datetime` passed as a `filters` value or a typed parameter.
+`datetime` passed as a `filters` value or a typed parameter. ISO text with more than six
+fractional digits of a second raises `ValueError` too: a `datetime` holds microseconds, and
+cutting the rest would move the time.
 
 **ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
 becomes an `Instant`. It must carry an offset (`Z` or `±HH:MM`): text without one is an
@@ -1578,7 +1585,7 @@ parameter, or a date-typed parameter over an instant field (`published_utc`, ben
 `published`). A date `start` is sent as that day's 00:00 in the request's day zone and a date
 `end` as the next day's 00:00, with `.gte` and `.lt`, so Massive never decides where a day
 starts. A date-typed parameter takes the instant as
-ISO-8601 text with its offset (`2025-06-02T00:00:00-04:00`); since Massive documents no
+ISO-8601 text in UTC (`2025-06-02T04:00:00Z`); since Massive documents no
 precision for that text, such an axis cannot be declared with `.gt` or `.lte` (the request
 fails with `ValueError`). A calendar-date axis (`period_end`, `ex_dividend_date`) keeps
 whole-day date bounds with `.gte` and `.lte`; an aware `datetime` bound on it becomes the
@@ -1586,11 +1593,14 @@ calendar day it falls on in the request's day zone, and an upper one, being the 
 excluded, the day of the instant just before it, so a day the range covers in part is
 included, as the flat-file partitions of `history()` are.
 
-**The request's day zone.** A dataset with an asset class follows its class. A dataset without
-one can serve several classes (the indicators take stock and crypto tickers), so each REST
-request follows the class its own symbols share (`symbol_class`): a crypto or forex ticker's
-days are UTC days, a stock, option, or index ticker's New York days. A request with no
-symbols, or with symbols of several classes, uses New York.
+**The request's day zone** (`dates.day_class`). A dataset with an asset class follows its
+class. A dataset without one uses New York days, with one exception: a dataset that declares a
+path per symbol class (`fetch_paths_by_class`, the indicators, whose crypto bars have UTC
+days) serves class-specific data, so each REST request, and `history()`, follows the class its
+own symbols share (`symbol_class`): a crypto or forex ticker's days are UTC days, a stock,
+option, or index ticker's New York days, and a request with symbols of several classes uses
+New York. A filter on a publication time does not depend on which tickers are listed, so
+`m.reference.news(["AAPL", "X:BTCUSD"], start=...)` asks for one New York window.
 
 **Day zone per class.**
 
@@ -1972,9 +1982,15 @@ How a request is built from a `DatasetSpec` and a `Request`:
   [section 9](#9-filters) and [section 12](#12-timestamp-units-and-day-boundaries): instants
   on an instant axis (decided by the generated row field the parameter filters, so a
   date-typed `published_utc.gte` gets an instant), whole-day dates on a calendar-date axis.
-  Each request's dates, its axis and its date filters on instant parameters, follow the day
-  zone of its own symbols ([section 12](#12-timestamp-units-and-day-boundaries)), so a crypto
-  indicator's `start="2025-03-03"` is UTC midnight and a stock indicator's New York midnight.
+  Each request's dates, its axis and its date filters on instant parameters, follow the
+  request's day zone ([section 12](#12-timestamp-units-and-day-boundaries)): the dataset's
+  class, or for a dataset with a path per symbol class the class of the request's own symbols,
+  so a crypto indicator's `start="2025-03-03"` is UTC midnight and a stock indicator's New
+  York midnight.
+- **Currency pairs.** A per-symbol request on a path whose `{from}` and `{to}` nothing else
+  fills (crypto's daily open-close, whose rows carry their own `symbol`) takes them from the
+  request's symbol, split into its two currencies, wherever the dataset's symbol key comes
+  from; the rows' symbol is made canonical as usual.
 - **Bars ranges.** A bars spec declares no `time_axis`. `history()` fills the range path's
   `{from}` and `{to}` segments from its bounds, as epoch milliseconds or as `YYYY-MM-DD`
   according to the kind the generated path gives the parameter.
@@ -2393,11 +2409,13 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
                      convert_field applies a field's named conversion and raises with the
                      shared bad-value message; missing_key_message and excerpt, so both
                      decoders word a row failure alike and add only their own context
+  values.py          encode_value(param, value, *, label): one REST parameter value's wire
+                     text by ParamKind, for the REST client and the library's filter check
   rest.json  ws.json  flatfiles.json        generated, committed
 rest/                imports net, spec
   __init__.py        RestClient, Page, to_batch
   client.py          pool, bearer auth, retries, not-before instant (leaf lock), next_url paging, close
-  query.py           path and query encoding by ParamKind
+  query.py           request targets (values encoded by spec.values), next_url checks
   response.py        strict decoding, envelopes, result keys, error mapping
   batch.py           to_batch(rows, rest_path, *, required) -> (RecordBatch, DriftReport)
 ws/                  imports net, spec
@@ -2459,13 +2477,15 @@ names, resolving them lazily (PEP 562), so a REST-only session never imports bot
 websockets:
 
 - errors: `WireError`, `WireAuthError`, `WireEntitlementError`;
-- REST: `RestClient`, `Page`, `to_batch`, and `encode_value` (one parameter value's wire
-  text by its `ParamKind`, which the library's filter check also runs, so a filter it accepts
-  always encodes);
+- REST: `RestClient`, `Page`, `to_batch`;
 - WebSocket: `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`;
 - flat files: `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`;
 - spec: `source`, `sources`, `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`,
-  `WireType`, `WireUnit`, `DriftReport`, `provenance`, `Provenance`.
+  `WireType`, `WireUnit`, `DriftReport`, `provenance`, `Provenance`, and `encode_value` (one
+  parameter value's wire text by its `ParamKind`, in `spec.values`, which the REST client and
+  the library's filter check both run, so a filter the check accepts always encodes; it loads
+  no client, and a subprocess test checks that no vocabulary name loads a client or network
+  module).
 
 `Param` is reached as an attribute of `RestPath`. `Transport` (`REST`, `WS`, `FLAT_FILES`) is
 the library's one transport enum.
@@ -2551,7 +2571,8 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   ISO-8601, an aware `datetime` for a `TIMESTAMP` parameter as an exact integer count of the
   parameter's `unit` (`Param.unit`, set exactly for `TIMESTAMP`: nanoseconds for most,
   milliseconds for the indicators' `timestamp` filters) computed from `timedelta` days,
-  seconds, and microseconds (never through a float), and as ISO-8601 for a `DATE` parameter;
+  seconds, and microseconds (never through a float), and for a `DATE` parameter as ISO-8601
+  text in UTC ending in `Z` (`2025-06-02T04:00:00Z`, the form of Massive's examples);
   a non-empty sequence of `str` joined with commas (the `.any_of` form). A naive `datetime`, an
   instant that is not a whole number of the parameter's unit (rounding would move a range
   bound), an empty sequence, and a non-finite number raise `ValueError`; a value of a type the

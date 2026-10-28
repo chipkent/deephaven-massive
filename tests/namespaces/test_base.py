@@ -258,9 +258,9 @@ def test_filter_validation(massive_session: dm.MassiveSession) -> None:
         build(massive_session, DIVIDENDS, filters=[("a", 1)])
     with pytest.raises(TypeError, match="filter names must be str"):
         build(massive_session, DIVIDENDS, filters={1: "a"})
-    with pytest.raises(TypeError, match="sequence of str; got dict"):
+    with pytest.raises(TypeError, match="sequence of str or date; got dict"):
         build(massive_session, DIVIDENDS, filters={"a": {"b": 1}})
-    with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str$"):
+    with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
         build(massive_session, DIVIDENDS, filters={"a": ["A", 1]})
     # A dataset without a time axis takes its timestamp filters through `filters`, and the
     # request keeps what the text means, never the text.
@@ -300,7 +300,7 @@ def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession
     build(massive_session, DIVIDENDS, filters={"frequency": 4})
     with pytest.raises(ValueError, match="has no filter 'pay_date_lte'"):
         build(massive_session, DIVIDENDS, filters={"pay_date_lte": "2025-12-31"})
-    with pytest.raises(ValueError, match=r"filter 'frequency': .* takes integer values"):
+    with pytest.raises(ValueError, match=r"filter 'frequency' takes integer values"):
         build(massive_session, DIVIDENDS, filters={"frequency": "4"})
 
 

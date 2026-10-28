@@ -221,8 +221,8 @@ def _request_id(value: object) -> str | None:
 
     The `request_id` is metadata for logs and support requests, so it never fails a call:
     Massive's documentation samples send it as text and as a number (`1`). Text is kept, an
-    integer or a number becomes its decimal text, and a boolean `true` or `false`. A missing
-    value, `null`, or an object or list (never documented) gives None.
+    integer or a number becomes its `repr` text (`1`, `2.5`, `1e+20`), and a boolean `true` or
+    `false`. A missing value, `null`, or an object or list (never documented) gives None.
 
     Args:
         value: The decoded `request_id` value, or None when the envelope has none.

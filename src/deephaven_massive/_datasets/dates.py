@@ -36,12 +36,11 @@ from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo
 
-from deephaven_massive._datasets.symbols import symbol_class
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._massive import WireUnit
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._types import DateLike
@@ -90,6 +89,8 @@ Futures are absent: a futures date names a trading session, not a calendar day (
 and `futures_sessions`). Datasets without an asset class use New York."""
 
 _DATE_ONLY: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# A fraction of a second finer than the microsecond, which `datetime.fromisoformat` truncates.
+_BELOW_MICROSECOND: Final = re.compile(r"\d:\d{2}[.,]\d{7,}")
 _ONE_DAY: Final = timedelta(days=1)
 
 
@@ -107,8 +108,9 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
     Raises:
         TypeError: If `value` is not a `str`, `date`, or `datetime`.
         ValueError: For a naive `datetime` or a string with a time but no offset (the message
-            names the parameter, the value, and the fix; `require_aware`), or a string that
-            is not ISO-8601.
+            names the parameter, the value, and the fix; `require_aware`), a string that is
+            not ISO-8601, or a string with more than six fractional digits of a second, which
+            a `datetime` would silently cut to microseconds.
     """
     if isinstance(value, datetime):
         parsed = value
@@ -116,6 +118,12 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
         return value
     elif isinstance(value, str):
         text = value.strip()
+        if _BELOW_MICROSECOND.search(text):
+            raise ValueError(
+                f"{name}={value!r} has more than six fractional digits of a second, which a "
+                "datetime cannot hold; cutting them would move the time, so give at most "
+                "microseconds"
+            )
         try:
             if _DATE_ONLY.match(text):
                 return date.fromisoformat(text)
@@ -393,33 +401,42 @@ def flat_file_published(partition: date, *, now: datetime, zone: tzinfo, cutoff:
     return now.astimezone(UTC) >= published.astimezone(UTC)
 
 
-def bounds(spec: DatasetSpec, start: DateLike, end: DateLike) -> TimeRange | FuturesSessions:
-    """Normalize the bounds of a dataset's `history()` call by its asset class's day rules.
+def bounds(
+    spec: DatasetSpec,
+    start: DateLike,
+    end: DateLike,
+    *,
+    classes: Iterable[AssetClass] = (),
+) -> TimeRange | FuturesSessions:
+    """Normalize the bounds of a dataset's `history()` call by its day rules.
 
-    Futures with two date bounds name trading sessions and get `FuturesSessions` (trades and
-    quotes filter `session_end_date`; bars use the widened window). Every other case is a
-    half-open `TimeRange`: date bounds are midnights in the class day zone (New York for
-    datasets without a class, Chicago for a futures range given with a `datetime` bound, where
-    futures filter on `Timestamp`). Unparseable, naive, or empty bounds raise the `ValueError`
-    of `parse_date_like`, `history_range`, or `futures_sessions`.
+    The rules are those of the class `day_class` picks: the dataset's own, or for a dataset
+    with a path per symbol class the class its symbols share. Futures with two date bounds
+    name trading sessions and get `FuturesSessions` (trades and quotes filter
+    `session_end_date`; bars use the widened window). Every other case is a half-open
+    `TimeRange`: date bounds are midnights in the class day zone (New York without a class,
+    Chicago for a futures range given with a `datetime` bound, where futures filter on
+    `Timestamp`). Unparseable, naive, or empty bounds raise the `ValueError` of
+    `parse_date_like`, `history_range`, or `futures_sessions`.
 
     Args:
         spec: The dataset.
         start: The first day or instant, as passed or already parsed by `parse_date_like`
             (parsed bounds pass through unchanged).
         end: The last day, or the first instant excluded, in the same forms.
+        classes: The classes of the request's symbols, for `day_class`; empty by default.
 
     Returns:
         The sessions for date-bounded futures, otherwise the instant range.
     """
     first = parse_date_like(start, "start")
     last = parse_date_like(end, "end")
-    if spec.asset_class is AssetClass.FUTURES:
+    asset_class = day_class(spec, classes)
+    if asset_class is AssetClass.FUTURES:
         if isinstance(first, datetime) or isinstance(last, datetime):
             return history_range(first, last, CHICAGO)
         return futures_sessions(first, last)
-    zone = NEW_YORK if spec.asset_class is None else DAY_ZONES[spec.asset_class]
-    return history_range(first, last, zone)
+    return history_range(first, last, day_zone(asset_class))
 
 
 def day_zone(asset_class: AssetClass | None) -> tzinfo:
@@ -439,26 +456,30 @@ def day_zone(asset_class: AssetClass | None) -> tzinfo:
     return NEW_YORK if asset_class is None else DAY_ZONES[asset_class]
 
 
-def day_class(spec: DatasetSpec, symbols: Sequence[str] | None) -> AssetClass | None:
+def day_class(spec: DatasetSpec, classes: Iterable[AssetClass] = ()) -> AssetClass | None:
     """Return the asset class whose day rules a request of a dataset follows.
 
-    A dataset with an asset class follows its class. A dataset without one can serve several
-    classes (the indicators take stock and crypto tickers), so a request follows the class
-    its symbols share (`symbols.symbol_class`: a crypto ticker's days are UTC days). With no
-    symbols, or symbols of several classes, it follows none, and `day_zone` reads its days
-    in New York.
+    A dataset with an asset class follows its class. A dataset without one reads its days in
+    New York, with one exception: a dataset that declares a path per symbol class
+    (`DatasetSpec.fetch_paths_by_class`, the indicators, whose crypto bars have UTC days)
+    serves class-specific data, so a request follows the class its symbols share. A filter on
+    a publication time does not depend on which tickers are listed, so every other dataset
+    without a class keeps one window per call.
 
     Args:
         spec: The dataset.
-        symbols: The canonical symbols of one request, or None.
+        classes: The classes of the request's symbols (`symbols.symbol_class` of each);
+            empty when the request has none.
 
     Returns:
-        The class, or None.
+        The class, or None for New York days.
     """
     if spec.asset_class is not None:
         return spec.asset_class
-    classes = {symbol_class(symbol) for symbol in symbols or ()}
-    return classes.pop() if len(classes) == 1 else None
+    shared = set(classes)
+    if not spec.fetch_paths_by_class or len(shared) != 1:
+        return None
+    return shared.pop()
 
 
 def calendar_day(spec: DatasetSpec, value: DateLike, name: str) -> date:

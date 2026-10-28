@@ -352,14 +352,44 @@ def test_a_session_opens_at_17_chicago_on_the_day_before(session: date) -> None:
     assert futures_session(opens - timedelta(microseconds=1)) == eve
 
 
-def test_a_request_follows_the_class_its_symbols_share() -> None:
-    # A dataset's own class wins; without one, the symbols' shared class decides.
-    assert day_class(_spec(AssetClass.STOCKS), ("X:BTCUSD",)) is AssetClass.STOCKS
-    assert day_class(_spec(None), ("X:BTCUSD", "X:ETHUSD")) is AssetClass.CRYPTO
-    assert day_class(_spec(None), ("AAPL",)) is AssetClass.STOCKS
-    assert day_class(_spec(None), ("AAPL", "X:BTCUSD")) is None
-    assert day_class(_spec(None), None) is None
-    assert day_class(_spec(None), ()) is None
+_INDICATOR = DatasetSpec(
+    name="indicators.sma",
+    summary="A dataset for the tests.",
+    fetch_path="/v1/indicators/sma/{stockTicker}",
+    fetch_paths_by_class={AssetClass.CRYPTO: "/v1/indicators/sma/{cryptoTicker}"},
+)
+
+
+def test_only_a_dataset_with_a_path_per_class_follows_its_symbols_class() -> None:
+    crypto, stocks = AssetClass.CRYPTO, AssetClass.STOCKS
+    # A dataset's own class wins.
+    assert day_class(_spec(stocks), [crypto]) is stocks
+    # A path per symbol class: the symbols' shared class, else New York days.
+    assert day_class(_INDICATOR, [crypto, crypto]) is crypto
+    assert day_class(_INDICATOR, [stocks]) is stocks
+    assert day_class(_INDICATOR, [stocks, crypto]) is None
+    assert day_class(_INDICATOR) is None
+    # Any other dataset without a class keeps New York days, whatever its symbols.
+    assert day_class(_spec(None), [crypto]) is None
+
+
+def test_history_bounds_follow_the_symbols_class_only_with_a_path_per_class() -> None:
+    crypto = bounds(_INDICATOR, "2025-03-03", "2025-03-03", classes=[AssetClass.CRYPTO])
+    assert crypto == TimeRange(datetime(2025, 3, 3, tzinfo=UTC), datetime(2025, 3, 4, tzinfo=UTC))
+    unclassed = bounds(_spec(None), "2025-03-03", "2025-03-03", classes=[AssetClass.CRYPTO])
+    assert unclassed == TimeRange(
+        datetime(2025, 3, 3, 5, tzinfo=UTC), datetime(2025, 3, 4, 5, tzinfo=UTC)
+    )
+
+
+def test_text_finer_than_a_microsecond_is_refused_not_cut() -> None:
+    with pytest.raises(ValueError, match=r"more than six fractional digits of a second"):
+        parse_date_like("2025-01-02T09:30:00.123456789+00:00", "timestamp_gte")
+    with pytest.raises(ValueError, match=r"more than six fractional digits of a second"):
+        parse_date_like("2025-01-02T09:30:00,1234567Z", "start")
+    assert parse_date_like("2025-01-02T09:30:00.123456Z", "start") == datetime(
+        2025, 1, 2, 9, 30, 0, 123456, tzinfo=UTC
+    )
 
 
 def test_each_class_has_its_day_zone_and_day_start() -> None:

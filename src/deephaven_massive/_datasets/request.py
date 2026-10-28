@@ -29,8 +29,12 @@ if TYPE_CHECKING:
 
 __all__ = ["HostDecision", "ParamValue", "Request", "StreamKey"]
 
-ParamValue: TypeAlias = "str | int | float | bool | date | datetime | StrEnum | tuple[str, ...]"
-"""A normalized parameter or filter value, as a `Request` stores it (sequences become tuples)."""
+ParamValue: TypeAlias = (
+    "str | int | float | bool | date | datetime | StrEnum | tuple[str | date, ...]"
+)
+"""A normalized parameter or filter value (sequences become tuples). A sequence may hold dates
+for a list of dates (`date.any_of`); the filter check writes them as ISO-8601 text, so a
+`Request` stores lists of text."""
 
 StreamKey: TypeAlias = "tuple[str, str | None, NormalizedSymbols]"
 """The identity of a stream: `(dataset name, channel, symbols)`. The symbols are the sorted

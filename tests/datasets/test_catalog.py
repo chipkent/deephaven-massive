@@ -19,7 +19,16 @@ from deephaven_massive._datasets import catalog as catalog_module
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import AssetClass, ContractType, Timespan
-from deephaven_massive._massive import Source, Transport, sources
+from deephaven_massive._massive import (
+    Field,
+    ParamKind,
+    RestPath,
+    Source,
+    Transport,
+    WireType,
+    WireUnit,
+    sources,
+)
 from deephaven_massive._session import CATALOG, NAMESPACE_MODULES
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -1039,7 +1048,7 @@ def test_the_symbol_parameter_reserves_only_its_equality_forms() -> None:
 
 def test_filter_values_must_fit_their_kind() -> None:
     with pytest.raises(
-        ValueError, match=r"^stocks.dividends filter 'frequency': .* takes integer values, not '4'"
+        ValueError, match=r"^stocks\.dividends filter 'frequency' takes integer values, not '4'$"
     ):
         check(DIVIDENDS, {"frequency": "4"})
     with pytest.raises(ValueError, match=r"takes one of \['recurring', 'special', .*\], not 'x'"):
@@ -1164,12 +1173,13 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
         ),
         (NEWS, "published_utc_gt", "2025-06-02", "no exact unit to end a day with"),
         (DIVIDENDS, "distribution_type_any_of", ("a", 1), "takes a sequence of text"),
+        (DIVIDENDS, "distribution_type_any_of", 5, "takes a sequence of text"),
     ],
 )
 def test_a_value_the_wire_cannot_send_is_refused_at_once(
     *, spec: DatasetSpec, key: str, value: object, message: str
 ) -> None:
-    with pytest.raises(ValueError, match=rf"^{spec.name} filter '{key}': .*{message}"):
+    with pytest.raises(ValueError, match=rf"^{spec.name} filter '{key}'.*{message}"):
         check(spec, {key: value})
 
 
@@ -1178,3 +1188,72 @@ def test_sources_of_a_catalog_can_be_given() -> None:
     given = Catalog((EXCHANGES,), source_tables=lambda t: table if t is R else {})
     assert given.problems() == ()
     assert given.source(R, "/v3/reference/exchanges") is table["/v3/reference/exchanges"]
+
+
+RATINGS = DatasetSpec(
+    name="partners.ratings",
+    summary="A dataset for the tests.",
+    fetch_path="/benzinga/v1/ratings",
+)
+
+
+def test_a_list_of_dates_writes_its_date_items_as_days() -> None:
+    assert check(RATINGS, {"date_any_of": (date(2025, 6, 2), "2025-06-03,2025-06-04")}) == {
+        "date_any_of": ("2025-06-02", "2025-06-03", "2025-06-04")
+    }
+    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes text items, not"):
+        check(RATINGS, {"ticker_any_of": (date(2025, 6, 2),)})
+
+
+def _two_paths(as_text: tuple[str, ...]) -> tuple[Catalog, DatasetSpec]:
+    # The dividends path and a copy that takes text for the parameters named `as_text*`.
+    real = sources(R)["/stocks/v1/dividends"]
+    assert isinstance(real, RestPath)
+    params = tuple(
+        dataclasses.replace(p, kind=ParamKind.STRING) if p.name.startswith(as_text) else p
+        for p in real.params
+    )
+    copy = dataclasses.replace(real, key="/stocks/v1/dividends-copy", params=params)
+    table: dict[str, Source] = {real.key: real, copy.key: copy}
+    spec = DatasetSpec(
+        name="stocks.two_paths",
+        summary="A dataset for the tests.",
+        fetch_path=real.key,
+        extra_paths=(copy.key,),
+    )
+    return Catalog((spec,), source_tables=lambda t: table if t is R else {}), spec
+
+
+def test_every_path_that_declares_a_filter_checks_it() -> None:
+    catalog, spec = _two_paths(("frequency", "ex_dividend_date"))
+    # The copy takes text where the real path takes an integer: no value suits both.
+    with pytest.raises(ValueError, match=r"takes integer values, not '4' \(on /stocks/v1/div"):
+        catalog.check_filters(spec, {"frequency": "4"})
+    with pytest.raises(ValueError, match=r"takes text, not 4 \(on /stocks/v1/dividends-copy\)"):
+        catalog.check_filters(spec, {"frequency": 4})
+    # A date parameter on one path and a text one on the other read the text differently.
+    with pytest.raises(ValueError, match=r"the dataset's paths read '2025-01-02' as different"):
+        catalog.check_filters(spec, {"ex_dividend_date": "2025-01-02"})
+    # Paths that agree pass.
+    assert catalog.check_filters(spec, {"distribution_type": "special"}) == (
+        ("distribution_type", "special"),
+    )
+
+
+def test_an_epoch_field_behind_a_date_parameter_compares_instants() -> None:
+    news = sources(R)["/v2/reference/news"]
+    assert isinstance(news, RestPath)
+    assert catalog_module.takes_instants(news, "published_utc.gte", ParamKind.DATE)
+    epoch = Field(
+        wire_key="published_utc", column="PublishedUtc", wire_type=WireType.EPOCH, unit=WireUnit.MS
+    )
+    fields = tuple(epoch if f.wire_key == "published_utc" else f for f in news.fields)
+    assert catalog_module.takes_instants(
+        dataclasses.replace(news, fields=fields), "published_utc.gte", ParamKind.DATE
+    )
+    text = Field(wire_key="published_utc", column="PublishedUtc", wire_type=WireType.STRING)
+    fields = tuple(text if f.wire_key == "published_utc" else f for f in news.fields)
+    assert not catalog_module.takes_instants(
+        dataclasses.replace(news, fields=fields), "published_utc.gte", ParamKind.DATE
+    )
+    assert not catalog_module.takes_instants(news, "ticker", ParamKind.STRING)

@@ -50,7 +50,11 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
-from deephaven_massive._datasets.symbols import SymbolTable, symbol_canonicalizer
+from deephaven_massive._datasets.symbols import (
+    SymbolTable,
+    symbol_canonicalizer,
+    symbol_class,
+)
 from deephaven_massive._enums import (
     HistorySource,
     PollMode,
@@ -497,10 +501,12 @@ class HistoryQuery(QueryBase):
         self._core.require_verb_thread()
         chosen = _require_enum(source, HistorySource, "source")
         first, last = parse_date_like(start, "start"), parse_date_like(end, "end")
-        window = bounds(self._spec, first, last)
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
             symbols = _read_symbol_table(self._core, self._spec, symbols)
+        # A dataset with a path per symbol class takes its days from its symbols' class.
+        listed = symbols if isinstance(symbols, tuple) else ()
+        window = bounds(self._spec, first, last, classes=map(symbol_class, listed))
         request = replace(self._request, start=first, end=last, symbols=symbols)
         if chosen is HistorySource.REST:
             self._check_rest_history()

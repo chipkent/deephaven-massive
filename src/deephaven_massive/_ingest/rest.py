@@ -13,7 +13,7 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   the validated `filters` (each key mapped back to its dotted wire name), the time axis
   (`DatasetSpec.time_axis`: whole days on a calendar-date axis, and on an instant axis,
   whether its parameter is a timestamp or a date typed over an instant field such as
-  `published_utc`, the instants that start the bounds' days in the dataset's day zone), the
+  `published_utc`, the instants that start the bounds' days in the request's day zone), the
   symbol parameter (`DatasetSpec.symbol_param`, at most `DatasetSpec.symbols_per_request`
   symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, and the page
   size (`DatasetSpec.page_size`).
@@ -309,20 +309,61 @@ def _pair(spec: DatasetSpec, symbol: str) -> tuple[str, str]:
     return base, quote
 
 
+def _own_symbols(
+    spec: DatasetSpec, symbol: str | None, own_query: Mapping[str, object]
+) -> tuple[str, ...]:
+    """Return the symbols one planned request carries.
+
+    Args:
+        spec: The dataset, whose `symbol_param` holds a chunk of symbols.
+        symbol: The one symbol of a per-symbol request, or None.
+        own_query: The request's own query parameters (`_symbol_parts`).
+
+    Returns:
+        The symbol of a per-symbol request, the chunk in the symbol parameter of a listed
+        request, or nothing for a request without symbols.
+    """
+    if symbol is not None:
+        return (symbol,)
+    chunk = own_query.get(spec.symbol_param) if spec.symbol_param is not None else None
+    return chunk if isinstance(chunk, tuple) else ()
+
+
+def _symbol_targets(keys: list[str], *, slot: str | None, pair: bool) -> list[str]:
+    """Return where each per-symbol request puts its symbol.
+
+    Args:
+        keys: The parameters of the keys the dataset fills from the request.
+        slot: The path's one placeholder nothing else fills, or None.
+        pair: True when an otherwise unfilled `{from}/{to}` pair takes the symbol.
+
+    Returns:
+        The parameter names, `"from"` standing for the whole pair.
+    """
+    targets = list(keys)
+    if slot is not None:
+        targets.append(slot)
+    if pair:
+        targets.append("from")
+    return targets
+
+
 def _symbol_parts(
     spec: DatasetSpec,
     rest_path: RestPath,
     symbols: NormalizedSymbols | None,
     *,
     slot: str | None,
+    pair: bool = False,
 ) -> list[tuple[str | None, dict[str, object], dict[str, object]]]:
     """Return how a request's symbols spread over requests of one path.
 
     A path that takes the symbol itself (a key the dataset fills from the request, such as
     `{stocksTicker}`, or a currency pair's `{from}/{to}`), a path whose one placeholder nothing
-    else fills (`slot`: a per-symbol detail path whose rows also carry the ticker), a
-    `per_symbol` dataset, and a symbol parameter that takes one value (`ticker`) get one
-    request per symbol. A list parameter
+    else fills (`slot`: a per-symbol detail path whose rows also carry the ticker), a path
+    whose `{from}/{to}` pair nothing else fills (`pair`: crypto's daily open-close, whose rows
+    carry their own symbol), a `per_symbol` dataset, and a symbol parameter that takes one
+    value (`ticker`) get one request per symbol. A list parameter
     (`ticker.any_of`, `tickers`) gets up to `DatasetSpec.symbols_per_request` symbols a
     request (all of them when the dataset sets no limit). `dm.ALL`, no
     symbols, and a path that takes neither get one request without symbols.
@@ -332,6 +373,8 @@ def _symbol_parts(
         rest_path: The path.
         symbols: The static symbols: a sorted tuple, `ALL`, or None.
         slot: The path's one placeholder that no parameter, key, or window fills, or None.
+        pair: True when the path's `{from}` and `{to}` placeholders are filled by nothing
+            else, so each symbol's currency pair (`_pair`) fills them.
 
     Returns:
         `(symbol, path parameters, query parameters)` per request: `symbol` is set for a
@@ -347,7 +390,7 @@ def _symbol_parts(
     from_request = [key for _, key in keys.declared() if key.from_request]
     param = spec.symbol_param if spec.symbol_param in params else None
     listed = param is not None and params[param].kind is ParamKind.LIST
-    takes_one = bool(from_request) or slot is not None or spec.per_symbol
+    takes_one = bool(from_request) or slot is not None or pair or spec.per_symbol
     per_symbol = takes_one or (param is not None and not listed)
     if symbols is None or isinstance(symbols, _All):
         if takes_one:
@@ -361,19 +404,18 @@ def _symbol_parts(
             return [(None, {}, {})]
         size = spec.symbols_per_request or len(explicit)
         return [(None, {}, {param: explicit[i : i + size]}) for i in range(0, len(explicit), size)]
+    targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
     parts: list[tuple[str | None, dict[str, object], dict[str, object]]] = []
     for symbol in explicit:
         path: dict[str, object] = {}
         query: dict[str, object] = {}
-        for key in from_request:
-            if key.column == "from" and "to" in params:
+        for name in targets:
+            if name == "from" and "to" in params:
                 path["from"], path["to"] = _pair(spec, symbol)
-            elif params[key.column].in_path:
-                path[key.column] = symbol
+            elif params[name].in_path:
+                path[name] = symbol
             else:
-                query[key.column] = symbol
-        if slot is not None:
-            path[slot] = symbol
+                query[name] = symbol
         if param is not None:
             query[param] = (symbol,) if listed else symbol
         parts.append((symbol, path, query))
@@ -533,8 +575,10 @@ def plan_calls(
     Returns:
         The calls, in result order: per symbol, or per chunk of symbols, or one. Each call's
         dates (its time axis and its date filters on instant parameters) follow the day rules
-        of its own symbols (`dates.day_class`): a crypto ticker of a dataset without a class
-        gets UTC days, a stock ticker New York days.
+        `dates.day_class` picks: the dataset's class, or for a dataset with a path per symbol
+        class (the indicators) the class of the call's own symbols, so a crypto indicator gets
+        UTC days and a stock indicator New York days. Every other dataset without a class
+        gets New York days.
 
     A path that needs a symbol per request, called without explicit symbols, raises the
     `ValueError` of `_symbol_parts`; an inexact axis bound the `ValueError` of `_axis_query`.
@@ -544,12 +588,18 @@ def plan_calls(
     filled = set(path) | {key.column for _, key in keys if key.from_request}
     if "from" in filled:
         filled.add("to")  # a currency pair fills both
+    placeholders = {p.name for p in rest_path.params if p.in_path}
+    # A `{from}/{to}` pair nothing else fills takes each symbol's currency pair, wherever the
+    # rows' symbol key comes from.
+    pair = {"from", "to"} <= placeholders - filled
+    if pair:
+        filled |= {"from", "to"}
     empty = [p.name for p in rest_path.params if p.in_path and p.name not in filled]
     slot = empty[0] if len(empty) == 1 else None
-    listed = symbols if isinstance(symbols, tuple) else ()
     calls = []
-    for symbol, own_path, own_query in _symbol_parts(spec, rest_path, symbols, slot=slot):
-        zone_class = day_class(spec, listed if symbol is None else (symbol,))
+    parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair)
+    for symbol, own_path, own_query in parts:
+        zone_class = day_class(spec, map(symbol_class, _own_symbols(spec, symbol, own_query)))
         axis = _axis_query(spec, rest_path, dates=dates, exact=exact, asset_class=zone_class)
         sent = _filter_days(rest_path, {**query, **axis}, zone_class)
         calls.append(Call({**path, **own_path}, {**sent, **own_query}, symbol))
