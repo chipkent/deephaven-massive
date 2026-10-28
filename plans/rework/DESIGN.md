@@ -1617,7 +1617,9 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
 - **Wire spellings.** Massive writes some symbols differently per transport: `EUR/USD` in
   WebSocket forex frames, `EUR-USD` in forex topics, `BTC-USD` in crypto frames, `X:BTC-USD`
   in FMV frames, `X:EUR-USD` in the forex quotes flat-file sample. `canonical_from_wire` reads
-  every spelling the library knows, without folding case; topics use `ws_symbol`
+  every spelling the library knows, without folding case (a prefixed crypto ticker such as
+  `X:BTCDAI` is read as written even when its quote is not in `CRYPTO_QUOTES`, which only a
+  topic needs); topics use `ws_symbol`
   (`C.EUR-USD`, as the WebSocket documentation gives every forex channel's `ticker`
   parameter). A flat-file filter holds every spelling of each requested symbol
   (`wire_spellings`), so a file that writes `X:EUR-USD` still matches `C:EURUSD`, and its rows

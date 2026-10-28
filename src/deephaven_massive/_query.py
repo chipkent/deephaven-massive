@@ -299,6 +299,8 @@ class Query(QueryBase):
         """Return a live table that re-runs `fetch()` every `interval`.
 
         A reactive `Table` passed as `symbols` is re-read once per cycle on the poller thread.
+        Every non-null row must be Massive's exact ticker: a bad row present at the call raises
+        `ValueError`, and one added later fails the table, naming `dm.canonicalize_symbols`.
         Fan-out endpoints issue one request per symbol per cycle, at most `max_concurrency` at a
         time. Releasing the table (`m.release`, garbage collection) stops its poller. A
         non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a

@@ -988,9 +988,11 @@ def canonical_from_wire(asset_class: AssetClass | None, raw: str) -> str | None:
 
     The spellings the library knows: forex pairs as `C:EURUSD`, `EUR/USD`, `EUR-USD`,
     `EURUSD`, or `X:EUR-USD` (the forex quotes flat-file sample); crypto pairs as `X:BTCUSD`,
-    `BTC-USD`, `BTC/USD`, or `X:BTC-USD` (FMV frames); an index without its prefix (`SPX`) on
-    a dataset of the indices class, which then gets `I:` from the dataset's class, never from
-    the name. Every other class takes only its canonical text. Case is never folded.
+    `BTC-USD`, `BTC/USD`, or `X:BTC-USD` (FMV frames), and a prefixed pair without a separator
+    as written, even when its quote currency is not in `CRYPTO_QUOTES`; an index without its
+    prefix (`SPX`) on a dataset of the indices class, which then gets `I:` from the dataset's
+    class, never from the name. Every other class takes only its canonical text. Case is never
+    folded.
 
     Args:
         asset_class: The dataset's class, or None for a dataset that spans classes: the prefix
@@ -1004,7 +1006,9 @@ def canonical_from_wire(asset_class: AssetClass | None, raw: str) -> str | None:
     if resolved is AssetClass.FOREX:
         return _forex(raw, ("C:", "X:") if asset_class is AssetClass.FOREX else ("C:",))
     if resolved is AssetClass.CRYPTO:
-        return _crypto(raw, ("X:",))
+        # Massive's own ticker is read as written even when its quote currency is missing
+        # from CRYPTO_QUOTES, which only a topic needs to split it.
+        return raw if _CRYPTO.match(raw) is not None else _crypto(raw, ("X:",))
     if asset_class is AssetClass.INDICES and not raw.startswith("I:"):
         raw = f"I:{raw}"
     return raw if _CANONICAL[resolved](raw) else None

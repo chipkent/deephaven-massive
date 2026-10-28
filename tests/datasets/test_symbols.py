@@ -420,6 +420,7 @@ def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
         (CRY, "X:BTCUSD", "X:BTCUSD"),
         (CRY, "BTC/USD", "X:BTCUSD"),
         (CRY, "BTC-XYZ", None),
+        (CRY, "X:BTCDAI", "X:BTCDAI"),  # Massive's own ticker, though DAI is no known quote
         (CRY, "ABCUS-DT", None),
         (CRY, "BTC--USD", None),
         (IDX, "I:SPX", "I:SPX"),
