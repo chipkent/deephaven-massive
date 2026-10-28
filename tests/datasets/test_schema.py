@@ -1,5 +1,6 @@
 """Tests for the column types, `Schema`, the key rename, and the merge of a kind's sources."""
 
+import dataclasses
 from datetime import UTC, date, datetime
 
 import pyarrow as pa
@@ -447,6 +448,20 @@ def test_a_fanout_key_that_is_no_instrument_keeps_its_column_and_is_required() -
     assert "FilerCik" in names
     assert "Underlying" not in names
     assert [f.wire_key for f in required_fields(filings, source(*holdings))] == ["filer_cik"]
+
+
+def test_an_optional_symbol_key_is_not_required() -> None:
+    index = (R, "/stocks/filings/vX/index")
+    filings = DatasetSpec(
+        name="stocks.filings",
+        summary="A dataset for the tests.",
+        fetch_path=index[1],
+        keys={index: SourceKeys(symbol=KeySpec("Ticker", required=False))},
+    )
+    assert "Symbol" in [c.column for c in rename(filings, source(*index))]
+    assert required_fields(filings, source(*index)) == ()
+    required = dataclasses.replace(filings, keys={index: SourceKeys(symbol=KeySpec("Ticker"))})
+    assert [f.wire_key for f in required_fields(required, source(*index))] == ["ticker"]
 
 
 def test_a_fanout_key_from_the_request_precedes_the_fields() -> None:

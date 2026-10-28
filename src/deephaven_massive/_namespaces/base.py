@@ -18,6 +18,8 @@ module does the work they share when a dataset method is called:
 - `list_params` validates the `sort` and `order` parameters of the `…F` block shared by the
   REST list datasets; its `limit` goes to `build_query(limit=...)` (`Request.limit`), because
   it is a total-row cap, not the endpoint's page-size parameter.
+- `require_bool` and `optional_text` check the plain `bool` and optional `str` arguments of
+  dataset methods.
 
 Filter keys and value kinds are checked against the generated parameters of the dataset's REST
 paths (`Catalog.check_filters` in `_datasets/catalog.py`) synchronously at construction, so a
@@ -35,7 +37,7 @@ from typing import TYPE_CHECKING, ClassVar
 from deephaven.table import Table
 
 from deephaven_massive._config import require_positive_int
-from deephaven_massive._datasets.catalog import filter_key, param_family
+from deephaven_massive._datasets.catalog import filter_key, param_family, symbol_family
 from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
@@ -58,7 +60,15 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
-__all__ = ["Namespace", "bar_query_class", "build_query", "list_params", "query_class"]
+__all__ = [
+    "Namespace",
+    "bar_query_class",
+    "build_query",
+    "list_params",
+    "optional_text",
+    "query_class",
+    "require_bool",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +209,43 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
     return params
 
 
+def require_bool(name: str, value: object) -> bool:
+    """Check a dataset method's `bool` argument, such as a flag that includes extra rows.
+
+    Args:
+        name: The parameter's name, for the message.
+        value: The argument as passed.
+
+    Returns:
+        The value unchanged.
+
+    Raises:
+        TypeError: If `value` is not a `bool` (`0`, `1`, and `"true"` are refused, so a typo
+            never becomes a filter Massive reads differently).
+    """
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be a bool, not {type(value).__name__}")
+    return value
+
+
+def optional_text(name: str, value: object) -> str | None:
+    """Check a dataset method's optional text argument, such as a search term.
+
+    Args:
+        name: The parameter's name, for the message.
+        value: The argument as passed, or None when the caller left it out.
+
+    Returns:
+        The value unchanged.
+
+    Raises:
+        TypeError: If `value` is neither None nor a `str`.
+    """
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{name} must be a str, not {type(value).__name__}")
+    return value
+
+
 def _value(name: str, value: object) -> ParamValue:
     """Normalize one parameter or filter value to its hashable stored form.
 
@@ -236,15 +283,17 @@ def _value(name: str, value: object) -> ParamValue:
 
 
 def _filters(
-    spec: DatasetSpec, filters: object, *, typed: Iterable[str]
+    spec: DatasetSpec, filters: object, *, typed: Iterable[str], fixed: Iterable[str]
 ) -> tuple[tuple[str, ParamValue], ...]:
     """Normalize the `filters` mapping into a sorted tuple.
 
     Args:
-        spec: The dataset, for its time-axis parameter pair.
+        spec: The dataset, for its time-axis parameter pair and symbol parameter.
         filters: The mapping as passed.
         typed: The wire names of the factory's typed parameters, set or not; a filter may not
             name one of them, nor any of its suffixed forms.
+        fixed: The wire names of the parameters the library sets itself; a filter may not name
+            one of them, nor any of its suffixed forms.
 
     Returns:
         `(name, value)` pairs sorted by name.
@@ -253,14 +302,22 @@ def _filters(
         TypeError: If `filters` is not a mapping, a key is not a `str`, or a value has an
             unsupported type.
         ValueError: If a key is a parameter of the dataset's time axis (`DatasetSpec.axis_params`,
-            the `start`/`end` pair's base name and every suffixed form), a typed parameter of
-            the factory or one of its suffixed forms (`param_family`), or `adjusted`, which
+            the `start`/`end` pair's base name and every suffixed form), an equality form of
+            its symbol parameter (`symbol_family`, such as `ticker_any_of`: symbols go through
+            `symbols=`), a parameter the library sets itself or a typed parameter of the
+            factory, or one of their suffixed forms (`param_family`), or `adjusted`, which
             has its own typed argument: a filter would reach REST but not the flat-file
             source choice, which reads only `Request.adjusted`.
     """
     if not isinstance(filters, Mapping):
         raise TypeError(f"filters must be a mapping, not {type(filters).__name__}")
     reserved = {filter_key(form) for name in typed for form in param_family(name)}
+    library = {filter_key(form) for name in fixed for form in param_family(name)}
+    symbol_keys = (
+        set()
+        if spec.symbol_param is None
+        else set(map(filter_key, symbol_family(spec.symbol_param)))
+    )
     pairs: list[tuple[str, ParamValue]] = []
     for key, value in filters.items():
         if not isinstance(key, str):
@@ -269,6 +326,10 @@ def _filters(
             raise ValueError(f"{key} is set through start= and end=, not filters")
         if key == "adjusted":
             raise ValueError("adjusted is set through build_query(adjusted=...), not filters")
+        if key in symbol_keys:
+            raise ValueError(f"{key} is set through symbols=, not filters")
+        if key in library:
+            raise ValueError(f"the library sets {key} itself; it is not a filter")
         if key in reserved:
             raise ValueError(f"{key} is set through its own argument, not filters")
         pairs.append((key, _value(key, value)))
@@ -288,6 +349,7 @@ def build_query(
     start: DateLike | None = None,
     end: DateLike | None = None,
     params: Mapping[str, object] | None = None,
+    fixed: Mapping[str, ParamValue] | None = None,
     filters: Mapping[str, FilterValue] | None = None,
     limit: int | None = None,
 ) -> QueryBase:
@@ -311,6 +373,10 @@ def build_query(
         end: The upper bound of the dataset's time axis, or None.
         params: The dataset's other typed parameters by wire name; None values are dropped,
             but every key, set or not, is reserved from `filters` with its suffixed forms.
+        fixed: Parameters the library sets itself on every request, by wire name, such as
+            the options snapshot's `type="options"`; they have no argument of their own. Each
+            is sent like a typed parameter, and its whole family is reserved from `filters`
+            and left out of the valid filter keys a refused filter lists.
         filters: The `filters` mapping, by key: a wire parameter name with its dots written
             as underscores (`Catalog.check_filters`).
         limit: The cap on the total number of rows (`Request.limit`), or None for every row;
@@ -322,8 +388,8 @@ def build_query(
 
     Raises:
         ValueError: If `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
-            `Symbol` column, or `params` or `filters` holds `adjusted`, which has its own typed
-            argument.
+            `Symbol` column, `params` or `filters` holds `adjusted`, which has its own typed
+            argument, or `params` names a key of `fixed`.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
@@ -346,6 +412,10 @@ def build_query(
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     if params is not None and "adjusted" in params:
         raise ValueError("adjusted is set through build_query(adjusted=...), not params")
+    library = dict(fixed or {})
+    clash = sorted(library.keys() & (params or {}).keys())
+    if clash:
+        raise ValueError(f"{spec.name}: the library sets {clash} itself; they are not params")
     cls = query_class(spec)
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")
@@ -363,9 +433,15 @@ def build_query(
         adjusted=adjusted,
         start=first,
         end=last,
-        params=tuple(sorted((k, _value(k, v)) for k, v in (params or {}).items() if v is not None)),
-        filters=() if filters is None else _filters(spec, filters, typed=params or {}),
+        params=tuple(
+            sorted(
+                (k, _value(k, v)) for k, v in {**(params or {}), **library}.items() if v is not None
+            )
+        ),
+        filters=()
+        if filters is None
+        else _filters(spec, filters, typed=params or {}, fixed=library),
         limit=None if limit is None else require_positive_int("limit", limit),
     )
-    core.catalog.check_filters(spec, dict(request.filters))
+    core.catalog.check_filters(spec, dict(request.filters), fixed=library)
     return cls(core, spec, request)

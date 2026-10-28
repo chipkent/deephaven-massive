@@ -163,6 +163,21 @@ BARS = DatasetSpec(
         (R, GROUPED_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("WindowStart")),
     },
 )
+FUTURES_TRADES_PATH = "/futures/v1/trades/{ticker}"
+FUTURES_TRADES = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="futures.trades",
+    asset_class=AssetClass.FUTURES,
+    history_path=FUTURES_TRADES_PATH,
+    time_axis=("timestamp.gte", "timestamp.lt"),
+    keys={
+        (R, FUTURES_TRADES_PATH): SourceKeys(
+            KeySpec("ticker", from_request=True),
+            KeySpec("Timestamp"),
+            session=KeySpec("SessionEndDate"),
+        )
+    },
+)
 FUTURES_AGGS_PATH = "/futures/v1/aggs/{ticker}"
 FUTURES_BARS = DatasetSpec(
     summary="A dataset for the tests.",
@@ -321,7 +336,16 @@ def test_limit_caps_rows_across_requests(
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND, AAPL_DIVIDEND])))
     out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=3)
     assert len(out) == 3
-    assert all("limit" not in q or q["limit"] == ["1000"] for _, q in sent(fake_rest))
+    # A cap below the page size is the page size: no request asks for rows it cannot keep.
+    assert [q["limit"] for _, q in sent(fake_rest)] == [["3"], ["3"]]
+
+
+def test_a_limit_above_the_page_size_keeps_the_page_size(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
+    fetch(session, DIVIDENDS, symbols=["AAPL"], limit=5000)
+    assert [q["limit"] for _, q in sent(fake_rest)] == [["1000"]]
 
 
 def test_order_is_sent_as_is_where_the_path_has_it(
@@ -618,6 +642,24 @@ def test_a_row_without_its_symbol_is_a_data_failure(
     assert "stocks.dividends: " in caplog.text  # logged at ERROR with the same text
 
 
+def test_a_row_without_an_optional_symbol_keeps_a_null_symbol(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    optional = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="stocks.filings",
+        asset_class=AssetClass.STOCKS,
+        fetch_path=DIVIDENDS_PATH,
+        keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker", required=False))},
+    )
+    row = {key: value for key, value in AAPL_DIVIDEND.items() if key != "ticker"}
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([row, AAPL_DIVIDEND])))
+    with caplog.at_level(logging.WARNING, LOGGER):
+        out = fetch(session, optional)
+    assert [r["Symbol"] for r in out] == [None, "AAPL"]
+    assert caplog.text == ""  # a missing optional symbol is no invalid symbol
+
+
 def test_a_timestamp_out_of_bounds_is_a_data_failure(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
@@ -729,7 +771,7 @@ def test_bars_fill_the_range_segments_in_milliseconds(
         timespan=Timespan.DAY,
         adjusted=False,
     )
-    assert sent(fake_rest) == [(path, {"adjusted": ["false"]})]
+    assert sent(fake_rest) == [(path, {"adjusted": ["false"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Timestamp"], r["Close"]) for r in out] == [
         ("AAPL", midnight * 10**6, 2.0)
     ]
@@ -782,11 +824,121 @@ def test_futures_bars_widen_date_bounds_to_whole_sessions(
         multiplier=5,
     )
     q = sent(fake_rest)[0][1]
-    opens = datetime(2025, 3, 3, tzinfo=CHICAGO)
+    # From the session's regular open, Monday 17:00 Chicago, less the three-day holiday
+    # margin; to the next session's regular open, which is exact.
+    opens = datetime(2025, 2, 28, 17, tzinfo=CHICAGO)
     assert q["window_start.gte"] == [str(epoch_ns(opens))]
-    assert q["window_start.lt"] == [str(epoch_ns(datetime(2025, 3, 6, tzinfo=CHICAGO)))]
+    assert q["window_start.lt"] == [str(epoch_ns(datetime(2025, 3, 4, 17, tzinfo=CHICAGO)))]
     assert q["resolution"] == ["5min"]
+    assert q["sort"] == ["window_start.asc"]  # oldest first, as flat files return rows
     assert [r["SessionEndDate"] for r in out] == [date(2025, 3, 4)]
+
+
+def futures_trade(moment: datetime, session: str) -> dict[str, object]:
+    return {
+        "ticker": "ESH5",
+        "timestamp": epoch_ns(moment),
+        "sequence_number": 1,
+        "report_sequence": 1,
+        "channel": 1,
+        "price": 1.0,
+        "session_end_date": session,
+    }
+
+
+def test_futures_history_reaches_a_session_a_holiday_opened_early(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # CME traded Martin Luther King Day (Monday 2025-01-20) from Sunday 17:00 Chicago time
+    # under the trade date 2025-01-21, a day before that session's regular open.
+    sunday = futures_trade(datetime(2025, 1, 19, 18, tzinfo=CHICAGO), "2025-01-21")
+    tuesday = futures_trade(datetime(2025, 1, 21, 10, tzinfo=CHICAGO), "2025-01-21")
+    friday = futures_trade(datetime(2025, 1, 17, 10, tzinfo=CHICAGO), "2025-01-17")
+    fake_rest.reply(
+        FUTURES_TRADES_PATH.format(ticker="ESH5"), Reply(envelope([friday, sunday, tuesday]))
+    )
+    out = history(session, FUTURES_TRADES, start="2025-01-21", end="2025-01-21", symbols=["ESH5"])
+    q = sent(fake_rest)[0][1]
+    assert int(q["timestamp.gte"][0]) <= epoch_ns(datetime(2025, 1, 19, 17, tzinfo=CHICAGO))
+    assert q["timestamp.lt"] == [str(epoch_ns(datetime(2025, 1, 21, 17, tzinfo=CHICAGO)))]
+    assert q["sort"] == ["timestamp.asc"]  # `sort` lists no values: the time axis's field
+    assert [r["Timestamp"] for r in out] == [sunday["timestamp"], tuesday["timestamp"]]
+
+
+def test_mixed_futures_bounds_keep_a_whole_session_on_the_date_side(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    evening = futures_trade(datetime(2024, 12, 16, 18, tzinfo=CHICAGO), "2024-12-17")
+    morning = futures_trade(datetime(2024, 12, 17, 9, tzinfo=CHICAGO), "2024-12-17")
+    after = futures_trade(datetime(2024, 12, 17, 16, 30, tzinfo=CHICAGO), "2024-12-17")
+    before = futures_trade(datetime(2024, 12, 16, 10, tzinfo=CHICAGO), "2024-12-16")
+    fake_rest.reply(
+        FUTURES_TRADES_PATH.format(ticker="ESH5"),
+        Reply(envelope([before, evening, morning, after])),
+    )
+    end = datetime(2024, 12, 17, 16, tzinfo=CHICAGO)
+    out = history(session, FUTURES_TRADES, start="2024-12-17", end=end, symbols=["ESH5"])
+    q = sent(fake_rest)[0][1]
+    assert q["timestamp.lt"] == [str(epoch_ns(end))]
+    # The evening before the date belongs to its session; the instant end is exact.
+    assert [r["Timestamp"] for r in out] == [evening["timestamp"], morning["timestamp"]]
+
+
+def test_keep_ignores_a_bound_whose_column_the_rows_lack() -> None:
+    sessions = bounds(FUTURES_BARS, "2025-03-04", "2025-03-04")
+    mixed = bounds(FUTURES_BARS, "2025-03-04", datetime(2025, 3, 4, 16, tzinfo=CHICAGO))
+    late = epoch_ns(datetime(2025, 3, 4, 20, tzinfo=CHICAGO))
+    times = pa.RecordBatch.from_pydict({"Timestamp": pa.array([late], pa.timestamp("ns", "UTC"))})
+    days = pa.RecordBatch.from_pydict({"SessionEndDate": pa.array([date(2025, 3, 3)], pa.date32())})
+    other = pa.RecordBatch.from_pydict({"Other": pa.array([1])})
+    assert rest._keep(times, sessions).num_rows == 1  # dates bound only SessionEndDate
+    assert rest._keep(times, mixed).num_rows == 0  # the instant side bounds Timestamp
+    assert rest._keep(days, mixed).num_rows == 0  # the date side bounds SessionEndDate
+    assert rest._keep(other, sessions).num_rows == 1
+    starts = bounds(FUTURES_BARS, datetime(2025, 3, 3, 18, tzinfo=CHICAGO), "2025-03-04")
+    assert rest._keep(days, starts).num_rows == 1  # no Timestamp to bound the instant side
+
+
+@pytest.mark.parametrize(
+    ("path", "time_axis", "expected"),
+    [
+        (TRADES_PATH, ("timestamp.gte", "timestamp.lt"), {"order": "asc", "sort": "timestamp"}),
+        ("/v1/indicators/sma/{stockTicker}", ("timestamp.gte", "timestamp.lt"), {"order": "asc"}),
+        (RANGE_PATH, None, {"sort": "asc"}),
+        (FUTURES_AGGS_PATH, ("window_start.gte", "window_start.lt"), {"sort": "window_start.asc"}),
+        (FUTURES_TRADES_PATH, ("timestamp.gte", "timestamp.lt"), {"sort": "timestamp.asc"}),
+        (FUTURES_TRADES_PATH, None, {}),
+        ("/v1/open-close/{stocksTicker}/{date}", None, {}),
+    ],
+)
+def test_history_asks_for_ascending_order(
+    path: str, time_axis: tuple[str, str] | None, expected: dict[str, object]
+) -> None:
+    spec = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="test.ascending",
+        history_path=path,
+        time_axis=time_axis,
+    )
+    rest_path = cast("RestPath", _massive.source(R, path))
+    assert rest._ascending(spec, rest_path, Request()) == expected
+    # A direction the caller set is kept.
+    assert rest._ascending(spec, rest_path, Request(params=(("order", "desc"),))) == {}
+
+
+def test_a_session_date_parameter_takes_an_instant_as_its_session() -> None:
+    # A futures session date compares sessions, so an instant names the session it is in.
+    evening = datetime(2024, 6, 10, 20, tzinfo=UTC)  # 15:00 Chicago: the 2024-06-10 session
+    night = datetime(2024, 6, 10, 23, tzinfo=UTC)  # 18:00 Chicago: the 2024-06-11 session
+    assert rest._date_bound("session_end_date.gte", evening, upper=False) == date(2024, 6, 10)
+    assert rest._date_bound("session_end_date.gte", night, upper=False) == date(2024, 6, 11)
+    # The upper bound excludes its instant: the session open itself ends the previous one.
+    opens = datetime(2024, 6, 10, 17, tzinfo=CHICAGO)
+    assert rest._date_bound("session_end_date.lte", opens, upper=True) == date(2024, 6, 10)
+    assert rest._date_bound("session_end_date.lt", opens, upper=True) == date(2024, 6, 11)
+    assert rest._date_bound("session_end_date", night, upper=False) == date(2024, 6, 11)
+    # Any other date parameter takes the instant as ISO-8601 text.
+    assert rest._date_bound("ex_dividend_date.gte", night, upper=False) == night
 
 
 def test_futures_history_with_instant_bounds_filters_on_the_time_column() -> None:

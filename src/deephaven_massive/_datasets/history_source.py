@@ -90,11 +90,12 @@ def partition_dates(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> t
 
     For a `TimeRange` they are the dates of `start` and of `end - 1 ns` in the class's day zone
     and every date between: New York for stocks, options, and indices, UTC for forex and
-    crypto. For date-bounded futures (`FuturesSessions`) they are the sessions from `first` to
-    `last`. A futures range given with `datetime` bounds reads the sessions its instants belong
-    to, from the session of `start` to the session of the last instant before `end`; a session
-    opens at 17:00 Chicago time on the day before its `session_end_date`
-    (`dates.futures_session`). Its rows are then filtered on `Timestamp`.
+    crypto. For futures they are trading sessions: from `first` (or, for a `start` instant,
+    the session that instant belongs to) to `last` (or, for an `end` instant, the session of
+    the last instant before it); a session opens at 17:00 Chicago time on the day before its
+    `session_end_date` (`dates.futures_session`). An instant side is then filtered on
+    `Timestamp`. A holiday's trading lies in the next session's file, which the flat-file
+    transport reads when the last session's file is missing.
 
     Args:
         spec: The dataset; its asset class picks the day zone.
@@ -104,7 +105,9 @@ def partition_dates(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> t
         The partition dates; never empty.
     """
     if isinstance(window, FuturesSessions):
-        first, last = window.first, window.last
+        before_end = window.window.end - timedelta(microseconds=1)
+        first = window.first or futures_session(window.window.start)
+        last = window.last or futures_session(before_end)
     elif spec.asset_class is AssetClass.FUTURES:
         last_instant = window.end - timedelta(microseconds=1)
         first, last = futures_session(window.start), futures_session(last_instant)

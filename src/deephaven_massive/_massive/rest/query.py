@@ -9,7 +9,7 @@ type is refused here instead of reaching Massive as surprising text:
 |---|---|---|
 | `STRING` | `str` (an enum member by its value) | the text |
 | `INTEGER` | `int` | decimal digits |
-| `NUMBER` | `int` or finite `float` | the shortest exact decimal (`repr`) |
+| `NUMBER` | `int` or finite `float` | digits; a `float` positionally (`0.0000001`) |
 | `BOOLEAN` | `bool` | `true` or `false` |
 | `ENUM` | `str` or enum member, one of `Param.values` | the value |
 | `DATE` | `date`, or aware `datetime` | `YYYY-MM-DD`, or ISO-8601 date-time |
@@ -33,6 +33,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING
 from urllib.parse import quote, unquote, urlencode, urlsplit
@@ -143,8 +144,11 @@ def _number(param: Param, value: object) -> str:
         value: An `int`, or for `NUMBER` also a finite `float`; never a `bool`.
 
     Returns:
-        The number's shortest exact decimal text. A subclass (an `IntEnum` member, numpy's
-        `float64`) is sent by its numeric value, never by its own `repr`.
+        The number's text: an `int` as its digits, a `float` as its shortest exact decimal
+        written out in positional notation, without an exponent or trailing zeros (`1e20` is
+        `100000000000000000000`, `1e-7` is `0.0000001`, `2.0` is `2`), since a query
+        parameter is not documented to take scientific notation. A subclass (an `IntEnum`
+        member, numpy's `float64`) is sent by its numeric value, never by its own `repr`.
 
     Raises:
         TypeError: If `value` is not a number the kind accepts.
@@ -157,7 +161,10 @@ def _number(param: Param, value: object) -> str:
         return str(int(value))
     if not math.isfinite(value):
         raise ValueError(f"parameter {param.name!r} takes a finite number, not {value!r}")
-    return repr(float(value))
+    text = format(Decimal(repr(float(value))), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
 
 
 def _text(param: Param, value: object) -> str:
@@ -265,8 +272,9 @@ def request_target(
     Args:
         rest_path: The path, whose `params` say each parameter's kind and place.
         path_params: A value for every placeholder of the template, by wire name. Each is
-            encoded by its kind and then percent-encoded whole, so a `/` in a value stays
-            inside its segment.
+            encoded by its kind and then percent-encoded whole (`I:SPX` is sent as
+            `I%3ASPX`). No value may contain `/`: Massive answers HTTP 404 for a segment
+            holding `%2F`, and no canonical symbol contains one (a forex pair is `C:EURUSD`).
         query_params: Query values by wire name, in the order to send them. A `None` value is
             left out.
 
@@ -275,9 +283,10 @@ def request_target(
         with no `?` when no query value is sent.
 
     Raises:
-        ValueError: If a path parameter is missing, `None`, or unknown, or a query name is not
-            a query parameter of the path. Each value is encoded by `encode_value`, which
-            raises `TypeError` or `ValueError` for a value its kind cannot send.
+        ValueError: If a path parameter is missing, `None`, or unknown, its encoded value
+            contains `/`, or a query name is not a query parameter of the path. Each value is
+            encoded by `encode_value`, which raises `TypeError` or `ValueError` for a value
+            its kind cannot send.
     """
     params = {param.name: param for param in rest_path.params}
     path_names = {name for name, param in params.items() if param.in_path}
@@ -287,9 +296,14 @@ def request_target(
             f"{rest_path.template} takes path parameters {sorted(path_names)}, "
             f"given {sorted(name for name, value in given.items() if value is not None)}"
         )
-    segments = {
-        name: quote(encode_value(params[name], value), safe="") for name, value in given.items()
-    }
+    texts = {name: encode_value(params[name], value) for name, value in given.items()}
+    slashed = sorted(name for name, text in texts.items() if "/" in text)
+    if slashed:
+        raise ValueError(
+            f"{rest_path.template}: path parameters {slashed} contain '/', which Massive cannot "
+            "read inside a path segment"
+        )
+    segments = {name: quote(text, safe="") for name, text in texts.items()}
     path = rest_path.template.format_map(segments)
     query = []
     for name, value in dict(query_params).items():

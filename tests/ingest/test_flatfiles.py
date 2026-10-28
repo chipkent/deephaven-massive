@@ -12,7 +12,7 @@ import tracemalloc
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 from zoneinfo import ZoneInfo
@@ -1058,6 +1058,88 @@ def test_futures_instants_before_a_holiday_do_not_raise(
         datetime(2024, 12, 24, 10, tzinfo=CHICAGO), datetime(2024, 12, 24, 11, tzinfo=CHICAGO)
     )
     assert t.size == 1
+    assert fake_s3.keys() == [key]
+
+
+def test_futures_instants_on_a_holiday_read_the_next_session(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # CME traded Martin Luther King Day (Monday 2025-01-20) from Sunday 17:00 Chicago time
+    # under the trade date 2025-01-21: no 2025-01-20 file exists, and the rows are in the next.
+    clock(datetime(2025, 2, 10, tzinfo=UTC))
+    sunday = epoch_ns(datetime(2025, 1, 19, 18, tzinfo=CHICAGO))
+    tuesday = epoch_ns(datetime(2025, 1, 21, 9, tzinfo=CHICAGO))
+    rows = "".join(f",1.0,1,1,1,1,2025-01-21,ESH5,{moment}\n" for moment in (sunday, tuesday))
+    key = FUTURES_KEY.format("cme", date(2025, 1, 21))
+    fake_s3.put(key, make_csv_gz(FUTURES_HEADER + rows))
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    with caplog.at_level(logging.INFO, "deephaven_massive._ingest.flatfiles"):
+        t = q.history(
+            datetime(2025, 1, 19, 17, tzinfo=CHICAGO),
+            datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
+            source=HistorySource.FLAT_FILES,
+        )
+    assert pick(t, "Timestamp") == [(sunday,)]  # the range keeps only its own instants
+    assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20)), key]
+    assert "for the hours a holiday moved into it" in caplog.text
+
+
+def test_a_roll_forward_gives_up_after_the_holiday_margin(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+) -> None:
+    clock(datetime(2025, 2, 10, tzinfo=UTC))
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    t = q.history(
+        datetime(2025, 1, 17, 18, tzinfo=CHICAGO),  # the weekend sessions are missing too
+        datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
+        source=HistorySource.FLAT_FILES,
+    )
+    assert t.size == 0
+    # Only the last session rolls forward, and at most three days.
+    days = [date(2025, 1, 18) + timedelta(days=n) for n in range(6)]
+    assert sorted(fake_s3.keys()) == [FUTURES_KEY.format("cme", day) for day in days]
+
+
+def test_futures_dates_do_not_roll_forward(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+) -> None:
+    # A date names its own session exactly: a holiday's hours belong to another session.
+    clock(datetime(2025, 2, 10, tzinfo=UTC))
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    t = q.history("2025-01-20", "2025-01-20", source=HistorySource.FLAT_FILES)
+    assert t.size == 0
+    assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
+
+
+def test_mixed_futures_bounds_filter_the_instant_side(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    clock(datetime(2025, 1, 10, tzinfo=UTC))
+    evening = epoch_ns(datetime(2024, 12, 16, 18, tzinfo=CHICAGO))
+    after = epoch_ns(datetime(2024, 12, 17, 16, 30, tzinfo=CHICAGO))
+    rows = "".join(f",1.0,1,1,1,1,2024-12-17,ESH5,{m}\n" for m in (evening, after))
+    key = FUTURES_KEY.format("cme", date(2024, 12, 17))
+    fake_s3.put(key, make_csv_gz(FUTURES_HEADER + rows))
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    t = q.history(
+        "2024-12-17", datetime(2024, 12, 17, 16, tzinfo=CHICAGO), source=HistorySource.FLAT_FILES
+    )
+    assert pick(t, "Timestamp") == [(evening,)]
     assert fake_s3.keys() == [key]
 
 

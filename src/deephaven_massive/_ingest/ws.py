@@ -1197,7 +1197,8 @@ class WsConnections:
     ) -> None:
         """Refuse static options topics that would cross the cap; `registry_lock` is held.
 
-        In use are the contracts the connection admitted and those of streams still opening.
+        In use are the topics the connection admitted and those of streams still opening. The
+        cap counts topics, one per contract and channel, so `T.X` and `Q.X` are two.
 
         Args:
             spec: The stream's dataset.
@@ -1217,8 +1218,9 @@ class WsConnections:
         new = {t for t in topics if not is_wildcard(t)} - in_use
         if len(new) + len(in_use) > OPTIONS_CAP:
             raise ValueError(
-                f"{spec.name}: {len(new)} new option contracts and {len(in_use)} in use exceed "
-                f"the {OPTIONS_CAP} contracts one /options connection carries"
+                f"{spec.name}: {len(new)} new option topics and {len(in_use)} in use exceed "
+                f"the {OPTIONS_CAP} topics one /options connection carries; a topic is one "
+                "contract on one channel, so each channel of a contract counts once"
             )
 
     def _attach(self, core: SessionCore, stream: _Stream) -> None:

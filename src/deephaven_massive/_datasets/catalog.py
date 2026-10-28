@@ -87,6 +87,7 @@ class KeySpec:
             KeySpec("SipTimestamp")  # the source's own SipTimestamp column
             KeySpec("stocksTicker", from_request=True)  # the symbol is a path parameter
             KeySpec("FilerCik", instrument=False)  # a fan-out key that is no instrument
+            KeySpec("Ticker", required=False)  # a ticker Massive sends only "if available"
 
     Attributes:
         column: The source's generated column that holds the key, after the projection of the
@@ -104,11 +105,19 @@ class KeySpec:
             about); False keeps its generated column (a filer CIK stays `FilerCik`). Only a
             `fanout` key may set it False, and such a key comes from the source's rows, never
             from the request (`DatasetSpec` rejects both, when it is created).
+        required: Whether every row must carry the key. True, the default, makes a row
+            without it a loud failure (`RowDataError`), never a null key. False lets such a
+            row through with a null key column; it is for a symbol Massive documents as
+            present only "if available", such as a filing's `ticker`. Only a `symbol` key read
+            from a REST path's rows may set it False: a flat file and a stream filter and
+            route rows by their symbol, and the `time`, `fanout`, and `session` keys are
+            always required (`DatasetSpec` rejects the rest, when it is created).
     """
 
     column: str
     from_request: bool = False
     instrument: bool = True
+    required: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,8 +435,10 @@ class DatasetSpec:
         Raises:
             ValueError: If `keys` names a source the dataset does not read; a `time` or
                 `session` key is filled from the request; or a key other than `fanout` is
-                marked as no instrument, or a fan-out key that is no instrument is filled from
-                the request (it would have no column to keep). The message names the dataset.
+                marked as no instrument, a fan-out key that is no instrument is filled from
+                the request (it would have no column to keep), or a key other than a `symbol`
+                key read from a REST path's rows is optional (`KeySpec.required` False). The
+                message names the dataset.
         """
         unused = sorted(f"{t.value} {k}" for t, k in set(self.keys) - set(self.sources))
         if unused:
@@ -445,6 +456,13 @@ class DatasetSpec:
                     raise ValueError(
                         f"{where}: a fanout key that is no instrument keeps a column of the "
                         "rows, so it cannot come from the request"
+                    )
+                optional_ok = (
+                    role == "symbol" and transport is Transport.REST and not spec.from_request
+                )
+                if not spec.required and not optional_ok:
+                    raise ValueError(
+                        f"{where}: only a symbol key read from a REST path's rows can be optional"
                     )
 
     def _check_flat_files(self) -> None:
@@ -728,7 +746,9 @@ class Catalog:
         with self._lock:
             return self._schemas.setdefault(spec, schema)
 
-    def check_filters(self, spec: DatasetSpec, filters: Mapping[str, object]) -> None:
+    def check_filters(
+        self, spec: DatasetSpec, filters: Mapping[str, object], *, fixed: Iterable[str] = ()
+    ) -> None:
         """Validate a `filters` mapping against the generated parameters of the dataset's paths.
 
         Runs synchronously when the query is built. A key is a wire parameter's name with its
@@ -736,11 +756,14 @@ class Catalog:
         parameter of any of the dataset's REST paths, except the ones the library sets itself:
         the equality forms of the symbol parameter (`symbol_family`: its base, `.any_of`, and
         `.all_of`), the whole family of the time axis (`param_family`: its base and every
-        suffixed form), `limit`, `sort`, `order`, and `adjusted`.
+        suffixed form), the whole family of each parameter the dataset's factory fixes,
+        `limit`, `sort`, `order`, and `adjusted`.
 
         Args:
             spec: The dataset.
             filters: The normalized filters by key; sequences are already tuples.
+            fixed: The wire names of the parameters the library sets itself for this call
+                (`build_query(fixed=...)`); neither accepted nor named among the valid keys.
 
         Raises:
             ValueError: If a key is not a filter of the dataset (the message lists the valid
@@ -754,7 +777,8 @@ class Catalog:
         if not filters:
             return
         symbols = () if spec.symbol_param is None else symbol_family(spec.symbol_param)
-        reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols}
+        library = (form for name in fixed for form in param_family(name))
+        reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols, *library}
         params = {
             filter_key(param.name): param
             for path in spec.rest_paths

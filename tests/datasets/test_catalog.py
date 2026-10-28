@@ -272,6 +272,33 @@ def test_only_a_fanout_key_can_be_no_instrument(role: str) -> None:
         change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): bad})
 
 
+@pytest.mark.parametrize(
+    ("role", "spec"),
+    [
+        ("time", KeySpec("Id", required=False)),
+        ("fanout", KeySpec("Id", required=False)),
+        ("session", KeySpec("Id", required=False)),
+        ("symbol", KeySpec("stocksTicker", from_request=True, required=False)),
+    ],
+)
+def test_only_a_symbol_from_rest_rows_can_be_optional(role: str, spec: KeySpec) -> None:
+    bad = SourceKeys(**{role: spec})
+    with pytest.raises(ValueError, match=r"only a symbol key read from a REST path's rows"):
+        change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): bad})
+
+
+def test_a_stream_symbol_cannot_be_optional() -> None:
+    optional = keys(KeySpec("Ticker", required=False), "SipTimestamp")
+    with pytest.raises(ValueError, match=r"only a symbol key read from a REST path's rows"):
+        change(STOCK_TRADES, keys={**STOCK_TRADES.keys, (W, "stocks/T"): optional})
+
+
+def test_a_rest_symbol_can_be_optional() -> None:
+    optional = SourceKeys(symbol=KeySpec("Ticker", required=False))
+    spec = change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): optional})
+    assert spec.keys_for(R, "/v3/reference/exchanges").symbol == KeySpec("Ticker", required=False)
+
+
 def test_a_fanout_key_that_is_no_instrument_comes_from_the_rows() -> None:
     bad = SourceKeys(fanout=KeySpec("filer_cik", from_request=True, instrument=False))
     with pytest.raises(ValueError, match=r"no instrument keeps a column of the rows"):

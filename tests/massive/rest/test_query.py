@@ -87,7 +87,14 @@ def test_integers_and_numbers() -> None:
     assert _encode("limit", 50_000) == "50000"
     assert _encode("strike_price.gte", 100) == "100"
     assert _encode("strike_price.gte", 0.1) == "0.1"
-    assert _encode("strike_price.gte", 1e-7) == "1e-07"
+    # Positional notation, never an exponent, and no trailing zeros.
+    assert _encode("strike_price.gte", 1e-7) == "0.0000001"
+    assert _encode("strike_price.gte", 1e20) == "100000000000000000000"
+    assert _encode("strike_price.gte", 2.0) == "2"
+    assert _encode("strike_price.gte", 150.250) == "150.25"
+    assert _encode("strike_price.gte", -0.0) == "0"
+    assert _encode("strike_price.gte", -1.5e-3) == "-0.0015"
+    assert _encode("strike_price.gte", 10**30) == "1" + "0" * 30  # an int is sent exactly
 
 
 def test_number_subclasses_are_sent_by_value_never_by_their_repr() -> None:
@@ -230,8 +237,14 @@ def test_a_target_without_query_values_has_no_question_mark() -> None:
 
 
 def test_path_values_are_percent_encoded_whole() -> None:
-    target = query.request_target(_PATH, {"stockTicker": "BRK/B X", "date": date(2026, 1, 2)}, {})
-    assert target == "/v1/open-close/BRK%2FB%20X/2026-01-02"
+    target = query.request_target(_PATH, {"stockTicker": "I:SPX X", "date": date(2026, 1, 2)}, {})
+    assert target == "/v1/open-close/I%3ASPX%20X/2026-01-02"
+
+
+def test_a_path_value_with_a_slash_is_refused() -> None:
+    # Massive answers 404 for a `%2F` segment, so such a value could never succeed.
+    with pytest.raises(ValueError, match=r"path parameters \['stockTicker'\] contain '/'"):
+        query.request_target(_PATH, {"stockTicker": "EUR/USD", "date": date(2026, 1, 2)}, {})
 
 
 def test_query_values_are_percent_encoded() -> None:
