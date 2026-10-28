@@ -352,8 +352,8 @@ test code imports helpers as `tests._fakes…`. So `tests/massive/` can never sh
 
 Integration tests end in `_integration` and carry the `integration` marker, which `addopts`
 deselects in every default run (CI's included); `uv run pytest -m integration` runs them, and
-each skips unless `MASSIVE_API_KEY` is set. [LIVE-CHECKS.md](LIVE-CHECKS.md) is the owner's
-runbook for them. The live tests that deliberately exceed Massive's subscription and connection
+each skips unless `MASSIVE_API_KEY` is set (and always under CI).
+[`docs/live-tests.md`](../../docs/live-tests.md) is the runbook for them. The live tests that deliberately exceed Massive's subscription and connection
 limits also carry `integration_limits`: `-m integration` deselects them, and only
 `-m integration_limits` runs them. The exceptions to the mirror rule, and no
 others:
@@ -4245,7 +4245,8 @@ document already reflects them.
 
 Each item is handled conservatively now, covered by a fixture test in its unit-test module, and
 retired by a live integration test (`*_integration.py`, marked `integration`, skipped without
-`MASSIVE_API_KEY`); [LIVE-CHECKS.md](LIVE-CHECKS.md) says how to run each and what each outcome
+`MASSIVE_API_KEY`); [`docs/live-tests.md`](../../docs/live-tests.md) says how to run them, each
+test's docstring what its evidence means, and the comment on issue #26 what each outcome
 changes. Each item that a live test refutes becomes an owner decision
 before 1.0. Items 17 and 18 concern Deephaven, not Massive: the work that adds column
 descriptions settles them in the embedded test JVM and the web UI, and they need no live test.

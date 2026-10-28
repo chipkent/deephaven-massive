@@ -2,10 +2,11 @@
 
 Each test opens one wire `WsClient` to one cluster on `socket.massive.com`, records every
 status and, where the form of a value is the question, every raw frame (`evidence`), and
-closes the client before the next test, so no cluster ever holds more than one of the test
-run's connections. The tests that subscribe to many topics or a wildcard deliberately exceed
-Massive's limits: they are marked `integration_limits` and run only with
-`-m integration_limits`.
+closes the client before the next test; a probe of a cluster waits a few seconds after the
+previous one closed, so the two never overlap on the server. The tests that subscribe to many
+topics or a wildcard deliberately exceed Massive's limits: they are marked
+`integration_limits` and run only with `-m integration_limits`. How to run these tests is in
+`docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -40,14 +42,28 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.integration
 
+# Fixture types, repeated in each live module: test modules may not import from conftest.
 Evidence: TypeAlias = "Callable[[str], None]"
+OpenProbe: TypeAlias = "Callable[[str, str], _Probe]"
 
 _HOST = "socket.massive.com"
-_WAIT = 60.0
+_AUTH_WAIT = 20.0
+"""Seconds a probe waits for Massive to accept the key."""
+
+_WAIT = 45.0
 """Seconds a test waits for a status or a frame."""
 
 _LISTEN = 15.0
 """Seconds a test keeps listening after it has what it waited for."""
+
+_GAP = 3.0
+"""Seconds between closing a probe of a cluster and opening the next one."""
+
+_CLOSED_AT: dict[str, float] = {}
+"""When the last probe of each cluster closed (`time.monotonic()`); the test thread's only."""
+
+_STATUSES, _ROWS, _FRAMES = "statuses", "rows", "frames"
+"""What a probe keeps: statuses only, statuses and decoded rows, or also every raw frame."""
 
 
 @dataclass(frozen=True)
@@ -66,6 +82,19 @@ class _Records:
             The topics.
         """
         return {t for _, s in self.statuses if s.kind is StatusKind.ACK for t in s.topics}
+
+    def answered(self, topics: Sequence[str]) -> bool:
+        """Return whether every topic is acknowledged or refused, or the whole request refused.
+
+        Returns:
+            True once nothing more is to be waited for.
+        """
+        named = {t for _, s in self.statuses for t in s.topics}
+        whole = any(
+            s.kind is StatusKind.MAX_CONNECTIONS or (s.kind is StatusKind.REFUSED and not s.topics)
+            for _, s in self.statuses
+        )
+        return whole or named >= set(topics)
 
     def status_lines(self) -> list[str]:
         """Describe every status, in arrival order.
@@ -102,14 +131,20 @@ class _Probe:
     reads copies (`records`) and reaches the loop with `call_soon_threadsafe`.
     """
 
-    def __init__(self, cluster: str, api_key: str, frames: Callable[[], list[str]]) -> None:
+    def __init__(
+        self, cluster: str, api_key: str, *, frames: Callable[[], list[str]], keep_rows: bool
+    ) -> None:
         """Create the client of `wss://socket.massive.com/<cluster>`; nothing connects yet.
 
         Args:
             cluster: The cluster, such as `"crypto"`.
             api_key: The Massive API key.
-            frames: Returns a copy of the raw frames recorded so far.
+            frames: Returns a copy of the raw frames recorded so far (none when not recorded).
+            keep_rows: Whether to keep the decoded rows; a probe that only counts
+                acknowledgements drops them, so a busy subscription costs no memory.
         """
+        self.cluster = cluster
+        self._keep_rows = keep_rows
         self._lock = threading.Lock()
         self._opened = threading.Event()
         self._generation = 0
@@ -144,6 +179,8 @@ class _Probe:
             self._statuses.append((time.monotonic(), status))
 
     def _on_data(self, channel: str, rows: list[dict[str, object]]) -> None:
+        if not self._keep_rows:
+            return
         now = time.monotonic()
         with self._lock:
             self._rows.extend((now, channel, row) for row in rows)
@@ -165,7 +202,7 @@ class _Probe:
     def open(self) -> None:
         """Start the client and wait until Massive accepts the key; fail the test otherwise."""
         self.client.start()
-        assert self._opened.wait(_WAIT), f"not authenticated; states {self.records().states}"
+        assert self._opened.wait(_AUTH_WAIT), f"not authenticated; states {self.records().states}"
 
     def send(self, action: str, topics: Sequence[str]) -> None:
         """Send `subscribe` or `unsubscribe` frames for `topics` from the loop thread."""
@@ -194,31 +231,8 @@ class _Probe:
         self.client.join(10.0)
 
 
-@pytest.fixture
-def probe(
-    live_config: MassiveConfig, raw_frames: Callable[[], list[str]]
-) -> Iterator[Callable[[str], _Probe]]:
-    """Yield a function that opens a probe of one cluster; every probe is closed at teardown.
-
-    Yields:
-        A function mapping a cluster (`"crypto"`) to an authenticated probe.
-    """
-    opened: list[_Probe] = []
-
-    def open_probe(cluster: str) -> _Probe:
-        made = _Probe(cluster, live_config.api_key, raw_frames)
-        opened.append(made)
-        made.open()
-        return made
-
-    yield open_probe
-    for made in opened:
-        made.close()
-
-
-@pytest.fixture
-def raw_frames(monkeypatch: pytest.MonkeyPatch) -> Callable[[], list[str]]:
-    """Record the text of every frame any wire client decodes during the test.
+def _recorder(monkeypatch: pytest.MonkeyPatch) -> Callable[[], list[str]]:
+    """Record the text of every frame any wire client decodes until the test ends.
 
     Returns:
         A function returning a copy of the frames recorded so far, in arrival order.
@@ -240,11 +254,43 @@ def raw_frames(monkeypatch: pytest.MonkeyPatch) -> Callable[[], list[str]]:
     return copy
 
 
-@pytest.mark.timeout(110)
-def test_form_of_the_forex_quote_exchange_id(
-    probe: Callable[[str], _Probe], *, evidence: Evidence
-) -> None:
-    made = probe("forex")
+@pytest.fixture
+def probe(live_config: MassiveConfig, monkeypatch: pytest.MonkeyPatch) -> Iterator[OpenProbe]:
+    """Yield a function that opens a probe of one cluster; every probe is closed at teardown.
+
+    Yields:
+        A function `(cluster, keep)`: the cluster (`"crypto"`) and what to keep, `"statuses"`,
+        `"rows"`, or `"frames"` (rows and every raw frame). It waits until a few seconds have
+        passed since the last probe of that cluster closed, then returns an authenticated
+        probe.
+    """
+    opened: list[_Probe] = []
+
+    def open_probe(cluster: str, keep: str) -> _Probe:
+        frames = _recorder(monkeypatch) if keep == _FRAMES else list
+        since = time.monotonic() - _CLOSED_AT.get(cluster, float("-inf"))
+        if since < _GAP:
+            threading.Event().wait(_GAP - since)
+        made = _Probe(cluster, live_config.api_key, frames=frames, keep_rows=keep != _STATUSES)
+        opened.append(made)
+        made.open()
+        return made
+
+    yield open_probe
+    for made in opened:
+        made.close()
+        _CLOSED_AT[made.cluster] = time.monotonic()
+
+
+@pytest.mark.timeout(100)
+def test_form_of_the_forex_quote_exchange_id(probe: OpenProbe, *, evidence: Evidence) -> None:
+    """Whether a forex quote's `x` arrives as an integer or as decimal-digit text.
+
+    It is declared an integer and sampled as the text `"44"`; the library reads either. Records
+    the raw `C` frames of `C.EUR-USD` and the JSON type of `x`. Reading it: either form
+    settles the question; nothing else changes. No quote on a weekend skips: forex is closed.
+    """
+    made = probe("forex", _FRAMES)
     made.send("subscribe", ["C.EUR-USD"])
     records = made.wait(lambda r: bool(r.objects("C")), _WAIT)
     quotes = records.objects("C")
@@ -256,9 +302,15 @@ def test_form_of_the_forex_quote_exchange_id(
         pytest.skip("no forex quote arrived (is the market closed?)")
 
 
-@pytest.mark.timeout(110)
-def test_form_of_the_crypto_trade_id(probe: Callable[[str], _Probe], *, evidence: Evidence) -> None:
-    made = probe("crypto")
+@pytest.mark.timeout(100)
+def test_form_of_the_crypto_trade_id(probe: OpenProbe, *, evidence: Evidence) -> None:
+    """Whether a crypto trade's `i` arrives as an integer or as text on the WebSocket.
+
+    It is declared and sampled as an integer, while REST and the flat files send text; the
+    library keeps either as text. Records the raw `XT` frames of `XT.BTC-USD` and the JSON type
+    of `i`. Reading it: either form settles the question; nothing else changes.
+    """
+    made = probe("crypto", _FRAMES)
     made.send("subscribe", ["XT.BTC-USD"])
     records = made.wait(lambda r: bool(r.objects("XT")), _WAIT)
     trades = records.objects("XT")
@@ -269,11 +321,16 @@ def test_form_of_the_crypto_trade_id(probe: Callable[[str], _Probe], *, evidence
     assert trades
 
 
-@pytest.mark.timeout(110)
-def test_whether_an_unsubscribe_is_acknowledged(
-    probe: Callable[[str], _Probe], *, evidence: Evidence
-) -> None:
-    made = probe("crypto")
+@pytest.mark.timeout(100)
+def test_whether_an_unsubscribe_is_acknowledged(probe: OpenProbe, *, evidence: Evidence) -> None:
+    """Whether Massive acknowledges an unsubscribe, and how soon frames stop.
+
+    The library awaits no acknowledgement and removes a topic at once. Subscribes
+    `XT.BTC-USD`, waits for a trade, unsubscribes, and records every status and every row in
+    the next 15 s. Reading it: either way the library is right; the evidence records what a
+    removed topic still delivers, and for how long.
+    """
+    made = probe("crypto", _ROWS)
     made.send("subscribe", ["XT.BTC-USD"])
     before = made.wait(lambda r: bool(r.rows), _WAIT)
     sent = time.monotonic()
@@ -290,13 +347,18 @@ def test_whether_an_unsubscribe_is_acknowledged(
 
 
 @pytest.mark.integration_limits
-@pytest.mark.timeout(110)
+@pytest.mark.timeout(100)
 def test_a_frame_of_one_thousand_topics_is_acknowledged(
-    probe: Callable[[str], _Probe],
-    *,
-    live_rest: RestClient,
-    evidence: Evidence,
+    probe: OpenProbe, *, live_rest: RestClient, evidence: Evidence
 ) -> None:
+    """Whether Massive accepts one subscribe frame of 1,000 topics.
+
+    The library sends at most 1,000 topics per frame. Subscribes 1,000 crypto minute-bar
+    topics (`XA.<pair>`, a light channel) in one frame and records the acknowledgements and
+    any other status, stopping as soon as every topic is answered. Reading it: all 1,000
+    acknowledged confirms the frame size; a refusal or a closed connection means the per-frame
+    cap must be lower.
+    """
     pairs = live_rest.get(
         source(Transport.REST, "/v3/reference/tickers"),
         {},
@@ -309,9 +371,9 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
             if p.get("base_currency_symbol") and p.get("currency_symbol")
         }
     )[:1000]
-    made = probe("crypto")
+    made = probe("crypto", _STATUSES)
     made.send("subscribe", topics)
-    records = made.wait(lambda r: len(r.acked()) >= len(topics), _WAIT)
+    records = made.wait(lambda r: r.answered(topics), _WAIT)
     others = [
         (s.kind.value, s.message) for _, s in records.statuses if s.kind is not StatusKind.ACK
     ]
@@ -323,26 +385,33 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
 
 
 @pytest.mark.integration_limits
-@pytest.mark.timeout(110)
+@pytest.mark.timeout(100)
 def test_the_options_topic_cap_counts_topics_or_contracts(
-    probe: Callable[[str], _Probe],
-    *,
-    live_rest: RestClient,
-    evidence: Evidence,
+    probe: OpenProbe, *, live_rest: RestClient, evidence: Evidence
 ) -> None:
+    """Whether Massive's options cap of 1,000 counts topics or contracts.
+
+    The library counts topics, the stricter reading. Subscribes 501 far-dated SPY contracts
+    (expiring a year or more out, so their quote streams are quiet) on both `T` and `Q`, 1,002
+    topics, and records the acknowledgements and refusals, stopping as soon as every topic is
+    answered; rows are not kept. Reading it: a refusal past 1,000 topics confirms that topics
+    count; all 1,002 acknowledged means contracts count and the library's cap could be relaxed.
+    Needs an options plan with real-time WebSocket access.
+    """
+    far = datetime.now(UTC).date() + timedelta(days=365)
     contracts = live_rest.get(
         source(Transport.REST, "/v3/reference/options/contracts"),
         {},
-        {"underlying_ticker": "SPY", "limit": 1000},
+        {"underlying_ticker": "SPY", "expiration_date.gte": far, "limit": 1000},
     ).rows
     tickers = [str(row["ticker"]) for row in contracts][:501]
     topics = [f"T.{t}" for t in tickers] + [f"Q.{t}" for t in tickers]
-    made = probe("options")
+    made = probe("options", _STATUSES)
     made.send("subscribe", topics)
-    records = made.wait(lambda r: len(r.acked()) >= len(topics), 30.0)
+    records = made.wait(lambda r: r.answered(topics), 30.0)
     kinds = Counter(s.kind.value for _, s in records.statuses)
     others = [s.message for _, s in records.statuses if s.kind is not StatusKind.ACK]
-    evidence(f"subscribed {len(tickers)} contracts on T and Q ({len(topics)} topics)")
+    evidence(f"subscribed {len(tickers)} contracts from {far} on T and Q ({len(topics)} topics)")
     evidence(f"acknowledged {len(records.acked())} topics; status kinds {dict(kinds)}")
     evidence(f"other statuses: {others[:10]}")
     evidence(f"client states: {records.states}")
@@ -350,15 +419,28 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
 
 
 @pytest.mark.integration_limits
-@pytest.mark.timeout(110)
+@pytest.mark.timeout(100)
 def test_a_wildcard_and_an_explicit_topic_deliver_an_event_once_or_twice(
-    probe: Callable[[str], _Probe], *, evidence: Evidence
+    probe: OpenProbe, *, evidence: Evidence
 ) -> None:
-    made = probe("crypto")
+    """Whether a trade arrives twice under a wildcard and an explicit topic of one channel.
+
+    While a channel's wildcard is acknowledged, the library takes its explicit topics off the
+    wire. Subscribes `XT.*` and `XT.BTC-USD` together for 30 s and counts BTC-USD trades
+    delivered more than once (same pair, id, exchange, time, and price). Reading it: duplicates
+    confirm the library's handling is needed; none means it is harmless.
+    """
+    made = probe("crypto", _ROWS)
     made.send("subscribe", ["XT.*", "XT.BTC-USD"])
     records = made.wait(lambda _: False, 30.0)
     trades = [
-        (row.get("Pair"), row.get("Id"), row.get("ParticipantTimestamp"), row.get("Price"))
+        (
+            row.get("Pair"),
+            row.get("Id"),
+            row.get("Exchange"),
+            row.get("ParticipantTimestamp"),
+            row.get("Price"),
+        )
         for _, channel, row in records.rows
         if channel == "XT" and row.get("Pair") == "BTC-USD"
     ]

@@ -30,27 +30,11 @@ environment. [`AGENTS.md`](AGENTS.md) has the full command list and the contribu
 ### Live integration tests
 
 The tests in `tests/**/test_*_integration.py` call Massive itself. They carry the `integration`
-marker, which the default run deselects, and they skip without `MASSIVE_API_KEY`, so neither
-`./scripts/check.sh` nor CI ever reaches Massive. Run them, and only them, with a key:
-
-```bash
-MASSIVE_API_KEY=... uv run pytest -m integration 2>&1 | tee live-checks.log
-```
-
-The flat-file tests also need `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY`.
-A few tests need more and skip without it: `MASSIVE_BUSINESS_API_KEY` (a Business key),
-`MASSIVE_DELAYED_API_KEY` (a delayed key), `MASSIVE_LIVE_BASIC_SUBSCRIPTION` (a subscription on
-the free Basic tier, such as `options`). Each test records what Massive sent; the "live
-evidence" section at the end of the run lists it, test by test.
-
-Four live tests deliberately exceed Massive's subscription and connection limits (1,000
-topics, 501 options contracts, a wildcard, and a second connection with the same key). They
-also carry the `integration_limits` marker: `-m integration` leaves them out, and they run
-only on their own:
-
-```bash
-MASSIVE_API_KEY=... uv run pytest -m integration_limits 2>&1 | tee live-limits.log
-```
+marker, which the default run deselects, and they skip without `MASSIVE_API_KEY` and under CI,
+so neither `./scripts/check.sh` nor CI ever reaches Massive. Those that deliberately exceed
+Massive's limits also carry `integration_limits` and run only with `-m integration_limits`.
+[`docs/live-tests.md`](docs/live-tests.md) says how to run them, in which order, and with
+which keys; each test's docstring says what its evidence means.
 
 ## License
 

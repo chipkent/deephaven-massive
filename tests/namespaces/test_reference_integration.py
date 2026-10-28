@@ -3,7 +3,7 @@
 Each test records what Massive sent (`evidence`) and asserts only that the requests worked:
 the evidence, not a pass, settles the open question. The library's tables serve where they
 show the answer; raw rows from the wire REST client serve where the library renames or rejects
-the very keys or spellings in question.
+the very keys or spellings in question. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.integration
 
+# Fixture types, repeated in each live module: test modules may not import from conftest.
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
 
@@ -39,6 +40,8 @@ _STOCK_TICKER = re.compile(r"[A-Z]+(?:\.[A-Z]|p[A-Z]?|r|w)?")
 (rights), and `w` (warrants)."""
 
 _TYPES = ("WARRANT", "UNIT", "RIGHT", "PFD")
+_LIMIT = 10_000
+"""The most rows read of a listing; a result of exactly this many is cut short."""
 _PARTNER_PAGES = ("/benzinga/v1/ratings", "/etf-global/v1/constituents", "/tmx/v1/corporate-events")
 
 
@@ -58,6 +61,13 @@ def test_key_of_the_ticker_event_type(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
+    """Which key the ticker events carry their event type in: `type` or `event_type`.
+
+    The schema requires `event_type` while every sample uses `type`; the library reads `type`
+    into `Type`. Records the raw keys of `META`'s events and the library's `Type`. Reading it:
+    `type` with `Type` filled confirms the library; `event_type` means `Type` is null and the
+    library must read that key.
+    """
     rows = live_rest.get(source(Transport.REST, _EVENTS), {"id": _RENAMED}, {}).rows
     for row in rows:
         evidence(f"raw event keys {sorted(row)}: {row}")
@@ -70,13 +80,22 @@ def test_key_of_the_ticker_event_type(
 def test_inactive_tickers_on_several_rows(
     live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
 ) -> None:
+    """Whether a delisted ticker can appear on several rows of the inactive tickers listing.
+
+    `reference.tickers` polls keyed by `Symbol`. Records inactive tickers from `A` to `AC`
+    that occur on more than one row. Reading it: none confirms the key; any means a polled
+    table keeps one of them, and the key needs an owner decision.
+    """
     rows = table_rows(
         live_session.reference.tickers(
-            active=False, filters={"ticker_gte": "A", "ticker_lt": "AC"}, limit=10_000
+            active=False, filters={"ticker_gte": "A", "ticker_lt": "AC"}, limit=_LIMIT
         ).fetch()
     )
     repeated = _repeated((row["Symbol"],) for row in rows)
-    evidence(f"tickers(active=False) A..AC: {len(rows)} rows, {len(repeated)} repeated tickers")
+    cut = " (cut short at the limit)" if len(rows) == _LIMIT else ""
+    evidence(
+        f"tickers(active=False) A..AC: {len(rows)} rows{cut}, {len(repeated)} repeated tickers"
+    )
     for key, count in repeated[:20]:
         evidence(f"    {key[0]} on {count} rows")
     assert rows
@@ -85,6 +104,11 @@ def test_inactive_tickers_on_several_rows(
 def test_exchanges_are_keyed_by_asset_class_and_id(
     live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
 ) -> None:
+    """Whether `(AssetClass, Id)` identifies one exchange, the key `reference.exchanges` polls by.
+
+    Records every repeated key. Reading it: none confirms the key; any means it needs another
+    column.
+    """
     rows = table_rows(live_session.reference.exchanges().fetch())
     repeated = _repeated((row["AssetClass"], row["Id"]) for row in rows)
     evidence(f"exchanges: {len(rows)} rows; repeated (AssetClass, Id): {repeated}")
@@ -94,9 +118,15 @@ def test_exchanges_are_keyed_by_asset_class_and_id(
 def test_conditions_are_keyed_by_asset_class_type_and_id(
     live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
 ) -> None:
-    rows = table_rows(live_session.reference.conditions(limit=10_000).fetch())
+    """Whether `(AssetClass, Type, Id)` identifies one condition, the key it polls by.
+
+    Records every repeated key. Reading it: none confirms the key; any means it needs another
+    column.
+    """
+    rows = table_rows(live_session.reference.conditions(limit=_LIMIT).fetch())
     repeated = _repeated((row["AssetClass"], row["Type"], row["Id"]) for row in rows)
-    evidence(f"conditions: {len(rows)} rows; repeated (AssetClass, Type, Id): {repeated}")
+    cut = " (cut short at the limit)" if len(rows) == _LIMIT else ""
+    evidence(f"conditions: {len(rows)} rows{cut}; repeated (AssetClass, Type, Id): {repeated}")
     assert rows
 
 
@@ -104,6 +134,14 @@ def test_conditions_are_keyed_by_asset_class_type_and_id(
 def test_stock_ticker_spellings_outside_the_documented_forms(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
+    """Which stock ticker spellings fall outside an upper-case root and one documented suffix.
+
+    Reads one page of stock tickers of each type `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and
+    one page of three partner datasets, and records every ticker outside the root-and-suffix
+    forms (`.X`, `pX`, `r`, `w`). Reading it: none confirms the symbol grammar; each other
+    spelling must join the grammar or be left to the handling of unknown symbols. A refused
+    partner page (no entitlement) is recorded and skipped.
+    """
     seen = 0
     for ticker_type in _TYPES:
         rows = live_rest.get(

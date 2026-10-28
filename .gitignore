@@ -239,7 +239,7 @@ uv.lock
 vendor/massive-incoming/
 vendor/massive-previous/
 
-# The output of a live integration run (`uv run pytest -m integration | tee live-checks.log`),
-# which shows what Massive sent; the owner shares it, it is never committed.
+# The output and evidence of live integration runs (docs/live-tests.md): they hold raw licensed
+# rows, so they are never committed.
 live-checks.log
-live-limits.log
+live-evidence.log

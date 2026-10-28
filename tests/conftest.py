@@ -9,8 +9,9 @@ Test modules never import from this file; they request its fixtures by name. Fak
 `tests/_fakes/` are handed to tests through thin fixtures defined here.
 
 The live integration tests (`tests/**/test_*_integration.py`) get their own fixtures here too:
-the `integration` marker check, the key skip, live sessions and wire clients, raw flat-file
-and REST readers, and the `evidence` recorder whose lines close the terminal summary.
+the marker checks, the key skip, live sessions and wire clients, raw flat-file and REST
+readers, and the `evidence` recorder, which writes `live-evidence.log` as it goes and closes
+the terminal summary.
 """
 
 from __future__ import annotations
@@ -23,10 +24,12 @@ import os
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
+from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
@@ -434,10 +437,13 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
 
 # --- Live integration tests --------------------------------------------------------------------
 # Live tests live in `tests/**/test_*_integration.py` and carry the `integration` marker, which
-# `addopts` deselects by default; `uv run pytest -m integration` runs them. Each one skips
-# without `MASSIVE_API_KEY`, so CI, which has no key, never reaches Massive even when it selects
-# them. What each test observed is recorded with the `evidence` fixture and printed in a
-# "live evidence" section at the end of the run, for passed, failed, and skipped tests alike.
+# `addopts` deselects by default; `uv run pytest -m integration` runs them. Those that
+# deliberately exceed Massive's limits also carry `integration_limits` and run only when `-m`
+# names it. Each live test skips without `MASSIVE_API_KEY`, and always under CI. What a test
+# observes is recorded with the `evidence` fixture: appended at once to `live-evidence.log` in
+# the repository root, flushed line by line, so a run cut short keeps everything recorded
+# before, and printed again in a "live evidence" section at the end of the run.
+# `docs/live-tests.md` explains how to run them.
 
 _INTEGRATION = "integration"
 _LIMITS = "integration_limits"
@@ -446,8 +452,14 @@ _INTEGRATION_FILE_SUFFIX = "_integration.py"
 _EVIDENCE: Final = pytest.StashKey[list[tuple[str, str]]]()
 """The config stash key of the evidence lines recorded so far, as (test id, line) pairs."""
 
+_EVIDENCE_FILE = "live-evidence.log"
+"""The file, in the repository root, every evidence line is appended to as it is recorded."""
+
 _EVIDENCE_LOCK = threading.Lock()
-"""Guards the evidence list, so a line may be recorded from any thread."""
+"""Guards the evidence list and file, so a line may be recorded from any thread."""
+
+_BASIC_SUBSCRIPTION = "MASSIVE_LIVE_BASIC_SUBSCRIPTION"
+"""Names the subscription the key's account holds on Massive's free Basic tier."""
 
 _FLAT_FILE_BLOCK = 1 << 20
 """Bytes of decompressed CSV per block when a live test reads a flat file."""
@@ -457,12 +469,14 @@ _FLAT_FILE_BLOCK = 1 << 20
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Check the live markers, and keep the limit tests out of every run that does not name them.
 
-    Runs before the `-m` deselection, so the checks cover every collected test, also those a
-    default run deselects. A live test without the `integration` marker would run in CI, and a
-    marked test elsewhere would never run by default. A test marked `integration_limits`
-    deliberately exceeds Massive's subscription and connection limits, so it must also be a
-    live test, and it is deselected unless the `-m` expression names `integration_limits`:
-    `-m integration` runs every live test but those, `-m integration_limits` runs only them.
+    Runs first (`tryfirst`), before the `-m` deselection, so the checks cover every collected
+    test, also those a default run deselects; run later, a marked unit test would already be
+    deselected and escape the check. A live test without the `integration` marker would run in
+    CI, and a marked test elsewhere would never run by default. A test marked
+    `integration_limits` deliberately exceeds Massive's subscription and connection limits, so
+    it must also be a live test, and it is deselected unless the `-m` expression names
+    `integration_limits`: `-m integration` runs every live test but those, and
+    `-m integration_limits` runs only them.
 
     Args:
         config: The pytest configuration, for the `-m` expression and the deselection hook.
@@ -505,13 +519,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 @pytest.fixture(autouse=True)
 def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
-    """Skip a live test when `MASSIVE_API_KEY` is not set, before the test's own fixtures run.
+    """Skip a live test under CI, or when `MASSIVE_API_KEY` is not set.
+
+    It runs before the test's own fixtures, so a skipped live test touches nothing. `CI` is
+    checked too, so a key added to CI's secrets later still never reaches Massive from CI.
 
     Args:
         request: The requesting test, for its markers.
     """
-    if request.node.get_closest_marker(_INTEGRATION) is not None:
-        _required_env("MASSIVE_API_KEY")
+    if request.node.get_closest_marker(_INTEGRATION) is None:
+        return
+    if os.environ.get("CI", "").strip():
+        pytest.skip("live tests never run in CI")
+    _required_env("MASSIVE_API_KEY")
 
 
 def _required_env(name: str) -> str:
@@ -544,12 +564,34 @@ def live_env() -> Callable[[str], str]:
 
 
 @pytest.fixture
+def not_on_basic() -> Callable[[str], None]:
+    """Return a function that skips a test whose REST requests go to the run's Basic subscription.
+
+    A subscription on Massive's free Basic tier answers only 5 REST requests per minute, so a
+    test that sends more to it would record refusals instead of answers. The run names that
+    subscription in `MASSIVE_LIVE_BASIC_SUBSCRIPTION` (`stocks`, `options`, `indices`,
+    `currencies`, or `futures`); a test calls this with each subscription it reads.
+
+    Returns:
+        A function taking a subscription's name; it skips the test when the run names it.
+    """
+
+    def check(subscription: str) -> None:
+        if os.environ.get(_BASIC_SUBSCRIPTION, "").strip().lower() == subscription:
+            pytest.skip(f"{subscription} is on Basic ({_BASIC_SUBSCRIPTION}): 5 requests a minute")
+
+    return check
+
+
+@pytest.fixture
 def evidence(request: pytest.FixtureRequest) -> Callable[[str], None]:
     """Return a function that records one line of what a live test observed.
 
-    The lines are printed, grouped by test, in the "live evidence" section of the terminal
-    summary, whatever the test's outcome; a skipped test's lines show what was missing. Safe
-    to call from any thread.
+    Each line is appended at once to `live-evidence.log` in the repository root, under the
+    test's id, and flushed, so nothing recorded is lost if the run is cut short (a timeout
+    that ends the process). The lines are printed again, grouped by test, in the "live
+    evidence" section of the terminal summary, whatever the test's outcome. Safe to call from
+    any thread.
 
     Args:
         request: The requesting test, whose id heads its lines.
@@ -557,12 +599,20 @@ def evidence(request: pytest.FixtureRequest) -> Callable[[str], None]:
     Returns:
         A function taking one line of text.
     """
-    records = request.config.stash.setdefault(_EVIDENCE, [])
+    config = request.config
+    records = config.stash.setdefault(_EVIDENCE, [])
+    path = config.rootpath / _EVIDENCE_FILE
     test_id = request.node.nodeid
 
     def record(line: str) -> None:
         with _EVIDENCE_LOCK:
+            heading = not records or records[-1][0] != test_id
             records.append((test_id, line))
+            with path.open("a", encoding="utf-8") as file:
+                if heading:
+                    file.write(f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ} {test_id}\n")
+                file.write(f"    {line}\n")
+                file.flush()
 
     return record
 
@@ -581,7 +631,7 @@ def pytest_terminal_summary(
         records = list(stored)
     if not records:
         return
-    terminalreporter.write_sep("=", "live evidence")
+    terminalreporter.write_sep("=", f"live evidence (also in {_EVIDENCE_FILE})")
     current = None
     for test_id, line in records:
         if test_id != current:
@@ -604,16 +654,16 @@ def live_config() -> MassiveConfig:
 
 @pytest.fixture
 def live_s3_config(live_config: MassiveConfig) -> MassiveConfig:
-    """Return the live configuration, or skip the test when it has no S3 credentials.
+    """Return the live configuration, or skip the test when it lacks an S3 credential.
 
     Args:
         live_config: The live configuration.
 
     Returns:
-        `live_config`, whose `s3_access_key_id` and `s3_secret_access_key` are set.
+        `live_config`, whose `s3_access_key_id` and `s3_secret_access_key` are both set.
     """
-    if live_config.s3_access_key_id is None:
-        pytest.skip("MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY are not set")
+    if live_config.s3_access_key_id is None or live_config.s3_secret_access_key is None:
+        pytest.skip("MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY are not both set")
     return live_config
 
 
@@ -658,7 +708,7 @@ def live_flat_files(live_s3_config: MassiveConfig) -> Iterator[FlatFileClient]:
     """Yield the wire flat-file client on the live S3 credentials; closed at teardown.
 
     Args:
-        live_s3_config: The live configuration with S3 credentials.
+        live_s3_config: The live configuration with both S3 credentials.
 
     Yields:
         A `FlatFileClient` with one connection.
@@ -680,34 +730,21 @@ FlatFileRows = tuple[list[dict[str, str | None]], frozenset[str]]
 """The raw rows of a flat file, every value as its CSV text, and its undocumented headers."""
 
 
-def _read_flat_file(
-    client: FlatFileClient,
-    key: str,
-    prefix: str,
-    *,
-    max_rows: int | None,
-    tickers: list[str] | None,
-) -> FlatFileRows | None:
-    """Read the raw rows of one flat file: every documented header as its CSV text.
+def _raw_plan(prefix: str, tickers: list[str] | None) -> ReadPlan:
+    """Return a plan that reads every documented header of a prefix as its CSV text.
 
     Nothing is converted (no unit, no type) and futures rows are not checked against their
     session, so the rows show the wire form.
 
     Args:
-        client: The live flat-file client.
-        key: The object's key.
-        prefix: The generated prefix whose documented headers are read, such as
-            `"us_futures_{venue}/session_aggs_v1"`.
-        max_rows: The most rows to keep; reading stops after the block that reaches it. None
-            reads the whole file.
+        prefix: The generated prefix, such as `"us_futures_{venue}/session_aggs_v1"`.
         tickers: The `ticker` values to keep, as a sorted list, or None for every row.
 
     Returns:
-        The rows and the headers the file has beyond the documented ones, or None when the
-        file does not exist.
+        The plan.
     """
     headers = [field.wire_key for field in source(Transport.FLAT_FILES, prefix).fields]
-    plan = ReadPlan(
+    return ReadPlan(
         columns=tuple(ReadColumn(header, header, pa.string()) for header in headers),
         symbol_header="ticker",
         symbols=None if tickers is None else pa.array(tickers, pa.string()),
@@ -718,12 +755,36 @@ def _read_flat_file(
         block_size=_FLAT_FILE_BLOCK,
         required=frozenset(),
     )
+
+
+def _read_flat_file(
+    client: FlatFileClient,
+    key: str,
+    prefix: str,
+    *,
+    max_rows: int | None,
+    tickers: list[str] | None,
+) -> FlatFileRows | None:
+    """Read the raw rows of one flat file: every documented header as its CSV text.
+
+    Args:
+        client: The live flat-file client.
+        key: The object's key.
+        prefix: The generated prefix whose documented headers are read.
+        max_rows: The most rows to keep; reading stops after the block that reaches it. None
+            reads the whole file.
+        tickers: The `ticker` values to keep, as a sorted list, or None for every row.
+
+    Returns:
+        The rows and the headers the file has beyond the documented ones, or None when the
+        file does not exist. A refusal raises the wire error.
+    """
     file = client.open(key)
     if file is None:
         return None
     rows: list[dict[str, str | None]] = []
     extra: frozenset[str] = frozenset()
-    with file, contextlib.closing(file.batches(plan)) as batches:
+    with file, contextlib.closing(file.batches(_raw_plan(prefix, tickers))) as batches:
         for batch, drift in batches:
             extra = drift.extra
             rows.extend(batch.to_pylist())
@@ -752,7 +813,7 @@ def flat_file_head(
         `"global_forex/quotes_v1"`), the file's day, and the venue that fills a futures
         prefix (`"cme"`; None for every other prefix). It returns the first 1,000 rows, every
         value as the file's text, and the file's undocumented headers, or None when the file
-        does not exist.
+        does not exist; a refusal raises the wire error.
     """
 
     def read(prefix: str, day: date, venue: str | None) -> FlatFileRows | None:
@@ -787,6 +848,38 @@ def flat_file_tickers(
 
 
 @pytest.fixture
+def flat_file_sessions(
+    live_flat_files: FlatFileClient,
+) -> Callable[[str, date, str], Counter[str | None] | None]:
+    """Return a function that counts the `session_end_date` values of a whole futures file.
+
+    The whole file is read, block by block, and only the counts are kept, so a large minute
+    file costs no memory.
+
+    Args:
+        live_flat_files: The live flat-file client.
+
+    Returns:
+        A function `(prefix, day, venue)`: a futures prefix such as
+        `"us_futures_{venue}/minute_aggs_v1"`, the file's day, and the venue. It returns how
+        many rows hold each `session_end_date` text, or None when the file does not exist; a
+        refusal raises the wire error.
+    """
+
+    def count(prefix: str, day: date, venue: str) -> Counter[str | None] | None:
+        file = live_flat_files.open(object_key(prefix, day, venue))
+        if file is None:
+            return None
+        counts: Counter[str | None] = Counter()
+        with file, contextlib.closing(file.batches(_raw_plan(prefix, None))) as batches:
+            for batch, _drift in batches:
+                counts.update(batch.column("session_end_date").to_pylist())
+        return counts
+
+    return count
+
+
+@pytest.fixture
 def table_rows() -> Callable[[Table], list[dict[str, Any]]]:
     """Return a function that snapshots a table into row dictionaries, instants as epoch ns.
 
@@ -816,6 +909,9 @@ def stream_report(
 ) -> Callable[[MassiveSession], list[str]]:
     """Return a function that describes a session's connections and streams, one line each.
 
+    Call it before releasing a stream: a release is carried out on the session's reaper
+    thread, so a report taken after it may or may not still show the stream's topics.
+
     Returns:
         A function mapping a session to lines such as `connection stocks/TICK
         socket.massive.com CONNECTED acked=1 ...` and `stream 1 stocks.trades RUNNING ...`.
@@ -843,18 +939,18 @@ def stream_report(
 def wait_rows(
     table_rows: Callable[[Table], list[dict[str, Any]]],
 ) -> Callable[[MassiveSession, Table, float], list[dict[str, Any]]]:
-    """Return a function that waits for a live table's first rows.
+    """Return a function that waits for a live table's first rows, up to a deadline.
 
     Returns:
-        A function `(session, table, timeout)`: it returns the table's rows once it holds any,
-        once any of the session's streams has `FAILED`, or once `timeout` seconds have passed,
-        whichever comes first, so the caller records what happened (a closed market sends
-        nothing; a refusal fails the stream).
+        A function `(session, table, deadline)`, the deadline a `time.monotonic()` value: it
+        returns the table's rows once it holds any, once any of the session's streams has
+        `FAILED`, or once the deadline has passed, whichever comes first, so the caller
+        records what happened (a closed market sends nothing; a refusal fails the stream).
+        Several waits of one test share one deadline, which keeps the test within its time.
     """
 
-    def wait(session: MassiveSession, table: Table, timeout: float) -> list[dict[str, Any]]:
+    def wait(session: MassiveSession, table: Table, deadline: float) -> list[dict[str, Any]]:
         pause = threading.Event()  # never set; only paces the polling
-        deadline = time.monotonic() + timeout
         while True:
             rows = table_rows(table)
             if rows or time.monotonic() >= deadline:
@@ -910,11 +1006,8 @@ def rest_rows(
         path: str, path_params: Mapping[str, object], query_params: Mapping[str, object]
     ) -> list[dict[str, Any]]:
         rest_path = source(Transport.REST, path)
-        return [
-            row
-            for page in live_rest.pages(rest_path, path_params, query_params)
-            for row in page.rows
-        ]
+        pages = live_rest.pages(rest_path, path_params, query_params)
+        return [row for page in pages for row in page.rows]
 
     return read
 
@@ -922,11 +1015,41 @@ def rest_rows(
 _MS = 1_000_000
 """Nanoseconds per millisecond."""
 
-_WEEK_MS = 7 * 86_400_000
+_DAY_MS = 86_400_000
+"""Milliseconds per day."""
+
+_WEEK_MS = 7 * _DAY_MS
 """Milliseconds per week."""
 
-_WEEK_RANGE = (date(2025, 2, 24), date(2025, 3, 23))
+_WEEK_RANGE = (date(2026, 2, 23), date(2026, 3, 22))
 """The four calendar weeks, Monday to Sunday, whose week bars the week-start checks read."""
+
+_MATCH = 1e-9
+"""The relative volume error within which a candidate week is the bar's bucket."""
+
+_NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _week_candidates(stamp_ms: int) -> list[tuple[str, int]]:
+    """Return the candidate starts of the seven days a week bar may cover.
+
+    Args:
+        stamp_ms: The bar's stamp, in epoch milliseconds.
+
+    Returns:
+        `(label, start_ms)` pairs: 00:00 UTC of each day from three days before the stamp's
+        UTC day to three days after, and 17:00 New York time of each of those days (the
+        forex trading day's start).
+    """
+    day = datetime.fromtimestamp(stamp_ms / 1000, UTC).date()
+    found = []
+    for offset in range(-3, 4):
+        start = day + timedelta(days=offset)
+        utc = datetime.combine(start, dt_time(), UTC)
+        new_york = datetime.combine(start, dt_time(17), _NEW_YORK)
+        found.append((f"{start:%a %m-%d} 00:00 UTC", int(utc.timestamp()) * 1000))
+        found.append((f"{start:%a %m-%d} 17:00 New York", int(new_york.timestamp()) * 1000))
+    return found
 
 
 @pytest.fixture
@@ -936,11 +1059,12 @@ def week_bar_report(
     """Return a function that shows where Massive starts a week bar, from raw REST bars.
 
     It reads the week bars and the hour bars of one ticker over four calendar weeks
-    (2025-02-24 to 2025-03-23) from the aggregates range endpoint, unfiltered. For each week
-    bar it reports its stamp, its volume, the first and last hour bar inside the seven days
-    from its stamp, and the hour-bar volume of three candidate weeks: from Monday 00:00 UTC,
-    from the Sunday before at 00:00 UTC, and from the stamp itself. The candidate whose volume
-    equals the week bar's is the bucket Massive uses.
+    (2026-02-23 to 2026-03-22) from the aggregates range endpoint, unfiltered. For each week
+    bar it reports its stamp, its volume, the first and last hour bar of the seven days from
+    its stamp, and the candidate seven-day windows whose hour-bar volume comes closest to the
+    bar's: windows starting at 00:00 UTC, and at 17:00 New York time, on each day from three
+    days before the stamp to three after. A candidate within a relative error of 1e-9 is
+    marked `MATCH`: that is the bucket Massive uses, wherever the bar is stamped.
 
     Args:
         rest_rows: Reads raw REST rows.
@@ -958,7 +1082,7 @@ def week_bar_report(
 
         def bars(span: str) -> list[dict[str, Any]]:
             params = {ticker_param: ticker, "multiplier": 1, "timespan": span}
-            params |= {"from": first, "to": last}
+            params |= {"from": first - timedelta(days=7), "to": last + timedelta(days=7)}
             return rest_rows(path, params, {"sort": "asc", "limit": 50_000})
 
         weeks, hours = bars("week"), bars("hour")
@@ -969,16 +1093,24 @@ def week_bar_report(
         lines = [f"{ticker}: {len(weeks)} week bars, {len(hours)} hour bars"]
         for week in weeks:
             stamp = int(week["t"])
+            target = float(week["v"])
             inside = [h for h in hours if stamp <= h["t"] < stamp + _WEEK_MS]
-            day = datetime.fromtimestamp(stamp / 1000, UTC).date()
-            monday = datetime.combine(day - timedelta(days=day.weekday()), dt_time(), UTC)
-            monday_ms = int(monday.timestamp()) * 1000
+            scored = sorted(
+                (abs(volume(start) - target) / max(abs(target), 1e-12), label)
+                for label, start in _week_candidates(stamp)
+            )
+            best = ", ".join(
+                f"{label} err={error:.2e}{' MATCH' if error <= _MATCH else ''}"
+                for error, label in scored[:3]
+            )
+            span = (
+                f"{_instant_text(inside[0]['t'] * _MS)} .. {_instant_text(inside[-1]['t'] * _MS)}"
+                if inside
+                else "none"
+            )
             lines.append(
-                f"week t={_instant_text(stamp * _MS)} v={week['v']} "
-                f"first_hour={_instant_text(inside[0]['t'] * _MS) if inside else None} "
-                f"last_hour={_instant_text(inside[-1]['t'] * _MS) if inside else None} "
-                f"hour_volume_from_monday_utc={volume(monday_ms)} "
-                f"from_sunday_utc={volume(monday_ms - 86_400_000)} from_stamp={volume(stamp)}"
+                f"week t={_instant_text(stamp * _MS)} v={target} hours from the stamp: {span}; "
+                f"closest windows: {best}"
             )
         return lines
 

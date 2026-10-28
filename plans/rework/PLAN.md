@@ -2487,11 +2487,14 @@ column).
 a row concerns: `tests/namespaces/test_{crypto,forex,stocks,indices,options,futures,reference}_integration.py`,
 `tests/datasets/test_timestamps_integration.py`,
 `tests/ingest/test_{hosts,ws,flatfiles}_integration.py`, `tests/massive/ws/test_client_integration.py`
-(raw frames and statuses), and `tests/massive/rest/test_client_integration.py` (the rate limit).
-Create `plans/rework/LIVE-CHECKS.md`, the owner's runbook: how to run, and what each outcome
-changes. Modify `pyproject.toml` (the `integration` marker, deselected in `addopts`),
-`tests/conftest.py` (the marker check, the key skip, live fixtures, the evidence summary),
-`README.md` and `AGENTS.md` (how to run), `.gitignore` (`live-checks.log`). CI needs no change:
+(raw frames and statuses), `tests/massive/rest/test_client_integration.py` (the rate limit), and
+`tests/massive/flatfiles/test_client_integration.py` (publication times, missing keys). Create
+`docs/live-tests.md`, the runbook; each test's docstring says what its evidence means, and a
+comment on issue #26 holds the one-time outcome tables. Modify `pyproject.toml` (the
+`integration` and `integration_limits` markers, `integration` deselected in `addopts`),
+`tests/conftest.py` (the marker checks, the key and CI skip, live fixtures, the evidence log),
+`tests/test_layout.py` (the `addopts` exclusion and the marker check's order are pinned),
+`README.md` and `AGENTS.md` (how to run), `.gitignore` (the run logs). CI needs no change:
 `addopts` deselects the live tests. `tests/data/datasets/symbols/crypto_tickers.csv` is
 regenerated from the live reference endpoint after the owner's run, not here.
 
