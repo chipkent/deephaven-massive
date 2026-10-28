@@ -750,6 +750,20 @@ def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream(
     assert sent == {"T.AAPL"}
 
 
+def test_a_refused_symbol_table_row_fails_its_stream(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # The watch calls this on an update-graph thread; called here from a Python thread, which
+    # line coverage before 3.14 can see.
+    every = harness.query(TRADES, dm.ALL).append_only()
+    harness.subscribed("T.*")
+    (stream_id,) = list(harness.connections._streams)
+    harness.connections._symbol_refused(stream_id, "a symbol table holds 'msft'")
+    wait_for(lambda: failed_after_flush(harness, every))
+    (row,) = streams_of(harness, dh_to_pylist)
+    assert (row["State"], row["Error"]) == ("FAILED", "a symbol table holds 'msft'")
+
+
 def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams(
     harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> None:

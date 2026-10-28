@@ -390,6 +390,8 @@ def canonicalize_symbols(
                 f"{len(refused)} value(s) of {column} are not {resolved.value} symbols: "
                 f"{shown}. Pass on_error=dm.OnError.NULL to null them instead"
             )
+        for value in sorted(refused):  # logged here, in order; the formula repeats none
+            refuse(value, refused[value])
     massive_canonical_symbol = _row_converter(convert, refuse, mode)
     # Deephaven resolves the formula's function from this call's local variables, by the name
     # the helper gives it.

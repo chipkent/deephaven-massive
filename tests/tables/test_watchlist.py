@@ -16,6 +16,7 @@ from deephaven_massive._enums import AssetClass, OnError, SymbolConvention
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.watchlist import (
     SymbolWatch,
+    _row_converter,
     _SymbolCounter,
     invalid_row_message,
     read_symbols,
@@ -305,3 +306,25 @@ def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: object) -> None
         dm.canonicalize_symbols(table, AssetClass.FOREX, column="Size")
     with pytest.raises(ValueError, match=r"^column 'Pair' must be a String column of the table$"):
         dm.canonicalize_symbols(table, AssetClass.FOREX, column="Pair")
+
+
+def test_the_row_converter_raises_or_nulls() -> None:
+    # Called from a Python thread: Deephaven runs a formula on its own threads, which line
+    # coverage before 3.14 cannot see.
+    refused: list[tuple[str, str]] = []
+
+    def convert(text: str) -> str | None:
+        return dm.canonical_symbol(text, AssetClass.FOREX)
+
+    def refuse(value: str, reason: str) -> None:
+        refused.append((value, reason))
+
+    strict = _row_converter(convert, refuse, OnError.RAISE)
+    assert strict(None) is None
+    assert strict("EUR/USD") == "C:EURUSD"
+    with pytest.raises(ValueError, match="cannot read 'nope'"):
+        strict("nope")
+    lenient = _row_converter(convert, refuse, OnError.NULL)
+    assert lenient("nope") is None
+    assert lenient("GBP-USD") == "C:GBPUSD"
+    assert [value for value, _ in refused] == ["nope"]
