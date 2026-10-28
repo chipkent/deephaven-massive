@@ -16,8 +16,9 @@ can. This module holds the rest, each entry with its reason, and nothing else:
   contradicts, each with the samples;
 - `DESCRIPTION_FIXES`: the corrected description of each field whose vendor description is
   clearly wrong for its source (another asset class's or event's text copied onto it, or a
-  statement Massive's own documentation of the field contradicts), for every use of the
-  source or per asset class, each quoting the vendor's text and giving the reason;
+  statement Massive's own documentation of the field contradicts) or missing where a sibling
+  source describes the same field, for every use of the source or per asset class, each
+  quoting the vendor's text (empty for a missing one) and giving the reason;
 - `RESULT_KEYS`: the paths whose rows do not sit under `results`;
 - `PARAM_UNITS`: the unit of every timestamp-like string parameter, and of any other string
   parameter that takes an epoch (or "sent as date or date-time text");
@@ -166,7 +167,10 @@ class DescriptionFix:
     trade's timestamp described as when "the quote" was generated, a futures trade's value
     computed without the contract multiplier. The entry replaces that text for one
     `(source, wire key)` only; the field keeps its name and type, and every other source keeps
-    its own description. A description that is merely terse or imprecise is kept.
+    its own description. A description that is merely terse or imprecise is kept. A field the
+    vendor leaves undescribed, where a sibling source describes the same field, gets an entry
+    that quotes the empty text (`vendor=""`) and takes the sibling's, so the entry goes stale
+    once the vendor writes one.
 
     An entry takes one of two forms:
 
@@ -1059,9 +1063,18 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
             _FUTURES_PRICE,
         ),
         ("/futures/v1/snapshot", "last_trade.price"): _FUTURES_PRICE,
+        ("/futures/v1/snapshot", "details.product_code"): DescriptionFix(
+            vendor="",
+            text="The identifier for the contract's product.",
+            reason="Massive gives the snapshot's product code no description, which leaves the "
+            "`futures.snapshots` column blank. The text is Massive's own for the same field of "
+            "the contracts endpoint (`/futures/v1/contracts` `product_code`); the snapshot's "
+            "`details` describe the same contract.",
+        ),
     }
 )
-"""`(source, wire key)` to the corrected description of a field whose vendor text is wrong."""
+"""`(source, wire key)` to the corrected description of a field whose vendor text is wrong,
+or missing where a sibling source describes the same field."""
 
 
 def _result_keys() -> dict[str, ResultKey]:
