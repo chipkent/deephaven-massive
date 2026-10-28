@@ -98,7 +98,8 @@ line-length = 100
 # top-level `massive`.
 src = ["src", "."]
 # tests/ has no __init__.py; its modules are imported from the repository root as `tests.…`.
-namespace-packages = ["tests"]
+# scripts/ has none either: its Python files are standalone scripts, run by path.
+namespace-packages = ["tests", "scripts"]
 
 [tool.ruff.lint]
 # Besides ALL: the preview rules selected by name. DOC201, DOC501, and DOC502 check that
