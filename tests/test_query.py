@@ -8,7 +8,7 @@ from typing import Any, Protocol, cast
 
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, empty_table, input_table, new_table, time_table
+from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import TablePublisher
@@ -19,7 +19,7 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive import _errors
 from deephaven_massive._datasets import history_source
-from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import FuturesSessions, TimeRange
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
@@ -103,13 +103,15 @@ class FakeStreams(Protocol):
 
 
 class Recorder:
-    # Stands in for the REST and flat-file transports and records every call.
-    def __init__(self) -> None:
+    # Stands in for the REST and flat-file transports and records every call. Each call returns
+    # an empty table in the dataset's schema, as a transport does when no row matches.
+    def __init__(self, catalog: Catalog) -> None:
         self.calls: list[tuple[str, DatasetSpec, Request, dict[str, Any]]] = []
+        self._catalog = catalog
 
     def _record(self, verb: str, spec: DatasetSpec, request: Request, **extra: object) -> Table:
         self.calls.append((verb, spec, request, dict(extra)))
-        return empty_table(0)
+        return dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
 
     def fetch(self, spec: DatasetSpec, request: Request) -> Table:
         return self._record("fetch", spec, request)
@@ -132,14 +134,14 @@ class Recorder:
 
 @pytest.fixture
 def rest(massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> Recorder:
-    recorder = Recorder()
+    recorder = Recorder(massive_session._core.catalog)
     monkeypatch.setattr(massive_session._core, "rest_transport", lambda: recorder)
     return recorder
 
 
 @pytest.fixture
 def flat(massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> Recorder:
-    recorder = Recorder()
+    recorder = Recorder(massive_session._core.catalog)
     monkeypatch.setattr(massive_session._core, "flat_file_transport", lambda: recorder)
     return recorder
 
@@ -365,7 +367,7 @@ def test_history_dispatches_by_the_source_choice(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    rest, flat = Recorder(), Recorder()
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
     monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
@@ -612,6 +614,69 @@ def test_the_guard_runs_before_argument_checks(massive_session: dm.MassiveSessio
         q.ring(0)
     with pytest.raises(dm.MassiveError, match="is closed"):
         q.last_by(by="Nope")
+
+
+# --- Column descriptions on every result -----------------------------------------------------
+
+
+def assert_described(session: dm.MassiveSession, spec: DatasetSpec, table: Table) -> None:
+    schema = session._core.catalog.dataset_schema(spec)
+    found = table.attributes()["ColumnDescriptions"]
+    described = {str(e.getKey()): str(e.getValue()) for e in found.entrySet().toArray()}
+    assert described == {c.name: c.description for c in schema.columns if c.description}
+    assert described
+    assert table.attributes()["TableDescription"] == f"{spec.name}: {spec.summary}"
+
+
+def test_every_stream_shape_is_described(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    q, reactive = trades(massive_session), trades(massive_session, watchlist)
+    results = [
+        q.blink(),
+        q.append_only(),
+        q.ring(5),
+        q.last_by(),
+        reactive.last_by(),  # where_in after the aggregation
+        reactive.last_by(by="Exchange"),  # where_in before it
+    ]
+    for result in results:
+        assert_described(massive_session, TRADES_SPEC, result)
+    assert results[0].is_blink
+    # The stream's own blink table is never described: every result is a copy.
+    streams = massive_session._core._streams.values()
+    blinks = [state.handle.blink for state in streams if state.handle is not None]
+    assert blinks
+    assert all("TableDescription" not in blink.attributes() for blink in blinks)
+    for result in results:
+        massive_session.release(result)
+
+
+def test_every_static_verb_is_described(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    stream_latest = trades(s3_session)
+    previous = make(s3_session, BARS_SPEC, symbols=["EUR/USD"], timespan=Timespan.DAY)
+    assert isinstance(previous, HistoryLatestQuery)
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    cases = [
+        (NEWS_SPEC, news(s3_session).fetch()),
+        (TRADES_SPEC, stream_latest.fetch()),
+        (BARS_SPEC, previous.fetch()),
+        (TRADES_SPEC, stream_latest.history("2025-03-03", "2025-03-04")),  # REST
+        (VALUES_SPEC, values.history("2025-03-03", "2025-03-04")),  # flat files
+    ]
+    for spec, table in cases:
+        assert_described(s3_session, spec, table)
+        assert not table.is_refreshing
+    assert [c[0] for c in rest.calls] == ["fetch", "fetch", "fetch", "history"]
+    assert [c[0] for c in flat.calls] == ["history"]
 
 
 # --- columns() -------------------------------------------------------------------------------

@@ -42,7 +42,6 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 from deephaven.stream import blink_to_append_only
-from deephaven.table import Table
 from deephaven.table_factory import ring_table
 
 from deephaven_massive._config import require_positive_int, require_positive_number
@@ -58,7 +57,7 @@ from deephaven_massive._enums import (
     PollMode,
     _require_enum,
 )
-from deephaven_massive._tables.columns import column_table
+from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.core import ON_UPDATE_GRAPH, on_update_graph
 from deephaven_massive._tables.liveness import entered
 from deephaven_massive._tables.watchlist import canonical_view
@@ -66,6 +65,8 @@ from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
@@ -225,6 +226,23 @@ class QueryBase:
         suffix = f" {described}" if described else ""
         return f"<{type(self).__name__} {self._spec.name}{suffix}>"
 
+    def _described(self, table: Table) -> Table:
+        """Describe the static table a transport returned, as the verb's result (`describe`).
+
+        Static results need no liveness scope: they never refresh. The copy is made on the
+        caller thread, inside the session's execution context.
+
+        Args:
+            table: The static table of `fetch()` or `history()`.
+
+        Returns:
+            Its copy that carries the dataset's column and table descriptions.
+        """
+        spec = self._spec
+        schema = self._core.catalog.dataset_schema(spec)
+        with entered(self._core.exec_ctx):
+            return describe(table, spec, schema)
+
     def _static_request(self) -> Request:
         """Return the request with a reactive symbol table read once, for a static verb.
 
@@ -271,7 +289,9 @@ class Query(QueryBase):
             A static table.
         """
         self._core.require_verb_thread()
-        return self._core.rest_transport().fetch(self._spec, self._static_request())
+        return self._described(
+            self._core.rest_transport().fetch(self._spec, self._static_request())
+        )
 
     def poll(self, interval: float | timedelta, *, mode: PollMode | None = None) -> Table:
         """Return a live table that re-runs `fetch()` every `interval`.
@@ -346,25 +366,34 @@ class StreamQuery(QueryBase):
         """
         return self._spec.channels[self._request.timespan]
 
-    def _stream(self, build: Callable[[Table], Table], *, wrap: bool = False) -> Table:
+    def _stream(self, shape: Callable[[Table], Table]) -> Table:
         """Shape a live result from this query's stream, creating the stream if needed.
 
+        The result is the shape, described last (`describe`): an append-only or ring table
+        copies no attributes, so describing the blink table first would lose them. The schema
+        is read before the stream is acquired, so the result is built under no library lock.
+
         Args:
-            build: Turns the stream's blink table into the result.
-            wrap: True when `build` returns a new wrapper of the blink table itself.
+            shape: Turns the stream's blink table into the result's shape; the identity for
+                `blink()`, whose described copy is then a new table of its own.
 
         Returns:
             The tracked live result.
         """
+        spec = self._spec
+        schema = self._core.catalog.dataset_schema(spec)
         return self._core.stream_result(
-            self._spec, self._request, channel=self._channel, build=build, wrap=wrap
+            spec,
+            self._request,
+            channel=self._channel,
+            build=lambda blink: describe(shape(blink), spec, schema),
         )
 
     def blink(self) -> Table:
         """Return the stream as a blink table: each update cycle holds only that cycle's rows.
 
-        Each call returns a new wrapper with its own liveness scope, so two `blink()` results
-        are released independently.
+        Each call returns a new table, a described copy of the stream's blink table, with its
+        own liveness scope, so two `blink()` results are released independently.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -373,7 +402,7 @@ class StreamQuery(QueryBase):
             A live blink table in the dataset's schema.
         """
         self._core.require_verb_thread()
-        return self._stream(lambda blink: Table(j_table=blink.j_table), wrap=True)
+        return self._stream(lambda blink: blink)
 
     def append_only(self) -> Table:
         """Return every row received since the call, in arrival order.
@@ -558,7 +587,7 @@ class HistoryQuery(QueryBase):
         request = replace(self._request, start=first, end=last, symbols=symbols)
         if chosen is HistorySource.REST:
             self._check_rest_history()
-            return self._core.rest_transport().history(self._spec, request, window)
+            return self._described(self._core.rest_transport().history(self._spec, request, window))
         dates = partition_dates(self._spec, window)
         choice = choose_source(
             self._spec, request, dates, requested=chosen, config=self._core.config
@@ -571,8 +600,10 @@ class HistoryQuery(QueryBase):
                 choice.reason,
             )
         if choice.source is HistorySource.REST:
-            return self._core.rest_transport().history(self._spec, request, window)
-        return self._core.flat_file_transport().history(self._spec, request, window, dates=dates)
+            return self._described(self._core.rest_transport().history(self._spec, request, window))
+        return self._described(
+            self._core.flat_file_transport().history(self._spec, request, window, dates=dates)
+        )
 
     def _check_rest_history(self) -> None:
         """Reject `history(source=REST)` where REST cannot serve the request.
@@ -625,7 +656,9 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
         """
         self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
-        return self._core.rest_transport().fetch(self._spec, self._static_request())
+        return self._described(
+            self._core.rest_transport().fetch(self._spec, self._static_request())
+        )
 
 
 class HistoryLatestQuery(HistoryQuery):
@@ -653,4 +686,6 @@ class HistoryLatestQuery(HistoryQuery):
         """
         self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
-        return self._core.rest_transport().fetch(self._spec, self._static_request())
+        return self._described(
+            self._core.rest_transport().fetch(self._spec, self._static_request())
+        )

@@ -1,11 +1,10 @@
 """Tests for the Deephaven side of a dataset schema: types, descriptions, and `columns()`.
 
 The description tests build every result shape directly in the embedded JVM (a static table,
-a publisher's blink table, its append-only, ring, and `last_by` tables, and a keyed input
-table) and check that `describe` gives each one the schema's descriptions without changing
-what it is: the copy ticks with its parent, keeps the blink and input-table attributes, and
-keeps its parent, and so the stream's `on_shutdown_callback`, alive exactly as long as it
-lives.
+a publisher's blink table, and its append-only, ring, and `last_by` tables) and check that
+`describe` gives each one the schema's descriptions without changing what it is: the copy
+ticks with its parent, keeps the blink attribute, and keeps its parent, and so the stream's
+`on_shutdown_callback`, alive exactly as long as it lives.
 """
 
 import threading

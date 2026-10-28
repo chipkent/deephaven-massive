@@ -1981,10 +1981,11 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `SessionCore.fail_stream(stream_id, ...)` as soon as the publisher exists; the callback calls
   `SessionCore.stream_shut_down(stream_id)` before it releases the topics; the returned
   `StreamHandle` carries `stream_id`. `blink()`
-  returns a new wrapper of the blink table's Java object, managed in its own result scope
+  returns a described copy of the blink table, a new table managed in its own result scope
   ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)); `append_only()` is
   `blink_to_append_only(blink)`; `ring(n)` is `ring_table(blink, n)`; `last_by()` is as in
-  [section 7](#7-query-classes-and-verbs).
+  [section 7](#7-query-classes-and-verbs); each shape is described last
+  ([section 7.4](#74-column-descriptions)).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
   row buffer once. The rows arrive keyed by long-form column; the flush renames them
   (`rename` in `_datasets/schema.py`), converts them (`_datasets/timestamps.py`), and builds one Arrow batch in the dataset

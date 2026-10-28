@@ -113,8 +113,8 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
     append-only or ring table built from a described blink table would lose the attributes,
     because neither copies them. The copy is a new table that depends on `table`, so `table`
     (for a stream, the blink table that owns the `on_shutdown_callback`) lives as long as the
-    copy does, and the copy ticks with it. Every other attribute of `table` is kept, including
-    the blink and input-table attributes.
+    copy does, and the copy ticks with it. Every other attribute of `table` is kept, the blink
+    attribute included, so the copy of a blink table is a blink table.
 
     The copy is created in the liveness scope at the top of the calling thread's stack, so
     call it on the caller thread inside the result's scope and the session's execution
@@ -141,9 +141,10 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
         A new table with the same rows, columns, and other attributes as `table`, plus
         `ColumnDescriptions` and `TableDescription`.
 
-    Deephaven raises a `RuntimeError` (through `jpy`) if a described column is missing from
-    `table` (its `NoSuchColumnException`), or if `table` has already failed, as a failed
-    stream's blink table has: copying a table listens to it.
+    The Java methods are called directly, so a Java exception reaches the caller as the
+    `RuntimeError` jpy raises, not as Deephaven's `DHError`: if a described column is missing
+    from `table` (its `NoSuchColumnException`, "Unknown column names [...]"), or if `table` has
+    already failed, as a failed stream's blink table has (copying a table listens to it).
     """
     descriptions = {c.name: c.description for c in schema.columns if c.description}
     described = table.j_table.withColumnDescriptions(j_hashmap(descriptions)).withDescription(
