@@ -184,9 +184,11 @@ nothing is kept or shimmed for compatibility.
     (`Date`), is ISO `yyyy-MM-dd` text, a `String`, stored as a column: never a `LocalDate`
     and never a view computed on read. Deephaven stores a repeated string once, with an
     integer per row, so a stored date is cheap, and one type lets every date join and compare
-    with every other. Instants stay `Instant`s. The names `Date`, `Timestamp`, and every
-    `Timestamp<Qualifier>` belong to the library's time columns (`_datasets/row_times.py`):
-    no vendor field and no refresh `NAMES` entry may take one.
+    with every other. Instants stay `Instant`s. The library's time columns
+    (`_datasets/row_times.py`) own their names: no vendor field keeps `Timestamp` or any
+    `Timestamp<Qualifier>` outside a declared key, and on a tick, bar, or daily-summary
+    dataset none keeps `Date` either (a vendor `date` stays `Date` only on a dataset without
+    the library's `Date`, such as the economy data); no refresh `NAMES` entry may coin one.
 
 ## Layers
 

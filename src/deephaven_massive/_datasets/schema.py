@@ -936,7 +936,11 @@ def _description(
     """
     note = spec.column_notes.get(name, "")
     text = _chosen(spec, name, own=own, suppliers=suppliers, library=library)
-    return f"{text} {note}" if text and note else text or note
+    if not text or not note:
+        return text or note
+    # The vendor's text may lack its closing period; the note is a sentence of its own.
+    stop = "" if text.endswith((".", "!", "?", *_QUOTED_ENDS)) else "."
+    return f"{text}{stop} {note}"
 
 
 def _chosen(

@@ -607,7 +607,9 @@ class HistoryQuery(QueryBase):
         day in the class day zone (New York for stocks, options, and indices; UTC for forex
         and crypto), whatever the source, and ends at 00:00 after its last day (an hour later
         for indices, whose day is not verified); a futures bar keeps Massive's window start and
-        ends at 17:00 Chicago time on its session date.
+        ends at 17:00 Chicago time on its session date, or for a bar of several sessions, a week,
+        or longer at the latest end its label allows, since Massive does not document whether
+        it labels such a bar with its first or its last session.
 
         One call never mixes split bases: with `adjusted=True`, the default of the stock and
         option bars, it reads REST only and checks every page's `adjusted` echo; flat files

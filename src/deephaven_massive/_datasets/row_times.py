@@ -16,7 +16,8 @@ Every market-data row answers three questions, whichever transport served it:
   intraday bar across midnight) has a null `Date`.
 - **When the library received it.** `TimestampInsert`, the last column of every dataset, is the
   local clock (`time.time_ns()`) when the REST page, the flat-file block, or the WebSocket
-  frame that carried the row arrived. Every row of one page, block, or frame shares it. It is
+  frame that carried the row arrived (a frame's rows of one channel are stamped together, as
+  the decoded frame is handed over). Every row of one page or block shares it. It is
   not monotonic and is not Massive's own receive time; on `history()` rows it is the download
   time, and on a `poll()` table the latest poll's.
 
@@ -75,7 +76,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final, Protocol, TypeVar
+from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -130,8 +131,11 @@ INSERT: Final = "TimestampInsert"
 """When the library received the row: the last column of every dataset."""
 
 LIBRARY_COLUMNS: Final = frozenset({DATE, TIMESTAMP, START, END, INSERT})
-"""The time columns the library owns. Only a dataset's declared keys and this module fill them:
-no vendor field keeps one of these names, and no `NAMES` entry of the refresh may coin one."""
+"""The time columns the library owns. On a dataset that has them, only its declared keys and
+this module fill them: no vendor field keeps `Timestamp` or a `Timestamp<Qualifier>` outside a
+declared key, nor `Date` on a tick, bar, or daily-summary dataset (a vendor `date` keeps the
+name only on a dataset without the library's `Date`), and no `NAMES` entry of the refresh may
+coin one."""
 
 _DAY_NS: Final = 86_400 * 10**9
 _HOUR_NS: Final = 3_600 * 10**9
@@ -460,6 +464,12 @@ class TimeRule:
         timespan: The bar unit of a `BAR` request; `DAY` for a daily summary; None for every
             other dataset.
         multiplier: How many units one bar spans; 1 for everything but bars.
+        stamped: True when the stamps of bars of a day or longer were checked against the
+            times and days Massive is known to use, so each lies on its period's first day
+            (`history_source.stamp_rule`). False for the indicators, whose stamps Massive does
+            not document: a week, month, quarter, or year value then ends at the latest end a
+            window holding its stamp's day can have, `multiplier` periods after that day, so
+            a join on its end never sees it early.
     """
 
     dataset: str
@@ -467,6 +477,17 @@ class TimeRule:
     asset_class: AssetClass | None
     timespan: Timespan | None = None
     multiplier: int = 1
+    stamped: bool = True
+
+    def __post_init__(self) -> None:
+        """Reject a bar rule without a timespan.
+
+        Raises:
+            ValueError: If `row_times` is `BAR` and `timespan` is None: a bar's window needs
+                its unit.
+        """
+        if self.row_times is RowTimes.BAR and self.timespan is None:
+            raise ValueError(f"{self.dataset}: a bar rule needs its timespan")
 
     @property
     def _futures(self) -> bool:
@@ -591,8 +612,8 @@ class TimeRule:
         Returns:
             The batch with `Date`, `TimestampStart`, and `TimestampEnd`.
         """
-        timespan = self.timespan
-        if timespan is None or intraday(timespan):
+        timespan = cast("Timespan", self.timespan)  # a bar rule has one (`__post_init__`)
+        if intraday(timespan):
             return self._intraday(rows, session_dates)
         if self._futures:
             return self._futures_long(rows, timespan)
@@ -608,7 +629,7 @@ class TimeRule:
         Returns:
             The batch with `Date` and `TimestampEnd`.
         """
-        timespan = self.timespan or Timespan.MINUTE
+        timespan = cast("Timespan", self.timespan)
         start = _to_int(rows.column(START))
         end = pc.add(start, unit_ns(timespan) * self.multiplier)
         if self._futures and timespan is Timespan.SECOND:
@@ -687,6 +708,8 @@ class TimeRule:
             first, after = bar_days(
                 self.asset_class, day, timespan=timespan, multiplier=self.multiplier
             )
+            if not self.stamped and timespan is not Timespan.DAY:
+                after = max(after, _periods_after(day, timespan, self.multiplier))
             starts.append(_ns(_midnight(first, zone)))
             ends.append(_ns(_midnight(after, zone) + later))
             dates.append(day.isoformat() if single else None)
@@ -744,10 +767,37 @@ class TimeRule:
         if timespan is not Timespan.SESSION:
             last = futures_period_last(session, timespan=timespan, multiplier=self.multiplier)
             return _ns(futures_session_end(last))
-        if self.multiplier == 1 or start is None:
+        if self.multiplier == 1:
             return _ns(futures_session_end(session))
+        if start is None:
+            return None
         counted = add_weekdays(futures_session(_instant(start)), self.multiplier - 1)
         return _ns(futures_session_end(max(session, counted + FUTURES_HOLIDAY_MARGIN)))
+
+
+def _periods_after(day: date, timespan: Timespan, multiplier: int) -> date:
+    """Return the day `multiplier` weeks, months, quarters, or years after another.
+
+    A window of that many periods that holds `day` ends no later than this day, whichever day
+    of the window `day` is, so it is the conservative end of a value whose stamp's place in its
+    window is not known.
+
+    Args:
+        day: The day.
+        timespan: `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+        multiplier: How many periods.
+
+    Returns:
+        The day; a month shift that lands past a short month's end moves to the 1st after it.
+    """
+    if timespan is Timespan.WEEK:
+        return day + timedelta(weeks=multiplier)
+    months = {Timespan.MONTH: 1, Timespan.QUARTER: 3}.get(timespan, 12) * multiplier
+    total = day.year * 12 + day.month - 1 + months
+    year, month = divmod(total, 12)
+    first = date(year, month + 1, 1)
+    following = date(year + (month + 1) // 12, (month + 1) % 12 + 1, 1)
+    return min(first.replace(day=1) + timedelta(days=day.day - 1), following)
 
 
 def _set(rows: _Rows, name: str, values: pa.Array) -> _Rows:
@@ -785,7 +835,14 @@ def time_rule(
     times = spec.times
     zone_class = spec.asset_class if asset_class is None else asset_class
     if times is RowTimes.BAR:
-        return TimeRule(spec.name, times, zone_class, request.timespan, request.multiplier)
+        return TimeRule(
+            spec.name,
+            times,
+            zone_class,
+            request.timespan,
+            request.multiplier,
+            stamped=spec.is_bars,
+        )
     if times is RowTimes.DAY:
         return TimeRule(spec.name, times, zone_class, Timespan.DAY)
     return TimeRule(spec.name, times, zone_class)

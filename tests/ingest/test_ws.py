@@ -1697,3 +1697,27 @@ def test_one_calendar_wins_a_race_and_closes_with_the_connections(
     assert not loser._thread.is_alive()  # the loser was closed at once
     harness.close()
     assert not winner._thread.is_alive()
+
+
+def test_no_calendar_outlives_a_closed_transport(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[futures_sessions.FuturesSessions] = []
+    real = futures_sessions.FuturesSessions
+
+    def closing(
+        fetch: Callable[..., list[dict[str, object]]], *, label: str
+    ) -> futures_sessions.FuturesSessions:
+        calendar = real(fetch, label=label)
+        created.append(calendar)
+        harness.connections.close()  # the session closes while the calendar starts
+        return calendar
+
+    monkeypatch.setattr("deephaven_massive._ingest.ws.FuturesSessions", closing)
+    with pytest.raises(dm.MassiveError, match="is closed"):
+        harness.connections.futures_sessions()
+    assert not created[0]._thread.is_alive()  # closed at once, never installed
+    # Once closed, no calendar is even created.
+    with pytest.raises(dm.MassiveError, match="is closed"):
+        harness.connections.futures_sessions()
+    assert len(created) == 1

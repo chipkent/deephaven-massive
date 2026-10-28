@@ -211,7 +211,7 @@ def test_a_long_watchlist_is_looked_up_in_chunks(
     calendar.watch(tickers)
     until(known(calendar, *tickers))
     sent = [query["ticker.any_of"] for path, query in fetch.calls if path == CONTRACTS_PATH]
-    assert [len(chunk) for chunk in sent] == [100, 1]  # type: ignore[arg-type]  # tuples of str
+    assert [len(chunk) for chunk in sent if isinstance(chunk, tuple)] == [100, 1]
 
 
 def test_what_is_queued_while_a_request_runs_is_served_together(
@@ -300,7 +300,7 @@ def test_a_product_not_loaded_yet_keeps_the_rule_date_silently(
     assert (dates, misses) == (["2024-03-28"], [])
 
 
-def test_a_row_past_the_loaded_sessions_is_a_miss_reported_once(
+def test_a_row_past_the_loaded_sessions_is_a_miss_logged_once(
     *, calendar: FuturesSessions, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     watched(calendar, "ESM4")
@@ -320,7 +320,7 @@ def test_a_row_past_the_loaded_sessions_is_a_miss_reported_once(
             ),
         )
     ]
-    assert again == (["2024-04-02"], [])
+    assert again == (["2024-04-02"], misses)  # every batch shows it; the log once
     assert caplog.text.count("not confirmed") == 1
     # The miss asked for a reload, which the spacing allows once the schedule's own load aged.
     assert fetch.paths().count(SCHEDULES_PATH) == 1
@@ -440,3 +440,20 @@ def test_a_schedule_without_events_for_a_product_places_nothing(
 def test_the_module_names_its_paths() -> None:
     assert futures_sessions.CONTRACTS_PATH == "/futures/v1/contracts"
     assert futures_sessions.SCHEDULES_PATH == "/futures/v1/schedules"
+
+
+def test_the_worker_outlives_an_unexpected_error(
+    *, calendar: FuturesSessions, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An answer the calendar cannot read (here a defect's ValueError) is a failed lookup: its
+    # rows are misses, and the worker keeps serving later lookups.
+    fetch.answers[CONTRACTS_PATH] = ValueError("bad answer")
+    with caplog.at_level(logging.ERROR):
+        watched(calendar, "ESM4")
+        until(lambda: "looking it up failed" in caplog.text)
+        _, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
+    assert "not confirmed: looking it up failed: ValueError('bad answer')" in misses[0][1]
+    fetch.answers[CONTRACTS_PATH] = list(CONTRACTS)
+    clock.now += SPACING
+    correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
+    until(loaded(calendar, "ES"))

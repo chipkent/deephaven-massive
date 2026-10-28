@@ -22,15 +22,16 @@ the current instant for a datetime `start`, and for a date `start` the current d
 day zone (for futures, the session the current instant belongs to). `bounds` applies these
 rules to a dataset's `history()` arguments.
 
-Bars are kept only when their whole window lies inside the range (`bar_starts`,
-`bar_sessions`): an intraday or 1-day bar's window is its own interval. For stocks, options,
-indices, and futures sessions, which do not trade at weekends, a week runs Monday to Friday
-and months, quarters, and years are calendar periods less their leading and trailing weekend
-days. Forex and crypto trade at weekends (forex from Sunday evening UTC), so their weeks run
-Monday to Sunday and their months, quarters, and years are whole calendar periods. A bar of
-several units spans that many. A bar whose window has not ended yet
-(the current month, say) is never returned. There is no holiday calendar: a week whose Friday
-is a holiday is still the Monday-to-Friday week.
+Bars are kept only when their whole window lies inside the range (`bar_starts`, `bar_sessions`):
+an intraday or 1-day bar's window is its own interval. For stocks, options, indices, and futures
+sessions, which do not trade at weekends, a week runs Monday to Friday and months, quarters, and
+years are calendar periods less their leading and trailing weekend days. Forex and crypto trade
+at weekends (forex from Sunday evening UTC), so their weeks run Monday to Sunday and their
+months, quarters, and years are whole calendar periods. A bar of several units spans that many;
+several days of stocks, options, and indices count as weekdays, since whether Massive counts
+calendar or trading days is not documented and the weekday reading ends later. A bar whose
+window has not ended yet (the current month, say) is never returned. There is no holiday
+calendar: a week whose Friday is a holiday is still the Monday-to-Friday week.
 
 The futures trading day rolls at 17:00 Chicago time, so an instant belongs to the session of
 its Chicago date until 17:00 and to the next day's session from then on (`futures_session`).
@@ -624,10 +625,13 @@ class _Periods:
     Attributes:
         asset_class: The class; futures days are trading sessions.
         timespan: The bar unit: `DAY`, `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+        multiplier: How many units one bar spans; a stock, option, or index bar of several
+            days counts its days as weekdays (`_sessions`).
     """
 
     asset_class: AssetClass | None
     timespan: Timespan
+    multiplier: int = 1
 
     def day_of(self, moment: datetime) -> date:
         """Return the day an instant belongs to: its session for futures, else its zone date.
@@ -674,8 +678,18 @@ class _Periods:
 
     @property
     def _sessions(self) -> bool:
-        """True for futures sessions, which end on weekdays only, so they count as weekdays."""
-        return self.asset_class is AssetClass.FUTURES and self.timespan is Timespan.SESSION
+        """True when the periods are trading days counted as weekdays.
+
+        Futures sessions end on weekdays only. A stock, option, or index bar of several days
+        may count calendar days or trading days, which Massive does not document, so its days
+        are counted as weekdays too: a 2-day bar from a Friday holds the Monday, the later of
+        the two readings, so its window never ends early. Forex and crypto trade every day and
+        keep calendar days.
+        """
+        if self.asset_class is AssetClass.FUTURES:
+            return self.timespan is Timespan.SESSION
+        several = self.timespan is Timespan.DAY and self.multiplier > 1
+        return several and not trades_at_weekends(self.asset_class)
 
     def period_of(self, day: date) -> date:
         """Return the anchor of the period a day belongs to, its leading weekend included.
@@ -746,9 +760,11 @@ class _Periods:
 
         Returns:
             The first day after the window: the next period's anchor, moved back over the
-            period's trailing weekend days where weekends are out. Futures sessions never ask:
-            `admitted` counts them as weekdays.
+            period's trailing weekend days where weekends are out; for a trading day counted as
+            a weekday, the day after it.
         """
+        if self._sessions:
+            return anchor + _ONE_DAY
         end = self.shift(anchor, 1)
         while self._weekdays_only() and (end - _ONE_DAY).weekday() >= _SATURDAY:
             end -= _ONE_DAY
@@ -857,7 +873,7 @@ def bar_starts(
         whole = timedelta(seconds=unit * (multiplier - 1))
         high = _round_to_unit(span.end, unit, up=False) - whole
         return TimeRange(low, max(low, high))
-    periods = _Periods(asset_class, timespan)
+    periods = _Periods(asset_class, timespan, multiplier)
     first = periods.day_of(span.start)
     if periods.day_start(first) < span.start:
         first += _ONE_DAY
@@ -919,7 +935,7 @@ def bar_days(
     Returns:
         The window's first day, and the day after its last day.
     """
-    periods = _Periods(asset_class, timespan)
+    periods = _Periods(asset_class, timespan, multiplier)
     anchor = periods.period_of(day)
     return periods.window_start(anchor), periods.window_end(periods.shift(anchor, multiplier - 1))
 

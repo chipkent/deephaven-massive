@@ -107,11 +107,12 @@ def adjustment_notes(prices: Iterable[str], volumes: Iterable[str]) -> Mapping[s
     `adjusted=true`, but no vendor description says so, and the same column holds either basis
     depending on the query; each such column's description therefore ends with a note
     (`DatasetSpec.column_notes`), which the column tooltips, `columns()`, and the column
-    reference show.
+    reference show. Only columns REST fills take a note: a column only the WebSocket sends is
+    always as traded.
 
     Args:
-        prices: The dataset's price columns, such as `"Close"`.
-        volumes: Its volume columns, such as `"Volume"`.
+        prices: The dataset's price columns REST fills, such as `"Close"`.
+        volumes: Its volume columns REST fills, such as `"Volume"`.
 
     Returns:
         `ADJUSTED_PRICE` for each price column and `ADJUSTED_VOLUME` for each volume column.

@@ -1769,7 +1769,8 @@ window lies inside the range. The windows:
 - An intraday bar (second, minute, hour) spans `multiplier` units from its `Timestamp`, on whole
   units of UTC time (whole hours in every zone the library uses).
 - A 1-day bar is its calendar day in the class day zone; a bar of `multiplier` days spans that
-  many days. Datetime bounds therefore keep only whole calendar days of 1-day bars: Monday
+  many days, counted as weekdays for stocks, options, and indices (the later reading of what
+  Massive does not document) and as calendar days for forex and crypto. Datetime bounds therefore keep only whole calendar days of 1-day bars: Monday
   09:30 to Friday 16:00 New York time returns Tuesday to Thursday, so daily bars are asked
   for with dates.
 - For stocks, options, and indices, which do not trade at weekends, a week runs Monday to
@@ -1900,12 +1901,12 @@ reference, partner, and economy data). The columns come first, in the order `Sym
 | Tick | (none: `Timestamp`) | (none) | the day zone's date of `Timestamp`; futures: `session_end_date` from REST and flat files, the WebSocket rule below on streams |
 | Intraday bar, n seconds, minutes, or hours | Massive's start | start + n units; a futures one-second WebSocket bar: the later of that and Massive's `e` | the start's date, null when the bar ends on a later date (it crosses midnight); futures: as ticks, null when the bar crosses 17:00 Chicago time |
 | 1-day bar | 00:00 of the day | 00:00 of the next day; indices 01:00 New York time | the day |
-| n-day, week, month, quarter, year bar | 00:00 of the window's first day: a week's Monday; for stocks, options, and indices a month's, quarter's, or year's first weekday | 00:00 after the window's last day (last weekday for stocks, options, and indices); indices one hour later | null |
+| n-day, week, month, quarter, year bar | 00:00 of the window's first day: a week's Monday; for stocks, options, and indices a month's, quarter's, or year's first weekday | 00:00 after the window's last day (last weekday for stocks, options, and indices, whose n days count as weekdays); indices one hour later | null |
 | Futures session bar | Massive's `window_start` | 17:00 Chicago time on its session date | `session_end_date` |
 | Futures bar of several sessions | `window_start` | 17:00 Chicago time on the last of its sessions counted as weekdays from its start, plus `FUTURES_HOLIDAY_MARGIN` (4 days) | null |
 | Futures week, month, quarter, year bar | `window_start` | 17:00 Chicago time on the last weekday of the latest period its label allows | null |
 | Daily open-close | 00:00 of its date | as a 1-day bar | its date (`from`, crypto `day`) |
-| Indicator value | the bar rule of the query's timespan, in the day zone of the symbol's class | the same | the same |
+| Indicator value | the bar rule of the query's timespan, in the day zone of the symbol's class | the same, but a week, month, quarter, or year value ends no earlier than that many periods after its stamp's day, since its stamp's place in its window is not checked | the same |
 
 The ends of the index bars and of the futures bars of several periods are conservative: an
 index day bar is stamped at midnight in Chicago, and whether it covers the New York or the
@@ -1913,7 +1914,10 @@ Chicago day is not verified ([section 23](#23-open-verification-items) item 44);
 not document whether a futures bar of several sessions, or a week or longer, is labelled with
 its first or its last session (item 40), so its end is the later of the two readings, and a
 holiday can move a session later. A 1-day index bar keeps its `Date` although its end is an
-hour into the next day. The next midnight is always the calendar's next midnight in the zone,
+hour into the next day. A stock, option, or index bar of several days counts its days as
+weekdays: whether Massive counts calendar or trading days is not documented
+([section 23](#23-open-verification-items) item 55), and a 2-day bar from a Friday that holds
+the Monday ends on Tuesday, the later reading. The next midnight is always the calendar's next midnight in the zone,
 never 24 hours later, so a day across a daylight-saving change keeps its true length. The
 library computes day boundaries with `zoneinfo`, once per distinct UTC day of a batch, and
 applies them with Arrow; Arrow's own time-zone database is not used.
@@ -1951,7 +1955,9 @@ looked up as they arrive); the flush never waits on it. What is not loaded yet k
 date silently. A row the loaded schedules cannot place (past the last loaded session, a
 contract Massive's contracts do not list, a failed lookup) is a **miss**: it keeps the rule's
 date, the miss is logged at ERROR once per product (or contract) and date, and the `Error` of
-every stream that receives the contract shows it in `m.streams()`; the stream keeps running.
+every stream that receives the contract shows it in `m.streams()` until a later batch of the
+stream's rows all place; the stream keeps running. An answer the calendar cannot read, or any
+other failure of a lookup, is a miss of its contracts' rows too, and the worker carries on.
 A miss past the loaded sessions asks for a reload of its product, at most once per 10 minutes
 (`RELOAD_SPACING`, so a stream of misses never spends a Basic key's 5 requests a minute), and a
 product's sessions are reloaded once a day as the dates move on. Subscribing never waits on
@@ -4666,7 +4672,9 @@ document already reflects them.
     option bars and open-close, `None` (Massive's default, adjusted) that of the indicators;
     one `history()` never mixes bases, every aggregates page's `adjusted` echo is checked, and
     the jumps at splits in live tables are the data, documented with the factors to adjust
-    as-traded data. `Timestamp`, `Timestamp<Qualifier>`, and `Date` are the library's names
+    as-traded data. A stock, option, or index bar of several days counts its days as weekdays,
+    and an indicator value of a week or longer ends no earlier than that many periods after its
+    stamp's day, both the later reading of what Massive does not document. `Timestamp`, `Timestamp<Qualifier>`, and `Date` are the library's names
     ([section 12](#12-timestamp-units-and-day-boundaries), [section 13.4](#134-rest),
     [section 19.4](#194-generated-schemas)).
 
@@ -4736,3 +4744,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 52 | The index day zone: whether an index bar of a day or longer covers the New York or the Chicago day (item 44) | Its `TimestampEnd` is 01:00 New York time, an hour after the New York day, and its `Date` the New York day | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indices.py`: the extra hour | `tests/namespaces/test_indices_integration.py` (item 44's evidence) |
 | 53 | The stamps of indicator values of a day or longer: at which time of day, and in which zone, Massive stamps them per class | Not checked: a value is labelled with the day its stamp falls on in its class's day zone | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indicators.py`: day labels from the stamp | `tests/namespaces/test_stocks_integration.py`, `test_crypto_integration.py`: one week of daily SMA for AAPL and `X:BTCUSD`; record each `TimestampStart` |
 | 54 | What an unknown ticker gets: HTTP 404 or an empty 200, per endpoint, and whether a 404 can follow a good first page | A symbol with no data returns no rows; a 404 after its first page raises `MassiveError` | `tests/ingest/test_rest.py`: a first-page 404 drops the symbol; a later 404 raises | `tests/namespaces/test_stocks_integration.py`: an invalid ticker on `/prev`, the range, `/v3/trades`, and `ticker_details`; record each status |
+| 55 | Whether a stock, option, or index bar of several days (`multiplier` above 1) counts calendar days or trading days | Its days count as weekdays, so its window and its end are the later reading; a forex or crypto bar counts calendar days | `tests/datasets/test_row_times.py`, `tests/datasets/test_dates.py`: a 2-day bar from a Friday ends on Tuesday | `tests/namespaces/test_stocks_integration.py`: AAPL's 2-day bars over two weeks beside its 1-day bars; record which days each bar's volume sums |

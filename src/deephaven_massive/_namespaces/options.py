@@ -188,10 +188,7 @@ BARS: Final = DatasetSpec(
         (_FLAT, _DAY_FILES): _keys("Ticker", "WindowStart"),
     },
     page_size=_TICK_PAGE,
-    column_notes=adjustment_notes(
-        ("Open", "High", "Low", "Close", "Vwap", "OfficialOpen", "DayVwap"),
-        ("Volume", "AccumulatedVolume", "AverageTradeSize"),
-    ),
+    column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
 )
 
 FMV: Final = DatasetSpec(

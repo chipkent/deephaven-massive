@@ -341,6 +341,7 @@ class FakeSessionDates:
 
     def __init__(self) -> None:
         self.calls: list[tuple[list[str | None], list[int | None], list[str | None]]] = []
+        self.missing = {"NQM5"}
 
     def correct(
         self, symbols: pa.Array, instants: pa.Array, dates: pa.Array
@@ -351,7 +352,7 @@ class FakeSessionDates:
             "2025-03-11" if name == "ESM5" else day
             for name, day in zip(names, dates.to_pylist(), strict=True)
         ]
-        misses = [("NQM5", "NQM5 missed")] if "NQM5" in names else []
+        misses = [(name, f"{name} missed") for name in sorted(self.missing) if name in names]
         return pa.array(fixed, pa.string()), misses
 
 
@@ -450,7 +451,8 @@ def test_a_session_miss_shows_in_the_streams_error_without_failing_it(
     plan = ChannelPlan.build(core.catalog, spec, "T")
     updates: list[dict[int, StreamUpdate]] = []
     monkeypatch.setattr(core, "update_streams", updates.append)
-    flusher = Flusher(core, "test-flush", interval=3600.0, sessions=FakeSessionDates())
+    calendar = FakeSessionDates()
+    flusher = Flusher(core, "test-flush", interval=3600.0, sessions=calendar)
     sinks = []
     for stream_id, symbols in ((1, ("NQM5",)), (2, ("ESM5",))):
         opened = open_stream_tables(
@@ -465,18 +467,36 @@ def test_a_session_miss_shows_in_the_streams_error_without_failing_it(
         )
         flusher.routes.add("T", opened.sink)
         sinks.append(opened.sink)
-    flusher.rows(
-        "T", [futures_trade("NQM5", BEFORE_ROLL_MS), futures_trade("ESM5", BEFORE_ROLL_MS)]
-    )
+    both = [futures_trade("NQM5", BEFORE_ROLL_MS), futures_trade("ESM5", BEFORE_ROLL_MS)]
+    flusher.rows("T", both)
+    flusher.flush()
+    # The same miss again: the row already shows it.
+    flusher.rows("T", both)
+    flusher.flush()
+    # Placed at last: the stream's next rows clear it.
+    calendar.missing.clear()
+    flusher.rows("T", both)
+    flusher.flush()
+    # A stream no longer routed is forgotten.
+    calendar.missing.add("NQM5")
+    flusher.rows("T", both)
+    flusher.flush()
+    flusher.routes.remove(1)
     flusher.flush()
     flusher.stop()
     assert not any(sink.failed for sink in sinks)
-    assert updates == [
+    assert updates[:3] == [
         {
             1: StreamUpdate(rows_published=1, error="NQM5 missed"),
             2: StreamUpdate(rows_published=1),
-        }
+        },
+        {1: StreamUpdate(rows_published=2), 2: StreamUpdate(rows_published=2)},
+        {
+            1: StreamUpdate(rows_published=3, clear_error=True),
+            2: StreamUpdate(rows_published=3),
+        },
     ]
+    assert flusher._shown == {}
 
 
 # --- Flusher -----------------------------------------------------------------------------------

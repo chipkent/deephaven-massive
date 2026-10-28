@@ -165,16 +165,7 @@ BARS: Final = DatasetSpec(
         (_F, _DAY_FILES): _ticker_keys("WindowStart"),
     },
     page_size=50_000,
-    column_notes=adjustment_notes(
-        ("Open", "High", "Low", "Close", "Vwap", "OfficialOpen", "DayVwap"),
-        (
-            "Volume",
-            "DecimalVolume",
-            "AccumulatedVolume",
-            "AccumulatedDecimalVolume",
-            "AverageTradeSize",
-        ),
-    ),
+    column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
 )
 LULD: Final = DatasetSpec(
     name="stocks.luld",

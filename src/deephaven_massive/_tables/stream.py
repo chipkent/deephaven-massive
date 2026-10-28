@@ -718,6 +718,7 @@ class Flusher:
         "_flush_lock",
         "_interval",
         "_sessions",
+        "_shown",
         "_stop",
         "_symbols",
         "_thread",
@@ -751,6 +752,8 @@ class Flusher:
         self._final = threading.Event()
         # Flush-lock state: the raw-to-canonical symbol map of each plan.
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
+        # Flush-lock state: the futures session miss each stream's `Error` shows, by stream.
+        self._shown: dict[int, str] = {}
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
 
     def start(self) -> None:
@@ -865,6 +868,9 @@ class Flusher:
                     self._report_drift(core, routes.get(item.channel, ()), item.drift)
             if updates:
                 core.update_streams(updates)
+            if self._shown:  # forget the misses of streams no longer routed
+                live = {sink.stream_id for sinks in routes.values() for sink in sinks}
+                self._shown = {i: m for i, m in self._shown.items() if i in live}
 
     def _publish(
         self,
@@ -914,8 +920,9 @@ class Flusher:
         """Convert a channel's rows for one dataset once and add them to its streams.
 
         A futures session-date miss (a row the schedules cannot place, which keeps the 17:00
-        Chicago rule's date) is shown in the `Error` of every stream that receives its symbol;
-        it does not fail the stream.
+        Chicago rule's date) is shown in the `Error` of every stream that receives its symbol,
+        written again only when the message changes; it does not fail the stream. A stream
+        whose next published rows all place clears it.
 
         Args:
             core: The session's core.
@@ -928,11 +935,15 @@ class Flusher:
         converted = plan.convert(
             rows, self._symbols.setdefault(plan, {}), arrived=arrived, sessions=self._sessions
         )
+        missed: set[int] = set()
         for symbol, message in converted.misses:
             for sink in readers:
                 if sink.receives(symbol):
-                    found = updates.get(sink.stream_id, StreamUpdate())
-                    updates[sink.stream_id] = replace(found, error=message)
+                    missed.add(sink.stream_id)
+                    if self._shown.get(sink.stream_id) != message:
+                        self._shown[sink.stream_id] = message
+                        found = updates.get(sink.stream_id, StreamUpdate())
+                        updates[sink.stream_id] = replace(found, error=message)
         for failure in converted.failures:
             error = MassiveError(failure.message)
             for sink in readers:
@@ -944,7 +955,12 @@ class Flusher:
         for sink in readers:
             if sink.publish(table, converted):
                 found = updates.get(sink.stream_id, StreamUpdate())
-                updates[sink.stream_id] = replace(found, rows_published=sink.rows_published)
+                cleared = sink.stream_id not in missed and sink.stream_id in self._shown
+                if cleared:
+                    del self._shown[sink.stream_id]
+                updates[sink.stream_id] = replace(
+                    found, rows_published=sink.rows_published, clear_error=cleared
+                )
 
     @staticmethod
     def _report_drift(core: SessionCore, sinks: tuple[StreamSink, ...], drift: DriftReport) -> None:

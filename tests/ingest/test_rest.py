@@ -350,6 +350,9 @@ def session(
 
 
 def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
+    # An indicator is computed over bars of a timespan, which its factory always sets.
+    if spec is SMA:
+        kwargs.setdefault("timespan", Timespan.MINUTE)
     return build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
 
 

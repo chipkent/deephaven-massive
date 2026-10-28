@@ -97,11 +97,11 @@ Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 | `Vwap` | double | The volume weighted average price. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, WebSocket | `vw` |  | `vw` |
 | `Otc` | boolean | Always null for `options.bars`; supplied by `stocks.bars`. |  |  |  |  |
 | `DecimalVolume` | String | Always null for `options.bars`; supplied by `stocks.bars`. |  |  |  |  |
-| `AccumulatedVolume` | long | Today's accumulated volume. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | WebSocket |  |  | `av` |
+| `AccumulatedVolume` | long | Today's accumulated volume. | WebSocket |  |  | `av` |
 | `AccumulatedDecimalVolume` | String | Always null for `options.bars`; supplied by `stocks.bars`. |  |  |  |  |
-| `OfficialOpen` | double | Today's official opening price. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | WebSocket |  |  | `op` |
-| `DayVwap` | double | Today's volume weighted average price. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | WebSocket |  |  | `a` |
-| `AverageTradeSize` | long | The average trade size for this aggregate window. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | WebSocket |  |  | `z` |
+| `OfficialOpen` | double | Today's official opening price. | WebSocket |  |  | `op` |
+| `DayVwap` | double | Today's volume weighted average price. | WebSocket |  |  | `a` |
+| `AverageTradeSize` | long | The average trade size for this aggregate window. | WebSocket |  |  | `z` |
 | `DollarVolume` | double | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `SettlementPrice` | double | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `Exchange` | long | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |

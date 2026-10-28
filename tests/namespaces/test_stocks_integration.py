@@ -578,3 +578,25 @@ def test_unknown_ticker_statuses(live_rest: RestClient, *, evidence: Evidence) -
             evidence(f"{template}: HTTP 200, status {page.status}, {len(page.rows)} rows")
         answered += 1
     assert answered == len(requests)
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("55")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_bars_of_several_days_count_calendar_or_trading_days(
+    *, rest_rows: RestRows, instant_text: Text, evidence: Evidence
+) -> None:
+    """Whether a stock bar of several days counts calendar days or trading days.
+
+    Records AAPL's 2-day and 1-day bars from Monday 2026-03-02 to Friday 2026-03-13. Reading
+    it: a 2-day bar from a Friday whose volume equals Friday's alone counts calendar days; one
+    whose volume equals Friday's and Monday's counts trading days, the reading the library's
+    `TimestampEnd` already allows for.
+    """
+    bounds = (date(2026, 3, 2), date(2026, 3, 13))
+    two = _bars(rest_rows, "day", multiplier=2, bounds=bounds)
+    one = _bars(rest_rows, "day", multiplier=1, bounds=bounds)
+    evidence(f"2-day bars (t, v): {[(instant_text(b['t'] * _MS), b['v']) for b in two]}")
+    evidence(f"1-day bars (t, v): {[(instant_text(b['t'] * _MS), b['v']) for b in one]}")
+    assert two

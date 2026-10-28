@@ -1049,6 +1049,10 @@ def test_a_column_note_follows_the_description() -> None:
     bare = Source(key="/notes", transport=R, fields=(described("", "p", "Price"),))
     alone = dataset_schema(dataset, (dataset,), lambda *_: bare).columns[0]
     assert alone.description == "A note."
+    # A vendor text without its closing period still ends its sentence before the note.
+    open_ended = Source(key="/notes", transport=R, fields=(described("A price", "p", "Price"),))
+    closed = dataset_schema(dataset, (dataset,), lambda *_: open_ended).columns[0]
+    assert closed.description == "A price. A note."
     assert "Split-adjusted when" in description(stocks.BARS, "Close")
     assert "multiplied by its ratio" in description(stocks.BARS, "Volume")
 

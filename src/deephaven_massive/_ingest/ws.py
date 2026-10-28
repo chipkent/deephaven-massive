@@ -1077,10 +1077,10 @@ class WsConnections:
         symbols = request.symbol_key()
         wanted, topics = _wanted(asset_class, channel, symbols)
         decision = self._resolve(asset_class, spec.family)
-        if asset_class is AssetClass.FUTURES and wanted:
-            self.futures_sessions().watch(wanted)
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
+            if asset_class is AssetClass.FUTURES and wanted:
+                self.futures_sessions().watch(wanted)
             if created:
                 connection.start()
             opened = open_stream_tables(
@@ -1333,22 +1333,31 @@ class WsConnections:
 
         The calendar starts its worker thread when it is created, outside `registry_lock`;
         it is installed under the lock, and a calendar a racing caller installed first wins
-        (the other one is closed at once). Never waits on the network.
+        (the other one is closed at once). Never waits on the network. Once `close()` has run,
+        no calendar is created, so none outlives the transport.
 
         Returns:
             The calendar every futures connection's flusher corrects its rows' dates with.
+
+        Raises:
+            MassiveError: If the transport is closed and has no calendar (`"... is closed"`).
         """
         with self._lock:
             found = self._sessions
+            if found is None:
+                self._check_open()
         if found is not None:
             return found
         candidate = FuturesSessions(self._fetch_rows, label=self._label)
         with self._lock:
             found = self._sessions
-            if found is None:
+            closed = self._is_closed()
+            if found is None and not closed:
                 found = self._sessions = candidate
         if found is not candidate:
             candidate.close()
+        if found is None:
+            raise MassiveError(f"{self._label} is closed")
         return found
 
     def owns_row(self, connection: Connection, family: ChannelFamily) -> bool:
