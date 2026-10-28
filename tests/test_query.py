@@ -10,7 +10,6 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import string_col
-from deephaven.dherror import DHError
 from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
@@ -963,12 +962,6 @@ def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[Query
             yield make(session, spec, symbols=symbols, timespan=span)
 
 
-def keyed_on_every_column(spec: DatasetSpec, columns: Sequence[str]) -> bool:
-    # An `UPSERT` poll of such a dataset fails: its `last_by` has no column left to aggregate
-    # (see the expected failure below), so it has no column order to check.
-    return set(spec.poll_keys) >= set(columns)
-
-
 def verb_results(query: QueryBase, columns: Sequence[str]) -> Iterator[tuple[str, Table]]:
     # Every result shape the query's verbs make, labelled by the call. The last column is a
     # `last_by` key that the aggregation itself would move to the front.
@@ -982,8 +975,7 @@ def verb_results(query: QueryBase, columns: Sequence[str]) -> Iterator[tuple[str
         yield "fetch()", query.fetch()
     if isinstance(query, Query):
         for mode in PollMode:
-            if mode is not PollMode.UPSERT or not keyed_on_every_column(query._spec, columns):
-                yield f"poll(mode={mode.name})", query.poll(60, mode=mode)
+            yield f"poll(mode={mode.name})", query.poll(60, mode=mode)
     if isinstance(query, HistoryQuery):
         yield "history()", query.history("2025-03-03", "2025-03-04")
 
@@ -1003,18 +995,3 @@ def test_every_verb_returns_the_columns_in_the_order_columns_lists(
             if result.is_refreshing:
                 faked_session.release(result)
     assert calls  # every dataset has a verb
-
-
-@pytest.mark.xfail(
-    raises=DHError,
-    strict=True,
-    reason="the last_by of an UPSERT poll keyed on every column has nothing to aggregate",
-)
-def test_an_upsert_poll_keyed_on_every_column(faked_session: dm.MassiveSession) -> None:
-    spec = _session.CATALOG.by_name["reference.related_companies"]
-    columns = _session.CATALOG.dataset_schema(spec).column_names
-    assert keyed_on_every_column(spec, columns)
-    query = next(every_query(faked_session, spec))
-    assert isinstance(query, Query)
-    result = query.poll(60, mode=PollMode.UPSERT)
-    assert result.column_names == list(columns)

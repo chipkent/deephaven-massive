@@ -814,7 +814,9 @@ taxonomy is a reference list revised in place, not a feed of new rows).
 
 - `REPLACE` is a keyed table (`poll_keys`) from which keys absent in the latest cycle are
   deleted, also when the cycle is empty.
-- `UPSERT` is keyed the same way and never deletes.
+- `UPSERT` is keyed the same way and never deletes. When `poll_keys` are every column
+  (`reference.related_companies`), it keeps each distinct row once and adds the new ones each
+  cycle brings.
 - `APPEND` is append-only and appends only rows it has not seen before. A row's identity is
   its `poll_keys` followed by its `revision_keys` (empty by default). Each cycle skips every
   row whose identity the table already holds, and a second row with the same identity in one
@@ -2366,7 +2368,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `blink_to_append_only(blink)`, fed only the rows whose identity (`poll_keys`, then
   `revision_keys`) the poller has not appended yet ([section 7](#7-query-classes-and-verbs)); the
   poller thread alone owns that set of identities, so it needs no lock, and adds a cycle's
-  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE`
+  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`, or
+`blink.select_distinct(poll_keys)` when they are every column (a `last_by` with nothing to
+aggregate is refused, and the distinct rows are what it would keep); `REPLACE`
   is that `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone
   row for every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`,
   so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
