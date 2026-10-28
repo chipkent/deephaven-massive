@@ -8,9 +8,9 @@ namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset
 The four datasets and what serves them:
 
 - `indices.values`: index levels, streamed tick by tick from the WebSocket `V` channel,
-  fetched from the indices snapshot (its `ticker`, `value`, and `last_updated` fields, the
-  snapshot's membership of the values kind), and read back from the `us_indices/values_v1` flat
-  files. Massive has no REST history of index values, so `history()` reads flat files only.
+  fetched from the indices snapshot (only its `ticker`, `value`, and `last_updated` fields), and
+  read back from the `us_indices/values_v1` flat files. Massive has no REST history of index
+  values, so `history()` reads flat files only.
 - `indices.bars`: OHLC bars from the `A` (1 second) and `AM` (1 minute) channels, the
   previous-session and range aggregates endpoints, and the minute and day aggregate flat files.
   Index aggregates are computed from index values, so they have no volume and no `adjusted`.
@@ -169,20 +169,23 @@ class _Indices(Namespace):
         stream verbs subscribe to the WebSocket `V` channel. `fetch()` reads the current level
         of each index from the indices snapshot (`/v3/snapshot/indices`), whose `last_updated`
         becomes `Timestamp`, so it returns the same columns as the stream; the snapshot takes
-        up to 250 indices per request, so a list needs one request per 250 indices. An index
-        Massive does not know, or that the plan does not include, is left out of the result
-        with a WARNING that names it and Massive's reason. `history()` reads the
-        `us_indices/values_v1` flat files, the only history Massive has for index values: it
-        needs S3 credentials, and `source=dm.HistorySource.REST` raises `ValueError`. There is
-        no `limit`; every verb returns every row it is asked for.
+        up to 250 indices per request, so a list needs one request per 250 indices. The
+        snapshot needs an Indices Starter plan or above; on Indices Basic it raises
+        `EntitlementError`, and `m.indices.bars(symbols, dm.Timespan.DAY).fetch()` (the
+        previous session's bar) and `m.indices.daily_open_close()` are the REST alternatives.
+        An index Massive does not know, or that the plan does not include, is left out of the
+        result, with one WARNING per session and index that names it and Massive's reason.
+        `history()` reads the `us_indices/values_v1` flat files, the only history Massive has
+        for index values: it needs S3 credentials, and `source=dm.HistorySource.REST` raises
+        `ValueError`. There is no `limit`; every verb returns every row it is asked for.
 
         `dm.ALL` is accepted by the stream verbs (every index on the stream) and by
         `history()` (every index in the files). `fetch()` with `dm.ALL` raises `ValueError`;
         `m.indices.snapshots(dm.ALL).fetch()` returns every index. The values stream is
-        served from the indices TICK host. If that host refuses the `V` topic, the stream fails
-        with `EntitlementError`, whose message names the host,
-        `MassiveConfig.ws_hosts[AssetClass.INDICES]`, and `business.massive.com`, the host
-        Massive documents for index values.
+        served from the indices stream host the session resolved for your plan. If that host
+        refuses the `V` topic, the stream fails with `EntitlementError`, whose message names
+        the host, `MassiveConfig.ws_hosts[AssetClass.INDICES]`, and `business.massive.com`,
+        the host Massive documents for index values.
 
         Each column is described in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.md#values,
@@ -312,7 +315,9 @@ class _Indices(Namespace):
         REST only: `fetch()` returns the snapshot once, and `poll(interval)` re-reads it every
         interval, into a table keyed by `Symbol`. Each request names at most 250 indices, so a
         list of 250 or fewer takes one request a cycle.
-        This is the way to get current index levels on every plan.
+        The snapshot needs an Indices Starter plan or above; on Indices Basic it raises
+        `EntitlementError`, and `m.indices.bars(symbols, dm.Timespan.DAY).fetch()` (the
+        previous session's bar) and `m.indices.daily_open_close()` are the REST alternatives.
 
         `dm.ALL` is every index Massive publishes, paged 250 at a time. `limit` caps the
         total number of rows across pages; the page size is internal.

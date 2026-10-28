@@ -14,7 +14,7 @@ import io
 import json
 import logging
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -41,6 +41,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
 )
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables import stream
 
 # The reply and envelope builders are plain functions of the fake, which no fixture hands over.
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -234,7 +235,12 @@ def test_rest_fixtures_carry_only_generated_fields(
 
 
 @pytest.mark.parametrize(
-    ("name", "channel"), [("ws_values.json", "indices/V"), ("ws_minute_bars.json", "indices/AM")]
+    ("name", "channel"),
+    [
+        ("ws_values.json", "indices/V"),
+        ("ws_second_bars.json", "indices/A"),
+        ("ws_minute_bars.json", "indices/AM"),
+    ],
 )
 def test_websocket_fixtures_carry_every_generated_field(
     load_fixture: Callable[[str, str], bytes], name: str, channel: str
@@ -493,24 +499,30 @@ def test_values_fetch_reads_the_snapshot_and_drops_error_rows(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     fake_rest.reply(SNAPSHOT, Reply(load_fixture(OWNER, "snapshot.json")))
+    q = rest_session.indices.values(["I:SPX", "NDX", "I:NOPE"])
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
-        out = rows(rest_session.indices.values(["I:SPX", "NDX", "I:NOPE"]).fetch())
-    assert sent(fake_rest) == [
-        (SNAPSHOT, {"ticker.any_of": ["I:NDX,I:NOPE,I:SPX"], "limit": ["250"]})
-    ]
+        out = rows(q.fetch())
+        again = rows(q.fetch())
+    assert again == out
+    request = (SNAPSHOT, {"ticker.any_of": ["I:NDX,I:NOPE,I:SPX"], "limit": ["250"]})
+    assert sent(fake_rest) == [request, request]
     assert out == [
         {"Symbol": "I:SPX", "Timestamp": 1748894400 * NS, "Value": 5935.94},
         {"Symbol": "I:NDX", "Timestamp": 1748894400 * NS, "Value": 21491.1},
     ]
-    assert "NOT_FOUND for I:NOPE: Ticker not found.; the row is dropped" in caplog.text
+    # Once per session and index, however often the row comes back.
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    dropped = "indices.values: Massive answered NOT_FOUND for I:NOPE: Ticker not found."
+    assert warned == [f"{dropped}; the row is dropped"]
 
 
+@pytest.mark.parametrize("dataset", ["values", "snapshots"])
 def test_the_snapshot_names_at_most_250_indices_a_request(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, dataset: str
 ) -> None:
     fake_rest.reply(SNAPSHOT, Reply(envelope([])))
     symbols = [f"I:X{n:03d}" for n in range(251)]
-    rest_session.indices.snapshots(symbols).fetch()
+    getattr(rest_session.indices, dataset)(symbols).fetch()
     batches = [query["ticker.any_of"][0].split(",") for _, query in sent(fake_rest)]
     # The batches are requested concurrently, so they arrive in either order.
     assert sorted(len(batch) for batch in batches) == [1, 250]
@@ -711,8 +723,22 @@ def subscribed(server: FakeMassiveServer, topic: str) -> None:
                 "EndTimestamp": 1748894400000 * MS,
             },
         ),
+        (
+            "ws_second_bars.json",
+            "A.I:SPX",
+            {
+                "Symbol": "I:SPX",
+                "Timestamp": 1748894399000 * MS,
+                "Open": 5935.5,
+                "Close": 5935.94,
+                "High": 5936.0,
+                "Low": 5935.4,
+                "OfficialOpen": 5896.68,
+                "EndTimestamp": 1748894400000 * MS,
+            },
+        ),
     ],
-    ids=["values", "minute-bars"],
+    ids=["values", "minute-bars", "second-bars"],
 )
 def test_a_frame_lands_in_blink(
     *,
@@ -725,6 +751,8 @@ def test_a_frame_lands_in_blink(
 ) -> None:
     if topic.startswith("V."):
         blink = ws_session.indices.values("SPX").blink()
+    elif topic.startswith("A."):
+        blink = ws_session.indices.bars("SPX", dm.Timespan.SECOND).blink()
     else:
         blink = ws_session.indices.bars("SPX").blink()
     seen = blink_to_append_only(blink)
@@ -735,8 +763,19 @@ def test_a_frame_lands_in_blink(
 
 
 def test_a_refused_values_topic_names_the_indices_host_setting(
-    *, ws_session: dm.MassiveSession, fake_ws_server: FakeMassiveServer
+    *,
+    ws_session: dm.MassiveSession,
+    fake_ws_server: FakeMassiveServer,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    failures: list[dm.MassiveError] = []
+    fail = stream.Flusher.fail
+
+    def recording(flusher: stream.Flusher, ids: Iterable[int], error: dm.MassiveError) -> None:
+        failures.append(error)
+        fail(flusher, ids, error)
+
+    monkeypatch.setattr(stream.Flusher, "fail", recording)
     fake_ws_server.refuse["V.I:SPX"] = "not authorized"
     result = ws_session.indices.values("I:SPX").blink()
 
@@ -751,6 +790,7 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
     assert "socket.test/indices refused V.I:SPX: not authorized" in message
     assert "MassiveConfig.ws_hosts[AssetClass.INDICES]" in message
     assert "business.massive.com" in message
+    assert [type(error) for error in failures] == [dm.EntitlementError]
     del result
 
 
