@@ -834,7 +834,9 @@ taxonomy is a reference list revised in place, not a feed of new rows).
 
 - `REPLACE` is a keyed table (`poll_keys`) from which keys absent in the latest cycle are
   deleted, also when the cycle is empty.
-- `UPSERT` is keyed the same way and never deletes.
+- `UPSERT` is keyed the same way and never deletes. When `poll_keys` are every column
+  (`reference.related_companies`), it keeps each distinct row once and adds the new ones each
+  cycle brings.
 - `APPEND` is append-only and appends only rows it has not seen before. A row's identity is
   its `poll_keys` followed by its `revision_keys` (empty by default). Each cycle skips every
   row whose identity the table already holds, and a second row with the same identity in one
@@ -1065,9 +1067,17 @@ result order. The table's columns are **Column**, **Deephaven type**, **Descript
 **Wire field** column per transport the dataset uses (`REST field`, `Flat-file field`,
 `WebSocket field`). A wire-field cell lists the distinct wire keys of that
 transport's sources that feed the column, in source order and before any projection, or
-`request` for a key filled from the request. A footer names the snapshot's fetch date and the
-vendor URLs of the sources the page's datasets use, from the `Provenance` passed to the renderer
-([section 19.4](#194-generated-schemas)). Units and nullability get no columns: every
+`request` for a key filled from the request. Under the table, a list headed "Massive's
+documentation of this dataset:" gives the vendor pages of that dataset's own sources, sorted and
+distinct, from the `Provenance` passed to the renderer ([section 19.4](#194-generated-schemas));
+a dataset whose sources have no URLs gets no list. A source several asset classes share (the
+unified snapshot `/v3/snapshot`, `/v3/reference/tickers`) has one page per class; for a dataset
+with an `asset_class`, only the pages whose URL path has a segment equal to that class's value
+(`/docs/rest/options/snapshots/unified-snapshot.md` for `options.snapshots`) are listed, and all
+of the source's pages when none matches, so a dataset never loses its links to a change in the
+vendor's URL layout. A dataset that spans classes (`asset_class` None, such as
+`reference.snapshots` or `reference.tickers`) lists every class's page. The page ends with a
+footer naming the generator command and the snapshot's fetch date. Units and nullability get no columns: every
 timestamp is an `Instant`, and **Supplied by** with the description already says when a
 column is null. Readers can see what each table holds before they install.
 
@@ -2458,7 +2468,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `blink_to_append_only(blink)`, fed only the rows whose identity (`poll_keys`, then
   `revision_keys`) the poller has not appended yet ([section 7](#7-query-classes-and-verbs)); the
   poller thread alone owns that set of identities, so it needs no lock, and adds a cycle's
-  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE`
+  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`, or
+`blink.select_distinct(poll_keys)` when they are every column (a `last_by` with nothing to
+aggregate is refused, and the distinct rows are what it would keep); `REPLACE`
   is that `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone
   row for every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`,
   so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
@@ -4432,6 +4444,13 @@ document already reflects them.
     `DESCRIPTION_FIXES` entry quotes the empty text and takes the sibling's, with its reason,
     so no column of a dataset is left blank for want of text Massive already wrote
     ([section 19.4](#194-generated-schemas)).
+55. **Each dataset links its own Massive documentation** (2026-10-28). The column
+    reference lists each dataset's vendor pages under that dataset's section instead of one
+    page-wide list at the foot of the page, which tied no link to a dataset and, through a
+    source several asset classes share, linked unrelated classes' pages (the options page
+    listed the stocks, forex, crypto, and indices unified-snapshot pages). A dataset of one
+    asset class links only that class's page of a shared source; the footer keeps the fetch
+    date ([section 7.4](#74-column-descriptions)).
 
 56. **A REST rate governor per subscription** (2026-10-28). Massive limits REST requests per
     subscription (Basic: 5 per minute; paid: none), shared by every key of the account, so the

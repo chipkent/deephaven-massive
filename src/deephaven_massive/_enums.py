@@ -108,7 +108,8 @@ class PollMode(StrEnum):
 
     - `REPLACE`: a keyed table that holds exactly the latest cycle; keys absent from it are
       deleted, including when the cycle returns no rows.
-    - `UPSERT`: a keyed table that adds and updates rows but never deletes.
+    - `UPSERT`: a keyed table that adds and updates rows but never deletes. On a dataset
+      keyed on every column (`reference.related_companies`), it holds each distinct row once.
     - `APPEND`: an append-only table that adds only rows it has not seen before. A row is
       identified by the dataset's poll keys (such as a news article's id), followed on a
       current-state dataset by its update time (a snapshot's `Updated`), so an explicit
