@@ -800,9 +800,9 @@ dataset has `poll()`. Current state on every tier is `m.<class>.snapshots(symbol
 request per cycle.
 
 **`poll()`.** `mode=None` uses the catalog default: `PollMode.APPEND` for `reference.news`,
-`stocks.ipos`, every `stocks.filings.*`, and `partners.benzinga.news`; `PollMode.REPLACE`
-otherwise. `REPLACE` is a keyed table from which keys absent in the latest cycle are deleted.
-`UPSERT` is keyed and never deletes. `APPEND` is append-only. A reactive `Table` passed as
+`stocks.ipos`, every `stocks.filings.*` but the two taxonomies, and `partners.benzinga.news`;
+`PollMode.REPLACE` otherwise. `REPLACE` is a keyed table from which keys absent in the latest cycle are
+deleted. `UPSERT` is keyed and never deletes. `APPEND` is append-only. A reactive `Table` passed as
 `symbols` is read once per cycle with `Table.snapshot()` on the poller thread, never inside a
 listener. Fan-out endpoints issue one request per symbol per cycle under `max_concurrency`;
 `m.streams()` shows `RequestsPerCycle`.
@@ -854,7 +854,7 @@ DaySpan = Literal[Timespan.DAY]
 FuturesSpan = Literal[Timespan.SECOND, Timespan.MINUTE, Timespan.HOUR, Timespan.SESSION,
                       Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR]   # no DAY
 
-class _Stocks:   # same shape on m.options, m.forex, m.crypto; m.indices has no `adjusted`
+class _Stocks:   # same shape on m.options and m.forex; m.indices and m.crypto have no `adjusted`
     @overload
     def bars(self, symbols: Symbols, timespan: StreamSpan = Timespan.MINUTE, *,
              multiplier: Literal[1] = 1, adjusted: bool = True) -> StreamHistoryQuery: ...
@@ -1049,7 +1049,9 @@ Notation:
   ([section 7](#7-query-classes-and-verbs)).
 - `limit` is a total-row cap. Page size is internal. Every docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
-  endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`.
+  endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
+  when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging
+  stops once `limit` rows have arrived.
 - The REST column names the path template as the OpenAPI spec writes it (the spec's own
   placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
   Every path is a generated REST source (`_massive.source(Transport.REST, template)`,
@@ -1061,7 +1063,7 @@ Notation:
   `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column. A
   `time` key is always an instant, so `Timestamp` is an `Instant`. Every axis below that is
   a calendar date (all but the instants `published_utc`, `published`, and the indicators'
-  `timestamp`: the dividends, splits, IPOs, short interest and volume, float, financials,
+  `timestamp`: the dividends, splits, IPOs, short interest and volume, financial statements,
   filings, futures schedules, economy, and TMX axes) keeps its `LocalDate` column under its
   own name, such as `Date` or `ExDividendDate`, and declares no `time` key. Datasets whose
   rows each list several tickers (a JSON `tickers` field) describe a filing, a company, or
@@ -1088,8 +1090,9 @@ Notation:
 | `ipos(symbols=None, …T)`, axis `listing_date` | Query | | `/vX/reference/ipos` | |
 | `short_interest(symbols=None, …T)`, axis `settlement_date` | Query | | `/stocks/v1/short-interest` | |
 | `short_volume(symbols=None, …T)`, axis `date` | Query | | `/stocks/v1/short-volume` | |
-| `share_float(symbols=None, …T)`, axis `effective_date` when the generated path has it; at the pinned snapshot it has no date parameter, so the method is `share_float(symbols=None, …F)` with no `start` or `end` | Query | | `/stocks/vX/float` | |
-| `financials.balance_sheets`, `financials.income_statements`, `financials.cash_flow_statements`, `financials.ratios` — each `(symbols=None, *, timeframe: Timeframe \| None = None, …T)`, axis `period_end` | Query | | `/stocks/financials/v1/{balance-sheets,income-statements,cash-flow-statements,ratios}` | |
+| `share_float(symbols=None, *, …F)`, no axis (the path documents no date parameter; `EffectiveDate` is a column only) | Query | | `/stocks/vX/float` | |
+| `financials.balance_sheets`, `financials.income_statements`, `financials.cash_flow_statements` — each `(symbols=None, *, timeframe: Timeframe \| None = None, …T)`, axis `period_end` | Query | | `/stocks/financials/v1/{balance-sheets,income-statements,cash-flow-statements}` | |
+| `financials.ratios(symbols=None, *, …F)`, no axis (the path documents no `period_end`, `timeframe`, or `date` parameter; its rows carry one `ticker`, so it has `Symbol`) | Query | | `/stocks/financials/v1/ratios` | |
 | `filings.index(symbols=None, *, form_type: str \| None = None, …T)`, axis `filing_date` | Query | | `/stocks/filings/vX/index` | |
 | `filings.sections_10k`, `filings.text_8k`, `filings.disclosures_8k`, `filings.risk_factors` — each `(symbols=None, …T)`, axis `filing_date` | Query | | `/stocks/filings/10-K/vX/sections`, `/stocks/filings/8-K/vX/text`, `/stocks/filings/8-K/vX/disclosures`, `/stocks/filings/vX/risk-factors` | |
 | `filings.institutional_holdings(*, filer_cik: str \| None = None, …T)`, axis `filing_date` (Form 13-F) | Query | | `/stocks/filings/vX/13-F` | |
@@ -1159,10 +1162,10 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 |---|---|---|---|---|
 | `trades(symbols)` | StreamHistoryLatestQuery | `XT` | fetch `/v1/last/crypto/{from}/{to}`; history `/v3/trades/{X:…}` | `global_crypto/trades_v1` |
 | `quotes(symbols)` | StreamQuery | `XQ` | | |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; 1-day bars are stamped by source: midnight New York on `/prev` and the range in every documented sample, the UTC day's last millisecond in `day_aggs_v1`, [section 23](#23-open-verification-items) item 29) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
-| `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
+| `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
 
 ### 8.7 `m.reference`
 
@@ -1439,7 +1442,14 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   `"O:AAPL250117C00150000"`; `"BTC-USD"` and `"X:BTCUSD"`; `"I:SPX"` and `"SPX"` (an index
   symbol without its prefix gets `I:`); `"ESZ5"`. The `Symbol` column always holds the canonical
   Massive form. A crypto pair must end in a known quote currency, so its WebSocket form
-  (`BTC-USD`) can always be recovered; others raise `ValueError` at construction. A symbol
+  (`BTC-USD`) can always be recovered; others raise `ValueError` at construction. A forex
+  currency is three letters (`EU1/USD` raises; crypto codes such as `1INCH` keep their
+  digits). An option symbol's `YYMMDD` expiry must be a real date (`AAPL250132C...` raises).
+  A prefix with nothing after it (`"I:"`, `"O:"`, `"C:"`, `"X:"`) raises `ValueError`.
+  WebSocket topics spell a forex pair `{from}-{to}` (`C.EUR-USD`), as Massive's WebSocket
+  documentation gives every forex channel's `ticker` parameter; forex quote and aggregate
+  frames spell it `EUR/USD` and FMV frames `C:EURUSD`, and every spelling maps back to
+  `C:EURUSD`, so frames reach their streams. A symbol
   with another class's prefix raises `ValueError` saying which prefix, if any, the class uses
   (`'X:BTCUSD' carries the prefix of another asset class; stocks symbols have no prefix`).
 - **Datasets that span asset classes** (indicators, reference data, the unified
@@ -1498,7 +1508,7 @@ has the same value set as that parameter.
 | `Direction` | GAINERS, LOSERS | `gainers`, `losers` | `movers()` |
 | `ContractType` | CALL, PUT | `call`, `put` | `options.chain`, `options.contracts` |
 | `SeriesType` | OPEN, HIGH, LOW, CLOSE | `open`, `high`, `low`, `close` | `indicators.*` |
-| `Timeframe` | ANNUAL, QUARTERLY | `annual`, `quarterly` | `stocks.financials.*` |
+| `Timeframe` | ANNUAL, QUARTERLY, TRAILING_TWELVE_MONTHS | `annual`, `quarterly`, `trailing_twelve_months` (the income and cash flow statements document all three, the balance sheets the first two) | `stocks.financials` statements |
 | `Order` | ASC, DESC | `asc`, `desc` | the `…F` block |
 | `Market` | STOCKS, OTC, INDICES, FX, CRYPTO | `stocks`, `otc`, `indices`, `fx`, `crypto` | `reference.tickers` |
 | `Locale` | US, GLOBAL | `us`, `global` | `reference.ticker_types`, `reference.exchanges` |
@@ -1618,10 +1628,26 @@ New York. A filter on a publication time does not depend on which tickers are li
   `end - 1 ns`.
 - **UTC** for forex and crypto.
 - **Sessions** for futures. A date means the trading session whose `session_end_date` equals
-  it. `trades`, `quotes`, and `bars` all request their instant range (`timestamp` for trades
-  and quotes, `window_start` for bars) widened by one day on each side in America/Chicago and
-  post-filter `SessionEndDate` within `[start, end]`; `session_end_date` stays an ordinary
-  filter of the trades and quotes paths, never their time axis. Flat-file keys are assumed to be keyed by session date
+  it. An exchange holiday folds into the next session, which then opens early: CME traded
+  Martin Luther King Day (Monday 2025-01-20) from Sunday 17:00 CT under the trade date
+  2025-01-21. So `trades`, `quotes`, and `bars` request their instant range (`timestamp` for
+  trades and quotes, `window_start` for bars) from `futures_session_open(start)` (17:00 CT
+  the day before) less `FUTURES_HOLIDAY_MARGIN` (4 days) to `futures_session_open(end + 1
+  day)`, which is exact because a holiday only moves a session's open earlier, and
+  post-filter `SessionEndDate` within `[start, end]`. The longest known fold is a Friday
+  holiday whose trading goes to Monday's session (Good Friday 2024: the 2024-04-01 session
+  opened Thursday 17:00 CT), three days before the regular Sunday open; the fourth day is
+  slack. The margin costs REST requests up to four more days of rows at the lower end (a
+  Friday session fetches from the previous Sunday evening), all dropped by the post-filter; `session_end_date` stays an ordinary
+  filter of the trades and quotes paths, never their time axis. Mixed bounds follow the same
+  rule per side: a date side is a session, widened and filtered on `SessionEndDate`; a
+  `datetime` side is exact and filtered on `Timestamp`
+  (`history("2024-12-17", datetime(2024, 12, 17, 16, tzinfo=CT))` keeps the evening of
+  12-16, which belongs to session 12-17). A date `start` with an `end` instant before that
+  session's regular open is a range only when one holiday opened the session early: the end
+  instant's session and every weekday session after it up to `start` may hold at most one
+  weekday, so `("2025-01-21", Monday 2025-01-20 10:00 CT)` reads the MLK trading and
+  `("2025-01-22", the same instant)` raises `ValueError`. Flat-file keys are assumed to be keyed by session date
   (**UNVERIFIED**: the futures flat-file overview says only "standardized in Central Time"; the
   implementation checks every block of every futures file against its key, and a
   `session_end_date` that differs from the key's date, or is empty, fails loudly). With
@@ -1630,7 +1656,15 @@ New York. A filter on a publication time does not depend on which tickers are li
   Sunday 17:00 CT; 16:00 to 17:00 CT is the daily maintenance break), so the session of an
   instant `t` is `(t in America/Chicago + 7 h).date()`, and the files read are the sessions
   from the session of `start` to the session of `end - 1 ns`. An intraday window reads one
-  file; an evening window reads only the next session's file.
+  file; an evening window reads only the next session's file. When a futures range ends at an
+  instant and the run of missing files that ends it (per venue) holds a weekday (a holiday,
+  alone or followed by a weekend, such as Good Friday and the Saturday after it), the next
+  existing session file within the 4-day margin of the run's first day is read too, because
+  the holiday's hours lie in it; its rows are filtered on `Timestamp` like the others. A run
+  of weekend days after an existing Friday file reads nothing more. A date-bounded range never rolls
+  forward: a date names its own session exactly. A `datetime` sent to a futures
+  `session_end_date` parameter (`schedules(start=...)`) becomes the session it belongs to,
+  and for the exclusive upper bound the session of the instant just before it.
 
 ## 13. Host resolution and connection protocol
 
@@ -1991,6 +2025,27 @@ How a request is built from a `DatasetSpec` and a `Request`:
   turned into a calendar date by `calendar_day` in `_datasets/dates.py`: a date or
   `"YYYY-MM-DD"` as given, an aware `datetime` as the calendar day it falls on in the dataset's
   day zone ([section 12](#12-timestamp-units-and-day-boundaries)).
+- **History order.** REST `history()` returns each request's rows, so each symbol's, oldest
+  first; the rows of several requests follow one another in request order. Wherever the
+  history path takes a direction and the caller set none, REST sends the ascending one on
+  the time axis's field when the path lists it (`order=asc` with `sort=timestamp`;
+  `sort=asc` on the aggregates; `sort=window_start.asc` or, where `sort` lists no values,
+  `<time axis field>.asc` on the futures paths, which default to newest first). The order of
+  rows inside a flat file is Massive's and is not documented.
+- **Library-fixed parameters.** A parameter the library sets itself, with no argument of its
+  own (the options snapshot's `type=options`), is declared on the dataset as
+  `DatasetSpec.fixed_params`. The catalog's `wire parameters` gate requires every REST path of
+  the dataset to take it as a query parameter, so it is never blamed on the caller as a
+  parameter a path lacks. `build_query` sends it like a typed parameter, and its whole
+  family is reserved from `filters` ("the library
+  sets type itself; it is not a filter") and left out of the valid keys a refused filter
+  lists. An equality form of the symbol parameter in `filters` (`ticker_any_of`) is refused
+  with a message naming `symbols=`.
+- **Path values.** A path value is percent-encoded whole (`I:SPX` is `I%3ASPX`) and may not
+  contain `/`: Massive answers 404 for a `%2F` segment, and no canonical symbol has one, so
+  `request_target` raises `ValueError`. A `NUMBER` value is sent as an `int`'s digits or a
+  `float`'s shortest exact decimal in positional notation (`1e-7` is `0.0000001`, `1e20` is
+  `100000000000000000000`), never with an exponent; a non-finite value raises.
 - **Time axis.** `start` and `end` go to the `time_axis` pair by the rules of
   [section 9](#9-filters) and [section 12](#12-timestamp-units-and-day-boundaries): instants
   on an instant axis (decided by the generated row field the parameter filters, so a
@@ -2169,7 +2224,7 @@ reaches that instant; comparing full instants, not a time of day, keeps the rule
 every day zone. Futures files are named by session date, and their clock starts at the next
 midnight in America/Chicago, where Massive standardizes futures data. `indices.values` is
 flat-file only.
-`indices.bars` has no `adjusted`, so the predicate is satisfied.
+`indices.bars` and `crypto.bars` have no `adjusted`, so the predicate is satisfied.
 
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
 nothing is split between the sources. A dataset without instruments counts as `ALL`.
@@ -3246,7 +3301,8 @@ longer shows its sample, the field accepts it, or the field is gone; samples com
 text, so `1`, `1.0`, and `true` are three samples.
 
 **Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
-columns as `KeySpec(column, from_request=False, instrument=True)`, grouped per source in a
+columns as `KeySpec(column, from_request=False, instrument=True, required=True)`, grouped
+per source in a
 `SourceKeys`, one optional declaration per role (`symbol`, `time`, `fanout`, `session`):
 
 - every source of a dataset in a kind declares `symbol` and `time`;
@@ -3271,7 +3327,16 @@ columns as `KeySpec(column, from_request=False, instrument=True)`, grouped per s
 - `instrument` says whether a `fanout` key names an instrument: True, the default, renames it
   to `Underlying` (the options underlying, the related company asked about); False keeps its
   generated column (`filer_cik` stays `FilerCik`). Only a `fanout` key may set it False, and
-  such a key is a column of the rows, never `from_request`.
+  such a key is a column of the rows, never `from_request`;
+- `required` (default True) says whether every row must carry the key. False is for a symbol
+  Massive documents as present only "if available", such as the `ticker` of
+  the stocks `filings.index`: a row without it keeps a null `Symbol` instead of failing the request
+  as a missing required key. Only a `symbol` key read from a REST path's rows may set it
+  False; flat files and streams filter and route rows by symbol, and the `time`, `fanout`,
+  and `session` keys are always required. A dataset with an optional symbol key cannot key a
+  `REPLACE` or `UPSERT` `poll()` on `Symbol` (`DatasetSpec` refuses it): every row without a
+  symbol would share the null key and collapse into one row, so such a dataset declares other
+  `poll_keys`.
 
 A key is `from_request` when the source does not carry it in its rows: the symbol of a source
 that takes it as a path parameter or holds it outside the result key
@@ -3279,7 +3344,7 @@ that takes it as a path parameter or holds it outside the result key
 `from_request` key as a constant column. `to_batch(..., required=)` and `ReadPlan.required`
 (per request) and `WsClient.set_required(channel, keys, *, symbol)` (per channel, before its first
 subscription, [section 13.3](#133-connection-and-subscription-protocol)) receive exactly the
-source's required keys, so a futures WebSocket row without
+source's required keys (declared, not `from_request`, and not marked `required=False`), so a futures WebSocket row without
 `session_end_date` is not a missing key, while a futures flat file without it is. Every member
 of a kind gets the identical
 column set: crypto's `ParticipantTimestamp` is renamed to `Timestamp`, while stocks keeps its
@@ -3689,7 +3754,7 @@ wl_quotes = m.stocks.quotes(wl).last_by()        # subscriptions follow edits; r
 wl_trades = m.stocks.trades(wl).ring(10_000)
 movers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
 mover_quotes = m.stocks.quotes(movers).last_by()                          # follows the top 20
-mover_ratios = m.stocks.financials.ratios(movers).poll(600)               # 20 requests per cycle
+mover_ratios = m.stocks.financials.ratios(movers).poll(600)               # one ticker.any_of request per cycle
 m.release(wl_trades)        # deterministic: T topics unsubscribed when no other table holds the stream
 del wl_quotes               # released at the end of this console command, unless a UI panel shows it
 ```
@@ -3896,8 +3961,9 @@ document already reflects them.
     picks a per-symbol detail path from
     the role paths, canonicalizes symbols read from rows, and drops error rows only from a
     projected `fetch()` ([section 13.4](#134-rest)). The § 8 rows gain `product_code` on every
-    futures dataset that takes it, `adjusted` on the options and crypto `daily_open_close`,
-    `filters` on `consensus_ratings`, `type=options` on `options.snapshots`, and the generated
+    futures dataset that takes it, `adjusted` on the options `daily_open_close` (the crypto
+    `bars` and `daily_open_close` take none: crypto has no corporate actions), `filters` on
+    `consensus_ratings`, `type=options` on `options.snapshots`, and the generated
     axis of `share_float` ([section 8](#8-namespace-tree)). The indicators take
     `adjusted: bool | None = None`: None sends nothing, an explicit value is sent where the
     chosen path declares `adjusted`, and raises `ValueError` on the crypto templates, which do
@@ -3940,3 +4006,9 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 21 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
 | 22 | Where the futures snapshot carries a contract's ticker: the OpenAPI schema nests it as `details.ticker`, which the generator names `DetailsTicker` | `futures.snapshots` declares `DetailsTicker` as its `symbol` key; a row without it is a missing required key and fails loudly ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: a spec-shaped fixture fills `Symbol` from `details.ticker` | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for a current contract; record where the ticker appears and that `Symbol` is filled |
 | 23 | Key of the REST ticker events' event type (`/vX/reference/tickers/{id}/events`): the schema declares the required `event_type`, while the response example, the documentation sample, and Massive's Python client all use `type` | A `KEY_FIXES` entry reads the field as `type`, column `Type`; were the wire to send `event_type`, `Type` would be null and `event_type` would be reported as drift | `tests/massive/refresh/test_overrides.py`: the entry reads `event_type` as `type`, column `Type` | `tests/namespaces/test_reference_integration.py`: one `ticker_events` request; record which key the events carry |
+| 24 | Whether rows of the stocks `filings.index`, `filings.sections_10k`, `filings.text_8k`, and `filings.risk_factors` always carry `ticker`: no filings response schema marks it required, and the index documents it as present only "if available" | Each of the four declares its symbol key `KeySpec("Ticker", required=False)`: a row without `ticker` keeps a null `Symbol` instead of failing the request, and none keys a keyed `poll()` on `Symbol` | `tests/ingest/test_rest.py`: a row without its optional symbol keeps a null `Symbol`; `tests/datasets/test_catalog.py`: only a symbol key from REST rows may be optional; `tests/namespaces/test_stocks.py`: a row without `ticker` of each of the four keeps a null `Symbol` | `tests/namespaces/test_stocks_integration.py`: one request over a month of each of the four; record how many rows lack `ticker` |
+| 25 | Whether Massive reads a percent-encoded colon in a path segment (`/v2/aggs/ticker/I%3ASPX/prev`) as `I:SPX` | Every path value is percent-encoded whole; a value containing `/` is refused before sending, since Massive answers 404 for `%2F` | `tests/massive/rest/test_query.py`: `I:SPX` becomes `I%3ASPX`; a `/` raises | `tests/namespaces/test_indices_integration.py`: one `I:SPX` `/prev` call returns a row for `I:SPX` |
+| 26 | Spelling of an explicit forex pair topic: the WebSocket documentation gives `{from}-{to}` (`C.EUR-USD`), while quote and aggregate frames spell the pair `EUR/USD` | Topics use `EUR-USD`; frames of any spelling map back to `C:EURUSD` | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`: `C.EUR-USD` is subscribed and an `EUR/USD` frame reaches its stream | `tests/namespaces/test_forex_integration.py`: subscribe `C.EUR-USD` and `CA.EUR-USD`; record the acknowledgement and that frames arrive |
+| 27 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The reader assumes the canonical form: symbol pushdown compares the file's `ticker` column with canonical symbols, and `Symbol` holds the column as written. Were the files to write `X:EUR-USD`, a symbol request would match no row; that outcome becomes an owner decision | `tests/ingest/test_flatfiles.py`: symbol pushdown keeps the rows whose ticker equals a requested canonical symbol | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |
+| 28 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | A date `start` requests from the session's regular open less 4 days and post-filters `SessionEndDate`; an instant range whose trailing missing files hold a weekday rolls forward to the next file within 4 days of the run's first day | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept | `tests/namespaces/test_futures_integration.py`: `trades` and `bars` of ES for 2025-01-21, and one `YEAR` bar request; record the first row's time and whether the candles arrive |
+| 29 | Day alignment of crypto 1-day bars: every documented REST sample (`/prev`, the aggregates range) stamps a daily bar at midnight New York time, while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC; forex day bars may share the question | Each source's own stamp is kept and documented on `crypto.bars`; `history()` keeps the rows whose `Timestamp` falls in the requested UTC range, and `AUTO` may pick either source by symbol count | `tests/namespaces/test_crypto.py`: the documented REST and flat-file samples round-trip with their own stamps | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `Timestamp` and whether the OHLCV agree |

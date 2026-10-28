@@ -17,6 +17,7 @@ from deephaven_massive._datasets.symbols import (
     CRYPTO_QUOTES,
     SymbolTable,
     canonical,
+    is_forex_currency,
     normalize,
     symbol_canonicalizer,
     symbol_class,
@@ -88,11 +89,25 @@ def test_canonical_forms(asset_class: AssetClass, raw: str, expected: str) -> No
         (CRY, "USD"),
         (FX, "EURO/USD"),
         (FX, "EU/USD"),
+        (FX, "EU1/USD"),  # a forex code is three letters, never a digit
+        (FX, "EU1USD"),
+        (FX, "C:EURUS1"),
+        (STK, "-"),  # no letter or digit
+        (STK, "."),
+        (IDX, "I:-"),
     ],
 )
 def test_invalid_symbols(asset_class: AssetClass, raw: str) -> None:
     with pytest.raises(ValueError, match=r"symbol|pair|prefix"):
         canonical(asset_class, raw)
+
+
+def test_forex_currencies_are_three_letters() -> None:
+    assert is_forex_currency("EUR")
+    for code in ("EU1", "EU", "EURO", "eur", "1NC"):
+        assert not is_forex_currency(code)
+    # Crypto codes keep their digits.
+    assert canonical(CRY, "1INCH-USD") == "X:1INCHUSD"
 
 
 def test_non_string_symbol() -> None:
@@ -103,7 +118,7 @@ def test_non_string_symbol() -> None:
 @pytest.mark.parametrize(
     ("asset_class", "symbol", "expected"),
     [
-        (FX, "C:EURUSD", "EUR/USD"),
+        (FX, "C:EURUSD", "EUR-USD"),
         (CRY, "X:BTCUSD", "BTC-USD"),
         (CRY, "X:SHIBUSDT", "SHIB-USDT"),
         (CRY, "X:ETHBTC", "ETH-BTC"),
@@ -115,6 +130,54 @@ def test_non_string_symbol() -> None:
 )
 def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
     assert ws_symbol(asset_class, symbol) == expected
+
+
+@pytest.mark.parametrize("frame_symbol", ["USD/CNH", "USD-CNH", "C:USDCNH"])
+def test_every_forex_wire_spelling_reads_back_to_the_topic_symbol(frame_symbol: str) -> None:
+    # Topics use the documented `{from}-{to}` form; quote and aggregate frames carry `USD/CNH`
+    # and FMV frames `C:USDCNH`. All of them must name the pair the topic subscribed.
+    assert ws_symbol(FX, "C:USDCNH") == "USD-CNH"
+    assert canonical(FX, frame_symbol) == "C:USDCNH"
+    assert canonical(FX, ws_symbol(FX, "C:USDCNH")) == "C:USDCNH"
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "raw"),
+    [
+        (None, "I:"),
+        (None, "O:"),
+        (None, "X:"),
+        (None, " c: "),
+        (IDX, "I:"),
+        (OPT, "O:"),
+        (FX, "C:"),
+        (CRY, "X:"),
+    ],
+)
+def test_a_prefix_without_a_symbol_is_rejected(asset_class: AssetClass | None, raw: str) -> None:
+    with pytest.raises(ValueError, match="is a prefix without a symbol"):
+        canonical(asset_class, raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "O:AAPL250132C00150000",  # day 32
+        "O:AAPL251301C00150000",  # month 13
+        "O:AAPL250229C00150000",  # 2025 is no leap year
+        "O:AAPL250100C00150000",  # day 0
+        "O:AAPL1234567C00150000",  # root AAPL1, expiry 234567
+    ],
+)
+def test_an_option_expiry_must_be_a_real_date(raw: str) -> None:
+    with pytest.raises(ValueError, match="OCC"):
+        canonical(OPT, raw)
+    with pytest.raises(ValueError, match="OCC"):
+        underlying(raw)
+
+
+def test_a_leap_day_expiry_is_a_real_date() -> None:
+    assert canonical(OPT, "AAPL280229C00150000") == "O:AAPL280229C00150000"
 
 
 def test_ws_symbol_unknown_crypto_quote() -> None:

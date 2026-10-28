@@ -168,7 +168,9 @@ class Direction(StrEnum):
 
             import deephaven_massive as dm
 
-            assert dm.Direction("gainers") is dm.Direction.GAINERS
+            m = dm.MassiveSession()
+            gainers = m.crypto.movers(dm.Direction.GAINERS).poll(60)
+            assert dm.Direction("losers") is dm.Direction.LOSERS
     """
 
     GAINERS = "gainers"
@@ -214,6 +216,10 @@ class SeriesType(StrEnum):
 class Timeframe(StrEnum):
     """The reporting period of the `m.stocks.financials` statements.
 
+    `ANNUAL` is a fiscal year and `QUARTERLY` a fiscal quarter. `TRAILING_TWELVE_MONTHS` sums
+    the four most recent quarters; the income and cash flow statements offer it, while a
+    balance sheet, a snapshot at the period's end, has no trailing form.
+
     Example:
         ::
 
@@ -224,6 +230,7 @@ class Timeframe(StrEnum):
 
     ANNUAL = "annual"
     QUARTERLY = "quarterly"
+    TRAILING_TWELVE_MONTHS = "trailing_twelve_months"
 
 
 class Order(StrEnum):
