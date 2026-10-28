@@ -12,7 +12,7 @@ US Treasury yields at constant maturities from one month to 30 years, one row pe
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Date` | LocalDate | Calendar date of the yield observation (YYYY-MM-DD). | REST | `date` |
+| `Date` | String | Calendar date of the yield observation (YYYY-MM-DD). | REST | `date` |
 | `Yield10Year` | double | Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity, Quoted on an Investment Basis | REST | `yield_10_year` |
 | `Yield1Month` | double | Market Yield on U.S. Treasury Securities at 1-Month Constant Maturity, Quoted on an Investment Basis | REST | `yield_1_month` |
 | `Yield1Year` | double | Market Yield on U.S. Treasury Securities at 1-Year Constant Maturity, Quoted on an Investment Basis | REST | `yield_1_year` |
@@ -24,6 +24,7 @@ US Treasury yields at constant maturities from one month to 30 years, one row pe
 | `Yield5Year` | double | Market Yield on U.S. Treasury Securities at 5-Year Constant Maturity, Quoted on an Investment Basis | REST | `yield_5_year` |
 | `Yield6Month` | double | Market Yield on U.S. Treasury Securities at 6-Month Constant Maturity, Quoted on an Investment Basis | REST | `yield_6_month` |
 | `Yield7Year` | double | Market Yield on U.S. Treasury Securities at 7-Year Constant Maturity, Quoted on an Investment Basis | REST | `yield_7_year` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -40,10 +41,11 @@ US inflation: CPI, core CPI, and the PCE price indexes and spending, one row per
 | `Cpi` | double | Consumer Price Index (CPI) for All Urban Consumers — a standard measure of headline inflation based on a fixed basket of goods and services, not seasonally adjusted. | REST | `cpi` |
 | `CpiCore` | double | Core Consumer Price Index — the CPI excluding food and energy, used to understand underlying inflation trends without short-term volatility. | REST | `cpi_core` |
 | `CpiYearOverYear` | double | Year-over-year percentage change in the headline CPI — the most commonly cited inflation rate in public discourse and economic policy. | REST | `cpi_year_over_year` |
-| `Date` | LocalDate | Calendar date of the observation (YYYY‑MM‑DD). | REST | `date` |
+| `Date` | String | Calendar date of the observation (YYYY‑MM‑DD). | REST | `date` |
 | `Pce` | double | Personal Consumption Expenditures (PCE) Price Index — a broader measure of inflation used by the Federal Reserve, reflecting actual consumer spending patterns and updated basket weights. | REST | `pce` |
 | `PceCore` | double | Core PCE Price Index — excludes food and energy prices from the PCE index, and is the Fed's preferred measure of underlying inflation. | REST | `pce_core` |
 | `PceSpending` | double | Nominal Personal Consumption Expenditures — total dollar value of consumer spending in the U.S. economy, reported in billions of dollars and not adjusted for inflation. | REST | `pce_spending` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -57,7 +59,7 @@ US inflation expectations from market prices and models, one row per day.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Date` | LocalDate | Calendar date of the observation (YYYY‑MM‑DD). | REST | `date` |
+| `Date` | String | Calendar date of the observation (YYYY‑MM‑DD). | REST | `date` |
 | `ForwardYears5To10` | double | 5-Year, 5-Year Forward Inflation Expectation Rate — the market's expectation of average annual inflation for the 5-year period beginning 5 years from now, based on the spread between forward nominal and real yields. | REST | `forward_years_5_to_10` |
 | `Market10Year` | double | 10-Year Breakeven Inflation Rate — the market's expectation of average annual inflation over the next 10 years, based on the spread between 10-year nominal Treasury yields and 10-year TIPS yields. | REST | `market_10_year` |
 | `Market5Year` | double | 5-Year Breakeven Inflation Rate — the market's expectation of average annual inflation over the next 5 years, based on the spread between 5-year nominal Treasury yields and 5-year TIPS yields. | REST | `market_5_year` |
@@ -65,6 +67,7 @@ US inflation expectations from market prices and models, one row per day.
 | `Model1Year` | double | The Cleveland Fed’s 1-year inflation expectations data estimated expected inflation, risk premiums, and the real interest rate using a model based on Treasury yields, inflation data, swaps, and surveys. | REST | `model_1_year` |
 | `Model30Year` | double | The Cleveland Fed’s 30-year inflation expectations data estimated expected inflation, risk premiums, and the real interest rate using a model based on Treasury yields, inflation data, swaps, and surveys. | REST | `model_30_year` |
 | `Model5Year` | double | The Cleveland Fed’s 5-year inflation expectations data estimated expected inflation, risk premiums, and the real interest rate using a model based on Treasury yields, inflation data, swaps, and surveys. | REST | `model_5_year` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -79,10 +82,11 @@ US labor-market indicators: unemployment, participation, earnings, and job openi
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `AvgHourlyEarnings` | double | Average hourly earnings of all employees on private nonfarm payrolls in USD (CES0500000003 series from FRED). | REST | `avg_hourly_earnings` |
-| `Date` | LocalDate | Calendar date of the observation (YYYY-MM-DD). | REST | `date` |
+| `Date` | String | Calendar date of the observation (YYYY-MM-DD). | REST | `date` |
 | `JobOpenings` | double | Total nonfarm job openings in thousands (JTSJOL series from FRED). | REST | `job_openings` |
 | `LaborForceParticipationRate` | double | Civilian labor force participation rate as a percentage of the civilian noninstitutional population (CIVPART series from FRED). | REST | `labor_force_participation_rate` |
 | `UnemploymentRate` | double | Civilian unemployment rate as a percentage of the labor force (UNRATE series from FRED). | REST | `unemployment_rate` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -96,7 +100,7 @@ US short-term funding conditions: policy, overnight, and repo rates, one row per
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Date` | LocalDate | Calendar date of the observation (YYYY-MM-DD). | REST | `date` |
+| `Date` | String | Calendar date of the observation (YYYY-MM-DD). | REST | `date` |
 | `EffectiveFedFundsRate` | double | Federal Funds Effective Rate as a percentage (DFF series from FRED); published daily. | REST | `effective_fed_funds_rate` |
 | `EffectiveFedFundsVolume` | double | Total transaction volume underlying the effective federal funds rate calculation, in billions of U.S. dollars; reported on business days. | REST | `effective_fed_funds_volume` |
 | `FedFundsTargetLower` | double | Lower bound of the federal funds target range as a percentage (DFEDTARL series from FRED); posted every calendar day. | REST | `fed_funds_target_lower` |
@@ -118,6 +122,7 @@ US short-term funding conditions: policy, overnight, and repo rates, one row per
 | `Tgcr75thPercentile` | double | 75th percentile transaction rate of the TGCR distribution as a percentage; posted on business days. | REST | `tgcr_75th_percentile` |
 | `TriPartyGeneralCollateralRate` | double | Tri-Party General Collateral Rate (TGCR) as a percentage; published by the Federal Reserve Bank of New York as a repo reference rate and reported on business days. | REST | `tri_party_general_collateral_rate` |
 | `TriPartyGeneralCollateralVolume` | double | Total transaction volume underlying the TGCR calculation, in billions of U.S. dollars; reported on business days. | REST | `tri_party_general_collateral_volume` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
