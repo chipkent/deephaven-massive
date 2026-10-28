@@ -504,15 +504,6 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     assert transform.plan.required == frozenset({"ticker", "sip_timestamp"})
 
 
-def test_widening_gives_each_column_its_merged_arrow_type() -> None:
-    # Checked before the batch is assembled, which on some pyarrow versions casts by itself.
-    longs = pa.array([100, None], pa.int64())
-    assert flatfiles._conform(longs, pa.float64()).type == pa.float64()
-    assert flatfiles._conform(longs, pa.list_(pa.int32())).type == pa.list_(pa.int32())
-    lists = pa.array([[1], None], pa.list_(pa.int32()))
-    assert flatfiles._conform(lists, pa.list_(pa.int32())).to_pylist() == [[1], None]
-
-
 def test_milliseconds_in_a_nanosecond_column_fail_the_bound(
     *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:

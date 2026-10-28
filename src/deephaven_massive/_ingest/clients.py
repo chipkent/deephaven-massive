@@ -1,10 +1,10 @@
 """`SessionClients`, the one holder of a session's wire clients and connections.
 
-A session talks to Massive through the wire package's clients (`_massive.FlatFileClient` for
-the S3 flat files; the REST client and the WebSocket connections are not implemented yet). Each
-client is per session: it carries the session's credentials and connection pool and is closed
-with the session. `SessionClients` owns them all, so nothing on the Deephaven side
-(`_tables/`) ever holds a wire client, and the session core reaches the transports only through
+A session talks to Massive through the wire package's clients (`_massive.RestClient` for the REST
+API and `_massive.FlatFileClient` for the S3 flat files; the WebSocket connections are not
+implemented yet). Each client is per session: it carries the session's credentials and connection
+pool and is closed with the session. `SessionClients` owns them all, so nothing on the Deephaven
+side (`_tables/`) ever holds a wire client, and the session core reaches the transports only through
 the `IngestPorts` protocol it defines (`rest()`, `streams()`, `flat_files()`).
 
 `MassiveSession.__init__` creates the core, then `SessionClients(core)`, then attaches the
@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from deephaven_massive import _massive
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
+from deephaven_massive._ingest.rest import RestEndpoints, RestState
 
 if TYPE_CHECKING:
     from deephaven_massive._massive import FlatFileClient
@@ -51,7 +52,7 @@ class SessionClients:
     core's `registry_lock`, and the clients themselves are thread-safe.
     """
 
-    __slots__ = ("_core", "_flat_files", "_label")
+    __slots__ = ("_core", "_flat_files", "_label", "_rest")
 
     def __init__(self, core: SessionCore) -> None:
         """Bind the clients to their session; no client is created yet.
@@ -64,6 +65,8 @@ class SessionClients:
         self._label = core.label
         # Created by the first flat-file read (`flat_files`), under the core's `registry_lock`.
         self._flat_files: FlatFileClient | None = None
+        # Created by the first REST call (`rest`): the client, host decisions, and pollers.
+        self._rest: RestState | None = None
 
     def _live_core(self) -> SessionCore:
         """Return the session's core, which a caller of these methods normally keeps alive.
@@ -81,12 +84,46 @@ class SessionClients:
         return core
 
     def rest(self) -> RestTransport:
-        """Return the session's REST transport.
+        """Return a REST transport bound to the session's core and its shared REST state.
 
-        Raises:
-            NotImplementedError: Always, until the REST transport is implemented.
+        Each call gets a new, lightweight `RestEndpoints`. The first call creates the
+        session's `RestState`: it creates the `_massive.RestClient` outside every lock (the
+        constructor reads the proxy and certificate settings, but makes no request), installs
+        it under the core's `registry_lock` unless a racing call installed one first (the
+        loser's client is closed at once), and registers the state's close with
+        `SessionCore.on_close` after releasing the lock. So the client closes, and every poller
+        stops, with the session, or at once if the session closed meanwhile. The closer refers
+        to the state only, never to the core.
+
+        Returns:
+            The transport.
+
+        An API key or `rest_base_url` the REST client cannot use raises its `ValueError` (see
+        `RestClient`), and a garbage-collected core the `MassiveError` of `_live_core`.
         """
-        raise NotImplementedError("the REST transport is not implemented yet")
+        core = self._live_core()
+        with core.registry_lock:
+            state = self._rest
+        if state is None:
+            config = core.config
+            candidate = RestState(
+                _massive.RestClient(
+                    config.api_key,
+                    base_url=config.rest_base_url,
+                    max_concurrency=config.max_concurrency,
+                ),
+                core.label,
+            )
+            with core.registry_lock:
+                state = self._rest
+                created = state is None
+                if state is None:
+                    state = self._rest = candidate
+            if created:
+                core.on_close(state.close)
+            else:
+                candidate.close()
+        return RestEndpoints(core, state)
 
     def streams(self) -> StreamTransport:
         """Return the session's WebSocket transport.

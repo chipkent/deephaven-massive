@@ -235,15 +235,17 @@ _namespaces/
 _datasets/               dataset semantics: no network I/O, no threads, no Deephaven calls;
                          only column_reference.sync writes files
   __init__.py            docstring only
-  catalog.py             DatasetSpec (summary, role paths, kind, per-source key columns, channels,
-                         prefixes, poll defaults, page size), Catalog (the specs by name,
+  catalog.py             DatasetSpec (summary, role paths and fetch paths by symbol class,
+                         kind, per-source key columns, channels, prefixes, poll defaults,
+                         page size, symbols per request), Catalog (the specs by name,
                          members(kind)), filter validation
   schema.py              ColumnType, Column, Schema, WireType -> ColumnType, rename(),
                          dataset_schema() with column descriptions (section 19.4)
   request.py             Request, StreamKey, ParamValue, HostDecision
   timestamps.py          the one timestamp routine (section 12), the FMV magnitude rule
   dates.py               DateLike parsing, day zones, sessions, publish_time, [start, end)
-  symbols.py             normalization, the Symbol/Underlying rule (section 10)
+  symbols.py             normalization, symbol_class(), the Symbol/Underlying rule
+                         (section 10)
   history_source.py      partition dates, publication grace, REST capability, the AUTO choice
   column_reference.py    the column reference: render(catalog, provenance) -> {file name:
                          Markdown} (pure); sync(directory, pages) owns docs/datasets/
@@ -935,8 +937,8 @@ never reads `__doc__` at run time, so `python -OO` changes nothing.
   Nothing in `BlinkTableTools` or `RingTableTools` copies attributes, so an append-only or
   ring table derived from a described blink table would lose them. The verb therefore calls
   `describe()` last: on the blink copy for `blink()`, on the append-only or ring table, on the
-  `last_by` table after any `where_in`, on the `poll()` table (the keyed `input_table` or the
-  publisher's append-only table), and on the static table of `fetch()` and `history()`.
+  `last_by` table after any `where_in`, on the `poll()` table (the shape derived from its
+  publisher's blink table), and on the static table of `fetch()` and `history()`.
 - **Threading and liveness.** `describe()` makes a new table, so it runs where every result
   table is made: on the caller thread, inside the result's `LivenessScope`
   ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), never under
@@ -944,8 +946,8 @@ never reads `__doc__` at run time, so `python -OO` changes nothing.
   take no update-graph lock. The described table depends on the table it copies, so the
   undescribed parent, and for a stream the blink table that owns `on_shutdown_callback`, lives
   exactly as long as the result does; a teardown test proves that releasing the result still
-  shuts the stream down. A `poll()` poller writes only through the `input_table` or publisher
-  it holds, never through the returned copy.
+  shuts the stream down. A `poll()` poller writes only through the publisher it holds, never
+  through the returned copy.
 - The diagnostics tables of [section 17](#17-diagnostics) are not dataset results and are not
   described.
 
@@ -1006,7 +1008,10 @@ column is null. Readers can see what each table holds before they install.
   `https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/<namespace>.md#<dataset>`,
   to the web UI's column tooltips, and to `columns()`. `tests/datasets/test_column_reference.py`
   checks that every declared dataset's docstring names `docs/datasets/<namespace>.md#<dataset>`
-  for its own namespace and dataset.
+  for its own namespace and dataset. The summary is the docstring's whole first line: ruff's
+  D205 requires a blank line after that line, so a sentence too long to fit on it, after the
+  method's indentation and the opening quotes, within the 100-character line length, is
+  shortened in the spec, never wrapped in the docstring.
 
 ## 8. Namespace tree
 
@@ -1016,6 +1021,11 @@ Notation:
 - `DateLike = str | date | datetime` ([section 11](#11-enums-and-types)).
 - `…F` is the trailing keyword-only block
   `sort: str | None = None, order: Order | None = None, limit: int | None = None, filters: Mapping[str, FilterValue] | None = None`.
+  The block offers only the ordering the dataset's paths accept, so a signature never offers
+  one the endpoint cannot apply: a dataset whose paths have neither a `sort` nor an `order`
+  parameter (futures `exchanges` and `market_status`, for example) leaves both out, and a
+  dataset whose paths have `order` but no `sort` (the indicators) keeps `order` alone. How
+  `sort` and `order` reach the wire is in [section 9](#9-filters).
 - `…T` is `start: DateLike | None = None, end: DateLike | None = None` followed by `…F`. It
   exists only on datasets whose row has a named time axis (shown as "axis"). `start` and `end`
   address that axis with the day rules of [section 12](#12-timestamp-units-and-day-boundaries).
@@ -1034,7 +1044,8 @@ Notation:
   placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
   Every path is a generated REST source (`_massive.source(Transport.REST, template)`,
   [section 19.4](#194-generated-schemas)). Each dataset names its paths by role (`fetch_path`,
-  `history_path`, `grouped_daily_path`, `extra_paths`), and declares the key columns of each
+  `detail_path`, `fetch_paths_by_class`, `history_path`, `grouped_daily_path`, `extra_paths`),
+  and declares the key columns of each
   source it reads as `KeySpec`s ([section 19.4](#194-generated-schemas), "Keys are declared
   per source"): the `symbol`, `time`, and instrument `fanout` keys become `Symbol`,
   `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column. A
@@ -1067,7 +1078,7 @@ Notation:
 | `ipos(symbols=None, …T)`, axis `listing_date` | Query | | `/vX/reference/ipos` | |
 | `short_interest(symbols=None, …T)`, axis `settlement_date` | Query | | `/stocks/v1/short-interest` | |
 | `short_volume(symbols=None, …T)`, axis `date` | Query | | `/stocks/v1/short-volume` | |
-| `share_float(symbols=None, …T)`, axis `date` | Query | | `/stocks/vX/float` | |
+| `share_float(symbols=None, …T)`, axis `effective_date` when the generated path has it; at the pinned snapshot it has no date parameter, so the method is `share_float(symbols=None, …F)` with no `start` or `end` | Query | | `/stocks/vX/float` | |
 | `financials.balance_sheets`, `financials.income_statements`, `financials.cash_flow_statements`, `financials.ratios` — each `(symbols=None, *, timeframe: Timeframe \| None = None, …T)`, axis `period_end` | Query | | `/stocks/financials/v1/{balance-sheets,income-statements,cash-flow-statements,ratios}` | |
 | `filings.index(symbols=None, *, form_type: str \| None = None, …T)`, axis `filing_date` | Query | | `/stocks/filings/vX/index` | |
 | `filings.sections_10k`, `filings.text_8k`, `filings.disclosures_8k`, `filings.risk_factors` — each `(symbols=None, …T)`, axis `filing_date` | Query | | `/stocks/filings/10-K/vX/sections`, `/stocks/filings/8-K/vX/text`, `/stocks/filings/8-K/vX/disclosures`, `/stocks/filings/vX/risk-factors` | |
@@ -1084,9 +1095,9 @@ Notation:
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `A`, `AM` | `/prev` (DAY); range | `us_options_opra/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/options`) | | |
 | `chain(underlying: str, *, contract_type: ContractType \| None = None, …F)`; `filters` takes `strike_price_*`, `expiration_date_*` | Query | | `/v3/snapshot/options/{u}` | |
-| `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` parsed; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…`, 250 per request. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
+| `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` from `underlying_asset.ticker`; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…`, 250 per request, always with `type=options`, so `ALL` lists only options contracts; `type` is set by the library and rejected as a filter. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
 | `contracts(*, symbols=None, underlying: str \| None = None, contract_type: ContractType \| None = None, as_of: DateLike \| None = None, expired: bool \| None = None, …F)`; `filters` takes `expiration_date_*`, `strike_price_*` | Query | | `/v3/reference/options/contracts`; with `symbols`: `/v3/reference/options/contracts/{o}` per contract | |
-| `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/{o}/{date}` per contract | |
+| `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/{o}/{date}` per contract | |
 
 ### 8.3 `m.futures`
 
@@ -1096,12 +1107,17 @@ below and selects the flat-file prefix only: it is not part of the stream key
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `trades(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (`session_end_date` filters) | `us_futures_{venue}/trades_v1` |
-| `quotes(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` | `us_futures_{venue}/quotes_v1` |
+| `trades(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (the `timestamp` range, date bounds widened to whole Chicago sessions as for bars, [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/trades_v1` |
+| `quotes(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` (as `trades`) | `us_futures_{venue}/quotes_v1` |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, venue: FuturesVenue \| None = None)` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
-| `snapshots(symbols, *, product_code: str \| None = None, …F)`; `ALL` with `product_code` is every contract of a product | Query | | `/futures/v1/snapshot` | |
-| `contracts(*, product_code: str \| None = None, …F)`, `products(…F)`, `exchanges()`, `market_status(…F)` | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
-| `schedules(…T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
+| `snapshots(symbols, *, product_code: str \| None = None, …F)`; `ALL` with `product_code` is every contract of a product; `Symbol` is the generated `DetailsTicker` field, where the OpenAPI schema nests the contract's ticker (`details.ticker`; [section 23](#23-open-verification-items)) | Query | | `/futures/v1/snapshot` | |
+| `contracts(*, product_code: str \| None = None, …F)`, `products(*, product_code: str \| None = None, …F)`, `exchanges(*, limit: int \| None = None, filters: Mapping[str, FilterValue] \| None = None)`, `market_status(*, product_code: str \| None = None, limit: int \| None = None, filters: Mapping[str, FilterValue] \| None = None)` (neither path takes `sort`) | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
+| `schedules(*, product_code: str \| None = None, …T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
+
+`product_code` is typed on every futures dataset whose path takes it (`snapshots`,
+`contracts`, `products`, `market_status`, `schedules`), so it is never a `filters` key there.
+`session_end_date` on `trades` and `quotes` is not their time axis: `start` and `end` of
+`history()` address `timestamp`, and `session_end_date` stays an ordinary filter of the path.
 
 No futures dataset has a "last" endpoint, so no futures stream query has `fetch()`.
 `snapshots(symbols).fetch()` is the one-request answer. There is no futures `day_aggs` flat
@@ -1113,7 +1129,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 |---|---|---|---|---|
 | `values(symbols)` | StreamHistoryLatestQuery | `V` | fetch `/v3/snapshot/indices` projected to `Value`, with `Timestamp` from `last_updated`; history flat files only | `us_indices/values_v1` |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: the endpoint has none) | overloads | `A`, `AM` | `/prev` (DAY); range | `us_indices/{minute,day}_aggs_v1` |
-| `snapshots(symbols, *, …F)` | Query | | `/v3/snapshot/indices` | |
+| `snapshots(symbols, *, …F)` | Query | | `/v3/snapshot/indices`, 250 tickers per request | |
 | `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/{t}/{date}` | |
 
 ### 8.5 `m.forex`
@@ -1136,7 +1152,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
-| `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` | |
+| `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
 
 ### 8.7 `m.reference`
 
@@ -1166,7 +1182,7 @@ All return `Query`. The symbol prefix selects the asset class. The axis is `time
 
 ```python
 sma(symbols, window: int, *, timespan: Timespan = Timespan.DAY,
-    series_type: SeriesType = SeriesType.CLOSE, adjusted: bool = True,
+    series_type: SeriesType = SeriesType.CLOSE, adjusted: bool | None = None,
     start: DateLike | None = None, end: DateLike | None = None,
     order: Order | None = None, limit: int | None = None,
     filters: Mapping[str, FilterValue] | None = None)
@@ -1174,19 +1190,24 @@ ema(...)   # same signature as sma
 rsi(...)   # same signature as sma
 macd(symbols, *, short_window: int, long_window: int, signal_window: int,
      timespan: Timespan = Timespan.DAY,
-     series_type: SeriesType = SeriesType.CLOSE, adjusted: bool = True,
+     series_type: SeriesType = SeriesType.CLOSE, adjusted: bool | None = None,
      start: DateLike | None = None, end: DateLike | None = None,
      order: Order | None = None, limit: int | None = None,
      filters: Mapping[str, FilterValue] | None = None)
 ```
 
-REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol; crypto symbols use the
-`{cryptoTicker}` template, which has no `adjusted` parameter. The axis is half-open
-(`timestamp.gte`/`.lt`). The endpoints have no `sort` (rows are in timestamp order, set by their
-own `order` parameter) and no multiplier, so neither is offered; `expand_underlying` is not
-offered either, because the underlying bars it adds are not rows of the table.
-`Timespan.SECOND` and `Timespan.SESSION` are rejected with `ValueError`: the endpoints' timespan
-enum runs from `minute` to `year`.
+REST: `/v1/indicators/{sma,ema,rsi,macd}/{t}` per symbol. The axis is half-open
+(`timestamp.gte`/`.lt`). The indicator paths have an `order` parameter but no `sort`, so the
+signature keeps `order` and has no `sort` ([section 9](#9-filters)). They have no multiplier,
+so none is offered, and `expand_underlying` is not offered either, because the underlying bars
+it adds are not rows of the table. `Timespan.SECOND` and `Timespan.SESSION` are rejected with
+`ValueError`: the endpoints' timespan enum runs from `minute` to `year`. Crypto symbols are
+served by the `{cryptoTicker}` templates, chosen per symbol through
+`DatasetSpec.fetch_paths_by_class` ([section 13.4](#134-rest)). Those templates have no
+`adjusted` parameter, so `adjusted` defaults to None, which sends nothing and leaves Massive's
+default in force. An explicit `True` or `False` is sent where the chosen path declares
+`adjusted`, and raises `ValueError` for a symbol whose path does not (a crypto symbol), rather
+than being dropped silently.
 
 ### 8.9 `m.economy`
 
@@ -1207,11 +1228,15 @@ All return `Query`.
 | Vendor | Methods | REST |
 |---|---|---|
 | `benzinga` | `analysts`, `analyst_insights`, `ratings`, `bulls_bears_say`, `guidance`, `earnings`, `firms` — `(symbols=None, …F)` where the endpoint takes tickers, `(…F)` otherwise | `/benzinga/v1/{analysts,analyst-insights,ratings,bulls-bears-say,guidance,earnings,firms}` |
-| `benzinga` | `consensus_ratings(symbols)` | `/benzinga/v1/consensus-ratings/{t}` per symbol (the ticker is a path segment) |
-| `benzinga` | `news(*, symbols=None, …T)`, axis `published` | `/benzinga/v2/news` |
+| `benzinga` | `consensus_ratings(symbols, *, filters: Mapping[str, FilterValue] \| None = None)` | `/benzinga/v1/consensus-ratings/{t}` per symbol (the ticker is a path segment); `filters` reaches the path's `date` family |
+| `benzinga` | `news(*, symbols=None, …T)`, axis `published` (an instant) | `/benzinga/v2/news` |
 | `etf_global` | `analytics`, `constituents`, `fund_flows`, `profiles`, `taxonomies` — `(symbols=None, …F)` | `/etf-global/v1/{analytics,constituents,fund-flows,profiles,taxonomies}` |
 | `tmx` | `corporate_events(symbols=None, …T)`, axis `date` | `/tmx/v1/corporate-events` |
 | `fable` | `merchant_aggregates(…T)`, `merchant_hierarchy(…F)` | `/consumer-spending/eu/v1/{merchant-aggregates,merchant-hierarchy}` |
+
+On the `etf_global` datasets `Symbol` is the fund the row describes (for `constituents`, the
+ETF, not the holding). Each partner dataset's `poll()` key is a set of its own generated
+columns that is unique per row, checked against the generated fields of its path.
 
 ### 8.11 `m.snapshots`
 
@@ -1332,15 +1357,35 @@ equality forms of the symbol parameter (its base name, `.any_of`, and `.all_of`:
 filters, since `symbols` cannot express an alphabetical range; the whole family of the time
 axis (its base name and every `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and `.all_of` form,
 so `date.any_of` is reserved too although `start` and `end` cannot express a list of dates);
-`limit`, `sort`, `order`; and the typed keyword parameters. An unknown
+`limit`, `sort`, `order`; and the whole family of every typed keyword parameter of the factory
+(its base name and its `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and `.all_of` forms, so
+`product_code_any_of` is rejected on a futures dataset that types `product_code`). An unknown
 key, a value of the wrong kind, or a value outside a parameter's enum raises `ValueError` naming
-the valid keys or values. When Massive adds a filter, refreshing the snapshot adds it; no code
-changes.
+the valid keys or values; a key reserved by a typed parameter names that parameter. The
+reservation is one shared check in the filter validation, fed the dataset's typed parameters,
+never a guard in a namespace module. Parameters the library always sets itself (the
+`type=options` of `options.snapshots`) are reserved the same way. When Massive adds a filter,
+refreshing the snapshot adds it; no code changes.
+
+**`sort` and `order`.** Most list endpoints have no `order` parameter: the direction is an
+`.asc` or `.desc` suffix inside `sort`. On such a path the REST transport folds the two, so
+`sort="date", order=Order.DESC` sends `sort=date.desc`, and `sort` alone is sent unchanged; on
+such a path `order` without `sort` raises `ValueError` at query construction, since there is
+nothing to fold it into. A path that has its own `order` parameter (`/v3/snapshot/indices`,
+`/v3/trades`, the reference lists, the indicators) receives `sort` and `order` as they are,
+and `order` alone is valid there. Which form applies is read from the path's generated
+parameters, never from a hand list. A dataset whose paths have neither parameter offers
+neither; one whose paths have `order` but no `sort` (the indicators) offers `order` alone
+([section 8](#8-namespace-tree)).
 
 `start` and `end` map to the wire parameter pair recorded per dataset in the catalog
-(`timestamp.gte`/`timestamp.lt`, `published_utc.gte`/`published_utc.lte`,
-`ex_dividend_date.gte`/`ex_dividend_date.lte`, `filing_date.gte`/`filing_date.lte`,
-`session_end_date.gte`/`session_end_date.lte`, and so on). Passing any form of the same axis
+(`DatasetSpec.time_axis`). The pair follows the axis: an instant axis is half-open, `.gte` and
+`.lt` (`timestamp.gte`/`timestamp.lt`, `published_utc.gte`/`published_utc.lt`,
+`published.gte`/`published.lt`), and a calendar-date axis is whole days, `.gte` and `.lte`
+(`ex_dividend_date.gte`/`ex_dividend_date.lte`, `filing_date.gte`/`filing_date.lte`,
+`session_end_date.gte`/`session_end_date.lte` on `futures.schedules`, and so on). Bars declare
+no `time_axis`: `history()` fills the range path's `{from}` and `{to}` segments instead
+([section 13.4](#134-rest)). Passing any form of the same axis
 through `filters` (as `timestamp_gte`, `timestamp_lte`, or `timestamp`, for example) raises
 `ValueError`.
 
@@ -1515,9 +1560,10 @@ timezone-aware `datetime` is used as is.
   `end - 1 ns`.
 - **UTC** for forex and crypto.
 - **Sessions** for futures. A date means the trading session whose `session_end_date` equals
-  it. `trades` and `quotes` use `session_end_date.gte`/`.lte`. `bars` request `window_start`
-  widened by one day on each side in America/Chicago and post-filter
-  `SessionEndDate` within `[start, end]`. Flat-file keys are assumed to be keyed by session date
+  it. `trades`, `quotes`, and `bars` all request their instant range (`timestamp` for trades
+  and quotes, `window_start` for bars) widened by one day on each side in America/Chicago and
+  post-filter `SessionEndDate` within `[start, end]`; `session_end_date` stays an ordinary
+  filter of the trades and quotes paths, never their time axis. Flat-file keys are assumed to be keyed by session date
   (**UNVERIFIED**: the futures flat-file overview says only "standardized in Central Time"; the
   implementation checks every block of every futures file against its key, and a
   `session_end_date` that differs from the key's date, or is empty, fails loudly). With
@@ -1561,7 +1607,13 @@ life, and resolution is **single-flight**: the cache holds one future per (class
 created under the transport's own leaf lock (never `registry_lock`); the first caller makes
 the REST call and completes the future, and later callers wait on it outside every lock. A
 failed resolution completes the future with the error and removes it, so nothing is cached.
-Each new decision writes the pair's `Transport=REST` row of `m.connections()`.
+Each new decision writes the pair's `Transport=REST` row of `m.connections()`. The cache is
+the one place a decision lives: the explicit-verdict rule of
+[section 13.3](#133-connection-and-subscription-protocol) records its re-routed decision there
+through `RestTransport.record_verdict(asset_class, family, decision)`, which replaces the cached
+decision under the same leaf lock (a caller already waiting on the earlier decision still gets
+that one) and rewrites the pair's row with the new host, `Recency=DELAYED`, and evidence
+`"server verdict: <message>"`.
 
 ```
 resolve(asset_class, family) -> HostDecision(host, recency, evidence)
@@ -1848,9 +1900,14 @@ sees:
 - **Fan-out.** In a per-symbol `fetch()` or `poll()` cycle (`ticker_details`,
   `daily_open_close` on a holiday, `/prev`, the "last" endpoints), an HTTP 404 for one symbol
   drops that symbol, with one WARNING per symbol; every other error fails the call.
-- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, or hits
+- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
   a data failure of [section 19.5](#195-runtime-drift) (a missing required key, an
-  unconvertible value, a timestamp out of bounds), fails the table through `publish_failure`.
+  unconvertible value, a timestamp out of bounds), or plans a request with a parameter the
+  chosen path does not take (a reactive symbol table's new symbol routed to a path that lacks
+  an explicit parameter; retrying cannot fix it) fails the table through `publish_failure`.
+  `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
+  every path, with a reactive table the parameters against the dataset's fetch paths, at
+  least one of which must take every one of them. An emptied symbol table plans no request.
   Any other error is logged at ERROR, sets the stream's `Error` in `m.streams()`, keeps the
   previous rows, and the next cycle runs as scheduled.
 - **Drift.** `to_batch` returns each page's `DriftReport`; the transport routes it to the
@@ -1863,8 +1920,47 @@ sees:
 - Every error message names the HTTP status, the path, and the response's `request_id`, and is
   logged at ERROR with the same text; the API key never appears in a message or a log.
 
-Per-ticker `NOT_ENTITLED` rows in snapshots keep their `Error` and `Message` columns and are
-logged once.
+How a request is built from a `DatasetSpec` and a `Request`:
+
+- **Path parameters.** The symbol fills its own segment (`{stocksTicker}`, or `{from}` and
+  `{to}` of a pair). Every other path parameter (`direction`, `from`, `to`, `amount`,
+  `precision`, `date`) travels in `Request.params` under its wire name and fills the path's
+  `{name}` segment; it is not sent again as a query parameter. A one-day path parameter is
+  turned into a calendar date by `calendar_day` in `_datasets/dates.py`: a date or
+  `"YYYY-MM-DD"` as given, an aware `datetime` as the calendar day it falls on in the dataset's
+  day zone ([section 12](#12-timestamp-units-and-day-boundaries)).
+- **Bars ranges.** A bars spec declares no `time_axis`. `history()` fills the range path's
+  `{from}` and `{to}` segments from its bounds, as epoch milliseconds or as `YYYY-MM-DD`
+  according to the kind the generated path gives the parameter.
+- **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
+  of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
+  (250 on the unified snapshot and the indices snapshot), the transport splits the symbol
+  list into batches of at most that size, issues them in order, and concatenates the rows;
+  None sends every symbol in one request. A projected
+  `fetch()` (`indices.values`) batches the same way, so it is not one request per symbol.
+- **A path per symbol class.** `DatasetSpec.fetch_paths_by_class: Mapping[AssetClass, str]`
+  (empty by default) names the fetch path that serves symbols of one class, for a dataset that
+  spans classes whose vendor templates differ (the indicators:
+  `{AssetClass.CRYPTO: "/v1/indicators/sma/{cryptoTicker}"}`). Each symbol's class is
+  `symbol_class(symbol)` in `_datasets/symbols.py`; a class without an entry uses
+  `fetch_path`. Each such path is a source of the dataset and declares its `keys` like any
+  other.
+- **Only declared parameters are sent.** A request carries only the parameters its chosen
+  path declares in its generated parameters. A typed parameter the chosen path lacks raises
+  `ValueError` naming the parameter and the path, rather than being dropped silently.
+- **Per-symbol detail paths.** A dataset with both a list path (`fetch_path`) and a per-symbol
+  detail path (`DatasetSpec.detail_path`; `options.contracts`:
+  `/v3/reference/options/contracts` and `/v3/reference/options/contracts/{o}`) calls the
+  detail path once per symbol when symbols are given and the list path when they are not. The choice follows from the spec's role
+  paths, never from the dataset's name.
+- **Row symbols are canonical.** A `symbol` key read from the rows, not from the request,
+  goes through `canonical(spec.asset_class, value)`, exactly as WebSocket rows do, so forex
+  conversion's `AUD/USD` becomes `C:AUDUSD` and matches the symbol the caller passed.
+- **Error rows in multi-ticker snapshots.** A snapshot of several tickers answers a ticker it
+  cannot serve (`NOT_FOUND`, `NOT_ENTITLED`) with a row carrying `error` and `message`.
+  `snapshots()` keeps such rows, with their `Error` and `Message` columns, and logs each
+  ticker once. A projected `fetch()` (`indices.values`) drops an error row and logs one
+  WARNING naming the ticker and the vendor's message, so its result holds only values.
 
 ## 14. Publishers, fan-out, and failure semantics
 
@@ -1926,8 +2022,18 @@ logged once.
   while a derived table or an open panel still keeps the publisher alive (the row moves from
   `RELEASED` to `FAILED` with its `Error`), or after the blink table shut down while results
   are still held. A failure reported for a stream that has left the registry is only logged.
-- REST `poll()` tables use a per-table publisher (`APPEND`) or a keyed `input_table`
-  (`REPLACE`, `UPSERT`), created in the result scope.
+- Each REST `poll()` table has its own publisher, named `massive.<dataset>#<stream id>` and
+  created with the result in the result scope; every mode is shaped from its blink table, so
+  `publish_failure` fails the table in every mode. (A keyed `input_table` cannot be failed:
+  Deephaven notifies failures only inside an update cycle.) `APPEND` is
+  `blink_to_append_only(blink)`; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE` is that
+  `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone row for
+  every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`, so its
+  rows and its removals land in one update. The `last_by` state keeps a hidden row for every key
+  ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a churning
+  key set (an options chain, the day's movers) grows with the keys it has held. The `poll()`
+  docstring says so. The poller holds the session core only weakly, so a `poll()` table never
+  keeps an unclosed session alive.
 
 ## 15. Options contract cap
 
@@ -2117,7 +2223,7 @@ without the GIL.
 | caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key | hold the registry lock while calling Deephaven or waiting |
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
-| poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
+| poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
@@ -2291,7 +2397,7 @@ refresh/             build time only; excluded from the wheel; may import any of
   hand_input.py      HandInput: the hand tables bundled for the generators
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
   overrides.py       NAMES, KINDS, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
-                     TRANSPORT_ONLY, RESULT_KEYS, PARAM_UNITS, VENUES
+                     KEY_FIXES, TRANSPORT_ONLY, RESULT_KEYS, PARAM_UNITS, VENUES
   exclusions.py      EXCLUSIONS (kind, item, reason), the executable rows of section 8.12;
                      SAMPLE_ERRORS (path, wire key, sample, reason), the wrong vendor samples
   drift.py           live-against-snapshot comparison, unaccounted items, deprecations
@@ -2690,8 +2796,12 @@ verification, never a column list.
   timestamp-like string parameter (base name `timestamp`, `*_timestamp`, `updated`,
   `*_updated`, `window_start`, `window_end`, or `*_time`, the names of the `timestamp-unit`
   gate) takes its `PARAM_UNITS` entry: a unit makes it `TIMESTAMP` in that unit (`Param.unit`), and "not an
-  epoch" makes it `DATE`; a string with `format: date` or `date-time`, a choice of formats, or
-  a base name `date`, `*_date`, `*_utc`, or `as_of` is `DATE`; any other string is `STRING`.
+  epoch" makes it `DATE`; a string with `format: date` or `date-time`, a choice of formats, a
+  base name `date`, `*_date`, `*_utc`, or `as_of`, or a description that gives the date format
+  `yyyy-mm-dd` (any letter case) is `DATE`; any other string is `STRING`. The description is
+  the vendor's evidence where the schema is a bare string: Massive types its date filters
+  `{"type": "string"}` and states the format only in prose ("Value must be formatted
+  'yyyy-mm-dd'"), whatever the parameter's name (`period_end`, `active_from`, `published`).
   The `.gt`, `.gte`, `.lt`, and `.lte` variants share their base name's entry.
 - **WebSocket.** Every `websocket.json` channel not in `EXCLUSIONS`, keyed `(cluster,
   channel)` and spelled `"<cluster>/<channel>"` as its `Source.key` (`"stocks/T"`,
@@ -2766,6 +2876,7 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
+| `KEY_FIXES` | `overrides.py` | `{(source, declared key): (wire key, reason)}`: a field the specification declares under one key while every documented sample (the response example and the documentation sample) sends it under another that nothing declares; the field is read under the samples' key, keeping its declared type and description, and every other hand entry names it by that key. Stale once the declared key is gone, or the example no longer sends the corrected key or sends the declared one; each goes into section 23 | ticker events `event_type` → `type` (column `Type`) |
 | `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
@@ -2843,9 +2954,10 @@ description for the reviewer. Every gate has a descriptive name, which is how th
   decided by the representation rules. A timestamp-like string REST parameter (by its base
   name) with no `PARAM_UNITS` entry fails the same gate;
 - **`stale-entry`:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict,
-  `TYPE_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry
+  `TYPE_FIXES`, `KEY_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry
   naming a source, field, or parameter the snapshot lacks, or claiming what the snapshot contradicts (a type fix
-  whose declared type the spec no longer gives, a tag conflict the tag no longer contradicts,
+  whose declared type the spec no longer gives, a key fix whose key the example no longer
+  sends in place of the declared one, a tag conflict the tag no longer contradicts,
   a `NAMES` quote the description no longer matches, an exclusion of a path the spec already
   marks deprecated or draft); an identity entry no generated object uses is stale too;
 - **`type-agreement`:** within one kind, one column name joins to one `WireType`, unless a
@@ -3647,6 +3759,27 @@ document already reflects them.
 49. **Each table keeps its endpoint's spelling** (2026-10-27). One concept spelled two ways by
     Massive gets one column within a table, but no cross-table unification or synonym map
     ([section 19.4](#194-generated-schemas), "Cross-table naming").
+50. **Dataset gaps settled while declaring the namespaces** (2026-10-28). `order` is sent as
+    is where a path has its own `order` parameter and folded into `sort` as a `.asc`/`.desc`
+    suffix where it has none, and only there is `order` without `sort` a `ValueError`; a
+    dataset whose paths have neither parameter offers neither, and the indicators, whose
+    paths have `order` but no `sort`, keep `order` alone ([section 9](#9-filters)). The whole family of every typed
+    parameter is reserved from `filters` in one shared check. Instant axes are half-open
+    (`.gte`/`.lt`), date axes whole days (`.gte`/`.lte`). Futures trades and quotes take the
+    `timestamp` range widened to whole Chicago sessions, as bars do
+    ([section 12](#12-timestamp-units-and-day-boundaries)). The REST transport fills path
+    parameters from `Request.params`, fills the bars `{from}`/`{to}` from `history()`'s bounds,
+    batches symbols by `DatasetSpec.symbols_per_request`, picks a path per symbol class by
+    `DatasetSpec.fetch_paths_by_class`, sends only the parameters the chosen path declares,
+    picks a per-symbol detail path from
+    the role paths, canonicalizes symbols read from rows, and drops error rows only from a
+    projected `fetch()` ([section 13.4](#134-rest)). The § 8 rows gain `product_code` on every
+    futures dataset that takes it, `adjusted` on the options and crypto `daily_open_close`,
+    `filters` on `consensus_ratings`, `type=options` on `options.snapshots`, and the generated
+    axis of `share_float` ([section 8](#8-namespace-tree)). The indicators take
+    `adjusted: bool | None = None`: None sends nothing, an explicit value is sent where the
+    chosen path declares `adjusted`, and raises `ValueError` on the crypto templates, which do
+    not.
 
 ## 23. Open verification items
 
@@ -3673,9 +3806,11 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/datasets/test_history_source.py`: AUTO before and after the cutoff | `tests/ingest/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |
 | 14 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/ingest/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
 | 15 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): request a weekend key and record the status |
-| 16 | Whether the described copy of a keyed `input_table` (a `poll()` result in `REPLACE` or `UPSERT` mode) keeps the input-table attribute, which the web UI reads to offer editing ([section 7.4](#74-column-descriptions)) | The poller writes only through the `input_table` it holds, never through the returned copy, so either outcome keeps the rows correct; the copy carries the descriptions either way | `tests/tables/test_columns.py`: the copy of a keyed `input_table` ticks with its parent, carries `ColumnDescriptions`, and pins whichever input-table attribute behaviour 42.7 shows | None: the embedded JVM settles it |
+| 16 | Retired: `poll()` results are no longer keyed `input_table`s but shapes of a publisher's blink table ([section 14](#14-publishers-fan-out-and-failure-semantics)), so no input-table attribute is involved | | | |
 | 17 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
 | 18 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/namespaces/test_forex_integration.py`: one `C` frame; record the form of `x` |
 | 19 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/namespaces/test_crypto_integration.py`: one `XT` frame; record the form of `i` |
 | 20 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); the overflow check and the [1990, 2100] bound fail loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
 | 21 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
+| 22 | Where the futures snapshot carries a contract's ticker: the OpenAPI schema nests it as `details.ticker`, which the generator names `DetailsTicker` | `futures.snapshots` declares `DetailsTicker` as its `symbol` key; a row without it is a missing required key and fails loudly ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: a spec-shaped fixture fills `Symbol` from `details.ticker` | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for a current contract; record where the ticker appears and that `Symbol` is filled |
+| 23 | Key of the REST ticker events' event type (`/vX/reference/tickers/{id}/events`): the schema declares the required `event_type`, while the response example, the documentation sample, and Massive's Python client all use `type` | A `KEY_FIXES` entry reads the field as `type`, column `Type`; were the wire to send `event_type`, `Type` would be null and `event_type` would be reported as drift | `tests/massive/refresh/test_overrides.py`: the entry reads `event_type` as `type`, column `Type` | `tests/namespaces/test_reference_integration.py`: one `ticker_events` request; record which key the events carry |

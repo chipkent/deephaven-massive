@@ -2333,7 +2333,7 @@
    },
    "/vX/reference/tickers/{id}/events": {
     "date": "The date the event took place",
-    "event_type": "The type of historical event for the asset",
+    "type": "The type of historical event for the asset",
     "ticker_change.ticker": "A ticker symbol"
    }
   },
