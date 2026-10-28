@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table, time_table
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     import pytest
     from deephaven.table import Table
+    from deephaven.table_listener import TableUpdate
 
 
 def test_canonical_view(dh_exec_ctx: object) -> None:
@@ -99,3 +100,38 @@ def test_a_watch_lives_as_long_as_its_keeper(dh_exec_ctx: object) -> None:
     watchlist.add(new_table([string_col("Symbol", ["EUR/USD"])]))
     wait_for(lambda: len(seen) == 1)
     keeper_scope.release()
+
+
+class _Update:
+    # The parts of a `TableUpdate` the counter reads, for calls from a Python thread: Deephaven
+    # delivers real updates on its own threads, which line coverage before 3.14 cannot see.
+    def __init__(self, **columns: list[str]) -> None:
+        self._columns = columns
+
+    def added(self, cols: list[str]) -> dict[str, list[str]]:
+        return {cols[0]: self._columns.get("added", [])}
+
+    def modified(self, cols: list[str]) -> dict[str, list[str]]:
+        return {cols[0]: self._columns.get("modified", [])}
+
+    def modified_prev(self, cols: list[str]) -> dict[str, list[str]]:
+        return {cols[0]: self._columns.get("modified_prev", [])}
+
+    def removed(self, cols: list[str]) -> dict[str, list[str]]:
+        return {cols[0]: self._columns.get("removed", [])}
+
+
+def test_the_counter_reports_set_changes_of_updates() -> None:
+    seen: list[Change] = []
+    counter = _SymbolCounter(lambda added, removed: seen.append((added, removed)))
+    updates = [
+        _Update(added=["A", "A", "B"]),
+        _Update(removed=["A"]),  # one of A's two rows remains
+        _Update(modified=["C"], modified_prev=["A"]),  # A's last row now holds C
+    ]
+    for update in updates:
+        counter.on_update(cast("TableUpdate", update), is_replay=False)
+    assert seen == [
+        (frozenset({"A", "B"}), frozenset()),
+        (frozenset({"C"}), frozenset({"A"})),
+    ]
