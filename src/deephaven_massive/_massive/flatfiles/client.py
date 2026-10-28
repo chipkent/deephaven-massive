@@ -5,9 +5,11 @@
 prefixes for the refresh's drift check (`prefixes`). It takes plain arguments, never the
 library's configuration, and maps every S3 failure to the wire errors of `net.errors`:
 
-- a 404 whose S3 error code is `NoSuchKey` is no error: `open` returns None, and the library
-  applies its missing-file policy; any other 404 (`NoSuchBucket`, another code, or none) is a
-  `WireError` naming the bucket and the key, so a wrong bucket never looks like a missing file;
+- a 404 whose body is S3's error with the code `NoSuchKey` is no error: `open` returns None,
+  and the library applies its missing-file policy; any other 404 (another S3 code, no code, or
+  a body that is not S3's, such as the HTML "404 Not Found" page Massive's front end serves
+  for a path it does not route) is a `WireError` naming the bucket and the key, so a wrong
+  bucket or endpoint never looks like a missing file;
 - a 403 whose S3 error code says the credentials themselves are wrong (`InvalidAccessKeyId`,
   `SignatureDoesNotMatch`) is `WireAuthError`;
 - any other 403 is `WireEntitlementError`;
@@ -42,8 +44,9 @@ The client follows the network rules the REST and WebSocket clients follow, from
   them and read the object again from its start, waiting first with `wait_to_reread`, which
   follows the same schedule and limit.
 
-The body of an object reaches `FlatFile` through a small stream that turns botocore's read
-errors (a connection dropped part-way through the body) into `OSError`, so the reader needs no
+The body of an object reaches `FlatFile` through a small stream that turns botocore's and
+urllib3's read errors (a connection dropped, reset, or broken at the TLS layer part-way
+through the body) into `OSError`, so the reader needs no
 botocore. This module imports only the standard library, `boto3`, `botocore`, `urllib3`, and
 the rest of `flatfiles` and `net`; the package's interface resolves it only when
 `FlatFileClient` is first used, so a session that reads no flat file never imports boto3.
@@ -72,7 +75,7 @@ from botocore.exceptions import (
     SSLError,
 )
 from botocore.exceptions import ConnectionError as BotoConnectionError
-from urllib3.exceptions import ProtocolError
+from urllib3.exceptions import HTTPError, ProtocolError
 from urllib3.exceptions import ReadTimeoutError as ResponseReadTimeoutError
 
 from deephaven_massive._massive.flatfiles.reader import FlatFile
@@ -152,8 +155,10 @@ class _Retryable:
 class _Body:
     """An object's response body, read as a plain binary stream.
 
-    botocore raises its own errors when the connection drops part-way through a body; this
-    stream raises them as `OSError` (chained to the original), the error every other stream
+    botocore raises its own errors when the connection drops part-way through a body, and
+    lets some of urllib3's through unwrapped (a TLS failure while reading, which urllib3
+    raises as its `SSLError`); this stream raises all of them as `OSError` (chained to the
+    original), the error every other stream
     raises for a failed read. Used by one reader thread; `close()` is safe from any thread.
     """
 
@@ -181,7 +186,7 @@ class _Body:
         """
         try:
             return self._body.read(None if size < 0 else size)
-        except BotoCoreError as error:
+        except (BotoCoreError, HTTPError) as error:
             raise OSError(str(error)) from error
 
     def close(self) -> None:
@@ -294,10 +299,10 @@ class FlatFileClient:
 
         Errors: `WireError` when the client is closed (no request is made) or cannot be
         created, TLS fails (never retried), a retryable failure persists after the last retry,
-        S3 answers a 404 whose error code is not `NoSuchKey` (such as `NoSuchBucket`, a wrong
-        bucket: `"cannot read s3://flatfile/<key> at https://files.massive.com: HTTP 404
-        (NoSuchBucket: The specified bucket does not exist)"`), or S3 answers any other status
-        but 200 and 404. On HTTP 403 it is the subclass `WireAuthError` when S3 rejects the
+        the endpoint answers a 404 that is not S3's `NoSuchKey` (for a wrong bucket, Massive's
+        front end serves an HTML page, which reads as `"cannot read s3://flatfile/<key> at
+        https://files.massive.com: HTTP 404 (404: Not Found)"`), or S3 answers any other
+        status but 200 and 404. On HTTP 403 it is the subclass `WireAuthError` when S3 rejects the
         credentials themselves, and otherwise `WireEntitlementError`: the plan lacks the files.
         The message names the object and quotes S3's error code and message, such as `"HTTP
         403 for s3://flatfiles/<key> at https://files.massive.com (AccessDenied: Access
@@ -307,7 +312,7 @@ class FlatFileClient:
             key: The object key (`object_key`).
 
         Returns:
-            The object, open for reading, or None if the bucket answered 404 `NoSuchKey`.
+            The object, open for reading, or None if S3 answered 404 `NoSuchKey`.
         """
         location = f"s3://{self._bucket}/{key} at {self._endpoint_url}"
 
@@ -335,6 +340,8 @@ class FlatFileClient:
         client's clock. Each is logged at INFO and giving up at ERROR, naming the failure.
         Blocks the calling thread for the wait, which ends early once `cancel` is set, by the
         caller or by `close()`; the caller then finds the call stopped or the client closed.
+        When `cancel` is already set or the client already closed, it returns at once, with
+        no wait and no log line, since no reread will follow.
 
         Args:
             error: The failed read's error, for the log.
@@ -349,6 +356,10 @@ class FlatFileClient:
         if retry == MAX_RETRIES:
             _log.error("%s; giving up after %d reads", error, retry + 1)
             return False
+        with self._lock:
+            if self._closed.is_set() or cancel.is_set():
+                return True
+            self._rereads.append(cancel)
         wait = transient_wait(retry, _JITTER.random())
         _log.info(
             "%s; reading it again from its start, reread %d of %d in %.2f s",
@@ -357,10 +368,6 @@ class FlatFileClient:
             MAX_RETRIES,
             wait,
         )
-        with self._lock:
-            if self._closed.is_set():
-                return True
-            self._rereads.append(cancel)
         try:
             self._clock.wait(cancel, wait)
         finally:
@@ -379,8 +386,8 @@ class FlatFileClient:
         round trip and any retry waits, and `close()` ends a retry wait at once. The first
         request of either method creates the boto3 client.
 
-        Errors: as for `open`, except that HTTP 404 (S3's `NoSuchBucket`) is a `WireError`
-        too. A message names the bucket instead of an object, such as `"HTTP 403 for
+        Errors: as for `open`, except that every HTTP 404 is a `WireError`, whatever its
+        code. A message names the bucket instead of an object, such as `"HTTP 403 for
         s3://flatfiles/ at https://files.massive.com (AccessDenied: Access Denied)"`, and its
         `path` is `""`. A page that says the listing goes on but gives no continuation token,
         or repeats the one it was asked with, is a `WireError` too: following it would stop

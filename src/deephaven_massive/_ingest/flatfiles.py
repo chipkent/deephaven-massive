@@ -48,13 +48,12 @@ publication time (`within_publication_grace` in `_datasets/history_source.py`) i
 `MassiveError` naming both causes, and after that it is skipped with a WARNING like any other
 weekday.
 
-A missing file is one S3 answers with `NoSuchKey`; any other 404 (`NoSuchBucket`, for a wrong
-`MassiveConfig.s3_bucket`) raises `MassiveError` naming the bucket and the settings to check.
-Holidays are isolated, so a range that holds a trading date but no file at all raises
-`MassiveError` too, rather than return an empty table: the bucket may be wrong, Massive may
-have renamed the prefix, or the range may lie wholly before the dataset's first file. A
-futures range named by instants is exempt, since its roll forward finds the next session's
-file or raises.
+A missing file is one S3 answers with HTTP 404 and the S3 error code `NoSuchKey`. Any other
+404 (another S3 code, or a page that is not S3's at all, such as the HTML "404 Not Found" page
+Massive's front end serves for a path it does not route) raises `MassiveError` naming the
+object and the settings to check (`MassiveConfig.s3_bucket` and `s3_endpoint_url`). A range
+with no file at all is no error: it returns an empty table, with a WARNING per missing
+weekday, whatever the reason.
 
 A connection that drops part-way through a file does not fail the call: a file's rows stay
 with its reader until the file ends, so the reader discards them and reads the file again
@@ -101,6 +100,7 @@ import contextlib
 import functools
 import logging
 import threading
+import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -499,19 +499,20 @@ class FlatFileHistory:
         Returns:
             A static table in the dataset's schema: the files' rows in date order (and, for
             futures, venue order within a date), each file's rows in file order. A range
-            without rows gives an empty table with every column.
+            without rows, or without any file, gives an empty table with every column.
 
         Errors, all raised on the calling thread: `AuthenticationError` when S3 rejects the S3
         credentials; `EntitlementError` when S3 answers HTTP 403 for a file otherwise, naming
         the venue and the `venue=` parameter for futures; `MassiveError` when the file for the
         last requested date is missing on a trading day within a day after its publication time
         (`"... is not yet published (flat files land ~11:00 ET next day), or was a market
-        holiday"`), when a range with a trading date has no file at all (`"<dataset>: no file
-        of the range exists, from s3://<bucket>/<first key> to <last key>: ..."`), when the S3
-        client cannot be created, the bucket is unreachable, does not exist (`NoSuchBucket`),
-        or answers another error, a file's connection drops part-way on its first read and on
-        each of its three rereads, a file is not the expected gzip CSV (for example, it lacks
-        the symbol or time header, or a value does not parse as its type), a timestamp
+        holiday"`), when the S3 client cannot be created, the bucket is unreachable, answers
+        a 404 that is not S3's `NoSuchKey` (a wrong bucket or endpoint: `"cannot read
+        s3://<bucket>/<key> at <endpoint>: HTTP 404 (404: Not Found); check MassiveConfig
+        s3_bucket and s3_endpoint_url"`), or answers another error, a file's connection drops
+        part-way on its first read and on each of its three rereads, a file is not the
+        expected gzip CSV (for example, it lacks the symbol or time header, or a value does
+        not parse as its type), a timestamp
         overflows or lies outside 1990 to 2100 (`"timestamp unit mismatch for
         <dataset>.<header>: ..."`, then the file), a futures file holds another session, or
         the session is closed during the call. Errors that come from S3 carry its
@@ -548,7 +549,7 @@ class FlatFileHistory:
         raises the failure of the earliest file (an interrupt is re-raised as is). If the
         session was closed meanwhile, it raises `"MassiveSession #1 is closed"`, whatever the
         reads returned: a request in flight at the close may have been answered with any
-        outcome. The missing-file errors of `_skip_missing` propagate.
+        outcome. The missing-file error of `_skip_missing` propagates.
 
         Args:
             spec: The dataset.
@@ -576,7 +577,7 @@ class FlatFileHistory:
         self._check_open()
         parts = [_outcome(future) for future in futures]
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
-        self._skip_missing(spec, keys, missing, last=last, rolls=roll is not None)
+        self._skip_missing(spec, missing, last=last)
         logger.info(
             "%s history: source=S3 files=%d skipped=%s",
             spec.name,
@@ -772,10 +773,14 @@ class FlatFileHistory:
         Returns:
             The file's tables; None if the file does not exist; or, when the connection dropped
             part-way through the body (`FlatFile.dropped`), the read's error, with the body
-            closed and the tables gathered so far discarded.
+            closed and the frames its traceback holds cleared, so the tables gathered so far
+            are freed before the wait and the next read.
 
         Raises:
-            MassiveError: Every failure `_read_key` describes except a dropped connection.
+            MassiveError: Every failure `_read_key` describes except a dropped connection,
+                including its subclasses `AuthenticationError` and `EntitlementError`. A
+                cancelled call raises `_CancelledError` instead, which is not a
+                `MassiveError`.
         """
         self._check(cancel)
         file = None
@@ -796,9 +801,11 @@ class FlatFileHistory:
                     raise MassiveError(f"{error} (in {file.location})") from error
         except WireError as error:
             if file is not None and file.dropped:
-                # The tables gathered so far die with the failed call; none was handed on, so
-                # reading the file again from its start repeats no row.
-                return error
+                # None of the tables gathered so far was handed on, so reading the file again
+                # from its start repeats no row. The error's traceback still holds them, in
+                # the frames it passed through; clearing those frames frees them now rather
+                # than after the next read.
+                return _released(error)
             public = _public(error, key)
             raise public from error
 
@@ -852,79 +859,62 @@ class FlatFileHistory:
                 tables.append(_convert(pending, transform))
         return tables
 
-    def _skip_missing(
-        self,
-        spec: DatasetSpec,
-        keys: Sequence[_Key],
-        missing: Sequence[_Key],
-        *,
-        last: date,
-        rolls: bool,
-    ) -> None:
+    def _skip_missing(self, spec: DatasetSpec, missing: Sequence[_Key], *, last: date) -> None:
         """Apply the missing-file rules to the files that did not exist.
 
         A weekend file is skipped silently (except for crypto, which trades every day); a
         weekday file is skipped with a WARNING (most likely a market holiday). The file for the
         last requested date may instead be late, so within `PUBLICATION_GRACE` (in
         `_datasets/history_source.py`) after its publication time it raises; after that it is
-        skipped with a WARNING too. Holidays are isolated, so when no file of the range exists,
-        across every venue, and the range holds a trading date, the call raises instead, before
-        any WARNING: the bucket or the prefix is wrong, or the range lies before the dataset's
-        first file. A range of weekend days only (for every class but crypto) is no error. A
-        futures range named by instants is left to `_roll_forward`, which finds the next
-        session's file or raises.
+        skipped with a WARNING too.
 
         Args:
             spec: The dataset.
-            keys: Every key of the request, in date order.
             missing: The keys that S3 reported as missing, in date order.
             last: The last partition date of the request.
-            rolls: True when the request rolls forward past missing last files.
 
         Raises:
             MassiveError: If the file for `last` is missing on a trading day within a day after
                 its publication time: `"<dataset>: <key> does not exist: <date> is not yet
-                published (flat files land ~11:00 ET next day), or was a market holiday"`;
-                if no file of a range with a trading date exists: `"<dataset>: no file of the range
-                exists, from s3://<bucket>/<first key> to <last key>: ..."`, with the causes
-                and the settings to check.
+                published (flat files land ~11:00 ET next day), or was a market holiday"`.
         """
         cutoff = self._core.config.flat_file_publish_cutoff
-        absent = [key for key in missing if _trades(spec, key)]
-        for key in absent:
+        for key in missing:
+            trading = spec.asset_class is AssetClass.CRYPTO or key.day.weekday() < _SATURDAY
+            if not trading:
+                continue
+            day = key.day.isoformat()
             if key.day == last and within_publication_grace(spec, key.day, cutoff=cutoff):
                 raise MassiveError(
-                    f"{spec.name}: {key.key} does not exist: {key.day.isoformat()} is not yet "
-                    "published (flat files land ~11:00 ET next day), or was a market holiday"
+                    f"{spec.name}: {key.key} does not exist: {day} is not yet published (flat "
+                    "files land ~11:00 ET next day), or was a market holiday"
                 )
-        if absent and not rolls and len(missing) == len(keys):
-            raise MassiveError(
-                f"{spec.name}: no file of the range exists, from "
-                f"s3://{self._core.config.s3_bucket}/{absent[0].key} to {absent[-1].key}: "
-                "the range may begin before the dataset's first file, the bucket may not hold "
-                "this prefix (check MassiveConfig s3_bucket and s3_endpoint_url), or every "
-                "date in it was a market holiday"
-            )
-        for key in absent:
             logger.warning(
-                "%s: %s does not exist; skipping %s (a market holiday?)",
-                spec.name,
-                key.key,
-                key.day.isoformat(),
+                "%s: %s does not exist; skipping %s (a market holiday?)", spec.name, key.key, day
             )
 
 
-def _trades(spec: DatasetSpec, key: _Key) -> bool:
-    """Tell whether a file's date is a trading date, whose missing file is worth a word.
+def _released(error: WireError) -> WireError:
+    """Clear the local variables of every finished frame an error's tracebacks hold.
+
+    The error, its cause, and its context keep their messages and their tracebacks' file and
+    line entries, so a final failure still reads the same; only the values the frames held
+    (a failed read's tables and Arrow batches) are released. A frame that is still running
+    is left alone.
 
     Args:
-        spec: The dataset.
-        key: The file.
+        error: The error of a failed read.
 
     Returns:
-        True on a weekday, and on every day for crypto, which trades every day.
+        The same error.
     """
-    return spec.asset_class is AssetClass.CRYPTO or key.day.weekday() < _SATURDAY
+    seen: set[int] = set()
+    link: BaseException | None = error
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        traceback.clear_frames(link.__traceback__)
+        link = link.__cause__ or link.__context__
+    return error
 
 
 def _public(error: WireError, key: _Key) -> MassiveError:

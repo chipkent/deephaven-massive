@@ -9,6 +9,7 @@ import logging
 import re
 import threading
 import tracemalloc
+import weakref
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -1214,12 +1215,11 @@ def test_futures_dates_do_not_roll_forward(
     fake_s3: FakeS3,
     clock: Callable[[datetime], None],
 ) -> None:
-    # A date names its own session exactly: a holiday's hours belong to another session. With
-    # no file in the range at all, the call says so rather than read the next session.
+    # A date names its own session exactly: a holiday's hours belong to another session.
     clock(datetime(2025, 2, 10, tzinfo=UTC))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
-    with pytest.raises(dm.MassiveError, match="no file of the range exists"):
-        q.history("2025-01-20", "2025-01-20", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-01-20", "2025-01-20", source=HistorySource.FLAT_FILES)
+    assert t.size == 0
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
 
@@ -1496,16 +1496,25 @@ def test_a_reread_is_not_made_for_a_broken_file(
     assert (fake_s3.keys(), retry_clock.waits) == ([TRADES_0303], [])
 
 
-@pytest.mark.parametrize("code", ["NoSuchBucket", "NotFound"])
-def test_a_404_that_is_not_a_missing_file_names_the_bucket(
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        # How botocore reads the HTML "Massive 404 Not Found" page of Massive's front end,
+        # which a wrong bucket meets.
+        ("404", "Not Found"),
+        ("NotFound", "Not Found"),
+    ],
+)
+def test_a_404_that_is_not_a_missing_file_names_the_settings(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     caplog: pytest.LogCaptureFixture,
     code: str,
+    message: str,
 ) -> None:
     # A wrong bucket answers 404 for every key; it must not read as a run of holidays.
-    fake_s3.refuse("", status=404, code=code, message="The specified bucket does not exist")
+    fake_s3.refuse("", status=404, code=code, message=message)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with (
         caplog.at_level(logging.WARNING, logger=LOGGER),
@@ -1514,52 +1523,177 @@ def test_a_404_that_is_not_a_missing_file_names_the_bucket(
         q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)
     assert type(info.value) is dm.MassiveError
     assert str(info.value) == (
-        f"cannot read {LOCATION.format(TRADES_0303)}: HTTP 404 ({code}: The specified bucket "
-        "does not exist); check MassiveConfig s3_bucket and s3_endpoint_url"
+        f"cannot read {LOCATION.format(TRADES_0303)}: HTTP 404 ({code}: {message}); check "
+        "MassiveConfig s3_bucket and s3_endpoint_url"
     )
     assert (info.value.status, info.value.request_id) == (404, fake_s3.request_id)
     assert caplog.messages == []
 
 
-@pytest.mark.parametrize(
-    ("start", "end", "first", "last"),
-    [
-        pytest.param("2025-03-03", "2025-03-05", TRADES_0303, TRADES_0305, id="three-weekdays"),
-        # The weekend files are missing too, but only the weekday ones are named.
-        pytest.param("2025-03-01", "2025-03-03", TRADES_0303, TRADES_0303, id="one-weekday"),
-    ],
-)
-def test_a_range_without_any_file_is_an_error(
+def test_a_range_without_any_file_is_an_empty_table(
+    *, session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # No data is no data, whatever the reason: each missing weekday is logged, nothing raises.
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        t = q.history("2025-03-01", "2025-03-04", source=HistorySource.FLAT_FILES)
+    assert t.size == 0
+    assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
+    assert caplog.messages == [
+        f"stocks.trades: {TRADES_0303} does not exist; skipping 2025-03-03 (a market holiday?)",
+        f"stocks.trades: {TRADES_0304} does not exist; skipping 2025-03-04 (a market holiday?)",
+    ]
+
+
+class _Watching(FakeClock):
+    """A fake clock that runs a check at the start of every wait."""
+
+    def __init__(self, check: Callable[[], None]) -> None:
+        super().__init__()
+        self.check = check
+
+    @override
+    def wait(self, event: threading.Event, seconds: float) -> bool:
+        self.check()
+        return super().wait(event, seconds)
+
+
+def test_a_dropped_reads_tables_are_freed_before_the_wait(
     *,
     session: dm.MassiveSession,
-    caplog: pytest.LogCaptureFixture,
-    start: str,
-    end: str,
-    first: str,
-    last: str,
+    fake_s3: FakeS3,
+    many_blocks: Callable[[str], int],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A renamed prefix, a range before the dataset's first file, and a wrong bucket on a server
-    # that answers `NoSuchKey` all look like this; holidays never span a whole range this long.
-    q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with (
-        caplog.at_level(logging.WARNING, logger=LOGGER),
-        pytest.raises(dm.MassiveError) as info,
-    ):
-        q.history(start, end, source=HistorySource.FLAT_FILES)
-    assert str(info.value) == (
-        f"stocks.trades: no file of the range exists, from s3://flatfiles/{first} to {last}: "
-        "the range may begin before the dataset's first file, the bucket may not hold this "
-        "prefix (check MassiveConfig s3_bucket and s3_endpoint_url), or every date in it was a "
-        "market holiday"
+    many_blocks(TRADES_0303)
+    monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 1)  # a table per block, so drops leave some
+    fake_s3.drop(TRADES_0303, times=1, at=len(fake_s3.data(TRADES_0303)) // 2)
+    partial: list[weakref.ref[Table]] = []
+    convert = flatfiles._convert
+
+    def recorded(batches: list[pa.RecordBatch], transform: flatfiles._Transform) -> Table:
+        table = convert(batches, transform)
+        if len(fake_s3.keys()) == 1:  # the read that drops
+            partial.append(weakref.ref(table))
+        return table
+
+    alive: list[int] = []
+
+    def count() -> None:
+        gc.collect()
+        alive.append(sum(ref() is not None for ref in partial))
+
+    monkeypatch.setattr(flatfiles, "_convert", recorded)
+    monkeypatch.setitem(
+        vars(_massive),
+        "FlatFileClient",
+        functools.partial(vars(_massive)["FlatFileClient"].func, clock=_Watching(count)),
     )
-    assert caplog.messages == []  # no holiday WARNING per date before the error
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert t.size == 4000
+    assert partial  # the dropped read had built tables ...
+    assert alive == [0]  # ... and none of them outlived it into the wait
 
 
-def test_a_crypto_range_without_any_file_is_an_error(*, session: dm.MassiveSession) -> None:
-    # Crypto trades every day, so a range of weekend days alone is judged too.
-    q = query(session, CRYPTO_TRADES, symbols=["BTC-USD"])
-    with pytest.raises(dm.MassiveError, match=r"crypto\.trades: no file of the range exists"):
-        q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
+_RESCUE = 10.0
+"""Seconds of real time after which `manual_retry_clock` moves time on, ending any wait."""
+
+
+@pytest.fixture
+def manual_retry_clock(
+    monkeypatch: pytest.MonkeyPatch, retry_clock: FakeClock
+) -> Iterator[FakeClock]:
+    """Give the session's flat-file client a manual clock, so a reread wait lasts until ended.
+
+    A wait that nothing ends would hang the test, so after `_RESCUE` seconds of real time the
+    clock moves an hour on, which ends every wait: the test then fails on the time that passed.
+
+    Yields:
+        The clock.
+    """
+    clock = FakeClock(manual=True)
+    monkeypatch.setitem(
+        vars(_massive),
+        "FlatFileClient",
+        functools.partial(vars(_massive)["FlatFileClient"].func, clock=clock),
+    )
+    rescue = threading.Timer(_RESCUE, clock.advance, (3600.0,))
+    rescue.start()
+    yield clock
+    rescue.cancel()
+
+
+def test_a_failing_sibling_ends_a_reread_wait(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    put: Callable[[str, str], None],
+    manual_retry_clock: FakeClock,
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.drop(TRADES_0303, times=1, at=len(fake_s3.data(TRADES_0303)) // 2)
+    fake_s3.refuse(TRADES_0304, status=403, code="AccessDenied", message="Access Denied")
+
+    def hold(key: str) -> None:
+        # The refusal arrives only once the other file waits to be read again.
+        if key == TRADES_0304:
+            manual_retry_clock.wait_for_sleepers(1)
+
+    fake_s3.before_answer = hold
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(dm.EntitlementError):
+        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+    assert manual_retry_clock.monotonic() == 0.0  # the wait ended without time passing
+    assert fake_s3.keys().count(TRADES_0303) == 1  # and the file was not read again
+
+
+def test_an_interrupt_ends_a_reread_wait(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    put: Callable[[str, str], None],
+    manual_retry_clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.drop(TRADES_0303, times=1, at=len(fake_s3.data(TRADES_0303)) // 2)
+
+    def interrupted(*_: object, **__: object) -> None:
+        # Ctrl-C reaches the calling thread while the reader waits to read the file again.
+        manual_retry_clock.wait_for_sleepers(1)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(flatfiles, "wait", interrupted)
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(KeyboardInterrupt):
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert manual_retry_clock.monotonic() == 0.0
+    assert fake_s3.keys() == [TRADES_0303]
+
+
+def test_closing_the_session_ends_a_reread_wait(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    put: Callable[[str, str], None],
+    manual_retry_clock: FakeClock,
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.drop(TRADES_0303, times=1, at=len(fake_s3.data(TRADES_0303)) // 2)
+
+    def close_while_waiting() -> None:
+        manual_retry_clock.wait_for_sleepers(1)
+        session.close()
+
+    closer = threading.Thread(target=close_while_waiting)
+    closer.start()
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    closer.join(TIMEOUT)
+    assert manual_retry_clock.monotonic() == 0.0
+    assert fake_s3.keys() == [TRADES_0303]
 
 
 def test_every_response_body_is_closed(
