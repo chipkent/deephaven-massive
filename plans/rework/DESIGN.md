@@ -3141,8 +3141,8 @@ returns.
     the client cannot repeat the request by itself: the read fails with a `WireError`, and the
     file's `dropped` flag is set. `_ingest/flatfiles.py` keeps a file's rows to itself until
     the file ends, so it reads such a file again from its start: it frees the file's partial
-    tables (it clears the frames the error's tracebacks hold, which keep the failed read's
-    locals alive) and calls `wait_to_reread(error, retry, cancel)`, which waits on the shared
+    tables (it clears the frames the error's traceback holds, `_gather`'s and the batch
+    generator's, which keep the failed read's locals alive) and calls `wait_to_reread(error, retry, cancel)`, which waits on the shared
     schedule (logged at INFO), and returns `False` once `MAX_RETRIES` rereads are spent (logged
     at ERROR); the library then raises the failure. A wait whose `cancel` is already set, or on
     a closed client, returns at once without a log line. `close()` ends such a wait at once by
