@@ -765,9 +765,9 @@ Massive's documentation of this dataset:
 
 - <https://massive.com/docs/rest/stocks/filings/13-f-filings.md>
 
-<a id="filings-insider_holdings"></a>
+<a id="filings-initial_insider_ownership"></a>
 
-## `m.stocks.filings.insider_holdings`
+## `m.stocks.filings.initial_insider_ownership`
 
 Initial insider ownership statements (SEC Form 3), one row per reported holding.
 
@@ -890,9 +890,9 @@ Massive's documentation of this dataset:
 
 - <https://massive.com/docs/rest/stocks/filings/insider-activity.md>
 
-<a id="filings-insider_roster"></a>
+<a id="filings-insider_holdings"></a>
 
-## `m.stocks.filings.insider_roster`
+## `m.stocks.filings.insider_holdings`
 
 Each company's insiders and the shares each one holds now, one row per insider.
 

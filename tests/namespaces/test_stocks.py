@@ -90,10 +90,10 @@ LIST_WITH_SYMBOLS = [
     "filings.text_8k",
     "filings.disclosures_8k",
     "filings.risk_factors",
-    "filings.insider_holdings",
+    "filings.initial_insider_ownership",
     "filings.insider_transactions",
     "filings.insider_activity",
-    "filings.insider_roster",
+    "filings.insider_holdings",
 ]
 LIST_WITHOUT_SYMBOLS = [
     "filings.institutional_holdings",
@@ -106,10 +106,10 @@ LIST_VALUED = [
     "financials.income_statements",
     "financials.cash_flow_statements",
     "filings.disclosures_8k",
-    "filings.insider_holdings",
+    "filings.initial_insider_ownership",
     "filings.insider_transactions",
     "filings.insider_activity",
-    "filings.insider_roster",
+    "filings.insider_holdings",
 ]
 STREAMED = ["trades", "quotes", "bars", "luld", "imbalances", "fmv"]
 
@@ -129,10 +129,10 @@ AXES = {
     "filings.disclosures_8k": ("filing_date", "FilingDate"),
     "filings.risk_factors": ("filing_date", "FilingDate"),
     "filings.institutional_holdings": ("filing_date", "FilingDate"),
-    "filings.insider_holdings": ("filing_date", "FilingDate"),
+    "filings.initial_insider_ownership": ("filing_date", "FilingDate"),
     "filings.insider_transactions": ("filing_date", "FilingDate"),
     "filings.insider_activity": ("transaction_date", "TransactionDate"),
-    "filings.insider_roster": ("last_filing_date", "LastFilingDate"),
+    "filings.insider_holdings": ("last_filing_date", "LastFilingDate"),
 }
 
 # Each REST source of the namespace, its fixture, and a value for each path placeholder.
@@ -182,10 +182,10 @@ SOURCES: dict[str, tuple[str, dict[str, object]]] = {
     "/stocks/filings/8-K/vX/disclosures": ("filings_disclosures_8k.json", {}),
     "/stocks/filings/vX/risk-factors": ("filings_risk_factors.json", {}),
     "/stocks/filings/vX/13-F": ("filings_institutional_holdings.json", {}),
-    "/stocks/filings/vX/form-3": ("filings_insider_holdings.json", {}),
+    "/stocks/filings/vX/form-3": ("filings_initial_insider_ownership.json", {}),
     "/stocks/filings/vX/form-4": ("filings_insider_transactions.json", {}),
     "/stocks/insiders/vX/activity": ("filings_insider_activity.json", {}),
-    "/stocks/insiders/vX/holdings": ("filings_insider_roster.json", {}),
+    "/stocks/insiders/vX/holdings": ("filings_insider_holdings.json", {}),
     "/stocks/taxonomies/vX/risk-factors": ("filings_risk_factor_taxonomy.json", {}),
     "/stocks/taxonomies/vX/disclosures": ("filings_disclosure_taxonomy.json", {}),
 }
@@ -373,7 +373,7 @@ REPLACE_KEYS = {
     # A later filing for the same day revises that day's totals.
     "filings.insider_activity": ("IssuerCik", "TransactionDate"),
     # A new filing by an insider updates that insider's current position.
-    "filings.insider_roster": ("IssuerCik", "OwnerCik"),
+    "filings.insider_holdings": ("IssuerCik", "OwnerCik"),
     "filings.risk_factor_taxonomy": ("Taxonomy", *CATEGORIES),
     "filings.disclosure_taxonomy": ("Taxonomy", *CATEGORIES),
 }
@@ -637,7 +637,12 @@ def test_institutional_holdings_take_a_filer(massive_session: dm.MassiveSession)
 
 
 @pytest.mark.parametrize(
-    "name", ["filings.insider_holdings", "filings.insider_transactions", "filings.insider_roster"]
+    "name",
+    [
+        "filings.initial_insider_ownership",
+        "filings.insider_transactions",
+        "filings.insider_holdings",
+    ],
 )
 def test_insider_datasets_take_issuer_and_owner(
     massive_session: dm.MassiveSession, name: str
@@ -661,7 +666,7 @@ def test_insider_activity_takes_an_issuer_and_no_owner(massive_session: dm.Massi
         activity(issuer_cik=cast("Any", 1045810))
 
 
-@pytest.mark.parametrize("name", ["filings.insider_activity", "filings.insider_roster"])
+@pytest.mark.parametrize("name", ["filings.insider_activity", "filings.insider_holdings"])
 def test_insider_aggregates_leave_no_parameter_to_filters(
     massive_session: dm.MassiveSession, name: str
 ) -> None:
@@ -1040,7 +1045,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         ("FilerCik", "0001067983"),
     ),
     (
-        "filings.insider_holdings",
+        "filings.initial_insider_ownership",
         {"issuer_cik": "0000320193"},
         "/stocks/filings/vX/form-3",
         {"issuer_cik": "0000320193", "limit": "10000"},
@@ -1066,7 +1071,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         ("TransactionDate", date(2026, 9, 17)),
     ),
     (
-        "filings.insider_roster",
+        "filings.insider_holdings",
         {"owner_cik": "0001588670", "start": date(2026, 1, 1), "sort": "shares_owned"},
         "/stocks/insiders/vX/holdings",
         {
@@ -1151,7 +1156,7 @@ INSIDER_ROWS = {
         "Tickers": '["NVDA"]',
         "TransactionDate": date(2026, 9, 17),
     },
-    "filings.insider_roster": {
+    "filings.insider_holdings": {
         "FilingCount": 94,
         "FirstFilingDate": date(2013, 10, 9),
         "IssuerCik": "0001045810",
@@ -1610,7 +1615,7 @@ NULLABLE_KEYS = {
         "VotingAuthorityShared",
         "VotingAuthorityNone",
     },
-    "filings.insider_holdings": {"NatureOfOwnership", "ExercisePrice", "ExerciseDate"},
+    "filings.initial_insider_ownership": {"NatureOfOwnership", "ExercisePrice", "ExerciseDate"},
     "filings.insider_transactions": {
         "NatureOfOwnership",
         "ExercisePrice",

@@ -17,7 +17,7 @@ The REST list datasets (dividends through the filings) share one shape: `symbols
 and only filters the request, `dm.ALL` is refused in favour of `symbols=None`, `start` and
 `end` bound the dataset's date axis where it has one, and the `sort`, `order`, `limit`, and
 `filters` block works as described in the package documentation. The rows of the three financial
-statements, Forms 3 and 4, the insider activity and roster, and the 8-K disclosures each list
+statements, Forms 3 and 4, the insider activity and holdings, and the 8-K disclosures each list
 several tickers, so those datasets have no `Symbol` column and keep `Tickers`.
 """
 
@@ -373,7 +373,7 @@ _FORM_13F: Final = "/stocks/filings/vX/13-F"
 _FORM_3: Final = "/stocks/filings/vX/form-3"
 _FORM_4: Final = "/stocks/filings/vX/form-4"
 _INSIDER_ACTIVITY: Final = "/stocks/insiders/vX/activity"
-_INSIDER_ROSTER: Final = "/stocks/insiders/vX/holdings"
+_INSIDER_HOLDINGS: Final = "/stocks/insiders/vX/holdings"
 _RISK_TAXONOMY: Final = "/stocks/taxonomies/vX/risk-factors"
 _DISCLOSURE_TAXONOMY: Final = "/stocks/taxonomies/vX/disclosures"
 _CATEGORIES: Final = ("PrimaryCategory", "SecondaryCategory", "TertiaryCategory")
@@ -523,8 +523,8 @@ INSTITUTIONAL_HOLDINGS: Final = _filing(
     page_size=1_000,
     summary="Holdings that institutional managers report on Form 13-F, one row per position.",
 )
-INSIDER_HOLDINGS: Final = _filing(
-    "insider_holdings",
+INITIAL_INSIDER_OWNERSHIP: Final = _filing(
+    "initial_insider_ownership",
     _FORM_3,
     symbol_param="tickers.any_of",
     poll_keys=(*_INSIDER_HOLDING, "ExercisePrice", "ExerciseDate"),
@@ -587,12 +587,12 @@ INSIDER_ACTIVITY: Final = DatasetSpec(
     poll_keys=("IssuerCik", "TransactionDate"),
     page_size=10_000,
 )
-INSIDER_ROSTER: Final = DatasetSpec(
-    name="stocks.filings.insider_roster",
+INSIDER_HOLDINGS: Final = DatasetSpec(
+    name="stocks.filings.insider_holdings",
     summary="Each company's insiders and the shares each one holds now, one row per insider.",
     asset_class=_STOCKS,
-    fetch_path=_INSIDER_ROSTER,
-    keys={(_R, _INSIDER_ROSTER): _NO_KEYS},
+    fetch_path=_INSIDER_HOLDINGS,
+    keys={(_R, _INSIDER_HOLDINGS): _NO_KEYS},
     time_axis=("last_filing_date.gte", "last_filing_date.lte"),
     symbol_param="tickers.any_of",
     # One row is one reporting owner's current position in one issuer; each new filing by
@@ -641,10 +641,10 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
     DISCLOSURES_8K,
     RISK_FACTORS,
     INSTITUTIONAL_HOLDINGS,
-    INSIDER_HOLDINGS,
+    INITIAL_INSIDER_OWNERSHIP,
     INSIDER_TRANSACTIONS,
     INSIDER_ACTIVITY,
-    INSIDER_ROSTER,
+    INSIDER_HOLDINGS,
     RISK_FACTOR_TAXONOMY,
     DISCLOSURE_TAXONOMY,
 )
@@ -1048,7 +1048,7 @@ class _StockFilings(Namespace):
     Created once per session by `_Stocks`; holds no state of its own, so it is safe to use from
     any thread. Each method builds a query and never blocks. By default `poll()` on a filings
     dataset appends only the rows it has not seen before, while the insider activity, the
-    insider roster, and the two taxonomies replace their table each cycle.
+    insider holdings, and the two taxonomies replace their table each cycle.
 
     Example:
         ::
@@ -1443,7 +1443,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
-    def insider_holdings(
+    def initial_insider_ownership(
         self,
         symbols: Symbols | None = None,
         *,
@@ -1468,7 +1468,7 @@ class _StockFilings(Namespace):
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_holdings,
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-initial_insider_ownership,
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
@@ -1497,11 +1497,11 @@ class _StockFilings(Namespace):
         Example:
             ::
 
-                t = m.stocks.filings.insider_holdings("NVDA", start="2024-01-01").fetch()
+                t = m.stocks.filings.initial_insider_ownership("NVDA", start="2024-01-01").fetch()
         """
         return _insider_query(
             self._core,
-            INSIDER_HOLDINGS,
+            INITIAL_INSIDER_OWNERSHIP,
             symbols=symbols,
             issuer_cik=issuer_cik,
             owner_cik=owner_cik,
@@ -1665,7 +1665,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
-    def insider_roster(
+    def insider_holdings(
         self,
         symbols: Symbols | None = None,
         *,
@@ -1691,8 +1691,8 @@ class _StockFilings(Namespace):
         `OldestPositionDate` far behind `LastFilingDate` warns that a summed position has not
         been restated lately and may be stale. Use it to see who a company's insiders are and
         how much they own, or, with `owner_cik`, every company one person is an insider of;
-        `insider_holdings()` (Form 3) and `insider_transactions()` (Form 4) return the filings
-        themselves.
+        `initial_insider_ownership()` (Form 3) and `insider_transactions()` (Form 4) return the
+        filings themselves.
 
         A company can have several share classes, so a row has no `Symbol`: its `Tickers`
         column holds the JSON list of the issuer's tickers, and `symbols` only selects the
@@ -1703,7 +1703,7 @@ class _StockFilings(Namespace):
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_roster,
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_holdings,
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
@@ -1738,12 +1738,12 @@ class _StockFilings(Namespace):
         Example:
             ::
 
-                insiders = m.stocks.filings.insider_roster("NVDA").fetch()
-                one_person = m.stocks.filings.insider_roster(owner_cik="0001588670").fetch()
+                insiders = m.stocks.filings.insider_holdings("NVDA").fetch()
+                one_person = m.stocks.filings.insider_holdings(owner_cik="0001588670").fetch()
         """
         return _insider_query(
             self._core,
-            INSIDER_ROSTER,
+            INSIDER_HOLDINGS,
             symbols=symbols,
             issuer_cik=issuer_cik,
             owner_cik=owner_cik,
@@ -1872,7 +1872,7 @@ def _insider_query(
 ) -> Query:
     """Build the query of an insider dataset that takes an issuer and an owner CIK.
 
-    Form 3, Form 4, and the insider roster share the arguments and their checks.
+    Form 3, Form 4, and the insider holdings share the arguments and their checks.
 
     Args:
         core: The session core.
