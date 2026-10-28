@@ -766,10 +766,10 @@ def columns(self) -> Table:
         `int`, `double`, `boolean`, `String`, `Instant`, `LocalDate`, or `int[]`);
         `Description` (String), what the column holds, empty when Massive gives no
         description; and `SuppliedBy` (String), the transports whose sources fill the
-        column for this dataset, `REST`, `FLAT_FILES`, and `WS` in that order, joined by
-        ", " (`fetch()` and `poll()` are served by REST, the stream verbs by WS, and
-        `history()` by REST or FLAT_FILES); empty for a column that only other datasets
-        of the same kind supply, which this dataset always leaves null.
+        column for this dataset, spelled `REST`, `flat files`, and `WebSocket`, in that
+        order, joined by ", " (`fetch()` and `poll()` are served by REST, the stream verbs
+        by WebSocket, and `history()` by REST or flat files); empty for a column that only
+        other datasets of the same kind supply, which this dataset always leaves null.
 
     Raises:
         ValueError: If called on an update-graph thread, for example from a table listener.
@@ -778,7 +778,7 @@ def columns(self) -> Table:
         ::
 
             cols = m.stocks.trades(["AAPL"]).columns()
-            stream_only = cols.where("SuppliedBy = `WS`")
+            stream_only = cols.where("SuppliedBy = `WebSocket`")
     """
 ```
 
@@ -963,7 +963,13 @@ the documented way to convert text.
 Each dataset column has one description, chosen by the rule of
 [section 19.4](#194-generated-schemas) from the field descriptions in `spec/descriptions.json`
 (the vendor's, corrected where they are clearly wrong). It reaches users through three outlets,
-all generated from the same dataset schema, so they can never disagree.
+all generated from the same dataset schema, so they can never disagree. All three spell the
+transports one way, `REST`, `flat files`, and `WebSocket` (`schema.TRANSPORT_LABELS`): the
+key-column descriptions of [section 19.4](#194-generated-schemas) rule 3, `columns()`'s
+`SuppliedBy`, and the column reference's **Supplied by**, so a filter copied from a page
+(``cols.where("SuppliedBy = `WebSocket`")``) works on `columns()`. The `Transport` enum values
+(`REST`, `FLAT_FILES`, `WS`) are internal names; only the diagnostics tables of
+[section 17](#17-diagnostics) show them.
 
 **1. Every result is described.** Deephaven 42.7 stores column descriptions as the table
 attribute `ColumnDescriptions` and a table description as `TableDescription`, set through
@@ -1025,9 +1031,9 @@ where `<dataset>` is the dataset's name below its namespace with dots written as
 (`trades`, `financials-ratios`, `benzinga-news`); a heading naming the dataset
 (`m.stocks.trades`); its `DatasetSpec.summary`; and one table with one row per column, in
 result order. The table's columns are **Column**, **Deephaven type**, **Description**,
-**Supplied by** (the transports of `columns()`'s `SuppliedBy`, spelled `REST`, `flat files`,
-and `WebSocket`), and one **Wire field** column per transport the dataset uses (`REST field`,
-`Flat-file field`, `WebSocket field`). A wire-field cell lists the distinct wire keys of that
+**Supplied by** (the transports of `columns()`'s `SuppliedBy`, in the same spelling), and one
+**Wire field** column per transport the dataset uses (`REST field`, `Flat-file field`,
+`WebSocket field`). A wire-field cell lists the distinct wire keys of that
 transport's sources that feed the column, in source order and before any projection, or
 `request` for a key filled from the request. A footer names the snapshot's fetch date and the
 vendor URLs of the sources the page's datasets use, from the `Provenance` passed to the renderer
@@ -3241,7 +3247,7 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
 | `KEY_FIXES` | `overrides.py` | `{(source, declared key): (wire key, reason)}`: a field the specification declares under one key while every documented sample (the response example and the documentation sample) sends it under another that nothing declares; the field is read under the samples' key, keeping its declared type and description, and every other hand entry names it by that key. Stale once the declared key is gone, or the example no longer sends the corrected key or sends the declared one; each goes into section 23 | ticker events `event_type` → `type` (column `Type`) |
-| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text or asset classes, reason)}`: a field whose vendor description is clearly wrong for its source (another asset class's or event's text copied onto it, or a statement the vendor's own documentation contradicts); the entry quotes the vendor's text (as plain text, after normalization) and gives the replacement, either `text` for every use of the source, or, for a source that serves several asset classes, `asset_classes`: the text a dataset of each listed class shows, every other class keeping the vendor's. The replacement is Massive's own wording for the same field of a sibling source wherever that is right and says what the field holds; it is written here only when no sibling text is adequate, and the reason says so. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once no generated field looks the entry up (its source or key is gone, or the key is one a `KEY_FIXES` entry replaces or only an example sends), or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | the crypto last trade's and trades flat file's `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated"; the futures trades' `price` ("100 contracts × $2.00 = $200.00", no multiplier) → the `futures/T` channel's text; the unified `/v3/snapshot` `last_trade.price` → the options trades' text, for `options` only |
+| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text or asset classes, reason)}`: a field whose vendor description is clearly wrong for its source (another asset class's or event's text copied onto it, or a statement the vendor's own documentation contradicts), or missing where a sibling source describes the same field (the entry then quotes `""`); the entry quotes the vendor's text (as plain text, after normalization) and gives the replacement, either `text` for every use of the source, or, for a source that serves several asset classes, `asset_classes`: the text a dataset of each listed class shows, every other class keeping the vendor's. The replacement is Massive's own wording for the same field of a sibling source wherever that is right and says what the field holds; it is written here only when no sibling text is adequate, and the reason says so. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once no generated field looks the entry up (its source or key is gone, or the key is one a `KEY_FIXES` entry replaces or only an example sends), or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | the crypto last trade's and trades flat file's `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated"; the futures trades' `price` ("100 contracts × $2.00 = $200.00", no multiplier) → the `futures/T` channel's text; the unified `/v3/snapshot` `last_trade.price` → the options trades' text, for `options` only; the futures snapshot's `details.product_code` (no description) → the `/futures/v1/contracts` text |
 | `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
@@ -3406,8 +3412,11 @@ checks.
   per class: the entry gives the text for each listed class, and every other class keeps the
   vendor's. A class text that no dataset of its class shows (no such dataset reads the source,
   or an earlier source's text wins the column) fails a catalog test, since the refresh cannot
-  see the datasets. That is the only hand input on descriptions; a description that is merely
-  terse or imprecise is kept.
+  see the datasets. A field Massive leaves without a description, where a sibling source
+  describes the same field, gets an entry too: it quotes the empty text, so it goes stale once
+  Massive adds one, and its text is the sibling's (the futures snapshot's
+  `details.product_code` takes the `/futures/v1/contracts` text). That is the only hand input
+  on descriptions; a description that is merely terse or imprecise is kept.
 - **No gate.** A field without a description gets `""`, and nothing stops the refresh.
   Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
   changed description is an ordinary line in the refresh diff, except where a
@@ -3599,7 +3608,8 @@ a dataset with no asset class takes the field's own description.
    dataset, get a fixed library sentence ("The instrument,
    in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
    underlying instrument, in the library's canonical symbol form."), followed, per transport in
-   the order of rule 1, by the wire key each source renames and its quoted field description
+   the order of rule 1 and spelled as in [section 7.4](#74-column-descriptions), by the wire
+   key each source renames and its quoted field description
    (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``), or, for a key
    filled from the request, the request parameter it came from
    (`` REST: the request's `stocksTicker` parameter. ``).
@@ -4236,6 +4246,16 @@ document already reflects them.
     `end` on a list sends no upper bound, so future-dated rows such as an announced
     ex-dividend date appear ([section 12](#12-timestamp-units-and-day-boundaries),
     [section 16](#16-historysourceauto)).
+53. **One spelling for the transports in user-facing text** (2026-10-28). The key-column
+    descriptions, `columns()`'s `SuppliedBy`, and the column reference spell the transports
+    `REST`, `flat files`, and `WebSocket`, so a filter copied from a page works on
+    `columns()`; the internal `Transport` values (`REST`, `FLAT_FILES`, `WS`) are unchanged
+    ([section 7.4](#74-column-descriptions)).
+54. **A missing description is filled from a sibling source** (2026-10-28). Where Massive
+    gives a field no description but describes the same field on a sibling source, a
+    `DESCRIPTION_FIXES` entry quotes the empty text and takes the sibling's, with its reason,
+    so no column of a dataset is left blank for want of text Massive already wrote
+    ([section 19.4](#194-generated-schemas)).
 
 ## 23. Open verification items
 

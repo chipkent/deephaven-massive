@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 __all__ = [
     "COLUMN_TYPES",
     "KEY_COLUMNS",
+    "TRANSPORT_LABELS",
     "Column",
     "ColumnType",
     "Schema",
@@ -587,6 +588,14 @@ _TRANSPORT_ORDER: Final = (Transport.REST, Transport.FLAT_FILES, Transport.WS)
 """The order in which a column's transports are listed and its descriptions are tried: REST
 first, because its descriptions are the most complete."""
 
+TRANSPORT_LABELS: Final[Mapping[Transport, str]] = MappingProxyType(
+    {Transport.REST: "REST", Transport.FLAT_FILES: "flat files", Transport.WS: "WebSocket"}
+)
+"""How every text a user reads spells each transport: the key-column descriptions, the
+`SuppliedBy` column of `columns()`, and the column reference all use it, so a filter copied
+from one works on another. The `Transport` values are internal names and appear only in the
+diagnostics tables. Read-only."""
+
 _KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The instrument, in the library's canonical symbol form.",
     "Timestamp": "The row's primary time, as an Instant.",
@@ -634,14 +643,16 @@ def _key_part(transport: Transport, column: SourceColumn, asset_class: str | Non
     Returns:
         ``REST `sip_timestamp`: "<field description>"`` for a wire key with a description,
         ``REST `sip_timestamp`.`` for one without, or ``REST: the request's `stocksTicker`
-        parameter.`` for a key filled from the request.
+        parameter.`` for a key filled from the request, with the transport spelled as
+        `TRANSPORT_LABELS` spells it (``WebSocket `t`: …``).
     """
+    label = TRANSPORT_LABELS[transport]
     if column.field is None:
-        return f"{transport.value}: the request's `{column.parameter}` parameter."
+        return f"{label}: the request's `{column.parameter}` parameter."
     described = column.field.description_for(asset_class)
     if described:
-        return f'{transport.value} `{column.field.wire_key}`: "{described}"'
-    return f"{transport.value} `{column.field.wire_key}`."
+        return f'{label} `{column.field.wire_key}`: "{described}"'
+    return f"{label} `{column.field.wire_key}`."
 
 
 def _description(

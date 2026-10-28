@@ -12,8 +12,8 @@ Trades of US-listed options contracts (OPRA), tick by tick.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `T`: "The exchange symbol that this item is traded under." REST: the request's `optionsTicker` parameter. FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it." FLAT_FILES `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it." WS `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `T`: "The exchange symbol that this item is traded under." REST: the request's `optionsTicker` parameter. flat files `ticker`: "The exchange symbol that this item is traded under." WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it." flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it." WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
 | `Conditions` | int[] | A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `c`, `conditions` | `conditions` | `c` |
 | `Correction` | long | The trade correction indicator. | REST, flat files | `e`, `correction` | `correction` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `x`, `exchange` | `exchange` | `x` |
@@ -39,8 +39,8 @@ Quotes of US-listed options contracts (OPRA), tick by tick.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST: the request's `optionsTicker` parameter. FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it." FLAT_FILES `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it." WS `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `sip_timestamp` | `sip_timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. REST: the request's `optionsTicker` parameter. flat files `ticker`: "The exchange symbol that this item is traded under." WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | request | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it." flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it." WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `sip_timestamp` | `sip_timestamp` | `t` |
 | `AskExchange` | long | The ask exchange ID | REST, flat files, WebSocket | `ask_exchange` | `ask_exchange` | `ax` |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `ap` |
 | `AskSize` | double | The ask size. This represents the number of contracts sellers are offering at the given ask price. | REST, flat files, WebSocket | `ask_size` | `ask_size` | `as` |
@@ -69,8 +69,8 @@ Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `T`: "The exchange symbol that this item is traded under." REST: the request's `optionsTicker` parameter. FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." FLAT_FILES `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window." WS `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `T`: "The exchange symbol that this item is traded under." REST: the request's `optionsTicker` parameter. flat files `ticker`: "The exchange symbol that this item is traded under." WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window." WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -99,8 +99,8 @@ Massive's fair market value of US-listed options contracts, streamed in real tim
 
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. WS `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. WS `t`: "The nanosecond timestamp." | WebSocket | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
 
 <a id="chain"></a>

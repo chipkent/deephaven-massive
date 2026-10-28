@@ -201,10 +201,10 @@ class QueryBase:
             `int`, `double`, `boolean`, `String`, `Instant`, `LocalDate`, or `int[]`);
             `Description` (String), what the column holds, empty when Massive gives no
             description; and `SuppliedBy` (String), the transports whose sources fill the
-            column for this dataset, `REST`, `FLAT_FILES`, and `WS` in that order, joined by
-            ", " (`fetch()` and `poll()` are served by REST, the stream verbs by WS, and
-            `history()` by REST or FLAT_FILES); empty for a column that only other datasets
-            of the same kind supply, which this dataset always leaves null.
+            column for this dataset, spelled `REST`, `flat files`, and `WebSocket`, in that
+            order, joined by ", " (`fetch()` and `poll()` are served by REST, the stream verbs
+            by WebSocket, and `history()` by REST or flat files); empty for a column that only
+            other datasets of the same kind supply, which this dataset always leaves null.
 
         Raises:
             ValueError: If called on an update-graph thread, for example from a table listener.
@@ -213,7 +213,7 @@ class QueryBase:
             ::
 
                 cols = m.stocks.trades(["AAPL"]).columns()
-                stream_only = cols.where("SuppliedBy = `WS`")
+                stream_only = cols.where("SuppliedBy = `WebSocket`")
         """
         if on_update_graph(self._core.exec_ctx):
             raise ValueError(ON_UPDATE_GRAPH)

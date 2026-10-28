@@ -2,6 +2,7 @@
 
 import dataclasses
 from datetime import UTC, date, datetime
+from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -11,6 +12,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.schema import (
     COLUMN_TYPES,
     KEY_COLUMNS,
+    TRANSPORT_LABELS,
     Column,
     ColumnType,
     Schema,
@@ -784,6 +786,16 @@ def test_a_column_only_other_members_supply_names_them() -> None:
     assert stocks_tape.description == wire(R, "/v2/last/trade/{stocksTicker}", "Tape").description
 
 
+def test_every_transport_has_one_user_facing_spelling() -> None:
+    assert dict(TRANSPORT_LABELS) == {
+        Transport.REST: "REST",
+        Transport.FLAT_FILES: "flat files",
+        Transport.WS: "WebSocket",
+    }
+    with pytest.raises(TypeError):  # read-only: no caller can respell a transport
+        cast("dict[Transport, str]", TRANSPORT_LABELS)[Transport.WS] = "WS"
+
+
 def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
     columns = {c.name: c for c in TRADES.dataset_schema(STOCK_TRADES).columns}
     last, history = "/v2/last/trade/{stocksTicker}", "/v3/trades/{stockTicker}"
@@ -792,8 +804,8 @@ def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
         "The instrument, in the library's canonical symbol form.",
         f'REST `T`: "{wire(R, last, "Ticker").description}"',
         "REST: the request's `stockTicker` parameter.",
-        f'FLAT_FILES `ticker`: "{wire(F, files, "Ticker").description}"',
-        f'WS `sym`: "{wire(W, "stocks/T", "Ticker").description}"',
+        f'flat files `ticker`: "{wire(F, files, "Ticker").description}"',
+        f'WebSocket `sym`: "{wire(W, "stocks/T", "Ticker").description}"',
     ]
     assert columns["Symbol"].description == " ".join(symbol)
     assert dict(columns["Symbol"].wire_keys) == {R: ("T", None), F: ("ticker",), W: ("sym",)}
@@ -802,8 +814,8 @@ def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
         "The row's primary time, as an Instant.",
         f'REST `t`: "{wire(R, last, "SipTimestamp").description}"',
         f'REST `sip_timestamp`: "{wire(R, history, "SipTimestamp").description}"',
-        f'FLAT_FILES `sip_timestamp`: "{wire(F, files, "SipTimestamp").description}"',
-        f'WS `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',
+        f'flat files `sip_timestamp`: "{wire(F, files, "SipTimestamp").description}"',
+        f'WebSocket `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',
     ]
     assert columns["Timestamp"].description == " ".join(timestamp)
 
