@@ -3607,12 +3607,15 @@ a dataset with no asset class takes the field's own description.
 3. **`Symbol`, `Timestamp`, and `Underlying`**, when they are declared key columns of the
    dataset, get a fixed library sentence ("The instrument,
    in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
-   underlying instrument, in the library's canonical symbol form."), followed, per transport in
-   the order of rule 1 and spelled as in [section 7.4](#74-column-descriptions), by the wire
-   key each source renames and its quoted field description
-   (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``), or, for a key
-   filled from the request, the request parameter it came from
-   (`` REST: the request's `stocksTicker` parameter. ``).
+   underlying instrument, in the library's canonical symbol form."), followed by one sentence
+   that starts "From" and lists, per transport in the order of rule 1 and spelled as in
+   [section 7.4](#74-column-descriptions), the wire key each source renames and its quoted
+   field description (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``)
+   or, for a key filled from the request, the request parameter it came from
+   (`` REST: the request's `stocksTicker` parameter ``). The items are joined by "; " and
+   the sentence ends with a period, so a lowercase label such as `flat files` never starts a
+   sentence: `` The instrument, in the library's canonical symbol form. From REST `T`: "…";
+   flat files `ticker`: "…"; WebSocket `sym`: "…". ``
 
 A column whose sources carry no description gets `""`, and nothing fails. The sentences of
 rules 2 and 3 are the library's statements about its own columns, not hand input about Massive,
@@ -4249,8 +4252,10 @@ document already reflects them.
 53. **One spelling for the transports in user-facing text** (2026-10-28). The key-column
     descriptions, `columns()`'s `SuppliedBy`, and the column reference spell the transports
     `REST`, `flat files`, and `WebSocket`, so a filter copied from a page works on
-    `columns()`; the internal `Transport` values (`REST`, `FLAT_FILES`, `WS`) are unchanged
-    ([section 7.4](#74-column-descriptions)).
+    `columns()`; the internal `Transport` values (`REST`, `FLAT_FILES`, `WS`) are unchanged.
+    A key column's description lists its sources in one sentence starting "From", joined by
+    "; ", so a lowercase label never starts a sentence ([section 7.4](#74-column-descriptions),
+    [section 19.4](#194-generated-schemas)).
 54. **A missing description is filled from a sibling source** (2026-10-28). Where Massive
     gives a field no description but describes the same field on a sibling source, a
     `DESCRIPTION_FIXES` entry quotes the empty text and takes the sibling's, with its reason,

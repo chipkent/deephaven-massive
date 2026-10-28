@@ -727,8 +727,8 @@ def test_a_key_column_quotes_its_asset_class_s_description() -> None:
         (column,) = dataset_schema(dataset, (dataset,), lambda *_: made).columns
         quoted[asset_class] = column.description.split("REST `ticker`: ")[1]
     assert quoted == {
-        AssetClass.OPTIONS: '"The option contract symbol."',
-        AssetClass.STOCKS: '"The stock symbol."',
+        AssetClass.OPTIONS: '"The option contract symbol.".',
+        AssetClass.STOCKS: '"The stock symbol.".',
     }
 
 
@@ -801,23 +801,25 @@ def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
     last, history = "/v2/last/trade/{stocksTicker}", "/v3/trades/{stockTicker}"
     files = "us_stocks_sip/trades_v1"
     symbol = [
-        "The instrument, in the library's canonical symbol form.",
         f'REST `T`: "{wire(R, last, "Ticker").description}"',
-        "REST: the request's `stockTicker` parameter.",
+        "REST: the request's `stockTicker` parameter",
         f'flat files `ticker`: "{wire(F, files, "Ticker").description}"',
         f'WebSocket `sym`: "{wire(W, "stocks/T", "Ticker").description}"',
     ]
-    assert columns["Symbol"].description == " ".join(symbol)
+    assert columns["Symbol"].description == (
+        f"The instrument, in the library's canonical symbol form. From {'; '.join(symbol)}."
+    )
     assert dict(columns["Symbol"].wire_keys) == {R: ("T", None), F: ("ticker",), W: ("sym",)}
     assert columns["Symbol"].supplied_by == (R, F, W)
     timestamp = [
-        "The row's primary time, as an Instant.",
         f'REST `t`: "{wire(R, last, "SipTimestamp").description}"',
         f'REST `sip_timestamp`: "{wire(R, history, "SipTimestamp").description}"',
         f'flat files `sip_timestamp`: "{wire(F, files, "SipTimestamp").description}"',
         f'WebSocket `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',
     ]
-    assert columns["Timestamp"].description == " ".join(timestamp)
+    assert columns["Timestamp"].description == (
+        f"The row's primary time, as an Instant. From {'; '.join(timestamp)}."
+    )
 
 
 def test_an_underlying_column_takes_its_own_sentence() -> None:
@@ -831,8 +833,8 @@ def test_an_underlying_column_takes_its_own_sentence() -> None:
         c for c in dataset_schema(dataset, (dataset,), lookup).columns if c.name == "Underlying"
     )
     assert underlying.description == (
-        "The underlying instrument, in the library's canonical symbol form. "
-        f'REST `underlying_ticker`: "{wire(*contracts, "UnderlyingTicker").description}"'
+        "The underlying instrument, in the library's canonical symbol form. From "
+        f'REST `underlying_ticker`: "{wire(*contracts, "UnderlyingTicker").description}".'
     )
 
 
@@ -869,5 +871,5 @@ def test_a_key_part_without_text_names_the_key_and_repeats_once() -> None:
     made = Source(key="/first", transport=R, fields=(plain,))
     schema = dataset_schema(dataset, (dataset,), lambda *_: made)
     assert schema.columns[0].description == (
-        "The instrument, in the library's canonical symbol form. REST `sym`."
+        "The instrument, in the library's canonical symbol form. From REST `sym`."
     )

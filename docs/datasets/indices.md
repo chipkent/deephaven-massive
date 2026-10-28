@@ -12,8 +12,8 @@ Index levels, tick by tick, as computed by the index providers.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "Ticker of asset queried." flat files `ticker`: "The exchange symbol that this item is traded under." WebSocket `T`: "The assigned ticker of the index." | REST, flat files, WebSocket | `ticker` | `ticker` | `T` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `last_updated`: "The nanosecond timestamp of when this information was updated." flat files `timestamp`: "The timestamp in Unix MS." WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `last_updated` | `timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Ticker of asset queried."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `T`: "The assigned ticker of the index.". | REST, flat files, WebSocket | `ticker` | `ticker` | `T` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `last_updated`: "The nanosecond timestamp of when this information was updated."; flat files `timestamp`: "The timestamp in Unix MS."; WebSocket `t`: "The Timestamp in Unix MS.". | REST, flat files, WebSocket | `last_updated` | `timestamp` | `t` |
 | `Value` | double | Value of Index. | REST, flat files, WebSocket | `value` | `value` | `val` |
 
 <a id="bars"></a>
@@ -24,8 +24,8 @@ Open, high, low, and close index levels over fixed windows of time.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `T`: "The exchange symbol that this item is traded under." REST: the request's `indicesTicker` parameter. flat files `ticker`: "The exchange symbol that this item is traded under." WebSocket `sym`: "The symbol representing the given index." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window." WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `indicesTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The symbol representing the given index.". | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds.". | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `Volume` | double | Always null for `indices.bars`; supplied by `stocks.bars`, `options.bars`, `futures.bars`, `forex.bars`, `crypto.bars`. |  |  |  |  |
 | `Open` | double | The open value for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close value for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -54,7 +54,7 @@ The current state of each index: its level, its session so far, and its status.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "Ticker of asset queried." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Ticker of asset queried.". | REST | `ticker` |
 | `Error` | String | The error while looking for this ticker. | REST | `error` |
 | `LastUpdated` | Instant | The nanosecond timestamp of when this information was updated. | REST | `last_updated` |
 | `MarketStatus` | String | The market status for the market that trades this ticker. | REST | `market_status` |
@@ -79,7 +79,7 @@ One day's opening, closing, high, and low levels of each index.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `symbol`: "The exchange symbol that this item is traded under." | REST | `symbol` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The exchange symbol that this item is traded under.". | REST | `symbol` |
 | `AfterHours` | double | The close value of the ticker symbol in after hours trading. | REST | `afterHours` |
 | `Close` | double | The close value for the symbol in the given time period. | REST | `close` |
 | `From` | LocalDate | The requested date. | REST | `from` |

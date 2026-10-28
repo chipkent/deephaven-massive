@@ -12,8 +12,8 @@ Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST: the request's `from` parameter. REST: the request's `cryptoTicker` parameter. flat files `ticker`: "The exchange symbol that this item is traded under." WebSocket `pair`: "The crypto pair." | REST, flat files, WebSocket | request | `ticker` | `pair` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `timestamp`: "The Unix millisecond timestamp." REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the trade was generated at the exchange." flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange." WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp`, `participant_timestamp` | `participant_timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `from` parameter; REST: the request's `cryptoTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The crypto pair.". | REST, flat files, WebSocket | request | `ticker` | `pair` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix millisecond timestamp."; REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the trade was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS.". | REST, flat files, WebSocket | `timestamp`, `participant_timestamp` | `participant_timestamp` | `t` |
 | `Conditions` | int[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `conditions` | `conditions` | `c` |
 | `Correction` | long | Always null for `crypto.trades`; supplied by `stocks.trades`, `options.trades`, `futures.trades`. |  |  |  |  |
 | `Exchange` | long | The exchange that this crypto trade happened on. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a mapping of exchanges to IDs. | REST, flat files, WebSocket | `exchange` | `exchange` | `x` |
@@ -39,8 +39,8 @@ Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. WebSocket `pair`: "The crypto pair." | WebSocket | `pair` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. WebSocket `t`: "The Timestamp in Unix MS." | WebSocket | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `pair`: "The crypto pair.". | WebSocket | `pair` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix MS.". | WebSocket | `t` |
 | `AskExchange` | long | Always null for `crypto.quotes`; supplied by `stocks.quotes`, `options.quotes`, `forex.quotes`. |  |  |
 | `AskPrice` | double | The ask price. | WebSocket | `ap` |
 | `AskSize` | double | The ask size. | WebSocket | `as` |
@@ -69,8 +69,8 @@ Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `T`: "The exchange symbol that this item is traded under." REST: the request's `cryptoTicker` parameter. flat files `ticker`: "The exchange symbol that this item is traded under." WebSocket `pair`: "The crypto pair." | REST, flat files, WebSocket | `T`, request | `ticker` | `pair` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `t`: "The Unix millisecond timestamp for the end of the aggregate window." REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window." WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `cryptoTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The crypto pair.". | REST, flat files, WebSocket | `T`, request | `ticker` | `pair` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds.". | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -99,8 +99,8 @@ Massive's fair market value of crypto pairs, streamed as it updates.
 
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security.". | WebSocket | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp.". | WebSocket | `t` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
 
 <a id="snapshots"></a>
@@ -111,7 +111,7 @@ The current state of crypto pairs: today's, the last minute's, and yesterday's b
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under.". | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
 | `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
@@ -151,7 +151,7 @@ The 20 crypto pairs that gained or lost the most since the previous day's close.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under.". | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
 | `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
@@ -191,7 +191,7 @@ The open and close prices of crypto pairs on one UTC day, with the trades behind
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `symbol`: "The symbol pair that was evaluated from the request." | REST | `symbol` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The symbol pair that was evaluated from the request.". | REST | `symbol` |
 | `Close` | double | The close price for the symbol in the given time period. | REST | `close` |
 | `ClosingTrades` | String | An array of results containing the requested data. | REST | `closingTrades` |
 | `Day` | LocalDate | The date requested. | REST | `day` |

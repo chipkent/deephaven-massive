@@ -641,18 +641,19 @@ def _key_part(transport: Transport, column: SourceColumn, asset_class: str | Non
             the field's description (`Field.description_for`).
 
     Returns:
+        One item of the list `_description` joins with "; ", with no closing punctuation:
         ``REST `sip_timestamp`: "<field description>"`` for a wire key with a description,
-        ``REST `sip_timestamp`.`` for one without, or ``REST: the request's `stocksTicker`
-        parameter.`` for a key filled from the request, with the transport spelled as
+        ``REST `sip_timestamp``` for one without, or ``REST: the request's `stocksTicker`
+        parameter`` for a key filled from the request, with the transport spelled as
         `TRANSPORT_LABELS` spells it (``WebSocket `t`: …``).
     """
     label = TRANSPORT_LABELS[transport]
     if column.field is None:
-        return f"{label}: the request's `{column.parameter}` parameter."
+        return f"{label}: the request's `{column.parameter}` parameter"
     described = column.field.description_for(asset_class)
     if described:
         return f'{label} `{column.field.wire_key}`: "{described}"'
-    return f"{label} `{column.field.wire_key}`."
+    return f"{label} `{column.field.wire_key}`"
 
 
 def _description(
@@ -683,12 +684,13 @@ def _description(
         named = ", ".join(f"`{member}`" for member in suppliers)
         return f"Always null for `{spec.name}`; supplied by {named}."
     if is_key and name in _KEY_SENTENCES:
-        parts = [_KEY_SENTENCES[name]]
+        parts: list[str] = []
         for transport, column in own:
             part = _key_part(transport, column, asset_class)
             if part not in parts:
                 parts.append(part)
-        return " ".join(parts)
+        # One sentence after the library's own, so a lowercase label never starts a sentence.
+        return f"{_KEY_SENTENCES[name]} From {'; '.join(parts)}."
     for _, column in own:
         described = column.field.description_for(asset_class) if column.field else ""
         if described:

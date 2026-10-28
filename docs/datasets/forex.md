@@ -12,8 +12,8 @@ Foreign exchange quotes: the best bid and ask of each currency pair, tick by tic
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST: the request's `from` parameter. REST: the request's `fxTicker` parameter. flat files `ticker`: "The exchange symbol that this item is traded under." WebSocket `p`: "The current pair." | REST, flat files, WebSocket | request | `ticker` | `p` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `timestamp`: "The Unix millisecond timestamp." REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the quote was generated at the exchange." flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange." WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp`, `participant_timestamp` | `participant_timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `from` parameter; REST: the request's `fxTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `p`: "The current pair.". | REST, flat files, WebSocket | request | `ticker` | `p` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix millisecond timestamp."; REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the quote was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS.". | REST, flat files, WebSocket | `timestamp`, `participant_timestamp` | `participant_timestamp` | `t` |
 | `AskExchange` | long | The ask exchange ID | REST, flat files | `ask_exchange` | `ask_exchange` |  |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `ask`, `ask_price` | `ask_price` | `a` |
 | `AskSize` | double | Always null for `forex.quotes`; supplied by `stocks.quotes`, `options.quotes`, `futures.quotes`, `crypto.quotes`. |  |  |  |  |
@@ -42,8 +42,8 @@ Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `T`: "The exchange symbol that this item is traded under." REST: the request's `forexTicker` parameter. flat files `ticker`: "The exchange symbol that this item is traded under." WebSocket `pair`: "The currency pair." | REST, flat files, WebSocket | `T`, request | `ticker` | `pair` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." REST `t`: "The Unix millisecond timestamp for the end of the aggregate window." flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window." WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `forexTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The currency pair.". | REST, flat files, WebSocket | `T`, request | `ticker` | `pair` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds.". | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -72,8 +72,8 @@ Massive's fair market value of each currency pair, streamed as it updates.
 
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security.". | WebSocket | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp.". | WebSocket | `t` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
 
 <a id="snapshots"></a>
@@ -84,7 +84,7 @@ The current state of currency pairs: today's bar, the last minute, and the last 
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under.". | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
 | `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
@@ -120,7 +120,7 @@ The twenty currency pairs that gained or lost the most since the previous UTC cl
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under.". | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
 | `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
@@ -156,7 +156,7 @@ An amount converted between two currencies at the latest quote.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `symbol`: "The symbol pair that was evaluated from the request." | REST | `symbol` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The symbol pair that was evaluated from the request.". | REST | `symbol` |
 | `Converted` | double | The result of the conversion. | REST | `converted` |
 | `From` | String | The "from" currency symbol. | REST | `from` |
 | `InitialAmount` | double | The amount to convert. | REST | `initialAmount` |
