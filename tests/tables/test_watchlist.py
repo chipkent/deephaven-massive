@@ -382,13 +382,14 @@ def test_the_row_converter_raises_or_nulls() -> None:
 
 
 def _listeners(table: Table) -> int:
-    # The number of child listeners a Deephaven table holds (a private engine field, read by
-    # reflection through jpy, which ships no type stubs).
+    # The number of child listeners a Deephaven table holds: a private engine field, read by
+    # commons-lang3 (shipped with Deephaven) through jpy, which ships no type stubs. The read
+    # runs in Java because JDK 17's setAccessible fails when called over JNI with no Java
+    # caller frame.
     jpy = cast("Any", importlib.import_module("jpy"))
-    base = jpy.get_type("io.deephaven.engine.table.impl.BaseTable")
-    field = base.jclass.getDeclaredField("childListenerReferences")
-    field.setAccessible(True)
-    references = field.get(table.j_table)
+    fields = jpy.get_type("org.apache.commons.lang3.reflect.FieldUtils")
+    force_access = True  # Java takes it positionally: readField(target, name, forceAccess)
+    references = fields.readField(table.j_table, "childListenerReferences", force_access)
     manager = jpy.get_type("io.deephaven.util.datastructures.SimpleReferenceManager")
     held = jpy.cast(references, manager)
     if held is not None:
