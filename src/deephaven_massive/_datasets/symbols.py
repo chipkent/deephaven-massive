@@ -1230,8 +1230,11 @@ def wire_spellings(asset_class: AssetClass | None, symbol: str) -> tuple[str, ..
     """Return every spelling `canonical_from_wire` reads as a canonical symbol, for a file filter.
 
     A flat file is filtered on its raw `ticker` column before any row is read, so the filter
-    must hold every way a file may write the requested symbols: `C:EURUSD` is also looked for
-    as `X:EUR-USD`. The canonical text comes first.
+    must hold every way a file may write the requested symbols: Massive's knowledge base says
+    the crypto and forex files write `X:BTC-USD` and `C:EUR-USD`, and the forex quotes sample
+    shows `X:EUR-USD`, so `X:BTCUSD` and `C:EURUSD` are also looked for in those spellings. A
+    crypto pair whose quote is not in `CRYPTO_QUOTES` is looked for split at every point. The
+    canonical text comes first.
 
     Args:
         asset_class: The dataset's class, or None for one that spans classes.
@@ -1248,9 +1251,14 @@ def wire_spellings(asset_class: AssetClass | None, symbol: str) -> tuple[str, ..
         prefixes = ("C:", "X:", "") if asset_class is AssetClass.FOREX else ("C:",)
     elif resolved is AssetClass.CRYPTO:
         prefixes = ("X:", "") if asset_class is AssetClass.CRYPTO else ("X:",)
-        split = _split_crypto(symbol[2:])
-        if split is None:  # a quote outside CRYPTO_QUOTES: only the joined forms are known
-            return tuple(f"{p}{symbol[2:]}" for p in prefixes)
+        body = symbol[2:]
+        split = _split_crypto(body)
+        if split is None:
+            # A quote outside CRYPTO_QUOTES: the file may separate the pair at any point.
+            cuts = [(body[:i], body[i:]) for i in range(1, len(body))]
+            joined = tuple(f"{p}{body}" for p in prefixes)
+            dashed = (f"{p}{b}{s}{q}" for p in prefixes for b, q in cuts for s in ("/", "-"))
+            return (*joined, *dashed)
         base, quote = split
     elif asset_class is AssetClass.INDICES:
         return symbol, symbol[2:]

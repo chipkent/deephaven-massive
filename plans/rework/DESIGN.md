@@ -1672,8 +1672,12 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   row keeps its ticker as written; topics use `ws_symbol`
   (`C.EUR-USD`, as the WebSocket documentation gives every forex channel's `ticker`
   parameter). A flat-file filter holds every spelling of each requested symbol
-  (`wire_spellings`), so a file that writes `X:EUR-USD` still matches `C:EURUSD`, and its rows
-  hold `C:EURUSD`.
+  (`wire_spellings`): Massive's knowledge base says the crypto and forex files write
+  `X:BTC-USD` and `C:EUR-USD`
+  (https://massive.com/knowledge-base/article/why-doesnt-a-bar-from-the-rest-api-match-the-flat-files),
+  and the forex quotes sample shows `X:EUR-USD`, so a request for `X:BTCUSD` or `C:EURUSD`
+  matches those rows, which hold the canonical ticker; a crypto pair whose quote is not in
+  `CRYPTO_QUOTES` is looked for split at every point.
 - **The index prefix comes from the endpoint, never from the name.** A ticker without `I:` on
   a dataset of the indices class is read as `I:` and the ticker; on any other dataset it is a
   stock. No conversion looks a name up (`SPX` is never recognized as an index by its name).

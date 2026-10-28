@@ -883,6 +883,29 @@ def test_quote_files_in_the_sample_spelling_are_read(
     assert pick(every, "Symbol") == [("C:EURUSD",), ("C:GBPUSD",)]
 
 
+@pytest.mark.parametrize("spelling", ["C:EUR-USD", "X:EUR-USD", "C:EURUSD"])
+def test_a_quote_file_in_any_massive_spelling_is_read(
+    *, files_session: dm.MassiveSession, fake_s3: FakeS3, spelling: str
+) -> None:
+    # Massive's knowledge base says the forex files write `C:EUR-USD`; the sample shows
+    # `X:EUR-USD`. A request for `C:EURUSD` finds the rows in every one.
+    moment = epoch_ns(datetime(2025, 3, 3, 12, tzinfo=UTC))
+    header = (
+        "ticker",
+        "ask_exchange",
+        "ask_price",
+        "bid_exchange",
+        "bid_price",
+        "participant_timestamp",
+    )
+    row = dict(zip(header, (spelling, 48, 1.08066, 48, 1.08063, moment), strict=True))
+    fake_s3.put_csv(file_key("global_forex/quotes_v1"), header, [row])
+    table = files_session.forex.quotes("C:EURUSD").history(
+        FILE_DAY, FILE_DAY, source=dm.HistorySource.FLAT_FILES
+    )
+    assert pick(table, "Symbol", "AskPrice") == [("C:EURUSD", 1.08066)]
+
+
 BAR_HEADER = ("ticker", "volume", "open", "close", "high", "low", "window_start", "transactions")
 
 

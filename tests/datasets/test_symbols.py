@@ -555,6 +555,7 @@ def test_wire_spellings_are_the_inverse_of_canonical_from_wire(
 def test_wire_spellings_cover_the_flat_file_and_websocket_forms() -> None:
     assert {"X:EUR-USD", "EUR/USD", "EUR-USD"} <= set(wire_spellings(FX, "C:EURUSD"))
     assert {"BTC-USD", "X:BTC-USD"} <= set(wire_spellings(CRY, "X:BTCUSD"))
+    assert "C:EUR-USD" in wire_spellings(FX, "C:EURUSD")  # the knowledge base's file spelling
     assert wire_spellings(IDX, "I:SPX") == ("I:SPX", "SPX")
 
 
@@ -722,7 +723,10 @@ def test_a_crypto_ticker_streams_only_when_its_quote_is_known() -> None:
     assert "fetch(), poll(), and history() still serve it" in problem
     with pytest.raises(ValueError, match=r"^'X:BTCDAI' cannot be streamed"):
         ws_symbol(CRY, "X:BTCDAI")
-    assert wire_spellings(CRY, "X:BTCDAI") == ("X:BTCDAI", "BTCDAI")
+    spellings = wire_spellings(CRY, "X:BTCDAI")
+    assert spellings[:2] == ("X:BTCDAI", "BTCDAI")
+    assert {"X:BTC-DAI", "BTC/DAI", "X:BT-CDAI"} <= set(spellings)
+    assert all(canonical_from_wire(CRY, s) == "X:BTCDAI" for s in spellings)
 
 
 def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:

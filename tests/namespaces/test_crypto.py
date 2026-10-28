@@ -535,6 +535,7 @@ def test_ws_frames_carry_exactly_the_generated_fields(
         ("global_crypto/trades_v1", "global_crypto_trades_v1_2023-03-28.csv"),
         ("global_crypto/minute_aggs_v1", "global_crypto_minute_aggs_v1_2023-03-28.csv"),
         ("global_crypto/day_aggs_v1", "global_crypto_day_aggs_v1_2023-03-28.csv"),
+        ("global_crypto/trades_v1", "global_crypto_trades_v1_dashed.csv"),
     ],
 )
 def test_flat_file_fixtures_have_the_generated_header(
@@ -989,3 +990,30 @@ def test_a_flat_file_day_bar_stamped_inside_its_utc_day_fails_loudly(
         r"stamped 2023-03-28T04:00:00",
     ):
         q.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES)
+
+
+def test_a_flat_file_that_dashes_its_pairs_is_read(
+    *,
+    s3_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Fixture,
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    # Massive's knowledge base says the crypto files write `X:BTC-USD`: the filter must look
+    # for that spelling, and the rows hold the canonical ticker.
+    text = load_fixture(OWNER, "global_crypto_trades_v1_dashed.csv").decode()
+    fake_s3.put("global_crypto/trades_v1/2023/03/2023-03-28.csv.gz", make_csv_gz(text))
+    flat = dm.HistorySource.FLAT_FILES
+
+    def symbols(symbols: object) -> list[tuple[str, float]]:
+        q = s3_session.crypto.trades(cast("Any", symbols))
+        table = q.history("2023-03-28", "2023-03-28", source=flat)
+        return [(r["Symbol"], r["Price"]) for r in rows(table)]
+
+    assert symbols("X:BTCUSD") == [("X:BTCUSD", 27142.85)]
+    assert symbols("X:BTCDAI") == [("X:BTCDAI", 27140.12)]  # a quote the library does not know
+    assert symbols(dm.ALL) == [
+        ("X:BTCUSD", 27142.85),
+        ("X:ETHUSD", 1772.6),
+        ("X:BTCDAI", 27140.12),
+    ]
