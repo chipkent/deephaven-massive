@@ -1846,7 +1846,11 @@ def _modules_loaded_by(names: list[str]) -> list[str]:
         names: Attribute names to read from `deephaven_massive._massive`.
 
     Returns:
-        The modules of `_CLIENT_AND_NETWORK_MODULES` in `sys.modules` afterwards, sorted.
+        The modules of `_CLIENT_AND_NETWORK_MODULES` that reading the names added to
+        `sys.modules`, sorted. Whatever importing the package itself loads is left out: the
+        library's front door reads its version through `importlib.metadata`, which on Python
+        before 3.13 imports `email` and with it `socket`, and no name of the interface is to
+        blame for that.
     """
     # The script is a literal and the data travels on stdin; `-P` keeps the working directory
     # off `sys.path`.
@@ -1859,9 +1863,10 @@ def _modules_loaded_by(names: list[str]) -> list[str]:
                 "import importlib, json, sys\n"
                 "names, watched = json.load(sys.stdin)\n"
                 "wire = importlib.import_module('deephaven_massive._massive')\n"
+                "before = set(sys.modules)\n"
                 "for name in names:\n"
                 "    getattr(wire, name)\n"
-                "print(json.dumps(sorted(set(watched) & set(sys.modules))))"
+                "print(json.dumps(sorted(set(watched) & (set(sys.modules) - before))))"
             ),
         ],
         input=json.dumps([names, _CLIENT_AND_NETWORK_MODULES]),
