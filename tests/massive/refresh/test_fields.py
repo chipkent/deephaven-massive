@@ -143,6 +143,19 @@ def test_a_description_fix_under_the_declared_key_of_a_key_fix_is_never_looked_u
     assert use.described_keys == frozenset()
 
 
+def test_a_stale_description_fix_by_asset_class_gives_no_class_texts() -> None:
+    fix = overrides.DescriptionFix(
+        vendor="Per whole share.", asset_classes={"options": "Per share."}, reason="test"
+    )
+    hand = dataclasses.replace(_EMPTY, description_fixes={("us_x/trades_v1", "price"): fix})
+    rules = _rules(hand)
+    described = {"type": "number", "description": "Reworded."}
+    item = rules.field(RawField("price", described, required=True))
+    assert item is not None
+    assert (item.description, item.class_descriptions) == ("Reworded.", ())
+    assert [(p.gate, p.key) for p in rules.problems] == [("stale-entry", "price")]
+
+
 def test_a_description_fix_by_asset_class_keeps_the_vendor_text_for_the_rest() -> None:
     fix = overrides.DescriptionFix(
         vendor="Per whole share.",

@@ -45,7 +45,7 @@ def test_every_description_fix_replaces_its_quote_with_other_single_spaced_text(
 def test_a_description_fix_gives_exactly_one_non_empty_form(
     text: str | None, asset_classes: dict[str, str] | None
 ) -> None:
-    with pytest.raises(ValueError, match="non-empty `text` or `asset_classes`"):
+    with pytest.raises(ValueError, match="needs exactly one of a non-empty `text`"):
         overrides.DescriptionFix(vendor="v", reason="r", text=text, asset_classes=asset_classes)
 
 

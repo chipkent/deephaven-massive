@@ -704,6 +704,32 @@ def test_a_dataset_takes_its_asset_class_s_description_of_a_shared_source() -> N
     }
 
 
+def test_a_key_column_quotes_its_asset_class_s_description() -> None:
+    ticker = Field(
+        wire_key="ticker",
+        column="Ticker",
+        wire_type=WireType.STRING,
+        description="The stock symbol.",
+        class_descriptions=(("options", "The option contract symbol."),),
+    )
+    made = Source(key="/shared", transport=R, fields=(ticker,))
+    quoted = {}
+    for asset_class in (AssetClass.OPTIONS, AssetClass.STOCKS):
+        dataset = DatasetSpec(
+            name="reference.x",
+            summary="A dataset for the tests.",
+            asset_class=asset_class,
+            fetch_path="/shared",
+            keys={(R, "/shared"): SourceKeys(KeySpec("Ticker"))},
+        )
+        (column,) = dataset_schema(dataset, (dataset,), lambda *_: made).columns
+        quoted[asset_class] = column.description.split("REST `ticker`: ")[1]
+    assert quoted == {
+        AssetClass.OPTIONS: '"The option contract symbol."',
+        AssetClass.STOCKS: '"The stock symbol."',
+    }
+
+
 TRADES_KEYS = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
 STOCK_TRADES = DatasetSpec(
     name="stocks.trades",

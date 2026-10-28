@@ -216,7 +216,10 @@ class DescriptionFix:
         """
         texts = [self.text] if self.text is not None else list((self.asset_classes or {}).values())
         if (self.text is None) == (self.asset_classes is None) or not texts or not all(texts):
-            raise ValueError("a description fix gives a non-empty `text` or `asset_classes`")
+            raise ValueError(
+                "a description fix needs exactly one of a non-empty `text` or a non-empty "
+                "`asset_classes` with non-empty texts"
+            )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -829,9 +832,12 @@ _CRYPTO_PRICE_TEXT = (
 )
 _CRYPTO_PRICE_REASON = (
     "Written here because no Massive text for a crypto trade's price is both right and "
-    "informative: the WebSocket crypto trade says only 'The price.', and the REST crypto trades "
-    "say 'in the base currency of the crypto pair', the first currency by the usual pair "
-    "convention, which is the one priced, not the one the price is in."
+    "unambiguous: the WebSocket crypto trade says only 'The price.', and the REST crypto trades "
+    "say 'in the base currency of the crypto pair'. Massive's ticker reference defines the base "
+    "currency as 'the currency that this asset is priced against' (`base_currency_symbol`), "
+    "which makes that the second currency, while the usual pair convention makes the base the "
+    "first currency, the one priced; the replacement names the currency explicitly and is "
+    "right under either reading."
 )
 _CRYPTO_PRICE = DescriptionFix(
     vendor=_SHARE_PRICE,
@@ -988,8 +994,8 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
         ("/v3/trades/{cryptoTicker}", "price"): DescriptionFix(
             vendor="The price of the trade in the base currency of the crypto pair.",
             text=_CRYPTO_PRICE_TEXT,
-            reason="The price is in the pair's second (quote) currency, not its base. "
-            f"{_CRYPTO_PRICE_REASON}",
+            reason="Ambiguous: Massive's own meaning of 'base currency' and the usual one name "
+            f"opposite currencies of the pair. {_CRYPTO_PRICE_REASON}",
         ),
         **_for(CRYPTO_SNAPSHOTS, ("lastTrade.i",), _CRYPTO_ID),
         ("global_crypto/trades_v1", "id"): _CRYPTO_ID,
