@@ -61,7 +61,7 @@ from deephaven_massive._datasets.symbols import SymbolTable, symbol_canonicalize
 from deephaven_massive._enums import PollMode
 from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
 from deephaven_massive._massive import Transport
-from deephaven_massive._tables.columns import col_defs
+from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.liveness import entered, make_result
 
@@ -586,16 +586,17 @@ def _build(
         stop: The poller's stop event.
 
     Returns:
-        The result and its publisher (`build_table`), and the result scope.
+        The result and its publisher (`build_table`), and the result scope. The result is the
+        shape `build_table` derives, described last (`describe`), so it carries the dataset's
+        column descriptions in every mode; the poller writes only through the publisher.
     """
     built: list[TablePublisher] = []
+    schema = core.catalog.dataset_schema(spec)
 
     def shape() -> Table:
-        table, publisher = build_table(
-            spec, core.catalog.dataset_schema(spec), mode, stream_id=stream_id, stop=stop
-        )
+        table, publisher = build_table(spec, schema, mode, stream_id=stream_id, stop=stop)
         built.append(publisher)
-        return table
+        return describe(table, spec, schema)
 
     result, scope = make_result(shape)
     return (result, built[0]), scope

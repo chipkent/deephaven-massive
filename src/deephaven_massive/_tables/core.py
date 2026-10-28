@@ -632,7 +632,6 @@ class SessionCore:
         *,
         channel: str,
         build: Callable[[Table], Table],
-        wrap: bool = False,
     ) -> Table:
         """Create one live result over the stream of `(spec, channel, symbols)`.
 
@@ -651,15 +650,17 @@ class SessionCore:
         A stream that failed while it was opening, or between the claim and the build, serves no
         result: every shape, `blink()` included, raises `MassiveError` naming the stream's
         failure, with the hold released. A failure that lands while the shape is being derived
-        makes Deephaven raise `DHError` ("Can not listen to failed table"); that error is
-        wrapped in the same `MassiveError`. Either way `m.streams()` shows `FAILED`.
+        makes Deephaven raise `DHError` ("Can not listen to failed table"), or jpy's
+        `RuntimeError` from the described copy; that error is wrapped in the same
+        `MassiveError`. Either way `m.streams()` shows `FAILED`.
 
         Args:
             spec: The dataset.
             request: The normalized arguments.
             channel: The WebSocket channel.
-            build: Turns the stream's blink table into the result.
-            wrap: True when `build` returns a new wrapper of the blink table (`blink()`).
+            build: Turns the stream's blink table into the result. It must create a new
+                table, never return the blink table itself, so the result scope manages the
+                result and each call returns a distinct table.
 
         Returns:
             The live result, a distinct Python object per call.
@@ -674,13 +675,16 @@ class SessionCore:
         try:
             self._require_unfailed(spec, handle.stream_id)
             with entered(self.exec_ctx):
-                result, scope = make_result(lambda: build(blink), wrap=wrap)
+                result, scope = make_result(lambda: build(blink))
             self.results.track(
                 result, scope, functools.partial(self._release_hold, handle.stream_id)
             )
         except BaseException as error:  # nothing was tracked: the scope and the hold are ours
             # Read first: releasing the last hold of a shut-down stream deletes its record.
-            failure = self._failure(handle.stream_id) if isinstance(error, DHError) else None
+            # A failed table fails a shape with `DHError`, or with jpy's `RuntimeError` when the
+            # Java call is direct (the described copy every result ends with).
+            deephaven = isinstance(error, DHError | RuntimeError)
+            failure = self._failure(handle.stream_id) if deephaven else None
             try:
                 if scope is not None:
                     with entered(self.exec_ctx):
