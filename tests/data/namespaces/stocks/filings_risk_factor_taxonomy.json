@@ -1,0 +1,20 @@
+{
+  "request_id": "daac836f71724420b66011d55d88b30b",
+  "results": [
+    {
+      "description": "Risk from inadequate performance management systems, unclear accountability structures, or ineffective measurement and incentive systems that could affect employee performance, goal achievement, and organizational effectiveness.",
+      "primary_category": "Governance & Stakeholder",
+      "secondary_category": "Organizational & Management",
+      "taxonomy": "1.0",
+      "tertiary_category": "Performance management and accountability"
+    },
+    {
+      "description": "Risk from requirements to monitor, document, and report on compliance with privacy and data protection regulations including risks from compliance program effectiveness, record-keeping requirements, and breach notification obligations.",
+      "primary_category": "Regulatory & Compliance",
+      "secondary_category": "Data & Privacy",
+      "taxonomy": "1.0",
+      "tertiary_category": "Compliance monitoring and reporting"
+    }
+  ],
+  "status": "OK"
+}

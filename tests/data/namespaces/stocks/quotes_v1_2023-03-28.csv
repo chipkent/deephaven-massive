@@ -1,0 +1,4 @@
+ticker,ask_exchange,ask_price,ask_size,bid_exchange,bid_price,bid_size,conditions,indicators,participant_timestamp,sequence_number,sip_timestamp,tape,trf_timestamp
+MSFT,0,0,0,12,275.33,2,1,,1679990400004452251,3178,1679990400004468151,3,0
+MSFT,11,277.01,3,12,275.33,2,1,,1679990400018372096,3886,1679990400018726518,3,0
+AAPL,11,160.6,3,12,160.4,2,1,,1679990400018372096,3887,1679990400018800000,3,0

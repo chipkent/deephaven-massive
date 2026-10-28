@@ -1,0 +1,30 @@
+{
+  "request_id": "6a7e466379af0a71039d60cc78e72282",
+  "results": [
+    {
+      "announced_date": "2024-06-01",
+      "currency_code": "USD",
+      "final_issue_price": 17,
+      "highest_offer_price": 17,
+      "ipo_status": "history",
+      "isin": "US75383L1026",
+      "issue_end_date": "2024-06-06",
+      "issue_start_date": "2024-06-01",
+      "issuer_name": "Rapport Therapeutics Inc.",
+      "last_updated": "2024-06-27",
+      "listing_date": "2024-06-07",
+      "lot_size": 100,
+      "lowest_offer_price": 17,
+      "max_shares_offered": 8000000,
+      "min_shares_offered": 1000000,
+      "primary_exchange": "XNAS",
+      "security_description": "Ordinary Shares",
+      "security_type": "CS",
+      "shares_outstanding": 35376457,
+      "ticker": "RAPP",
+      "total_offer_size": 136000000,
+      "us_code": "75383L102"
+    }
+  ],
+  "status": "OK"
+}

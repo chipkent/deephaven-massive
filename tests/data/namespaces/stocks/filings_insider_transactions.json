@@ -1,0 +1,53 @@
+{
+  "request_id": "047c7035a86042b1925118e5f68d81b0",
+  "results": [
+    {
+      "accession_number": "0002123147-26-000002",
+      "aff_10b5_one": false,
+      "date_of_original_submission": null,
+      "deemed_execution_date": "2026-03-27",
+      "direct_or_indirect": "D",
+      "equity_swap_involved": false,
+      "exercise_date": "2026-03-27",
+      "exercise_price": 88.167,
+      "expiration_date": "2026-03-27",
+      "filing_date": "2026-03-30",
+      "filing_url": "https://www.sec.gov/Archives/edgar/data/1469395/0002123147-26-000002.txt",
+      "footnotes": [
+        {
+          "description": "These shares were acquired at a price of 4955 argentine pesos per share. For reporting purposes, the exercise price has been converted to US dollars based on the exchange rate reported by Banco de la Nacion Argentina for the date of the acquisition, which was 1405 argentine pesos per US dollar. Then multiplied by 25, the Par value or rate of common shares to one ADR.",
+          "id": "F1"
+        }
+      ],
+      "form_type": "4",
+      "is_director": false,
+      "is_officer": true,
+      "is_other": false,
+      "is_ten_percent_owner": false,
+      "issuer_cik": "0001469395",
+      "issuer_name": "Pampa Energy Inc.",
+      "not_subject_to_section_16": false,
+      "officer_title": "Chief Financial Officer",
+      "owner_cik": "0002123147",
+      "owner_name": "Zuberbuhler Adolfo Fernando",
+      "period_of_report": "2026-03-27",
+      "record_type": "transaction",
+      "security_title": "Common Stock, $25 Par Value",
+      "security_type": "derivative",
+      "shares_owned_following_transaction": 2759,
+      "tickers": [
+        "PAM"
+      ],
+      "transaction_acquired_disposed": "A",
+      "transaction_code": "A",
+      "transaction_date": "2026-03-27",
+      "transaction_price_per_share": 88.167,
+      "transaction_shares": 12923,
+      "transaction_timeliness": "O",
+      "transaction_value": 1139382.141,
+      "underlying_security_shares": 12923,
+      "underlying_security_title": "PAMP"
+    }
+  ],
+  "status": "OK"
+}
