@@ -235,14 +235,19 @@ def test_bars_pick_their_class_from_the_timespan(
     query = massive_session.forex.bars("EUR/USD", timespan, multiplier=multiplier)
     assert type(query) is expected
     assert request(query) == Request(
-        symbols=("C:EURUSD",), timespan=timespan, multiplier=multiplier, adjusted=True
+        symbols=("C:EURUSD",), timespan=timespan, multiplier=multiplier
     )
 
 
-def test_bars_defaults_and_adjusted(massive_session: dm.MassiveSession) -> None:
-    query = massive_session.forex.bars(dm.ALL, adjusted=False)
+def test_bars_default_to_one_minute_and_take_no_adjusted(
+    massive_session: dm.MassiveSession,
+) -> None:
+    query = massive_session.forex.bars(dm.ALL)
     assert type(query) is StreamHistoryQuery
-    assert request(query) == Request(symbols=dm.ALL, timespan=dm.Timespan.MINUTE, adjusted=False)
+    # Currency pairs have no corporate actions: no `adjusted` is stored, so none is ever sent.
+    assert request(query) == Request(symbols=dm.ALL, timespan=dm.Timespan.MINUTE)
+    with pytest.raises(TypeError, match="adjusted"):
+        massive_session.forex.bars(dm.ALL, adjusted=False)  # type: ignore[call-overload]  # no such argument
 
 
 def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
@@ -253,8 +258,6 @@ def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
         bars("EUR/USD", "minute")  # type: ignore[call-overload]  # a plain string is refused
     with pytest.raises(ValueError, match="multiplier"):
         bars("EUR/USD", dm.Timespan.HOUR, multiplier=0)
-    with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars("EUR/USD", adjusted="yes")  # type: ignore[call-overload]  # a str is no bool
 
 
 def test_fmv(massive_session: dm.MassiveSession) -> None:
@@ -528,8 +531,8 @@ def test_daily_bars_fetch_reads_the_previous_session(
     fake_rest.reply(
         "/v2/aggs/ticker/C%3AEURUSD/prev", Reply(fixture_body(load_fixture, "prev.json"))
     )
-    table = rest_session.forex.bars("EUR/USD", dm.Timespan.DAY, adjusted=False).fetch()
-    assert sent(fake_rest) == [("/v2/aggs/ticker/C:EURUSD/prev", {"adjusted": ["false"]})]
+    table = rest_session.forex.bars("EUR/USD", dm.Timespan.DAY).fetch()
+    assert sent(fake_rest) == [("/v2/aggs/ticker/C:EURUSD/prev", {})]
     assert pick(table, *BAR_COLUMNS) == [
         ("C:EURUSD", 1_651_708_799_999 * MS, 1.05252, 1.0631, 1.0505, 1.06206, 180300.0, 1.055)
     ]
@@ -547,11 +550,11 @@ def test_bars_history_reads_the_aggregate_range(
     )
     query = rest_session.forex.bars("C:EURUSD", dm.Timespan.HOUR)
     table = query.history("2021-07-22", "2021-07-22", source=dm.HistorySource.REST)
-    # The UTC day goes out as millisecond path segments; `adjusted` and the page size as query.
+    # The UTC day goes out as millisecond path segments, the page size as the query.
     assert sent(fake_rest) == [
         (
             "/v2/aggs/ticker/C:EURUSD/range/1/hour/1626912000000/1626998399999",
-            {"adjusted": ["true"], "limit": ["50000"]},
+            {"limit": ["50000"]},
         )
     ]
     assert pick(table, *BAR_COLUMNS) == [
@@ -571,9 +574,7 @@ def test_daily_bars_of_every_pair_read_the_grouped_day(
     )
     query = rest_session.forex.bars(dm.ALL, dm.Timespan.DAY)
     table = query.history("2020-10-14", "2020-10-14", source=dm.HistorySource.REST)
-    assert sent(fake_rest) == [
-        ("/v2/aggs/grouped/locale/global/market/fx/2020-10-14", {"adjusted": ["true"]})
-    ]
+    assert sent(fake_rest) == [("/v2/aggs/grouped/locale/global/market/fx/2020-10-14", {})]
     assert [row[0] for row in pick(table, "Symbol")] == ["C:ILSCHF", "C:GBPCAD", "C:DKKAUD"]
 
 
@@ -858,9 +859,9 @@ def test_bar_files_round_trip(
     start = epoch_ns(datetime(2025, 3, 3, tzinfo=UTC))
     values = ("C:EURUSD", 120, 1.08063, 1.08033, 1.0807, 1.0803, start, 120)
     fake_s3.put_csv(file_key(prefix), BAR_HEADER, [dict(zip(BAR_HEADER, values, strict=True))])
-    # Flat files hold unadjusted bars only, so the query asks for those.
-    query = files_session.forex.bars(dm.ALL, timespan, adjusted=False)
-    table = query.history(FILE_DAY, FILE_DAY, source=dm.HistorySource.FLAT_FILES)
+    # With no `adjusted` to rule them out, AUTO reads every pair's bars from the files.
+    query = files_session.forex.bars(dm.ALL, timespan)
+    table = query.history(FILE_DAY, FILE_DAY)
     assert fake_s3.requests == [("flatfiles", file_key(prefix))]
     assert pick(table, *BAR_COLUMNS) == [
         ("C:EURUSD", start, 1.08063, 1.0807, 1.0803, 1.08033, 120.0, None)

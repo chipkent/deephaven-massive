@@ -280,7 +280,6 @@ class _Forex(Namespace):
         timespan: StreamSpan = Timespan.MINUTE,
         *,
         multiplier: Literal[1] = 1,
-        adjusted: bool = True,
     ) -> StreamHistoryQuery: ...
     @overload
     def bars(
@@ -289,7 +288,6 @@ class _Forex(Namespace):
         timespan: DaySpan,
         *,
         multiplier: Literal[1] = 1,
-        adjusted: bool = True,
     ) -> HistoryLatestQuery: ...
     @overload
     def bars(
@@ -298,7 +296,6 @@ class _Forex(Namespace):
         timespan: Timespan = Timespan.MINUTE,
         *,
         multiplier: int = 1,
-        adjusted: bool = True,
     ) -> HistoryQuery: ...
     def bars(
         self,
@@ -306,7 +303,6 @@ class _Forex(Namespace):
         timespan: Timespan = Timespan.MINUTE,
         *,
         multiplier: int = 1,
-        adjusted: bool = True,
     ) -> HistoryQuery:
         """Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 
@@ -316,12 +312,14 @@ class _Forex(Namespace):
         the previous UTC day's bar from `/v2/aggs/ticker/{t}/prev`; every other
         timespan and multiplier is `history()` only. `history()` reads the REST aggregate
         range (`/v2/aggs/ticker/{t}/range/…`) or the `global_forex/minute_aggs_v1` and
-        `global_forex/day_aggs_v1` flat files, which hold only unadjusted bars. There is no
-        `limit`: `history()` pages internally. `dm.ALL` streams every pair (the `CA.*` or
-        `CAS.*` topic), and `history()` accepts it for one-day bars, through the grouped
-        daily endpoint (`/v2/aggs/grouped/locale/global/market/fx/{date}`, one request per
-        day) or the day files, and for one-minute bars through the minute files (with
-        `adjusted=False`); `fetch()` with `dm.ALL` raises `ValueError`.
+        `global_forex/day_aggs_v1` flat files. Currency pairs have no corporate actions, so
+        there is no `adjusted` argument: no request sends one, and the flat files serve every
+        bar timespan they hold. There is no `limit`: `history()` pages internally. `dm.ALL`
+        streams every pair (the `CA.*` or `CAS.*` topic), and `history()` accepts it for
+        one-day bars, through the grouped daily endpoint
+        (`/v2/aggs/grouped/locale/global/market/fx/{date}`, one request per day) or the day
+        files, and for one-minute bars through the minute files; `fetch()` with `dm.ALL`
+        raises `ValueError`.
 
         Each column is described in the web UI's column tooltips, by `columns()`, and at
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#bars.
@@ -334,9 +332,6 @@ class _Forex(Namespace):
                 Defaults to one minute.
             multiplier: The number of `timespan` units in one bar's window, a positive
                 integer. Defaults to 1.
-            adjusted: Whether REST bars are adjusted, sent as the endpoints' `adjusted`
-                parameter. Defaults to True; flat files hold only unadjusted bars, so
-                `history()` reads them only with False.
 
         Returns:
             A `StreamHistoryQuery` for one-second or one-minute bars, a `HistoryLatestQuery`
@@ -344,8 +339,8 @@ class _Forex(Namespace):
             subscribed until a verb is called.
 
         The call raises `TypeError` if `symbols` is not a pair, a sequence of pairs, a table,
-        or `dm.ALL`, `timespan` is not a `dm.Timespan`, `multiplier` is not an `int`, or
-        `adjusted` is not a `bool`; and `ValueError` if a pair is not two three-letter
+        or `dm.ALL`, `timespan` is not a `dm.Timespan`, or `multiplier` is not an `int`; and
+        `ValueError` if a pair is not two three-letter
         currency codes, the sequence is empty, a table has no `Symbol` column, `multiplier`
         is not positive, or `timespan` is `dm.Timespan.SESSION`.
 
@@ -364,7 +359,6 @@ class _Forex(Namespace):
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
-            adjusted=adjusted,
         )
         return cast("HistoryQuery", query)
 
