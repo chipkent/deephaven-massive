@@ -1064,6 +1064,11 @@ INDICATOR = DatasetSpec(
     fetch_path="/v1/indicators/sma/{stockTicker}",
 )
 OPTION_CONTRACTS = change(CONTRACTS, symbol_param=None)
+NEWS = DatasetSpec(
+    name="reference.news",
+    summary="A dataset for the tests.",
+    fetch_path="/v2/reference/news",
+)
 
 
 @pytest.mark.parametrize(
@@ -1085,7 +1090,24 @@ OPTION_CONTRACTS = change(CONTRACTS, symbol_param=None)
             "2025-09-18T09:30:00-04:00",
             datetime(2025, 9, 18, 13, 30, tzinfo=UTC),
         ),
+        # A date on a range filter of an instant parameter stays a date: the REST transport
+        # places it in the day zone of each request's symbols. A millisecond timestamp can
+        # end a day exactly, so every form takes one.
         (INDICATOR, "timestamp_gte", "2025-01-02", date(2025, 1, 2)),
+        (INDICATOR, "timestamp_lte", date(2025, 1, 2), date(2025, 1, 2)),
+        (INDICATOR, "timestamp", date(2025, 1, 2), date(2025, 1, 2)),  # no range bound
+        (NEWS, "published_utc_gte", "2025-06-02", date(2025, 6, 2)),
+        (NEWS, "published_utc_lt", "2025-06-02", date(2025, 6, 2)),
+        (NEWS, "published_utc", "2025-06-02", date(2025, 6, 2)),
+        # An instant given by the caller is exact already.
+        (
+            NEWS,
+            "published_utc_lte",
+            "2025-06-02T12:00:00Z",
+            datetime(2025, 6, 2, 12, tzinfo=UTC),
+        ),
+        # A calendar-date parameter keeps the day.
+        (OPTION_CONTRACTS, "expiration_date_gt", "2026-01-16", date(2026, 1, 16)),
         (
             INDICATOR,
             "timestamp_gte",
@@ -1095,6 +1117,9 @@ OPTION_CONTRACTS = change(CONTRACTS, symbol_param=None)
         # A bare text for a list parameter is the list of that one value.
         (DIVIDENDS, "distribution_type_any_of", "special", ("special",)),
         (DIVIDENDS, "distribution_type_any_of", ("a", "b"), ("a", "b")),
+        # The wire joins a list with commas, so every spelling of one list is one value.
+        (DIVIDENDS, "distribution_type_any_of", "a, b", ("a", "b")),
+        (DIVIDENDS, "distribution_type_any_of", ("a,b", "c"), ("a", "b", "c")),
     ],
 )
 def test_each_parameter_kind_keeps_the_value_it_sends(
@@ -1125,6 +1150,19 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
             "takes whole ms since the epoch",
         ),
         (DIVIDENDS, "distribution_type_any_of", (), "takes at least one value"),
+        (DIVIDENDS, "distribution_type_any_of", "a,,b", "has an empty value in"),
+        (DIVIDENDS, "distribution_type_any_of", " ", "has an empty value in"),
+        # ISO-8601 text of no documented precision cannot end a day exactly.
+        (
+            NEWS,
+            "published_utc_lte",
+            date(2025, 6, 2),
+            (
+                r"published_utc\.lte has no exact unit to end a day with; pass an aware "
+                "datetime, or a date to published_utc_gte or published_utc_lt"
+            ),
+        ),
+        (NEWS, "published_utc_gt", "2025-06-02", "no exact unit to end a day with"),
         (DIVIDENDS, "distribution_type_any_of", ("a", 1), "takes a sequence of text"),
     ],
 )

@@ -30,11 +30,11 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
-from deephaven_massive._datasets.dates import parse_date_like, require_aware
+from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
 from deephaven_massive._datasets.schema import dataset_schema, rename
 from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan
 from deephaven_massive._massive import ParamKind, Transport, WireType, encode_value, sources
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.request import ParamValue
     from deephaven_massive._datasets.schema import Schema
-    from deephaven_massive._massive import RestPath, Source
+    from deephaven_massive._massive import RestPath, Source, WireUnit
 
 __all__ = [
     "Catalog",
@@ -69,6 +69,9 @@ _FILTER_SUFFIXES: Final = ("gt", "gte", "lt", "lte", "any_of", "all_of")
 
 _EQUALITY_SUFFIXES: Final = ("any_of", "all_of")
 """The suffixes that, like the base name, select rows by equal values (`tickers.any_of`)."""
+
+_INSTANT_TYPES: Final = frozenset({WireType.ISO_INSTANT, WireType.EPOCH})
+"""Wire types of a row field that holds an instant rather than a calendar date."""
 
 _LIST_TYPES: Final = frozenset({WireType.JSON_TEXT, WireType.INT_ARRAY})
 """Wire types of a field that holds several values, such as a filing's list of tickers."""
@@ -544,30 +547,145 @@ def filter_key(name: str) -> str:
     return name.replace(".", "_")
 
 
-def _parsed(kind: ParamKind, key: str, value: ParamValue) -> ParamValue:
-    """Return a normalized `filters` value in the form the wire encoder takes for its kind.
+def takes_instants(rest_path: RestPath, name: str, kind: ParamKind) -> bool:
+    """Tell whether a REST parameter compares instants rather than calendar days.
 
-    The caller may write a date or an instant as text and a one-value list as a bare `str`;
-    the request must carry what is sent, never the text, so the value is parsed here, once,
-    and the parsed form is both checked and stored.
+    A timestamp parameter does. Massive also types some instant filters as dates
+    (`published_utc.gte` on the news paths, `last_updated.gte` on the benzinga paths); the
+    generated row field the parameter is named after says which: its wire key is the
+    parameter's base name, and an ISO-8601 or epoch instant field makes the parameter compare
+    instants. A date parameter over a calendar-date field (`ex_dividend_date`), or with no
+    top-level field of its name, compares days.
 
     Args:
-        kind: The parameter's kind.
-        key: The filter's key, for messages.
-        value: The value; sequences are already tuples.
+        rest_path: The path, whose generated fields are read.
+        name: The wire name of one of the path's parameters, such as `"published_utc.gte"`.
+        kind: That parameter's kind.
 
     Returns:
-        For a `DATE` or `TIMESTAMP` parameter, text parsed into a `date` or an aware
-        `datetime`; for a `LIST` parameter, a bare `str` as a one-item tuple; any other value
-        unchanged.
+        True when a date given to the parameter must become an instant before it is sent.
+    """
+    if kind is ParamKind.TIMESTAMP:
+        return True
+    if kind is not ParamKind.DATE:
+        return False
+    base = name.partition(".")[0]
+    return any(f.wire_key == base and f.wire_type in _INSTANT_TYPES for f in rest_path.fields)
+
+
+def _list_items(spec: DatasetSpec, key: str, value: ParamValue) -> ParamValue:
+    """Return a list filter's values one item each, so every spelling gives one request key.
+
+    The wire joins a list with commas, so a comma can never be part of one value: `"a,b"`,
+    `("a,b",)`, and `("a", "b")` all send `a,b`. Splitting every item on commas, and
+    stripping the spaces around each part, makes them one value, so equal filters give equal
+    queries.
+
+    Args:
+        spec: The dataset, for messages.
+        key: The filter's key, for messages.
+        value: A `str` or a tuple of `str`; anything else is returned unchanged for the
+            encoder to refuse.
+
+    Returns:
+        The tuple of items.
+
+    Raises:
+        ValueError: If an item is empty (`"a,,b"`, `""`, or `" "`), which Massive would read
+            as a value of its own.
+    """
+    if isinstance(value, str):
+        value = (value,)
+    if not isinstance(value, tuple) or not all(isinstance(item, str) for item in value):
+        return value
+    items = tuple(part.strip() for item in value for part in item.split(","))
+    if "" in items:
+        raise ValueError(f"{spec.name} filter {key!r}: has an empty value in {value!r}")
+    return items
+
+
+def _check_day_filter(
+    spec: DatasetSpec, value: date, *, key: str, name: str, unit: WireUnit | None
+) -> None:
+    """Check that a date given to a range filter of an instant parameter can be sent exactly.
+
+    The REST transport sends such a date as the instant that keeps the filter's calendar
+    meaning, in the day zone of each request's symbols (`dates.instant_bound`): `_gte` a day
+    is from its start, `_lt` a day before its start, `_gt` a day after its end, and `_lte` a
+    day up to its end. The date itself is stored, since the zone depends on the symbols. The
+    end of a day is the next day's start less one unit of the parameter, which needs a unit
+    a `datetime` can step by exactly; the same function decides that here, at construction.
+
+    Args:
+        spec: The dataset, for messages.
+        value: The date.
+        key: The filter's key, for messages.
+        name: The wire name of the parameter, which compares instants (`takes_instants`).
+        unit: The parameter's timestamp unit, or None for a date parameter, which takes the
+            instant as ISO-8601 text.
+
+    Raises:
+        ValueError: If the filter is a `_gt` or `_lte` bound and the parameter counts
+            nanoseconds or takes ISO-8601 instants of no documented precision, so the end of
+            the day cannot be written exactly; the message names the forms that work.
+    """
+    base, _, suffix = name.partition(".")
+    if suffix not in ("gt", "gte", "lt", "lte"):
+        return
+    try:
+        instant_bound(spec.asset_class, name, value, unit=unit, upper=suffix in ("gt", "lte"))
+    except ValueError:
+        raise ValueError(
+            f"{spec.name} filter {key!r}: {name} has no exact unit to end a day with; "
+            f"pass an aware datetime, or a date to {base}_gte or {base}_lt"
+        ) from None
+
+
+def _sent_value(
+    spec: DatasetSpec,
+    rest_path: RestPath,
+    value: ParamValue,
+    *,
+    key: str,
+    name: str,
+    kind: ParamKind,
+    unit: WireUnit | None,
+) -> ParamValue:
+    """Return a normalized `filters` value in the form that is sent.
+
+    The request must carry the value, never the caller's spelling, so it is turned into its
+    wire form here, once, and that form is both checked and stored: ISO-8601 text of a date
+    or timestamp parameter is parsed, and a list is split into its items (`_list_items`). A
+    date on a range filter of a parameter that compares instants stays a date, because its
+    day zone follows each request's symbols; the REST transport turns it into its day's
+    bound, and `_check_day_filter` refuses here the forms it could not send exactly.
+
+    Args:
+        spec: The dataset, for messages.
+        rest_path: The path the parameter belongs to, whose fields say if it compares instants.
+        value: The value; sequences are already tuples.
+        key: The filter's key, for messages.
+        name: The parameter's wire name.
+        kind: The parameter's kind.
+        unit: The parameter's timestamp unit, or None.
+
+    Returns:
+        The value to store; any other value unchanged.
 
     Text that is not ISO-8601, or has a time without an offset, raises the `ValueError` of
-    `dates.parse_date_like`.
+    `dates.parse_date_like`; a bad list or day bound the `ValueError` of `_list_items` or
+    `_check_day_filter`.
     """
+    if kind is ParamKind.LIST:
+        return _list_items(spec, key, value)
     if isinstance(value, str) and kind in _TIME_KINDS:
-        return parse_date_like(value, key)
-    if isinstance(value, str) and kind is ParamKind.LIST:
-        return (value,)
+        value = parse_date_like(value, key)
+    if (
+        isinstance(value, date)
+        and not isinstance(value, datetime)
+        and takes_instants(rest_path, name, kind)
+    ):
+        _check_day_filter(spec, value, key=key, name=name, unit=unit)
     return value
 
 
@@ -738,11 +856,16 @@ class Catalog:
         `.all_of`), the whole family of the time axis (`param_family`: its base and every
         suffixed form), `limit`, `sort`, `order`, and `adjusted`.
 
-        Each value is first put in the form that is sent: ISO-8601 text of a date or timestamp
-        parameter becomes a `date` or an aware `datetime`, and a bare `str` for a list
-        parameter becomes a one-item tuple. The parsed value is then checked by the wire
-        package's own encoder (`encode_value`), the same function that writes it into the
-        request, so a filter that passes here cannot fail to encode later.
+        Each value is first put in the form that is sent (`_sent_value`): ISO-8601 text of a
+        date or timestamp parameter becomes a `date` or an aware `datetime`; a date on a range
+        filter of a parameter that compares instants (`takes_instants`, such as
+        `last_updated_gte`) stays a date, which the REST transport sends as its day's bound
+        in the day zone of each request's symbols, after this check has refused a `_gt` or
+        `_lte` form whose unit cannot end a day exactly; and a list becomes its
+        comma-separated items, so `"a,b"` and `("a", "b")` are one value. The parsed value is
+        then checked by the wire package's own encoder (`encode_value`), the same function
+        that writes it into the request, so a filter that passes here cannot fail to encode
+        later.
 
         Args:
             spec: The dataset.
@@ -759,7 +882,9 @@ class Catalog:
                 or an instant finer than a timestamp parameter's unit (the message quotes the
                 encoder's). A naive `datetime`, or text of a date or timestamp parameter that
                 is not ISO-8601 or has a time without an offset, raises the `ValueError` of
-                `dates.require_aware` or `dates.parse_date_like`.
+                `dates.require_aware` or `dates.parse_date_like`. An empty list item, or a
+                date on a `_gt` or `_lte` filter whose parameter has no exact unit to end a
+                day with, raises the `ValueError` of `_list_items` or `_day_filter`.
 
         An unknown REST path raises the `KeyError` of `source`.
         """
@@ -768,27 +893,50 @@ class Catalog:
         symbols = () if spec.symbol_param is None else symbol_family(spec.symbol_param)
         reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols}
         params = {
-            filter_key(param.name): param
+            filter_key(param.name): (param, rest_path)
             for path in spec.rest_paths
-            for param in self._rest(path).params
+            for rest_path in (self._rest(path),)
+            for param in rest_path.params
             if not param.in_path and param.name not in reserved
         }
         checked: list[tuple[str, ParamValue]] = []
         for key, value in filters.items():
             if isinstance(value, datetime):
                 require_aware(key, value, value)
-            param = params.get(key)
-            if param is None:
+            found = params.get(key)
+            if found is None:
                 raise ValueError(
                     f"{spec.name} has no filter {key!r}; valid filters: {sorted(params)}"
                 )
-            parsed = _parsed(param.kind, key, value)
+            param, rest_path = found
+            parsed = _sent_value(
+                spec, rest_path, value, key=key, name=param.name, kind=param.kind, unit=param.unit
+            )
             try:
                 encode_value(param, parsed)
             except (TypeError, ValueError) as error:
                 raise ValueError(f"{spec.name} filter {key!r}: {error}") from None
             checked.append((key, parsed))
         return tuple(checked)
+
+    def takes_param(self, spec: DatasetSpec, name: str) -> bool:
+        """Tell whether any of the dataset's REST paths takes a query parameter.
+
+        Args:
+            spec: The dataset.
+            name: The wire name, such as `"order"`.
+
+        Returns:
+            True when at least one of the dataset's REST paths (`DatasetSpec.rest_paths`)
+            declares `name` as a query parameter in its generated parameters.
+
+        An unknown REST path raises the `KeyError` of `source`.
+        """
+        return any(
+            param.name == name and not param.in_path
+            for path in spec.rest_paths
+            for param in self._rest(path).params
+        )
 
     def _rest(self, path: str) -> RestPath:
         """Return the generated REST path of a template.

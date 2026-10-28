@@ -148,9 +148,18 @@ def test_list_params() -> None:
         list_params(sort=cast("str", 1), order=None)
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         list_params(sort=None, order=cast("Order", "desc"))
-    # Most list endpoints take the direction as a suffix of `sort`, so it needs a sort field.
-    with pytest.raises(ValueError, match="order needs sort"):
-        list_params(sort=None, order=Order.DESC)
+    # Whether `order` needs `sort` depends on the dataset's paths, which `build_query` reads.
+    assert list_params(sort=None, order=Order.DESC) == {"order": Order.DESC}
+
+
+def test_order_without_sort_follows_the_dataset_paths(massive_session: dm.MassiveSession) -> None:
+    # The indicator path has its own `order` parameter; the dividends path only `sort`.
+    assert build(massive_session, INDICATOR, params={"order": Order.DESC})._request.params == (
+        ("order", Order.DESC),
+    )
+    with pytest.raises(ValueError, match=r"^stocks\.dividends: order needs sort"):
+        build(massive_session, DIVIDENDS, params={"order": Order.DESC, "sort": None})
+    build(massive_session, DIVIDENDS, params={"order": Order.DESC, "sort": "pay_date"})
 
 
 def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSession) -> None:

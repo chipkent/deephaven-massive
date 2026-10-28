@@ -195,6 +195,13 @@ NEWS = DatasetSpec(
     time_axis=("published_utc.gte", "published_utc.lt"),
     keys={(R, NEWS_PATH): SourceKeys()},
 )
+RATINGS_PATH = "/benzinga/v1/ratings"
+RATINGS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="partners.ratings",
+    fetch_path=RATINGS_PATH,
+    keys={(R, RATINGS_PATH): SourceKeys()},
+)
 MIXED = DatasetSpec(
     summary="A dataset for the tests.",
     name="stocks.mixed",
@@ -221,6 +228,7 @@ SPECS = (
     FUTURES_BARS,
     CONSTITUENTS,
     NEWS,
+    RATINGS,
 )
 
 AAPL_DIVIDEND = {
@@ -371,6 +379,76 @@ def test_every_filter_kind_reaches_the_wire_as_the_check_parsed_it(
     assert dividends["distribution_type.any_of"] == ["special"]  # bare text: a list of one
 
 
+def test_a_date_on_an_instant_filter_is_sent_as_its_days_bound(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(RATINGS_PATH, Reply(envelope([])))
+    fetch(
+        session,
+        RATINGS,
+        filters={
+            "last_updated_gte": "2025-06-02",
+            "last_updated_lt": date(2025, 6, 4),
+            "date_gte": "2025-06-01",
+            "ticker_any_of": "AAPL, MSFT",
+        },
+    )
+    ((_, sent_query),) = sent(fake_rest)
+    # `last_updated` is an instant field behind a date-typed filter: its days start in New
+    # York. `date` is a calendar date and keeps the day.
+    assert sent_query["last_updated.gte"] == ["2025-06-02T00:00:00-04:00"]
+    assert sent_query["last_updated.lt"] == ["2025-06-04T00:00:00-04:00"]
+    assert sent_query["date.gte"] == ["2025-06-01"]
+    assert sent_query["ticker.any_of"] == ["AAPL,MSFT"]
+    with pytest.raises(ValueError, match=r"last_updated\.lte has no exact unit to end a day"):
+        query(session, RATINGS, filters={"last_updated_lte": "2025-06-02"})
+
+
+def test_a_crypto_indicator_takes_utc_days_and_a_stock_new_york_days(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The indicators have no asset class: each request follows its symbol's class.
+    fake_rest.reply("/v1/indicators/sma/X:BTCUSD", Reply(envelope({"values": []})))
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
+    fetch(session, SMA, symbols=["X:BTCUSD", "AAPL"], start="2025-03-03", end="2025-03-03")
+    by_path = dict(sent(fake_rest))
+    utc_day = epoch_ns(datetime(2025, 3, 3, tzinfo=UTC)) // 10**6
+    new_york_day = epoch_ns(datetime(2025, 3, 3, 5, tzinfo=UTC)) // 10**6
+    one_day = 86_400_000
+    assert by_path["/v1/indicators/sma/X:BTCUSD"]["timestamp.gte"] == [str(utc_day)]
+    assert by_path["/v1/indicators/sma/X:BTCUSD"]["timestamp.lt"] == [str(utc_day + one_day)]
+    assert by_path["/v1/indicators/sma/AAPL"]["timestamp.gte"] == [str(new_york_day)]
+
+
+def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> None:
+    path = cast("RestPath", _massive.source(R, SMA_CRYPTO))
+    day = date(2025, 3, 3)
+    instant = datetime(2025, 3, 3, 12, tzinfo=UTC)
+    query = {
+        "timestamp.gte": day,  # from the day's start
+        "timestamp.lt": day,  # before the day's start
+        "timestamp.gt": day,  # after the day's end
+        "timestamp.lte": day,  # up to the day's end
+        "timestamp": day,  # no range bound: kept
+        "window": 50,
+        "unknown.gte": day,
+    }
+    assert rest._filter_days(path, {**query, "series_type": instant}, AssetClass.CRYPTO) == {
+        **query,
+        "series_type": instant,
+        "timestamp.gte": datetime(2025, 3, 3, tzinfo=UTC),
+        "timestamp.lt": datetime(2025, 3, 3, tzinfo=UTC),
+        "timestamp.gt": datetime(2025, 3, 3, 23, 59, 59, 999000, tzinfo=UTC),
+        "timestamp.lte": datetime(2025, 3, 3, 23, 59, 59, 999000, tzinfo=UTC),
+    }
+    # An instant the caller gave is exact already; a calendar date parameter keeps its day.
+    assert rest._filter_days(path, {"timestamp.gte": instant}, None) == {"timestamp.gte": instant}
+    dividends = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
+    assert rest._filter_days(dividends, {"ex_dividend_date.gte": day}, None) == {
+        "ex_dividend_date.gte": day
+    }
+
+
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
@@ -408,10 +486,30 @@ def test_order_is_sent_as_is_where_the_path_has_it(
     assert sent(fake_rest)[0][1]["order"] == ["asc"]
 
 
-def test_order_without_order_or_sort_on_the_path_fails_before_any_request(
+def test_order_alone_goes_as_is_on_a_list_path_with_its_own_order(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    q = query(session, MOVERS, params={"direction": Direction.GAINERS, "order": Order.ASC})
+    fake_rest.reply(NEWS_PATH, Reply(envelope([])))
+    fetch(session, NEWS, params={"order": Order.DESC})
+    ((_, sent_query),) = sent(fake_rest)
+    assert sent_query["order"] == ["desc"]
+    assert "sort" not in sent_query
+
+
+def test_order_without_sort_fails_where_no_path_has_order(session: dm.MassiveSession) -> None:
+    # The movers path has neither `order` nor `sort`, and dividends only `sort`: the
+    # direction could only travel as a suffix of a sort field.
+    with pytest.raises(ValueError, match=r"^stocks\.movers: order needs sort"):
+        query(session, MOVERS, params={"direction": Direction.GAINERS, "order": Order.ASC})
+    with pytest.raises(ValueError, match=r"^stocks\.dividends: order needs sort"):
+        query(session, DIVIDENDS, params={"order": Order.ASC})
+
+
+def test_order_without_sort_fails_on_a_chosen_path_without_order(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The contracts list path has `order`; the per-contract detail path has neither.
+    q = query(session, CONTRACTS, symbols=["O:SPY251219C00600000"], params={"order": Order.ASC})
     assert isinstance(q, Query)
     with pytest.raises(ValueError, match=r"does not take \['order'\]"):
         q.fetch()
@@ -911,8 +1009,21 @@ def test_date_axes_are_whole_days_and_shift_for_exclusive_ends() -> None:
         "ex_dividend_date.gt": date(2025, 1, 9),
         "ex_dividend_date.lt": date(2025, 1, 21),
     }
-    instant = datetime(2025, 1, 10, 12, tzinfo=UTC)
-    assert axis(spec, instant, None) == {"ex_dividend_date.gt": instant}
+    # An instant names the calendar day it falls on in the day zone: 2025-01-10 03:00 UTC is
+    # still January 9 in New York. An upper instant is the first one excluded, so a range
+    # ending at a New York midnight ends with the day before.
+    early = datetime(2025, 1, 10, 3, tzinfo=UTC)
+    midnight = datetime(2025, 1, 20, 5, tzinfo=UTC)
+    assert axis(spec, early, midnight) == {
+        "ex_dividend_date.gt": date(2025, 1, 8),
+        "ex_dividend_date.lt": date(2025, 1, 20),
+    }
+    inclusive = axis_spec("ex_dividend_date.gte", "ex_dividend_date.lte", DIVIDENDS_PATH)
+    noon = datetime(2025, 1, 20, 17, tzinfo=UTC)
+    assert axis(inclusive, early, noon) == {
+        "ex_dividend_date.gte": date(2025, 1, 9),
+        "ex_dividend_date.lte": date(2025, 1, 20),  # partly covered: included
+    }
 
 
 def test_timestamp_axes_take_midnights_in_the_day_zone() -> None:

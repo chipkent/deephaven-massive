@@ -18,10 +18,11 @@ A date-only bound means a whole day in the asset class's *day zone*:
 Ranges are half-open, `[start, end)`. A date `start` is that day's midnight; a date `end` is the
 *next* day's midnight, so `history("2025-03-03", "2025-03-03")` is the whole of March 3.
 
-`bounds` applies these rules to a dataset's `history()` arguments. `flat_file_published` decides
-whether a day's flat file can exist yet: files land "by approximately 11:00 AM ET the following
-day", so a day's file counts as published from the first configured cutoff (New York time) after
-the next day starts in the class's day zone.
+`bounds` applies these rules to a dataset's `history()` arguments, and `day_start` and
+`instant_bound` to a date sent to a REST parameter that compares instants.
+`flat_file_published` decides whether a day's flat file can exist yet: files land "by
+approximately 11:00 AM ET the following day", so a day's file counts as published from the
+first configured cutoff (New York time) after the next day starts in the class's day zone.
 
 Every function is pure (the current time is a parameter) and thread-safe.
 """
@@ -35,10 +36,12 @@ from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo
 
+from deephaven_massive._datasets.symbols import symbol_class
 from deephaven_massive._enums import AssetClass
+from deephaven_massive._massive import WireUnit
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._types import DateLike
@@ -52,11 +55,15 @@ __all__ = [
     "bounds",
     "calendar_day",
     "check_order",
+    "day_class",
+    "day_start",
+    "day_zone",
     "flat_file_published",
     "futures_session",
     "futures_session_open",
     "futures_sessions",
     "history_range",
+    "instant_bound",
     "parse_date_like",
     "publish_time",
     "require_aware",
@@ -415,13 +422,52 @@ def bounds(spec: DatasetSpec, start: DateLike, end: DateLike) -> TimeRange | Fut
     return history_range(first, last, zone)
 
 
+def day_zone(asset_class: AssetClass | None) -> tzinfo:
+    """Return the zone whose calendar days an asset class's dates and instants are read in.
+
+    New York for stocks, options, indices, and data of no class; UTC for forex and crypto;
+    Chicago for futures, whose sessions roll there.
+
+    Args:
+        asset_class: The class, or None.
+
+    Returns:
+        The zone.
+    """
+    if asset_class is AssetClass.FUTURES:
+        return CHICAGO
+    return NEW_YORK if asset_class is None else DAY_ZONES[asset_class]
+
+
+def day_class(spec: DatasetSpec, symbols: Sequence[str] | None) -> AssetClass | None:
+    """Return the asset class whose day rules a request of a dataset follows.
+
+    A dataset with an asset class follows its class. A dataset without one can serve several
+    classes (the indicators take stock and crypto tickers), so a request follows the class
+    its symbols share (`symbols.symbol_class`: a crypto ticker's days are UTC days). With no
+    symbols, or symbols of several classes, it follows none, and `day_zone` reads its days
+    in New York.
+
+    Args:
+        spec: The dataset.
+        symbols: The canonical symbols of one request, or None.
+
+    Returns:
+        The class, or None.
+    """
+    if spec.asset_class is not None:
+        return spec.asset_class
+    classes = {symbol_class(symbol) for symbol in symbols or ()}
+    return classes.pop() if len(classes) == 1 else None
+
+
 def calendar_day(spec: DatasetSpec, value: DateLike, name: str) -> date:
     """Turn the single day a dataset's path takes into a calendar date in its day zone.
 
     Endpoints such as the daily open-close summary take one day in the request path. A date
     or a `"YYYY-MM-DD"` string is that day as given. An aware `datetime` names the calendar day
-    it falls on in the dataset's day zone (New York for stocks, options, indices, and datasets
-    without an asset class; UTC for forex and crypto; Chicago for futures), so
+    it falls on in the dataset's day zone (`day_zone`: New York for stocks, options, indices,
+    and datasets without an asset class; UTC for forex and crypto; Chicago for futures), so
     `datetime(2025, 3, 4, 2, 0, tzinfo=UTC)` is 2025-03-03 for a stock and 2025-03-04 for
     crypto.
 
@@ -438,10 +484,81 @@ def calendar_day(spec: DatasetSpec, value: DateLike, name: str) -> date:
     parsed = parse_date_like(value, name)
     if not isinstance(parsed, datetime):
         return parsed
-    if spec.asset_class is AssetClass.FUTURES:
-        zone: tzinfo = CHICAGO
-    elif spec.asset_class is None:
-        zone = NEW_YORK
+    return parsed.astimezone(day_zone(spec.asset_class)).date()
+
+
+_UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {
+    WireUnit.S: timedelta(seconds=1),
+    WireUnit.MS: timedelta(milliseconds=1),
+    WireUnit.US: timedelta(microseconds=1),
+}
+"""One step of each timestamp unit a `datetime` can express exactly; nanoseconds cannot be."""
+
+
+def day_start(asset_class: AssetClass | None, day: date) -> datetime:
+    """Return the instant a date starts under an asset class's day rules.
+
+    A calendar day starts at midnight in the class's day zone (`day_zone`; New York without
+    a class). A futures date names a trading session, which opens at 17:00 Chicago time on the
+    day before its `session_end_date` (`futures_session_open`).
+
+    Args:
+        asset_class: The class whose rules apply (`day_class`), or None.
+        day: The date.
+
+    Returns:
+        The aware instant, in the day zone.
+    """
+    if asset_class is AssetClass.FUTURES:
+        return futures_session_open(day)
+    return datetime(day.year, day.month, day.day, tzinfo=day_zone(asset_class))
+
+
+def instant_bound(
+    asset_class: AssetClass | None,
+    name: str,
+    value: date,
+    *,
+    unit: WireUnit | None,
+    upper: bool,
+) -> datetime:
+    """Return the instant a REST parameter that compares instants is sent for a bound.
+
+    Such a parameter is a timestamp parameter, or a date parameter whose row field is an
+    instant (`published_utc`). A `date` bound is a whole day, inclusive at either end; an
+    aware `datetime` is the first instant included at the lower end and the first excluded at
+    the upper end. A date becomes the instant its day starts (`day_start`), the next day's
+    start for an upper bound. An exclusive lower `.gt` or an inclusive upper `.lte` then moves
+    the instant back one unit of the parameter, so the range is exactly the same.
+
+    Args:
+        asset_class: The class whose day rules apply (`day_class`), or None for New York days.
+        name: The parameter's wire name, such as `"timestamp.gte"`.
+        value: The bound.
+        unit: The unit a timestamp parameter counts in; None for a date parameter, which
+            takes the instant as ISO-8601 text.
+        upper: True for the upper bound.
+
+    Returns:
+        The instant to send.
+
+    Raises:
+        ValueError: If a `.gt` or `.lte` bound has no step a `datetime` can take exactly: a
+            parameter in nanoseconds, or a date parameter that takes the instant as ISO-8601
+            text (`unit` None), whose precision Massive does not document. Use the `.gte` and
+            `.lt` forms instead.
+    """
+    if isinstance(value, datetime):
+        instant = value
     else:
-        zone = DAY_ZONES[spec.asset_class]
-    return parsed.astimezone(zone).date()
+        instant = day_start(asset_class, value + _ONE_DAY if upper else value)
+    if name.rpartition(".")[2] not in ("gt", "lte"):
+        return instant
+    step = None if unit is None else _UNIT_STEPS.get(unit)
+    if step is None:
+        sent = "ISO-8601 instants of no documented precision" if unit is None else "nanoseconds"
+        raise ValueError(
+            f"{name} takes {sent}, so it cannot bound a half-open range exactly; use the .gte "
+            "and .lt forms"
+        )
+    return instant - step

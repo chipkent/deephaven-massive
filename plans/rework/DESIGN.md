@@ -1354,12 +1354,26 @@ so `date.any_of` is reserved too although `start` and `end` cannot express a lis
 key, a value of the wrong kind, or a value outside a parameter's enum raises `ValueError` naming
 the valid keys or values; a key reserved by a typed parameter names that parameter. The check
 first puts each value in the form that is sent: ISO-8601 text of a `DATE` or `TIMESTAMP`
-parameter becomes a `date` or an aware `datetime` (`dates.parse_date_like`), and a bare `str`
-for a `LIST` parameter becomes a one-item tuple. It then runs the wire package's own encoder
-(`encode_value`) on that value, so everything the encoder refuses (a non-finite number, an
-empty list, an instant finer than a timestamp parameter's unit) fails here, at construction,
-with the encoder's message. `Request.filters` holds the parsed values, never the caller's
-text, so validation and encoding cannot disagree. The
+parameter becomes a `date` or an aware `datetime` (`dates.parse_date_like`), and a `LIST`
+value is split into its comma-separated items, with the spaces around each removed, so
+`"a,b"`, `"a, b"`, and `("a", "b")` are one value and one query key (the wire joins a list
+with commas, so no item can hold one); an empty item (`"a,,b"`) raises `ValueError`. It then
+runs the wire package's own encoder (`encode_value`) on that value, so everything the encoder
+refuses (a non-finite number, an empty list, an instant finer than a timestamp parameter's
+unit) fails here, at construction, with the encoder's message. `Request.filters` holds the
+parsed values, never the caller's text, so validation and encoding cannot disagree.
+
+A `date` on a range filter (`_gt`, `_gte`, `_lt`, `_lte`) of a parameter that compares
+instants (a timestamp parameter, or a date-typed one over an instant field, such as
+`last_updated_gte` on the benzinga paths) keeps its calendar meaning and never leaves the day
+boundary to Massive: the REST transport sends `_gte` a day as the day's start, `_lt` a day as
+the day's start, `_gt` a day as the day's end, and `_lte` a day as the day's end, where a day
+starts at 00:00 in the request's day zone ([section 12](#12-timestamp-units-and-day-boundaries))
+and its end is the next day's start less one unit of the parameter. The request keeps the
+date, since the zone follows each request's symbols. Where no unit can end a day exactly (a
+nanosecond timestamp, or ISO-8601 text, whose precision Massive does not document), `_gt` and
+`_lte` with a date raise `ValueError` at construction, naming the `_gte` and `_lt` forms. The
+base name and `.any_of` keep the date. An aware `datetime` is always sent as given. The
 reservation is one shared check in the filter validation, fed the dataset's typed parameters,
 never a guard in a namespace module. Parameters the library always sets itself (the
 `type=options` of `options.snapshots`) are reserved the same way. When Massive adds a filter,
@@ -1367,12 +1381,15 @@ refreshing the snapshot adds it; no code changes.
 
 **`sort` and `order`.** Most list endpoints have no `order` parameter: the direction is an
 `.asc` or `.desc` suffix inside `sort`. On such a path the REST transport folds the two, so
-`sort="date", order=Order.DESC` sends `sort=date.desc`, and `sort` alone is sent unchanged; on
-such a path `order` without `sort` raises `ValueError` at query construction, since there is
-nothing to fold it into. A path that has its own `order` parameter (`/v3/snapshot/indices`,
-`/v3/trades`, the reference lists, the indicators) receives `sort` and `order` as they are,
-and `order` alone is valid there. Which form applies is read from the path's generated
-parameters, never from a hand list. A dataset whose paths have neither parameter offers
+`sort="date", order=Order.DESC` sends `sort=date.desc`, and `sort` alone is sent unchanged. A
+path that has its own `order` parameter (`/v3/snapshot`, `/v3/snapshot/indices`, `/v3/trades`,
+the reference lists such as tickers, news, and conditions, the indicators) receives `sort` and
+`order` as they are, and `order` alone is valid there. `order` without `sort` raises
+`ValueError` only where it would have to fold and there is nothing to fold it into: at query
+construction when none of the dataset's REST paths has an `order` parameter, and from the verb
+when the path chosen for a request (a per-symbol detail path, a path per symbol class) has
+neither. Which form applies is read from the path's generated parameters, never from a hand
+list. A dataset whose paths have neither parameter offers
 neither; one whose paths have `order` but no `sort` (the indicators) offers `order` alone
 ([section 8](#8-namespace-tree)).
 
@@ -1558,13 +1575,22 @@ timezone-aware `datetime` is used as is.
 
 The same rule bounds the time axis of a `…T` dataset on an instant axis: a timestamp
 parameter, or a date-typed parameter over an instant field (`published_utc`, benzinga
-`published`). A date `start` is sent as that day's 00:00 in the day zone (New York for a
-dataset without an asset class) and a date `end` as the next day's 00:00, with `.gte` and
-`.lt`, so Massive never decides where a day starts. A date-typed parameter takes the instant as
+`published`). A date `start` is sent as that day's 00:00 in the request's day zone and a date
+`end` as the next day's 00:00, with `.gte` and `.lt`, so Massive never decides where a day
+starts. A date-typed parameter takes the instant as
 ISO-8601 text with its offset (`2025-06-02T00:00:00-04:00`); since Massive documents no
 precision for that text, such an axis cannot be declared with `.gt` or `.lte` (the request
 fails with `ValueError`). A calendar-date axis (`period_end`, `ex_dividend_date`) keeps
-whole-day date bounds with `.gte` and `.lte`.
+whole-day date bounds with `.gte` and `.lte`; an aware `datetime` bound on it becomes the
+calendar day it falls on in the request's day zone, and an upper one, being the first instant
+excluded, the day of the instant just before it, so a day the range covers in part is
+included, as the flat-file partitions of `history()` are.
+
+**The request's day zone.** A dataset with an asset class follows its class. A dataset without
+one can serve several classes (the indicators take stock and crypto tickers), so each REST
+request follows the class its own symbols share (`symbol_class`): a crypto or forex ticker's
+days are UTC days, a stock, option, or index ticker's New York days. A request with no
+symbols, or with symbols of several classes, uses New York.
 
 **Day zone per class.**
 
@@ -1946,6 +1972,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   [section 9](#9-filters) and [section 12](#12-timestamp-units-and-day-boundaries): instants
   on an instant axis (decided by the generated row field the parameter filters, so a
   date-typed `published_utc.gte` gets an instant), whole-day dates on a calendar-date axis.
+  Each request's dates, its axis and its date filters on instant parameters, follow the day
+  zone of its own symbols ([section 12](#12-timestamp-units-and-day-boundaries)), so a crypto
+  indicator's `start="2025-03-03"` is UTC midnight and a stock indicator's New York midnight.
 - **Bars ranges.** A bars spec declares no `time_axis`. `history()` fills the range path's
   `{from}` and `{to}` segments from its bounds, as epoch milliseconds or as `YYYY-MM-DD`
   according to the kind the generated path gives the parameter.
@@ -2587,8 +2616,11 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   `ERROR` raises `WireError`. `OK`, `DELAYED`, and `success` (the "last" endpoints) are the
   documented good statuses, named once (`rest.response.GOOD_STATUSES`). Any other status still
   yields its rows and is reported in `Page.drift.statuses`, which the library logs at WARNING
-  once per (path, status). A `status` or `request_id` that is not text is a `WireError`. The
-  envelope's `status` and `request_id` are kept on the `Page`, so callers can read `DELAYED`.
+  once per (path, status). A `status` that is not text is a `WireError`. The `request_id` is
+  metadata and never fails a call: Massive's documentation samples send it as text and as a
+  number (`1`), so any JSON scalar is kept as text (`"1"`), and an object or list is dropped
+  (`None`), in a 200 envelope and in an error body alike. The envelope's `status` and
+  `request_id` are kept on the `Page`, so callers can read `DELAYED`.
 - **Batches.** `to_batch` turns a page's rows into one Arrow batch of the path's generated
   fields, in long-form column names, and returns its `DriftReport`; it validates every value
   per [section 19.5](#195-runtime-drift). It is the only code that walks a wire path; no row

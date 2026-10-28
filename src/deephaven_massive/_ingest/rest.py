@@ -63,12 +63,12 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from deephaven import arrow as dh_arrow
 
-from deephaven_massive._datasets.catalog import filter_key
+from deephaven_massive._datasets.catalog import filter_key, takes_instants
 from deephaven_massive._datasets.dates import (
-    DAY_ZONES,
-    NEW_YORK,
     FuturesSessions,
-    futures_session_open,
+    day_class,
+    day_zone,
+    instant_bound,
 )
 from deephaven_massive._datasets.history_source import partition_dates
 from deephaven_massive._datasets.schema import rename, required_fields, widen
@@ -88,8 +88,6 @@ from deephaven_massive._massive import (
     ParamKind,
     Transport,
     WireError,
-    WireType,
-    WireUnit,
     to_batch,
 )
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
@@ -136,17 +134,8 @@ _FUTURES_UNITS: Final[Mapping[Timespan, str]] = {
 endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built."""
 
 _ONE_DAY: Final = timedelta(days=1)
+_ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
-
-_UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {
-    WireUnit.S: timedelta(seconds=1),
-    WireUnit.MS: timedelta(milliseconds=1),
-    WireUnit.US: timedelta(microseconds=1),
-}
-"""One step of each timestamp unit a `datetime` can express exactly; nanoseconds cannot be."""
-
-_INSTANT_TYPES: Final = frozenset({WireType.ISO_INSTANT, WireType.EPOCH})
-"""The wire types of a row field that holds an instant rather than a calendar date."""
 
 _RATE_LIMIT_ADVICE: Final = (
     "%s: Massive rate-limited this session's REST requests; Basic keys allow 5 requests per "
@@ -171,111 +160,29 @@ class Call:
     symbol: str | None = None
 
 
-def _day_start(spec: DatasetSpec, day: date) -> datetime:
-    """Return the instant a date of the dataset's time axis starts.
+def _date_bound(asset_class: AssetClass | None, name: str, value: date, *, upper: bool) -> date:
+    """Return the day a date parameter of a calendar-date time axis is sent.
 
-    A calendar day starts at midnight in the asset class's day zone (New York for a dataset
-    without a class). A futures date names a trading session, which opens at 17:00 Chicago time
-    on the day before its `session_end_date` (`dates.futures_session_open`).
-
-    Args:
-        spec: The dataset.
-        day: The date.
-
-    Returns:
-        The aware instant.
-    """
-    if spec.asset_class is AssetClass.FUTURES:
-        return futures_session_open(day)
-    zone = NEW_YORK if spec.asset_class is None else DAY_ZONES[spec.asset_class]
-    return datetime(day.year, day.month, day.day, tzinfo=zone)
-
-
-def _instant_bound(
-    spec: DatasetSpec, name: str, value: date, *, unit: WireUnit | None, upper: bool
-) -> datetime:
-    """Return the instant a parameter of an instant time axis is sent.
-
-    An instant axis is a timestamp parameter, or a date parameter whose row field is an
-    instant (`_bounds_instants`), such as `published_utc`.
-
-    A bound is a `date` (a whole day, inclusive at either end) or an aware `datetime` (the
-    first instant included at the lower end, the first excluded at the upper end). A date
-    becomes the instant its day starts (`_day_start`: a midnight in the day zone, or a futures
-    session's 17:00 Chicago open), the next day's start for an upper bound. An exclusive lower
-    `.gt` or an inclusive upper `.lte` moves the instant back one unit of the parameter.
+    A bound is a whole day: the day itself, the day after for an exclusive upper `.lt`, the
+    day before for an exclusive lower `.gt`. An aware `datetime` becomes the calendar day it
+    falls on in the request's day zone (`dates.day_zone`); an upper `datetime` is the first
+    instant excluded, so it names the day of the instant just before it. The rows of such an
+    axis are whole days, so a day the range covers only in part is included, as `history()`
+    includes the flat-file partition of a partly covered day.
 
     Args:
-        spec: The dataset, for its day rules and messages.
-        name: The parameter's wire name, such as `"timestamp.gte"`.
-        unit: The unit a timestamp parameter counts in; None for a date parameter, which
-            takes the instant as ISO-8601 text.
-        value: The bound.
-        upper: True for the upper bound.
-
-    Returns:
-        The instant to send.
-
-    Raises:
-        ValueError: If a `.gt` or `.lte` bound has no step a `datetime` can take exactly: a
-            parameter in nanoseconds, or a date parameter that takes the instant as ISO-8601
-            text (`unit` None), whose precision Massive does not document. Such a dataset
-            declares the `.gte` and `.lt` pair instead.
-    """
-    if isinstance(value, datetime):
-        instant = value
-    else:
-        instant = _day_start(spec, value + _ONE_DAY if upper else value)
-    if name.rpartition(".")[2] not in ("gt", "lte"):
-        return instant
-    step = None if unit is None else _UNIT_STEPS.get(unit)
-    if step is None:
-        sent = "ISO-8601 instants of no documented precision" if unit is None else "nanoseconds"
-        raise ValueError(
-            f"{spec.name}: {name} takes {sent}, so it cannot bound a half-open range "
-            "exactly; declare the .gte and .lt pair"
-        )
-    return instant - step
-
-
-def _bounds_instants(rest_path: RestPath, name: str) -> bool:
-    """Tell whether a date parameter of the time axis bounds an instant field of the rows.
-
-    Massive types some instant filters as dates (`published_utc.gte` on the news paths); the
-    generated row field the parameter is named after says which: its wire key is the
-    parameter's base name, and an ISO-8601 or epoch instant field makes the axis an instant
-    axis. A field that is a calendar date (`ex_dividend_date`), or no field of that name,
-    keeps the axis whole days.
-
-    Args:
-        rest_path: The path, whose generated fields are read.
-        name: The parameter's wire name, such as `"published_utc.gte"`.
-
-    Returns:
-        True when the field the parameter filters holds instants.
-    """
-    base = name.partition(".")[0]
-    return any(f.wire_key == base and f.wire_type in _INSTANT_TYPES for f in rest_path.fields)
-
-
-def _date_bound(name: str, value: date, *, upper: bool) -> date:
-    """Return the value a date parameter of a calendar-date time axis is sent.
-
-    A `date` bound is a whole day: the day itself, the day after for an exclusive upper
-    `.lt`, the day before for an exclusive lower `.gt`. An aware `datetime` is sent as is, as
-    ISO-8601 text, which Massive's date filters accept.
-
-    Args:
+        asset_class: The class whose day zone applies (`dates.day_class`), or None.
         name: The parameter's wire name, such as `"ex_dividend_date.gte"`.
         value: The bound.
         upper: True for the upper bound.
 
     Returns:
-        The value to send.
+        The day to send.
     """
     suffix = name.rpartition(".")[2]
     if isinstance(value, datetime):
-        return value
+        moment = value - _ONE_MICROSECOND if upper else value
+        value = moment.astimezone(day_zone(asset_class)).date()
     if upper and suffix == "lt":
         return value + _ONE_DAY
     if not upper and suffix == "gt":
@@ -289,14 +196,15 @@ def _axis_query(
     *,
     dates: tuple[date | None, date | None],
     exact: tuple[datetime, datetime] | None = None,
+    asset_class: AssetClass | None = None,
 ) -> dict[str, object]:
     """Return the time-axis parameters of a request, by wire name.
 
-    A timestamp parameter, and a date parameter whose row field is an instant
-    (`_bounds_instants`, such as `published_utc`), get an instant (`_instant_bound`): a date
-    bound becomes the start of its day in the dataset's day zone, an upper one the start of
-    the next day, so a date never leaves the day boundary to Massive. A date parameter of a
-    calendar-date field gets a whole-day date or an instant as ISO text (`_date_bound`), and
+    An instant parameter (`catalog.takes_instants`: a timestamp, or a date parameter whose
+    row field is an instant, such as `published_utc`) gets an instant
+    (`dates.instant_bound`): a date bound becomes the start of its day in the request's day
+    zone, an upper one the start of the next day, so a date never leaves the day boundary to
+    Massive. A date parameter of a calendar-date field gets a whole day (`_date_bound`), and
     a parameter of any other kind the bound's ISO-8601 text.
 
     Args:
@@ -306,34 +214,79 @@ def _axis_query(
             for an open end), or for date-bounded futures the first and last sessions.
         exact: For `history()`, the window's exact instants, which an instant axis uses
             instead of `dates`; None to derive instants from `dates`.
+        asset_class: The class whose day rules apply to this request (`dates.day_class`);
+            None, the default, takes the dataset's own class (New York days without one).
 
     Returns:
         The parameters to send; empty when the dataset has no time axis.
 
-    A `.gt` or `.lte` bound of an instant axis in nanoseconds or ISO-8601 text raises the
-    `ValueError` of `_instant_bound`.
+    Raises:
+        ValueError: If a `.gt` or `.lte` bound of an instant axis counts nanoseconds or takes
+            ISO-8601 text, which no `datetime` step ends exactly (`dates.instant_bound`); the
+            message names the dataset.
     """
     if spec.time_axis is None:
         return {}
-    params = {p.name: (p.kind, p.unit) for p in rest_path.params}
+    zone_class = spec.asset_class if asset_class is None else asset_class
+    params = {p.name: p for p in rest_path.params}
     query: dict[str, object] = {}
     for index, name in enumerate(spec.time_axis):
         upper = index == 1
-        found = params.get(name)
+        param = params.get(name)
         value = dates[index]
-        if found is None or value is None:
+        if param is None or value is None:
             continue
-        kind, unit = found
-        if kind is ParamKind.TIMESTAMP or (
-            kind is ParamKind.DATE and _bounds_instants(rest_path, name)
-        ):
+        if takes_instants(rest_path, name, param.kind):
             bound = value if exact is None else exact[index]
-            query[name] = _instant_bound(spec, name, bound, unit=unit, upper=upper)
-        elif kind is ParamKind.DATE:
-            query[name] = _date_bound(name, value, upper=upper)
+            try:
+                query[name] = instant_bound(zone_class, name, bound, unit=param.unit, upper=upper)
+            except ValueError as error:
+                raise ValueError(f"{spec.name}: {error}") from None
+        elif param.kind is ParamKind.DATE:
+            query[name] = _date_bound(zone_class, name, value, upper=upper)
         else:
             query[name] = value.isoformat()
     return query
+
+
+def _filter_days(
+    rest_path: RestPath, query: Mapping[str, object], asset_class: AssetClass | None
+) -> dict[str, object]:
+    """Return the query with each date on an instant range filter as its day's bound.
+
+    `Catalog.check_filters` keeps a date given to a range filter of a parameter that compares
+    instants (`catalog.takes_instants`, such as `last_updated.gte`), because its day zone
+    depends on the request's symbols. Here it becomes the instant that keeps the filter's
+    calendar meaning (`dates.instant_bound`): `.gte` a day is from its start, `.lt` a day
+    before its start, `.gt` a day after its end, and `.lte` a day up to its end. The check
+    has refused the `.gt` and `.lte` forms whose unit cannot end a day exactly. Every other
+    value is kept.
+
+    Args:
+        rest_path: The path, whose parameters and fields are read.
+        query: The query parameters, by wire name.
+        asset_class: The class whose day rules apply (`dates.day_class`), or None.
+
+    Returns:
+        A new mapping.
+    """
+    params = {p.name: p for p in rest_path.params}
+    sent = dict(query)
+    for name, value in query.items():
+        param = params.get(name)
+        suffix = name.rpartition(".")[2]
+        if (
+            param is None
+            or suffix not in ("gt", "gte", "lt", "lte")
+            or not isinstance(value, date)
+            or isinstance(value, datetime)
+            or not takes_instants(rest_path, name, param.kind)
+        ):
+            continue
+        sent[name] = instant_bound(
+            asset_class, name, value, unit=param.unit, upper=suffix in ("gt", "lte")
+        )
+    return sent
 
 
 def _pair(spec: DatasetSpec, symbol: str) -> tuple[str, str]:
@@ -559,7 +512,8 @@ def plan_calls(
     *,
     symbols: NormalizedSymbols | None,
     fixed: Mapping[str, object] | None = None,
-    axis: Mapping[str, object] | None = None,
+    dates: tuple[date | None, date | None] = (None, None),
+    exact: tuple[datetime, datetime] | None = None,
 ) -> list[Call]:
     """Plan the requests that serve a dataset call on one REST path.
 
@@ -573,26 +527,33 @@ def plan_calls(
         symbols: The static symbols to request, in place of `request.symbols` (a reactive
             table has been read into a tuple by now).
         fixed: Path parameters the caller sets.
-        axis: Time-axis query parameters.
+        dates: The time-axis bounds (`_axis_query`); open by default.
+        exact: For `history()`, the window's exact instants (`_axis_query`).
 
     Returns:
-        The calls, in result order: per symbol, or per chunk of symbols, or one.
+        The calls, in result order: per symbol, or per chunk of symbols, or one. Each call's
+        dates (its time axis and its date filters on instant parameters) follow the day rules
+        of its own symbols (`dates.day_class`): a crypto ticker of a dataset without a class
+        gets UTC days, a stock ticker New York days.
 
     A path that needs a symbol per request, called without explicit symbols, raises the
-    `ValueError` of `_symbol_parts`.
+    `ValueError` of `_symbol_parts`; an inexact axis bound the `ValueError` of `_axis_query`.
     """
     path, query = _base(spec, rest_path, request, fixed=fixed or {})
-    query.update(axis or {})
     keys = spec.keys_for(Transport.REST, rest_path.template).declared()
     filled = set(path) | {key.column for _, key in keys if key.from_request}
     if "from" in filled:
         filled.add("to")  # a currency pair fills both
     empty = [p.name for p in rest_path.params if p.in_path and p.name not in filled]
     slot = empty[0] if len(empty) == 1 else None
-    return [
-        Call({**path, **own_path}, {**query, **own_query}, symbol)
-        for symbol, own_path, own_query in _symbol_parts(spec, rest_path, symbols, slot=slot)
-    ]
+    listed = symbols if isinstance(symbols, tuple) else ()
+    calls = []
+    for symbol, own_path, own_query in _symbol_parts(spec, rest_path, symbols, slot=slot):
+        zone_class = day_class(spec, listed if symbol is None else (symbol,))
+        axis = _axis_query(spec, rest_path, dates=dates, exact=exact, asset_class=zone_class)
+        sent = _filter_days(rest_path, {**query, **axis}, zone_class)
+        calls.append(Call({**path, **own_path}, {**sent, **own_query}, symbol))
+    return calls
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -1237,10 +1198,10 @@ class RestReader:
         planned = []
         for template, own in fetch_paths(spec, symbols):
             rest_path = self.rest_path(template)
-            axis = _axis_query(spec, rest_path, dates=(request.start, request.end))
-            planned.append(
-                (rest_path, plan_calls(spec, rest_path, request, symbols=own, axis=axis))
+            calls = plan_calls(
+                spec, rest_path, request, symbols=own, dates=(request.start, request.end)
             )
+            planned.append((rest_path, calls))
         return planned
 
     def read_fetch(
@@ -1534,9 +1495,14 @@ class RestEndpoints:
             else:
                 bounds = (request.start, request.end)
                 window_instants = (window.start, window.end)
-            axis = _axis_query(spec, rest_path, dates=bounds, exact=window_instants)
             calls = plan_calls(
-                spec, rest_path, request, symbols=request.symbols, fixed=fixed, axis=axis
+                spec,
+                rest_path,
+                request,
+                symbols=request.symbols,
+                fixed=fixed,
+                dates=bounds,
+                exact=window_instants,
             )
         try:
             table, requests = reader.read(spec, rest_path, calls, limit=None, window=window)

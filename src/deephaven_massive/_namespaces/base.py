@@ -180,10 +180,12 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
     Returns:
         The parameters that are set, by wire name.
 
+    Whether `order` may be given without `sort` depends on the dataset's paths, so
+    `build_query` decides it: a path with its own `order` parameter takes it as is, and only
+    a path without one needs `sort` to carry the direction as its `.asc` or `.desc` suffix.
+
     Raises:
         TypeError: If `sort` is not a `str`.
-        ValueError: If `order` is given without `sort`: most list endpoints take the direction
-            as the `.asc` or `.desc` suffix of `sort`, which the REST transport adds.
     """
     params: dict[str, ParamValue] = {}
     if sort is not None:
@@ -192,11 +194,6 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
         params["sort"] = sort
     if order is not None:
         params["order"] = _require_enum(order, Order, "order")
-        if sort is None:
-            raise ValueError(
-                "order needs sort: most list endpoints take the direction as a suffix of the "
-                "sort field"
-            )
     return params
 
 
@@ -327,7 +324,11 @@ def build_query(
     Raises:
         ValueError: If `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
             `Symbol` column, or `params` or `filters` holds `adjusted`, which has its own typed
-            argument.
+            argument; or if `params` sets `order` without `sort` and none of the dataset's
+            REST paths has an `order` parameter, so the direction could only travel as the
+            `.asc` or `.desc` suffix of `sort` (`Catalog.takes_param`). Where some path has
+            `order`, the REST transport sends it as is there, folds it into `sort` on a path
+            without it, and fails the verb on a chosen path that has neither.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
@@ -350,6 +351,12 @@ def build_query(
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     if params is not None and "adjusted" in params:
         raise ValueError("adjusted is set through build_query(adjusted=...), not params")
+    typed = {k: v for k, v in (params or {}).items() if v is not None}
+    if "order" in typed and "sort" not in typed and not core.catalog.takes_param(spec, "order"):
+        raise ValueError(
+            f"{spec.name}: order needs sort, since its paths take the direction as a suffix "
+            "of the sort field"
+        )
     cls = query_class(spec)
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")

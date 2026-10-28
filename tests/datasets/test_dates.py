@@ -16,15 +16,20 @@ from deephaven_massive._datasets.dates import (
     bounds,
     calendar_day,
     check_order,
+    day_class,
+    day_start,
+    day_zone,
     flat_file_published,
     futures_session,
     futures_session_open,
     futures_sessions,
     history_range,
+    instant_bound,
     parse_date_like,
     publish_time,
 )
 from deephaven_massive._enums import AssetClass
+from deephaven_massive._massive import WireUnit
 
 
 @pytest.mark.parametrize(
@@ -345,3 +350,38 @@ def test_a_session_opens_at_17_chicago_on_the_day_before(session: date) -> None:
     # The roll agrees: the opening instant belongs to the session, the one before does not.
     assert futures_session(opens) == session
     assert futures_session(opens - timedelta(microseconds=1)) == eve
+
+
+def test_a_request_follows_the_class_its_symbols_share() -> None:
+    # A dataset's own class wins; without one, the symbols' shared class decides.
+    assert day_class(_spec(AssetClass.STOCKS), ("X:BTCUSD",)) is AssetClass.STOCKS
+    assert day_class(_spec(None), ("X:BTCUSD", "X:ETHUSD")) is AssetClass.CRYPTO
+    assert day_class(_spec(None), ("AAPL",)) is AssetClass.STOCKS
+    assert day_class(_spec(None), ("AAPL", "X:BTCUSD")) is None
+    assert day_class(_spec(None), None) is None
+    assert day_class(_spec(None), ()) is None
+
+
+def test_each_class_has_its_day_zone_and_day_start() -> None:
+    assert day_zone(None) is NEW_YORK
+    assert day_zone(AssetClass.CRYPTO) is UTC
+    assert day_zone(AssetClass.FUTURES) is CHICAGO
+    assert day_start(AssetClass.FOREX, date(2025, 3, 3)) == datetime(2025, 3, 3, tzinfo=UTC)
+    assert day_start(None, date(2025, 3, 3)) == datetime(2025, 3, 3, 5, tzinfo=UTC)
+    assert day_start(AssetClass.FUTURES, date(2025, 3, 4)) == futures_session_open(date(2025, 3, 4))
+
+
+def test_an_instant_bound_keeps_a_whole_day_and_steps_back_one_unit() -> None:
+    day = date(2025, 3, 3)
+    assert instant_bound(AssetClass.CRYPTO, "t.gte", day, unit=WireUnit.MS, upper=False) == (
+        datetime(2025, 3, 3, tzinfo=UTC)
+    )
+    assert instant_bound(AssetClass.CRYPTO, "t.lte", day, unit=WireUnit.MS, upper=True) == (
+        datetime(2025, 3, 3, 23, 59, 59, 999000, tzinfo=UTC)
+    )
+    instant = datetime(2025, 3, 3, 12, tzinfo=UTC)
+    assert instant_bound(None, "t.lt", instant, unit=None, upper=True) == instant
+    with pytest.raises(ValueError, match=r"^t\.gt takes nanoseconds, so it cannot bound"):
+        instant_bound(None, "t.gt", day, unit=WireUnit.NS, upper=False)
+    with pytest.raises(ValueError, match=r"^t\.lte takes ISO-8601 instants of no documented"):
+        instant_bound(None, "t.lte", day, unit=None, upper=True)
