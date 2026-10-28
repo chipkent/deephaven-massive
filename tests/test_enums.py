@@ -261,6 +261,8 @@ ENUM_PARAMETERS = {
     "_Indices.snapshots.order": (
         "namespaces/test_indices.py::test_snapshots_check_their_list_parameters"
     ),
+    "_Crypto.bars.timespan": "namespaces/test_crypto.py::test_bar_arguments_are_checked",
+    "_Crypto.movers.direction": "namespaces/test_crypto.py::test_movers",
     **dict.fromkeys(
         (
             "_Options.bars.timespan",

@@ -1549,9 +1549,17 @@ def test_a_failure_stops_the_reads_in_progress(
 ) -> None:
     blocks = many_blocks(TRADES_0303)
     fake_s3.refuse(TRADES_0304, status=500, code="InternalError", message="second")
-    # The March 3 read pauses after its first block until the pool is shut down, which happens
-    # only once the March 4 failure has set the cancel event.
-    applied.hook = lambda _key: pool.shut.wait(TIMEOUT)
+    # The March 4 refusal is answered only after the March 3 read has applied its first block,
+    # so the failure always lands while that read is in progress. The March 3 read then pauses
+    # until the pool is shut down, which happens only once the failure has set the cancel event.
+    first_block = threading.Event()
+
+    def pause(_key: str) -> None:
+        first_block.set()
+        pool.shut.wait(TIMEOUT)
+
+    fake_s3.before_answer = lambda key: first_block.wait(TIMEOUT) if key == TRADES_0304 else None
+    applied.hook = pause
     m = dm.MassiveSession(config(max_concurrency=2))
     try:
         # The March 3 read stopped rather than failed, so the March 4 failure is raised.
