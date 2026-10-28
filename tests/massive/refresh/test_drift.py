@@ -49,6 +49,7 @@ NO_HAND = HandInput(
     units={},
     tag_conflicts={},
     type_fixes={},
+    key_fixes={},
     result_keys={},
     param_units={},
     exclusions=(),

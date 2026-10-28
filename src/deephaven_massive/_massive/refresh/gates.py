@@ -65,9 +65,10 @@ class Gate(StrEnum):
     `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or `*_time`."""
     STALE_ENTRY = "stale-entry"
     """A hand entry (a lexicon shape, identity, `NAMES`, `UNITS`, tag-conflict, `TYPE_FIXES`,
-    `RESULT_KEYS`, `PARAM_UNITS`, `EXCLUSIONS`, or `SAMPLE_ERRORS` entry) naming a path, field,
-    parameter, or sample the snapshot no longer has, or claiming what the snapshot contradicts
-    (a `TYPE_FIXES` entry no documented sample needs any more among them)."""
+    `KEY_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `EXCLUSIONS`, or `SAMPLE_ERRORS` entry) naming a
+    path, field, parameter, or sample the snapshot no longer has, or claiming what the snapshot
+    contradicts (a `TYPE_FIXES` entry no documented sample needs any more, or a `KEY_FIXES`
+    entry whose key the example no longer sends, among them)."""
     TYPE_AGREEMENT = "type-agreement"
     """Within one of `overrides.KINDS`, one column whose `WireType`s do not join: the type
     lattice joins `long` with `double` to `double`, `long` with `int-array` to `int-array`,
@@ -273,9 +274,9 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
     """Report the hand entries that name a source, field, object, or parameter not generated.
 
     The entries checked here are those whose staleness shows only once every source of every
-    transport has run:
-    `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `SAMPLE_ERRORS`, lexicon `SHAPES`,
-    `PARAM_UNITS`, `IDENTITY`, and `RESULT_KEYS`. An entry the snapshot contradicts on a field
+    transport has run: `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `KEY_FIXES` (by the
+    declared key), `SAMPLE_ERRORS`, lexicon `SHAPES`, `PARAM_UNITS`, `IDENTITY`, and
+    `RESULT_KEYS`. An entry the snapshot contradicts on a field
     it does generate is reported by the generator that meets the field.
 
     Args:
@@ -290,6 +291,7 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
         ("UNITS", hand.units),
         ("TAG_CONFLICTS", hand.tag_conflicts),
         ("TYPE_FIXES", hand.type_fixes),
+        ("KEY_FIXES", hand.key_fixes),
         ("SAMPLE_ERRORS", [(e.path, e.wire_key) for e in hand.sample_errors]),
     ]
     for table, keys in field_tables:

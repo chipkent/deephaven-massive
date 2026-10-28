@@ -2402,7 +2402,7 @@ refresh/             build time only; excluded from the wheel; may import any of
   hand_input.py      HandInput: the hand tables bundled for the generators
   lexicon.py         SHAPES (object shape -> lexicon), lexicons, identity entries
   overrides.py       NAMES, KINDS, PROJECTIONS, UNITS and tag conflicts, TYPE_FIXES,
-                     TRANSPORT_ONLY, RESULT_KEYS, PARAM_UNITS, VENUES
+                     KEY_FIXES, TRANSPORT_ONLY, RESULT_KEYS, PARAM_UNITS, VENUES
   exclusions.py      EXCLUSIONS (kind, item, reason), the executable rows of section 8.12;
                      SAMPLE_ERRORS (path, wire key, sample, reason), the wrong vendor samples
   drift.py           live-against-snapshot comparison, unaccounted items, deprecations
@@ -2881,6 +2881,7 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `VENUES` | `overrides.py` | the futures venues, folded into the `{venue}` template | `cme`, `cbot`, `nymex`, `comex` |
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
+| `KEY_FIXES` | `overrides.py` | `{(source, declared key): (wire key, reason)}`: a field the specification declares under one key while every documented sample (the response example and the documentation sample) sends it under another that nothing declares; the field is read under the samples' key, keeping its declared type and description, and every other hand entry names it by that key. Stale once the declared key is gone, or the example no longer sends the corrected key or sends the declared one; each goes into section 23 | ticker events `event_type` → `type` (column `Type`) |
 | `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
@@ -2958,9 +2959,10 @@ description for the reviewer. Every gate has a descriptive name, which is how th
   decided by the representation rules. A timestamp-like string REST parameter (by its base
   name) with no `PARAM_UNITS` entry fails the same gate;
 - **`stale-entry`:** a stale hand entry: a lexicon shape, `NAMES`, `UNITS`, tag-conflict,
-  `TYPE_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry
+  `TYPE_FIXES`, `KEY_FIXES`, `PROJECTIONS`, `KINDS`, `RESULT_KEYS`, `PARAM_UNITS`, or `EXCLUSIONS` entry
   naming a source, field, or parameter the snapshot lacks, or claiming what the snapshot contradicts (a type fix
-  whose declared type the spec no longer gives, a tag conflict the tag no longer contradicts,
+  whose declared type the spec no longer gives, a key fix whose key the example no longer
+  sends in place of the declared one, a tag conflict the tag no longer contradicts,
   a `NAMES` quote the description no longer matches, an exclusion of a path the spec already
   marks deprecated or draft); an identity entry no generated object uses is stale too;
 - **`type-agreement`:** within one kind, one column name joins to one `WireType`, unless a
@@ -3816,3 +3818,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 20 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); the overflow check and the [1990, 2100] bound fail loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
 | 21 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
 | 22 | Where the futures snapshot carries a contract's ticker: the OpenAPI schema nests it as `details.ticker`, which the generator names `DetailsTicker` | `futures.snapshots` declares `DetailsTicker` as its `symbol` key; a row without it is a missing required key and fails loudly ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: a spec-shaped fixture fills `Symbol` from `details.ticker` | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for a current contract; record where the ticker appears and that `Symbol` is filled |
+| 23 | Key of the REST ticker events' event type (`/vX/reference/tickers/{id}/events`): the schema declares the required `event_type`, while the response example, the documentation sample, and Massive's Python client all use `type` | A `KEY_FIXES` entry reads the field as `type`, column `Type`; were the wire to send `event_type`, `Type` would be null and `event_type` would be reported as drift | `tests/massive/refresh/test_overrides.py`: the entry reads `event_type` as `type`, column `Type` | `tests/namespaces/test_reference_integration.py`: one `ticker_events` request; record which key the events carry |

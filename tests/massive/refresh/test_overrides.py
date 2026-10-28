@@ -9,6 +9,7 @@ def test_every_entry_has_a_reason() -> None:
     assert all(entry.reason for entry in overrides.UNITS.values())
     assert all(overrides.TAG_CONFLICTS.values())
     assert all(entry.reason for entry in overrides.TYPE_FIXES.values())
+    assert all(entry.reason for entry in overrides.KEY_FIXES.values())
     assert all(entry.reason for entry in overrides.RESULT_KEYS.values())
     assert all(entry.reason for entry in overrides.PARAM_UNITS.values())
     assert all(entry.reason for entry in overrides.PROJECTIONS.values())
@@ -103,6 +104,13 @@ def test_the_crypto_snapshot_trade_id_is_one_decision_for_its_group() -> None:
     # Both crypto snapshots join one kind, so their trade IDs must convert alike.
     fixes = {overrides.TYPE_FIXES[path, "lastTrade.i"] for path in CRYPTO_SNAPSHOTS}
     assert [fix.conversion for fix in fixes] == [Conversion.TEXT_OR_INTEGER_ID]
+
+
+def test_the_ticker_event_type_is_read_as_the_samples_send_it() -> None:
+    # The specification declares `event_type`; every documented sample sends `type`.
+    fix = overrides.KEY_FIXES["/vX/reference/tickers/{id}/events", "event_type"]
+    assert fix.wire_key == "type"
+    assert naming.column_name([fix.wire_key]) == "Type"
 
 
 def test_result_keys_may_be_nested_or_the_body() -> None:
