@@ -7,7 +7,7 @@ value of the wrong type is refused here instead of reaching Massive as surprisin
 |---|---|---|
 | `STRING` | `str` (an enum member by its value) | the text |
 | `INTEGER` | `int` | decimal digits |
-| `NUMBER` | `int` or finite `float` | the shortest exact decimal (`repr`) |
+| `NUMBER` | `int` or finite `float` | digits; a `float` positionally (`0.0000001`) |
 | `BOOLEAN` | `bool` | `true` or `false` |
 | `ENUM` | `str` or enum member, one of `Param.values` | the value |
 | `DATE` | `date`, or aware `datetime` | `YYYY-MM-DD`, or ISO-8601 date-time in UTC (`Z`) |
@@ -35,6 +35,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -119,8 +120,12 @@ def _number(param: Param, value: object, label: str) -> str:
         label: How messages name the value.
 
     Returns:
-        The number's shortest exact decimal text. A subclass (an `IntEnum` member, numpy's
-        `float64`) is sent by its numeric value, never by its own `repr`.
+        The number's text: an `int` as its digits, a `float` as its shortest exact decimal
+        written out in positional notation, without an exponent or trailing zeros (`1e20` is
+        `100000000000000000000`, `1e-7` is `0.0000001`, `2.0` is `2`, `-0.0` is `0`), since a
+        query parameter is not documented to take scientific notation. A subclass (an
+        `IntEnum` member, numpy's `float64`) is sent by its numeric value, never by its own
+        `repr`.
 
     Raises:
         TypeError: If `value` is not a number the kind accepts.
@@ -133,7 +138,10 @@ def _number(param: Param, value: object, label: str) -> str:
         return str(int(value))
     if not math.isfinite(value):
         raise ValueError(f"{label} takes a finite number, not {value!r}")
-    return repr(float(value))
+    text = format(Decimal(repr(float(value))), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
 
 
 def _text(param: Param, value: object, label: str) -> str:

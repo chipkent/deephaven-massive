@@ -1,10 +1,10 @@
 """Symbol normalization across WebSocket, REST, and flat-file forms.
 
 Massive spells one instrument differently per transport: a forex pair is `EUR/USD` in
-WebSocket frames and topics but `C:EURUSD` on REST, and a crypto pair is `BTC-USD` on the
-WebSocket but `X:BTCUSD` on REST. Users may pass any of these forms. This module maps every
-input form to the *canonical* form, which is Massive's REST ticker, and that is what the
-`Symbol` column always holds:
+WebSocket quote and aggregate frames, `EUR-USD` in WebSocket topics, and `C:EURUSD` on REST,
+and a crypto pair is `BTC-USD` on the WebSocket but `X:BTCUSD` on REST. Users may pass any of
+these forms. This module maps every input form to the *canonical* form, which is Massive's REST
+ticker, and that is what the `Symbol` column always holds:
 
 | Class   | Inputs accepted                            | Canonical               |
 |---------|--------------------------------------------|-------------------------|
@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 from deephaven_massive._enums import AssetClass
@@ -51,6 +52,7 @@ __all__ = [
     "NormalizedSymbols",
     "SymbolTable",
     "canonical",
+    "is_forex_currency",
     "normalize",
     "symbol_canonicalizer",
     "symbol_class",
@@ -63,7 +65,11 @@ logger = logging.getLogger(__name__)
 _OCC: Final = re.compile(r"^O:(?P<root>[A-Z0-9.]{1,6})(?P<expiry>\d{6})[CP]\d{8}$")
 _PLAIN: Final = re.compile(r"^[A-Z0-9.:/\-]+$")
 _PAIR_SEPARATORS: Final = re.compile(r"[/\-]")
+_ALPHANUMERIC: Final = re.compile(r"[A-Z0-9]")
 _CURRENCY: Final = re.compile(r"^[A-Z0-9]+$")
+"""A crypto currency code: letters and digits of any length (`1INCH`, `USDT`)."""
+_FOREX_CURRENCY: Final = re.compile(r"^[A-Z]{3}$")
+"""A forex currency code: three letters, as ISO 4217 writes them (`EUR`)."""
 _PAIR_PARTS: Final = 2
 _CURRENCY_CODE_LENGTH: Final = 3  # ISO 4217
 CRYPTO_QUOTES: Final = (
@@ -158,25 +164,25 @@ def canonical(asset_class: AssetClass | None, raw: object) -> str:
 
     Raises:
         TypeError: If `raw` is not a `str`.
-        ValueError: If `raw` is empty, contains characters no Massive symbol has (spaces,
-            commas), carries another class's prefix (`X:` on a stock, `C:` on crypto; the
-            message says which prefix, if any, the class uses), carries an unknown prefix
-            when no class is given, is not
-            a valid OCC symbol for options, is not a readable pair for forex, or is not a
-            crypto pair that ends in one of `CRYPTO_QUOTES` (checked here, so the WebSocket
-            form can always be recovered).
+        ValueError: If `raw` is empty or a prefix with nothing after it (`I:`), contains
+            characters no Massive symbol has (spaces, commas), carries another class's prefix
+            (`X:` on a stock, `C:` on crypto; the message says which prefix, if any, the class
+            uses), carries an unknown prefix when no class is given, is not a valid OCC symbol
+            with a real `YYMMDD` expiry date for options, is not a pair of three-letter codes
+            for forex (`is_forex_currency`), or is not a crypto pair that ends in one of
+            `CRYPTO_QUOTES` (checked here, so the WebSocket form can always be recovered).
     """
     if not isinstance(raw, str):
         raise TypeError(f"a symbol must be a str, not {type(raw).__name__}")
     asset_class, prefix, body = _class_and_body(asset_class, raw)
     if asset_class is AssetClass.OPTIONS:
         symbol = f"O:{body}"
-        if not _OCC.match(symbol):
+        if _occ_match(symbol) is None:
             raise ValueError(f"{raw!r} is not an OCC option symbol such as O:AAPL250117C00150000")
         return symbol
     if asset_class is AssetClass.FOREX:
         pair = _split_pair(body, raw) if _PAIR_SEPARATORS.search(body) else (body[:3], body[3:])
-        if any(len(code) != _CURRENCY_CODE_LENGTH or not _CURRENCY.match(code) for code in pair):
+        if not all(is_forex_currency(code) for code in pair):
             raise ValueError(f"cannot read {raw!r} as a currency pair; write it as BASE/QUOTE")
         return f"C:{pair[0]}{pair[1]}"
     if asset_class is AssetClass.CRYPTO:
@@ -190,6 +196,21 @@ def canonical(asset_class: AssetClass | None, raw: object) -> str:
             raise ValueError(f"{raw!r} does not split back unambiguously; write it as BASE-QUOTE")
         return f"X:{base}{quote}"
     return f"{prefix}{body}"
+
+
+def is_forex_currency(code: str) -> bool:
+    """Tell whether text is a forex currency code: three upper-case letters, such as `EUR`.
+
+    Massive's forex pairs are ISO 4217 codes, so a digit (`EU1`) or another length is no
+    currency; crypto codes, which may hold digits, follow their own rule in `canonical`.
+
+    Args:
+        code: The code, already stripped and upper-cased.
+
+    Returns:
+        True for three letters `A` to `Z`.
+    """
+    return _FOREX_CURRENCY.match(code) is not None
 
 
 def symbol_class(symbol: str) -> AssetClass:
@@ -217,7 +238,8 @@ def _class_and_body(asset_class: AssetClass | None, raw: str) -> tuple[AssetClas
         without one), and the upper-cased symbol without that prefix.
 
     Raises:
-        ValueError: If `raw` is not a plain symbol, or carries another class's prefix.
+        ValueError: If `raw` is not a plain symbol, carries another class's prefix, is a
+            prefix with nothing after it (`I:`), or has no letter or digit (`-`, `.`).
     """
     text = raw.strip().upper()
     if not _PLAIN.match(text):
@@ -226,6 +248,10 @@ def _class_and_body(asset_class: AssetClass | None, raw: str) -> tuple[AssetClas
         asset_class = _CLASS_BY_PREFIX.get(text[:2], AssetClass.STOCKS)
     prefix = _PREFIXES.get(asset_class, "")
     body = text.removeprefix(prefix) if prefix else text
+    if not body:
+        raise ValueError(f"{raw!r} is a prefix without a symbol")
+    if not _ALPHANUMERIC.search(body):
+        raise ValueError(f"{raw!r} is not a symbol: it has no letter or digit")
     if ":" in body:
         rule = f"use the {prefix} prefix" if prefix else "have no prefix"
         raise ValueError(
@@ -259,9 +285,14 @@ def _split_crypto(body: str, raw: str) -> tuple[str, str]:
 def ws_symbol(asset_class: AssetClass, symbol: str) -> str:
     """Return the WebSocket spelling of a canonical symbol, as topics and frames use it.
 
-    Forex becomes `BASE/QUOTE` (`C:EURUSD` to `EUR/USD`) and crypto `BASE-QUOTE` (`X:BTCUSD`
-    to `BTC-USD`); every other class uses the canonical form unchanged. Every symbol
-    `canonical` returns converts; a crypto ticker it would reject raises its `ValueError`.
+    Forex and crypto become `BASE-QUOTE` (`C:EURUSD` to `EUR-USD`, `X:BTCUSD` to `BTC-USD`);
+    every other class uses the canonical form unchanged. Every symbol `canonical` returns
+    converts; a crypto ticker it would reject raises its `ValueError`.
+
+    Massive's WebSocket documentation gives every forex channel's `ticker` parameter (`C`,
+    `CA`, `CAS`, `FMV`) as `{from}-{to}`, so a forex topic is `C.EUR-USD`, even though forex
+    quote and aggregate frames spell the pair `EUR/USD` and FMV frames `C:EURUSD`. Frames are
+    matched by their canonical form, so every inbound spelling still reaches its stream.
 
     Args:
         asset_class: The symbol's class.
@@ -271,12 +302,36 @@ def ws_symbol(asset_class: AssetClass, symbol: str) -> str:
         The WebSocket form.
     """
     if asset_class is AssetClass.FOREX:
+        # The `ticker` parameter of every forex channel is "{from}-{to}": see
+        # vendor/massive/websocket/forex/quotes.md, aggregates-per-minute.md,
+        # aggregates-per-second.md, and fair-market-value.md.
         body = symbol.removeprefix("C:")
-        return f"{body[:_CURRENCY_CODE_LENGTH]}/{body[_CURRENCY_CODE_LENGTH:]}"
+        return f"{body[:_CURRENCY_CODE_LENGTH]}-{body[_CURRENCY_CODE_LENGTH:]}"
     if asset_class is AssetClass.CRYPTO:
         base, quote = _split_crypto(symbol.removeprefix("X:"), symbol)
         return f"{base}-{quote}"
     return symbol
+
+
+def _occ_match(symbol: str) -> re.Match[str] | None:
+    """Match a canonical OCC option symbol whose expiry is a real calendar date.
+
+    Args:
+        symbol: The symbol with its `O:` prefix, upper case.
+
+    Returns:
+        The match, with the `root` and `expiry` groups; None if the symbol has not the OCC
+        shape or its `YYMMDD` expiry is no date (`250132`, `251301`).
+    """
+    match = _OCC.match(symbol)
+    if match is None:
+        return None
+    expiry = match["expiry"]
+    try:
+        date(2000 + int(expiry[:2]), int(expiry[2:4]), int(expiry[4:]))
+    except ValueError:
+        return None
+    return match
 
 
 def underlying(option_symbol: str) -> str:
@@ -289,9 +344,10 @@ def underlying(option_symbol: str) -> str:
         The OCC root, such as `AAPL`.
 
     Raises:
-        ValueError: If the symbol is not a canonical OCC option symbol.
+        ValueError: If the symbol is not a canonical OCC option symbol with a real expiry
+            date.
     """
-    match = _OCC.match(option_symbol)
+    match = _occ_match(option_symbol)
     if match is None:
         raise ValueError(f"{option_symbol!r} is not an OCC option symbol")
     return match["root"]
