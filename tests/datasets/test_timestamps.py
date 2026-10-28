@@ -14,6 +14,8 @@ from deephaven_massive._datasets.timestamps import (
     TimeUnit,
     UnitMismatchError,
     instants,
+    masked_instants,
+    mismatch_message,
     time_unit,
     to_epoch_ns,
     to_epoch_ns_array,
@@ -209,3 +211,33 @@ def test_a_unit_mismatch_is_a_massive_error() -> None:
     assert issubclass(UnitMismatchError, MassiveError)
     with pytest.raises(UnitMismatchError, match="overflows"):
         to_epoch_ns_array(TRADES_T, MS, ints(NANOS))
+
+
+def test_the_masked_routine_reports_failing_rows_instead_of_raising() -> None:
+    sent = pa.array([1_700_000_000_000, 0, None, 5, 2**62, -(2**62)], pa.int64())
+    nanos, failed = masked_instants(TimeUnit.MILLISECONDS, sent, time_column=True)
+    assert nanos.to_pylist() == [1_700_000_000_000_000_000, None, None, None, None, None]
+    assert failed.to_pylist() == [False, True, False, True, True, True]
+    nanos, failed = masked_instants(TimeUnit.MILLISECONDS, sent, time_column=False)
+    assert failed.to_pylist() == [False, False, False, True, True, True]  # 0 is absent there
+
+
+def test_the_masked_routine_applies_the_fmv_rule(caplog: pytest.LogCaptureFixture) -> None:
+    sent = pa.array([1_700_000_000_000, 1_700_000_000_000_000_000, 5, None], pa.int64())
+    nanos, failed = masked_instants(TimeUnit.FMV_MAGNITUDE, sent, time_column=True)
+    assert nanos.to_pylist() == [1_700_000_000_000_000_000] * 2 + [None, None]
+    assert failed.to_pylist() == [False, False, True, False]
+    _, failed = masked_instants(
+        TimeUnit.FMV_MAGNITUDE, pa.array([None], pa.int64()), time_column=True
+    )
+    assert failed.to_pylist() == [False]
+
+
+def test_a_masked_failure_reads_as_the_routine_would_raise_it() -> None:
+    assert mismatch_message("t.T", TimeUnit.MILLISECONDS, 5) == (
+        "timestamp unit mismatch for t.T: 5 ms is outside 1990 to 2100"
+    )
+    assert mismatch_message("t.T", TimeUnit.FMV_MAGNITUDE, 2**62) == (
+        "timestamp unit mismatch for t.T: 4611686018427387904 ms|ns is outside 1990 to 2100"
+    )
+    assert mismatch_message("t.T", TimeUnit.SECONDS, 2**40).endswith("overflows 64-bit nanoseconds")

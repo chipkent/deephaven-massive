@@ -11,7 +11,8 @@ are the library's. It may import only `net` and `spec` from `_massive`.
   its rows, and its body. Decoding is strict; a malformed body raises `WireError`.
 - `to_batch` (`rest.batch`): a page's rows as one Arrow batch of the path's generated fields,
   with the `DriftReport` of what the rows had extra or lacked.
-- `rest.query` encodes parameter values by their `ParamKind`.
+- `rest.query` builds request targets, encoding each value by its `ParamKind` with
+  `spec.values.encode_value`, and checks every `next_url`.
 
 Example:
     ::

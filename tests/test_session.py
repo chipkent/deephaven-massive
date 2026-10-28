@@ -438,7 +438,7 @@ def test_a_session_closed_while_a_stream_opens(
 ) -> None:
     class Closing:
         def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str | None, *, stream_id: int
+            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
         ) -> StreamHandle:
             handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
             massive_session.close()

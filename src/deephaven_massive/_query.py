@@ -50,7 +50,11 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
-from deephaven_massive._datasets.symbols import SymbolTable, symbol_canonicalizer
+from deephaven_massive._datasets.symbols import (
+    SymbolTable,
+    symbol_canonicalizer,
+    symbol_class,
+)
 from deephaven_massive._enums import (
     HistorySource,
     PollMode,
@@ -281,6 +285,17 @@ class StreamQuery(QueryBase):
     returns a new, distinct table held in its own liveness scope. The stream stays subscribed
     while any result, or any table derived from one, is alive.
 
+    The first verb of a stream decides its host (one REST request the first time a class and
+    channel family streams in the session), connects if no connection to that host exists, and
+    subscribes; the verb returns once the stream's tables exist, without waiting for the
+    server's acknowledgement. A failure the server reports later (a refused topic, a rejected
+    key, a row that does not decode) fails the stream's tables and shows in `m.streams()`; a
+    verb whose stream fails while the verb opens it raises `MassiveError` naming the failure,
+    and once a stream has failed the next verb of an equal query opens a fresh one. Explicit
+    options contracts that would put more than 1,000 topics on the session's `/options`
+    connection raise `ValueError` at once; those of a reactive symbol table are deferred
+    instead (`Deferred` in `m.streams()`).
+
     No namespace declares a dataset of this kind yet, so no query can be built and there is no
     example here yet.
     """
@@ -288,9 +303,13 @@ class StreamQuery(QueryBase):
     __slots__ = ()
 
     @property
-    def _channel(self) -> str | None:
-        """The WebSocket channel: per timespan for bars, otherwise the dataset's channel."""
-        return self._spec.channels.get(self._request.timespan)
+    def _channel(self) -> str:
+        """The WebSocket channel: per timespan for bars, otherwise the dataset's channel.
+
+        A stream query exists only for a timespan with a channel (`bar_query_class`), so the
+        lookup always finds one.
+        """
+        return self._spec.channels[self._request.timespan]
 
     def _stream(self, build: Callable[[Table], Table], *, wrap: bool = False) -> Table:
         """Shape a live result from this query's stream, creating the stream if needed.
@@ -497,10 +516,12 @@ class HistoryQuery(QueryBase):
         self._core.require_verb_thread()
         chosen = _require_enum(source, HistorySource, "source")
         first, last = parse_date_like(start, "start"), parse_date_like(end, "end")
-        window = bounds(self._spec, first, last)
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
             symbols = _read_symbol_table(self._core, self._spec, symbols)
+        # A dataset with a path per symbol class takes its days from its symbols' class.
+        listed = symbols if isinstance(symbols, tuple) else ()
+        window = bounds(self._spec, first, last, classes=map(symbol_class, listed))
         request = replace(self._request, start=first, end=last, symbols=symbols)
         if chosen is HistorySource.REST:
             self._check_rest_history()

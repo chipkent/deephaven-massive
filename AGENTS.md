@@ -145,6 +145,12 @@ nothing is kept or shimmed for compatibility.
     passes. Merge `main` into a PR branch only when there is a conflict or a change you need,
     and push it with the other pending fixes. A branch with no PR runs no CI, so pushing it to
     keep work safe is fine; open its PR only when it is ready.
+16. **Review locally before every push that runs CI.** Before the push that opens a PR, and
+    before each batch push to one, review the whole branch yourself with the
+    `.claude/skills/pre-push-review` skill: read the diff against `origin/main` as a hostile
+    reviewer, break the code on purpose to prove the tests catch it, check the docs and the
+    PR description, and fix every finding. Only then push. CI and the review bots confirm a
+    clean branch; they are not the place to find its problems.
 
 ## Layers
 

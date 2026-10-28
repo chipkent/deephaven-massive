@@ -212,7 +212,8 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
         "adjusted=False start=2025-01-02 params={'sort': 'timestamp'}>"
     )
     filtered = make(massive_session, NEWS_SPEC, filters={"date_gte": "2025-01-02"})
-    assert repr(filtered) == "<Query economy.inflation filters={'date_gte': '2025-01-02'}>"
+    # The filter is held as the date its text names, rendered like `start`.
+    assert repr(filtered) == "<Query economy.inflation filters={'date_gte': 2025-01-02}>"
 
 
 def test_class_hierarchy() -> None:
@@ -225,14 +226,6 @@ def test_class_hierarchy() -> None:
     assert not hasattr(HistoryQuery, "fetch")
     assert not hasattr(StreamHistoryQuery, "fetch")
     assert not hasattr(Query, "history")
-
-
-# --- Transport hooks that are not implemented yet --------------------------------------------
-
-
-def test_the_stream_hook_raises_not_implemented(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(NotImplementedError, match="WebSocket transport"):
-        trades(massive_session).append_only()
 
 
 # --- fetch and poll --------------------------------------------------------------------------

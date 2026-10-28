@@ -10,7 +10,9 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
-from deephaven_massive._ingest import flatfiles, rest
+from deephaven_massive._datasets.request import HostDecision
+from deephaven_massive._enums import ChannelFamily, Recency
+from deephaven_massive._ingest import flatfiles, rest, ws
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._tables.core import SessionCore
 from tests._fakes.s3 import FakeS3
@@ -86,9 +88,78 @@ def test_the_flat_file_transport_needs_s3_credentials(fake_s3: FakeS3) -> None:
     assert clients_of(m)._flat_files is None
 
 
-def test_the_websocket_transport_is_not_implemented_yet(session: dm.MassiveSession) -> None:
-    with pytest.raises(NotImplementedError, match="the WebSocket transport is not implemented"):
-        session._core.stream_transport()
+def test_every_stream_transport_shares_the_sessions_connections(
+    session: dm.MassiveSession,
+) -> None:
+    first = session._core.stream_transport()
+    second = session._core.stream_transport()
+    assert isinstance(first, ws.WsTransport)
+    assert isinstance(second, ws.WsTransport)
+    assert first is not second
+    assert first._connections is second._connections is clients_of(session)._streams
+    assert first._core is session._core  # the transport holds the core for its verb
+
+
+def test_the_connections_close_with_the_session(fake_s3: FakeS3) -> None:
+    m = dm.MassiveSession(config())
+    m._core.stream_transport()
+    connections = clients_of(m)._streams
+    assert connections is not None
+    m.close()
+    assert connections._closed
+
+
+class _HostCache:
+    # The two host-decision calls the WebSocket side makes of the REST transport.
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def resolve_host(self, asset_class: dm.AssetClass, family: ChannelFamily) -> HostDecision:
+        self.calls.append(("resolve", asset_class, family))
+        return HostDecision("socket.massive.com", Recency.REALTIME, "test")
+
+    def record_verdict(
+        self, asset_class: dm.AssetClass, family: ChannelFamily, decision: HostDecision
+    ) -> None:
+        self.calls.append(("record", asset_class, family, decision))
+
+
+def test_host_decisions_go_through_the_rest_transport(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = _HostCache()
+    monkeypatch.setattr(SessionClients, "rest", lambda _: cache)
+    clients = clients_of(session)
+    decision = clients._resolve_host(dm.AssetClass.STOCKS, ChannelFamily.TICK)
+    verdict = HostDecision("delayed.massive.com", Recency.DELAYED, "server verdict: x")
+    clients._record_verdict(dm.AssetClass.FUTURES, ChannelFamily.TICK, verdict)
+    assert decision.host == "socket.massive.com"
+    assert cache.calls == [
+        ("resolve", dm.AssetClass.STOCKS, ChannelFamily.TICK),
+        ("record", dm.AssetClass.FUTURES, ChannelFamily.TICK, verdict),
+    ]
+
+
+def test_the_connections_do_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
+    # The connections live as long as the session and their close is a session closer, which the
+    # session's finalizer holds: a strong reference to the core would keep it alive forever.
+    m = dm.MassiveSession(config())
+    m._core.stream_transport()
+    connections = clients_of(m)._streams
+    core = weakref.ref(m._core)
+    gc.disable()
+    try:
+        del m
+        assert core() is None  # freed by reference counting alone
+    finally:
+        gc.enable()
+    assert connections is not None
+    closed = threading.Event()
+    for _ in range(200):  # its closer runs on the reaper
+        if connections._closed:
+            break
+        closed.wait(0.05)
+    assert connections._closed
 
 
 def test_every_rest_call_of_a_session_shares_one_client(session: dm.MassiveSession) -> None:

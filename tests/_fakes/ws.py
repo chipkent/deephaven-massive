@@ -5,7 +5,10 @@ loop, with `websockets.asyncio.server`: each connection gets the `connected` gre
 the authentication frame, and gets a reply; after `auth_success` every frame it receives is
 recorded and, when `auto_ack` is set, each subscribe frame is acknowledged as Massive's
 knowledge base shows it: one "subscribed to: <topic>" status object per topic, all in one
-array (or, with `combined_acks`, one object naming the comma-separated topics).
+array (or, with `combined_acks`, one object naming the comma-separated topics). Tests may also
+script the answers: `refuse` maps a topic to the message of the error status that refuses it,
+`silent` holds topics never answered, and each entry of `step_refusals` answers the next
+subscribe frame with one error status that names no topic.
 
 The server logs through its own logger at WARNING, so its DEBUG frame log (which would show
 the client's authentication frame) never reaches a test that captures every logger.
@@ -66,20 +69,31 @@ def status_frame(status: str, message: str | None = None) -> str:
     return json.dumps([{"ev": "status", "status": status, "message": text}])
 
 
-def _ack_frame(params: str, *, combined: bool) -> str:
-    """Return the acknowledgement of one subscribe frame.
+def _ack_frame(
+    params: str, *, combined: bool, refuse: dict[str, str], silent: set[str]
+) -> str | None:
+    """Return the answer to one subscribe frame.
 
     Args:
         params: The frame's comma-separated topics.
-        combined: One status object for all topics, instead of one per topic.
+        combined: One status object for all acknowledged topics, instead of one per topic.
+        refuse: Topics to refuse, each with the message of its error status.
+        silent: Topics never answered.
 
     Returns:
-        The status frame.
+        The status frame, or None when no topic is answered.
     """
-    topics = [params] if combined else params.split(",")
-    return json.dumps(
-        [{"ev": "status", "status": "success", "message": f"subscribed to: {t}"} for t in topics]
-    )
+    topics = params.split(",")
+    acked = [t for t in topics if t not in refuse and t not in silent]
+    statuses = [
+        {"ev": "status", "status": "error", "message": refuse[t]} for t in topics if t in refuse
+    ]
+    if acked:
+        listed = [",".join(acked)] if combined else acked
+        statuses += [
+            {"ev": "status", "status": "success", "message": f"subscribed to: {t}"} for t in listed
+        ]
+    return json.dumps(statuses) if statuses else None
 
 
 @dataclass
@@ -116,6 +130,9 @@ class FakeMassiveServer:
         self.auto_ack = True
         self.combined_acks = False
         self.close_after_refusal = True
+        self.refuse: dict[str, str] = {}
+        self.silent: set[str] = set()
+        self.step_refusals: list[str] = []
         self._rejects: list[tuple[int, dict[str, str]]] = []
         self._greetings: list[str | None] = []
         self._live: dict[int, ServerConnection] = {}
@@ -307,14 +324,23 @@ class FakeMassiveServer:
                 await ws.wait_closed()
                 return
             async for frame in ws:
+                request = json.loads(frame)
+                subscribe = request.get("action") == "subscribe"
                 with self._lock:
                     record.frames.append(str(frame))
                     ack = self.auto_ack
                     combined = self.combined_acks
+                    refuse, silent = dict(self.refuse), set(self.silent)
+                    step = self.step_refusals.pop(0) if subscribe and self.step_refusals else None
                     self._lock.notify_all()
-                request = json.loads(frame)
-                if ack and request.get("action") == "subscribe":
-                    await ws.send(_ack_frame(request["params"], combined=combined))
+                if step is not None:
+                    await ws.send(status_frame("error", step))
+                elif ack and subscribe:
+                    answer = _ack_frame(
+                        request["params"], combined=combined, refuse=refuse, silent=silent
+                    )
+                    if answer is not None:
+                        await ws.send(answer)
         except ConnectionClosed:
             pass  # the client went away mid-protocol, as a client under test may
         finally:

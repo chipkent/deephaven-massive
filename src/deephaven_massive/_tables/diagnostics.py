@@ -275,6 +275,7 @@ class StreamUpdate:
         requests_per_cycle: The REST requests of the latest `poll()` cycle.
         deferred: Options contracts deferred by the contract cap.
         symbol_count: How many symbols the stream now covers.
+        symbols: The readable, truncated list of those symbols, as `describe_symbols` writes it.
         host: The serving host.
         path: The cluster path.
         error: Warning text for the `Error` column.
@@ -288,6 +289,7 @@ class StreamUpdate:
     requests_per_cycle: int | None = None
     deferred: int | None = None
     symbol_count: int | None = None
+    symbols: str | None = None
     host: str | None = None
     path: str | None = None
     error: str | None = None
@@ -312,6 +314,7 @@ class StreamUpdate:
             else self.requests_per_cycle,
             deferred=row.deferred if self.deferred is None else self.deferred,
             symbol_count=row.symbol_count if self.symbol_count is None else self.symbol_count,
+            symbols=row.symbols if self.symbols is None else self.symbols,
             host=row.host if self.host is None else self.host,
             path=row.path if self.path is None else self.path,
             error=None if self.clear_error else row.error if self.error is None else self.error,
