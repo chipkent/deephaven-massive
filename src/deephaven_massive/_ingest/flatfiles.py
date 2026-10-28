@@ -33,7 +33,11 @@ text such as `NA` or `NULL` is data (both are valid tickers).
 
 A missing file is judged by its date: on a weekend (for every class but crypto, which trades
 every day) it is skipped silently; on a weekday it is skipped with a WARNING, since it is most
-likely a market holiday. A missing file for the last requested date may instead be late: within
+likely a market holiday. A futures exchange holiday folds into the next session, so when a
+futures range ends at an instant and the run of missing files that ends it holds a weekday (a
+holiday, alone or followed by a weekend), the next existing session file within
+`FUTURES_HOLIDAY_MARGIN` of the run's first day is read too: its early-opened hours may lie
+inside the range. A missing file for the last requested date may instead be late: within
 a day after its publication time (`within_publication_grace` in
 `_datasets/history_source.py`) it raises `MassiveError` naming both causes, and after that it is
 skipped with a WARNING like any other weekday.
@@ -79,13 +83,14 @@ import logging
 import threading
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
 from deephaven import merge
 from deephaven.arrow import to_table
 
-from deephaven_massive._datasets.dates import TimeRange
+from deephaven_massive._datasets.dates import FUTURES_HOLIDAY_MARGIN, TimeRange
 from deephaven_massive._datasets.history_source import within_publication_grace
 from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.timestamps import (
@@ -157,6 +162,38 @@ class _Key:
     key: str
     day: date
     venue: FuturesVenue | None
+
+
+def _window_ns(window: TimeRange | FuturesSessions) -> tuple[int, int] | None:
+    """Return the `Timestamp` range a read keeps, as epoch nanoseconds, or None for every time.
+
+    Args:
+        window: The normalized `history()` bounds.
+
+    Returns:
+        The range of a `TimeRange`, or of futures sessions with an instant bound (whose date
+        side is widened past every row of its sessions); None for sessions given as two dates.
+    """
+    if isinstance(window, TimeRange):
+        return window.start_ns, window.end_ns
+    if window.first is not None and window.last is not None:
+        return None
+    return window.window.start_ns, window.window.end_ns
+
+
+def _ends_at_an_instant(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> bool:
+    """Tell whether a futures range ends at an instant, so a holiday may hide its last rows.
+
+    Args:
+        spec: The dataset.
+        window: The normalized `history()` bounds.
+
+    Returns:
+        True for futures whose `end` was an aware `datetime`.
+    """
+    if spec.asset_class is not AssetClass.FUTURES:
+        return False
+    return isinstance(window, TimeRange) or window.last is None
 
 
 def _keys(prefix: str, venue: FuturesVenue | None, dates: Sequence[date]) -> tuple[_Key, ...]:
@@ -248,8 +285,9 @@ class _Transform:
             prefix: The dataset's prefix for the request; a futures prefix holds `{venue}`.
             symbols: The canonical symbols to keep, as a tuple; anything else (`dm.ALL`, or
                 None for a dataset without instruments) keeps every row.
-            window: The normalized `history()` bounds. Futures sessions keep every time,
-                since their files hold exactly the requested sessions.
+            window: The normalized `history()` bounds. Futures sessions given as two dates
+                keep every time, since their files hold exactly the requested sessions; with
+                an instant bound, rows are kept inside the request window.
 
         Returns:
             The transform.
@@ -280,7 +318,7 @@ class _Transform:
             symbol_header=header["Symbol"],
             symbols=pa.array(symbols, pa.string()) if isinstance(symbols, tuple) else None,
             time_header=header["Timestamp"],
-            window_ns=((window.start_ns, window.end_ns) if isinstance(window, TimeRange) else None),
+            window_ns=_window_ns(window),
             to_ns=to_ns,
             session=None,
             block_size=BLOCK_SIZE,
@@ -425,10 +463,18 @@ class FlatFileHistory:
         transform = _Transform.build(
             self._core.catalog, spec, prefix=prefix, symbols=request.symbols, window=window
         )
-        return self._read(spec, transform, _keys(prefix, request.venue, dates), last=dates[-1])
+        keys = _keys(prefix, request.venue, dates)
+        roll = prefix if _ends_at_an_instant(spec, window) else None
+        return self._read(spec, transform, keys, last=dates[-1], roll=roll)
 
     def _read(
-        self, spec: DatasetSpec, transform: _Transform, keys: Sequence[_Key], *, last: date
+        self,
+        spec: DatasetSpec,
+        transform: _Transform,
+        keys: Sequence[_Key],
+        *,
+        last: date,
+        roll: str | None = None,
     ) -> Table:
         """Read files on a pool of reader threads and merge their rows into one static table.
 
@@ -445,6 +491,9 @@ class FlatFileHistory:
             transform: The request's block transform.
             keys: The files to read, in result order.
             last: The last partition date of the request.
+            roll: The futures prefix when the range ends at an instant: when the run of
+                missing files that ends a venue's keys holds a weekday, the next existing
+                session file is read too (`_roll_forward`). None reads only `keys`.
 
         Returns:
             The merged table.
@@ -471,9 +520,76 @@ class FlatFileHistory:
             ",".join(sorted({key.day.isoformat() for key in missing})) or "none",
         )
         tables = [table for part in parts if part is not None for table in part]
+        if roll is not None:
+            tables.extend(
+                self._roll_forward(spec, transform, keys=keys, missing=set(missing), prefix=roll)
+            )
         with entered(self._core.exec_ctx):
             # Merging onto an empty table in the schema keeps every column when no row matched.
             return merge([to_table(transform.arrow_schema.empty_table()), *tables])
+
+    def _roll_forward(
+        self,
+        spec: DatasetSpec,
+        transform: _Transform,
+        *,
+        keys: Sequence[_Key],
+        missing: set[_Key],
+        prefix: str,
+    ) -> list[Table]:
+        """Read, per venue, the first session file after a range's missing last files.
+
+        A holiday's trading belongs to the next session, which opens early: the session of
+        Tuesday 2025-01-21 opened on Sunday 2025-01-19 at 17:00 Chicago time, and after Good
+        Friday 2024 the session of Monday 2024-04-01 opened on Thursday 2024-03-28. So a range
+        that ends on the holiday, or on the weekend after it, finds rows in a later file. For
+        each venue, the run of missing files that ends its keys is examined: a run of weekend
+        days only follows an existing file and needs nothing, while a run that holds a
+        weekday is followed by the days after the range, up to `FUTURES_HOLIDAY_MARGIN` past
+        the run's first day, until a file exists. The reads run on the caller thread, one at a
+        time; the transform keeps only the rows inside the range. Each read checks the session
+        before its request and after every block, as the pool's reads do, so a close stops it
+        with `"MassiveSession #1 is closed"`; the pool's cancel event is already set when this
+        runs, so these reads take an event of their own. A failed read raises the public error
+        `_read_key` raises (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
+
+        Args:
+            spec: The dataset, for the log.
+            transform: The request's block transform.
+            keys: The request's files, in date and then venue order.
+            missing: The files of `keys` that do not exist.
+            prefix: The futures prefix, with its `{venue}` placeholder.
+
+        Returns:
+            The tables of the files found, in venue order; empty when no run needs a roll or
+            none of the days has a file.
+        """
+        tables: list[Table] = []
+        for venue in dict.fromkeys(key.venue for key in keys):
+            own = [key for key in keys if key.venue == venue]
+            run: list[_Key] = []
+            for key in reversed(own):
+                if key not in missing:
+                    break
+                run.append(key)
+            if not any(key.day.weekday() < _SATURDAY for key in run):
+                continue
+            name = None if venue is None else venue.value
+            day, limit = own[-1].day, run[-1].day + FUTURES_HOLIDAY_MARGIN
+            while day < limit:
+                day += timedelta(days=1)
+                key = _Key(object_key(prefix, day, name), day, venue)
+                part = self._read_key(transform, key, cancel=threading.Event())
+                if part is not None:
+                    logger.info(
+                        "%s: %s is missing; reading %s for the hours a holiday moved into it",
+                        spec.name,
+                        run[-1].key,
+                        key.key,
+                    )
+                    tables.extend(part)
+                    break
+        return tables
 
     def _check_open(self) -> None:
         """Reject further work once the session's flat-file client is closed.
