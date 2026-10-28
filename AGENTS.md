@@ -51,6 +51,17 @@ and keeps one standing "Massive API drift" issue (`scripts/spec-drift-issue.sh`)
 short comment when the report of an open issue changed; it is advisory, never a required
 check.
 
+The column reference, `docs/datasets/<namespace>.md`, is generated from the dataset schemas and
+committed. Never edit it by hand: the command below owns the whole directory, rewriting stale
+pages and deleting any file it did not render. Run it, and commit its output in the same pull
+request, after any refresh (every page shows the snapshot's fetch date) and whenever a dataset,
+a namespace, a summary, or the description rule changes; the parity test fails until you do.
+
+```bash
+uv run python scripts/render_reference.py                     # regenerate docs/datasets/
+uv run pytest tests/datasets/test_column_reference.py -q      # the parity and docstring-link tests
+```
+
 Always go through `uv run`. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip` use the wrong
 environment, and the Claude Code hook blocks them.
 
