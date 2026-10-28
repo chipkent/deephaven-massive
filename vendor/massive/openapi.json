@@ -15084,7 +15084,7 @@
       }
      },
      {
-      "description": "Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date >= last_trade_date) and false otherwise.",
+      "description": "Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date <= last_trade_date) and false otherwise.",
       "in": "query",
       "name": "active",
       "schema": {
@@ -15238,7 +15238,7 @@
            "provider_id": "H3ZLPMESGCUM",
            "provider_product_id": "VGQ4V6NVXLBW",
            "settlement_date": "2026-12-18",
-           "settlement_tick_size": 0.0025,
+           "settlement_tick_size": 0.25,
            "spread_tick_size": 0.01,
            "ticker": "ESZ6",
            "trade_tick_size": 0.25,
@@ -15263,7 +15263,7 @@
            "items": {
             "properties": {
              "active": {
-              "description": "Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date >= last_trade_date) and false otherwise.",
+              "description": "Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date <= last_trade_date) and false otherwise.",
               "type": "boolean"
              },
              "date": {
@@ -16214,8 +16214,8 @@
           {
            "asset_class": "commodity",
            "asset_sub_class": "energy",
-           "clearing_symbol": "EBE",
-           "clearing_venue": "XCME",
+           "clearing_symbol": "EBF",
+           "clearing_venue": "NYMEX",
            "date": "2025-07-07",
            "last_updated": "2025-02-22",
            "name": "1% Fuel Oil Barges FOB Rdam (Platts) vs. 1% Fuel Oil Cargoes FOB NWE (Platts) BALMO Futures",
@@ -16263,7 +16263,7 @@
               "type": "string"
              },
              "clearing_venue": {
-              "description": "The trading venue (MIC) for the clearing house that clears this product's contracts.",
+              "description": "The exchange identifier for the clearing house that clears this product's contracts.",
               "type": "string"
              },
              "date": {
@@ -16309,7 +16309,7 @@
               "type": "string"
              },
              "strategy_type": {
-              "description": "The strategy type for combo products (e.g. spread, strip, pack). Null for single products.",
+              "description": "The strategy type for combo products (e.g. calendar, butterfly, strip). Null for single products.",
               "type": "string"
              },
              "sub_sector": {

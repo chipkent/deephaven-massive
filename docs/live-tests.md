@@ -83,7 +83,7 @@ access to the month's end ([S4], [S5]).
 | Every class on Basic | $0 | about 11 questions: the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps; plus the 429 text and the rate buckets |
 | Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, and the raw frame forms (with `s3` for the files) |
 | Options Starter | $29 | adds the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (with full contracts history), and the option half-day stamps |
-| Stocks Starter | $29 | adds the delayed-key refusal text, the flat-file publication time, and the weekend 404 (with `s3`) |
+| Stocks Starter | $29 | adds the delayed-key refusal text, the flat-file publication time, and that a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (with `s3`; if it answers anything else, the library raises on every flat-file range that holds a weekend) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
 | the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields, and its ticker location: 29 of the 37 open questions |
 | Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
