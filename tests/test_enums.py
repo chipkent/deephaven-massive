@@ -259,6 +259,8 @@ ENUM_PARAMETERS = {
     "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
     "_Forex.bars.timespan": "namespaces/test_forex.py::test_bars_reject_bad_arguments",
     "_Forex.movers.direction": "namespaces/test_forex.py::test_movers",
+    "_Crypto.bars.timespan": "namespaces/test_crypto.py::test_bar_arguments_are_checked",
+    "_Crypto.movers.direction": "namespaces/test_crypto.py::test_movers",
     **dict.fromkeys(
         (
             "_Options.bars.timespan",
