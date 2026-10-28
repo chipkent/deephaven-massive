@@ -2,6 +2,7 @@
 
 import dataclasses
 from datetime import UTC, date, datetime
+from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -11,6 +12,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.schema import (
     COLUMN_TYPES,
     KEY_COLUMNS,
+    TRANSPORT_LABELS,
     Column,
     ColumnType,
     Schema,
@@ -786,28 +788,40 @@ def test_a_column_only_other_members_supply_names_them() -> None:
     assert stocks_tape.description == wire(R, "/v2/last/trade/{stocksTicker}", "Tape").description
 
 
+def test_every_transport_has_one_user_facing_spelling() -> None:
+    assert dict(TRANSPORT_LABELS) == {
+        Transport.REST: "REST",
+        Transport.FLAT_FILES: "flat files",
+        Transport.WS: "WebSocket",
+    }
+    with pytest.raises(TypeError):  # read-only: no caller can respell a transport
+        cast("dict[Transport, str]", TRANSPORT_LABELS)[Transport.WS] = "WS"
+
+
 def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
     columns = {c.name: c for c in TRADES.dataset_schema(STOCK_TRADES).columns}
     last, history = "/v2/last/trade/{stocksTicker}", "/v3/trades/{stockTicker}"
     files = "us_stocks_sip/trades_v1"
     symbol = [
-        "The instrument, in the library's canonical symbol form.",
         f'REST `T`: "{wire(R, last, "Ticker").description}"',
-        "REST: the request's `stockTicker` parameter.",
-        f'FLAT_FILES `ticker`: "{wire(F, files, "Ticker").description}"',
-        f'WS `sym`: "{wire(W, "stocks/T", "Ticker").description}"',
+        "REST: the request's `stockTicker` parameter",
+        f'flat files `ticker`: "{wire(F, files, "Ticker").description}"',
+        f'WebSocket `sym`: "{wire(W, "stocks/T", "Ticker").description}"',
     ]
-    assert columns["Symbol"].description == " ".join(symbol)
+    assert columns["Symbol"].description == (
+        f"The instrument, in the library's canonical symbol form. From {'; '.join(symbol)}"
+    )
     assert dict(columns["Symbol"].wire_keys) == {R: ("T", None), F: ("ticker",), W: ("sym",)}
     assert columns["Symbol"].supplied_by == (R, F, W)
     timestamp = [
-        "The row's primary time, as an Instant.",
         f'REST `t`: "{wire(R, last, "SipTimestamp").description}"',
         f'REST `sip_timestamp`: "{wire(R, history, "SipTimestamp").description}"',
-        f'FLAT_FILES `sip_timestamp`: "{wire(F, files, "SipTimestamp").description}"',
-        f'WS `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',
+        f'flat files `sip_timestamp`: "{wire(F, files, "SipTimestamp").description}"',
+        f'WebSocket `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',
     ]
-    assert columns["Timestamp"].description == " ".join(timestamp)
+    assert columns["Timestamp"].description == (
+        f"The row's primary time, as an Instant. From {'; '.join(timestamp)}"
+    )
 
 
 def test_an_underlying_column_takes_its_own_sentence() -> None:
@@ -821,7 +835,7 @@ def test_an_underlying_column_takes_its_own_sentence() -> None:
         c for c in dataset_schema(dataset, (dataset,), lookup).columns if c.name == "Underlying"
     )
     assert underlying.description == (
-        "The underlying instrument, in the library's canonical symbol form. "
+        "The underlying instrument, in the library's canonical symbol form. From "
         f'REST `underlying_ticker`: "{wire(*contracts, "UnderlyingTicker").description}"'
     )
 
@@ -859,7 +873,7 @@ def test_a_key_part_without_text_names_the_key_and_repeats_once() -> None:
     made = Source(key="/first", transport=R, fields=(plain,))
     schema = dataset_schema(dataset, (dataset,), lambda *_: made)
     assert schema.columns[0].description == (
-        "The instrument, in the library's canonical symbol form. REST `sym`."
+        "The instrument, in the library's canonical symbol form. From REST `sym`."
     )
 
 
@@ -889,7 +903,7 @@ def test_a_bars_timestamp_is_described_as_the_window_start(
             f" A bar of a day or longer is stamped at 00:00 {zone} of the day it starts on, "
             "on every source, whatever time of day the source stamps it with."
         )
-    assert described.startswith(f"{sentence} REST `")
+    assert described.startswith(f"{sentence} From REST `")
     assert timestamp_description(stocks.TRADES).startswith(
-        "The row's primary time, as an Instant. REST `"
+        "The row's primary time, as an Instant. From REST `"
     )

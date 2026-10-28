@@ -12,8 +12,8 @@ Trades of US-listed options contracts (OPRA), tick by tick.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `T`: "The exchange symbol that this item is traded under." REST: the request's `optionsTicker` parameter. FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it." FLAT_FILES `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it." WS `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `optionsTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
 | `Conditions` | int[] | A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `c`, `conditions` | `conditions` | `c` |
 | `Correction` | long | The trade correction indicator. | REST, flat files | `e`, `correction` | `correction` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `x`, `exchange` | `exchange` | `x` |
@@ -39,8 +39,8 @@ Quotes of US-listed options contracts (OPRA), tick by tick.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST: the request's `optionsTicker` parameter. FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it." FLAT_FILES `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it." WS `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `sip_timestamp` | `sip_timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `optionsTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | request | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `sip_timestamp` | `sip_timestamp` | `t` |
 | `AskExchange` | long | The ask exchange ID | REST, flat files, WebSocket | `ask_exchange` | `ask_exchange` | `ax` |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `ap` |
 | `AskSize` | double | The ask size. This represents the number of contracts sellers are offering at the given ask price. | REST, flat files, WebSocket | `ask_size` | `ask_size` | `as` |
@@ -69,8 +69,8 @@ Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `T`: "The exchange symbol that this item is traded under." REST: the request's `optionsTicker` parameter. FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer is stamped at 00:00 New York time of the day it starts on, on every source, whatever time of day the source stamps it with. REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." FLAT_FILES `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window." WS `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `optionsTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Timestamp` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer is stamped at 00:00 New York time of the day it starts on, on every source, whatever time of day the source stamps it with. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -99,8 +99,8 @@ Massive's fair market value of US-listed options contracts, streamed in real tim
 
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. WS `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. WS `t`: "The nanosecond timestamp." | WebSocket | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
 
 <a id="chain"></a>
@@ -111,7 +111,7 @@ The snapshot of every contract in one underlying's option chain.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `details.ticker`: "The ticker symbol for the asset." | REST | `details.ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `details.ticker`: "The ticker symbol for the asset." | REST | `details.ticker` |
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). | REST | `break_even_price` |
 | `DayChange` | double | The value of the price change for the contract from the previous trading day. | REST | `day.change` |
 | `DayChangePercent` | double | The percent of the price change for the contract from the previous trading day. | REST | `day.change_percent` |
@@ -154,7 +154,7 @@ The snapshot of every contract in one underlying's option chain.
 | `UnderlyingAssetChangeToBreakEven` | double | The change in price for the contract to break even. | REST | `underlying_asset.change_to_break_even` |
 | `UnderlyingAssetLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. | REST | `underlying_asset.last_updated` |
 | `UnderlyingAssetPrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. | REST | `underlying_asset.price` |
-| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset." | REST | `underlying_asset.ticker` |
+| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset." | REST | `underlying_asset.ticker` |
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. | REST | `underlying_asset.timeframe` |
 | `UnderlyingAssetValue` | double | The value of the underlying index. | REST | `underlying_asset.value` |
 
@@ -166,7 +166,7 @@ The current snapshot of each requested options contract, with its greeks.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The ticker symbol for the asset." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker symbol for the asset." | REST | `ticker` |
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). | REST | `break_even_price` |
 | `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". | REST | `details.contract_type` |
 | `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. | REST | `details.exercise_style` |
@@ -234,7 +234,7 @@ The current snapshot of each requested options contract, with its greeks.
 | `UnderlyingAssetChangeToBreakEven` | double | The change in price for the contract to break even. | REST | `underlying_asset.change_to_break_even` |
 | `UnderlyingAssetLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. | REST | `underlying_asset.last_updated` |
 | `UnderlyingAssetPrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. | REST | `underlying_asset.price` |
-| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset." | REST | `underlying_asset.ticker` |
+| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset." | REST | `underlying_asset.ticker` |
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. | REST | `underlying_asset.timeframe` |
 | `UnderlyingAssetValue` | double | The value of the underlying index. | REST | `underlying_asset.value` |
 | `Value` | double | Value of Index. | REST | `value` |
@@ -247,7 +247,7 @@ Reference data on options contracts: type, exercise style, expiration, and strik
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The ticker for the option contract." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker for the option contract." | REST | `ticker` |
 | `AdditionalUnderlyings` | String | If an option contract has additional underlyings or deliverables associated with it, they will appear here. See here (https://www.optionseducation.org/referencelibrary/faq/splits-mergers-spinoffs-bankruptcies) for some examples of what might cause a contract to have additional underlyings. | REST | `additional_underlyings` |
 | `Cfi` | String | The 6 letter CFI code of the contract (defined in ISO 10962 (https://en.wikipedia.org/wiki/ISO_10962)) | REST | `cfi` |
 | `ContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". | REST | `contract_type` |
@@ -257,7 +257,7 @@ Reference data on options contracts: type, exercise style, expiration, and strik
 | `PrimaryExchange` | String | The MIC code of the primary exchange that this contract is listed on. | REST | `primary_exchange` |
 | `SharesPerContract` | double | The number of shares per contract for this contract. | REST | `shares_per_contract` |
 | `StrikePrice` | double | The strike price of the option contract. | REST | `strike_price` |
-| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. REST `underlying_ticker`: "The underlying ticker that the option contract relates to." | REST | `underlying_ticker` |
+| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. From REST `underlying_ticker`: "The underlying ticker that the option contract relates to." | REST | `underlying_ticker` |
 
 <a id="daily_open_close"></a>
 
@@ -267,7 +267,7 @@ The open, high, low, close, and volume of each options contract on one day.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `symbol`: "The exchange symbol that this item is traded under." | REST | `symbol` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The exchange symbol that this item is traded under." | REST | `symbol` |
 | `AfterHours` | double | The close price of the ticker symbol in after hours trading. | REST | `afterHours` |
 | `Close` | double | The close price for the symbol in the given time period. | REST | `close` |
 | `From` | LocalDate | The requested date. | REST | `from` |
