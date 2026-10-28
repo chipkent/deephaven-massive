@@ -19,6 +19,7 @@ from deephaven_massive._datasets.timestamps import (
     time_unit,
     to_epoch_ns,
     to_epoch_ns_array,
+    utc_day_stamps,
 )
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType, WireUnit, source, sources
@@ -241,3 +242,43 @@ def test_a_masked_failure_reads_as_the_routine_would_raise_it() -> None:
         "timestamp unit mismatch for t.T: 4611686018427387904 ms|ns is outside 1990 to 2100"
     )
     assert mismatch_message("t.T", TimeUnit.SECONDS, 2**40).endswith("overflows 64-bit nanoseconds")
+
+
+DAY_NS = 86_400 * 10**9
+MARCH_3 = 1_740_960_000 * 10**9  # 2025-03-03T00:00Z
+
+
+def stamps(*values: int | None) -> pa.Array:
+    return pa.array(values, pa.timestamp("ns", "UTC"))
+
+
+def test_utc_day_stamps_move_each_bar_to_its_days_start() -> None:
+    # The aggregates' 00:00 UTC stays; day_aggs_v1's 23:59:59.999 UTC moves to its day's start.
+    last_ms = MARCH_3 + DAY_NS - 10**6
+    values = stamps(MARCH_3, last_ms, None)
+    for checked in (True, False):
+        moved = utc_day_stamps("crypto.bars", values, source="REST", checked=checked)
+        assert moved.type == values.type
+        assert moved.cast(pa.int64()).to_pylist() == [MARCH_3, MARCH_3, None]
+    # A stamp anywhere in the first or last millisecond counts as that boundary.
+    edge = stamps(MARCH_3 + 999_999, MARCH_3 + DAY_NS - 1)
+    assert utc_day_stamps("crypto.bars", edge, source="x", checked=True).cast(
+        pa.int64()
+    ).to_pylist() == [MARCH_3, MARCH_3]
+
+
+def test_forex_day_stamps_move_any_stamp_of_the_day() -> None:
+    new_york_midnight = MARCH_3 + 5 * 3600 * 10**9
+    moved = utc_day_stamps("forex.bars", stamps(new_york_midnight), source="x", checked=False)
+    assert moved.cast(pa.int64()).to_pylist() == [MARCH_3]
+
+
+@pytest.mark.parametrize("offset", [10**6, 5 * 3600 * 10**9, DAY_NS - 10**6 - 1])
+def test_a_crypto_stamp_inside_its_day_fails_loudly(offset: int) -> None:
+    with pytest.raises(
+        MassiveError, match=r"^crypto\.bars: a 1-day bar from /v2/aggs/x is stamped 2025-03-03T"
+    ) as caught:
+        utc_day_stamps(
+            "crypto.bars", stamps(MARCH_3, MARCH_3 + offset), source="/v2/aggs/x", checked=True
+        )
+    assert "neither the start nor the last millisecond of a UTC day" in str(caught.value)

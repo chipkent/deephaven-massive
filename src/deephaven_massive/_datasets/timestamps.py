@@ -36,6 +36,13 @@ Every nanosecond value after 1973-03-03 is at least 10**17 and a millisecond val
 10**17 only in the year 3,170,000, so the rule cannot misclassify. The unit is picked per value
 before step 2, and the detected unit is logged once at INFO.
 
+**1-day bars of forex and crypto** (`utc_day_stamps`) mean the UTC day on every source, but
+Massive stamps them differently: 00:00 UTC on the aggregates range, 23:59:59.999 UTC in the
+`day_aggs_v1` flat files. Each stamp is moved to 00:00 UTC of its day. For crypto, whose cut
+is not verified (older REST samples sit at midnight New York time), a stamp at any other
+millisecond of the UTC day than its first or last raises `MassiveError`, so a bar of another
+day cut is never returned under a UTC label.
+
 The bound applies to epoch integers only, never to ISO-8601 text, so a pre-1990 date written as
 text stays valid. The module is pure: it makes no Deephaven or network call, and its only state
 is the once-only log line.
@@ -44,7 +51,7 @@ is the once-only log line.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
@@ -71,6 +78,7 @@ __all__ = [
     "time_unit",
     "to_epoch_ns",
     "to_epoch_ns_array",
+    "utc_day_stamps",
 ]
 
 logger = logging.getLogger(__name__)
@@ -352,3 +360,51 @@ def _overflows(unit: TimeUnit, value: int) -> bool:
         True when its nanoseconds do not fit a signed 64-bit integer.
     """
     return abs(value * _NS_PER[_fixed(unit, value)]) > _INT64_MAX
+
+
+_DAY_NS: Final = 86_400 * 10**9
+_MS_NS: Final = 10**6
+_LAST_MS_NS: Final = _DAY_NS - _MS_NS
+"""The first nanosecond of the last millisecond of a day: 23:59:59.999."""
+
+
+def utc_day_stamps(label: str, values: pa.Array, *, source: str, checked: bool) -> pa.Array:
+    """Move the stamps of 1-day bars to 00:00 UTC of the day each one falls on.
+
+    A forex or crypto 1-day bar covers one UTC day. The aggregates range stamps it at the
+    day's 00:00 UTC, and the `day_aggs_v1` flat files at its last millisecond (23:59:59.999
+    UTC); both become 00:00 UTC of that day, so every source labels a day alike.
+
+    Args:
+        label: The dataset, for the message, such as `"crypto.bars"`.
+        values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
+        source: Where the bars came from, for the message, such as a REST path template or a
+            flat-file key.
+        checked: True to refuse a stamp that is neither the first nor the last millisecond of
+            its UTC day (crypto, whose day cut is not verified); False to move any stamp to its
+            day's start (forex).
+
+    Returns:
+        The stamps at 00:00 UTC, in the same type; nulls stay null.
+
+    Raises:
+        MassiveError: If `checked` and a stamp lies elsewhere in its UTC day, naming the
+            dataset, the source, and the stamp; such a bar would cover another day than the
+            UTC day it would be labelled with.
+    """
+    ns = values.cast(pa.int64())
+    days = pc.divide(ns, _DAY_NS)  # epoch nanoseconds of bars are positive: this floors
+    starts = pc.multiply(days, _DAY_NS)
+    if checked:
+        offset = pc.subtract(ns, starts)
+        odd = pc.and_(pc.greater_equal(offset, _MS_NS), pc.less(offset, _LAST_MS_NS))
+        if pc.any(odd).as_py():
+            bad_ns = pc.filter(ns, odd)[0].as_py()
+            bad = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=bad_ns // 1000)
+            raise MassiveError(
+                f"{label}: a 1-day bar from {source} is stamped {bad.isoformat()}, which is "
+                "neither the start nor the last millisecond of a UTC day, so it does not cover "
+                "the UTC day it would be labelled with; report the stamp so the day cut can "
+                "be settled"
+            )
+    return starts.cast(values.type)

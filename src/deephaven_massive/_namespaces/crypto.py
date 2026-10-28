@@ -358,13 +358,17 @@ class _Crypto(Namespace):
         base aggregates, not rows, so it cannot cap rows) and `fetch()` returns one row per
         pair.
 
-        1-day bars are stamped differently by source, as Massive documents them: the REST
-        bars of `/prev` and the range endpoint are stamped at midnight New York time in every
-        documented sample, while a `global_crypto/day_aggs_v1` bar covers the UTC day
-        and is stamped at its last millisecond (23:59:59.999 UTC). With
-        `HistorySource.AUTO` the source, and so the stamp, can change with the number of
-        symbols; pass `source=` to keep one. `history()` keeps the rows whose `Timestamp`
-        falls in the requested UTC range.
+        A 1-day bar covers one UTC day and is stamped at 00:00 UTC of that day, whatever the
+        source. Massive stamps the `global_crypto/day_aggs_v1` bars at the day's last
+        millisecond (23:59:59.999 UTC) and the REST bars of the aggregates range, the grouped
+        daily endpoint, and `/prev` at a day boundary; each is moved to 00:00 UTC. Massive's
+        older REST samples sit at midnight New York time instead, which would be another day
+        cut, so a 1-day bar stamped anywhere in its UTC day but its first or last millisecond
+        fails the call with `MassiveError` naming the source, rather than being relabelled.
+        With `HistorySource.AUTO`, `history()` of 1-day bars reads the flat files whenever S3
+        credentials are configured and REST otherwise, so the number of symbols never changes
+        the source; `source=` selects one explicitly. `history()` keeps only bars whose whole
+        window lies inside the requested range and has ended.
 
         `dm.ALL` streams every pair. Its `history()` reads the flat files for 1-minute and
         1-day bars, and the grouped-daily endpoint, one request per day, for 1-day bars over

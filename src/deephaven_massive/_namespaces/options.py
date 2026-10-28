@@ -441,7 +441,8 @@ class _Options(Namespace):
         (`/v2/aggs/ticker/{optionsTicker}/range/...`, one request series per contract) or, for
         one-minute and one-day bars with `adjusted=False`, the `us_options_opra/minute_aggs_v1`
         and `us_options_opra/day_aggs_v1` flat files. There is no `limit`: `history()` pages
-        internally and returns the whole range.
+        internally and returns the whole range. It returns only the bars whose whole window
+        lies inside the range and has ended, so the current day's bar never appears.
 
         `dm.ALL` streams every contract and reads every contract of a day's flat file; `fetch()`
         and REST `history()` take explicit contracts and raise `ValueError` for `dm.ALL`. One

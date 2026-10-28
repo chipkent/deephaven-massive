@@ -1,11 +1,16 @@
-"""Where `history()` reads from: the partition dates of a window and the `AUTO` source choice.
+"""Where `history()` reads from: the window it keeps, its partition dates, and the source.
 
-`HistoryQuery.history()` asks this module which transport serves a request, then calls that
-transport; the transports themselves only do I/O. The module is pure (the current time comes
-from `_now`, which tests replace) and makes no network or Deephaven call.
+`HistoryQuery.history()` asks this module what a call reads and which transport serves it,
+then calls that transport; the transports themselves only do I/O. The module is pure (the
+current time comes from `_now`, which tests replace) and makes no network or Deephaven call.
 
-- `partition_dates` turns a `history()` window into the dates of the flat files it needs, in
-  the asset class's day zone; a futures date names a trading session.
+- `history_window` turns a call's bounds into a `HistoryWindow`: the bounds by kind (whole
+  days or sessions, or exact instants; `dates.bounds`), the rows to keep (on `Timestamp`, and
+  for futures named by date on `SessionEndDate`), and the instants a REST request covers.
+  Bars are kept only when their whole window lies inside the range and has ended
+  (`dates.bar_starts`, `dates.bar_sessions`).
+- `partition_dates` turns a window into the dates of the flat files it needs, in the asset
+  class's day zone; a futures date names a trading session.
 - `rest_history_problem` says why REST cannot serve a request, if it cannot: the dataset has
   no REST history endpoint, or the symbols are `dm.ALL` and the request is not daily bars with
   a grouped-daily endpoint.
@@ -14,7 +19,9 @@ from `_now`, which tests replace) and makes no network or Deephaven call.
   bars only 1-minute and 1-day bars, and 1-session bars for futures, and only unadjusted where
   the dataset has an `adjusted` parameter), and every file the range needs is already
   published. When both sources can, many symbols (`MassiveConfig.flat_file_symbol_threshold`
-  or more, or `dm.ALL`) read flat files and fewer use REST.
+  or more, or `dm.ALL`) read flat files and fewer use REST. Crypto 1-day bars are the
+  exception: `AUTO` reads them from flat files whenever S3 credentials are configured and from
+  REST otherwise, so the number of symbols never changes which source's bars a call returns.
 
 A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
 after the next day starts in the class's day zone (`dates.publish_time`); futures use their
@@ -24,6 +31,7 @@ Chicago session date. Massive says files land "by approximately 11:00 AM ET the 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Final, NamedTuple
 
@@ -31,32 +39,44 @@ from deephaven_massive._datasets.dates import (
     CHICAGO,
     DAY_ZONES,
     NEW_YORK,
-    FuturesSessions,
+    DaySpan,
+    TimeRange,
+    bar_sessions,
+    bar_starts,
+    bounds,
+    day_class,
+    day_zone,
     flat_file_published,
+    futures_bar_request,
     futures_session,
     futures_session_before,
+    intraday,
     publish_time,
 )
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from datetime import tzinfo
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._datasets.dates import TimeRange
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._types import DateLike
 
 __all__ = [
     "NOT_PUBLISHED",
     "PUBLICATION_GRACE",
+    "HistoryWindow",
     "SourceChoice",
     "choose_source",
     "flat_file_prefix",
+    "history_window",
     "partition_dates",
+    "published",
     "rest_history_problem",
+    "utc_day_bars",
     "within_publication_grace",
 ]
 
@@ -68,6 +88,8 @@ NOT_PUBLISHED: Final = "not yet published; flat files land ~11:00 ET next day"
 PUBLICATION_GRACE: Final = timedelta(days=1)
 """How long after its publication time a missing file may still just be late."""
 
+_ONE_DAY: Final = timedelta(days=1)
+
 _PARTITION_ZONES: Final[Mapping[AssetClass | None, tzinfo]] = dict(
     [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (None, NEW_YORK)]
 )
@@ -78,7 +100,7 @@ Time. A dataset without an asset class uses New York, as `dates.bounds` does."""
 
 
 def _now() -> datetime:
-    """Return the current instant: the one clock of the source choice, which tests replace.
+    """Return the current instant: the one clock of `history()`, which tests replace.
 
     Returns:
         An aware UTC `datetime`.
@@ -86,36 +108,182 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def partition_dates(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> tuple[date, ...]:
+@dataclass(frozen=True, slots=True)
+class HistoryWindow:
+    """What one `history()` call reads and keeps; built by `history_window`.
+
+    Attributes:
+        span: The bounds by kind: the whole days (for futures, sessions) of two dates, or the
+            exact instants of two datetimes.
+        times: The `Timestamp` range a row must lie in (for bars, the bar starts whose whole
+            window fits), or None where only `sessions` bounds the rows.
+        sessions: The `SessionEndDate`s a row must have, for futures named by date; else None.
+        requested: The instants a REST request covers: a time axis's range, or the
+            aggregates' `{from}` (the first fitting bar's start) and `{to}`; None for futures
+            trades and quotes named by date, which are requested one session at a time.
+    """
+
+    span: TimeRange | DaySpan
+    times: TimeRange | None
+    sessions: DaySpan | None
+    requested: TimeRange | None
+
+    @property
+    def empty(self) -> bool:
+        """True when no row can be kept, so no request needs to be made."""
+        return (self.times is not None and self.times.empty) or (
+            self.sessions is not None and self.sessions.empty
+        )
+
+
+def history_window(
+    spec: DatasetSpec,
+    request: Request,
+    *,
+    start: DateLike,
+    end: DateLike | None,
+    classes: Iterable[AssetClass] = (),
+    now: datetime | None = None,
+) -> HistoryWindow:
+    """Return what a `history()` call reads and keeps.
+
+    The bounds follow `dates.bounds`: two dates are whole days (for futures, sessions), two
+    datetimes a half-open range of instants, and an `end` of None reads through now. Ticks are
+    kept inside the range. A bar is kept only when its whole window lies inside the range and
+    has ended by now (`dates.bar_starts`); for futures named by date, a bar of a session or
+    longer is kept by its `SessionEndDate` (`dates.bar_sessions`, over the sessions finished by
+    now), and an intraday bar by its session and its end.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments; for bars, the timespan and multiplier.
+        start: The first day or instant.
+        end: The last day, the first instant excluded, or None for now.
+        classes: The classes of the request's symbols, for `dates.day_class`.
+        now: The current instant; None reads the clock.
+
+    Returns:
+        The window.
+
+    An unparseable or naive bound, a date mixed with a datetime, or a reversed range raises
+    the `ValueError` of `dates.bounds`.
+    """
+    moment = _now() if now is None else now
+    asset_class = day_class(spec, classes)
+    span = bounds(spec, start, end, now=moment, classes=classes)
+    futures = asset_class is AssetClass.FUTURES
+    if isinstance(span, DaySpan) and futures:
+        return _futures_sessions(spec, request, span, now=moment)
+    instants = span if isinstance(span, TimeRange) else span.instants(day_zone(asset_class))
+    timespan = request.timespan
+    if not spec.is_bars or timespan is None:
+        return HistoryWindow(span, instants, None, instants)
+    ended = TimeRange(instants.start, min(instants.end, moment))
+    keep, first = bar_starts(asset_class, ended, timespan=timespan, multiplier=request.multiplier)
+    # Futures bars named by instants take `window_start` exactly; the aggregates' `{from}`
+    # starts at the first whole bar, so a request is never aligned to a part of a period.
+    requested = instants if futures else TimeRange(first, instants.end)
+    return HistoryWindow(span, keep, None, requested)
+
+
+def _futures_sessions(
+    spec: DatasetSpec, request: Request, span: DaySpan, *, now: datetime
+) -> HistoryWindow:
+    """Return the window of futures named by session dates.
+
+    Args:
+        spec: The dataset, with the futures class.
+        request: The normalized arguments.
+        span: The sessions.
+        now: The current instant.
+
+    Returns:
+        Trades and quotes: every row of the sessions, requested one session at a time. Bars:
+        the bars requested from `dates.futures_bar_request`, kept by the session rules of
+        `history_window`.
+    """
+    timespan = request.timespan
+    if not spec.is_bars or timespan is None:
+        return HistoryWindow(span, None, span, None)
+    requested = futures_bar_request(span)
+    if intraday(timespan):
+        ended = TimeRange(requested.start, min(requested.end, now))
+        keep, _ = bar_starts(
+            AssetClass.FUTURES, ended, timespan=timespan, multiplier=request.multiplier
+        )
+        return HistoryWindow(span, keep, span, requested)
+    finished = DaySpan(span.first, min(span.last, futures_session(now) - _ONE_DAY))
+    sessions = bar_sessions(finished, timespan=timespan, multiplier=request.multiplier)
+    return HistoryWindow(span, None, sessions, requested)
+
+
+def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...]:
     """Return the dates of the flat files a `history()` window needs, oldest first.
 
-    For a `TimeRange` they are the dates of `start` and of `end - 1 ns` in the class's day zone
-    and every date between: New York for stocks, options, and indices, UTC for forex and
-    crypto. For futures they are trading sessions: from `first` (or, for a `start` instant,
-    the session that instant belongs to) to `last` (or, for an `end` instant, the session of
-    the last instant before it, and never before `first`); a session opens at 17:00 Chicago
-    time on the day before its `session_end_date` (`dates.futures_session`). An instant side
-    is then filtered on `Timestamp`. A holiday's trading lies in the next session's file,
-    which the flat-file transport reads when the last session's file is missing.
+    For futures named by date they are the sessions kept (`HistoryWindow.sessions`). For
+    futures named by instants they are the sessions of the first and last kept instant and
+    every one between; a session opens at 17:00 Chicago time on the day before its
+    `session_end_date` (`dates.futures_session`). A holiday's trading lies in the next
+    session's file, which the flat-file transport reads when the last sessions' files are
+    missing. For every other class they are the dates of the kept range's first and last
+    instant in the class's day zone (New York for stocks, options, and indices, UTC for forex
+    and crypto) and every date between.
 
     Args:
         spec: The dataset; its asset class picks the day zone.
-        window: The normalized `history()` bounds (`dates.bounds`).
+        window: The call's window (`history_window`).
 
     Returns:
-        The partition dates; never empty.
+        The partition dates; none for an empty window.
     """
-    if isinstance(window, FuturesSessions):
-        first = window.first or futures_session(window.window.start)
-        # A date start names its session even when the end instant falls before that
-        # session's regular open: a holiday opened it early (2025-01-21 from Sunday 17:00).
-        last = window.last or max(first, futures_session_before(window.window.end))
-    elif spec.asset_class is AssetClass.FUTURES:
-        first, last = futures_session(window.start), futures_session_before(window.end)
-    else:
-        dates = window.partition_dates(_PARTITION_ZONES[spec.asset_class])
-        first, last = dates[0], dates[-1]
-    return tuple(first + timedelta(days=n) for n in range((last - first).days + 1))
+    if window.sessions is not None:
+        return window.sessions.days()
+    times = window.times
+    if times is None or times.empty:
+        return ()
+    if spec.asset_class is AssetClass.FUTURES:
+        first, last = futures_session(times.start), futures_session_before(times.end)
+        return DaySpan(first, last).days()
+    return times.partition_dates(_PARTITION_ZONES[spec.asset_class])
+
+
+def published(spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | None = None) -> bool:
+    """Tell whether a day's flat file of a dataset counts as published (`dates.publish_time`).
+
+    Args:
+        spec: The dataset; its asset class picks the day zone (Chicago sessions for futures).
+        day: The file's partition date.
+        cutoff: `MassiveConfig.flat_file_publish_cutoff`, a New York wall-clock time.
+        now: The current instant; None reads the clock.
+
+    Returns:
+        True from the file's publication time on.
+    """
+    moment = _now() if now is None else now
+    zone = _PARTITION_ZONES[spec.asset_class]
+    return flat_file_published(day, now=moment, zone=zone, cutoff=cutoff)
+
+
+def utc_day_bars(spec: DatasetSpec, request: Request) -> bool:
+    """Tell whether a request reads forex or crypto 1-day bars, which mean the UTC day.
+
+    Massive stamps such a bar differently by source (00:00 UTC on the aggregates range,
+    23:59:59.999 UTC in the `day_aggs_v1` flat files), so every transport moves the stamp to
+    00:00 UTC of its day (`timestamps.utc_day_stamps`).
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments.
+
+    Returns:
+        True for 1-day bars, multiplier 1, of a forex or crypto bars dataset.
+    """
+    return (
+        spec.is_bars
+        and spec.asset_class in (AssetClass.FOREX, AssetClass.CRYPTO)
+        and request.timespan is Timespan.DAY
+        and request.multiplier == 1
+    )
 
 
 def within_publication_grace(
@@ -259,7 +427,10 @@ def choose_source(
     possible when `rest_history_problem` finds nothing. Under `AUTO`, when both are possible,
     flat files win for `dm.ALL` (and for datasets without instruments) or for at least
     `config.flat_file_symbol_threshold` symbols, and REST wins for fewer. The choice covers the
-    whole range: one unpublished date sends all of it to REST. Pure: no I/O.
+    whole range: one unpublished date sends all of it to REST. Crypto 1-day bars take one
+    fixed source under `AUTO`, so the number of symbols never changes the data: flat files
+    whenever S3 credentials are configured (raising when they cannot serve the request), and
+    REST otherwise. Pure: no I/O.
 
     Args:
         spec: The dataset.
@@ -276,14 +447,27 @@ def choose_source(
 
     Raises:
         ValueError: Under `FLAT_FILES`, if flat files cannot serve the request; under `AUTO`, if
-            neither source can. The message lists every violated constraint, per source.
+            neither source can, or for crypto 1-day bars with S3 credentials configured, if
+            flat files cannot (the message names `source=dm.HistorySource.REST`). The
+            message lists every violated constraint, per source.
     """
     moment = _now() if now is None else now
     flat = _flat_file_problems(spec, request, dates, config=config, now=moment)
-    if requested is HistorySource.FLAT_FILES:
+    # Crypto 1-day bars keep one source whatever the symbol count: flat files when S3 is set up.
+    fixed = requested is HistorySource.AUTO and _one_day_crypto(spec, request)
+    fixed = fixed and config.s3_access_key_id is not None
+    if requested is HistorySource.FLAT_FILES or fixed:
+        if flat and fixed:
+            raise ValueError(
+                f"{spec.name} 1-day bars read flat files whenever S3 credentials are configured, "
+                "so the number of symbols never changes the data, but flat files cannot serve "
+                f"this request: {'; '.join(flat)}; pass source=dm.HistorySource.REST to read "
+                "REST"
+            )
         if flat:
             raise ValueError(f"{spec.name} cannot be read from flat files: {'; '.join(flat)}")
-        return SourceChoice(HistorySource.FLAT_FILES, "requested")
+        reason = "crypto 1-day bars read flat files when S3 is configured" if fixed else "requested"
+        return SourceChoice(HistorySource.FLAT_FILES, reason)
     rest = rest_history_problem(spec, request)
     if flat and rest is not None:
         raise ValueError(
@@ -304,3 +488,16 @@ def choose_source(
     return SourceChoice(
         HistorySource.REST, f"{count} symbols < flat_file_symbol_threshold {threshold}"
     )
+
+
+def _one_day_crypto(spec: DatasetSpec, request: Request) -> bool:
+    """Tell whether a request reads crypto 1-day bars, whose `AUTO` source is fixed.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments.
+
+    Returns:
+        True for 1-day bars, multiplier 1, of a crypto bars dataset.
+    """
+    return utc_day_bars(spec, request) and spec.asset_class is AssetClass.CRYPTO

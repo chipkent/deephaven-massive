@@ -11,13 +11,22 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import CHICAGO, FuturesSessions, TimeRange, bounds
+from deephaven_massive._datasets.dates import (
+    CHICAGO,
+    DaySpan,
+    TimeRange,
+    futures_bar_request,
+)
 from deephaven_massive._datasets.history_source import (
+    HistoryWindow,
     SourceChoice,
     choose_source,
     flat_file_prefix,
+    history_window,
     partition_dates,
+    published,
     rest_history_problem,
+    utc_day_bars,
     within_publication_grace,
 )
 from deephaven_massive._datasets.request import Request
@@ -96,6 +105,15 @@ FOREX_BARS = bars(
         Timespan.DAY: "global_forex/day_aggs_v1",
     },
 )
+CRYPTO_BARS = bars(
+    STOCK_BARS,
+    "crypto.bars",
+    asset_class=AssetClass.CRYPTO,
+    prefixes={
+        Timespan.MINUTE: "global_crypto/minute_aggs_v1",
+        Timespan.DAY: "global_crypto/day_aggs_v1",
+    },
+)
 INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
     summary="A dataset for the tests.",
@@ -155,47 +173,159 @@ def many(count: int) -> tuple[str, ...]:
     return tuple(f"S{n:03d}" for n in range(count))
 
 
+def window(
+    spec: DatasetSpec,
+    start: object,
+    end: object,
+    *,
+    now: datetime = NOW,
+    **fields: object,
+) -> HistoryWindow:
+    return history_window(
+        spec,
+        Request(**cast("dict[str, Any]", fields)),
+        start=cast("Any", start),
+        end=cast("Any", end),
+        now=now,
+    )
+
+
+# --- history_window --------------------------------------------------------------------------
+
+
+def test_ticks_keep_the_range_and_request_it() -> None:
+    days = window(STOCK_TRADES, "2025-03-03", "2025-03-04")
+    instants = DaySpan(date(2025, 3, 3), date(2025, 3, 4)).instants(NEW_YORK)
+    assert days == HistoryWindow(
+        DaySpan(date(2025, 3, 3), date(2025, 3, 4)), instants, None, instants
+    )
+    start = datetime(2025, 3, 3, 9, 30, tzinfo=NEW_YORK)
+    exact = window(STOCK_TRADES, start, None)
+    assert exact.times == TimeRange(start.astimezone(UTC), NOW)
+    assert exact.requested == exact.times
+    assert not exact.empty
+
+
+def test_equal_datetimes_are_an_empty_window() -> None:
+    moment = datetime(2025, 3, 3, 12, tzinfo=UTC)
+    empty = window(STOCK_TRADES, moment, moment)
+    assert empty.empty
+    assert partition_dates(STOCK_TRADES, empty) == ()
+
+
+def test_bars_keep_whole_windows_and_request_from_the_first() -> None:
+    start = datetime(2025, 3, 3, 9, 30, tzinfo=NEW_YORK)
+    end = datetime(2025, 3, 5, 9, 30, tzinfo=NEW_YORK)
+    days = window(STOCK_BARS, start, end, timespan=Timespan.DAY)
+    tuesday = datetime(2025, 3, 4, tzinfo=NEW_YORK).astimezone(UTC)
+    assert days.times == TimeRange(tuesday, datetime(2025, 3, 5, tzinfo=NEW_YORK).astimezone(UTC))
+    assert days.requested == TimeRange(tuesday, end.astimezone(UTC))
+    assert partition_dates(STOCK_BARS, days) == (date(2025, 3, 4),)
+    # A range shorter than one bar keeps nothing.
+    assert window(STOCK_BARS, "2025-03-04", "2025-03-06", timespan=Timespan.WEEK).empty
+
+
+def test_unfinished_bars_are_left_out() -> None:
+    # NOW is Monday 2025-03-10 at 12:00 in New York: that day has not ended.
+    days = window(STOCK_BARS, "2025-03-06", None, timespan=Timespan.DAY)
+    assert days.span == DaySpan(date(2025, 3, 6), date(2025, 3, 10))
+    assert partition_dates(STOCK_BARS, days) == tuple(date(2025, 3, d) for d in (6, 7, 8, 9))
+    future = window(STOCK_BARS, "2025-03-01", "2025-03-31", timespan=Timespan.MONTH)
+    assert future.empty  # March has not ended
+
+
+def test_futures_trades_by_date_are_whole_sessions_requested_one_at_a_time() -> None:
+    sessions = window(FUTURES_TRADES, "2025-03-03", "2025-03-05")
+    span = DaySpan(date(2025, 3, 3), date(2025, 3, 5))
+    assert sessions == HistoryWindow(span, None, span, None)
+    assert partition_dates(FUTURES_TRADES, sessions) == span.days()
+
+
+def test_futures_bars_by_date() -> None:
+    span = DaySpan(date(2025, 3, 3), date(2025, 3, 7))
+    minute = window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.MINUTE)
+    assert minute.sessions == span
+    assert minute.requested == futures_bar_request(span)
+    assert minute.times is not None
+    assert minute.times.start == minute.requested.start
+    # A session bar of a session still trading is left out: the session of 03-10 opened at
+    # 17:00 Chicago on 03-09, and NOW is 11:00 Chicago on 03-10.
+    sessions = window(FUTURES_BARS, "2025-03-06", None, timespan=Timespan.SESSION)
+    assert sessions.sessions == DaySpan(date(2025, 3, 6), date(2025, 3, 9))
+    assert sessions.times is None
+    assert partition_dates(FUTURES_BARS, sessions) == tuple(date(2025, 3, d) for d in (6, 7, 8, 9))
+    # So is an intraday bar that has not ended.
+    live = window(FUTURES_BARS, "2025-03-10", None, timespan=Timespan.MINUTE)
+    assert live.times is not None
+    assert live.times.end == NOW
+    weeks = window(FUTURES_BARS, "2025-03-04", "2025-03-07", timespan=Timespan.WEEK)
+    assert weeks.empty
+
+
+def test_futures_bars_by_instants_request_them_exactly() -> None:
+    start = datetime(2025, 3, 3, 17, tzinfo=CHICAGO)
+    end = datetime(2025, 3, 4, 17, tzinfo=CHICAGO)
+    bars_window = window(FUTURES_BARS, start, end, timespan=Timespan.SESSION)
+    exact = TimeRange(start.astimezone(UTC), end.astimezone(UTC))
+    assert bars_window.requested == exact
+    assert bars_window.times == exact
+    assert partition_dates(FUTURES_BARS, bars_window) == (date(2025, 3, 4),)
+
+
+def test_utc_day_bars() -> None:
+    day = request(timespan=Timespan.DAY)
+    assert utc_day_bars(FOREX_BARS, day)
+    assert utc_day_bars(CRYPTO_BARS, day)
+    assert not utc_day_bars(STOCK_BARS, day)
+    assert not utc_day_bars(FOREX_BARS, request(timespan=Timespan.MINUTE))
+    assert not utc_day_bars(FOREX_BARS, request(timespan=Timespan.DAY, multiplier=2))
+    assert not utc_day_bars(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day)
+
+
+def test_published_reads_the_class_zone_and_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    cutoff = time(11, 30)
+    assert published(STOCK_TRADES, date(2025, 3, 7), cutoff=cutoff, now=NOW)
+    assert not published(STOCK_TRADES, date(2025, 3, 10), cutoff=cutoff, now=NOW)
+    monkeypatch.setattr(history_source, "_now", lambda: NOW)
+    assert published(STOCK_TRADES, date(2025, 3, 7), cutoff=cutoff)
+
+
 # --- partition_dates -------------------------------------------------------------------------
 
 
 def test_partition_dates_cover_the_range_in_the_class_day_zone() -> None:
-    window = bounds(STOCK_TRADES, "2025-03-03", "2025-03-05")
-    assert partition_dates(STOCK_TRADES, window) == (
+    days = window(STOCK_TRADES, "2025-03-03", "2025-03-05")
+    assert partition_dates(STOCK_TRADES, days) == (
         date(2025, 3, 3),
         date(2025, 3, 4),
         date(2025, 3, 5),
     )
     # The end is exclusive: midnight New York names no file of its own.
-    window = bounds(
+    exact = window(
         STOCK_TRADES,
         datetime(2025, 3, 3, 10, tzinfo=NEW_YORK),
         datetime(2025, 3, 4, tzinfo=NEW_YORK),
     )
-    assert partition_dates(STOCK_TRADES, window) == (date(2025, 3, 3),)
+    assert partition_dates(STOCK_TRADES, exact) == (date(2025, 3, 3),)
+
+
+def instants(start: datetime, end: datetime) -> HistoryWindow:
+    span = TimeRange(start.astimezone(UTC), end.astimezone(UTC))
+    return HistoryWindow(span, span, None, span)
 
 
 def test_partition_dates_of_forex_are_utc_dates() -> None:
     evening = datetime(2025, 3, 3, 22, tzinfo=NEW_YORK)  # 03:00 UTC on March 4
-    window = TimeRange(evening.astimezone(UTC), datetime(2025, 3, 4, 4, tzinfo=UTC))
-    assert partition_dates(FOREX_BARS, window) == (date(2025, 3, 4),)
-    assert partition_dates(STOCK_BARS, window) == (date(2025, 3, 3),)
+    exact = instants(evening, datetime(2025, 3, 4, 4, tzinfo=UTC))
+    assert partition_dates(FOREX_BARS, exact) == (date(2025, 3, 4),)
+    assert partition_dates(STOCK_BARS, exact) == (date(2025, 3, 3),)
 
 
 def test_partition_dates_without_a_class_are_new_york_dates() -> None:
-    evening = TimeRange(
+    evening = instants(
         datetime(2025, 3, 3, 22, tzinfo=NEW_YORK), datetime(2025, 3, 3, 23, tzinfo=NEW_YORK)
     )
     assert partition_dates(YIELDS, evening) == (date(2025, 3, 3),)  # March 4 in UTC
-
-
-def test_partition_dates_of_futures_are_sessions() -> None:
-    window = bounds(FUTURES_TRADES, "2025-03-03", "2025-03-05")
-    assert isinstance(window, FuturesSessions)
-    assert partition_dates(FUTURES_TRADES, window) == (
-        date(2025, 3, 3),
-        date(2025, 3, 4),
-        date(2025, 3, 5),
-    )
 
 
 @pytest.mark.parametrize(
@@ -212,12 +342,12 @@ def test_partition_dates_of_futures_are_sessions() -> None:
 def test_partition_dates_of_futures_instants_are_their_sessions(
     start: tuple[int, int], end: tuple[int, int], sessions: tuple[date, ...]
 ) -> None:
-    window = bounds(
+    exact = window(
         FUTURES_TRADES,
         datetime(2025, 3, 3, *start, tzinfo=CHICAGO),
         datetime(2025, 3, 3, *end, tzinfo=CHICAGO),
     )
-    assert partition_dates(FUTURES_TRADES, window) == sessions
+    assert partition_dates(FUTURES_TRADES, exact) == sessions
 
 
 # --- Prefixes and REST capability ------------------------------------------------------------
@@ -476,3 +606,45 @@ def test_publication_grace_reads_the_clock(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(history_source, "_now", much_later)
     assert within_publication_grace(STOCK_TRADES, date(2025, 3, 4), cutoff=time(11, 30)) is False
+
+
+def test_crypto_day_bars_keep_one_source_whatever_the_symbol_count() -> None:
+    # With S3 credentials: flat files for one pair and for many.
+    days = [date(2025, 3, 3)]
+    for symbols in (("X:BTCUSD",), many(60)):
+        req = request(symbols, timespan=Timespan.DAY)
+        choice = choose_source(
+            CRYPTO_BARS, req, days, requested=HistorySource.AUTO, config=config(), now=NOW
+        )
+        assert choice == SourceChoice(
+            HistorySource.FLAT_FILES, "crypto 1-day bars read flat files when S3 is configured"
+        )
+        # Without them: REST for one pair and for many.
+        assert choose(CRYPTO_BARS, req, cfg=NO_S3) is HistorySource.REST
+    # Minute bars still switch at the threshold, and an explicit REST stays REST.
+    assert choose(CRYPTO_BARS, request(("X:BTCUSD",), timespan=Timespan.MINUTE)) is (
+        HistorySource.REST
+    )
+
+
+def test_crypto_day_bars_refuse_unready_flat_files_rather_than_switch() -> None:
+    req = request(("X:BTCUSD",), timespan=Timespan.DAY)
+    unpublished = [date(2025, 3, 10)]
+    with pytest.raises(
+        ValueError, match=r"crypto\.bars 1-day bars read flat files whenever"
+    ) as caught:
+        choose_source(
+            CRYPTO_BARS, req, unpublished, requested=HistorySource.AUTO, config=config(), now=NOW
+        )
+    assert "source=dm.HistorySource.REST" in str(caught.value)
+    assert "not yet published" in str(caught.value)
+    # Forced flat files keep their own message.
+    with pytest.raises(ValueError, match=r"^crypto\.bars cannot be read from flat files"):
+        choose_source(
+            CRYPTO_BARS,
+            req,
+            unpublished,
+            requested=HistorySource.FLAT_FILES,
+            config=config(),
+            now=NOW,
+        )
