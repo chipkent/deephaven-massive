@@ -7,13 +7,15 @@ vendor's samples) and each factory's validation and the request it builds.
 
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from deephaven import new_table
 from deephaven.column import string_col
+from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
@@ -25,6 +27,7 @@ from deephaven_massive._namespaces import partners
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
     from deephaven_massive._types import FilterValue
@@ -453,3 +456,188 @@ def test_each_factory_links_its_column_reference(name: str) -> None:
     assert "\n" not in summary
     assert summary.endswith(".")
     assert "REST only" in doc
+
+
+# End to end: each dataset fetched through the fake REST server.
+
+
+@pytest.fixture
+def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
+    session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield session
+    session.close()
+
+
+def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
+    # Every GET the server received: its path and decoded query.
+    return [
+        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
+        for r in server.requests
+        if r.method == "GET"
+    ]
+
+
+def expected_value(value: object, column_type: ColumnType) -> object:
+    # A wire value as the result table holds it.
+    if column_type is ColumnType.LOCAL_DATE:
+        return date.fromisoformat(cast("str", value))
+    if column_type is ColumnType.INSTANT:
+        return datetime.fromisoformat(cast("str", value))
+    if column_type is ColumnType.DOUBLE:
+        return float(cast("float", value))
+    if column_type is ColumnType.STRING and not isinstance(value, str):
+        return value  # JSON text: compared parsed
+    return value
+
+
+@pytest.mark.parametrize("name", DATASETS)
+def test_fetch_returns_every_fixture_value(
+    name: str,
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    path, symbol = DATASETS[name]
+    spec = spec_of(name)
+    stem = name.removeprefix("partners.").replace(".", "_")
+    body = load_fixture(FIXTURES, f"{stem}.json")
+    target = path.replace("{ticker}", "AAPL")
+    fake_rest.reply(target, Reply(body))
+    make = factory(rest_session, name)
+    table = (make("AAPL") if name == "partners.benzinga.consensus_ratings" else make()).fetch()
+
+    # One request, for the documented maximum page, and nothing the caller did not set.
+    assert sent(fake_rest) == [(target, {"limit": [str(spec.page_size)]})]
+    schema = CATALOG.dataset_schema(spec)
+    assert table.column_names == list(schema.column_names)
+    out = dh_to_pylist(table)
+    rows = fixture_rows(load_fixture, name)
+    assert len(out) == len(rows)
+    columns = {f.wire_key: f.column for f in sources(Transport.REST)[path].fields}
+    if symbol is not None:
+        columns[symbol] = "Symbol"
+    if name == "partners.benzinga.news":
+        columns["published"] = "Timestamp"
+    types = {c.name: c.type for c in schema.columns}
+    for got, row in zip(out, rows, strict=True):
+        for key, value in row.items():
+            column = columns[key]
+            if isinstance(value, list | dict):
+                assert json.loads(got[column]) == value, column
+            else:
+                assert got[column] == expected_value(value, types[column]), column
+
+
+def test_list_requests_send_symbols_sort_filters_and_page(
+    rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/benzinga/v1/ratings", Reply(envelope([])))
+    rest_session.partners.benzinga.ratings(
+        ["msft", "AAPL"],
+        sort="date",
+        order=Order.DESC,
+        limit=10,
+        filters={"date_gte": date(2025, 1, 2), "rating_action_any_of": ["upgrades", "downgrades"]},
+    ).fetch()
+    assert sent(fake_rest) == [
+        (
+            "/benzinga/v1/ratings",
+            {
+                "ticker.any_of": ["AAPL,MSFT"],
+                "sort": ["date.desc"],  # the endpoint takes the direction as a suffix
+                "date.gte": ["2025-01-02"],
+                "rating_action.any_of": ["upgrades,downgrades"],
+                "limit": ["50000"],  # the page size; the row cap is the library's
+            },
+        )
+    ]
+
+
+def test_etf_symbols_filter_the_fund(
+    rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/etf-global/v1/constituents", Reply(envelope([])))
+    rest_session.partners.etf_global.constituents(
+        "SPY", filters={"effective_date": date(2025, 9, 18)}
+    ).fetch()
+    assert sent(fake_rest) == [
+        (
+            "/etf-global/v1/constituents",
+            {
+                "composite_ticker.any_of": ["SPY"],
+                "effective_date": ["2025-09-18"],
+                "limit": ["5000"],
+            },
+        )
+    ]
+
+
+def test_news_sends_an_instant_range_and_tickers(
+    rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/benzinga/v2/news", Reply(envelope([])))
+    end = datetime(2025, 6, 3, 14, 30, tzinfo=UTC)
+    rest_session.partners.benzinga.news(
+        symbols=["NVDA", "AAPL"], start="2025-06-02", end=end
+    ).fetch()
+    ((path, query),) = sent(fake_rest)
+    assert path == "/benzinga/v2/news"
+    assert query.pop("tickers.any_of") == ["AAPL,NVDA"]
+    # The axis is an instant: a date start is 00:00 New York, an aware datetime end is the
+    # first instant excluded. Both go out as instants; compare them as instants.
+    bounds = {k: v for k, v in query.items() if k.startswith("published")}
+    assert sorted(bounds) == ["published.gte", "published.lt"]
+    assert datetime.fromisoformat(bounds["published.gte"][0]) == datetime(2025, 6, 2, 4, tzinfo=UTC)
+    assert datetime.fromisoformat(bounds["published.lt"][0]) == end
+    two_days = rest_session.partners.benzinga.news(start="2025-06-02", end=date(2025, 6, 3))
+    two_days.fetch()
+    ((_, query),) = sent(fake_rest)[1:]
+    assert datetime.fromisoformat(query["published.lt"][0]) == datetime(2025, 6, 4, 4, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("name", "axis"),
+    [
+        ("partners.tmx.corporate_events", "date"),
+        ("partners.fable.merchant_aggregates", "transaction_date"),
+    ],
+)
+def test_a_date_range_is_whole_days(
+    name: str, axis: str, *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    path, _ = DATASETS[name]
+    fake_rest.reply(path, Reply(envelope([])))
+    factory(rest_session, name)(start="2025-07-01", end=date(2025, 7, 31)).fetch()
+    ((_, query),) = sent(fake_rest)
+    assert query[f"{axis}.gte"] == ["2025-07-01"]
+    assert query[f"{axis}.lte"] == ["2025-07-31"]
+
+
+def test_consensus_ratings_send_one_request_per_symbol(
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    for ticker, buys in (("AAPL", 6), ("MSFT", 9)):
+        row = {"ticker": ticker, "buy_ratings": buys, "consensus_rating": "buy"}
+        fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope([row])))
+    table = rest_session.partners.benzinga.consensus_ratings(
+        ["msft", "aapl"], filters={"date_gte": date(2024, 10, 1), "date_lt": date(2025, 1, 1)}
+    ).fetch()
+    window = {"date.gte": ["2024-10-01"], "date.lt": ["2025-01-01"], "limit": ["50000"]}
+    assert sorted(sent(fake_rest)) == [
+        ("/benzinga/v1/consensus-ratings/AAPL", window),
+        ("/benzinga/v1/consensus-ratings/MSFT", window),
+    ]
+    out = dh_to_pylist(table.view(["Symbol", "BuyRatings"]))
+    assert sorted((r["Symbol"], r["BuyRatings"]) for r in out) == [("AAPL", 6), ("MSFT", 9)]
+
+
+@pytest.mark.parametrize(
+    "name", [n for n in DATASETS if n != "partners.benzinga.consensus_ratings"]
+)
+def test_order_needs_sort(name: str, massive_session: dm.MassiveSession) -> None:
+    with pytest.raises(ValueError, match="order needs sort"):
+        factory(massive_session, name)(order=Order.ASC)

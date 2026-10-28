@@ -445,7 +445,9 @@ class _Benzinga(Namespace):
         Example:
             ::
 
-                top = m.partners.benzinga.analysts(sort="smart_score.desc", limit=50).fetch()
+                top = m.partners.benzinga.analysts(
+                    sort="smart_score", order=dm.Order.DESC, limit=50
+                ).fetch()
         """
         return _list_query(
             self._core, BENZINGA_ANALYSTS, sort=sort, order=order, limit=limit, filters=filters
@@ -878,9 +880,11 @@ class _Benzinga(Namespace):
 
         Served by REST only, from `GET /benzinga/v2/news`: `fetch()` reads every page into a
         static table, and `poll(interval)` re-reads the endpoint into a live table that, by
-        default (`PollMode.APPEND`), only grows. There is no stream and no `history()`; use
-        `start` and `end` for a past range. The columns and what they mean are in the column
-        reference,
+        default (`PollMode.APPEND`), only grows: each cycle appends every article its request
+        returns, so an article repeats in every cycle that returns it; `mode=PollMode.UPSERT`
+        keeps one row per article, keyed by `BenzingaId`. There is no stream and no
+        `history()`; use `start` and `end` for a past range. The columns and what they mean
+        are in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-news,
         in the web UI's column tooltips, and in `columns()`.
 
