@@ -2,8 +2,10 @@
 
 The factories are checked without the network: each builds a query whose class, request, and
 synchronous errors are asserted. The payload fixtures under `tests/data/namespaces/stocks/` are
-the vendor's documented response examples; each is served by the fake REST server, decoded
-through its generated path, and must carry the keys the dataset declares, with no drift.
+the vendor's documented response examples, without their `next_url` (the fake server would
+follow it to Massive) and with a text `request_id` where an example shows another type; each is
+served by the fake REST server, decoded through its generated path, and must carry the keys the
+dataset declares, with no drift.
 
 End to end, every REST dataset sends its exact request to the fake REST server and returns the
 fixture's rows; every streamed channel's documented message, sent by the fake WebSocket server,
@@ -15,7 +17,7 @@ import inspect
 import json
 import threading
 from collections.abc import Callable, Iterator, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -28,17 +30,18 @@ from deephaven.stream import blink_to_append_only
 from deephaven.table import Table
 
 import deephaven_massive as dm
-from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import NEW_YORK
 from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._enums import Recency
+from deephaven_massive._enums import ChannelFamily, Recency
 from deephaven_massive._ingest import ws
 from deephaven_massive._massive import (
     RestClient,
     RestPath,
     Source,
     Transport,
+    WireType,
     WsClient,
     source,
     to_batch,
@@ -286,6 +289,8 @@ def test_institutional_holdings_keep_the_filer_cik() -> None:
     found = columns("filings.institutional_holdings")
     assert "Symbol" not in found
     assert found["FilerCik"] is ColumnType.STRING
+    declared = stocks.INSTITUTIONAL_HOLDINGS.keys_for(R, "/stocks/filings/vX/13-F")
+    assert declared == SourceKeys(fanout=KeySpec("FilerCik", instrument=False))
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
@@ -370,8 +375,10 @@ def test_streams_take_symbols_and_all(
         make([])
 
 
-def test_fmv_streams_from_the_fmv_family() -> None:
-    assert stocks.FMV.family is not stocks.TRADES.family
+@pytest.mark.parametrize("name", STREAMED)
+def test_each_stream_names_its_channel_family(name: str) -> None:
+    expected = ChannelFamily.FMV if name == "fmv" else ChannelFamily.TICK
+    assert spec_of(name).family is expected
 
 
 def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession) -> None:
@@ -554,10 +561,27 @@ def test_statements_take_a_timeframe(massive_session: dm.MassiveSession, name: s
     query = make("AAPL", timeframe=dm.Timeframe.QUARTERLY)
     assert dict(query._request.params) == {"timeframe": dm.Timeframe.QUARTERLY}
     assert make()._request.params == ()
-    trailing = make(timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS)
-    assert dict(trailing._request.params) == {"timeframe": dm.Timeframe.TRAILING_TWELVE_MONTHS}
     with pytest.raises(TypeError, match=r"timeframe must be dm\.Timeframe"):
         make(timeframe="annual")
+
+
+@pytest.mark.parametrize(
+    "name", ["financials.income_statements", "financials.cash_flow_statements"]
+)
+def test_flow_statements_offer_the_trailing_twelve_months(
+    massive_session: dm.MassiveSession, name: str
+) -> None:
+    trailing = factory(massive_session, name)(timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS)
+    assert dict(trailing._request.params) == {"timeframe": dm.Timeframe.TRAILING_TWELVE_MONTHS}
+
+
+def test_balance_sheets_refuse_the_trailing_twelve_months(
+    massive_session: dm.MassiveSession,
+) -> None:
+    with pytest.raises(ValueError, match="balance sheets have no trailing twelve months"):
+        massive_session.stocks.financials.balance_sheets(
+            timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS
+        )
 
 
 def test_filings_index_takes_a_form_type(massive_session: dm.MassiveSession) -> None:
@@ -751,13 +775,41 @@ def test_all_daily_bars_read_the_grouped_daily_path(
     assert len(out) == 3
 
 
+SNAPSHOT_INSTANTS = (
+    "Symbol",
+    "Updated",
+    "LastTradeSipTimestamp",
+    "LastQuoteSipTimestamp",
+    "LastMinuteWindowStart",
+    "LastTradePrice",
+)
+
+
+def test_snapshots_split_a_long_watchlist_into_requests_of_250(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    serve(fake_rest, load_fixture, snapshots=SNAPSHOTS_PATH)
+    symbols = [f"T{n:03d}" for n in range(251)]
+    rest_session.stocks.snapshots(symbols).fetch()
+    sizes = sorted(len(q["tickers"].split(",")) for _, q in sent(fake_rest))
+    assert sizes == [1, 250]
+
+
 def test_snapshots_send_the_tickers_and_the_otc_flag(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, snapshots=SNAPSHOTS_PATH)
     out = table_rows(rest_session.stocks.snapshots(["MSFT", "AAPL"]).fetch())
     assert sent(fake_rest) == [(SNAPSHOTS_PATH, {"tickers": "AAPL,MSFT", "include_otc": "false"})]
-    assert out[0]["Symbol"] == "BCAT"  # the documented example answers with its own tickers
+    # The documented example answers with its own tickers; its times mix ns and ms.
+    assert {k: out[0][k] for k in SNAPSHOT_INSTANTS} == {
+        "Symbol": "BCAT",
+        "Updated": 1605192894630916600,
+        "LastTradeSipTimestamp": 1605192894630916600,
+        "LastQuoteSipTimestamp": 1605192959994246100,
+        "LastMinuteWindowStart": 1684428600000 * 10**6,
+        "LastTradePrice": 20.506,
+    }
     assert "Timestamp" not in out[0]
     full = table_rows(rest_session.stocks.snapshots(dm.ALL, include_otc=True).fetch())
     assert sent(fake_rest)[1] == (SNAPSHOTS_PATH, {"include_otc": "true"})
@@ -771,7 +823,14 @@ def test_movers_fill_the_direction(
     serve(fake_rest, load_fixture, movers=path)
     out = table_rows(rest_session.stocks.movers(dm.Direction.LOSERS).fetch())
     assert sent(fake_rest) == [(path, {"include_otc": "false"})]
-    assert out[0]["Symbol"]
+    assert {k: out[0][k] for k in SNAPSHOT_INSTANTS} == {
+        "Symbol": "PDS",
+        "Updated": 1605195848258266000,
+        "LastTradeSipTimestamp": 1605195848258266000,
+        "LastQuoteSipTimestamp": 1605195929997325600,
+        "LastMinuteWindowStart": 1684428600000 * 10**6,
+        "LastTradePrice": 14.2284,
+    }
 
 
 def test_daily_open_close_requests_each_symbol_on_its_day(
@@ -1291,3 +1350,86 @@ def test_a_flat_file_block_round_trips(
     out = table_rows(query.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES))
     assert [(r["Symbol"], r["Timestamp"], r[column]) for r in out] == expected
     assert fake_s3.requests == [("flatfiles", key)]
+
+
+def test_a_13f_row_without_its_filer_fails_the_request(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    path = "/stocks/filings/vX/13-F"
+    body = json.loads(load_fixture(FIXTURES, "filings_institutional_holdings.json"))
+    del body["results"][1]["filer_cik"]
+    fake_rest.reply(path, Reply(body=body))
+    with pytest.raises(dm.MassiveError, match="FilerCik"):
+        rest_session.stocks.filings.institutional_holdings().fetch()
+
+
+# --- Poll keys identify rows -------------------------------------------------------------------
+
+
+# The keyed REST datasets whose response is a list of rows, with the call and concrete path
+# that serve them. Daily open/close answers one row per request, keyed by its symbol.
+def _with_defaults(name: str) -> Callable[[dm.MassiveSession], QueryBase]:
+    # A list dataset's call with every argument left at its default.
+    def call(m: dm.MassiveSession) -> QueryBase:
+        return factory(m, name)()
+
+    return call
+
+
+KEYED_CALLS: dict[str, tuple[Callable[[dm.MassiveSession], QueryBase], str]] = {
+    "snapshots": (lambda m: m.stocks.snapshots(dm.ALL), SNAPSHOTS_PATH),
+    "movers": (
+        lambda m: m.stocks.movers(dm.Direction.GAINERS),
+        "/v2/snapshot/locale/us/markets/stocks/gainers",
+    ),
+    **{
+        name: (_with_defaults(name), cast("str", spec_of(name).fetch_path))
+        for name in [*LIST_WITH_SYMBOLS, *LIST_WITHOUT_SYMBOLS]
+    },
+}
+
+
+def _other(value: object, wire_type: WireType) -> object:
+    # A wire value that differs from `value` and still converts to the field's type.
+    if wire_type is WireType.JSON_TEXT:
+        return [*cast("list[object]", value or []), "other"]
+    if wire_type is WireType.DATE:
+        base = date(2020, 1, 1) if value is None else date.fromisoformat(cast("str", value))
+        return (base + timedelta(days=1)).isoformat()
+    if wire_type is WireType.BOOL:
+        return not value
+    if wire_type in {WireType.LONG, WireType.DOUBLE}:
+        return cast("float", value or 0) + 1
+    return f"{value or ''}Z"
+
+
+@pytest.mark.parametrize("name", list(KEYED_CALLS))
+def test_poll_keys_identify_one_row_and_none_is_spare(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+) -> None:
+    # The fixture's first row, then one copy per key column that differs only in that column:
+    # the keys tell every row apart, and leaving out any one key column merges two rows.
+    spec = spec_of(name)
+    make, path = KEYED_CALLS[name]
+    template = cast("str", spec.fetch_path)
+    rest_path = cast("RestPath", source(R, template))
+    body = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))
+    result_key = cast("str", rest_path.result_key)
+    first = body[result_key][0]
+    symbol = spec.keys_for(R, template).symbol
+    rows = [first]
+    for column in spec.poll_keys:
+        field = rest_path.field(symbol.column if column == "Symbol" and symbol else column)
+        rows.append({**first, field.wire_key: _other(first.get(field.wire_key), field.wire_type)})
+    body[result_key] = rows
+    fake_rest.reply(path, Reply(body=body))
+    out = table_rows(cast("Query", make(rest_session)).fetch())
+    keyed = [tuple(row[k] for k in spec.poll_keys) for row in out]
+    assert len(set(keyed)) == len(rows)
+    for index in range(len(spec.poll_keys)):
+        fewer = {key[:index] + key[index + 1 :] for key in keyed}
+        assert len(fewer) < len(rows), spec.poll_keys[index]
