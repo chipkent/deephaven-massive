@@ -709,7 +709,7 @@ class StreamQuery:                         # WebSocket datasets
     def last_by(self, by: str | Sequence[str] | None = None) -> Table: ...
 
 class HistoryQuery:                        # datasets with a historical retrieval path
-    def history(self, start: DateLike, end: DateLike, *,
+    def history(self, start: DateLike, end: DateLike | None = None, *,
                 source: HistorySource = HistorySource.AUTO) -> Table: ...   # static
 
 class StreamHistoryQuery(StreamQuery, HistoryQuery): ...
@@ -821,9 +821,14 @@ ticks in the group.
 plans, so a seed would behave differently per tier; `snapshots(symbols).poll(n)` is the
 tier-identical way to get current state.
 
-**`history()`.** Static. `start` and `end` follow the day rules of
-[section 12](#12-timestamp-units-and-day-boundaries). There is no `limit`: the library pages
-internally. (The aggregates endpoint's `limit` counts base aggregates, not rows, so it cannot
+**`history()`.** Static. `start` and `end` are both dates (whole days, inclusive at both
+ends; for futures, whole sessions) or both aware datetimes (exact instants, half-open `[start,
+end)`); a call that mixes them raises `ValueError`. `end=None`, the default, reads through now.
+A reversed range raises `ValueError`; two equal datetimes are an empty range and return an
+empty table without any request; two equal dates are that one day. A bar is returned only when
+its whole window lies inside the range and has ended, so the current day's, week's, or month's
+bar never appears. The full rules are in [section 12](#12-timestamp-units-and-day-boundaries).
+There is no `limit`: the library pages internally. (The aggregates endpoint's `limit` counts base aggregates, not rows, so it cannot
 serve as a row cap.) A reactive `Table` passed as `symbols` is read once, when the verb is
 called, on the caller thread inside the session's execution context: its valid rows become the
 sorted canonical symbol tuple that every source receives (`REST`, `FLAT_FILES`, and the `AUTO`
@@ -1038,10 +1043,15 @@ Notation:
   `sort` and `order` reach the wire is in [section 9](#9-filters).
 - `…T` is `start: DateLike | None = None, end: DateLike | None = None` followed by `…F`. It
   exists only on datasets whose row has a named time axis (shown as "axis"). `start` and `end`
-  address that axis with the day rules of [section 12](#12-timestamp-units-and-day-boundaries).
-  A range that ends before it starts raises `ValueError` at construction, as `history()` does
-  (two dates may be equal: whole days; two datetimes are half-open; a date and a datetime
-  compare by day).
+  address that axis with the day rules of [section 12](#12-timestamp-units-and-day-boundaries),
+  as `history()` does: both bounds dates (whole days) or both aware datetimes (exact instants,
+  half-open), a date mixed with a datetime raises `ValueError` at construction, and so does a
+  range that ends before it starts (two dates may be equal: one whole day; two equal datetimes
+  are an empty range). A calendar-date axis (dividends, splits, filings, financials, futures
+  `schedules`, and every other axis whose field is a calendar date) holds whole days, so a
+  datetime bound there raises `ValueError` ("`<axis> is a calendar date; pass dates`"). A
+  bound left None is open: unlike `history()`, an open `end` is not sent, so a list keeps rows
+  dated in the future, such as announced dividends.
 - Each namespace module declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`), and
   `_session.py` composes them, once, at import, into `CATALOG`, the process's `Catalog` (every
   `DatasetSpec` by name); a test asserts that every namespace module contributes. The query
@@ -1119,7 +1129,7 @@ below and selects the flat-file prefix only: it is not part of the stream key
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `trades(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (the `timestamp` range, date bounds widened to whole Chicago sessions as for bars, [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/trades_v1` |
+| `trades(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (dates: one request series per weekday session, `session_end_date=<date>`; datetimes: the exact `timestamp` range; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/trades_v1` |
 | `quotes(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` (as `trades`) | `us_futures_{venue}/quotes_v1` |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, venue: FuturesVenue \| None = None)` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
 | `snapshots(symbols, *, product_code: str \| None = None, …F)`; `ALL` with `product_code` is every contract of a product; `Symbol` is the generated `DetailsTicker` field, where the OpenAPI schema nests the contract's ticker (`details.ticker`; [section 23](#23-open-verification-items)) | Query | | `/futures/v1/snapshot` | |
@@ -1128,8 +1138,11 @@ below and selects the flat-file prefix only: it is not part of the stream key
 
 `product_code` is typed on every futures dataset whose path takes it (`snapshots`,
 `contracts`, `products`, `market_status`, `schedules`), so it is never a `filters` key there.
-`session_end_date` on `trades` and `quotes` is not their time axis: `start` and `end` of
-`history()` address `timestamp`, and `session_end_date` stays an ordinary filter of the path.
+`session_end_date` on `trades` and `quotes` is not their time axis: datetime bounds of
+`history()` address `timestamp`, and date bounds name sessions, which `history()` requests one
+at a time as `session_end_date=<date>`. `session_end_date` stays an ordinary filter of the
+path, usable with datetime bounds; with date bounds `history()` sets it and refuses a filter
+on it (`ValueError`).
 
 No futures dataset has a "last" endpoint, so no futures stream query has `fetch()`.
 `snapshots(symbols).fetch()` is the one-request answer. There is no futures `day_aggs` flat
@@ -1149,7 +1162,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
 | `quotes(symbols)` | StreamHistoryLatestQuery | `C` | fetch `/v1/last_quote/currencies/{from}/{to}`; history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` (a 1-day bar is the UTC day, stamped 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start; [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
 | `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
 | `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/forex/{gainers\|losers}` | |
@@ -1161,7 +1174,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 |---|---|---|---|---|
 | `trades(symbols)` | StreamHistoryLatestQuery | `XT` | fetch `/v1/last/crypto/{from}/{to}`; history `/v3/trades/{X:…}` | `global_crypto/trades_v1` |
 | `quotes(symbols)` | StreamQuery | `XQ` | | |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; 1-day bars are stamped by source: midnight New York on `/prev` and the range in every documented sample, the UTC day's last millisecond in `day_aggs_v1`, [section 23](#23-open-verification-items) item 29) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, stamped 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond, such as the midnight New York of the documented REST samples, raises `MassiveError` naming the dataset and source; `AUTO` reads 1-day bars from flat files whenever S3 credentials are configured and from REST otherwise; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 29) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
 | `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
@@ -1414,7 +1427,9 @@ neither; one whose paths have `order` but no `sort` (the indicators) offers `ord
 `.lt` (`timestamp.gte`/`timestamp.lt`, `published_utc.gte`/`published_utc.lt`,
 `published.gte`/`published.lt`), and a calendar-date axis is whole days, `.gte` and `.lte`
 (`ex_dividend_date.gte`/`ex_dividend_date.lte`, `filing_date.gte`/`filing_date.lte`,
-`session_end_date.gte`/`session_end_date.lte` on `futures.schedules`, and so on). Whether an
+`session_end_date.gte`/`session_end_date.lte` on `futures.schedules`, and so on). A
+calendar-date axis takes date bounds only; a datetime there raises `ValueError` at
+construction ([section 8](#8-namespace-tree)). Whether an
 axis is an instant axis follows from the generated row field its parameter filters (the field
 whose wire key is the parameter's base name), not from the parameter's kind: Massive types the
 `published_utc` and benzinga `published` filters as dates, but their fields are ISO-8601
@@ -1524,7 +1539,10 @@ the parameter, the value, and the fix, for example `start=datetime.datetime(2025
 needs a timezone: pass an aware datetime or a date`. The same rule and message apply to a naive
 `datetime` passed as a `filters` value or a typed parameter. ISO text with more than six
 fractional digits of a second raises `ValueError` too: a `datetime` holds microseconds, and
-cutting the rest would move the time.
+cutting the rest would move the time. A range (`history()` and the `start`/`end` of a `…T`
+dataset) takes two bounds of one kind: two dates are whole days, two datetimes exact instants,
+and a date mixed with a datetime raises `ValueError`
+([section 12](#12-timestamp-units-and-day-boundaries)).
 
 **ISO-8601 text.** A timestamp the wire carries as ISO-8601 text (for example `published_utc`)
 becomes an `Instant`. It must carry an offset (`Z` or `±HH:MM`): text without one is an
@@ -1593,23 +1611,80 @@ FMV `t`, the magnitude rule above picks the unit per value first, then the routi
 trades and quotes), `EndTimestamp` (bars), `LastUpdated` (snapshots). Calendar dates such as
 the futures `SessionEndDate` are `LocalDate`.
 
-**`history(start, end)` normalization.** Each bound converts independently to an `Instant`. The
-range is half-open: `[start, end)`. A `date` or `"YYYY-MM-DD"` `start` is that day's 00:00 in
-the class day zone. A `date` `end` is the next day's 00:00, so whole days are inclusive. A
-timezone-aware `datetime` is used as is.
+**`history(start, end=None)` bounds.** A range has two kinds of bounds, and one call never mixes
+them:
 
-The same rule bounds the time axis of a `…T` dataset on an instant axis: a timestamp
+- **Dates** (`"YYYY-MM-DD"` or a `date`) are whole days, inclusive at both ends:
+  `history("2025-03-03", "2025-03-03")` is all of March 3. A day is a calendar day in the class
+  day zone below; for futures a date names the trading session whose `session_end_date` it is.
+- **Aware datetimes** are exact instants, a half-open range `[start, end)`: a row is kept when
+  `start <= Timestamp < end`.
+
+A date mixed with a datetime raises `ValueError` ("start and end must both be dates or both be
+datetimes: ..."): a date means a whole day or session and a datetime one instant, and a futures
+session's first instant moves with the holiday calendar, which the library does not have. There
+is no inclusive or exclusive option. `end=None`, the default, reads through now: the current
+instant after a datetime `start`, and after a date `start` the current day in the day zone (for
+futures, the session the current instant belongs to). A reversed range (`start` after `end`, or
+after now when `end` is None) raises `ValueError`. Two equal datetimes are an empty range: the
+call returns an empty table with every column and makes no request. Two equal dates are that
+one day. Datetimes are compared in UTC, so the repeated hour of a daylight-saving fall-back is
+ordered correctly. `dates.bounds` normalizes the bounds to a `DaySpan` (dates) or a `TimeRange`
+(datetimes), and `history_source.history_window` turns them into the rows to keep, the
+partition dates, and the instants a REST request covers (`HistoryWindow`).
+
+**Bars: whole windows.** A bar, of any timespan and multiplier, is returned only when its whole
+window lies inside the range. The windows:
+
+- An intraday bar (second, minute, hour) spans `multiplier` units from its `Timestamp`, on whole
+  units of UTC time (whole hours in every zone the library uses).
+- A 1-day bar is its calendar day in the class day zone; a bar of `multiplier` days spans that
+  many days.
+- A week runs Monday to Friday; a bar Massive stamps on the Saturday or Sunday before a week
+  names that week. Months, quarters, and years are calendar periods less their leading and
+  trailing weekend days, so March 2024 runs from Friday the 1st to Friday the 29th. Crypto,
+  which trades every day, keeps its weekends: Monday-to-Sunday weeks and whole months. A bar of
+  `multiplier` periods spans that many.
+- A futures bar named by session dates is kept by its `SessionEndDate`: an intraday bar when
+  its session lies in the range; a session, week, month, quarter, or year bar when the whole
+  period of session dates its `SessionEndDate` belongs to (Monday to Friday for a week) lies in
+  the range. A futures bar named by datetimes follows the intraday rule, or for longer bars
+  the sessions of the period, from the regular 17:00 Chicago open of its first session to
+  that of the session after its last.
+
+A bar whose window has not ended yet is never returned, so the current day, week, month,
+quarter, or year is left out whatever `end` says; for futures named by date, only finished
+sessions count (the sessions before the one the current instant belongs to). There is no
+holiday calendar: a holiday is a weekday like any other, so a week whose Friday is a holiday
+still runs Monday to Friday, and monthly stock bars for March 2024 need a range through Good
+Friday, 03-29. The REST aggregates' `{from}` is snapped to the calendar start of the first
+bar that fits (its Monday, or the 1st of its month even when that is a weekend, where Massive
+stamps such a bar), so a request never starts part way through a period; `{to}` is the last
+whole millisecond before the range's end. Rows outside the window are then dropped.
+
+**Day labels.** A stock, option, or index 1-day bar is its New York date. A futures bar is its
+`SessionEndDate`. A forex or crypto 1-day bar means the UTC day on every source, and is stamped
+at 00:00 UTC of that day (`timestamps.utc_day_stamps`): the aggregates range already is, and
+the grouped daily, `/prev`, and the `day_aggs_v1` flat files (stamped 23:59:59.999 UTC) are
+moved to the day's start. For crypto, whose day cut is not verified (the documented REST
+samples sit at midnight New York time), a 1-day bar stamped anywhere in its UTC day but its
+first or last millisecond raises `MassiveError` naming the dataset and the source, never
+relabelled: it would cover another day than its label. `AUTO` reads crypto 1-day bars from
+flat files whenever S3 credentials are configured and from REST otherwise
+([section 16](#16-historysourceauto)), so the symbol count never changes the source; `source=`
+picks one explicitly.
+
+The same kinds bound the time axis of a `…T` dataset on an instant axis: a timestamp
 parameter, or a date-typed parameter over an instant field (`published_utc`, benzinga
 `published`). A date `start` is sent as that day's 00:00 in the request's day zone and a date
 `end` as the next day's 00:00, with `.gte` and `.lt`, so Massive never decides where a day
 starts. A date-typed parameter takes the instant as
 ISO-8601 text in UTC (`2025-06-02T04:00:00Z`); since Massive documents no
 precision for that text, such an axis cannot be declared with `.gt` or `.lte` (the request
-fails with `ValueError`). A calendar-date axis (`period_end`, `ex_dividend_date`) keeps
-whole-day date bounds with `.gte` and `.lte`; an aware `datetime` bound on it becomes the
-calendar day it falls on in the request's day zone, and an upper one, being the first instant
-excluded, the day of the instant just before it, so a day the range covers in part is
-included, as the flat-file partitions of `history()` are.
+fails with `ValueError`). A calendar-date axis (`period_end`, `ex_dividend_date`, the futures
+`schedules`' `session_end_date`) keeps whole-day date bounds with `.gte` and `.lte` and takes
+dates only: a datetime bound there raises `ValueError` at construction ("`<axis> is a calendar
+date; pass dates`"). An open bound of a `…T` dataset is not sent.
 
 **The request's day zone** (`dates.day_class`). A dataset with an asset class follows its
 class. A dataset without one uses New York days, with one exception: a dataset that declares a
@@ -1622,48 +1697,48 @@ New York. A filter on a publication time does not depend on which tickers are li
 
 **Day zone per class.**
 
-- **America/New_York** for stocks, options, and indices. Aggregates `from`/`to` are passed as ET
-  dates; tick endpoints get ns bounds; flat-file partition dates are the ET dates of `start` and
-  `end - 1 ns`.
+- **America/New_York** for stocks, options, and indices. Tick endpoints get ns bounds;
+  flat-file partition dates are the New York dates of the first and last instant kept.
 - **UTC** for forex and crypto.
 - **Sessions** for futures. A date means the trading session whose `session_end_date` equals
-  it. An exchange holiday folds into the next session, which then opens early: CME traded
-  Martin Luther King Day (Monday 2025-01-20) from Sunday 17:00 CT under the trade date
-  2025-01-21. So `trades`, `quotes`, and `bars` request their instant range (`timestamp` for
-  trades and quotes, `window_start` for bars) from `futures_session_open(start)` (17:00 CT
-  the day before) less `FUTURES_HOLIDAY_MARGIN` (4 days) to `futures_session_open(end + 1
-  day)`, which is exact because a holiday only moves a session's open earlier, and
-  post-filter `SessionEndDate` within `[start, end]`. The longest known fold is a Friday
-  holiday whose trading goes to Monday's session (Good Friday 2024: the 2024-04-01 session
-  opened Thursday 17:00 CT), three days before the regular Sunday open; the fourth day is
-  slack. The margin costs REST requests up to four more days of rows at the lower end (a
-  Friday session fetches from the previous Sunday evening), all dropped by the post-filter; `session_end_date` stays an ordinary
-  filter of the trades and quotes paths, never their time axis. Mixed bounds follow the same
-  rule per side: a date side is a session, widened and filtered on `SessionEndDate`; a
-  `datetime` side is exact and filtered on `Timestamp`
-  (`history("2024-12-17", datetime(2024, 12, 17, 16, tzinfo=CT))` keeps the evening of
-  12-16, which belongs to session 12-17). A date `start` with an `end` instant before that
-  session's regular open is a range only when one holiday opened the session early: the end
-  instant's session and every weekday session after it up to `start` may hold at most one
-  weekday, so `("2025-01-21", Monday 2025-01-20 10:00 CT)` reads the MLK trading and
-  `("2025-01-22", the same instant)` raises `ValueError`. Flat-file keys are assumed to be keyed by session date
-  (**UNVERIFIED**: the futures flat-file overview says only "standardized in Central Time"; the
-  implementation checks every block of every futures file against its key, and a
-  `session_end_date` that differs from the key's date, or is empty, fails loudly). With
-  `datetime` bounds, futures filter on `Timestamp`, and flat files read the sessions the
-  instants belong to. The futures trading day rolls at 17:00 America/Chicago (the weekly open is
-  Sunday 17:00 CT; 16:00 to 17:00 CT is the daily maintenance break), so the session of an
-  instant `t` is `(t in America/Chicago + 7 h).date()`, and the files read are the sessions
-  from the session of `start` to the session of `end - 1 ns`. An intraday window reads one
-  file; an evening window reads only the next session's file. When a futures range ends at an
-  instant and the run of missing files that ends it (per venue) holds a weekday (a holiday,
-  alone or followed by a weekend, such as Good Friday and the Saturday after it), the next
-  existing session file within the 4-day margin of the run's first day is read too, because
-  the holiday's hours lie in it; its rows are filtered on `Timestamp` like the others. A run
-  of weekend days after an existing Friday file reads nothing more. A date-bounded range never rolls
-  forward: a date names its own session exactly. A `datetime` sent to a futures
-  `session_end_date` parameter (`schedules(start=...)`) becomes the session it belongs to,
-  and for the exclusive upper bound the session of the instant just before it.
+  it. The futures trading day rolls at 17:00 America/Chicago (the weekly open is Sunday 17:00
+  CT; 16:00 to 17:00 CT is the daily maintenance break), so the session of an instant `t` is
+  `(t in America/Chicago + 7 h).date()`. An exchange holiday folds into the next session,
+  which then opens early: CME traded Martin Luther King Day (Monday 2025-01-20) from Sunday
+  17:00 CT under the trade date 2025-01-21, and after Good Friday 2024 the 2024-04-01 session
+  opened on Thursday 03-28 at 17:00 CT.
+  - **Trades and quotes named by dates** are requested one session at a time:
+    `session_end_date=<date>` per weekday session and symbol, following `next_url`, with no
+    time window, which is exact however early a holiday opened the session. Saturdays and
+    Sundays end no session and are skipped. The rows come in session order and, within a
+    session, in symbol order. A query that also filters `session_end_date` raises
+    `ValueError`.
+  - **Bars named by dates** are requested on `window_start` from the first session's regular
+    open less `FUTURES_HOLIDAY_MARGIN` (4 days: the longest known fold, Good Friday's, opens
+    three days early) to 18:00 CT on the last session date, and kept by `SessionEndDate` as
+    above. There is no probe for earlier sessions.
+  - **Datetimes** are exact: `timestamp.gte`/`.lt` for trades and quotes, `window_start.gte`/
+    `.lt` for bars, with the bars kept by their own window afterwards, since Massive may
+    match a candle by its start.
+  - **Flat files** are assumed to be keyed by session date (**UNVERIFIED**: the futures
+    flat-file overview says only "standardized in Central Time"; every block of every futures
+    file is checked against its key, and a `session_end_date` that differs from the key's date,
+    or is empty, fails loudly). Dates read one file per session date and never roll forward:
+    a date names its own session exactly. Datetimes read the sessions from that of `start` to
+    that of `end - 1 µs`, so an intraday window reads one file and an evening window only the
+    next session's file. When the run of missing files that ends such a range (per venue)
+    holds a weekday (a holiday, alone or followed by a weekend, such as Good Friday and the
+    Saturday after it), the next existing session file within 7 days of the run's first day is
+    read too, because the holiday's hours lie in it; its rows are filtered on `Timestamp` like
+    the others. A run of weekend days after an existing Friday file reads nothing more. If that
+    next file is not published yet, a missing weekday file on the way may still be late
+    (within a day of its publication time), or no file exists within 7 days, the call raises
+    `MassiveError`: the range's last hours may lie there, so it never returns a silently short
+    table.
+
+**Long downloads.** A futures per-session or grouped-daily download of more than five requests
+first logs one INFO line with the number of requests and about how many minutes a Basic key's
+5 requests a minute make it last.
 
 ## 13. Host resolution and connection protocol
 
@@ -2025,8 +2100,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `"YYYY-MM-DD"` as given, an aware `datetime` as the calendar day it falls on in the dataset's
   day zone ([section 12](#12-timestamp-units-and-day-boundaries)).
 - **History order.** REST `history()` returns each request's rows, so each symbol's, oldest
-  first; the rows of several requests follow one another in request order. Wherever the
-  history path takes a direction and the caller set none, REST sends the ascending one on
+  first; the rows of several requests follow one another in request order (futures sessions
+  named by date: session by session, and the symbols of one session in symbol order).
+  Wherever the history path takes a direction and the caller set none, REST sends the ascending one on
   the time axis's field when the path lists it (`order=asc` with `sort=timestamp`;
   `sort=asc` on the aggregates; `sort=window_start.asc` or, where `sort` lists no values,
   `<time axis field>.asc` on the futures paths, which default to newest first). The order of
@@ -2059,8 +2135,20 @@ How a request is built from a `DatasetSpec` and a `Request`:
   request's symbol, split into its two currencies, wherever the dataset's symbol key comes
   from; the rows' symbol is made canonical as usual.
 - **Bars ranges.** A bars spec declares no `time_axis`. `history()` fills the range path's
-  `{from}` and `{to}` segments from its bounds, as epoch milliseconds or as `YYYY-MM-DD`
-  according to the kind the generated path gives the parameter.
+  `{from}` and `{to}` segments as epoch milliseconds: `{from}` is the calendar start of the
+  first bar whose whole window fits the range and `{to}` the last whole millisecond before the
+  range's end ([section 12](#12-timestamp-units-and-day-boundaries)); the bars that do not fit
+  wholly, or have not ended, are dropped afterwards.
+- **Futures sessions.** Futures trades and quotes named by session dates are requested one
+  weekday session at a time, `session_end_date=<date>` with no time window; futures bars named
+  by session dates are requested on `window_start` and kept by `SessionEndDate`
+  ([section 12](#12-timestamp-units-and-day-boundaries)). A per-session or grouped-daily
+  download of more than five requests logs its request count and estimated minutes at a
+  Basic key's 5 requests a minute, once, at INFO, before the first request.
+- **1-day stamps.** Forex and crypto 1-day bars, from `/prev`, the range, and grouped daily,
+  are stamped at 00:00 UTC of their day; a crypto stamp elsewhere in its UTC day than its
+  first or last millisecond raises `MassiveError` naming the path
+  ([section 12](#12-timestamp-units-and-day-boundaries)).
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
   (250 on the unified snapshot and the indices snapshot), the transport splits the symbol
@@ -2212,6 +2300,8 @@ REST possible iff the dataset has a REST history endpoint
 none possible -> ValueError listing, per source, the violated constraint
 one possible  -> use it
 both          -> S3 if symbols is ALL or len(symbols) >= flat_file_symbol_threshold, else REST
+crypto 1-day bars under AUTO (multiplier 1): S3 whenever S3 credentials are configured
+              (ValueError naming source=REST if S3 cannot serve the range), else REST
 ```
 
 `publish_time(date)` is the first `flat_file_publish_cutoff` (New York time) strictly after the
@@ -2226,7 +2316,14 @@ flat-file only.
 `indices.bars` and `crypto.bars` have no `adjusted`, so the predicate is satisfied.
 
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
-nothing is split between the sources. A dataset without instruments counts as `ALL`.
+nothing is split between the sources. The partition dates are those of the rows the call keeps
+([section 12](#12-timestamp-units-and-day-boundaries)): for bars, the days of the bars whose
+whole window fits, so the unfinished current day never needs a file. Crypto 1-day bars take
+one fixed source under `AUTO`, flat files whenever S3 credentials are configured and REST
+otherwise, so the number of symbols never changes which source's bars a call returns; when
+S3 is configured but cannot serve the range (a day not yet published), the call raises
+`ValueError` naming `source=dm.HistorySource.REST` instead of switching. `source=` selects
+either explicitly. A dataset without instruments counts as `ALL`.
 `HistoryQuery.history()` makes the choice (`choose_source` in `_datasets/history_source.py`) and then calls one
 transport; the transports only do I/O. The REST predicate depends only on the dataset's REST
 capabilities (`DatasetSpec.has_rest_history`, `has_grouped_daily`), and the `adjusted` check on
@@ -2243,7 +2340,9 @@ calendar). Within one day after its `publish_time` it raises
 `MassiveError("<dataset>: <key> does not exist: <date> is not yet published (flat files land
 ~11:00 ET next day), or was a market holiday")`. After that window it is treated as a holiday:
 a WARNING, and the date is skipped like any other missing weekday, so the rest of the range is
-returned. Futures `venue=None` reads four prefixes per date; a 403 on any prefix raises
+returned. A futures range named by datetimes that ends on a holiday reads the next session's
+file, or raises, as [section 12](#12-timestamp-units-and-day-boundaries) describes. Futures
+`venue=None` reads four prefixes per date; a 403 on any prefix raises
 `EntitlementError` naming the venue and the `venue=` parameter. A 403 whose S3 error code says
 the credentials themselves are wrong (`InvalidAccessKeyId`, `SignatureDoesNotMatch`) raises
 `AuthenticationError` instead, for every asset class, naming `s3_access_key_id` and
@@ -2262,11 +2361,14 @@ becomes a null column of its declared type, and a missing declared key header ra
 column's type (epoch integers for `Instant`s, text for lists), and only an empty field is null:
 `NA` and `NULL` are text, since both are valid tickers. Each block then goes through pure Arrow
 operations in this order: the futures session check on the whole block, the `Symbol` filter
-(`pyarrow.compute.is_in`), the half-open `[start, end)` filter on the time column through the
-plan's converter to nanoseconds (not applied to date-bounded futures, whose files hold exactly
-the requested sessions), and, on the surviving rows only, the rename to long-form names and
+(`pyarrow.compute.is_in`), the window's half-open `Timestamp` range through the plan's converter
+to nanoseconds (for bars, the starts of the bars whose whole window fits; not applied to
+futures trades, quotes, and session bars named by date, whose files hold exactly the requested
+sessions), and, on the surviving rows only, the rename to long-form names and
 parsing of the list columns (`Conditions`, `Indicators`). `_ingest/flatfiles.py` then applies
-`rename` in `_datasets/schema.py` and the `_datasets/timestamps.py` routine. No block is converted to Python objects. A
+`rename` in `_datasets/schema.py` and the `_datasets/timestamps.py` routine, and moves forex
+and crypto 1-day bar stamps to 00:00 UTC (`timestamps.utc_day_stamps`). No block is converted
+to Python objects. A
 file's surviving rows become one static Deephaven table per 16 blocks of data and at the end of
 the file (usually one table per file, since each table carries a fixed JVM-heap cost), and the
 tables are merged.
@@ -3940,7 +4042,7 @@ document already reflects them.
     paths have `order` but no `sort`, keep `order` alone ([section 9](#9-filters)). The whole family of every typed
     parameter is reserved from `filters` in one shared check. Instant axes are half-open
     (`.gte`/`.lt`), date axes whole days (`.gte`/`.lte`). Futures trades and quotes take the
-    `timestamp` range widened to whole Chicago sessions, as bars do
+    `timestamp` range widened to whole Chicago sessions, as bars do (superseded by decision 51)
     ([section 12](#12-timestamp-units-and-day-boundaries)). The REST transport fills path
     parameters from `Request.params`, fills the bars `{from}`/`{to}` from `history()`'s bounds,
     batches symbols by `DatasetSpec.symbols_per_request`, picks a path per symbol class by
@@ -3955,6 +4057,26 @@ document already reflects them.
     `adjusted: bool | None = None`: None sends nothing, an explicit value is sent where the
     chosen path declares `adjusted`, and raises `ValueError` on the crypto templates, which do
     not.
+51. **Date ranges: two kinds, whole bar windows, UTC days for forex and crypto** (2026-10-28).
+    `history(start, end=None)` takes two dates (whole days, inclusive; for futures, whole
+    sessions) or two aware datetimes (exact instants, half-open), never one of each, with no
+    inclusive or exclusive option; `end=None` reads through now; a reversed range raises,
+    equal datetimes are an empty table, and equal dates one day. A calendar-date axis of a
+    `…T` dataset takes dates only. A bar of any timespan is returned only when its whole
+    window lies inside the range and has ended: Monday-to-Friday weeks (Monday to Sunday for
+    crypto), calendar months, quarters, and years less their leading and trailing weekend
+    days (whole for crypto), futures periods of session dates; there is no holiday calendar
+    and no option to match a period by its start or end instead. Futures trades and quotes
+    named by dates are requested one weekday session at a time by `session_end_date`, which
+    replaces the widened timestamp window and the holiday-fold heuristic; futures bars named by
+    dates are requested from the first open less four days to 18:00 Chicago on the last date,
+    with no probe. A futures flat-file range named by datetimes that ends on a holiday rolls
+    forward up to 7 days and raises `MassiveError` rather than return a short table. Forex and
+    crypto 1-day bars mean the UTC day and are stamped 00:00 UTC on every source; a crypto
+    stamp elsewhere in its day than its first or last millisecond raises `MassiveError`, and
+    `AUTO` reads crypto 1-day bars from flat files whenever S3 credentials are configured and
+    from REST otherwise ([section 12](#12-timestamp-units-and-day-boundaries),
+    [section 16](#16-historysourceauto)).
 
 ## 23. Open verification items
 
@@ -3993,5 +4115,12 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 25 | Whether Massive reads a percent-encoded colon in a path segment (`/v2/aggs/ticker/I%3ASPX/prev`) as `I:SPX` | Every path value is percent-encoded whole; a value containing `/` is refused before sending, since Massive answers 404 for `%2F` | `tests/massive/rest/test_query.py`: `I:SPX` becomes `I%3ASPX`; a `/` raises | `tests/namespaces/test_indices_integration.py`: one `I:SPX` `/prev` call returns a row for `I:SPX` |
 | 26 | Spelling of an explicit forex pair topic: the WebSocket documentation gives `{from}-{to}` (`C.EUR-USD`), while quote and aggregate frames spell the pair `EUR/USD` | Topics use `EUR-USD`; frames of any spelling map back to `C:EURUSD` | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`: `C.EUR-USD` is subscribed and an `EUR/USD` frame reaches its stream | `tests/namespaces/test_forex_integration.py`: subscribe `C.EUR-USD` and `CA.EUR-USD`; record the acknowledgement and that frames arrive |
 | 27 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The reader assumes the canonical form: symbol pushdown compares the file's `ticker` column with canonical symbols, and `Symbol` holds the column as written. Were the files to write `X:EUR-USD`, a symbol request would match no row; that outcome becomes an owner decision | `tests/ingest/test_flatfiles.py`: symbol pushdown keeps the rows whose ticker equals a requested canonical symbol | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |
-| 28 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | A date `start` requests from the session's regular open less 4 days and post-filters `SessionEndDate`; an instant range whose trailing missing files hold a weekday rolls forward to the next file within 4 days of the run's first day | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept | `tests/namespaces/test_futures_integration.py`: `trades` and `bars` of ES for 2025-01-21, and one `YEAR` bar request; record the first row's time and whether the candles arrive |
-| 29 | Day alignment of crypto 1-day bars: every documented REST sample (`/prev`, the aggregates range) stamps a daily bar at midnight New York time, while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC; forex day bars may share the question | Each source's own stamp is kept and documented on `crypto.bars`; `history()` keeps the rows whose `Timestamp` falls in the requested UTC range, and `AUTO` may pick either source by symbol count | `tests/namespaces/test_crypto.py`: the documented REST and flat-file samples round-trip with their own stamps | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `Timestamp` and whether the OHLCV agree |
+| 28 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run of bars named by date, whether 7 days cover every flat-file roll-forward, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | Trades and quotes named by date are requested by `session_end_date`, which needs no margin; bars named by date are requested from the session's regular open less 4 days and post-filtered on `SessionEndDate`; bars named by instants are filtered locally on their own window; an instant range whose trailing missing files hold a weekday rolls forward up to 7 days and raises `MassiveError` if the next file is unpublished or absent | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept, and an unpublished or absent next file raises | `tests/namespaces/test_futures_integration.py`: `trades` and `bars` of ES for 2025-01-21, and one `YEAR` bar request; record the first row's time and whether the candles arrive |
+| 29 | Day cut of crypto 1-day bars: every documented REST sample (`/prev`, the aggregates range, grouped daily) stamps a daily bar at midnight New York time, while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC; any other stamp raises `MassiveError` naming the dataset and source. `AUTO` reads 1-day bars from flat files whenever S3 credentials are configured and REST otherwise | `tests/namespaces/test_crypto.py`: both cuts map to 00:00 UTC on every source; the documented New York-midnight samples raise | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `Timestamp` and whether the OHLCV agree |
+| 30 | The day a stock week bar starts on: Monday, or the Sunday before | A week runs Monday to Friday, and a bar stamped on the Saturday or Sunday before a week names that week; the REST `{from}` is that Monday | `tests/datasets/test_dates.py`, `tests/ingest/test_rest.py`: Sunday- and Monday-stamped week bars are kept for their week | `tests/namespaces/test_stocks_integration.py`: two weeks of AAPL week bars; record each `Timestamp` and whether a `{from}` on Monday returns the bar of that week |
+| 31 | Whether the aggregates range returns a partial bar for a period `{from}` falls inside | `{from}` is snapped to the calendar start of the first bar that fits wholly, and a bar whose period starts before the range is dropped whatever it is stamped | `tests/ingest/test_rest.py`: the week and month requests start at a period start | `tests/namespaces/test_stocks_integration.py`: month bars with `{from}` in mid-month; record the first bar's stamp and volume against the whole month's |
+| 32 | How bars of `multiplier` above 1 are aligned: to clock and calendar boundaries, or to `{from}` | Aligned to boundaries (whole UTC units for intraday bars, period starts for longer ones); a bar spans `multiplier` units from its own start | `tests/datasets/test_dates.py`: five-minute and two-week bars fit by their full span | `tests/namespaces/test_stocks_integration.py`: five-minute and two-week bars from an odd `{from}`; record their stamps |
+| 33 | Whether a futures session can end on a Saturday or Sunday | Sessions are requested on weekdays only; Saturday and Sunday dates are skipped without a request | `tests/ingest/test_rest.py`: a range over a weekend requests only its weekday sessions | `tests/namespaces/test_futures_integration.py`: `schedules` over a month; record every `session_end_date`'s weekday |
+| 34 | The stamp of forex 1-day bars on every source: the range (00:00 UTC in the samples), grouped daily, `/prev`, and `global_forex/day_aggs_v1` | Every stamp is moved to 00:00 UTC of its UTC day, unchecked | `tests/datasets/test_timestamps.py`, `tests/ingest/test_rest.py`: range and grouped stamps map to 00:00 UTC | `tests/namespaces/test_forex_integration.py`: one 1-day bar of `C:EURUSD` from each source for one day; record each `Timestamp` and whether the OHLCV agree |
+| 35 | Whether crypto range and `/prev` 1-day bars cover the UTC day: compare them with the same day rebuilt from 1-minute bars | Item 29's loud check: a stamp elsewhere than a UTC day boundary fails | `tests/namespaces/test_crypto.py`: as item 29 | `tests/namespaces/test_crypto_integration.py`: rebuild one day of `X:BTCUSD` from `minute_aggs_v1` over the UTC day and over the New York day; record which matches the range and `/prev` bars |
+| 36 | Whether grouped daily and `day_aggs_v1` hold the same pairs on a day, for forex and crypto | `AUTO` keeps one source for crypto 1-day bars; nothing assumes the sets match | `tests/datasets/test_history_source.py`: crypto 1-day bars keep one source whatever the symbol count | `tests/namespaces/test_forex_integration.py`, `tests/namespaces/test_crypto_integration.py`: one day of `dm.ALL` 1-day bars from both sources; record the pairs only one holds |
