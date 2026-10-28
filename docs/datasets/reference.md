@@ -29,6 +29,13 @@ Every ticker Massive supports, across asset classes, with its listing details.
 | `ShareClassFigi` | String | The share Class OpenFIGI number for this ticker. Find more information here (https://www.openfigi.com/about/figi) | REST | `share_class_figi` |
 | `Type` | String | The type of the asset. Find the types that we support via our Ticker Types API (https://massive.com/docs/rest/stocks/tickers/ticker-types). | REST | `type` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/crypto/tickers/all-tickers.md>
+- <https://massive.com/docs/rest/forex/tickers/all-tickers.md>
+- <https://massive.com/docs/rest/indices/tickers/all-tickers.md>
+- <https://massive.com/docs/rest/stocks/tickers/all-tickers.md>
+
 <a id="ticker_details"></a>
 
 ## `m.reference.ticker_details`
@@ -70,6 +77,13 @@ One ticker's company and listing details: address, branding, shares, and more.
 | `Type` | String | The type of the asset. Find the types that we support via our Ticker Types API (https://massive.com/docs/rest/stocks/tickers/ticker-types). | REST | `type` |
 | `WeightedSharesOutstanding` | double | The shares outstanding calculated assuming all shares of other share classes are converted to this share class. | REST | `weighted_shares_outstanding` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/crypto/tickers/ticker-overview.md>
+- <https://massive.com/docs/rest/forex/tickers/ticker-overview.md>
+- <https://massive.com/docs/rest/indices/tickers/ticker-overview.md>
+- <https://massive.com/docs/rest/stocks/tickers/ticker-overview.md>
+
 <a id="ticker_types"></a>
 
 ## `m.reference.ticker_types`
@@ -82,6 +96,11 @@ The ticker type codes Massive uses, such as `CS` for common stock, with their na
 | `Code` | String | A code used by Massive to refer to this ticker type. | REST | `code` |
 | `Description` | String | A short description of this ticker type. | REST | `description` |
 | `Locale` | String | An identifier for a geographical location. | REST | `locale` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/forex/tickers/ticker-types.md>
+- <https://massive.com/docs/rest/stocks/tickers/ticker-types.md>
 
 <a id="ticker_events"></a>
 
@@ -96,6 +115,10 @@ The timeline of a ticker's events, such as ticker changes, one row per event.
 | `Type` | String | The type of historical event for the asset | REST | `type` |
 | `TickerChangeTicker` | String | A ticker symbol | REST | `ticker_change.ticker` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/corporate-actions/ticker-events.md>
+
 <a id="related_companies"></a>
 
 ## `m.reference.related_companies`
@@ -106,6 +129,10 @@ The companies Massive relates to a ticker, from news and returns data, one row e
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "A ticker related to the requested ticker." | REST | `ticker` |
 | `Underlying` | String | The underlying instrument, in the library's canonical symbol form. From REST: the request's `ticker` parameter. | REST | request |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/tickers/related-tickers.md>
 
 <a id="news"></a>
 
@@ -131,6 +158,10 @@ News articles about tickers, with their publishers and sentiment insights.
 | `Tickers` | String | The ticker symbols associated with the article. | REST | `tickers` |
 | `Title` | String | The title of the news article. | REST | `title` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/news.md>
+
 <a id="exchanges"></a>
 
 ## `m.reference.exchanges`
@@ -149,6 +180,13 @@ The exchanges, trade reporting facilities, and SIPs Massive knows, with their co
 | `ParticipantId` | String | The ID used by SIP's to represent this exchange. | REST | `participant_id` |
 | `Type` | String | Represents the type of exchange. | REST | `type` |
 | `Url` | String | A link to this exchange's website, if one exists. | REST | `url` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/crypto/market-operations/exchanges.md>
+- <https://massive.com/docs/rest/forex/market-operations/exchanges.md>
+- <https://massive.com/docs/rest/options/market-operations/exchanges.md>
+- <https://massive.com/docs/rest/stocks/market-operations/exchanges.md>
 
 <a id="conditions"></a>
 
@@ -176,6 +214,12 @@ The trade and quote condition codes, with what each means and how it updates bar
 | `UpdateRulesMarketCenterUpdatesHighLow` | boolean | Whether or not trades with this condition update the high/low. | REST | `update_rules.market_center.updates_high_low` |
 | `UpdateRulesMarketCenterUpdatesOpenClose` | boolean | Whether or not trades with this condition update the open/close. | REST | `update_rules.market_center.updates_open_close` |
 | `UpdateRulesMarketCenterUpdatesVolume` | boolean | Whether or not trades with this condition update the volume. | REST | `update_rules.market_center.updates_volume` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/crypto/market-operations/condition-codes.md>
+- <https://massive.com/docs/rest/options/market-operations/condition-codes.md>
+- <https://massive.com/docs/rest/stocks/market-operations/condition-codes.md>
 
 <a id="market_status"></a>
 
@@ -205,6 +249,14 @@ Whether the markets are open now, by exchange, currency market, and index group.
 | `Market` | String | The status of the market as a whole. | REST | `market` |
 | `ServerTime` | Instant | The current time of the server, returned as a date-time in RFC3339 format. | REST | `serverTime` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/crypto/market-operations/market-status.md>
+- <https://massive.com/docs/rest/forex/market-operations/market-status.md>
+- <https://massive.com/docs/rest/indices/market-operations/market-status.md>
+- <https://massive.com/docs/rest/options/market-operations/market-status.md>
+- <https://massive.com/docs/rest/stocks/market-operations/market-status.md>
+
 <a id="market_holidays"></a>
 
 ## `m.reference.market_holidays`
@@ -219,6 +271,14 @@ The upcoming market holidays and early closes, one row per exchange and day.
 | `Name` | String | The name of the holiday. | REST | `name` |
 | `Open` | Instant | The market open time on the holiday (if it's not closed). | REST | `open` |
 | `Status` | String | The status of the market on the holiday. | REST | `status` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/crypto/market-operations/market-holidays.md>
+- <https://massive.com/docs/rest/forex/market-operations/market-holidays.md>
+- <https://massive.com/docs/rest/indices/market-operations/market-holidays.md>
+- <https://massive.com/docs/rest/options/market-operations/market-holidays.md>
+- <https://massive.com/docs/rest/stocks/market-operations/market-holidays.md>
 
 <a id="snapshots"></a>
 
@@ -303,44 +363,14 @@ Called as `m.snapshots`, a method of the session itself rather than of `m.refere
 | `UnderlyingAssetValue` | double | The value of the underlying index. | REST | `underlying_asset.value` |
 | `Value` | double | Value of Index. | REST | `value` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/crypto/snapshots/unified-snapshot.md>
+- <https://massive.com/docs/rest/forex/snapshots/unified-snapshot.md>
+- <https://massive.com/docs/rest/indices/snapshots/unified-snapshot.md>
+- <https://massive.com/docs/rest/options/snapshots/unified-snapshot.md>
+- <https://massive.com/docs/rest/stocks/snapshots/unified-snapshot.md>
+
 ---
 
 Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-28. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and for columns that only other datasets of the same kind fill.
-
-Massive's documentation of these datasets:
-
-- <https://massive.com/docs/rest/crypto/market-operations/condition-codes.md>
-- <https://massive.com/docs/rest/crypto/market-operations/exchanges.md>
-- <https://massive.com/docs/rest/crypto/market-operations/market-holidays.md>
-- <https://massive.com/docs/rest/crypto/market-operations/market-status.md>
-- <https://massive.com/docs/rest/crypto/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/crypto/tickers/all-tickers.md>
-- <https://massive.com/docs/rest/crypto/tickers/ticker-overview.md>
-- <https://massive.com/docs/rest/forex/market-operations/exchanges.md>
-- <https://massive.com/docs/rest/forex/market-operations/market-holidays.md>
-- <https://massive.com/docs/rest/forex/market-operations/market-status.md>
-- <https://massive.com/docs/rest/forex/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/forex/tickers/all-tickers.md>
-- <https://massive.com/docs/rest/forex/tickers/ticker-overview.md>
-- <https://massive.com/docs/rest/forex/tickers/ticker-types.md>
-- <https://massive.com/docs/rest/indices/market-operations/market-holidays.md>
-- <https://massive.com/docs/rest/indices/market-operations/market-status.md>
-- <https://massive.com/docs/rest/indices/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/indices/tickers/all-tickers.md>
-- <https://massive.com/docs/rest/indices/tickers/ticker-overview.md>
-- <https://massive.com/docs/rest/options/market-operations/condition-codes.md>
-- <https://massive.com/docs/rest/options/market-operations/exchanges.md>
-- <https://massive.com/docs/rest/options/market-operations/market-holidays.md>
-- <https://massive.com/docs/rest/options/market-operations/market-status.md>
-- <https://massive.com/docs/rest/options/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/stocks/corporate-actions/ticker-events.md>
-- <https://massive.com/docs/rest/stocks/market-operations/condition-codes.md>
-- <https://massive.com/docs/rest/stocks/market-operations/exchanges.md>
-- <https://massive.com/docs/rest/stocks/market-operations/market-holidays.md>
-- <https://massive.com/docs/rest/stocks/market-operations/market-status.md>
-- <https://massive.com/docs/rest/stocks/news.md>
-- <https://massive.com/docs/rest/stocks/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/stocks/tickers/all-tickers.md>
-- <https://massive.com/docs/rest/stocks/tickers/related-tickers.md>
-- <https://massive.com/docs/rest/stocks/tickers/ticker-overview.md>
-- <https://massive.com/docs/rest/stocks/tickers/ticker-types.md>
