@@ -60,14 +60,10 @@ _MINUTE_FILES: Final = "us_indices/minute_aggs_v1"
 _DAY_FILES: Final = "us_indices/day_aggs_v1"
 
 _SNAPSHOT_PAGE: Final = 250
-"""The indices snapshot's largest `limit`, so a long symbol list or `dm.ALL` takes few pages."""
+"""The indices snapshot's largest `limit`, and the most tickers one request names."""
 
 _AGGREGATES_PAGE: Final = 50_000
 """The range endpoint's largest `limit`, which counts the base aggregates behind a page."""
-
-_REFERENCE: Final = (
-    "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.md"
-)
 
 VALUES: Final = DatasetSpec(
     name="indices.values",
@@ -87,6 +83,7 @@ VALUES: Final = DatasetSpec(
         ),
     },
     symbol_param="ticker.any_of",
+    symbols_per_request=_SNAPSHOT_PAGE,
     page_size=_SNAPSHOT_PAGE,
 )
 """`m.indices.values`: index levels, streamed, fetched from the snapshot, and in flat files."""
@@ -116,7 +113,6 @@ BARS: Final = DatasetSpec(
             symbol=KeySpec("Ticker"), time=KeySpec("WindowStart")
         ),
     },
-    per_symbol=True,
     page_size=_AGGREGATES_PAGE,
 )
 """`m.indices.bars`: OHLC bars of every timespan; no volume and no `adjusted`."""
@@ -128,6 +124,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOT,
     keys={(_REST, _SNAPSHOT): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
+    symbols_per_request=_SNAPSHOT_PAGE,
     page_size=_SNAPSHOT_PAGE,
 )
 """`m.indices.snapshots`: the whole indices snapshot, one row per index."""
@@ -172,18 +169,20 @@ class _Indices(Namespace):
         stream verbs subscribe to the WebSocket `V` channel. `fetch()` reads the current level
         of each index from the indices snapshot (`/v3/snapshot/indices`), whose `last_updated`
         becomes `Timestamp`, so it returns the same columns as the stream; the snapshot takes
-        many indices per request, so a list needs few requests. An index
+        up to 250 indices per request, so a list needs one request per 250 indices. An index
         Massive does not know, or that the plan does not include, is left out of the result
-        with a WARNING that names it and Massive's reason. `history()`
-        reads the `us_indices/values_v1` flat files, the only history Massive has for index
-        values: it needs S3 credentials, and `source=dm.HistorySource.REST` raises
-        `ValueError`. There is no `limit`; every verb returns every row it is asked for.
+        with a WARNING that names it and Massive's reason. `history()` reads the
+        `us_indices/values_v1` flat files, the only history Massive has for index values: it
+        needs S3 credentials, and `source=dm.HistorySource.REST` raises `ValueError`. There is
+        no `limit`; every verb returns every row it is asked for.
 
         `dm.ALL` is accepted by the stream verbs (every index on the stream) and by
         `history()` (every index in the files). `fetch()` with `dm.ALL` raises `ValueError`;
         `m.indices.snapshots(dm.ALL).fetch()` returns every index. The values stream is
-        served from the indices TICK host (`MassiveConfig.ws_hosts`); a plan without index
-        values is refused there, and the stream fails with a message that names that host.
+        served from the indices TICK host. If that host refuses the `V` topic, the stream fails
+        with `EntitlementError`, whose message names the host,
+        `MassiveConfig.ws_hosts[AssetClass.INDICES]`, and `business.massive.com`, the host
+        Massive documents for index values.
 
         Each column is described in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.md#values,
@@ -311,7 +310,8 @@ class _Indices(Namespace):
         `LastUpdated`, the market status, and the index name. An index Massive does not know,
         or that the plan does not include, gives a row whose `Error` and `Message` say why.
         REST only: `fetch()` returns the snapshot once, and `poll(interval)` re-reads it every
-        interval, one request per cycle for the whole list, into a table keyed by `Symbol`.
+        interval, into a table keyed by `Symbol`. Each request names at most 250 indices, so a
+        list of 250 or fewer takes one request a cycle.
         This is the way to get current index levels on every plan.
 
         `dm.ALL` is every index Massive publishes, paged 250 at a time. `limit` caps the

@@ -2,20 +2,34 @@
 
 The fixtures under `tests/data/namespaces/indices/` are shaped from the vendor's examples for
 each source the namespace reads; a test checks that every key they carry is a generated field
-of that source, so no fixture can invent a wire key.
+of that source, so no fixture can invent a wire key. The end-to-end tests send those fixtures
+through the fake REST server, the fake WebSocket server, and the fake S3 bucket, and check the
+exact requests and the rows every dataset returns.
 """
+
+from __future__ import annotations
 
 import csv
 import io
 import json
-from collections.abc import Callable, Iterator, Mapping
+import logging
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, date, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+import pyarrow as pa
 import pytest
+from deephaven import arrow as dh_arrow
+from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
+from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+from deephaven_massive._datasets.request import HostDecision
+from deephaven_massive._enums import Recency
+from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import indices
 from deephaven_massive._namespaces.base import Namespace, query_class
@@ -27,6 +41,16 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
 )
 from deephaven_massive._session import CATALOG
+
+# The reply and envelope builders are plain functions of the fake, which no fixture hands over.
+from tests._fakes.rest import FakeRestServer, Reply, envelope
+
+if TYPE_CHECKING:
+    from deephaven.table import Table
+
+    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
+    from tests._fakes.s3 import FakeS3
+    from tests._fakes.ws import FakeMassiveServer
 
 OWNER = "namespaces/indices"
 SNAPSHOT = "/v3/snapshot/indices"
@@ -80,6 +104,13 @@ def test_the_datasets_read_the_documented_sources() -> None:
     )
     assert indices.SNAPSHOTS.sources == ((rest, SNAPSHOT),)
     assert indices.DAILY_OPEN_CLOSE.sources == ((rest, OPEN_CLOSE),)
+
+
+def test_every_dataset_is_an_instrument_dataset() -> None:
+    # Each row names one index, so the declared-keys gate requires its symbol key; the open-close
+    # rows carry it and the path takes one index a request.
+    for spec in indices.DATASETS:
+        assert CATALOG.takes_symbols(spec), spec.name
 
 
 def test_values_history_is_flat_files_only() -> None:
@@ -218,6 +249,7 @@ def test_websocket_fixtures_carry_every_generated_field(
     [
         ("us_indices_values_v1_2025-06-02.csv", "us_indices/values_v1"),
         ("us_indices_minute_aggs_v1_2025-06-02.csv", "us_indices/minute_aggs_v1"),
+        ("us_indices_day_aggs_v1_2025-06-02.csv", "us_indices/day_aggs_v1"),
     ],
 )
 def test_flat_file_fixtures_have_the_generated_header(
@@ -420,3 +452,362 @@ def test_each_docstring_links_its_column_reference(spec: DatasetSpec) -> None:
     assert f"docs/datasets/indices.md#{dataset.replace('.', '-')}," in doc
     assert "`limit`" in doc
     assert "`dm.ALL`" in doc
+
+
+# --- End to end: REST -------------------------------------------------------------------------
+
+MS = 10**6
+NS = 10**9
+MIDNIGHT_MS = 1748836800000  # 2025-06-02 00:00 in New York
+
+
+@pytest.fixture
+def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
+    session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield session
+    session.close()
+
+
+def rows(table: Table) -> list[dict[str, Any]]:
+    # Instants become epoch nanoseconds, so assertions keep every digit.
+    data = dh_arrow.to_arrow(table)
+    columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
+    out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    return out
+
+
+def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
+    # Every GET the server received: its path and decoded query.
+    return [
+        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
+        for r in server.requests
+        if r.method == "GET"
+    ]
+
+
+def test_values_fetch_reads_the_snapshot_and_drops_error_rows(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_rest.reply(SNAPSHOT, Reply(load_fixture(OWNER, "snapshot.json")))
+    with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
+        out = rows(rest_session.indices.values(["I:SPX", "NDX", "I:NOPE"]).fetch())
+    assert sent(fake_rest) == [
+        (SNAPSHOT, {"ticker.any_of": ["I:NDX,I:NOPE,I:SPX"], "limit": ["250"]})
+    ]
+    assert out == [
+        {"Symbol": "I:SPX", "Timestamp": 1748894400 * NS, "Value": 5935.94},
+        {"Symbol": "I:NDX", "Timestamp": 1748894400 * NS, "Value": 21491.1},
+    ]
+    assert "NOT_FOUND for I:NOPE: Ticker not found.; the row is dropped" in caplog.text
+
+
+def test_the_snapshot_names_at_most_250_indices_a_request(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(SNAPSHOT, Reply(envelope([])))
+    symbols = [f"I:X{n:03d}" for n in range(251)]
+    rest_session.indices.snapshots(symbols).fetch()
+    batches = [query["ticker.any_of"][0].split(",") for _, query in sent(fake_rest)]
+    # The batches are requested concurrently, so they arrive in either order.
+    assert sorted(len(batch) for batch in batches) == [1, 250]
+    assert sorted(batches[0] + batches[1]) == symbols
+
+
+def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(SNAPSHOT, Reply(load_fixture(OWNER, "snapshot.json")))
+    q = rest_session.indices.snapshots(
+        ["I:SPX", "I:NDX", "I:NOPE"], sort="ticker", order=dm.Order.DESC
+    )
+    out = rows(q.fetch())
+    assert sent(fake_rest) == [
+        (
+            SNAPSHOT,
+            {
+                "ticker.any_of": ["I:NDX,I:NOPE,I:SPX"],
+                "sort": ["ticker"],
+                "order": ["desc"],
+                "limit": ["250"],
+            },
+        )
+    ]
+    assert out[0] == {
+        "Symbol": "I:SPX",
+        "Error": None,
+        "LastUpdated": 1748894400 * NS,
+        "MarketStatus": "closed",
+        "Message": None,
+        "Name": "S&P 500",
+        "SessionChange": 24.25,
+        "SessionChangePercent": 0.41,
+        "SessionClose": 5935.94,
+        "SessionHigh": 5940.35,
+        "SessionLow": 5876.0,
+        "SessionOpen": 5896.68,
+        "SessionPreviousClose": 5911.69,
+        "Timeframe": "REAL-TIME",
+        "Type": "indices",
+        "Value": 5935.94,
+    }
+    assert [(r["Symbol"], r["Error"], r["Message"], r["Value"]) for r in out[1:]] == [
+        ("I:NDX", None, None, 21491.1),
+        ("I:NOPE", "NOT_FOUND", "Ticker not found.", None),
+    ]
+
+
+def test_previous_day_bars_fetch_one_index_a_request(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(quote("/v2/aggs/ticker/I:SPX/prev"), Reply(load_fixture(OWNER, "prev.json")))
+    out = rows(rest_session.indices.bars("SPX", dm.Timespan.DAY).fetch())
+    assert sent(fake_rest) == [("/v2/aggs/ticker/I:SPX/prev", {})]
+    assert out == [
+        {
+            "Symbol": "I:SPX",
+            "Timestamp": MIDNIGHT_MS * MS,
+            "Open": 5896.68,
+            "Close": 5935.94,
+            "High": 5940.35,
+            "Low": 5876.0,
+            "OfficialOpen": None,
+            "EndTimestamp": None,
+        }
+    ]
+
+
+def test_bars_history_over_rest_fills_the_range_and_the_symbol(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    path = f"/v2/aggs/ticker/I:SPX/range/1/minute/{MIDNIGHT_MS}/{MIDNIGHT_MS + 86_400_000 - 1}"
+    fake_rest.reply(quote(path), Reply(load_fixture(OWNER, "range.json")))
+    q = rest_session.indices.bars(["I:SPX"])
+    out = rows(q.history(date(2025, 6, 2), date(2025, 6, 2), source=dm.HistorySource.REST))
+    assert sent(fake_rest) == [(path, {"limit": ["50000"]})]
+    assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Close"]) for r in out] == [
+        ("I:SPX", 1748871000000 * MS, 5896.68, 5899.02),
+        ("I:SPX", 1748871060000 * MS, 5899.02, 5898.4),
+    ]
+
+
+def test_daily_open_close_fetches_each_index_for_the_day(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    spx = json.loads(load_fixture(OWNER, "open_close.json"))
+    ndx = {**spx, "symbol": "I:NDX", "close": 21491.1}
+    del ndx["afterHours"]
+    fake_rest.reply(quote("/v1/open-close/I:SPX/2025-06-02"), Reply(spx))
+    fake_rest.reply(quote("/v1/open-close/I:NDX/2025-06-02"), Reply(ndx))
+    out = rows(rest_session.indices.daily_open_close(["I:SPX", "I:NDX"], "2025-06-02").fetch())
+    assert sorted(path for path, _ in sent(fake_rest)) == [
+        "/v1/open-close/I:NDX/2025-06-02",
+        "/v1/open-close/I:SPX/2025-06-02",
+    ]
+    day = {"From": date(2025, 6, 2), "High": 5940.35, "Low": 5876.0, "Open": 5896.68}
+    assert sorted(out, key=lambda r: r["Symbol"]) == [
+        {"Symbol": "I:NDX", "AfterHours": None, "Close": 21491.1, **day, "PreMarket": 5896.68},
+        {"Symbol": "I:SPX", "AfterHours": 5937.1, "Close": 5935.94, **day, "PreMarket": 5896.68},
+    ]
+
+
+# --- End to end: WebSocket --------------------------------------------------------------------
+
+SOCKET = HostDecision("socket.test", Recency.REALTIME, "test evidence")
+
+
+def wait_for(condition: Callable[[], bool]) -> None:
+    # Bounded wait for the flush thread and an update-graph cycle to apply a change.
+    pause = threading.Event()  # never set; only paces the loop
+    for _ in range(500):
+        if condition():
+            return
+        pause.wait(0.02)
+    assert condition()
+
+
+@pytest.fixture
+def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]:
+    # A session whose connections reach the fake server, as if the TICK host were real-time.
+    session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
+
+    def client(
+        url: str,
+        *,
+        sources: Sequence[Source],
+        on_open: Callable[[int], None],
+        on_status: Callable[[int, Status], None],
+        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
+        on_state: Callable[[WsState, float | WireError | None], None],
+    ) -> _massive.WsClient:
+        return _massive.WsClient(
+            fake_ws_server.url("/" + url.split("/", 3)[3]),
+            api_key="test-key",
+            sources=sources,
+            on_open=on_open,
+            on_status=on_status,
+            on_data=on_data,
+            on_state=on_state,
+            reconnect_backoff=0.05,
+            max_reconnect_backoff=0.1,
+        )
+
+    connections = ws.WsConnections(
+        session._core,
+        resolve_host=lambda *_: SOCKET,
+        record_verdict=lambda *_: None,
+        client_factory=client,
+    )
+    clients: Any = session._core._ports
+    clients._streams = connections
+    session._core.on_close(connections.close)
+    yield session
+    session.close()
+
+
+def subscribed(server: FakeMassiveServer, topic: str) -> None:
+    def named() -> bool:
+        frames = [json.loads(f) for f in server.frames()]
+        return any(topic in f["params"].split(",") for f in frames if f["action"] == "subscribe")
+
+    server.wait_for(lambda s: bool(s.connections) and s.connections[-1].auth is not None)
+    server.wait_for(lambda _: named())
+
+
+@pytest.mark.parametrize(
+    ("fixture", "topic", "expected"),
+    [
+        (
+            "ws_values.json",
+            "V.I:SPX",
+            {"Symbol": "I:SPX", "Timestamp": 1748894399000 * MS, "Value": 5935.94},
+        ),
+        (
+            "ws_minute_bars.json",
+            "AM.I:SPX",
+            {
+                "Symbol": "I:SPX",
+                "Timestamp": 1748894340000 * MS,
+                "Open": 5930.1,
+                "Close": 5935.94,
+                "High": 5936.2,
+                "Low": 5929.8,
+                "OfficialOpen": 5896.68,
+                "EndTimestamp": 1748894400000 * MS,
+            },
+        ),
+    ],
+    ids=["values", "minute-bars"],
+)
+def test_a_frame_lands_in_blink(
+    *,
+    ws_session: dm.MassiveSession,
+    fake_ws_server: FakeMassiveServer,
+    load_fixture: Callable[[str, str], bytes],
+    fixture: str,
+    topic: str,
+    expected: dict[str, object],
+) -> None:
+    if topic.startswith("V."):
+        blink = ws_session.indices.values("SPX").blink()
+    else:
+        blink = ws_session.indices.bars("SPX").blink()
+    seen = blink_to_append_only(blink)
+    subscribed(fake_ws_server, topic)
+    fake_ws_server.send(load_fixture(OWNER, fixture).decode())
+    wait_for(lambda: seen.size == 1)
+    assert rows(seen) == [expected]
+
+
+def test_a_refused_values_topic_names_the_indices_host_setting(
+    *, ws_session: dm.MassiveSession, fake_ws_server: FakeMassiveServer
+) -> None:
+    fake_ws_server.refuse["V.I:SPX"] = "not authorized"
+    result = ws_session.indices.values("I:SPX").blink()
+
+    def error() -> str | None:
+        assert ws_session._core.diagnostics.barrier().wait(15.0)
+        streams = rows(ws_session.streams())
+        failed = [s["Error"] for s in streams if s["State"] == "FAILED"]
+        return failed[0] if failed else None
+
+    wait_for(lambda: error() is not None)
+    message = str(error())
+    assert "socket.test/indices refused V.I:SPX: not authorized" in message
+    assert "MassiveConfig.ws_hosts[AssetClass.INDICES]" in message
+    assert "business.massive.com" in message
+    del result
+
+
+# --- End to end: flat files -------------------------------------------------------------------
+
+
+@pytest.fixture
+def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
+    fields = {
+        "api_key": "test-key",
+        "s3_access_key_id": "AKIDFLATFILES",
+        "s3_secret_access_key": "flat-file-secret",
+    }
+    session = dm.MassiveSession(dm.MassiveConfig(**cast("dict[str, Any]", fields)))
+    yield session
+    session.close()
+
+
+@pytest.mark.parametrize(
+    ("prefix", "fixture", "expected"),
+    [
+        (
+            "us_indices/values_v1",
+            "us_indices_values_v1_2025-06-02.csv",
+            [("I:SPX", 1748871000 * NS, 5896.68), ("I:SPX", 1748871001 * NS, 5897.12)],
+        ),
+        (
+            "us_indices/minute_aggs_v1",
+            "us_indices_minute_aggs_v1_2025-06-02.csv",
+            [("I:SPX", 1748871000 * NS, 5899.02)],
+        ),
+        (
+            "us_indices/day_aggs_v1",
+            "us_indices_day_aggs_v1_2025-06-02.csv",
+            [("I:SPX", MIDNIGHT_MS * MS, 5935.94)],
+        ),
+    ],
+    ids=["values", "minute-bars", "day-bars"],
+)
+def test_one_flat_file_round_trips(
+    *,
+    s3_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    make_csv_gz: Callable[[str], bytes],
+    prefix: str,
+    fixture: str,
+    expected: list[tuple[object, ...]],
+) -> None:
+    text = load_fixture(OWNER, fixture).decode()
+    fake_s3.put(f"{prefix}/2025/06/2025-06-02.csv.gz", make_csv_gz(text))
+    q: HistoryQuery
+    if prefix == "us_indices/values_v1":
+        q, value = s3_session.indices.values(["I:SPX"]), "Value"
+    elif prefix == "us_indices/day_aggs_v1":
+        q, value = s3_session.indices.bars(["I:SPX"], dm.Timespan.DAY), "Close"
+    else:
+        q, value = s3_session.indices.bars(["I:SPX"]), "Close"
+    out = rows(q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES))
+    assert [(r["Symbol"], r["Timestamp"], r[value]) for r in out] == expected
