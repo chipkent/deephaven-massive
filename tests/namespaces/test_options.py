@@ -690,19 +690,23 @@ def test_bars_fetch_the_previous_session_and_read_a_range(
     ]
 
 
-def test_a_daily_bar_stamped_off_a_known_time_fails_loudly(
+def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_fails(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # 13:00 New York time is neither the day's start nor the session close.
+    # The 13:00 close of a short day means its day; 14:30 is neither a start nor a close.
     early = int(datetime(2024, 11, 29, 18, tzinfo=UTC).timestamp()) * 1000
+    afternoon = early + 90 * 60_000
     fake_rest.reply(
         wire(f"/v2/aggs/ticker/{TSLA}/prev"),
         Reply({"status": "OK", "results": [{"T": TSLA, "t": early, "c": 1.0}]}),
+        Reply({"status": "OK", "results": [{"T": TSLA, "t": afternoon, "c": 1.0}]}),
     )
+    prev = rows(rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch())
+    assert [r["Timestamp"] for r in prev] == [ny_midnight_ns(date(2024, 11, 29))]
     with pytest.raises(
         dm.MassiveError,
         match=r"^options\.bars: a 1-day bar from /v2/aggs/ticker/\{optionsTicker\}/prev is "
-        r"stamped 2024-11-29T18:00:00\+00:00 \(2024-11-29T13:00:00-05:00 in America/New_York\)",
+        r"stamped 2024-11-29T19:30:00\+00:00 \(2024-11-29T14:30:00-05:00 in America/New_York\)",
     ):
         rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch()
 

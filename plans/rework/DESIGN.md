@@ -1754,25 +1754,27 @@ millisecond, so a New York session close is 16:00 in winter and in summer:
 
 | Class | 1-day bars (`multiplier` 1) | Longer bars (several days, or a week or longer; REST range only) |
 |---|---|---|
-| Stocks | 00:00 (range); 16:00, the session close (grouped daily, `/prev`, `day_aggs_v1`) | 00:00 |
-| Options | 00:00 (range, `day_aggs_v1`); 16:00 (`/prev`) | 00:00 |
+| Stocks | 00:00 (range); 16:00, the session close (grouped daily, `/prev`, `day_aggs_v1`); 13:00, the close of a short trading day | 00:00 |
+| Options | 00:00 (range, `day_aggs_v1`); 16:00 (`/prev`); 13:00, the close of a short trading day | 00:00 |
 | Indices | 00:00; 01:00, which is midnight in Chicago (range, `day_aggs_v1`); 16:00 (`/prev`) | 00:00; 01:00 |
 | Forex | 00:00 (range); 23:59:59.999, the day's last millisecond (grouped daily, `/prev`, `day_aggs_v1`) | 00:00 |
 | Crypto | 00:00; 23:59:59.999 (`day_aggs_v1`) | 00:00 |
 
 A time known for one class is not accepted for another, and every class's times apply to every
 source, since each class accepts 00:00 anyway. The indices longer bars' 01:00 is presumed from
-the range's 1-day bars; no sample shows one. A 1-day bar stamped at its day's end lies inside
+the range's 1-day bars; no sample shows one. The stock and option 13:00 is presumed too: a
+short trading day (the day after Thanksgiving, Christmas Eve, July 3) closes at 13:00 New York
+time, and a source that stamps a day at its close may stamp such a day there, so the check
+accepts it rather than fail real data on every short day. A 1-day bar stamped at its day's end lies inside
 its day, so the whole-window rule above keeps or drops it exactly as it does the same bar
 stamped at the start. Crypto's day cut is not verified: the documented range and `/prev` samples
 sit at midnight New York time and the grouped-daily samples at times such as 20:48 UTC, no day
 boundary at all, so crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all raise if
 live REST data follows those samples, until the owner decides after the live check
-([section 23](#23-open-verification-items) item 1). A stock day that closes early (the day after
-Thanksgiving) may be stamped at its 13:00 close, which raises the same way until the live check
-of item 41 settles it. `AUTO` picks the source as for every other dataset
-([section 16](#16-historysourceauto)): the check, not a fixed source, keeps both sources on the
-same days.
+([section 23](#23-open-verification-items) item 1). The live checks of items 41 to 43 confirm
+the stock, option, and index stamps, the 13:00 close included. `AUTO` picks the source as for
+every other dataset ([section 16](#16-historysourceauto)): the check, not a fixed source, keeps
+both sources on the same days.
 
 **One-day parameters.** A dataset parameter that names one calendar day (`daily_open_close`'s
 `date`, `options.contracts`' `as_of`, `reference.tickers`' and `ticker_details`' `date`)
@@ -4269,8 +4271,10 @@ document already reflects them.
     and crypto. This extends decision 52's UTC stamping of forex and crypto 1-day bars to
     stocks, options, and indices, whose grouped daily, `/prev`, and stock `day_aggs_v1` bars
     Massive stamps at the 16:00 New York session close while the range stamps the day's start.
-    Only the stamps the vendored samples show for a class are moved (the table of
-    [section 12](#12-timestamp-units-and-day-boundaries)); any other stamp, forex included,
+    Only the stamps the vendored samples show for a class, and for stocks and options the
+    13:00 close of a short trading day (so a known early close never fails real data), are
+    moved (the table of [section 12](#12-timestamp-units-and-day-boundaries)); any other
+    stamp, forex included,
     raises `MassiveError` naming the dataset, the source, and the other source, as decision
     52's crypto check does, instead of being relabelled. Futures bars keep Massive's
     `window_start` and their `SessionEndDate` label. A bars dataset's `Timestamp` is described
@@ -4326,6 +4330,6 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 38 | Whether crypto range and `/prev` 1-day bars cover the UTC day: compare them with the same day rebuilt from 1-minute bars | Item 1's loud check: a stamp elsewhere than a UTC day boundary fails | `tests/namespaces/test_crypto.py`: as item 1 | `tests/namespaces/test_crypto_integration.py`: rebuild one day of `X:BTCUSD` from `minute_aggs_v1` over the UTC day and over the New York day; record which matches the range and `/prev` bars |
 | 39 | Whether grouped daily and `day_aggs_v1` hold the same pairs on a day, for forex and crypto | `AUTO` keeps one source for crypto 1-day bars; nothing assumes the sets match | `tests/datasets/test_history_source.py`: crypto 1-day bars keep one source whatever the symbol count | `tests/namespaces/test_forex_integration.py`, `tests/namespaces/test_crypto_integration.py`: one day of `dm.ALL` 1-day bars from both sources; record the pairs only one holds |
 | 40 | Which session a futures bar of several sessions or longer is labelled with (`SessionEndDate` of its first or last session), and how such bars are aligned | Futures bars of a session or longer with `multiplier` above 1 named by dates raise `ValueError` ("pass datetimes, or multiplier=1"); named by datetimes, they are kept by their own window | `tests/datasets/test_history_source.py`, `tests/namespaces/test_futures.py`: the refusal for 2-session, 2-week, and 2-month bars | `tests/namespaces/test_futures_integration.py`: 2-session and 2-month bars of ES over a quarter; record each bar's `Timestamp` and `SessionEndDate` |
-| 41 | The stamps of stock 1-day and longer bars on every source: the range (00:00 New York time in the samples), grouped daily, `/prev`, and `us_stocks_sip/day_aggs_v1` (16:00 New York time, the session close, in the samples), on a full day and on a day that closes early at 13:00 (2024-11-29), and of week and month bars from the range | A 1-day stamp at 00:00 or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar must be stamped 00:00 New York time, and any other stamp raises `MassiveError` naming the dataset, the source, and the other source | `tests/datasets/test_timestamps.py`, `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`, `tests/namespaces/test_stocks.py`: the documented stamps of every source map to 00:00 New York time; 13:00 and a longer bar at 16:00 raise | `tests/namespaces/test_stocks_integration.py`: one 1-day bar of AAPL for 2024-11-27 and 2024-11-29 from each of the four sources, and two weeks and two months of AAPL bars from the range; record each `Timestamp` and whether the OHLCV agree |
-| 42 | The stamps of option 1-day and longer bars on every source: the range and `us_options_opra/day_aggs_v1` (00:00 New York time in the samples) and `/prev` (16:00 New York time) | As item 41, for options | `tests/namespaces/test_options.py`: the documented stamps map to 00:00 New York time; another stamp raises | `tests/namespaces/test_options_integration.py`: one 1-day bar of a listed SPY contract from the range, `/prev`, and `day_aggs_v1` for one day, and its week bars from the range; record each `Timestamp` |
+| 41 | The stamps of stock 1-day and longer bars on every source: the range (00:00 New York time in the samples), grouped daily, `/prev`, and `us_stocks_sip/day_aggs_v1` (16:00 New York time, the session close, in the samples), on a full day and on a day that closes early at 13:00 (2024-11-29), and of week and month bars from the range | A 1-day stamp at 00:00, 13:00 (a short day's close, presumed), or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar must be stamped 00:00 New York time, and any other stamp raises `MassiveError` naming the dataset, the source, and the other source | `tests/datasets/test_history_source.py`, `tests/datasets/test_timestamps.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_stocks.py`: the documented stamps of every source and a 13:00 close map to 00:00 New York time; 14:30 raises | `tests/namespaces/test_stocks_integration.py`: one 1-day bar of AAPL for 2024-11-27 and 2024-11-29 from each of the four sources, and two weeks and two months of AAPL bars from the range; record each `Timestamp` and whether the OHLCV agree |
+| 42 | The stamps of option 1-day and longer bars on every source: the range and `us_options_opra/day_aggs_v1` (00:00 New York time in the samples) and `/prev` (16:00 New York time) | As item 41, for options | `tests/namespaces/test_options.py`: the documented stamps and a 13:00 close map to 00:00 New York time; another stamp raises | `tests/namespaces/test_options_integration.py`: one 1-day bar of a listed SPY contract from the range, `/prev`, and `day_aggs_v1` for 2024-11-27 and 2024-11-29, and its week bars from the range; record each `Timestamp` |
 | 43 | The stamps of index 1-day and longer bars on every source: the range and `us_indices/day_aggs_v1` (01:00 New York time, midnight in Chicago, in the samples) and `/prev` (16:00 New York time); whether a bar stamped 01:00 New York time covers the New York day, the Chicago day, or the trading session; and whether longer bars are stamped 01:00 too | A 1-day stamp at 00:00, 01:00, or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar stamped 00:00 or 01:00 New York time to 00:00, and any other stamp raises `MassiveError` naming the dataset, the source, and the other source | `tests/namespaces/test_indices.py`, `tests/ingest/test_flatfiles.py`: the documented stamps of every source map to 00:00 New York time; another stamp raises | `tests/namespaces/test_indices_integration.py`: one 1-day bar of `I:SPX` and of `I:AAVE100` (which updates around the clock) from the range, `/prev`, and `day_aggs_v1` for one day, rebuilt from minute bars over the New York and the Chicago day, and two weeks of week bars; record each `Timestamp` and which day the OHLC match |

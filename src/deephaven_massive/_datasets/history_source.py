@@ -346,6 +346,11 @@ _SESSION_CLOSE: Final = time(16)
 """The 16:00 New York session close: grouped daily, `/prev`, and the stock day files stamp a
 stock, option, or index 1-day bar there."""
 
+_EARLY_CLOSE: Final = time(13)
+"""The 13:00 New York close of a short trading day (the day after Thanksgiving, Christmas Eve,
+July 3), presumed to be where the sources that stamp a stock or option 1-day bar at its
+session close stamp such a day."""
+
 _CHICAGO_MIDNIGHT: Final = time(1)
 """Midnight in Chicago, as New York time (the two zones change clocks together): the indices
 range and day files stamp their 1-day bars there."""
@@ -355,14 +360,15 @@ _LAST_MILLISECOND: Final = time(23, 59, 59, 999_000)
 day files stamp their 1-day bars there."""
 
 _ONE_DAY_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
-    AssetClass.STOCKS: frozenset({_SESSION_CLOSE}),
-    AssetClass.OPTIONS: frozenset({_SESSION_CLOSE}),
+    AssetClass.STOCKS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE}),
+    AssetClass.OPTIONS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE}),
     AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT, _SESSION_CLOSE}),
     AssetClass.FOREX: frozenset({_LAST_MILLISECOND}),
     AssetClass.CRYPTO: frozenset({_LAST_MILLISECOND}),
 }
-"""Per class, the times of day besides 00:00 at which some source stamps a 1-day bar, all from
-Massive's documented samples. Futures bars keep their own stamps and session labels."""
+"""Per class, the times of day besides 00:00 at which some source stamps a 1-day bar: those of
+Massive's documented samples, and for stocks and options the 13:00 close of a short trading
+day. Futures bars keep their own stamps and session labels."""
 
 _LONGER_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
     AssetClass.STOCKS: frozenset(),
@@ -387,7 +393,8 @@ def stamp_rule(spec: DatasetSpec, request: Request) -> StampRule | None:
     day or longer, of every class but futures, is stamped at 00:00 of the day it starts on in
     the class day zone (New York for stocks, options, and indices; UTC for forex and crypto).
     Massive stamps a 1-day bar at the day's start on the aggregates range but at the session
-    close (stocks, options, indices) or the day's last millisecond (forex, crypto) on other
+    close (stocks, options, indices; 13:00 New York time on a short stock trading day) or the
+    day's last millisecond (forex, crypto) on other
     sources, and the indices range and day files at midnight in Chicago; those stamps move to
     the day's start, and any other stamp fails, since such a bar may cover other days than its
     label (the documented crypto REST samples sit at midnight New York time, another day cut).

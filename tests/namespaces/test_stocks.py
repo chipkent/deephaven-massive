@@ -1338,6 +1338,9 @@ def flat_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
     m.close()
 
 
+HOUR_NS = 3600 * 10**9
+
+
 def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
     *, fake_rest: FakeRestServer, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:
@@ -1380,23 +1383,26 @@ def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
     assert stamped == [[("BCC", start)]] * 4
 
 
-def test_a_day_file_stamped_at_an_early_close_fails_loudly(
+def test_a_day_file_moves_an_early_close_and_refuses_an_unknown_stamp(
     *, flat_session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:
-    # 13:00 New York time, the close of a short day, is not a stamp Massive is known to use.
-    early = new_york_midnight_ns(date(2024, 11, 29)) + 13 * 3600 * 10**9
-    fake_s3.put(
-        "us_stocks_sip/day_aggs_v1/2024/11/2024-11-29.csv.gz",
-        make_csv_gz(
-            "ticker,volume,open,close,high,low,window_start,transactions\n"
-            f"BCC,1,61.68,61.99,62.565,61.41,{early},1\n"
-        ),
-    )
+    # The day after Thanksgiving closes at 13:00 New York time; that close means its day.
+    day = new_york_midnight_ns(date(2024, 11, 29))
+    key = "us_stocks_sip/day_aggs_v1/2024/11/2024-11-29.csv.gz"
+    header = "ticker,volume,open,close,high,low,window_start,transactions\n"
     query = flat_session.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
+    fake_s3.put(
+        key, make_csv_gz(f"{header}BCC,1,61.68,61.99,62.565,61.41,{day + 13 * HOUR_NS},1\n")
+    )
+    out = table_rows(query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES))
+    assert [(r["Symbol"], r["Timestamp"]) for r in out] == [("BCC", day)]
+    # 14:30 is no stamp Massive is known to use: the bar may cover another day, so it fails.
+    afternoon = day + 29 * HOUR_NS // 2
+    fake_s3.put(key, make_csv_gz(f"{header}BCC,1,61.68,61.99,62.565,61.41,{afternoon},1\n"))
     with pytest.raises(
         dm.MassiveError,
         match=r"^stocks\.bars: a 1-day bar from the flat files us_stocks_sip/day_aggs_v1 is "
-        r"stamped 2024-11-29T18:00:00\+00:00 .*; read REST with source=dm\.HistorySource\.REST",
+        r"stamped 2024-11-29T19:30:00\+00:00 .*; read REST with source=dm\.HistorySource\.REST",
     ):
         query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES)
 

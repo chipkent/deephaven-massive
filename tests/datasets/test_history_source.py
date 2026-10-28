@@ -278,9 +278,10 @@ def test_stamp_rule() -> None:
     # 1-day bars accept each class's documented vendor stamps; longer bars only the start.
     day = request(timespan=Timespan.DAY)
     close, chicago, last_ms = time(16), time(1), time(23, 59, 59, 999_000)
+    closes = frozenset({time(13), close})  # a short trading day closes at 13:00
     options_bars = replace(STOCK_BARS, asset_class=AssetClass.OPTIONS)
-    assert stamp_rule(STOCK_BARS, day) == StampRule(NEW_YORK, frozenset({close}), "1-day bar")
-    assert stamp_rule(options_bars, day) == StampRule(NEW_YORK, frozenset({close}), "1-day bar")
+    assert stamp_rule(STOCK_BARS, day) == StampRule(NEW_YORK, closes, "1-day bar")
+    assert stamp_rule(options_bars, day) == StampRule(NEW_YORK, closes, "1-day bar")
     assert stamp_rule(INDEX_BARS, day) == StampRule(
         NEW_YORK, frozenset({chicago, close}), "1-day bar"
     )
@@ -311,14 +312,15 @@ def test_stamp_rule() -> None:
 def test_a_stamp_rule_stamps_through_the_timestamp_routine() -> None:
     rule = stamp_rule(STOCK_BARS, request(timespan=Timespan.DAY))
     assert rule is not None
+    # The 16:00 close, and the 13:00 close of a short day (July 3), move to the day's start.
     close = datetime(2025, 7, 1, 16, tzinfo=NEW_YORK)
-    values = pa.array([close], pa.timestamp("ns", "UTC"))
+    early = datetime(2025, 7, 3, 13, tzinfo=NEW_YORK)
+    values = pa.array([close, early], pa.timestamp("ns", "UTC"))
     moved = rule.stamp("stocks.bars", values, source="s", remedy="r").to_pylist()
-    assert moved == [datetime(2025, 7, 1, tzinfo=NEW_YORK)]
+    assert moved == [datetime(2025, 7, 1, tzinfo=NEW_YORK), datetime(2025, 7, 3, tzinfo=NEW_YORK)]
+    afternoon = close.replace(hour=14, minute=30)
     with pytest.raises(dm.MassiveError, match=r"^stocks\.bars: a 1-day bar from s is stamped"):
-        rule.stamp(
-            "stocks.bars", pa.array([close.replace(hour=13)], values.type), source="s", remedy="r"
-        )
+        rule.stamp("stocks.bars", pa.array([afternoon], values.type), source="s", remedy="r")
 
 
 def test_published_reads_the_class_zone_and_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:

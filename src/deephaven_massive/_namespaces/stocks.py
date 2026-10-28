@@ -1831,10 +1831,10 @@ class _Stocks(Namespace):
 
         A bar of a day or longer is stamped at 00:00 New York time of the day it starts on,
         whatever the source: the range stamps a 1-day bar there, while grouped daily, `/prev`,
-        and the day files stamp it at the 16:00 session close, which is moved to the day's
-        start. A bar stamped at any other time of day, or a longer bar stamped elsewhere than
-        00:00, fails the call with `MassiveError` naming the source, since it may cover other
-        days than its label.
+        and the day files stamp it at the 16:00 session close (13:00 on a short trading day),
+        which is moved to the day's start. A bar stamped at any other time of day, or a longer
+        bar stamped elsewhere than 00:00, fails the call with `MassiveError` naming the source,
+        since it may cover other days than its label.
 
         `history()` has no `limit`: it pages internally. It returns only the bars whose whole
         window lies inside the range and has ended: a week runs Monday to Friday and a month

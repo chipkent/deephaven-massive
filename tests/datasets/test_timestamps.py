@@ -300,7 +300,7 @@ def test_new_york_stamps_move_by_wall_clock_across_daylight_saving_time() -> Non
         (UTC, (LAST_MS,), 5 * HOUR_NS),  # midnight New York time: another day cut
         (UTC, (LAST_MS,), DAY_NS - MS_NS - 1),
         (UTC, (), DAY_NS - MS_NS),  # a longer bar must start at 00:00
-        (NEW_YORK, (CLOSE,), 5 * HOUR_NS + 13 * HOUR_NS),  # a 13:00 early close
+        (NEW_YORK, (CLOSE,), 5 * HOUR_NS + 14 * HOUR_NS),  # 14:00, no known stamp
         (NEW_YORK, (CLOSE,), 5 * HOUR_NS + 16 * HOUR_NS + MS_NS),  # a millisecond after 16:00
         (NEW_YORK, (CLOSE,), 0),  # 19:00 New York time, the day before
         (NEW_YORK, (), 5 * HOUR_NS + 16 * HOUR_NS),  # a longer bar at the close
@@ -329,7 +329,7 @@ def test_an_unknown_stamp_fails_loudly(zone: tzinfo, known: tuple[time, ...], of
 
 
 def test_the_refusal_names_the_stamp_in_both_zones_and_the_accepted_times() -> None:
-    close = datetime(2024, 11, 29, 13, tzinfo=NEW_YORK)
+    close = datetime(2024, 11, 29, 14, 30, tzinfo=NEW_YORK)
     with pytest.raises(MassiveError) as caught:
         day_starts(
             "stocks.bars",
@@ -342,7 +342,7 @@ def test_the_refusal_names_the_stamp_in_both_zones_and_the_accepted_times() -> N
         )
     assert str(caught.value) == (
         "stocks.bars: a 1-day bar from the flat files us_stocks_sip/day_aggs_v1 is stamped "
-        "2024-11-29T18:00:00+00:00 (2024-11-29T13:00:00-05:00 in America/New_York), which is "
+        "2024-11-29T19:30:00+00:00 (2024-11-29T14:30:00-05:00 in America/New_York), which is "
         "not a time of day Massive is known to stamp such a bar at (00:00:00.000, 16:00:00.000 "
         "in America/New_York), so it may cover other days than the one it would be labelled "
         "with; read REST, and report the stamp so the day cut can be settled"
