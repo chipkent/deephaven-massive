@@ -62,8 +62,9 @@ TICKERS: Final = DatasetSpec(
     summary="Every ticker Massive supports, across asset classes, with its listing details.",
     fetch_path="/v3/reference/tickers",
     keys={(_REST, "/v3/reference/tickers"): SourceKeys(symbol=KeySpec("Ticker"))},
+    # `ticker` takes one value, so a symbol list fans out one request per symbol, while
+    # no symbols at all is one request that lists every ticker.
     symbol_param="ticker",
-    per_symbol=True,
     page_size=_LIST_PAGE,
 )
 TICKER_DETAILS: Final = DatasetSpec(

@@ -66,7 +66,8 @@ def test_tickers_are_instruments_filtered_one_ticker_a_request() -> None:
     spec = reference.TICKERS
     assert spec.fetch_path == "/v3/reference/tickers"
     assert spec.symbol_param == "ticker"
-    assert spec.per_symbol
+    assert not spec.per_symbol  # no symbols lists every ticker
+    assert CATALOG.takes_symbols(spec)
     assert spec.page_size == 1000
     assert CATALOG.dataset_schema(spec).column_names[0] == "Symbol"
     types = _types(spec)
@@ -558,6 +559,19 @@ def test_tickers_fetch(
     assert row["Name"] == "Agilent Technologies Inc."
     assert row["LastUpdatedUtc"] == datetime(2021, 4, 25, tzinfo=UTC)
     assert row["DelistedUtc"] is None
+
+
+def test_tickers_without_symbols_list_every_ticker_and_symbols_fan_out(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope([])))
+    rest_session.reference.tickers().fetch()
+    rest_session.reference.tickers(symbols=["MSFT", "AAPL"]).fetch()
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", {"active": ["true"], "limit": ["1000"]}),
+        ("/v3/reference/tickers", {"ticker": ["AAPL"], "active": ["true"], "limit": ["1000"]}),
+        ("/v3/reference/tickers", {"ticker": ["MSFT"], "active": ["true"], "limit": ["1000"]}),
+    ]
 
 
 def test_ticker_details_fetch_one_request_per_symbol(

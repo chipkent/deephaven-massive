@@ -229,10 +229,10 @@ class _Indicators(Namespace):
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
-            start: The first bar start (a date's 00:00 in the class day zone, or an aware
-                `datetime`); None for the endpoint's default range.
-            end: The end of the range: a date includes that whole day, a `datetime` is
-                exclusive; None for the latest.
+            start: The first bar start (a date is its 00:00 in New York, or an aware
+                `datetime`, for every asset class); None for the endpoint's default range.
+            end: The end of the range: a date includes that whole New York day, a
+                `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
@@ -293,10 +293,10 @@ class _Indicators(Namespace):
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
-            start: The first bar start (a date's 00:00 in the class day zone, or an aware
-                `datetime`); None for the endpoint's default range.
-            end: The end of the range: a date includes that whole day, a `datetime` is
-                exclusive; None for the latest.
+            start: The first bar start (a date is its 00:00 in New York, or an aware
+                `datetime`, for every asset class); None for the endpoint's default range.
+            end: The end of the range: a date includes that whole New York day, a
+                `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
@@ -357,10 +357,10 @@ class _Indicators(Namespace):
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
-            start: The first bar start (a date's 00:00 in the class day zone, or an aware
-                `datetime`); None for the endpoint's default range.
-            end: The end of the range: a date includes that whole day, a `datetime` is
-                exclusive; None for the latest.
+            start: The first bar start (a date is its 00:00 in New York, or an aware
+                `datetime`, for every asset class); None for the endpoint's default range.
+            end: The end of the range: a date includes that whole New York day, a
+                `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
@@ -426,10 +426,10 @@ class _Indicators(Namespace):
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
                 leaves Massive's default. The crypto endpoint has no such parameter, so an
                 explicit value fails the verb with `ValueError` for a crypto symbol.
-            start: The first bar start (a date's 00:00 in the class day zone, or an aware
-                `datetime`); None for the endpoint's default range.
-            end: The end of the range: a date includes that whole day, a `datetime` is
-                exclusive; None for the latest.
+            start: The first bar start (a date is its 00:00 in New York, or an aware
+                `datetime`, for every asset class); None for the endpoint's default range.
+            end: The end of the range: a date includes that whole New York day, a
+                `datetime` is exclusive; None for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
