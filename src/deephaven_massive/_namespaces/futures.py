@@ -109,7 +109,6 @@ TRADES: Final = DatasetSpec(
     per_symbol=True,
     page_size=50_000,
 )
-"""`m.futures.trades`: every trade of a futures contract."""
 
 QUOTES: Final = DatasetSpec(
     name="futures.quotes",
@@ -128,7 +127,6 @@ QUOTES: Final = DatasetSpec(
     per_symbol=True,
     page_size=50_000,
 )
-"""`m.futures.quotes`: every change of a futures contract's best bid and offer."""
 
 BARS: Final = DatasetSpec(
     name="futures.bars",
@@ -150,7 +148,6 @@ BARS: Final = DatasetSpec(
     per_symbol=True,
     page_size=50_000,
 )
-"""`m.futures.bars`: open, high, low, close, and volume bars of a futures contract."""
 
 SNAPSHOTS: Final = DatasetSpec(
     name="futures.snapshots",
@@ -161,7 +158,6 @@ SNAPSHOTS: Final = DatasetSpec(
     symbol_param="ticker.any_of",
     page_size=50_000,
 )
-"""`m.futures.snapshots`: the latest trade, quote, minute bar, and session of each contract."""
 
 CONTRACTS: Final = DatasetSpec(
     name="futures.contracts",
@@ -171,7 +167,6 @@ CONTRACTS: Final = DatasetSpec(
     poll_keys=("Ticker", "Date"),
     page_size=1_000,
 )
-"""`m.futures.contracts`: the specification of every listed futures contract."""
 
 PRODUCTS: Final = DatasetSpec(
     name="futures.products",
@@ -181,7 +176,6 @@ PRODUCTS: Final = DatasetSpec(
     poll_keys=("ProductCode", "TradingVenue", "Date"),
     page_size=50_000,
 )
-"""`m.futures.products`: the specification of every futures product."""
 
 EXCHANGES: Final = DatasetSpec(
     name="futures.exchanges",
@@ -191,7 +185,6 @@ EXCHANGES: Final = DatasetSpec(
     poll_keys=("Id",),
     page_size=1_000,
 )
-"""`m.futures.exchanges`: the futures exchanges and trading venues."""
 
 MARKET_STATUS: Final = DatasetSpec(
     name="futures.market_status",
@@ -201,7 +194,6 @@ MARKET_STATUS: Final = DatasetSpec(
     poll_keys=("ProductCode", "TradingVenue"),
     page_size=100,
 )
-"""`m.futures.market_status`: whether each futures product is trading right now."""
 
 SCHEDULES: Final = DatasetSpec(
     name="futures.schedules",
@@ -212,7 +204,6 @@ SCHEDULES: Final = DatasetSpec(
     poll_keys=("ProductCode", "TradingVenue", "Timestamp", "Event"),
     page_size=1_000,
 )
-"""`m.futures.schedules`: the timed events (open, close, breaks) of each product's sessions."""
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
     TRADES,
@@ -475,7 +466,8 @@ class _Futures(Namespace):
                 `sort`; it needs `sort`. None for the endpoint's default direction.
             limit: The most rows to return in total; None for every row.
             filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"product_code_any_of": ["ES", "NQ"]}`.
+                as underscores, such as `{"ticker_gte": "ES"}` for an alphabetical range
+                of tickers. The `product_code` forms are set through `product_code`.
 
         Returns:
             A query with `fetch()` and `poll()`.
@@ -594,7 +586,7 @@ class _Futures(Namespace):
             limit: The most rows to return in total; None for every row.
             filters: Further query parameters of the endpoint, by wire name with dots written
                 as underscores, such as `{"sector": "precious"}` or
-                `{"product_code_any_of": ["ES", "NQ"]}`.
+                `{"trading_venue": "XCME"}`.
 
         Returns:
             A query with `fetch()` and `poll()`.
@@ -621,21 +613,37 @@ class _Futures(Namespace):
         )
         return cast("Query", query)
 
-    def exchanges(self) -> Query:
+    def exchanges(
+        self,
+        *,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
         """Futures exchanges: the exchanges and trading venues of US futures.
 
         Each row is one venue, such as the Chicago Mercantile Exchange: its id, name, acronym,
         market identifier codes (MIC and operating MIC), type, locale, and web site, from the
-        REST endpoint `/futures/v1/exchanges`. The list is short and the endpoint takes no
-        filter or sort, so the method takes no arguments and no `limit`: `fetch()` returns
-        every row. The dataset takes no symbols and has no `Symbol` column.
+        REST endpoint `/futures/v1/exchanges`. The endpoint has no sort parameter, so the
+        method takes no `sort` or `order`. The dataset takes no symbols and has no `Symbol`
+        column.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
 
         The columns are described in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#exchanges,
         in the web UI's column-header tooltips, and by `columns()` on the query.
 
+        Args:
+            limit: The most rows to return in total; None for every row.
+            filters: Query parameters of the endpoint, by wire name with dots written as
+                underscores. The endpoint documents none today, so any key raises
+                `ValueError`; a filter Massive adds becomes valid when the library's
+                snapshot of the API is refreshed.
+
         Returns:
-            A query with `fetch()` and `poll()`. No request is made until a verb runs.
+            A query with `fetch()` and `poll()`.
+
+        An unknown filter raises `ValueError`. No request is made.
 
         Example:
             ::
@@ -645,7 +653,8 @@ class _Futures(Namespace):
                 m = dm.MassiveSession()
                 venues = m.futures.exchanges().fetch()
         """
-        return cast("Query", build_query(self._core, EXCHANGES))
+        query = build_query(self._core, EXCHANGES, filters=filters, limit=limit)
+        return cast("Query", query)
 
     def market_status(
         self,
@@ -659,8 +668,8 @@ class _Futures(Namespace):
         Each row is one product's current market event (`MarketEvent`, such as `open`,
         `pause`, or `close`), its trading venue, the session it belongs to, and the time the
         status was evaluated, from the REST endpoint `/futures/v1/market-status`. `poll()`
-        keeps the table current. The dataset takes no symbols and has no `Symbol` column.
-        The endpoint has no sort parameter, so the method takes no `sort` or `order`.
+        keeps the table current. The endpoint has no sort parameter, so the method takes no
+        `sort` or `order`. The dataset takes no symbols and has no `Symbol` column.
 
         `limit` caps the total number of rows across pages; the page size is internal.
 
@@ -672,12 +681,15 @@ class _Futures(Namespace):
             product_code: Only this product, such as `"ES"`; None for every product.
             limit: The most rows to return in total; None for every row.
             filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"product_code_any_of": ["ES", "CL"]}`.
+                as underscores. The endpoint's only other parameters today are the forms of
+                `product_code`, which are set through `product_code`, so any key raises
+                `ValueError`; a filter Massive adds becomes valid when the library's
+                snapshot of the API is refreshed.
 
         Returns:
             A query with `fetch()` and `poll()`.
 
-        An unknown filter or a filter value of the wrong kind raises `ValueError`. No
+        An unknown filter, or a form of `product_code` in `filters`, raises `ValueError`. No
         request is made.
 
         Example:
@@ -699,10 +711,10 @@ class _Futures(Namespace):
 
     def schedules(
         self,
-        start: DateLike | None = None,
-        end: DateLike | None = None,
         *,
         product_code: str | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
         sort: str | None = None,
         order: Order | None = None,
         limit: int | None = None,
@@ -727,10 +739,10 @@ class _Futures(Namespace):
         in the web UI's column-header tooltips, and by `columns()` on the query.
 
         Args:
+            product_code: Only this product, such as `"ES"`; None for every product.
             start: The first session, as an ISO date string or a `date`; None for no lower
                 bound.
             end: The last session, as an ISO date string or a `date`; None for no upper bound.
-            product_code: Only this product, such as `"ES"`; None for every product.
             sort: The field to sort by; None for the endpoint's default (`product_code`).
             order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
                 `sort`; it needs `sort`. None for the endpoint's default direction.
@@ -752,7 +764,9 @@ class _Futures(Namespace):
                 import deephaven_massive as dm
 
                 m = dm.MassiveSession()
-                week = m.futures.schedules("2025-12-22", "2025-12-26", product_code="ES").fetch()
+                week = m.futures.schedules(
+                    product_code="ES", start="2025-12-22", end="2025-12-26"
+                ).fetch()
         """
         query = build_query(
             self._core,

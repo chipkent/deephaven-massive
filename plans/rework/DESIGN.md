@@ -1376,9 +1376,11 @@ neither; one whose paths have `order` but no `sort` (the indicators) offers `ord
 `.lt` (`timestamp.gte`/`timestamp.lt`, `published_utc.gte`/`published_utc.lt`,
 `published.gte`/`published.lt`), and a calendar-date axis is whole days, `.gte` and `.lte`
 (`ex_dividend_date.gte`/`ex_dividend_date.lte`, `filing_date.gte`/`filing_date.lte`,
-`session_end_date.gte`/`session_end_date.lte` on `futures.schedules`, and so on). Bars declare
-no `time_axis`: `history()` fills the range path's `{from}` and `{to}` segments instead
-([section 13.4](#134-rest)). Passing any form of the same axis
+`session_end_date.gte`/`session_end_date.lte` on `futures.schedules`, and so on). Bars whose
+range path has `{from}` and `{to}` segments declare no `time_axis`: `history()` fills those
+segments instead ([section 13.4](#134-rest)). `futures.bars`, whose path
+`/futures/v1/aggs/{ticker}` has no such segments, declares the instant pair
+`window_start.gte`/`window_start.lt`. Passing any form of the same axis
 through `filters` (as `timestamp_gte`, `timestamp_lte`, or `timestamp`, for example) raises
 `ValueError`.
 
