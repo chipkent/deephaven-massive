@@ -10,10 +10,14 @@ A date-only bound means a whole day in the asset class's *day zone*:
 - **America/New_York** for stocks, options, and indices;
 - **UTC** for forex and crypto;
 - **trading sessions** for futures: a date names the session whose `session_end_date` equals
-  it. Futures bars are requested over a `window_start` range widened by one day on each side
-  in America/Chicago and then filtered on `SessionEndDate`. The futures trading day rolls at
-  17:00 Chicago time, so an instant belongs to the session of its Chicago date until 17:00 and
-  to the next day's session from then on (`futures_session`).
+  it. The futures trading day rolls at 17:00 Chicago time, so an instant belongs to the
+  session of its Chicago date until 17:00 and to the next day's session from then on
+  (`futures_session`). An exchange holiday folds into the next session, which then opens
+  earlier: CME trades Martin Luther King Day, Monday 2025-01-20, from Sunday 17:00 under the
+  trade date 2025-01-21. So a date `start` is requested from its session's regular open
+  (`futures_session_open`) less `FUTURES_HOLIDAY_MARGIN`, a date `end` up to the regular open
+  of the next session, which is exact, and the rows are then filtered on `SessionEndDate`
+  (`futures_sessions`).
 
 Ranges are half-open, `[start, end)`. A date `start` is that day's midnight; a date `end` is the
 *next* day's midnight, so `history("2025-03-03", "2025-03-03")` is the whole of March 3.
@@ -48,6 +52,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CHICAGO",
     "DAY_ZONES",
+    "FUTURES_HOLIDAY_MARGIN",
     "NEW_YORK",
     "FuturesSessions",
     "TimeRange",
@@ -59,6 +64,7 @@ __all__ = [
     "day_zone",
     "flat_file_published",
     "futures_session",
+    "futures_session_before",
     "futures_session_open",
     "futures_sessions",
     "history_range",
@@ -74,7 +80,21 @@ NEW_YORK: Final = ZoneInfo("America/New_York")
 """The day zone of stocks, options, and indices, and the zone of the flat-file cutoff."""
 
 CHICAGO: Final = ZoneInfo("America/Chicago")
-"""The zone in which futures bar requests are widened around session dates."""
+"""The zone in which futures sessions open and roll (17:00 America/Chicago)."""
+
+FUTURES_HOLIDAY_MARGIN: Final = timedelta(days=4)
+"""How far before its regular open a futures session may start, so a request reaches it.
+
+A holiday's trading folds into the next session, which then opens on an earlier evening. A
+Monday holiday moves Tuesday's open one day earlier (the session of 2025-01-21 opened on
+Sunday 2025-01-19 at 17:00 Chicago time). The longest known fold is a Friday holiday whose
+trading goes to Monday's session (Good Friday 2024: the session of 2024-04-01 opened on
+Thursday 2024-03-28 at 17:00), exactly three days before the regular Sunday open; the fourth
+day is slack for rows Massive stamps just before an open. The rows a widened request returns
+from earlier sessions are dropped by their `SessionEndDate`."""
+
+_FOLDED_WEEKDAYS: Final = 1
+"""The most weekday sessions a holiday folds into the next one (`futures_sessions`)."""
 
 DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
     AssetClass.STOCKS: NEW_YORK,
@@ -94,6 +114,7 @@ _DATE_ONLY: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # fraction of a second can hold a `.` or `,` in ISO-8601 text, so the separator marks it.
 _BELOW_MICROSECOND: Final = re.compile(r"[.,]\d{7,}")
 _ONE_DAY: Final = timedelta(days=1)
+_SATURDAY: Final = 5
 
 
 def parse_date_like(value: DateLike, name: str) -> date | datetime:
@@ -282,44 +303,77 @@ def history_range(start: DateLike, end: DateLike, zone: tzinfo) -> TimeRange:
 
 @dataclass(frozen=True, slots=True)
 class FuturesSessions:
-    """The futures sessions a date range names, and the bar request window around them.
+    """The futures sessions a range with a date bound names, and the request window around them.
+
+    A row is kept when its `SessionEndDate` lies in `[first, last]`, a side that is None being
+    open, and, on a side given as an instant, its `Timestamp` lies inside `window` there.
 
     Attributes:
-        first: The first `session_end_date` included.
-        last: The last `session_end_date` included.
-        window: The `window_start` range a bars request uses: from midnight in Chicago one day
-            before `first` to midnight two days after `last`, so every bar of every included
-            session is fetched; rows are then filtered to `SessionEndDate` in
-            `[first, last]`.
+        first: The first `session_end_date` included, or None when `start` was an instant.
+        last: The last `session_end_date` included, or None when `end` was an instant.
+        window: The range of instants requested (`timestamp`, `window_start`, or the
+            aggregates' `{from}/{to}`): from the regular open of `first` less
+            `FUTURES_HOLIDAY_MARGIN`, so a session a holiday opened early is reached, or from
+            the `start` instant; to the regular open of the session after `last`, the first
+            instant of a later session, or to the `end` instant.
     """
 
-    first: date
-    last: date
+    first: date | None
+    last: date | None
     window: TimeRange
 
 
-def futures_sessions(start: date, end: date) -> FuturesSessions:
-    """Return the futures sessions between two session dates, inclusive.
+def futures_sessions(start: date | datetime, end: date | datetime) -> FuturesSessions:
+    """Return the futures sessions a range names when at least one bound is a date.
 
-    A date names the trading session whose `session_end_date` equals it. Trades and quotes
-    filter on `session_end_date` directly; bars widen the `window_start` range by one day on
-    each side in America/Chicago. Bounds given as `datetime`s are not sessions: futures then
-    filter on `Timestamp` with `history_range`.
+    A date names the trading session whose `session_end_date` equals it, and is filtered on
+    `SessionEndDate`; an aware `datetime` is an exact instant, filtered on `Timestamp`. The
+    request window runs from `futures_session_open(start) - FUTURES_HOLIDAY_MARGIN` (or the
+    `start` instant) to `futures_session_open(end + 1 day)` (or the `end` instant): a holiday
+    only ever moves a session's open earlier, so the upper bound is exact, while the lower one
+    reaches back far enough for a session a holiday opened early. Two instants are no sessions:
+    `bounds` gives them a `TimeRange`.
+
+    A date `start` with an `end` instant before that session's regular open is a range only
+    when a holiday opened the session early: the instant's own session, and every weekday
+    session after it up to `start`, must be one holiday at most (`_FOLDED_WEEKDAYS`).
+    `("2025-01-21", Monday 2025-01-20 10:00 CT)` holds the Martin Luther King Day trading of
+    the 2025-01-21 session; `("2025-01-22", the same instant)` would need two weekday sessions
+    folded into one and is refused.
 
     Args:
-        start: The first session date.
-        end: The last session date.
+        start: The first session date, or the first instant included.
+        end: The last session date, or the first instant excluded.
 
     Returns:
-        The inclusive session dates and the widened bar window.
+        The sessions and the request window.
 
     Raises:
-        ValueError: If `start` is after `end`.
+        ValueError: If the range is empty: `start` is after `end`, the window ends before
+            it starts, or an `end` instant lies before more weekday sessions ahead of a date
+            `start` than one holiday can fold into it.
     """
-    if start > end:
+    first = None if isinstance(start, datetime) else start
+    last = None if isinstance(end, datetime) else end
+    if first is not None and last is not None and first > last:
         raise ValueError(f"start ({start}) must not be after end ({end})")
-    window = TimeRange(_midnight(start - _ONE_DAY, CHICAGO), _midnight(end + 2 * _ONE_DAY, CHICAGO))
-    return FuturesSessions(start, end, window)
+    lower = (
+        start
+        if isinstance(start, datetime)
+        else futures_session_open(start) - FUTURES_HOLIDAY_MARGIN
+    )
+    upper = end if isinstance(end, datetime) else futures_session_open(end + _ONE_DAY)
+    if lower >= upper:
+        raise ValueError(f"start ({start!r}) must be before end ({end!r})")
+    if first is not None and isinstance(end, datetime):
+        ends_in = futures_session_before(end)
+        skipped = (ends_in + timedelta(days=n) for n in range((first - ends_in).days))
+        if sum(day.weekday() < _SATURDAY for day in skipped) > _FOLDED_WEEKDAYS:
+            raise ValueError(
+                f"start ({start}) must be before end ({end!r}): the session of {start} cannot "
+                "open that early"
+            )
+    return FuturesSessions(first, last, TimeRange(lower.astimezone(UTC), upper.astimezone(UTC)))
 
 
 _SESSION_ROLL: Final = timedelta(hours=7)
@@ -356,6 +410,23 @@ def futures_session(moment: datetime) -> date:
         The session's end date.
     """
     return (moment.astimezone(CHICAGO) + _SESSION_ROLL).date()
+
+
+def futures_session_before(end: datetime) -> date:
+    """Return the futures session of the last instant before an exclusive end.
+
+    A range's `end` instant is excluded, so the range's last session is the one the instant
+    just before it belongs to: an end at a session's 17:00 Chicago open closes the previous
+    session, not the one that opens then.
+
+    Args:
+        end: An aware `datetime`, the first instant excluded.
+
+    Returns:
+        The session's end date (`futures_session` of `end` less one microsecond, the finest
+        step a `datetime` takes).
+    """
+    return futures_session(end - timedelta(microseconds=1))
 
 
 def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
@@ -413,12 +484,12 @@ def bounds(
     """Normalize the bounds of a dataset's `history()` call by its day rules.
 
     The rules are those of the class `day_class` picks: the dataset's own, or for a dataset
-    with a path per symbol class the class its symbols share. Futures with two date bounds
-    name trading sessions and get `FuturesSessions` (trades and quotes filter
-    `session_end_date`; bars use the widened window). Every other case is a half-open
-    `TimeRange`: date bounds are midnights in the class day zone (New York without a class,
-    Chicago for a futures range given with a `datetime` bound, where futures filter on
-    `Timestamp`). Unparseable, naive, or empty bounds raise the `ValueError` of
+    with a path per symbol class the class its symbols share. Futures with a date bound name
+    trading sessions and get `FuturesSessions`: a date side is filtered on `SessionEndDate`
+    and an instant side on `Timestamp` (`futures_sessions`). Every other case is a half-open
+    `TimeRange`: date bounds are midnights in the class day zone (New York without a class),
+    and futures with two instants filter on `Timestamp`. Unparseable, naive, or empty bounds
+    raise the `ValueError` of
     `parse_date_like`, `history_range`, or `futures_sessions`.
 
     Args:
@@ -429,13 +500,13 @@ def bounds(
         classes: The classes of the request's symbols, for `day_class`; empty by default.
 
     Returns:
-        The sessions for date-bounded futures, otherwise the instant range.
+        The sessions for futures with a date bound, otherwise the instant range.
     """
     first = parse_date_like(start, "start")
     last = parse_date_like(end, "end")
     asset_class = day_class(spec, classes)
     if asset_class is AssetClass.FUTURES:
-        if isinstance(first, datetime) or isinstance(last, datetime):
+        if isinstance(first, datetime) and isinstance(last, datetime):
             return history_range(first, last, CHICAGO)
         return futures_sessions(first, last)
     return history_range(first, last, day_zone(asset_class))

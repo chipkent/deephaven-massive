@@ -1,7 +1,7 @@
 """The subscription protocol of one WebSocket connection: topics and the reconcile loop.
 
 A WebSocket stream wants *topics*: the channel's wildcard (`T.*`) for `dm.ALL`, or one topic
-per symbol in the wire's spelling (`T.AAPL`, `C.EUR/USD`). Topics are exact strings: `T.*` and
+per symbol in the wire's spelling (`T.AAPL`, `C.EUR-USD`). Topics are exact strings: `T.*` and
 `T.AAPL` are unrelated, and nothing matches one topic as a prefix of another. This module holds
 the topic helpers and `Subscriptions`, the state machine that turns the topics a connection's
 streams want into subscribe and unsubscribe frames, one step at a time, and keeps track of what
@@ -84,7 +84,7 @@ def stream_topics(asset_class: AssetClass, channel: str, symbols: Iterable[str])
 
     Args:
         asset_class: The symbols' class, whose WebSocket spelling the topics use
-            (`ws_symbol`: `C:EURUSD` is `EUR/USD`, `X:BTCUSD` is `BTC-USD`).
+            (`ws_symbol`: `C:EURUSD` is `EUR-USD`, `X:BTCUSD` is `BTC-USD`).
         channel: The channel, such as `"T"`.
         symbols: Canonical symbols.
 

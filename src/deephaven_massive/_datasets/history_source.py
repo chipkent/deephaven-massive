@@ -34,6 +34,7 @@ from deephaven_massive._datasets.dates import (
     FuturesSessions,
     flat_file_published,
     futures_session,
+    futures_session_before,
     publish_time,
 )
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
@@ -90,11 +91,12 @@ def partition_dates(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> t
 
     For a `TimeRange` they are the dates of `start` and of `end - 1 ns` in the class's day zone
     and every date between: New York for stocks, options, and indices, UTC for forex and
-    crypto. For date-bounded futures (`FuturesSessions`) they are the sessions from `first` to
-    `last`. A futures range given with `datetime` bounds reads the sessions its instants belong
-    to, from the session of `start` to the session of the last instant before `end`; a session
-    opens at 17:00 Chicago time on the day before its `session_end_date`
-    (`dates.futures_session`). Its rows are then filtered on `Timestamp`.
+    crypto. For futures they are trading sessions: from `first` (or, for a `start` instant,
+    the session that instant belongs to) to `last` (or, for an `end` instant, the session of
+    the last instant before it, and never before `first`); a session opens at 17:00 Chicago
+    time on the day before its `session_end_date` (`dates.futures_session`). An instant side
+    is then filtered on `Timestamp`. A holiday's trading lies in the next session's file,
+    which the flat-file transport reads when the last session's file is missing.
 
     Args:
         spec: The dataset; its asset class picks the day zone.
@@ -104,10 +106,12 @@ def partition_dates(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> t
         The partition dates; never empty.
     """
     if isinstance(window, FuturesSessions):
-        first, last = window.first, window.last
+        first = window.first or futures_session(window.window.start)
+        # A date start names its session even when the end instant falls before that
+        # session's regular open: a holiday opened it early (2025-01-21 from Sunday 17:00).
+        last = window.last or max(first, futures_session_before(window.window.end))
     elif spec.asset_class is AssetClass.FUTURES:
-        last_instant = window.end - timedelta(microseconds=1)
-        first, last = futures_session(window.start), futures_session(last_instant)
+        first, last = futures_session(window.start), futures_session_before(window.end)
     else:
         dates = window.partition_dates(_PARTITION_ZONES[spec.asset_class])
         first, last = dates[0], dates[-1]
