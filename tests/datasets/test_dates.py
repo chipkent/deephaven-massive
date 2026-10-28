@@ -10,6 +10,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.dates import (
     CHICAGO,
     DAY_ZONES,
+    FUTURES_HOLIDAY_MARGIN,
     NEW_YORK,
     FuturesSessions,
     TimeRange,
@@ -21,6 +22,7 @@ from deephaven_massive._datasets.dates import (
     day_zone,
     flat_file_published,
     futures_session,
+    futures_session_before,
     futures_session_open,
     futures_sessions,
     history_range,
@@ -135,14 +137,31 @@ def test_epoch_ns_is_exact() -> None:
     assert window.start_ns % 10**9 == 1_000
 
 
-def test_futures_session_widening() -> None:
+def test_futures_session_window() -> None:
     sessions = futures_sessions(date(2025, 3, 3), date(2025, 3, 5))
     assert (sessions.first, sessions.last) == (date(2025, 3, 3), date(2025, 3, 5))
-    # One day either side, at midnight in Chicago (UTC-6 before March 9).
-    assert sessions.window.start == datetime(2025, 3, 2, 6, tzinfo=UTC)
-    assert sessions.window.end == datetime(2025, 3, 7, 6, tzinfo=UTC)
+    # From the first session's 17:00 Chicago open (UTC-6 before March 9) less the holiday
+    # margin, to the regular open of the session after the last, which is exact.
+    assert timedelta(days=4) == FUTURES_HOLIDAY_MARGIN
+    assert sessions.window.start == datetime(2025, 2, 26, 23, tzinfo=UTC)
+    assert sessions.window.end == datetime(2025, 3, 5, 23, tzinfo=UTC)
     single = futures_sessions(date(2025, 3, 3), date(2025, 3, 3))
-    assert single.window.end - single.window.start == timedelta(days=3)
+    assert single.window.end - single.window.start == timedelta(days=5)
+
+
+def test_the_margin_covers_a_friday_holiday_folded_into_monday() -> None:
+    # Good Friday 2024: the session of Monday 2024-04-01 opened on Thursday at 17:00 Chicago.
+    sessions = futures_sessions(date(2024, 4, 1), date(2024, 4, 1))
+    assert sessions.window.start < datetime(2024, 3, 28, 17, tzinfo=CHICAGO)
+
+
+def test_a_session_after_a_holiday_is_inside_its_window() -> None:
+    # CME traded Martin Luther King Day (Monday 2025-01-20) from Sunday 17:00 Chicago time
+    # under the trade date 2025-01-21, a day before that session's regular open.
+    sessions = futures_sessions(date(2025, 1, 21), date(2025, 1, 21))
+    sunday_open = datetime(2025, 1, 19, 17, tzinfo=CHICAGO)
+    assert sessions.window.start <= sunday_open < sessions.window.end
+    assert sessions.window.end == datetime(2025, 1, 21, 17, tzinfo=CHICAGO)
     with pytest.raises(ValueError, match="must not be after end"):
         futures_sessions(date(2025, 3, 5), date(2025, 3, 3))
 
@@ -235,11 +254,65 @@ def test_bounds_of_futures_dates_are_sessions() -> None:
 
 def test_bounds_of_futures_datetimes_filter_timestamps() -> None:
     moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
-    window = bounds(_spec(AssetClass.FUTURES), "2025-03-03", moment)
-    assert window == TimeRange(datetime(2025, 3, 3, 6, tzinfo=UTC), moment)
-    window = bounds(_spec(AssetClass.FUTURES), moment, "2025-03-03")
-    assert window == TimeRange(moment, datetime(2025, 3, 4, 6, tzinfo=UTC))
+    later = datetime(2025, 3, 4, 15, tzinfo=UTC)
+    assert bounds(_spec(AssetClass.FUTURES), moment, later) == TimeRange(moment, later)
     assert CHICAGO.key == "America/Chicago"
+
+
+def test_mixed_futures_bounds_keep_the_session_rule_on_the_date_side() -> None:
+    # A date start names its whole session, the evening before its date included.
+    end = datetime(2024, 12, 17, 16, tzinfo=CHICAGO)
+    window = bounds(_spec(AssetClass.FUTURES), "2024-12-17", end)
+    assert window == FuturesSessions(
+        date(2024, 12, 17),
+        None,
+        TimeRange(
+            (datetime(2024, 12, 16, 17, tzinfo=CHICAGO) - FUTURES_HOLIDAY_MARGIN).astimezone(UTC),
+            end.astimezone(UTC),
+        ),
+    )
+    # A date end names its session up to the next session's regular open.
+    start = datetime(2024, 12, 16, 18, tzinfo=CHICAGO)
+    window = bounds(_spec(AssetClass.FUTURES), start, "2024-12-17")
+    assert window == FuturesSessions(
+        None,
+        date(2024, 12, 17),
+        TimeRange(start.astimezone(UTC), datetime(2024, 12, 17, 23, tzinfo=UTC)),
+    )
+    with pytest.raises(ValueError, match="must be before end"):
+        bounds(_spec(AssetClass.FUTURES), datetime(2024, 12, 17, 18, tzinfo=CHICAGO), "2024-12-17")
+
+
+def test_a_date_start_may_end_before_its_regular_open_only_after_a_holiday() -> None:
+    spec = _spec(AssetClass.FUTURES)
+    monday = datetime(2025, 1, 20, 10, tzinfo=CHICAGO)
+    # Martin Luther King Day folded into the 2025-01-21 session, which opened on Sunday.
+    folded = bounds(spec, "2025-01-21", monday)
+    assert isinstance(folded, FuturesSessions)
+    assert folded.first == date(2025, 1, 21)
+    # Two weekday sessions (01-20 and 01-21) cannot both fold into 01-22.
+    with pytest.raises(ValueError, match="the session of 2025-01-22 cannot open that early"):
+        bounds(spec, "2025-01-22", monday)
+    # Good Friday folded into Monday's session, which opened on Thursday 17:00.
+    friday = bounds(spec, "2024-04-01", datetime(2024, 3, 29, 9, tzinfo=CHICAGO))
+    assert isinstance(friday, FuturesSessions)
+    assert friday.first == date(2024, 4, 1)
+    with pytest.raises(ValueError, match="cannot open that early"):
+        bounds(spec, "2024-04-01", datetime(2024, 3, 28, 10, tzinfo=CHICAGO))
+
+
+def test_an_instant_start_at_the_next_sessions_open_is_empty() -> None:
+    # The session of 2025-01-21 ends where the next one opens: 17:00 Chicago on 01-21.
+    opens = datetime(2025, 1, 21, 17, tzinfo=CHICAGO)
+    with pytest.raises(ValueError, match="must be before end"):
+        futures_sessions(opens, date(2025, 1, 21))
+    assert futures_sessions(opens - timedelta(microseconds=1), date(2025, 1, 21)).last
+
+
+def test_futures_session_before_excludes_the_end() -> None:
+    opens = datetime(2025, 1, 21, 17, tzinfo=CHICAGO)
+    assert futures_session_before(opens) == date(2025, 1, 21)
+    assert futures_session_before(opens + timedelta(microseconds=1)) == date(2025, 1, 22)
 
 
 def test_bounds_reject_bad_ranges() -> None:
@@ -251,8 +324,8 @@ def test_bounds_reject_bad_ranges() -> None:
 
 def test_futures_window_across_the_spring_dst_change() -> None:
     sessions = futures_sessions(date(2025, 3, 8), date(2025, 3, 10))
-    assert sessions.window.start == datetime(2025, 3, 7, 6, tzinfo=UTC)  # CST, UTC-6
-    assert sessions.window.end == datetime(2025, 3, 12, 5, tzinfo=UTC)  # CDT, UTC-5
+    assert sessions.window.start == datetime(2025, 3, 3, 23, tzinfo=UTC)  # CST, UTC-6
+    assert sessions.window.end == datetime(2025, 3, 10, 22, tzinfo=UTC)  # CDT, UTC-5
 
 
 def test_publish_time_across_the_spring_dst_change() -> None:
