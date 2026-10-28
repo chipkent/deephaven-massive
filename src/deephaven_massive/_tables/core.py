@@ -335,10 +335,11 @@ class IngestPorts(Protocol):
         ...
 
     def streams(self) -> StreamTransport:
-        """Return the session's WebSocket transport, the same one for the life of the session.
+        """Return a WebSocket transport over the session's one set of connections.
 
-        Raises:
-            NotImplementedError: Until the WebSocket transport is implemented.
+        Each call may return a new, lightweight transport; every one opens its streams on the
+        connections the session keeps for its whole life, which the first call creates and
+        registers with the session's closers. No connection is opened.
         """
         ...
 
@@ -574,8 +575,7 @@ class SessionCore:
         """Return the session's WebSocket transport (`IngestPorts.streams`).
 
         No connection is opened. Without attached ports this raises the `RuntimeError` of
-        `_attached_ports`; until the WebSocket transport is implemented the ports raise
-        `NotImplementedError`.
+        `_attached_ports`.
 
         Returns:
             The transport.
