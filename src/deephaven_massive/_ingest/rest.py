@@ -51,7 +51,7 @@ import logging
 import threading
 import time
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
@@ -75,7 +75,7 @@ from deephaven_massive._datasets.timestamps import UnitMismatchError, instants
 from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._errors import MassiveError, from_wire, log_once
 from deephaven_massive._ingest import hosts, poll
-from deephaven_massive._ingest.poll import Pollers, RowDataError
+from deephaven_massive._ingest.poll import Pollers, RowDataError, UnsupportedParameterError
 from deephaven_massive._massive import (
     DriftReport,
     ParamKind,
@@ -90,7 +90,6 @@ from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
-    from datetime import tzinfo
 
     from deephaven.table import Table
 
@@ -130,6 +129,9 @@ endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built.
 
 _ONE_DAY: Final = timedelta(days=1)
 
+_SESSION_OPEN_HOUR: Final = 17
+"""The Chicago hour a futures trading session opens, on the day before its session date."""
+
 _UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {
     WireUnit.S: timedelta(seconds=1),
     WireUnit.MS: timedelta(milliseconds=1),
@@ -160,18 +162,25 @@ class Call:
     symbol: str | None = None
 
 
-def _day_zone(spec: DatasetSpec) -> tzinfo:
-    """Return the zone whose midnights bound a date of the dataset's time axis.
+def _day_start(spec: DatasetSpec, day: date) -> datetime:
+    """Return the instant a date of the dataset's time axis starts.
+
+    A calendar day starts at midnight in the asset class's day zone (New York for a dataset
+    without a class). A futures date names a trading session, which opens at 17:00 Chicago time
+    on the day before its `session_end_date` (`dates.futures_session`).
 
     Args:
         spec: The dataset.
+        day: The date.
 
     Returns:
-        The asset class's day zone; Chicago for futures, New York for a dataset without a class.
+        The aware instant.
     """
-    if spec.asset_class is None:
-        return NEW_YORK
-    return DAY_ZONES.get(spec.asset_class, CHICAGO)
+    if spec.asset_class is AssetClass.FUTURES:
+        eve = day - _ONE_DAY
+        return datetime(eve.year, eve.month, eve.day, _SESSION_OPEN_HOUR, tzinfo=CHICAGO)
+    zone = NEW_YORK if spec.asset_class is None else DAY_ZONES[spec.asset_class]
+    return datetime(day.year, day.month, day.day, tzinfo=zone)
 
 
 def _instant_bound(
@@ -181,12 +190,12 @@ def _instant_bound(
 
     A bound is a `date` (a whole day, inclusive at either end) or an aware `datetime` (the
     first instant included at the lower end, the first excluded at the upper end). A date
-    becomes its midnight in the dataset's day zone (the next day's for an upper bound). An
-    exclusive lower `.gt` or an inclusive upper `.lte` moves the instant back one unit of
-    the parameter.
+    becomes the instant its day starts (`_day_start`: a midnight in the day zone, or a futures
+    session's 17:00 Chicago open), the next day's start for an upper bound. An exclusive lower
+    `.gt` or an inclusive upper `.lte` moves the instant back one unit of the parameter.
 
     Args:
-        spec: The dataset, for its day zone and messages.
+        spec: The dataset, for its day rules and messages.
         name: The parameter's wire name, such as `"timestamp.gte"`.
         unit: The unit the parameter counts in.
         value: The bound.
@@ -203,8 +212,7 @@ def _instant_bound(
     if isinstance(value, datetime):
         instant = value
     else:
-        day = value + _ONE_DAY if upper else value
-        instant = datetime(day.year, day.month, day.day, tzinfo=_day_zone(spec))
+        instant = _day_start(spec, value + _ONE_DAY if upper else value)
     if name.rpartition(".")[2] not in ("gt", "lte"):
         return instant
     step = _UNIT_STEPS.get(cast("WireUnit", unit))
@@ -246,7 +254,7 @@ def _axis_query(
     rest_path: RestPath,
     *,
     dates: tuple[date | None, date | None],
-    instants_: tuple[datetime, datetime] | None = None,
+    exact: tuple[datetime, datetime] | None = None,
 ) -> dict[str, object]:
     """Return the time-axis parameters of a request, by wire name.
 
@@ -259,8 +267,8 @@ def _axis_query(
         rest_path: The path; a name it does not take is left out.
         dates: The bounds as the caller gave them (a `date` or an aware `datetime`, or None
             for an open end), or for date-bounded futures the first and last sessions.
-        instants_: For `history()`, the window's exact instants, which a timestamp parameter
-            uses instead of `dates`; None to derive instants from `dates`.
+        exact: For `history()`, the window's exact instants, which a timestamp parameter uses
+            instead of `dates`; None to derive instants from `dates`.
 
     Returns:
         The parameters to send; empty when the dataset has no time axis.
@@ -280,8 +288,8 @@ def _axis_query(
             continue
         kind, unit = found
         if kind is ParamKind.TIMESTAMP:
-            exact = value if instants_ is None else instants_[index]
-            query[name] = _instant_bound(spec, name, exact, unit=unit, upper=upper)
+            bound = value if exact is None else exact[index]
+            query[name] = _instant_bound(spec, name, bound, unit=unit, upper=upper)
         elif kind is ParamKind.DATE:
             query[name] = _date_bound(name, value, upper=upper)
         else:
@@ -354,6 +362,8 @@ def _symbol_parts(
             raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
         return [(None, {}, {})]
     explicit = cast("tuple[str, ...]", symbols)
+    if not explicit:
+        return []
     if not per_symbol:
         if param is None:
             return [(None, {}, {})]
@@ -476,7 +486,7 @@ def fetch_paths(
 ) -> list[tuple[str, NormalizedSymbols | None]]:
     """Return the REST paths a `fetch()` or `poll()` cycle reads, each with its symbols.
 
-    A dataset with a per-symbol detail path (`DatasetSpec.extra_paths`, such as one option
+    A dataset with a per-symbol detail path (`DatasetSpec.detail_path`, such as one option
     contract's reference data) reads it once per symbol when the call names symbols, and its
     list path (`fetch_path`) otherwise. A dataset that serves some asset classes on paths of
     their own (`DatasetSpec.fetch_paths_by_class`) sends each symbol to its class's path
@@ -490,10 +500,10 @@ def fetch_paths(
         `(path template, symbols)` pairs, in the order of each path's first symbol.
     """
     default = cast("str", spec.fetch_path)
-    if not isinstance(symbols, tuple):
+    if not isinstance(symbols, tuple) or not symbols:
         return [(default, symbols)]
-    if spec.extra_paths:
-        return [(spec.extra_paths[0], symbols)]
+    if spec.detail_path is not None:
+        return [(spec.detail_path, symbols)]
     if not spec.fetch_paths_by_class:
         return [(default, symbols)]
     groups: dict[str, list[str]] = {}
@@ -560,8 +570,8 @@ class _Converter:
         arrow_schema: The dataset's Arrow schema.
         required: The long-form columns every row must carry: the dataset's keys for the path
             that are not filled from the request.
-        required_on_error: The required columns of a row that carries an `error`: only its
-            symbol key, so a ticker the plan does not include keeps its row.
+        required_on_error: The required columns of an error row (`hosts.is_error_row`): only
+            its symbol key, so a ticker the plan does not include keeps its row.
         projected: True when the path joins the dataset through a projection of its kind
             membership (the indices snapshot as index values): a row that carries an `error`
             has no value to project, so it is dropped instead of kept.
@@ -592,17 +602,16 @@ class _Converter:
         """
         schema = catalog.dataset_schema(spec)
         renamed = {c.column: c for c in rename(spec, rest_path)}
-        symbol = spec.keys_for(Transport.REST, rest_path.template).symbol
-        required = required_fields(spec, rest_path)
-        # The symbol comes first among the required fields when the rows carry it.
-        rows_symbol = symbol is not None and not symbol.from_request
+        symbol = renamed.get("Symbol")
+        # The rows' own symbol field, unless the key is filled from the request.
+        symbol_field = None if symbol is None else symbol.field
         return cls(
             dataset=spec.name,
             rest_path=rest_path,
             columns=tuple((c.type, c.name, renamed.get(c.name)) for c in schema.columns),
             arrow_schema=schema.arrow_schema(),
-            required=frozenset(f.column for f in required),
-            required_on_error=frozenset(f.column for f in required[:1] if rows_symbol),
+            required=frozenset(f.column for f in required_fields(spec, rest_path)),
+            required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
             projected=any(
                 m.kind == spec.kind and m.group == spec.group and m.projection is not None
                 for m in rest_path.memberships
@@ -615,24 +624,24 @@ class _Converter:
     ) -> tuple[list[pa.RecordBatch], DriftReport, list[Mapping[str, object]]]:
         """Convert one page's rows into batches of the dataset's schema.
 
-        Rows that carry an `error` (a ticker the plan does not include) are decoded apart,
-        with only their symbol required, and come after the page's other rows; a projected
-        path drops them instead.
+        Error rows (`hosts.is_error_row`: a ticker the plan does not include) are decoded
+        apart, with only their symbol required, and come after the page's other rows; a
+        projected path drops them instead.
 
         Args:
             rows: The page's rows.
             symbol: The request's one symbol, which fills the keys taken from the request.
 
         Returns:
-            The batches (none for an empty page), the page's drift, and the rows that carried
-            an `error`, kept or dropped.
+            The batches (none for an empty page), the page's drift, and the error rows, kept or
+            dropped.
 
         Raises:
             RowDataError: If a row lacks a required key or holds a value that does not convert
                 (`to_batch`), or a timestamp overflows or lies outside 1990 to 2100.
         """
-        flagged = [row for row in rows if row.get("error") is not None]
-        good = [row for row in rows if row.get("error") is None] if flagged else rows
+        flagged = [row for row in rows if hosts.is_error_row(row)]
+        good = [row for row in rows if not hosts.is_error_row(row)] if flagged else rows
         batches: list[pa.RecordBatch] = []
         extra: set[str] = set()
         missing: set[str] = set()
@@ -749,8 +758,8 @@ class _Outcome:
         requests: How many requests it made (pages, and a dropped symbol's 404).
     """
 
-    batches: list[pa.RecordBatch] = field(default_factory=list)
-    requests: int = 0
+    batches: tuple[pa.RecordBatch, ...]
+    requests: int
 
 
 class RestState:
@@ -763,7 +772,7 @@ class RestState:
     lock, held only to read or change them; the client and the pollers are thread-safe.
     """
 
-    __slots__ = ("_client", "_hosts", "_lock", "_once", "_rate_limit_warned", "label", "pollers")
+    __slots__ = ("_client", "_hosts", "_lock", "_once", "label", "pollers")
 
     def __init__(self, client: RestClient, label: str) -> None:
         """Hold the session's client; no request is made.
@@ -778,7 +787,6 @@ class RestState:
         self._lock = threading.Lock()
         self._hosts: dict[tuple[AssetClass, ChannelFamily], Future[HostDecision]] = {}
         self._once: set[tuple[str, ...]] = set()
-        self._rate_limit_warned = threading.Event()
 
     @property
     def client(self) -> RestClient:
@@ -848,10 +856,7 @@ class RestState:
 
     def warn_rate_limit(self) -> None:
         """Log, once per session, why Massive rate-limited the session and what multiplies it."""
-        with self._lock:
-            first = not self._rate_limit_warned.is_set()
-            self._rate_limit_warned.set()
-        if first:
+        if self.first("rate-limit"):
             logger.warning(_RATE_LIMIT_ADVICE, self.label)
 
 
@@ -908,7 +913,7 @@ class RestReader:
             spec: The dataset.
             rest_path: The path.
             calls: The planned calls, in result order.
-            limit: The cap on the total rows, or None.
+            limit: The cap on each call's rows, or None; `read_fetch` caps the total.
             window: The `history()` window whose rows to keep, or None.
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
@@ -930,8 +935,6 @@ class RestReader:
             outcomes = self._fan_out(run, calls, executor)
         batches = [batch for outcome in outcomes for batch in outcome.batches]
         table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
-        if limit is not None:
-            table = table.slice(0, limit)
         return table, sum(outcome.requests for outcome in outcomes)
 
     def _fan_out(
@@ -992,20 +995,21 @@ class RestReader:
         A failed request raises the public error of its `WireError` (`_public`), and a row
         that breaks the schema the `RowDataError` of `_Converter.convert`.
         """
-        outcome = _Outcome()
+        kept: list[pa.RecordBatch] = []
+        requests = 0
         template = converter.rest_path.template
         try:
             for page in self.state.client.pages(
                 converter.rest_path, call.path_params, call.query, limit=limit
             ):
-                outcome = _Outcome(outcome.batches, outcome.requests + 1)
+                requests += 1
                 self.drift.report_statuses(template, page.drift.statuses)
                 batches, drift, flagged = converter.convert(page.rows, call.symbol)
                 self.drift.report(spec.name, Transport.REST, drift)
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged)
-                outcome.batches.extend(_keep(batch, window) for batch in batches)
+                kept.extend(_keep(batch, window) for batch in batches)
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
                 if self.state.first("missing", spec.name, call.symbol):
@@ -1015,42 +1019,34 @@ class RestReader:
                         call.symbol,
                         template,
                     )
-                return _Outcome(outcome.batches, outcome.requests + 1)
+                return _Outcome(tuple(kept), requests + 1)
             raise self._public(error) from error
-        return outcome
+        return _Outcome(tuple(kept), requests)
 
     def _warn_error_rows(
         self, converter: _Converter, flagged: Sequence[Mapping[str, object]]
     ) -> None:
-        """Log the rows that carried an `error`, once per session.
+        """Log each ticker of an error row once per session, naming Massive's message.
 
-        A projected path dropped them: one WARNING per ticker, naming it and Massive's message.
-        Any other path kept them with their `Error` and `Message` columns: one WARNING for the
-        dataset.
+        A projected path dropped the row; any other path kept it, with its `Error` and
+        `Message` columns.
 
         Args:
             converter: The path's conversion.
-            flagged: The page's rows that carried an `error`.
+            flagged: The page's error rows.
         """
         dataset = converter.dataset
-        if not converter.projected:
-            if flagged and self.state.first("row-error", dataset):
-                logger.warning(
-                    "%s: %d rows carry an error from Massive (a ticker the plan does not "
-                    "include); they are kept with their Error and Message columns",
-                    dataset,
-                    len(flagged),
-                )
-            return
+        fate = "dropped" if converter.projected else "kept with its Error and Message columns"
         for row in flagged:
             ticker = str(row.get("ticker"))
-            if self.state.first("dropped-row", dataset, ticker):
+            if self.state.first("error-row", dataset, ticker):
                 logger.warning(
-                    "%s: no row for %s: Massive answered %s: %s",
+                    "%s: Massive answered %s for %s: %s; the row is %s",
                     dataset,
-                    ticker,
                     row.get("error"),
+                    ticker,
                     row.get("message"),
+                    fate,
                 )
 
     def _public(self, error: WireError) -> MassiveError:
@@ -1094,7 +1090,7 @@ class RestReader:
             raise self._public(error) from error
         return page.rows
 
-    def read_symbols(
+    def read_cycle(
         self,
         spec: DatasetSpec,
         request: Request,
@@ -1103,7 +1099,11 @@ class RestReader:
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
     ) -> tuple[pa.Table, int]:
-        """Run one `poll()` cycle: the dataset's fetch path for the cycle's symbols.
+        """Run one `poll()` cycle: `read_fetch` for the cycle's symbols.
+
+        A reactive symbol table can route a new symbol to a path that lacks a parameter the
+        caller set (an explicit `adjusted` on the crypto indicators). Retrying cannot fix that,
+        so its `ValueError` becomes `UnsupportedParameterError`, which fails the table.
 
         Args:
             spec: The dataset.
@@ -1114,8 +1114,45 @@ class RestReader:
 
         Returns:
             The cycle's rows and request count.
+
+        Raises:
+            UnsupportedParameterError: If a path of the cycle does not take a parameter the
+                caller set.
+
+        Any other error is that of `read_fetch`.
         """
-        return self.read_fetch(spec, request, symbols=symbols, record=record, executor=executor)
+        try:
+            planned = self.plan_fetch(spec, request, symbols)
+        except ValueError as error:
+            raise UnsupportedParameterError(str(error)) from error
+        return self._read_planned(spec, request, planned, record=record, executor=executor)
+
+    def check_parameters(self, spec: DatasetSpec, request: Request) -> None:
+        """Check, before any symbol is known, that some fetch path can take the parameters.
+
+        A `poll()` over a reactive symbol table cannot plan its paths until it reads the
+        table, but a parameter that none of the dataset's fetch paths takes (`fetch_path`,
+        `detail_path`, and the per-class paths) can never succeed, so it fails at once.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments.
+
+        When every fetch path refuses a parameter, the first path's `ValueError` (from `_base`
+        or `_axis_query`) is raised.
+        """
+        candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
+        errors: list[ValueError] = []
+        templates = [template for template in candidates if template is not None]
+        for template in templates:
+            rest_path = self.rest_path(template)
+            try:
+                _base(spec, rest_path, request, fixed={})
+                _axis_query(spec, rest_path, dates=(request.start, request.end))
+            except ValueError as error:
+                errors.append(error)
+        if len(errors) == len(templates):
+            raise errors[0]
 
     def plan_fetch(
         self, spec: DatasetSpec, request: Request, symbols: NormalizedSymbols | None
@@ -1168,9 +1205,35 @@ class RestReader:
         Errors are those of `read`, and a parameter a path does not take raises the
         `ValueError` of `_base`.
         """
+        planned = self.plan_fetch(spec, request, symbols)
+        return self._read_planned(spec, request, planned, record=record, executor=executor)
+
+    def _read_planned(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        planned: Sequence[tuple[RestPath, list[Call]]],
+        *,
+        record: Callable[[DriftReport], None] | None,
+        executor: ThreadPoolExecutor | None,
+    ) -> tuple[pa.Table, int]:
+        """Make planned calls, path by path, and cap the total rows at `Request.limit`.
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments.
+            planned: Each path with its calls (`plan_fetch`); never empty.
+            record: Receives each page's drift, or None.
+            executor: A pool for fan-out requests, or None for one of each read's own.
+
+        Returns:
+            The rows of every path, in path order, and the request count.
+
+        Errors are those of `read`.
+        """
         tables = []
         requests = 0
-        for rest_path, calls in self.plan_fetch(spec, request, symbols):
+        for rest_path, calls in planned:
             table, made = self.read(
                 spec, rest_path, calls, limit=request.limit, record=record, executor=executor
             )
@@ -1274,6 +1337,8 @@ class RestEndpoints:
                 )
             )
             raise
+        # Completed first, so no later step can leave the waiters of this pair blocked.
+        future.set_result(decision)
         self._core.diagnostics.write(
             ConnectionRow(
                 transport=Transport.REST,
@@ -1287,7 +1352,6 @@ class RestEndpoints:
                 updated_at=time.time_ns(),
             )
         )
-        future.set_result(decision)
         return decision
 
     def fetch(self, spec: DatasetSpec, request: Request) -> Table:
@@ -1310,9 +1374,11 @@ class RestEndpoints:
                 `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`), `RowDataError` for a row
                 that breaks the schema, and `MassiveError` itself for any other failure (a
                 rate limit as `"rate limited: ..."`, a closed session as `"... is closed"`).
+
+        A parameter a path does not take raises the `ValueError` of `_base` before any request:
+        every path is planned before the first one is read.
         """
         reader = self._reader()
-        reader.plan_fetch(spec, request, request.symbols)  # a bad parameter fails before I/O
         try:
             table, _ = reader.read_fetch(spec, request, symbols=request.symbols)
         except MassiveError as error:
@@ -1328,7 +1394,8 @@ class RestEndpoints:
         `dm.ALL` reads the grouped-daily path, one request per day of the window. Explicit
         symbols read the history path: the window goes out as the dataset's time axis (exact
         instants for a timestamp parameter, the sessions for date-bounded futures), or as the
-        aggregates' `{from}/{to}` dates; one request per symbol where the path takes one.
+        aggregates' `{from}/{to}` millisecond epochs; one request per symbol where the path
+        takes one.
         Rows outside the window (`[start, end)` on `Timestamp`, or the sessions on
         `SessionEndDate`) are dropped. Logs `source=REST requests=<n>` at INFO.
 
@@ -1359,11 +1426,11 @@ class RestEndpoints:
             bounds: tuple[date | None, date | None]
             if isinstance(window, FuturesSessions):
                 bounds = (window.first, window.last)
-                exact = (window.window.start, window.window.end)
+                window_instants = (window.window.start, window.window.end)
             else:
                 bounds = (request.start, request.end)
-                exact = (window.start, window.end)
-            axis = _axis_query(spec, rest_path, dates=bounds, instants_=exact)
+                window_instants = (window.start, window.end)
+            axis = _axis_query(spec, rest_path, dates=bounds, exact=window_instants)
             calls = plan_calls(
                 spec, rest_path, request, symbols=request.symbols, fixed=fixed, axis=axis
             )
@@ -1391,21 +1458,31 @@ class RestEndpoints:
 
         Returns:
             The live table, tracked by the session.
+
+        A parameter the caller set that a path of the call does not take raises `ValueError`
+        before the table exists. With static symbols every path is planned now; with a reactive
+        table, whose symbols choose the paths at each cycle, only a parameter that no fetch path
+        takes fails here (`RestReader.check_parameters`), and one the cycle's path lacks fails
+        the table then (`UnsupportedParameterError`).
         """
         reader = self._reader()
-        if not isinstance(request.symbols, SymbolTable):  # a bad parameter fails now, not later
+        if isinstance(request.symbols, SymbolTable):
+            reader.check_parameters(spec, request)
+        else:
             reader.plan_fetch(spec, request, request.symbols)
         host = urlsplit(self._core.config.rest_base_url).hostname
+        candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
+        paths = ", ".join(dict.fromkeys(path for path in candidates if path is not None))
         return poll.open_poll(
             self._core,
             spec=spec,
             request=request,
             interval=interval,
             mode=mode,
-            read=functools.partial(reader.read_symbols, spec, request),
+            read=functools.partial(reader.read_cycle, spec, request),
             pollers=self._state.pollers,
             host=host,
-            path=spec.fetch_path,
+            path=paths,
             clock=poll.CLOCK,
         )
 

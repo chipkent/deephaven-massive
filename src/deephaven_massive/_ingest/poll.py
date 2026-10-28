@@ -12,7 +12,10 @@ failure can fail the table (`publish_failure`) in every mode:
 - `REPLACE`: the same `last_by`, plus one *tombstone* row for each key the previous cycle had
   and this one lacks, marked in a hidden boolean column that the result filters on and drops;
   so a key absent from the latest cycle leaves the table, also when the cycle is empty. A cycle
-  is published in one `add`, so its rows and its removals reach the table in one update.
+  is published in one `add`, so its rows and its removals reach the table in one update. The
+  `last_by` state keeps a hidden row for every key ever seen, as the `last_by()` of a stream
+  does, so a `REPLACE` table over a churning key set (an options chain, the day's movers) grows
+  with the keys it has ever held.
 
 A cycle reads a reactive symbol table once, with `Table.snapshot()` on the poller thread (never
 in a listener), and requests the dataset's fetch path for the symbols it holds; a fan-out path
@@ -20,11 +23,13 @@ makes its requests on the poller's pool of `max_concurrency` threads. Each cycle
 table's row of `m.streams()`: `RowsPublished`, `RequestsPerCycle`, `SymbolCount` for a reactive
 table, and `SchemaDrift` from each page's drift.
 
-**Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or `RowDataError` (a
-row that breaks the schema) fails the table through `publish_failure`, marks the row `FAILED`
-(`SessionCore.fail_stream`), and ends the poller. Any other error is logged at ERROR and shown in
-the row's `Error`; the table keeps its rows and the next cycle runs as scheduled, and clears the
-`Error` once it succeeds.
+**Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, `RowDataError` (a
+row that breaks the schema), or `UnsupportedParameterError` (a symbol of a reactive table
+routed to a path that lacks a parameter the caller set) fails the table through
+`publish_failure`, marks the row `FAILED` (`SessionCore.fail_stream`), and ends the poller. Any
+other error, also one while publishing, is logged at ERROR and shown in the row's `Error`; the
+table keeps its rows and the next cycle runs as scheduled, and clears the `Error` once it
+succeeds.
 
 **Lifetime.** The poller ends when its table is released (`m.release`, or garbage collection
 through the reaper), when the table's blink table shuts down, when it fails, or when the
@@ -83,6 +88,7 @@ __all__ = [
     "Poller",
     "Pollers",
     "RowDataError",
+    "UnsupportedParameterError",
     "build_table",
     "open_poll",
 ]
@@ -101,6 +107,19 @@ class RowDataError(MassiveError):
     type, or a timestamp outside 1990 to 2100. `fetch()` and `history()` raise it like any
     `MassiveError`; a `poll()` table fails with it, since the next cycle would fail alike.
     """
+
+
+class UnsupportedParameterError(MassiveError):
+    """A parameter the caller set that the path a `poll()` cycle chose does not take.
+
+    A reactive symbol table can route a new symbol to a path that lacks a parameter (an
+    explicit `adjusted` on the crypto indicators). Retrying cannot fix it, so the table fails
+    with it.
+    """
+
+
+_FATAL: Final = (AuthenticationError, EntitlementError, RowDataError, UnsupportedParameterError)
+"""The errors that fail a `poll()` table: retrying the next cycle cannot fix them."""
 
 
 class PollClock(Protocol):
@@ -383,6 +402,9 @@ class Poller:
     def _cycle(self, pool: ThreadPoolExecutor) -> bool:
         """Run one cycle: read, publish, and update the table's row.
 
+        Every step is guarded: a failure while publishing is handled like one while reading,
+        so it never ends the poller unseen.
+
         Args:
             pool: The poller's fan-out pool.
 
@@ -393,14 +415,9 @@ class Poller:
         core = self._core()
         if core is None:
             return False
-        reactive = isinstance(self._request.symbols, SymbolTable)
         try:
-            symbols = self._symbols()
-            record = functools.partial(
-                core.record_stream_drift, self._stream_id, Transport.REST.value
-            )
-            table, requests = self._read(symbols=symbols, record=record, executor=pool)
-        except (AuthenticationError, EntitlementError, RowDataError) as error:
+            return self._publish_cycle(core, pool)
+        except _FATAL as error:
             if not self._stop.is_set():
                 self._fail(core, error)
             return False
@@ -410,6 +427,20 @@ class Poller:
             if not self._stop.is_set():
                 logger.exception("%s poll(): the cycle failed", self._spec.name)
             return self._carry_on(core, error)
+
+    def _publish_cycle(self, core: SessionCore, pool: ThreadPoolExecutor) -> bool:
+        """Read the cycle's rows, publish them, and update the table's row.
+
+        Args:
+            core: The session's core.
+            pool: The poller's fan-out pool.
+
+        Returns:
+            False if the poller was stopped while it read, so nothing was published.
+        """
+        symbols = self._symbols()
+        record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST.value)
+        table, requests = self._read(symbols=symbols, record=record, executor=pool)
         if self._stop.is_set():
             return False
         self._publish(table)
@@ -417,7 +448,7 @@ class Poller:
         update = StreamUpdate(
             rows_published=self._published,
             requests_per_cycle=requests,
-            symbol_count=len(symbols) if isinstance(symbols, tuple) and reactive else None,
+            symbol_count=len(symbols) if isinstance(symbols, tuple) else None,
             clear_error=True,
         )
         core.update_streams({self._stream_id: update})

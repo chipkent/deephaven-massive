@@ -192,7 +192,10 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
     if order is not None:
         params["order"] = _require_enum(order, Order, "order")
         if sort is None:
-            raise ValueError("order needs sort: it orders by the sort field")
+            raise ValueError(
+                "order needs sort: most list endpoints take the direction as a suffix of the "
+                "sort field"
+            )
     return params
 
 

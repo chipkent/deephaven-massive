@@ -44,6 +44,7 @@ __all__ = [
     "TIMEFRAME_FIELDS",
     "SnapshotProbe",
     "decide",
+    "is_error_row",
 ]
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,22 @@ TIMEFRAME_FIELDS: Final[Mapping[AssetClass, tuple[str, ...]]] = {
 """The dotted row fields, in reading order, whose `DELAYED` or `REAL-TIME` value states the
 recency of a class's data. `underlying_asset.timeframe` is never read: the option-chain sample
 shows the underlying delayed beside a real-time contract."""
+
+
+def is_error_row(row: Mapping[str, object]) -> bool:
+    """Tell whether a snapshot row reports a ticker the plan does not include.
+
+    Massive answers such a ticker with a row that carries an `error` (`NOT_ENTITLED`) and a
+    `message` in place of its data. The host decision counts the row as absent, and the REST
+    transport keeps or drops it apart from the data rows; both use this one test.
+
+    Args:
+        row: One decoded row.
+
+    Returns:
+        True when the row's `error` is set.
+    """
+    return row.get("error") is not None
 
 
 def _value(row: Mapping[str, object], dotted: str) -> object:
@@ -292,6 +309,6 @@ def decide(
             status=error.status,
             request_id=error.request_id,
         ) from error
-    entitled = [row for row in rows if "error" not in row and "message" not in row]
+    entitled = [row for row in rows if not is_error_row(row)]
     decision = _classify(asset_class, entitled)
     return decision if decision is not None else _without_timeframe(asset_class, entitled)

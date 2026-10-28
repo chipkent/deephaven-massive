@@ -1883,9 +1883,13 @@ sees:
 - **Fan-out.** In a per-symbol `fetch()` or `poll()` cycle (`ticker_details`,
   `daily_open_close` on a holiday, `/prev`, the "last" endpoints), an HTTP 404 for one symbol
   drops that symbol, with one WARNING per symbol; every other error fails the call.
-- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, or hits
+- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
   a data failure of [section 19.5](#195-runtime-drift) (a missing required key, an
-  unconvertible value, a timestamp out of bounds), fails the table through `publish_failure`.
+  unconvertible value, a timestamp out of bounds), or plans a request with a parameter the
+  chosen path does not take (a reactive symbol table's new symbol routed to a path that lacks
+  an explicit parameter; retrying cannot fix it) fails the table through `publish_failure`.
+  `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
+  every path, with a reactive table each parameter against all of the dataset's fetch paths.
   Any other error is logged at ERROR, sets the stream's `Error` in `m.streams()`, keeps the
   previous rows, and the next cycle runs as scheduled.
 - **Drift.** `to_batch` returns each page's `DriftReport`; the transport routes it to the
@@ -2007,8 +2011,11 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `blink_to_append_only(blink)`; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE` is that
   `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone row for
   every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`, so its
-  rows and its removals land in one update. The poller holds the session core only weakly, so a
-  `poll()` table never keeps an unclosed session alive.
+  rows and its removals land in one update. The `last_by` state keeps a hidden row for every key
+  ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a churning
+  key set (an options chain, the day's movers) grows with the keys it has held. The `poll()`
+  docstring says so. The poller holds the session core only weakly, so a `poll()` table never
+  keeps an unclosed session alive.
 
 ## 15. Options contract cap
 

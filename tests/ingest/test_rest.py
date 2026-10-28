@@ -19,7 +19,7 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import CHICAGO, bounds
+from deephaven_massive._datasets.dates import CHICAGO, TimeRange, bounds
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import (
     AssetClass,
@@ -36,6 +36,7 @@ from deephaven_massive._massive import RestPath, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables.core import SessionCore
+from deephaven_massive._tables.diagnostics import Diagnostics
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -82,7 +83,7 @@ CONTRACTS = DatasetSpec(
     name="options.contracts",
     asset_class=AssetClass.OPTIONS,
     fetch_path=CONTRACTS_PATH,
-    extra_paths=(CONTRACT_PATH,),
+    detail_path=CONTRACT_PATH,
     keys={
         (R, CONTRACTS_PATH): SourceKeys(symbol=KeySpec("Ticker")),
         (R, CONTRACT_PATH): SourceKeys(symbol=KeySpec("Ticker")),
@@ -555,16 +556,21 @@ def test_error_rows_of_a_snapshot_are_kept_and_logged_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
+    other = {**refused, "ticker": "I:RUT"}
     spx = {"ticker": "I:SPX", "value": 5900.0, "last_updated": 1704310200000000000}
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused, spx])))
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused, spx, other])))
     with caplog.at_level(logging.WARNING, LOGGER):
         out = fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
     assert [(r["Symbol"], r["Error"], r["Value"]) for r in out] == [
         ("I:SPX", None, 5900.0),
         ("I:VIX", "NOT_ENTITLED", None),
+        ("I:RUT", "NOT_ENTITLED", None),
     ]
-    assert caplog.text.count("they are kept with their Error and Message columns") == 1
+    # Once per ticker and session.
+    kept = "the row is kept with its Error and Message columns"
+    assert caplog.text.count(f"NOT_ENTITLED for I:VIX: Not entitled; {kept}") == 1
+    assert caplog.text.count(f"NOT_ENTITLED for I:RUT: Not entitled; {kept}") == 1
 
 
 def test_error_rows_of_a_projected_path_are_dropped_with_a_warning(
@@ -578,7 +584,9 @@ def test_error_rows_of_a_projected_path_are_dropped_with_a_warning(
     assert [(r["Symbol"], r["Timestamp"], r["Value"]) for r in out] == [
         ("I:SPX", 1704310200000000000, 5900.0)
     ]
-    assert "no row for I:VIX: Massive answered NOT_ENTITLED: Not entitled" in caplog.text
+    assert (
+        "Massive answered NOT_ENTITLED for I:VIX: Not entitled; the row is dropped" in caplog.text
+    )
 
 
 def test_drift_is_reported_once_per_field_and_status(
@@ -1014,7 +1022,7 @@ def test_a_missing_symbol_and_a_dropped_row_warn_once_per_session(
             assert fetch(session, CRYPTO_LAST, symbols=["ETH-USD"]) == []
             assert fetch(session, INDEX_VALUES, symbols=["I:VIX"]) == []
     assert caplog.text.count("X:ETHUSD has no data") == 1
-    assert caplog.text.count("no row for I:VIX") == 1
+    assert caplog.text.count("for I:VIX: Not entitled; the row is dropped") == 1
 
 
 def test_a_read_fans_out_on_the_callers_pool(
@@ -1057,3 +1065,100 @@ def test_a_404_without_a_symbol_fails_the_call(
     # Only a per-symbol request drops on 404; a list path that is missing is an error.
     with pytest.raises(dm.MassiveError, match="HTTP 404"):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
+
+
+def test_an_error_row_needs_only_its_symbol(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The time key is required of every data row, but an error row carries no time.
+    timed = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="indices.timed",
+        asset_class=AssetClass.INDICES,
+        fetch_path=INDEX_SNAPSHOT_PATH,
+        symbol_param="ticker.any_of",
+        keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("LastUpdated"))},
+    )
+    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    table, _ = reader.read_fetch(timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",))
+    assert table.column("Symbol").to_pylist() == ["I:VIX"]
+    assert table.column("Timestamp").to_pylist() == [None]
+
+
+def test_a_failed_call_cancels_the_calls_not_yet_started(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"{}", status=401))
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    path = reader.rest_path(CRYPTO_LAST_PATH)
+    symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
+    calls = rest.plan_calls(CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols)
+    with ThreadPoolExecutor(1) as pool, pytest.raises(dm.AuthenticationError):
+        reader.read(CRYPTO_LAST, path, calls, limit=None, executor=pool)
+    # The one worker may take the next call before the read cancels it; the rest never start.
+    assert len(sent(fake_rest)) <= 2
+
+
+def test_an_empty_symbol_tuple_plans_no_request() -> None:
+    path = cast("RestPath", _massive.source(R, INDEX_SNAPSHOT_PATH))
+    assert rest.plan_calls(INDEX_SNAPSHOTS, path, Request(), symbols=()) == []
+    assert rest.fetch_paths(SMA, ()) == [(SMA_STOCK, ())]
+
+
+def test_futures_date_bounds_are_whole_sessions() -> None:
+    path = "/futures/v1/trades/{ticker}"
+    spec = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="futures.recent",
+        asset_class=AssetClass.FUTURES,
+        fetch_path=path,
+        time_axis=("timestamp.gte", "timestamp.lt"),
+        keys={(R, path): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
+    )
+    rest_path = cast("RestPath", _massive.source(R, path))
+    out = rest._axis_query(spec, rest_path, dates=(date(2025, 3, 4), date(2025, 3, 4)))
+    # The session ending 2025-03-04 opens at 17:00 Chicago time on the 3rd.
+    assert out == {
+        "timestamp.gte": datetime(2025, 3, 3, 17, tzinfo=CHICAGO),
+        "timestamp.lt": datetime(2025, 3, 4, 17, tzinfo=CHICAGO),
+    }
+
+
+def test_range_segments_floor_to_whole_milliseconds() -> None:
+    start = datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
+    end = datetime(2025, 3, 3, 15, 0, 0, 500, tzinfo=UTC)
+    out = rest._range_segments(TimeRange(start, end))
+    assert out == {
+        "from": datetime(2025, 3, 3, 14, 30, 0, 123000, tzinfo=UTC),
+        "to": datetime(2025, 3, 3, 15, 0, 0, 0, tzinfo=UTC),
+    }
+
+
+def test_a_decision_is_shared_even_if_recording_it_fails(
+    *, session: dm.MassiveSession, snapshots: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: object, row: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Diagnostics, "write", broken)
+    transport = session._core.rest_transport()
+    with pytest.raises(KeyboardInterrupt):
+        transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    monkeypatch.undo()
+    # The decision was completed before the row: a later caller gets it, never blocks.
+    later = session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    assert later.recency is Recency.DELAYED
+    assert len(snapshots.requests) == 1
+
+
+def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    watch = new_table([string_col("Symbol", ["X:BTCUSD"])])
+    q = query(session, SMA, symbols=watch, params={"bogus": 1})
+    assert isinstance(q, Query)
+    with pytest.raises(ValueError, match=r"does not take \['bogus'\]"):
+        q.poll(60)
+    assert fake_rest.requests == []

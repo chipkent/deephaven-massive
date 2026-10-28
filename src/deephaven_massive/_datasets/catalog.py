@@ -8,11 +8,11 @@ module and imports nothing above the dataset layer, so the catalog is built by t
 owns the namespaces and handed down.
 
 A spec names its sources, never its columns. Each source is a generated `Source` of the wire
-package: a REST path by role (`fetch_path`, `history_path`, `grouped_daily_path`,
-`extra_paths`), a WebSocket channel, or a flat-file prefix. Its fields, their wire types, and
-their timestamp units come from the committed generated files; the spec adds only what the
-vendor's files cannot say: the dataset's kind, and, per source, which column holds each key
-(`KeySpec`, grouped per source in a `SourceKeys`). The catalog merges the rest
+package: a REST path by role (`fetch_path`, `detail_path`, `history_path`,
+`grouped_daily_path`, `extra_paths`), a WebSocket channel, or a flat-file prefix. Its fields,
+their wire types, and their timestamp units come from the committed generated files; the spec
+adds only what the vendor's files cannot say: the dataset's kind, and, per source, which column
+holds each key (`KeySpec`, grouped per source in a `SourceKeys`). The catalog merges the rest
 (`Catalog.dataset_schema`).
 
 A spec also says which transports serve the dataset, and its query class follows from them:
@@ -232,8 +232,11 @@ class DatasetSpec:
         history_path: The REST path behind `history(source=REST)`.
         grouped_daily_path: The REST path that serves `history()` for `dm.ALL` daily bars, one
             request per day.
-        extra_paths: Further REST paths the dataset reads (the per-contract path of
-            `options.contracts`).
+        detail_path: The REST path that serves `fetch()` and `poll()`, once per symbol, when the
+            call names symbols, such as one option contract's
+            `"/v3/reference/options/contracts/{options_ticker}"`; `fetch_path` serves calls
+            without symbols.
+        extra_paths: Further REST paths the dataset reads.
         channels: The WebSocket channel per bar timespan, or under the key None for datasets
             that are not bars, such as `{None: "T"}` or
             `{Timespan.SECOND: "A", Timespan.MINUTE: "AM"}`. Its source is
@@ -271,6 +274,7 @@ class DatasetSpec:
     fetch_path: str | None = None
     history_path: str | None = None
     grouped_daily_path: str | None = None
+    detail_path: str | None = None
     extra_paths: tuple[str, ...] = ()
     channels: Mapping[Timespan | None, str] = field(default_factory=dict)
     family: ChannelFamily = ChannelFamily.TICK
@@ -342,11 +346,12 @@ class DatasetSpec:
         """The REST paths the dataset reads: the role paths, then `extra_paths`.
 
         The role paths are `fetch_path`, the per-class fetch paths (`fetch_paths_by_class`),
-        `history_path`, and `grouped_daily_path`, without repeats.
+        `detail_path`, `history_path`, and `grouped_daily_path`, without repeats.
         """
         roles = (
             self.fetch_path,
             *self.fetch_paths_by_class.values(),
+            self.detail_path,
             self.history_path,
             self.grouped_daily_path,
         )

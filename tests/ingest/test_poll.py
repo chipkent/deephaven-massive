@@ -619,3 +619,149 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
     table = q.poll(60, mode=PollMode.UPSERT)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25)])
     assert "ticker.any_of=AAPL" in fake_rest.requests[0].target
+
+
+SMA_STOCK = "/v1/indicators/sma/{stockTicker}"
+SMA_CRYPTO = "/v1/indicators/sma/{cryptoTicker}"
+SMA = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="indicators.sma",
+    fetch_path=SMA_STOCK,
+    fetch_paths_by_class={AssetClass.CRYPTO: SMA_CRYPTO},
+    poll_keys=("Symbol", "Timestamp"),
+    keys={
+        (R, SMA_STOCK): SourceKeys(
+            symbol=KeySpec("stockTicker", from_request=True), time=KeySpec("Timestamp")
+        ),
+        (R, SMA_CRYPTO): SourceKeys(
+            symbol=KeySpec("cryptoTicker", from_request=True), time=KeySpec("Timestamp")
+        ),
+    },
+)
+INDEX_PATH = "/v3/snapshot/indices"
+INDEX_SNAPSHOTS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="indices.snapshots",
+    asset_class=AssetClass.INDICES,
+    fetch_path=INDEX_PATH,
+    symbol_param="ticker.any_of",
+    keys={(R, INDEX_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+)
+
+
+@pytest.fixture
+def routed_session(
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> Iterator[dm.MassiveSession]:
+    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    monkeypatch.setitem(
+        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=FakeClock())
+    )
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+def streams_of(m: dm.MassiveSession, to_pylist: ToPylist) -> list[dict[str, Any]]:
+    # The session's m.streams() rows, once every row queued so far is applied.
+    assert m._core.diagnostics.barrier().wait(TIMEOUT)
+    return to_pylist(m.streams())
+
+
+def symbols_of(table: Table, to_pylist: ToPylist) -> list[str]:
+    return sorted(row["Symbol"] for row in to_pylist(table))
+
+
+@pytest.mark.parametrize("spec", [INDEX_SNAPSHOTS, SMA], ids=["list parameter", "class paths"])
+def test_an_emptied_symbol_table_evicts_every_key(
+    *,
+    routed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    spec: DatasetSpec,
+) -> None:
+    fake_rest.reply(INDEX_PATH, Reply(envelope([{"ticker": "I:SPX", "value": 1.0}])))
+    fake_rest.reply(
+        "/v1/indicators/sma/I%3ASPX",
+        Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 1.0}]})),
+    )
+    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["I:SPX"])]))
+    q = build_query(routed_session._core, spec, symbols=watch)
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=PollMode.REPLACE)
+    until(lambda: symbols_of(table, dh_to_pylist) == ["I:SPX"])
+    watch.delete(new_table([string_col("Symbol", ["I:SPX"])]))
+    until(lambda: watch.size == 0)
+    requests = len(fake_rest.requests)
+    next_cycle(clock)
+    until(lambda: symbols_of(table, dh_to_pylist) == [])
+    assert len(fake_rest.requests) == requests  # an empty table asks for nothing
+    clock.wait_for_sleepers(1)
+    (row,) = streams_of(routed_session, dh_to_pylist)
+    assert (row["State"], row["Error"], row["SymbolCount"]) == ("RUNNING", None, 0)
+
+
+def test_a_symbol_routed_to_a_path_without_the_parameter_fails_the_table(
+    *,
+    routed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    watch = new_table([string_col("Symbol", ["X:BTCUSD"])])
+    q = build_query(routed_session._core, SMA, symbols=watch, adjusted=False)
+    assert isinstance(q, Query)
+    table = q.poll(60)  # the stock path takes `adjusted`, so nothing fails up front
+    until(lambda: bool(table.j_table.isFailed()))
+    until(lambda: streams_of(routed_session, dh_to_pylist)[0]["State"] == "FAILED")
+    (row,) = streams_of(routed_session, dh_to_pylist)
+    assert "does not take ['adjusted']" in row["Error"]
+    assert row["Path"] == f"{SMA_STOCK}, {SMA_CRYPTO}"
+    assert fake_rest.requests == []
+
+
+def test_a_cycle_reports_its_pages_drift(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "brand_new": 1}])))
+    q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.poll(60)
+    clock.wait_for_sleepers(1)
+    drift = streams_of(rest_session, dh_to_pylist)[0]["SchemaDrift"]
+    assert drift == "REST:brand_new+, REST:distribution_type-"
+    del table
+
+
+def test_a_failure_while_publishing_keeps_the_poller(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish = poll.Poller._publish
+    failures = [RuntimeError("publish failed")]
+
+    def flaky(self: poll.Poller, table: pa.Table) -> None:
+        if failures:
+            raise failures.pop()
+        publish(self, table)
+
+    monkeypatch.setattr(poll.Poller, "_publish", flaky)
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    clock.wait_for_sleepers(1)
+    assert stream_rows()[0]["Error"] == "publish failed"
+    script.rows(("AAPL", 2.0))
+    next_cycle(clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 2.0)])

@@ -134,7 +134,7 @@ def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
 def _read_symbol_table(
     core: SessionCore, spec: DatasetSpec, symbols: SymbolTable
 ) -> tuple[str, ...]:
-    """Read a reactive symbol table once, for a static `history()` result.
+    """Read a reactive symbol table once, for a static result (`fetch()` or `history()`).
 
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
     it reads, so the symbols are one consistent snapshot. Runs on the caller thread, inside the
@@ -158,7 +158,7 @@ def _read_symbol_table(
         raw = {canonical_symbol(row[0]) for row in symbols.table.iter_tuple(cols="Symbol")}
     found = tuple(sorted(symbol for symbol in raw if symbol is not None))
     if not found:
-        raise ValueError(f"{spec.name} history: the symbol table holds no valid symbols")
+        raise ValueError(f"{spec.name}: the symbol table holds no valid symbols")
     return found
 
 
@@ -245,7 +245,10 @@ class Query(QueryBase):
                 for news and filings and `REPLACE` otherwise.
 
         Returns:
-            A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`.
+            A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`. A
+            `REPLACE` table removes keys absent from the latest cycle, but its hidden state
+            keeps every key it has ever held, as `last_by()` does; over a key set that keeps
+            changing (an options chain, the day's movers) its memory grows with the keys seen.
         """
         self._core.require_verb_thread()
         period = _interval(interval)
