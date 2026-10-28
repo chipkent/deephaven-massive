@@ -179,6 +179,14 @@ nothing is kept or shimmed for compatibility.
     big-picture Summary from which a reader with no context could explain the whole PR, the
     required sections in order with the engineering detail in How it works, nothing the reader
     must decode, and rewritten to the final state on every push that changes the PR.
+18. **Dates in Deephaven tables are ISO strings.** Every calendar date column the library
+    produces, the vendor's (`ExDividendDate`, an economy `Date`) and the library's own
+    (`Date`), is ISO `yyyy-MM-dd` text, a `String`, stored as a column: never a `LocalDate`
+    and never a view computed on read. Deephaven stores a repeated string once, with an
+    integer per row, so a stored date is cheap, and one type lets every date join and compare
+    with every other. Instants stay `Instant`s. The names `Date`, `Timestamp`, and every
+    `Timestamp<Qualifier>` belong to the library's time columns (`_datasets/row_times.py`):
+    no vendor field and no refresh `NAMES` entry may take one.
 
 ## Layers
 
