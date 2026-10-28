@@ -63,6 +63,7 @@ __all__ = [
     "KEY_COLUMNS",
     "OPTION_ROOT",
     "RAW_SYMBOL",
+    "TRANSPORT_LABELS",
     "Column",
     "ColumnType",
     "Schema",
@@ -590,6 +591,14 @@ _TRANSPORT_ORDER: Final = (Transport.REST, Transport.FLAT_FILES, Transport.WS)
 """The order in which a column's transports are listed and its descriptions are tried: REST
 first, because its descriptions are the most complete."""
 
+TRANSPORT_LABELS: Final[Mapping[Transport, str]] = MappingProxyType(
+    {Transport.REST: "REST", Transport.FLAT_FILES: "flat files", Transport.WS: "WebSocket"}
+)
+"""How every text a user reads spells each transport: the key-column descriptions, the
+`SuppliedBy` column of `columns()`, and the column reference all use it, so a filter copied
+from one works on another. The `Transport` values stay internal names, which the diagnostics
+tables show. Read-only."""
+
 _KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The instrument, in the library's canonical symbol form.",
     "Timestamp": "The row's primary time, as an Instant.",
@@ -622,6 +631,10 @@ _DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     ),
 }
 """The library's description of each derived column."""
+
+_QUOTED_ENDS: Final = ('."', '?"', '!"')
+"""The endings of a quoted description that already closes a sentence, so the key column's
+"From …" sentence takes no period after the closing quote."""
 
 _Contribution = tuple[Transport, SourceColumn]
 """One column one source of a dataset contributes, with the source's transport."""
@@ -660,16 +673,19 @@ def _key_part(transport: Transport, column: SourceColumn, asset_class: str | Non
             the field's description (`Field.description_for`).
 
     Returns:
+        One item of the list `_description` joins with "; ", with no closing punctuation:
         ``REST `sip_timestamp`: "<field description>"`` for a wire key with a description,
-        ``REST `sip_timestamp`.`` for one without, or ``REST: the request's `stocksTicker`
-        parameter.`` for a key filled from the request.
+        ``REST `sip_timestamp``` for one without, or ``REST: the request's `stocksTicker`
+        parameter`` for a key filled from the request, with the transport spelled as
+        `TRANSPORT_LABELS` spells it (``WebSocket `t`: …``).
     """
+    label = TRANSPORT_LABELS[transport]
     if column.field is None:
-        return f"{transport.value}: the request's `{column.parameter}` parameter."
+        return f"{label}: the request's `{column.parameter}` parameter"
     described = column.field.description_for(asset_class)
     if described:
-        return f'{transport.value} `{column.field.wire_key}`: "{described}"'
-    return f"{transport.value} `{column.field.wire_key}`."
+        return f'{label} `{column.field.wire_key}`: "{described}"'
+    return f"{label} `{column.field.wire_key}`"
 
 
 def _description(
@@ -700,12 +716,16 @@ def _description(
         named = ", ".join(f"`{member}`" for member in suppliers)
         return f"Always null for `{spec.name}`; supplied by {named}."
     if is_key and name in _KEY_SENTENCES:
-        parts = [_KEY_SENTENCES[name]]
+        parts: list[str] = []
         for transport, column in own:
             part = _key_part(transport, column, asset_class)
             if part not in parts:
                 parts.append(part)
-        return " ".join(parts)
+        # One sentence after the library's own, so a lowercase label never starts a sentence.
+        # A quote that already ends the sentence inside it gets no second period after it.
+        listed = "; ".join(parts)
+        end = "" if listed.endswith(_QUOTED_ENDS) else "."
+        return f"{_KEY_SENTENCES[name]} From {listed}{end}"
     for _, column in own:
         described = column.field.description_for(asset_class) if column.field else ""
         if described:

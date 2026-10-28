@@ -786,10 +786,10 @@ def columns(self) -> Table:
         `int`, `double`, `boolean`, `String`, `Instant`, `LocalDate`, or `int[]`);
         `Description` (String), what the column holds, empty when Massive gives no
         description; and `SuppliedBy` (String), the transports whose sources fill the
-        column for this dataset, `REST`, `FLAT_FILES`, and `WS` in that order, joined by
-        ", " (`fetch()` and `poll()` are served by REST, the stream verbs by WS, and
-        `history()` by REST or FLAT_FILES); empty for a column that only other datasets
-        of the same kind supply, which this dataset always leaves null.
+        column for this dataset, spelled `REST`, `flat files`, and `WebSocket`, in that
+        order, joined by ", " (`fetch()` and `poll()` are served by REST, the stream verbs
+        by WebSocket, and `history()` by REST or flat files); empty for a column that only
+        other datasets of the same kind supply, which this dataset always leaves null.
 
     Raises:
         ValueError: If called on an update-graph thread, for example from a table listener.
@@ -798,7 +798,7 @@ def columns(self) -> Table:
         ::
 
             cols = m.stocks.trades(["AAPL"]).columns()
-            stream_only = cols.where("SuppliedBy = `WS`")
+            stream_only = cols.where("SuppliedBy = `WebSocket`")
     """
 ```
 
@@ -983,7 +983,13 @@ the documented way to convert text.
 Each dataset column has one description, chosen by the rule of
 [section 19.4](#194-generated-schemas) from the field descriptions in `spec/descriptions.json`
 (the vendor's, corrected where they are clearly wrong). It reaches users through three outlets,
-all generated from the same dataset schema, so they can never disagree.
+all generated from the same dataset schema, so they can never disagree. All three spell the
+transports one way, `REST`, `flat files`, and `WebSocket` (`schema.TRANSPORT_LABELS`): the
+key-column descriptions of [section 19.4](#194-generated-schemas) rule 3, `columns()`'s
+`SuppliedBy`, and the column reference's **Supplied by**, so a filter copied from a page
+(``cols.where("SuppliedBy = `WebSocket`")``) works on `columns()`. The `Transport` enum values
+(`REST`, `FLAT_FILES`, `WS`) stay internal names, which the diagnostics tables of
+[section 17](#17-diagnostics) show.
 
 **1. Every result is described.** Deephaven 42.7 stores column descriptions as the table
 attribute `ColumnDescriptions` and a table description as `TableDescription`, set through
@@ -1045,9 +1051,9 @@ where `<dataset>` is the dataset's name below its namespace with dots written as
 (`trades`, `financials-ratios`, `benzinga-news`); a heading naming the dataset
 (`m.stocks.trades`); its `DatasetSpec.summary`; and one table with one row per column, in
 result order. The table's columns are **Column**, **Deephaven type**, **Description**,
-**Supplied by** (the transports of `columns()`'s `SuppliedBy`, spelled `REST`, `flat files`,
-and `WebSocket`), and one **Wire field** column per transport the dataset uses (`REST field`,
-`Flat-file field`, `WebSocket field`). A wire-field cell lists the distinct wire keys of that
+**Supplied by** (the transports of `columns()`'s `SuppliedBy`, in the same spelling), and one
+**Wire field** column per transport the dataset uses (`REST field`, `Flat-file field`,
+`WebSocket field`). A wire-field cell lists the distinct wire keys of that
 transport's sources that feed the column, in source order and before any projection, or
 `request` for a key filled from the request. A footer names the snapshot's fetch date and the
 vendor URLs of the sources the page's datasets use, from the `Provenance` passed to the renderer
@@ -3396,7 +3402,7 @@ names a source or field the snapshot lacks fails the refresh as stale (`stale-en
 | `UNITS` | `overrides.py` | the verified unit per `(source, wire key)`, `unverified-ms` where [section 23](#23-open-verification-items) says so, or "not a timestamp" (a timestamp-like field that is not an epoch, kept as it is); with the tag-conflict list | the 20 indicator `IMicroseconds` tags are ms |
 | `TYPE_FIXES` | `overrides.py` | a field whose documented samples its declared type does not fit (a wrong or missing type, or a second form the vendor sends): one named `Conversion`, field-scoped, that the decoder applies deliberately (see **Named conversions** below), each citing the sample; each is exercised by a fixture test, and one the vendor's own docs do not show goes into section 23 | every row of the conversions table below |
 | `KEY_FIXES` | `overrides.py` | `{(source, declared key): (wire key, reason)}`: a field the specification declares under one key while every documented sample (the response example and the documentation sample) sends it under another that nothing declares; the field is read under the samples' key, keeping its declared type and description, and every other hand entry names it by that key. Stale once the declared key is gone, or the example no longer sends the corrected key or sends the declared one; each goes into section 23 | ticker events `event_type` → `type` (column `Type`) |
-| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text or asset classes, reason)}`: a field whose vendor description is clearly wrong for its source (another asset class's or event's text copied onto it, or a statement the vendor's own documentation contradicts); the entry quotes the vendor's text (as plain text, after normalization) and gives the replacement, either `text` for every use of the source, or, for a source that serves several asset classes, `asset_classes`: the text a dataset of each listed class shows, every other class keeping the vendor's. The replacement is Massive's own wording for the same field of a sibling source wherever that is right and says what the field holds; it is written here only when no sibling text is adequate, and the reason says so. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once no generated field looks the entry up (its source or key is gone, or the key is one a `KEY_FIXES` entry replaces or only an example sends), or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | the crypto last trade's and trades flat file's `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated"; the futures trades' `price` ("100 contracts × $2.00 = $200.00", no multiplier) → the `futures/T` channel's text; the unified `/v3/snapshot` `last_trade.price` → the options trades' text, for `options` only |
+| `DESCRIPTION_FIXES` | `overrides.py` | `{(source, wire key): (vendor, text or asset classes, reason)}`: a field whose vendor description is clearly wrong for its source (another asset class's or event's text copied onto it, or a statement the vendor's own documentation contradicts), or missing where a sibling source describes the same field (the entry then quotes `""`); the entry quotes the vendor's text (as plain text, after normalization) and gives the replacement, either `text` for every use of the source, or, for a source that serves several asset classes, `asset_classes`: the text a dataset of each listed class shows, every other class keeping the vendor's. The replacement is Massive's own wording for the same field of a sibling source wherever that is right and says what the field holds; it is written here only when no sibling text is adequate, and the reason says so. Only that `(source, wire key)` changes: the field keeps its name and type, and every other source keeps its own description. Stale once no generated field looks the entry up (its source or key is gone, or the key is one a `KEY_FIXES` entry replaces or only an example sends), or the vendor's text no longer matches the quote, so a rewritten description is reviewed again | the crypto last trade's and trades flat file's `price` ("actual dollar value per whole share", stock text) → the price in the pair's second currency; the stocks last trade's `y` ("when the quote was actually generated") → "when the trade was actually generated"; the futures trades' `price` ("100 contracts × $2.00 = $200.00", no multiplier) → the `futures/T` channel's text; the unified `/v3/snapshot` `last_trade.price` → the options trades' text, for `options` only; the futures snapshot's `details.product_code` (no description) → the `/futures/v1/contracts` text |
 | `SAMPLE_ERRORS` | `exclusions.py` | `(source, wire key, sample, reason)`: a documented example value that is wrong while the type is right, or a key a WebSocket example sends that the message does not declare, which the `example-type` gate skips | IPO `us_code` example `37833100`, a CUSIP that lost its leading zero |
 | `TRANSPORT_ONLY` | `overrides.py` | `{(kind, group, column): reason}`: columns legitimately on one transport within one group | `(bars, stocks, AccumulatedVolume)` (WebSocket only) |
 | `RESULT_KEYS` | `overrides.py` | the paths whose rows are not under `results`: another key, a dotted path of keys, or `None` for a body that is itself the rows | `/v1/last/crypto` → `last`; indicators → `results.values`; ticker events → `results.events`; `/v1/marketstatus/now` → `None` |
@@ -3561,8 +3567,11 @@ checks.
   per class: the entry gives the text for each listed class, and every other class keeps the
   vendor's. A class text that no dataset of its class shows (no such dataset reads the source,
   or an earlier source's text wins the column) fails a catalog test, since the refresh cannot
-  see the datasets. That is the only hand input on descriptions; a description that is merely
-  terse or imprecise is kept.
+  see the datasets. A field Massive leaves without a description, where a sibling source
+  describes the same field, gets an entry too: it quotes the empty text, so it goes stale once
+  Massive adds one, and its text is the sibling's (the futures snapshot's
+  `details.product_code` takes the `/futures/v1/contracts` text). That is the only hand input
+  on descriptions; a description that is merely terse or imprecise is kept.
 - **No gate.** A field without a description gets `""`, and nothing stops the refresh.
   Descriptions change about twenty times as often as keys, so a gate on them would be noise; a
   changed description is an ordinary line in the refresh diff, except where a
@@ -3754,11 +3763,16 @@ a dataset with no asset class takes the field's own description.
    dataset, get a fixed library sentence ("The instrument,
    in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
    instrument Massive links the row to, exactly as Massive sends it; for an option, the linked
-   instrument, not what the contract delivers."), followed, per transport in
-   the order of rule 1, by the wire key each source renames and its quoted field description
-   (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``), or, for a key
-   filled from the request, the request parameter it came from
-   (`` REST: the request's `stocksTicker` parameter. ``).
+   instrument, not what the contract delivers."), followed by one sentence
+   that starts "From" and lists, per transport in the order of rule 1 and spelled as in
+   [section 7.4](#74-column-descriptions), the wire key each source renames and its quoted
+   field description (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``)
+   or, for a key filled from the request, the request parameter it came from
+   (`` REST: the request's `stocksTicker` parameter ``). The items are joined by "; ", so a
+   lowercase label such as `flat files` never starts a sentence, and the sentence ends with a
+   period unless its last quoted description already ends one inside the quote:
+   `` The instrument, in the library's canonical symbol form. From REST `T`: "…"; flat files
+   `ticker`: "…"; WebSocket `sym`: "The ticker symbol for the given stock." ``
 
 A column whose sources carry no description gets `""`, and nothing fails. The sentences of
 rules 2 and 3 are the library's statements about its own columns, not hand input about Massive,
@@ -4403,8 +4417,20 @@ document already reflects them.
     `end` on a list sends no upper bound, so future-dated rows such as an announced
     ex-dividend date appear ([section 12](#12-timestamp-units-and-day-boundaries),
     [section 16](#16-historysourceauto)).
+53. **One spelling for the transports in user-facing text** (2026-10-28). The key-column
+    descriptions, `columns()`'s `SuppliedBy`, and the column reference spell the transports
+    `REST`, `flat files`, and `WebSocket`, so a filter copied from a page works on
+    `columns()`; the internal `Transport` values (`REST`, `FLAT_FILES`, `WS`) are unchanged.
+    A key column's description lists its sources in one sentence starting "From", joined by
+    "; ", so a lowercase label never starts a sentence ([section 7.4](#74-column-descriptions),
+    [section 19.4](#194-generated-schemas)).
+54. **A missing description is filled from a sibling source** (2026-10-28). Where Massive
+    gives a field no description but describes the same field on a sibling source, a
+    `DESCRIPTION_FIXES` entry quotes the empty text and takes the sibling's, with its reason,
+    so no column of a dataset is left blank for want of text Massive already wrote
+    ([section 19.4](#194-generated-schemas)).
 
-53. **Canonical symbols only, converters for the rest** (2026-10-28). Every symbol a dataset
+56. **Canonical symbols only, converters for the rest** (2026-10-28). Every symbol a dataset
     takes and every `Symbol` column is Massive's exact REST ticker, case kept (`KIMpL`); the
     old normalization (upper-casing, `EUR/USD` to `C:EURUSD`, `SPX` to `I:SPX` on input) is
     gone, and a non-canonical symbol raises `ValueError` naming the canonical form. Conversion
@@ -4476,10 +4502,10 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 38 | Whether crypto range and `/prev` 1-day bars cover the UTC day: compare them with the same day rebuilt from 1-minute bars | Item 1's loud check: a stamp elsewhere than a UTC day boundary fails | `tests/namespaces/test_crypto.py`: as item 1 | `tests/namespaces/test_crypto_integration.py`: rebuild one day of `X:BTCUSD` from `minute_aggs_v1` over the UTC day and over the New York day; record which matches the range and `/prev` bars |
 | 39 | Whether grouped daily and `day_aggs_v1` hold the same pairs on a day, for forex and crypto | `AUTO` keeps one source for crypto 1-day bars; nothing assumes the sets match | `tests/datasets/test_history_source.py`: crypto 1-day bars keep one source whatever the symbol count | `tests/namespaces/test_forex_integration.py`, `tests/namespaces/test_crypto_integration.py`: one day of `dm.ALL` 1-day bars from both sources; record the pairs only one holds |
 | 40 | Which session a futures bar of several sessions or longer is labelled with (`SessionEndDate` of its first or last session), and how such bars are aligned | Futures bars of a session or longer with `multiplier` above 1 named by dates raise `ValueError` ("pass datetimes, or multiplier=1"); named by datetimes, they are kept by their own window | `tests/datasets/test_history_source.py`, `tests/namespaces/test_futures.py`: the refusal for 2-session, 2-week, and 2-month bars | `tests/namespaces/test_futures_integration.py`: 2-session and 2-month bars of ES over a quarter; record each bar's `Timestamp` and `SessionEndDate` |
-| 41 | Massive's spelling of every US stock ticker: the documentation shows `BRK.A` and `KIMpL` only; warrants, units, rights, when-issued, and test issues are undocumented, and Benzinga and ETF Global rows may spell tickers otherwise (the TMX calendar is global and keeps its tickers as written) | The canonical grammar is an upper-case root and the CQS suffixes `.X`, `pX`, `r`, and `w`; the conventions convert plain tickers, classes, and preferreds only; a row spelled otherwise follows `unknown_symbols` (fails by default) | `tests/datasets/test_symbols.py`: the grammar, each convention's table and refusals, and the unreadable spellings | `tests/namespaces/test_reference_integration.py`: `tickers(ticker_type=...)` for `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and one page of each partner dataset; record every spelling outside the grammar |
-| 42 | Which endpoints of the indices class send an index without its `I:` prefix | Every dataset of the indices class reads a bare ticker as `I:` and the ticker; datasets of other classes and cross-class datasets never add it | `tests/datasets/test_symbols.py`: `canonical_from_wire` adds the prefix only for the indices class, and no conversion depends on the name | `tests/namespaces/test_indices_integration.py`: one request of each indices dataset, the unified snapshot, and an indicator for `I:SPX`; record the spelling of each row's ticker |
-| 43 | `Underlying` of the options datasets for `BRK.B`, `SPX`/`SPXW`, `NDX`/`NDXP`, `VIX`/`VIXW`, and an adjusted contract (`AAPL1`, `DELL1`), and whether the chain takes `I:SPX` as its underlying | `Underlying` is Massive's field as sent; `underlying=` is sent as given; nothing maps a root to an underlying | `tests/namespaces/test_options.py`: the chain's `Underlying` is the fixture's, `underlying=` keeps case and refuses other classes | `tests/namespaces/test_options_integration.py`: one chain and one contracts request for each; record `Underlying` and `OptionRoot` |
-| 44 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
-| 45 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | Upper-case letters and digits; a year is never rewritten, and `ESZ25` is not `ESZ5`; spreads are item 46 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `esz5` and `ES-Z5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |
-| 46 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | `canonical_symbol_future_spread` accepts exactly those forms as written; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: each form is canonical and converts unchanged, a single contract and a spread refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
-| 47 | Which crypto quote currencies Massive's pairs use beyond `CRYPTO_QUOTES` | Any `X:` ticker is canonical; a stream refuses a pair whose quote it cannot split, and `fetch()`, `poll()`, and `history()` serve it | `tests/datasets/test_symbols.py`, `tests/namespaces/test_crypto.py`: `X:BTCDAI` is taken, and a stream verb refuses it | `tests/namespaces/test_crypto_integration.py`: `reference.tickers(market=dm.Market.CRYPTO)`; record every quote outside the list and widen it |
+| 44 | Massive's spelling of every US stock ticker: the documentation shows `BRK.A` and `KIMpL` only; warrants, units, rights, when-issued, and test issues are undocumented, and Benzinga and ETF Global rows may spell tickers otherwise (the TMX calendar is global and keeps its tickers as written) | The canonical grammar is an upper-case root and the CQS suffixes `.X`, `pX`, `r`, and `w`; the conventions convert plain tickers, classes, and preferreds only; a row spelled otherwise follows `unknown_symbols` (fails by default) | `tests/datasets/test_symbols.py`: the grammar, each convention's table and refusals, and the unreadable spellings | `tests/namespaces/test_reference_integration.py`: `tickers(ticker_type=...)` for `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and one page of each partner dataset; record every spelling outside the grammar |
+| 45 | Which endpoints of the indices class send an index without its `I:` prefix | Every dataset of the indices class reads a bare ticker as `I:` and the ticker; datasets of other classes and cross-class datasets never add it | `tests/datasets/test_symbols.py`: `canonical_from_wire` adds the prefix only for the indices class, and no conversion depends on the name | `tests/namespaces/test_indices_integration.py`: one request of each indices dataset, the unified snapshot, and an indicator for `I:SPX`; record the spelling of each row's ticker |
+| 46 | `Underlying` of the options datasets for `BRK.B`, `SPX`/`SPXW`, `NDX`/`NDXP`, `VIX`/`VIXW`, and an adjusted contract (`AAPL1`, `DELL1`), and whether the chain takes `I:SPX` as its underlying | `Underlying` is Massive's field as sent; `underlying=` is sent as given; nothing maps a root to an underlying | `tests/namespaces/test_options.py`: the chain's `Underlying` is the fixture's, `underlying=` keeps case and refuses other classes | `tests/namespaces/test_options_integration.py`: one chain and one contracts request for each; record `Underlying` and `OptionRoot` |
+| 47 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
+| 48 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | Upper-case letters and digits; a year is never rewritten, and `ESZ25` is not `ESZ5`; spreads are item 49 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `esz5` and `ES-Z5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |
+| 49 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | `canonical_symbol_future_spread` accepts exactly those forms as written; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: each form is canonical and converts unchanged, a single contract and a spread refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
+| 50 | Which crypto quote currencies Massive's pairs use beyond `CRYPTO_QUOTES` | Any `X:` ticker is canonical; a stream refuses a pair whose quote it cannot split, and `fetch()`, `poll()`, and `history()` serve it | `tests/datasets/test_symbols.py`, `tests/namespaces/test_crypto.py`: `X:BTCDAI` is taken, and a stream verb refuses it | `tests/namespaces/test_crypto_integration.py`: `reference.tickers(market=dm.Market.CRYPTO)`; record every quote outside the list and widen it |

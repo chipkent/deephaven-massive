@@ -34,7 +34,7 @@ Benzinga analyst insights on US stocks: a rating, a price target, and the reason
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The stock symbol of the company being rated." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company being rated." | REST | `ticker` |
 | `BenzingaFirmId` | String | The identifier used by Benzinga for the firm record. | REST | `benzinga_firm_id` |
 | `BenzingaId` | String | The identifier used by Benzinga for this record. | REST | `benzinga_id` |
 | `BenzingaRatingId` | String | The identifier used by Benzinga for the rating record. | REST | `benzinga_rating_id` |
@@ -55,7 +55,7 @@ Analyst rating and price-target actions on US stocks, as reported by Benzinga.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The stock symbol of the company being rated." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company being rated." | REST | `ticker` |
 | `AdjustedPriceTarget` | double | The current price target adjusted for stock splits and dividends. | REST | `adjusted_price_target` |
 | `Analyst` | String | The name of the individual analyst who issued the rating. | REST | `analyst` |
 | `BenzingaAnalystId` | String | The identifier used by Benzinga for this analyst. | REST | `benzinga_analyst_id` |
@@ -88,7 +88,7 @@ The consensus of analyst ratings and price targets for each US stock, from Benzi
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST: the request's `ticker` parameter. | REST | request |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `ticker` parameter. | REST | request |
 | `BuyRatings` | long | The count of 'Buy' ratings from contributing analysts. | REST | `buy_ratings` |
 | `ConsensusPriceTarget` | double | The average price target across all analysts, rounded to 2 decimal places. | REST | `consensus_price_target` |
 | `ConsensusRating` | String | The overall rating category determined by the average consensus weight. Possible values: 'strong_buy', 'buy', 'hold', 'sell', 'strong_sell'. | REST | `consensus_rating` |
@@ -111,7 +111,7 @@ Benzinga's bull case and bear case summaries for US stocks.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The stock ticker symbol for the company associated with the bull and bear case summaries." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock ticker symbol for the company associated with the bull and bear case summaries." | REST | `ticker` |
 | `BearCase` | String | A concise summary of the bearish investment thesis, highlighting potential risks, challenges, and reasons why the stock could decline in value. | REST | `bear_case` |
 | `BenzingaId` | String | The unique identifier used by Benzinga for this bull/bear case record. | REST | `benzinga_id` |
 | `BullCase` | String | A concise summary of the bullish investment thesis, highlighting positive aspects, growth opportunities, and reasons why the stock could appreciate in value. | REST | `bull_case` |
@@ -125,7 +125,7 @@ Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The stock symbol of the company issuing guidance." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company issuing guidance." | REST | `ticker` |
 | `BenzingaId` | String | A unique identifier assigned by Benzinga to the guidance record. | REST | `benzinga_id` |
 | `CompanyName` | String | The name of the company issuing guidance. | REST | `company_name` |
 | `Currency` | String | The ISO 4217 code representing the currency in which the company issued its guidance figures. | REST | `currency` |
@@ -159,7 +159,7 @@ Earnings announcements of US companies from Benzinga, with estimates and surpris
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The stock symbol of the company reporting earnings." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company reporting earnings." | REST | `ticker` |
 | `ActualEps` | double | The actual earnings per share (EPS) reported by the company for the given period. | REST | `actual_eps` |
 | `ActualRevenue` | double | The actual revenue reported by the company for the given fiscal period. | REST | `actual_revenue` |
 | `BenzingaId` | String | The identifier used by Benzinga for this record. | REST | `benzinga_id` |
@@ -205,7 +205,7 @@ Benzinga news articles, with headline, teaser, body, and the tickers each one na
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `published`: "The timestamp (formatted as an ISO 8601 timestamp) when the news article was originally published." | REST | `published` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `published`: "The timestamp (formatted as an ISO 8601 timestamp) when the news article was originally published." | REST | `published` |
 | `Author` | String | The name of the journalist or entity that authored the news article. | REST | `author` |
 | `BenzingaId` | long | The identifier used by Benzinga for this record. | REST | `benzinga_id` |
 | `Body` | String | The full text content of the news article. | REST | `body` |
@@ -226,7 +226,7 @@ ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
 | `EffectiveDate` | LocalDate | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
 | `ProcessedDate` | LocalDate | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
 | `QuantCompositeBehavioral` | double | Behavioral analysis score measuring investor psychology and market behavior patterns. | REST | `quant_composite_behavioral` |
@@ -269,7 +269,7 @@ The holdings of US-listed ETFs from ETF Global, one row per fund, date, and hold
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `composite_ticker`: "The stock ticker symbol of the ETF that holds these constituent securities." | REST | `composite_ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol of the ETF that holds these constituent securities." | REST | `composite_ticker` |
 | `AssetClass` | String | The broad category of asset type, such as Equity, Corporate Bond, Municipal Bond, etc. | REST | `asset_class` |
 | `ConstituentName` | String | The full company or security name of the constituent holding. | REST | `constituent_name` |
 | `ConstituentRank` | long | The rank of this constituent within the ETF for a given effective_date, ordered by weight (descending), market_value (descending), and constituent_ticker (ascending). A rank of 1 indicates the largest holding. | REST | `constituent_rank` |
@@ -296,7 +296,7 @@ Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `composite_ticker`: "The stock ticker symbol used to identify this ETF on exchanges." | REST | `composite_ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF on exchanges." | REST | `composite_ticker` |
 | `EffectiveDate` | LocalDate | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
 | `FundFlow` | double | The net daily capital flow into or out of the ETF through the creation and redemption process, where positive values indicate inflows and negative values indicate outflows. | REST | `fund_flow` |
 | `Nav` | double | The net asset value per share, representing the per-share value of the ETF's underlying holdings. | REST | `nav` |
@@ -311,7 +311,7 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
 | `Administrator` | String | The administrator of the ETF. | REST | `administrator` |
 | `Advisor` | String | The investment advisor of the ETF. | REST | `advisor` |
 | `AssetClass` | String | The primary type of assets held by the ETF, such as equities, bonds, commodities, or other securities. | REST | `asset_class` |
@@ -376,7 +376,7 @@ ETF Global's classification of US-listed ETFs by strategy, structure, and exposu
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
 | `AssetClass` | String | The primary type of assets held by the ETF, such as equities, bonds, commodities, or other securities. | REST | `asset_class` |
 | `Category` | String | The broad investment category that describes the ETF's investment focus and strategy. | REST | `category` |
 | `Country` | String | The specific country focus of the ETF, if applicable. | REST | `country` |
@@ -424,7 +424,7 @@ Corporate events from TMX: earnings dates, dividends, conferences, and more.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The company's stock symbol." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The company's stock symbol." | REST | `ticker` |
 | `CompanyName` | String | Full name of the company. | REST | `company_name` |
 | `Date` | LocalDate | Scheduled date of the corporate event, formatted as YYYY-MM-DD. | REST | `date` |
 | `Isin` | String | Standard international identifier for the company's common stock. | REST | `isin` |

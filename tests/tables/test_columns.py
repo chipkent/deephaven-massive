@@ -45,7 +45,12 @@ SCHEMA = Schema(
     "stocks.trades",
     (
         Column("Symbol", ColumnType.STRING, "The instrument.", (Transport.WS,)),
-        Column("Price", ColumnType.DOUBLE, "The price.", (Transport.REST, Transport.WS)),
+        Column(
+            "Price",
+            ColumnType.DOUBLE,
+            "The price.",
+            (Transport.REST, Transport.FLAT_FILES, Transport.WS),
+        ),
         Column("Note", ColumnType.STRING),  # no description: left out of the attribute
     ),
 )
@@ -274,13 +279,13 @@ def test_the_column_table_lists_every_column(
             "Name": "Symbol",
             "Type": "String",
             "Description": "The instrument.",
-            "SuppliedBy": "WS",
+            "SuppliedBy": "WebSocket",
         },
         {
             "Name": "Price",
             "Type": "double",
             "Description": "The price.",
-            "SuppliedBy": "REST, WS",
+            "SuppliedBy": "REST, flat files, WebSocket",
         },
         {"Name": "Note", "Type": "String", "Description": "", "SuppliedBy": ""},
     ]

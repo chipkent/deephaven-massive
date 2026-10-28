@@ -14,8 +14,8 @@ Trades of futures contracts, tick by tick.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract)." FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `timestamp`: "The time when the trade was generated at the exchange to nanosecond precision." FLAT_FILES `timestamp`: "The time when the trade was generated at the exchange to nanosecond precision." WS `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp` | `timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract)."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The time when the trade was generated at the exchange to nanosecond precision."; flat files `timestamp`: "The time when the trade was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp` | `timestamp` | `t` |
 | `Conditions` | int[] | Always null for `futures.trades`; supplied by `stocks.trades`, `options.trades`, `crypto.trades`. |  |  |  |  |
 | `Correction` | long | The trade correction indicator. | flat files |  | `correction` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs. | flat files |  | `exchange` |  |
@@ -41,8 +41,8 @@ Quotes of futures contracts: every change of the best bid and offer.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract)." FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision." FLAT_FILES `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision." WS `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp` | `timestamp` | `t` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract)."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision."; flat files `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp` | `timestamp` | `t` |
 | `AskExchange` | long | Always null for `futures.quotes`; supplied by `stocks.quotes`, `options.quotes`, `forex.quotes`. |  |  |  |  |
 | `AskPrice` | double | The ask price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `ap` |
 | `AskSize` | double | The quote size represents the number of futures contracts available at the given ask price. | REST, flat files, WebSocket | `ask_size` | `ask_size` | `as` |
@@ -71,8 +71,8 @@ Open, high, low, close, and volume bars of futures contracts.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The ticker for the contract." FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `window_start`: "The timestamp of the beginning of the candlestick’s aggregation window." FLAT_FILES `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window." WS `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `window_start` | `window_start` | `s` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker for the contract."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `window_start`: "The timestamp of the beginning of the candlestick’s aggregation window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `window_start` | `window_start` | `s` |
 | `Volume` | double | The number of contracts that traded within the timeframe. | REST, flat files, WebSocket | `volume` | `volume` | `v` |
 | `Open` | double | The opening price within the timeframe. | REST, flat files, WebSocket | `open` | `open` | `o` |
 | `Close` | double | The last price within the timeframe. | REST, flat files, WebSocket | `close` | `close` | `c` |
@@ -101,8 +101,8 @@ Snapshots of futures contracts: the latest trade, quote, minute bar, and session
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `details.ticker`. | REST | `details.ticker` |
-| `DetailsProductCode` | String |  | REST | `details.product_code` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `details.ticker`. | REST | `details.ticker` |
+| `DetailsProductCode` | String | The identifier for the contract's product. | REST | `details.product_code` |
 | `DetailsSettlementDate` | Instant | The day that this contract is settled. | REST | `details.settlement_date` |
 | `LastMinuteClose` | double | The price at the end of the minute bar. | REST | `last_minute.close` |
 | `LastMinuteHigh` | double | The highest price reached in the minute bar. | REST | `last_minute.high` |

@@ -31,7 +31,7 @@ from deephaven.column import string_col
 from deephaven.jcompat import j_hashmap
 from deephaven.table import Table
 
-from deephaven_massive._datasets.schema import ColumnType
+from deephaven_massive._datasets.schema import TRANSPORT_LABELS, ColumnType
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -182,9 +182,9 @@ COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
         ),
         "Description": "What the column holds; empty when Massive gives no description.",
         "SuppliedBy": (
-            "The transports whose sources fill the column for this dataset, REST, FLAT_FILES, and "
-            'WS in that order, joined by ", "; empty for a column that only other datasets of the '
-            "same kind supply, which this dataset always leaves null."
+            "The transports whose sources fill the column for this dataset, spelled REST, flat "
+            'files, and WebSocket, in that order, joined by ", "; empty for a column that only '
+            "other datasets of the same kind supply, which this dataset always leaves null."
         ),
     }
 )
@@ -205,8 +205,8 @@ def column_table(schema: Schema) -> Table:
     Returns:
         A static table with one row per schema column, in result column order: `Name`
         (String), `Type` (String, the `ColumnType` value), `Description` (String, possibly
-        empty), and `SuppliedBy` (String, the column's transports joined by ", ", possibly
-        empty).
+        empty), and `SuppliedBy` (String, the column's transports as `TRANSPORT_LABELS` spells
+        them, joined by ", ", possibly empty).
     """
     columns = schema.columns
     table = new_table(
@@ -214,7 +214,10 @@ def column_table(schema: Schema) -> Table:
             string_col("Name", [c.name for c in columns]),
             string_col("Type", [c.type.value for c in columns]),
             string_col("Description", [c.description for c in columns]),
-            string_col("SuppliedBy", [", ".join(t.value for t in c.supplied_by) for c in columns]),
+            string_col(
+                "SuppliedBy",
+                [", ".join(TRANSPORT_LABELS[t] for t in c.supplied_by) for c in columns],
+            ),
         ]
     )
     described = table.j_table.withColumnDescriptions(j_hashmap(dict(COLUMN_TABLE_DESCRIPTIONS)))

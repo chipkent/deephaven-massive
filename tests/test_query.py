@@ -22,6 +22,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
@@ -734,7 +735,7 @@ def expected_columns(session: dm.MassiveSession, spec: DatasetSpec) -> list[dict
             "Name": c.name,
             "Type": c.type.value,
             "Description": c.description,
-            "SuppliedBy": ", ".join(t.value for t in c.supplied_by),
+            "SuppliedBy": ", ".join(TRANSPORT_LABELS[t] for t in c.supplied_by),
         }
         for c in session._core.catalog.dataset_schema(spec).columns
     ]
@@ -760,7 +761,7 @@ def test_columns_lists_the_schema_without_any_request(
     assert listed == expected_columns(massive_session, TRADES_SPEC)
     assert listed[0]["Name"] == "Symbol"
     assert listed[0]["Description"].startswith("The instrument")
-    assert listed[0]["SuppliedBy"] == "REST, WS"
+    assert listed[0]["SuppliedBy"] == "REST, WebSocket"
     # The arguments choose rows, never columns.
     assert dh_to_pylist(trades(massive_session, ["MSFT", "IBM"]).columns()) == listed
     assert dh_to_pylist(trades(massive_session, dm.ALL).columns()) == listed

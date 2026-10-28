@@ -14,7 +14,7 @@ Every ticker Massive supports, across asset classes, with its listing details.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
 | `Active` | boolean | Whether or not the asset is actively traded. False means the asset has been delisted. | REST | `active` |
 | `BaseCurrencyName` | String | The name of the currency that this asset is priced against. | REST | `base_currency_name` |
 | `BaseCurrencySymbol` | String | The ISO 4217 code of the currency that this asset is priced against. | REST | `base_currency_symbol` |
@@ -39,7 +39,7 @@ One ticker's company and listing details: address, branding, shares, and more.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
 | `Active` | boolean | Whether or not the asset is actively traded. False means the asset has been delisted. | REST | `active` |
 | `AddressAddress1` | String | The first line of the company's headquarters address. | REST | `address.address1` |
 | `AddressAddress2` | String | The second line of the company's headquarters address, if applicable. | REST | `address.address2` |
@@ -93,7 +93,7 @@ The timeline of a ticker's events, such as ticker changes, one row per event.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST: the request's `id` parameter. | REST | request |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `id` parameter. | REST | request |
 | `Date` | LocalDate | The date the event took place | REST | `date` |
 | `Type` | String | The type of historical event for the asset | REST | `type` |
 | `TickerChangeTicker` | String | A ticker symbol | REST | `ticker_change.ticker` |
@@ -106,8 +106,8 @@ The companies Massive relates to a ticker, from news and returns data, one row e
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "A ticker related to the requested ticker." | REST | `ticker` |
-| `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. REST: the request's `ticker` parameter. | REST | request |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "A ticker related to the requested ticker." | REST | `ticker` |
+| `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. From REST: the request's `ticker` parameter. | REST | request |
 
 <a id="news"></a>
 
@@ -232,7 +232,7 @@ Called as `m.snapshots`, a method of the session itself rather than of `m.refere
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The ticker symbol for the asset." | REST | `ticker` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker symbol for the asset." | REST | `ticker` |
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). | REST | `break_even_price` |
 | `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". | REST | `details.contract_type` |
 | `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. | REST | `details.exercise_style` |
