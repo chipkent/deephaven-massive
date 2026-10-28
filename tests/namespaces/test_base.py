@@ -790,3 +790,8 @@ def test_a_typed_parameter_is_reserved_from_filters(massive_session: dm.MassiveS
                 params={"frequency": None},
                 filters={key: 4},
             )
+    # The valid filters an unknown key's message names leave the typed family out.
+    with pytest.raises(ValueError, match="has no filter 'pay_date'") as caught:
+        build(massive_session, DIVIDENDS, params={"frequency": None}, filters={"pay_date": "x"})
+    assert "frequency" not in str(caught.value)
+    assert "'distribution_type'" in str(caught.value)

@@ -389,7 +389,7 @@ def build_query(
         start=first,
         end=last,
         params=tuple(sorted((k, _value(k, v)) for k, v in (params or {}).items() if v is not None)),
-        filters=core.catalog.check_filters(spec, dict(given)),
+        filters=core.catalog.check_filters(spec, dict(given), typed=params or {}),
         limit=None if limit is None else require_positive_int("limit", limit),
     )
     return cls(core, spec, request)

@@ -858,7 +858,11 @@ class Catalog:
             return self._schemas.setdefault(spec, schema)
 
     def check_filters(
-        self, spec: DatasetSpec, filters: Mapping[str, ParamValue]
+        self,
+        spec: DatasetSpec,
+        filters: Mapping[str, ParamValue],
+        *,
+        typed: Iterable[str] = (),
     ) -> tuple[tuple[str, ParamValue], ...]:
         """Validate a `filters` mapping and return the values the request carries and sends.
 
@@ -885,6 +889,9 @@ class Catalog:
         Args:
             spec: The dataset.
             filters: The normalized filters by key; sequences are already tuples.
+            typed: The wire names of the factory's typed parameters, set or not; each one's
+                whole family (`param_family`) is reserved like the time axis, so neither
+                accepted nor named among the valid keys.
 
         Returns:
             The `(key, value)` pairs in the order given, each value in its parsed form; empty
@@ -909,7 +916,8 @@ class Catalog:
         if not filters:
             return ()
         symbols = () if spec.symbol_param is None else symbol_family(spec.symbol_param)
-        reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols}
+        families = (form for name in typed for form in param_family(name))
+        reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols, *families}
         # Every path that declares a filter, with the parameter's position in it.
         params: dict[str, list[tuple[RestPath, int]]] = {}
         for path in spec.rest_paths:

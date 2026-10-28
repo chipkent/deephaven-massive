@@ -1257,3 +1257,18 @@ def test_an_epoch_field_behind_a_date_parameter_compares_instants() -> None:
         dataclasses.replace(news, fields=fields), "published_utc.gte", ParamKind.DATE
     )
     assert not catalog_module.takes_instants(news, "ticker", ParamKind.STRING)
+
+
+def test_the_valid_filters_named_are_only_those_the_caller_can_pass() -> None:
+    catalog = Catalog((DIVIDENDS,))
+    with pytest.raises(ValueError, match=r"has no filter 'pay_date'") as caught:
+        catalog.check_filters(DIVIDENDS, {"pay_date": "2025-01-01"}, typed=("frequency",))
+    named = str(caught.value).partition("valid filters: ")[2]
+    # The typed parameter's family, the time axis, the symbol's equality forms, and the
+    # parameters the library sets are reserved; the symbol's range forms stay filters.
+    for reserved in ("'frequency", "'ex_dividend_date", "'ticker'", "'ticker_any_of'", "'limit'"):
+        assert reserved not in named
+    assert "'ticker_gte'" in named
+    assert "'distribution_type'" in named
+    with pytest.raises(ValueError, match=r"has no filter 'frequency_gte'"):
+        catalog.check_filters(DIVIDENDS, {"frequency_gte": 4}, typed=("frequency",))

@@ -1354,7 +1354,8 @@ so `date.any_of` is reserved too although `start` and `end` cannot express a lis
 (its base name and its `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and `.all_of` forms, so
 `product_code_any_of` is rejected on a futures dataset that types `product_code`). An unknown
 key, a value of the wrong kind, or a value outside a parameter's enum raises `ValueError` naming
-the valid keys or values; a key reserved by a typed parameter names that parameter. The check
+the valid keys or values (the valid keys are only those the caller can pass: every reserved key
+is left out); a key reserved by a typed parameter names that parameter. The check
 first puts each value in the form that is sent: ISO-8601 text of a `DATE` or `TIMESTAMP`
 parameter becomes a `date` or an aware `datetime` (`dates.parse_date_like`), and a `LIST`
 value is split into its comma-separated items, with the spaces around each removed, so
