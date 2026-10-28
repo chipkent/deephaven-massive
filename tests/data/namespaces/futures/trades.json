@@ -1,0 +1,46 @@
+{
+  "request_id": "a47d1beb8c11b6ae897ab76cdbbf35a3",
+  "results": [
+    {
+      "price": 6052,
+      "report_sequence": 12033289,
+      "sequence_number": 27317882,
+      "session_end_date": "2024-12-17",
+      "size": 3,
+      "ticker": "ESZ4",
+      "timestamp": 1734472799000509200,
+      "channel": 360
+    },
+    {
+      "price": 6051.75,
+      "report_sequence": 12033276,
+      "sequence_number": 27317863,
+      "session_end_date": "2024-12-17",
+      "size": 1,
+      "ticker": "ESZ4",
+      "timestamp": 1734472798789679900,
+      "channel": 360
+    },
+    {
+      "price": 6052,
+      "report_sequence": 12033255,
+      "sequence_number": 27317826,
+      "session_end_date": "2024-12-17",
+      "size": 2,
+      "ticker": "ESZ4",
+      "timestamp": 1734472797000893000,
+      "channel": 360
+    },
+    {
+      "price": 6053.25,
+      "report_sequence": 12033301,
+      "sequence_number": 27317901,
+      "session_end_date": "2024-12-18",
+      "size": 1,
+      "ticker": "ESZ4",
+      "timestamp": 1734478200000000000,
+      "channel": 360
+    }
+  ],
+  "status": "OK"
+}

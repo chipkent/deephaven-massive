@@ -1,0 +1,17 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "acronym": "CME",
+      "id": "4",
+      "locale": "US",
+      "mic": "XCME",
+      "name": "Chicago Mercantile Exchange",
+      "operating_mic": "XCME",
+      "type": "exchange",
+      "url": "https://cmegroup.com"
+    }
+  ],
+  "status": "OK"
+}
