@@ -1065,6 +1065,29 @@ def test_a_null_poll_key_fails_the_table_in_every_mode(
     assert row["RowsPublished"] == 0  # nothing of the cycle was published
 
 
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_a_null_in_a_nullable_poll_key_is_a_value(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+) -> None:
+    # `Currency` may be null; `Id` may not, so its null still fails the table.
+    spec = dataclasses.replace(
+        FEED, poll_keys=("Id", "Currency"), nullable_poll_keys={"Currency": "for the tests"}
+    )
+    rows = [{"id": "a", "ticker": "AAPL", "currency": None}, {"id": "b", "ticker": "AAPL"}]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(feed_session._core, spec, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=mode)
+    until(lambda: sorted(row["Id"] for row in dh_to_pylist(table)) == ["a", "b"])
+    assert not table.j_table.isFailed()
+    (found,) = streams_of(feed_session, dh_to_pylist)
+    assert (found["State"], found["RowsPublished"]) == ("RUNNING", 2)
+
+
 def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
     *,
     massive_session: dm.MassiveSession,

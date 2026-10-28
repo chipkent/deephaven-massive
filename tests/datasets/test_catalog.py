@@ -967,6 +967,26 @@ def test_poll_keys_gate() -> None:
     )
 
 
+def test_nullable_poll_keys_are_poll_keys_with_a_reason() -> None:
+    with pytest.raises(ValueError, match=r"nullable_poll_keys \['Name'\] are not poll_keys"):
+        change(EXCHANGES, nullable_poll_keys={"Name": "a reason"})
+    with pytest.raises(ValueError, match=r"nullable_poll_keys \['Id'\] need a reason"):
+        change(EXCHANGES, poll_keys=("Id", "Name"), nullable_poll_keys={"Id": ""})
+    spec = change(EXCHANGES, poll_keys=("Id", "Name"), nullable_poll_keys={"Name": "a reason"})
+    assert spec.nullable_poll_keys == {"Name": "a reason"}
+
+
+def test_nullable_keys_gate() -> None:
+    some = change(EXCHANGES, poll_keys=("Id", "Name"), nullable_poll_keys={"Name": "a reason"})
+    assert problems(some) == ()
+    every = change(some, nullable_poll_keys={"Id": "a reason", "Name": "a reason"})
+    assert problems(every) == (
+        "nullable keys: reference.exchanges: every poll key may be null; at least one must not be",
+    )
+    # A one-row dataset has no poll key to be null.
+    assert problems(change(EXCHANGES, poll_keys=(), revision_keys=("Name",))) == ()
+
+
 def test_append_keys_gate() -> None:
     assert problems(change(EXCHANGES, poll_mode=PollMode.APPEND)) == ()
     defaulted = DatasetSpec(

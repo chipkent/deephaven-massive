@@ -524,8 +524,9 @@ class Poller:
         A null key would silently merge unrelated rows: one keyed row for all of them, or
         every later row with the same null skipped by `APPEND`; a NaN never equals itself, so
         `APPEND` would append its row again every cycle. Like a missing required key, it is a
-        data failure, so it fails the table. Revision keys are not checked: a null there is a
-        value.
+        data failure, so it fails the table. The dataset's nullable poll keys
+        (`DatasetSpec.nullable_poll_keys`, such as an option's `PutCall`, empty for common
+        stock) and its revision keys are not checked: a null there is a value.
 
         Args:
             table: The cycle's rows.
@@ -535,7 +536,8 @@ class Poller:
                 the cycle, and that row's non-null values, truncated to `_ROW_TEXT`
                 characters, so the row can be found although it was never published.
         """
-        for name in self._spec.poll_keys:
+        nullable = self._spec.nullable_poll_keys
+        for name in (key for key in self._spec.poll_keys if key not in nullable):
             missing = pc.is_null(table.column(name), nan_is_null=True)
             row = pc.index(missing, True).as_py()
             if row >= 0:

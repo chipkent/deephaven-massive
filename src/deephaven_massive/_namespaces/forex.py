@@ -146,6 +146,7 @@ SNAPSHOTS: Final = DatasetSpec(
     keys={(_REST, _SNAPSHOTS): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="tickers",
     symbols_per_request=250,
+    revision_keys=("Updated",),
 )
 """`m.forex.snapshots`: the full-market snapshot, narrowed by its `tickers` parameter."""
 
@@ -157,6 +158,7 @@ MOVERS: Final = DatasetSpec(
     asset_class=AssetClass.FOREX,
     fetch_path=_MOVERS,
     keys={(_REST, _MOVERS): SourceKeys(symbol=KeySpec("Ticker"))},
+    revision_keys=("Updated",),
 )
 """`m.forex.movers`: the top gainers or losers, the direction a path segment."""
 
@@ -169,6 +171,8 @@ CONVERSION: Final = DatasetSpec(
     fetch_path=_CONVERSION,
     # The vendor's own `symbol` field is generated as `Symbol`, so the key uses it as is.
     keys={(_REST, _CONVERSION): SourceKeys(symbol=KeySpec("Symbol"))},
+    # The quote the conversion used: an explicit APPEND poll appends each new conversion.
+    revision_keys=("LastTimestamp",),
 )
 """`m.forex.conversion`: one conversion between two currencies at the latest quote."""
 

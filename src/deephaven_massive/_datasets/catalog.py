@@ -275,6 +275,11 @@ class DatasetSpec:
             which then declares `revision_keys`, and never on an `APPEND` dataset. A dataset
             whose `poll_mode` is `APPEND` declares its own (a catalog gate refuses the
             default), which its tests check is unique per row.
+        nullable_poll_keys: The `poll_keys` columns whose null is a value rather than a data
+            failure, each mapped to the reason the vendor leaves it empty, such as
+            `{"PutCall": "empty for common stock"}`. A null in any other poll-key column fails
+            the `poll()` table; a catalog gate requires at least one poll-key column outside
+            this map, so a row is never identified by nulls alone. Empty by default.
         revision_keys: Further columns of a row's identity in an `APPEND` table only, after
             `poll_keys`: a current-state dataset's update time, such as `("Updated",)` on a
             snapshot, so that an explicit `mode=APPEND` appends each new state of a symbol
@@ -315,6 +320,7 @@ class DatasetSpec:
     symbol_param: str | None = None
     poll_mode: PollMode = PollMode.REPLACE
     poll_keys: tuple[str, ...] = _DEFAULT_POLL_KEYS
+    nullable_poll_keys: Mapping[str, str] = field(default_factory=dict)
     revision_keys: tuple[str, ...] = ()
     per_symbol: bool = False
     fetch_paths_by_class: Mapping[AssetClass, str] = field(default_factory=dict)
@@ -335,7 +341,8 @@ class DatasetSpec:
                 request, or makes a key optional other than a `symbol` key read from a REST
                 path's rows; `poll_keys` holds the `Symbol` of an optional symbol key, is empty
                 on an `APPEND` dataset, is empty together with `revision_keys`, or shares a
-                column with `revision_keys`; a flat-file prefix does not
+                column with `revision_keys`; `nullable_poll_keys` names a column that is no
+                poll key, or gives an empty reason; a flat-file prefix does not
                 declare its `symbol` and `time` keys from its own columns (and, for futures,
                 its `session` key, against which every futures file is checked); or the
                 transports match no query class (see the class docstring and `_check_verbs`).
@@ -355,6 +362,7 @@ class DatasetSpec:
         if self.kind is not None and self.asset_class is None:
             raise ValueError(f"{self.name}: a dataset in a kind needs a class (its group)")
         self._check_keys()
+        self._check_poll_keys()
         self._check_flat_files()
         self._check_verbs()
 
@@ -493,6 +501,16 @@ class DatasetSpec:
                     raise ValueError(
                         f"{where}: only a symbol key read from a REST path's rows can be optional"
                     )
+
+    def _check_poll_keys(self) -> None:
+        """Check the `poll()` keys: the identity every mode keys or appends by.
+
+        Raises:
+            ValueError: If `poll_keys` holds the `Symbol` of an optional symbol key (a row
+                without one would have a null poll key); is empty on an `APPEND` dataset, or
+                together with `revision_keys`; shares a column with `revision_keys`; or if
+                `nullable_poll_keys` names a column that is no poll key, or gives no reason.
+        """
         optional = any(
             declared.symbol is not None and not declared.symbol.required
             for declared in self.keys.values()
@@ -512,6 +530,10 @@ class DatasetSpec:
             )
         if repeated := sorted(set(self.poll_keys) & set(self.revision_keys)):
             raise ValueError(f"{self.name}: revision_keys repeat poll_keys {repeated}")
+        if stray := sorted(set(self.nullable_poll_keys) - set(self.poll_keys)):
+            raise ValueError(f"{self.name}: nullable_poll_keys {stray} are not poll_keys")
+        if unexplained := sorted(k for k, why in self.nullable_poll_keys.items() if not why):
+            raise ValueError(f"{self.name}: nullable_poll_keys {unexplained} need a reason")
 
     def _check_flat_files(self) -> None:
         """Check that every flat-file prefix can be filtered and checked.
@@ -1088,6 +1110,8 @@ class Catalog:
         - **append keys:** a dataset whose `poll_mode` is `APPEND` declares its own
           `poll_keys`, not the default `("Symbol",)`. The gate checks only that the key is
           explicit; the dataset's tests check that it is unique per row.
+        - **nullable keys:** a dataset with `poll_keys` has at least one that is not in
+          `nullable_poll_keys`, so no row is identified by nulls alone.
         - **poll keys:** every `poll_keys` and `revision_keys` column is a column of the
           dataset's schema.
 
@@ -1113,6 +1137,11 @@ class Catalog:
                 found.append(
                     f"append keys: {spec.name}: an APPEND dataset declares its own poll_keys, "
                     "unique per row, not the default ['Symbol']"
+                )
+            if spec.poll_keys and set(spec.poll_keys) <= set(spec.nullable_poll_keys):
+                found.append(
+                    f"nullable keys: {spec.name}: every poll key may be null; at least one "
+                    "must not be"
                 )
             if keys:
                 continue  # the merge would only repeat them

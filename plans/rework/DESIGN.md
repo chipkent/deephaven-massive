@@ -822,18 +822,25 @@ taxonomy is a reference list revised in place, not a feed of new rows).
   appended by the next cycle that returns them.
 - `revision_keys` are what make an explicit `mode=APPEND` on a current-state dataset build a
   history: every snapshot and movers dataset declares its update time, so each new state of a
-  symbol is a new row, while `REPLACE` and `UPSERT` stay keyed by `Symbol`. The stocks and
-  crypto snapshots and movers declare `Updated`; the indices snapshots `LastUpdated`; the
+  symbol is a new row, while `REPLACE` and `UPSERT` stay keyed by `Symbol`. The stocks,
+  crypto, and forex snapshots and movers declare `Updated`; the forex conversion
+  `LastTimestamp`, the time of the quote it used; the indices snapshots `LastUpdated`; the
   options snapshots and chain `LastQuoteLastUpdated` and `LastTradeSipTimestamp`; the unified
   snapshots `LastUpdated`, `LastQuoteLastUpdated`, and `LastTradeLastUpdated`, which together
   cover every asset class; and `reference.market_status`, a one-row dataset with no
   `poll_keys`, its `ServerTime`. A null in a revision column is a value (a ticker not yet
   updated). On a dataset with neither unique `poll_keys` nor `revision_keys` (the default
   `Symbol`), an explicit `APPEND` appends one row per symbol.
-- A null value in a `poll_keys` column, or a NaN in a float one, fails the table in every mode,
-  as a missing required key does: it would otherwise merge unrelated rows into one key. The
-  `RowDataError` names the dataset, the key column, the row's position in the cycle, and the
-  row's non-null values, truncated.
+- A dataset may name poll-key columns the vendor leaves empty on some rows in
+  `nullable_poll_keys`, each with its reason from the vendor's description (the 13-F `PutCall`
+  is empty for common stock; the Form 3 and Form 4 exercise price and dates are set only for
+  derivatives, and their `NatureOfOwnership` only for indirect ownership; a Form 4 holding
+  record has no transaction columns). A null there is a value. The catalog gate requires at
+  least one poll-key column outside that map, so no row is identified by nulls alone.
+- A null value in any other `poll_keys` column, or a NaN in a float one, fails the table in
+  every mode, as a missing required key does: it would otherwise merge unrelated rows into one
+  key. The `RowDataError` names the dataset, the key column, the row's position in the cycle,
+  and the row's non-null values, truncated.
 - Every dataset whose default is `APPEND` declares its own `poll_keys`, not the default
   `Symbol` (a catalog gate). No gate can prove that a key is unique per row; each dataset's
   tests check its key against its fixtures.
@@ -3450,6 +3457,9 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
   `poll_keys` on an `APPEND` dataset, an empty identity (no `poll_keys` and no
   `revision_keys`) on any dataset, since an explicit `APPEND` could not tell rows apart, and
   `revision_keys` that repeat a poll key.)
+- **Nullable keys:** a dataset with `poll_keys` has at least one that is not in
+  `nullable_poll_keys` (`DatasetSpec` refuses a nullable key that is no poll key, or one without
+  a reason);
 - **Poll keys:** every `poll_keys` and `revision_keys` column is a column of the dataset's
   schema;
 - **Generated sources:** every path, channel, and prefix a dataset uses is generated; a miss names

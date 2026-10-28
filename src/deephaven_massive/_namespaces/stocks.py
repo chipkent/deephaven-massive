@@ -378,6 +378,10 @@ _INSIDER_HOLDING: Final = (
 )
 """One owner's holding of one security in one Form 3 or Form 4 filing."""
 
+_DERIVATIVE_ONLY: Final = "set for derivative securities only"
+_INDIRECT: Final = {"NatureOfOwnership": "the nature of indirect ownership, empty for direct"}
+_DERIVATIVE: Final = {"ExercisePrice": _DERIVATIVE_ONLY}
+
 
 def _filing(
     dataset: str,
@@ -386,6 +390,7 @@ def _filing(
     summary: str,
     symbol_param: str | None,
     poll_keys: tuple[str, ...],
+    nullable_poll_keys: Mapping[str, str] | None = None,
     keys: SourceKeys | None = None,
     page_size: int,
 ) -> DatasetSpec:
@@ -398,6 +403,8 @@ def _filing(
         symbol_param: The parameter `symbols` is sent in, or None for a dataset without one.
         poll_keys: The columns that identify one row, the key of a keyed `poll()` (a mode
             other than the default).
+        nullable_poll_keys: The poll keys the vendor leaves empty on some rows, each with
+            its reason; a null there is a value, not a data failure. None for no such key.
         keys: The source's keys; by default the optional `Ticker` of `_OPTIONAL_TICKER`.
         page_size: The largest `limit` the path documents.
 
@@ -414,6 +421,7 @@ def _filing(
         symbol_param=symbol_param,
         poll_mode=PollMode.APPEND,
         poll_keys=poll_keys,
+        nullable_poll_keys={} if nullable_poll_keys is None else nullable_poll_keys,
         page_size=page_size,
     )
 
@@ -480,6 +488,10 @@ INSTITUTIONAL_HOLDINGS: Final = _filing(
         "InvestmentDiscretion",
         "OtherManagers",
     ),
+    nullable_poll_keys={
+        "PutCall": "PUT or CALL for an option, and empty for common stock",
+        "OtherManagers": "the other managers sharing discretion, only if applicable",
+    },
     keys=SourceKeys(fanout=KeySpec("FilerCik", instrument=False)),
     page_size=1_000,
     summary="Holdings that institutional managers report on Form 13-F, one row per position.",
@@ -489,6 +501,7 @@ INSIDER_HOLDINGS: Final = _filing(
     _FORM_3,
     symbol_param="tickers.any_of",
     poll_keys=(*_INSIDER_HOLDING, "ExercisePrice", "ExerciseDate"),
+    nullable_poll_keys={**_INDIRECT, **_DERIVATIVE, "ExerciseDate": _DERIVATIVE_ONLY},
     keys=_NO_KEYS,
     page_size=10_000,
     summary="Initial insider ownership statements (SEC Form 3), one row per reported holding.",
@@ -507,6 +520,20 @@ INSIDER_TRANSACTIONS: Final = _filing(
         "ExercisePrice",
         "ExpirationDate",
     ),
+    nullable_poll_keys={
+        **_INDIRECT,
+        **_DERIVATIVE,
+        "ExpirationDate": _DERIVATIVE_ONLY,
+        **dict.fromkeys(
+            (
+                "TransactionDate",
+                "TransactionCode",
+                "TransactionShares",
+                "TransactionPricePerShare",
+            ),
+            "a 'holding' record (RecordType) reports no transaction",
+        ),
+    },
     keys=_NO_KEYS,
     page_size=10_000,
     summary="Insider transactions (SEC Form 4), one row per reported transaction or holding.",

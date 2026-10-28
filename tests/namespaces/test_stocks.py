@@ -1481,6 +1481,50 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
         assert len(fewer) < len(rows), spec.poll_keys[index]
 
 
+NULLABLE_KEYS = {
+    "filings.institutional_holdings": {"PutCall", "OtherManagers"},
+    "filings.insider_holdings": {"NatureOfOwnership", "ExercisePrice", "ExerciseDate"},
+    "filings.insider_transactions": {
+        "NatureOfOwnership",
+        "ExercisePrice",
+        "ExpirationDate",
+        "TransactionDate",
+        "TransactionCode",
+        "TransactionShares",
+        "TransactionPricePerShare",
+    },
+}
+
+
+@pytest.mark.parametrize("name", ALL_NAMES)
+def test_only_the_ownership_filings_have_nullable_poll_keys(name: str) -> None:
+    nullable = spec_of(name).nullable_poll_keys
+    assert set(nullable) == NULLABLE_KEYS.get(name, set())
+    assert all(nullable.values())  # each with its reason
+
+
+@pytest.mark.parametrize("mode", list(dm.PollMode))
+@pytest.mark.parametrize("name", list(NULLABLE_KEYS))
+def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+    mode: dm.PollMode,
+) -> None:
+    # The real fixtures leave nullable key columns empty: a null there is a value, so the
+    # first cycle publishes every row instead of failing the table.
+    template = cast("str", spec_of(name).fetch_path)
+    body = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))
+    fake_rest.reply(template, Reply(body=body))
+    table = cast("Query", factory(rest_session, name)()).poll(60, mode=mode)
+    rows = _rows_when(table, len(body["results"]))
+    assert not table.j_table.isFailed()
+    assert any(row[column] is None for row in rows for column in NULLABLE_KEYS[name])
+    rest_session.release(table)
+
+
 # --- Filings without a ticker --------------------------------------------------------------------
 
 OPTIONAL_TICKER = [
