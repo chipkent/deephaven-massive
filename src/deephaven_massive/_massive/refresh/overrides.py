@@ -14,6 +14,10 @@ can. This module holds the rest, each entry with its reason, and nothing else:
   type does not fit (a wrong type, or a second form the vendor sends), each with the sample;
 - `KEY_FIXES`: the wire key of each field whose declared key every documented sample
   contradicts, each with the samples;
+- `DESCRIPTION_FIXES`: the corrected description of each field whose vendor description is
+  clearly wrong for its source (another asset class's or event's text copied onto it, or a
+  statement Massive's own documentation of the field contradicts), for every use of the
+  source or per asset class, each quoting the vendor's text and giving the reason;
 - `RESULT_KEYS`: the paths whose rows do not sit under `results`;
 - `PARAM_UNITS`: the unit of every timestamp-like string parameter, and of any other string
   parameter that takes an epoch (or "sent as date or date-time text");
@@ -57,6 +61,7 @@ _V = TypeVar("_V")
 
 
 __all__ = [
+    "DESCRIPTION_FIXES",
     "KEY_FIXES",
     "KINDS",
     "NAMES",
@@ -68,6 +73,7 @@ __all__ = [
     "TYPE_FIXES",
     "UNITS",
     "VENUES",
+    "DescriptionFix",
     "KeyFix",
     "Name",
     "Projection",
@@ -149,6 +155,71 @@ class KeyFix:
 
     wire_key: str
     reason: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class DescriptionFix:
+    """The corrected description of a field whose vendor description is clearly wrong.
+
+    Massive reuses one description across asset classes and endpoints, and sometimes the text
+    is clearly wrong for the source it sits on: crypto trades priced "per whole share", a
+    trade's timestamp described as when "the quote" was generated, a futures trade's value
+    computed without the contract multiplier. The entry replaces that text for one
+    `(source, wire key)` only; the field keeps its name and type, and every other source keeps
+    its own description. A description that is merely terse or imprecise is kept.
+
+    An entry takes one of two forms:
+
+    - `text` replaces the field's description everywhere the source is used;
+    - `asset_classes` gives, for a source that serves several asset classes (the unified
+      snapshot), the description a dataset of each listed class shows; the field's own
+      description, and the one every other class shows, stays the vendor's.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.refresh.overrides import DescriptionFix
+
+            fix = DescriptionFix(
+                vendor="The price per whole share.",
+                text="The price per coin.",
+                reason="A crypto pair has no shares.",
+            )
+
+    Attributes:
+        vendor: Massive's description, as plain text (`plain_text`: links written as
+            `text (url)`), quoted exactly, whitespace aside. The refresh checks the quote, so a
+            description the vendor rewrites makes the entry stale (the `stale-entry` gate) and
+            the new text is reviewed instead of silently replaced.
+        reason: Why the vendor's text is wrong for this source, and where the replacement
+            comes from.
+        text: The description the field gets in its place, as plain text. It is Massive's own
+            wording for the same field of a sibling source wherever that is right and says
+            what the field holds; only when no sibling text is adequate is it written here.
+            `None` for an entry by asset class.
+        asset_classes: Asset class (an `AssetClass` value, such as `"options"`) to the
+            description a dataset of that class shows, chosen as `text` is. `None` for an
+            entry that replaces the description everywhere.
+    """
+
+    vendor: str
+    reason: str
+    text: str | None = None
+    asset_classes: Mapping[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        """Check that exactly one form is given and that no replacement is empty.
+
+        Raises:
+            ValueError: If both or neither of `text` and `asset_classes` is given, or a
+                replacement or the asset-class mapping is empty.
+        """
+        texts = [self.text] if self.text is not None else list((self.asset_classes or {}).values())
+        if (self.text is None) == (self.asset_classes is None) or not texts or not all(texts):
+            raise ValueError(
+                "a description fix needs exactly one of a non-empty `text` or a non-empty "
+                "`asset_classes` with non-empty texts"
+            )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -749,6 +820,248 @@ KEY_FIXES: Mapping[tuple[str, str], KeyFix] = MappingProxyType(
     }
 )
 """`(source, declared key)` to the wire key of a field every documented sample sends under it."""
+
+# Massive's stock trade price, copied onto the crypto and options trade pages.
+_SHARE_PRICE = (
+    "The price of the trade. This is the actual dollar value per whole share of this trade. A "
+    "trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00."
+)
+_CRYPTO_PRICE_TEXT = (
+    "The price of the trade: the amount of the pair's second currency paid for one unit of its "
+    "first (US dollars per bitcoin for X:BTCUSD)."
+)
+_CRYPTO_PRICE_REASON = (
+    "Written here because no Massive text for a crypto trade's price is both right and "
+    "unambiguous: the WebSocket crypto trade says only 'The price.', and the REST crypto trades "
+    "say 'in the base currency of the crypto pair'. Massive's ticker reference defines the base "
+    "currency as 'the currency that this asset is priced against' (`base_currency_symbol`), "
+    "which makes that the second currency, while the usual pair convention makes the base the "
+    "first currency, the one priced; the replacement names the currency explicitly and is "
+    "right under either reading."
+)
+_CRYPTO_PRICE = DescriptionFix(
+    vendor=_SHARE_PRICE,
+    text=_CRYPTO_PRICE_TEXT,
+    reason=f"Massive's stock text: a crypto pair has no shares and need not be priced in "
+    f"dollars. {_CRYPTO_PRICE_REASON}",
+)
+_STOCK_TRADE_ID = (
+    "The Trade ID which uniquely identifies a trade. These are unique per combination of "
+    "ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for "
+    "AAPL executed on NASDAQ could potentially have the same Trade ID."
+)
+_CRYPTO_ID = DescriptionFix(
+    vendor=_STOCK_TRADE_ID,
+    text="The Trade ID which uniquely identifies a trade on the exchange that the trade "
+    "happened on.",
+    reason="Massive's stock text: a crypto trade has no trade reporting facility (TRF), and "
+    "the example names a stock and two stock exchanges. The text is Massive's own for the "
+    "crypto trade ID (`/v3/trades/{cryptoTicker}` `id`).",
+)
+_OPTIONS_PRICE_TEXT = (
+    "The price of the trade. This is the price per share of the underlying, so the total "
+    "dollar value of a trade is the price multiplied by the size and by the contract "
+    "multiplier, which is typically 100 shares per contract."
+)
+_OPTIONS_PRICE_REASON = (
+    "Massive's stock text: an option trades in contracts, and a contract's price is per share "
+    "of the underlying, so the stock example's total understates the trade's value by the "
+    "contract multiplier. The text is Massive's own for the options trade price "
+    "(`/v3/trades/{optionsTicker}` `price`)."
+)
+_OPTIONS_PRICE = DescriptionFix(
+    vendor=_SHARE_PRICE, text=_OPTIONS_PRICE_TEXT, reason=_OPTIONS_PRICE_REASON
+)
+_OPTIONS_ID_TEXT = (
+    "The trade ID. Options trades do not have a trade ID, so this field is returned as an "
+    "empty string."
+)
+_OPTIONS_ID_REASON = (
+    "Massive's stock text, with a trade reporting facility and stock exchanges; the documented "
+    "options last trade sends an empty ID. The text is Massive's own for the options trade ID "
+    "(`/v3/trades/{optionsTicker}` `id`)."
+)
+_STOCK_EXCHANGES = "https://massive.com/docs/rest/stocks/market-operations/exchanges"
+_OPTIONS_EXCHANGES = "https://massive.com/docs/rest/options/market-operations/exchanges"
+_EXCHANGE_LEAD = "exchange ID. See Exchanges"
+_EXCHANGE_TAIL = "for Massive's mapping of exchange IDs."
+_OPTIONS_EXCHANGE_REASON = (
+    "The link is to the stock exchanges, whose IDs are not the options venues' (the documented "
+    "options last trade is on exchange 312); Massive's own options trades "
+    "(`/v3/trades/{optionsTicker}` `exchange`) and options chain snapshot trade link the "
+    "options exchanges, as here."
+)
+
+
+def _options_exchange(side: str = "") -> DescriptionFix:
+    """Return the fix of an options exchange ID whose description links the stock exchanges.
+
+    Args:
+        side: `"ask side "` or `"bid side "` for a quote's exchange, empty for a trade's.
+
+    Returns:
+        The entry, linking the options exchanges instead.
+    """
+    lead = f"The {side}{_EXCHANGE_LEAD}"
+    return DescriptionFix(
+        vendor=f"{lead} ({_STOCK_EXCHANGES}) {_EXCHANGE_TAIL}",
+        text=f"{lead} ({_OPTIONS_EXCHANGES}) {_EXCHANGE_TAIL}",
+        reason=_OPTIONS_EXCHANGE_REASON,
+    )
+
+
+def _flat_file_conditions(asset: str) -> DescriptionFix:
+    """Return the fix of a flat file's condition codes whose description links the stock ones.
+
+    Args:
+        asset: `"crypto"` or `"options"`, the asset class whose condition codes apply.
+
+    Returns:
+        The entry, linking that asset class's condition codes instead.
+    """
+    quoted = (
+        "A list of condition codes. If there are multiple conditions, they will appear in "
+        "quotations, separated by commas."
+    )
+    return DescriptionFix(
+        vendor=f"{quoted} See Trade Conditions "
+        "(https://massive.com/knowledge-base/article/stock-trade-conditions) for Massive\u2019s "
+        "definitions of each condition.",
+        text=f"{quoted} See {asset.capitalize()} Condition Codes "
+        f"(https://massive.com/docs/rest/{asset}/market-operations/condition-codes) for what "
+        "each code means.",
+        reason=f"The link is to the stock trade conditions; Massive's own {asset} trades "
+        f"(`/v3/trades/{{{asset}Ticker}}` `conditions`) link the {asset} condition codes, as "
+        "here.",
+    )
+
+
+_TRADE_PARTICIPANT_TIME = DescriptionFix(
+    vendor="The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp "
+    "of when the quote was actually generated at the exchange.",
+    text="The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of "
+    "when the trade was actually generated at the exchange.",
+    reason="The last trade's time is described as the quote's, Massive's text for a quote's "
+    "participant timestamp; its trades (`/v3/trades/{optionsTicker}`, the stocks trades flat "
+    "file) describe the same field of a trade as here.",
+)
+# Massive's futures bar dollar volume, which the WebSocket and flat-file bars misdescribe.
+_FUTURES_DOLLAR_VOLUME_TEXT = (
+    "The sum of price \u00d7 size across all trades in the window, expressed in the contract's "
+    "quoted price units, which are the same units as the bar's open, high, low, and close. "
+    "Despite the field name, no contract multiplier is applied, so this is not a notional "
+    "dollar value. See the Products endpoint (https://massive.com/docs/rest/futures/products) "
+    "for contract multiplier details. Because dollar_volume is a raw sum, you can use it to "
+    "compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume "
+    "across the bars in the window and divide by the summed volume."
+)
+_FUTURES_DOLLAR_VOLUME_SOURCE = (
+    "The text is Massive's own for the futures bar's dollar volume "
+    "(`/futures/v1/aggs/{ticker}` `dollar_volume`), the same column of the bars kind."
+)
+_FUTURES_WS_DOLLAR_VOLUME = DescriptionFix(
+    vendor="The total US dollar value of shares traded within the aggregate window.",
+    text=_FUTURES_DOLLAR_VOLUME_TEXT,
+    reason="Massive's stock text: a futures bar trades contracts, not shares, and its dollar "
+    f"volume is not in US dollars. {_FUTURES_DOLLAR_VOLUME_SOURCE}",
+)
+_FUTURES_FILE_DOLLAR_VOLUME = DescriptionFix(
+    vendor="The total dollar volume of the transactions that occurred within the timeframe.",
+    text=_FUTURES_DOLLAR_VOLUME_TEXT,
+    reason="Massive's own futures bars say this sum applies no contract multiplier and is not "
+    f"a notional dollar value. {_FUTURES_DOLLAR_VOLUME_SOURCE}",
+)
+_FUTURES_PRICE = DescriptionFix(
+    vendor="The price of the trade. This is the actual dollar value per whole contract of this "
+    "trade. A trade of 100 contracts with a price of $2.00 would be worth a total dollar value "
+    "of $200.00.",
+    text="The trade price is quoted per unit of the underlying asset, with the total contract "
+    "value determined by multiplying by the contract\u2019s specific multiplier.",
+    reason="Massive's stock text with 'share' made 'contract': a futures price is quoted per "
+    "unit of the underlying, so the example's total leaves out the contract multiplier, which "
+    "Massive's own futures bars say their prices do not include. The text is Massive's own for "
+    "the futures trade price (the `futures/T` channel's `p`).",
+)
+_FUTURES_FILES = "us_futures_{venue}"
+# The unified snapshot serves every asset class, and its trade texts are the stock ones.
+_UNIFIED_SNAPSHOT = "/v3/snapshot"
+
+DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
+    {
+        ("/v1/last/crypto/{from}/{to}", "price"): _CRYPTO_PRICE,
+        **_for(CRYPTO_SNAPSHOTS, ("lastTrade.p",), _CRYPTO_PRICE),
+        ("global_crypto/trades_v1", "price"): _CRYPTO_PRICE,
+        ("/v3/trades/{cryptoTicker}", "price"): DescriptionFix(
+            vendor="The price of the trade in the base currency of the crypto pair.",
+            text=_CRYPTO_PRICE_TEXT,
+            reason="Ambiguous: Massive's own meaning of 'base currency' and the usual one name "
+            f"opposite currencies of the pair. {_CRYPTO_PRICE_REASON}",
+        ),
+        **_for(CRYPTO_SNAPSHOTS, ("lastTrade.i",), _CRYPTO_ID),
+        ("global_crypto/trades_v1", "id"): _CRYPTO_ID,
+        ("global_crypto/trades_v1", "conditions"): _flat_file_conditions("crypto"),
+        ("/v2/last/trade/{stocksTicker}", "y"): _TRADE_PARTICIPANT_TIME,
+        ("/v2/last/trade/{optionsTicker}", "y"): _TRADE_PARTICIPANT_TIME,
+        ("/v2/last/trade/{optionsTicker}", "p"): _OPTIONS_PRICE,
+        ("/v3/snapshot/options/{underlyingAsset}", "last_trade.price"): _OPTIONS_PRICE,
+        ("us_options_opra/trades_v1", "price"): _OPTIONS_PRICE,
+        ("/v2/last/trade/{optionsTicker}", "i"): DescriptionFix(
+            vendor=_STOCK_TRADE_ID, text=_OPTIONS_ID_TEXT, reason=_OPTIONS_ID_REASON
+        ),
+        ("/v2/last/trade/{optionsTicker}", "x"): _options_exchange(),
+        ("options/T", "x"): _options_exchange(),
+        ("us_options_opra/trades_v1", "exchange"): _options_exchange(),
+        ("/v3/snapshot/options/{underlyingAsset}", "last_quote.ask_exchange"): _options_exchange(
+            "ask side "
+        ),
+        ("/v3/snapshot/options/{underlyingAsset}", "last_quote.bid_exchange"): _options_exchange(
+            "bid side "
+        ),
+        ("us_options_opra/trades_v1", "conditions"): _flat_file_conditions("options"),
+        ("options/Q", "q"): DescriptionFix(
+            vendor="The sequence number represents the sequence in which trade events happened. "
+            "These are increasing and unique per ticker symbol, but will not always be "
+            "sequential (e.g., 1, 2, 6, 9, 10, 11).",
+            text="The sequence number represents the sequence in which quote events happened. "
+            "These are increasing and unique per ticker symbol, but will not always be "
+            "sequential (e.g., 1, 2, 6, 9, 10, 11).",
+            reason="A quote's sequence is described as the trades' (the options trade "
+            "channel's text); Massive's own options quotes (`/v3/quotes/{optionsTicker}` "
+            "`sequence_number`) describe it as here.",
+        ),
+        (_UNIFIED_SNAPSHOT, "last_trade.price"): DescriptionFix(
+            vendor=_SHARE_PRICE,
+            asset_classes={"options": _OPTIONS_PRICE_TEXT},
+            reason=f"For an option only, as on the options chain snapshot. {_OPTIONS_PRICE_REASON}",
+        ),
+        (_UNIFIED_SNAPSHOT, "last_trade.id"): DescriptionFix(
+            vendor=_STOCK_TRADE_ID,
+            asset_classes={"options": _OPTIONS_ID_TEXT},
+            reason=f"For an option only, as on the options last trade. {_OPTIONS_ID_REASON}",
+        ),
+        (_UNIFIED_SNAPSHOT, "last_trade.exchange"): DescriptionFix(
+            vendor=f"The {_EXCHANGE_LEAD} ({_STOCK_EXCHANGES}) {_EXCHANGE_TAIL}",
+            asset_classes={
+                "options": f"The {_EXCHANGE_LEAD} ({_OPTIONS_EXCHANGES}) {_EXCHANGE_TAIL}"
+            },
+            reason="For an option only, as on the options chain snapshot. "
+            + _OPTIONS_EXCHANGE_REASON,
+        ),
+        **_for(("futures/A", "futures/AM"), ("dv",), _FUTURES_WS_DOLLAR_VOLUME),
+        **_for(
+            (f"{_FUTURES_FILES}/session_aggs_v1", f"{_FUTURES_FILES}/minute_aggs_v1"),
+            ("dollar_volume",),
+            _FUTURES_FILE_DOLLAR_VOLUME,
+        ),
+        **_for(
+            ("/futures/v1/trades/{ticker}", f"{_FUTURES_FILES}/trades_v1"),
+            ("price",),
+            _FUTURES_PRICE,
+        ),
+        ("/futures/v1/snapshot", "last_trade.price"): _FUTURES_PRICE,
+    }
+)
+"""`(source, wire key)` to the corrected description of a field whose vendor text is wrong."""
 
 
 def _result_keys() -> dict[str, ResultKey]:

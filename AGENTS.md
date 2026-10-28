@@ -36,9 +36,11 @@ the `spec/*.json` diff, and any hand-input lines in one pull request. When a gat
 refresh it prints each problem (gate, source, key, vendor description); fix it with an entry
 and its reason in one of the hand-input tables, never by editing the generated file: a
 lexicon, `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_CONFLICTS`,
-`TYPE_FIXES`, `KEY_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`, `PROJECTIONS`,
-`TRANSPORT_ONLY`, or `VENUES` entry (`overrides.py`); or an `EXCLUSIONS` or `SAMPLE_ERRORS` entry
-(`exclusions.py`).
+`TYPE_FIXES`, `KEY_FIXES`, `DESCRIPTION_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`,
+`PROJECTIONS`, `TRANSPORT_ONLY`, or `VENUES` entry (`overrides.py`); or an `EXCLUSIONS` or
+`SAMPLE_ERRORS` entry (`exclusions.py`). A vendor description that is clearly wrong for its
+source (another asset class's or event's text, or a statement Massive's own documentation of the
+field contradicts) is corrected the same way, by a `DESCRIPTION_FIXES` entry that quotes it.
 
 `--check` downloads the live sources into a scratch directory and prints a Markdown report of
 what differs from the snapshot and the committed schemas, each item under the action that

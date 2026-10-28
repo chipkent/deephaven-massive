@@ -432,6 +432,7 @@ def _hand(
         tag_conflicts=tag_conflicts or {},
         type_fixes=type_fixes or {},
         key_fixes=key_fixes or {},
+        description_fixes={},
         result_keys=result_keys or {},
         param_units=param_units or {},
         exclusions=exclusions,
