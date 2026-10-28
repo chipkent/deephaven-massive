@@ -207,6 +207,8 @@ REST endpoints for market data, reference data and other financial data sets.
 - [Initial Insider Ownership (Form 3)](https://massive.com/docs/rest/stocks/filings/form-3.md): Retrieve SEC Form 3 filings that report the initial beneficial ownership of securities by corporate insiders (directors, officers, and 10%+ shareholders)
 - [Insider Transactions (Form 4)](https://massive.com/docs/rest/stocks/filings/form-4.md): Retrieve SEC Form 4 filings that disclose all changes in beneficial ownership by corporate insiders
 - [SEC EDGAR Index](https://massive.com/docs/rest/stocks/filings/index.md): Retrieve the master index of all SEC EDGAR filings, including form types, filing dates, CIKs, tickers, issuer names, accession numbers, and direct links to original documents on SEC.gov
+- [Insider Trading Activity](https://massive.com/docs/rest/stocks/filings/insider-activity.md): Retrieve aggregated insider trading activity for a company — how much its corporate insiders bought and sold each day
+- [Insider Holdings](https://massive.com/docs/rest/stocks/filings/insider-holdings.md): Retrieve the roster of a company's insiders and the shares each one currently holds — one row per reporting owner per issuer
 - [Risk Categories](https://massive.com/docs/rest/stocks/filings/risk-categories.md): Access the full standardized hierarchical taxonomy used to classify risk factors in SEC filings
 - [Risk Factors](https://massive.com/docs/rest/stocks/filings/risk-factors.md): Standardized, machine-readable risk factor disclosures from SEC filings
 - [Balance Sheets](https://massive.com/docs/rest/stocks/fundamentals/balance-sheets.md): Retrieve comprehensive balance sheet data for public companies, containing quarterly and annual financial positions
