@@ -270,9 +270,10 @@ _ingest/                 the only holder of wire clients
                          (single-flight)
   hosts.py               host resolution from REST evidence (section 13.2)
   poll.py                poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> publish_failure
-  ws.py                  connections over WsClient: reconcile, wildcards, watchdogs, the NO_ACK
-                         rule, the verdict rule, the options cap, rejects and drift routing
-                         (section 13.3)
+  subscriptions.py       topics and the reconcile loop of one connection: wildcards,
+                         watchdogs, the NO_ACK rule, the options cap's admission (section 13.3)
+  ws.py                  connections over WsClient: leases, the verdict rule, rejects and drift
+                         routing, the options cap's verb check (section 13.3)
 _massive/                the wire package (section 19)
 py.typed
 ```
@@ -627,11 +628,13 @@ return result
   waiters wake and open the stream themselves. `m.close()` wakes the waiters, which raise
   `MassiveError`; the opener releases the stream when its open returns. A failure reported
   during the open leaves the stream `FAILED`, and the open returns the stream as is, exactly as
-  if the failure had arrived just after it: every shape raises Deephaven's `DHError` ("Can not
-  listen to failed table") as it derives from the failed blink table, with the hold released.
-  `blink()` is no exception, because its described copy listens to the blink table
-  ([section 7.4](#74-column-descriptions)). The WebSocket layer wraps that error in a
-  `MassiveError` naming the stream's failure.
+  if the failure had arrived just after it: every shape, `blink()` included, raises
+  `MassiveError` naming the stream's failure, with the hold released. `SessionCore.stream_result`
+  checks the stream's recorded failure before it builds the shape, and wraps in the same
+  `MassiveError` the `DHError` ("Can not listen to failed table") Deephaven raises when the
+  failure lands while the shape derives from the blink table. A stream's failure is recorded
+  (`SessionCore.fail_stream`) before its table is failed (`publish_failure`), so a verb that
+  meets the failed table always finds the failure to name.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
   either may come last. A stream's registry record is deleted only once both have happened:
@@ -1749,8 +1752,8 @@ they break**, so a stream never loses data because of another stream's wildcard:
 - During an overlap, an event may arrive twice for one round trip. That brief duplicate is
   accepted; a gap would be silent and unrecoverable.
 - Covered explicit topics count toward the options cap ([section 15](#15-options-contract-cap))
-  only while they are on the wire; when a wildcard is removed, they re-enter through the cap's
-  deferral in sorted order.
+  even while the wildcard keeps them off the wire, so removing the wildcard never pushes a
+  contract past the cap.
 
 Responsibilities:
 
@@ -1825,9 +1828,10 @@ fatal handshake error, or auth_failed
       HTTP status and the host, or AuthenticationError); State=FAILED
 shutdown callback (section 6.1)
    -> ref-count decrement; topics at zero leave D, and each cancels its watchdog
-a connection whose D stays empty for 30 s
+a connection with no stream attached for 30 s (no lease, so no stream opening either)
    -> closed by the connection loop (idle grace); the row is kept in m.connections() with
-      State=CLOSED
+      State=CLOSED. A reactive stream whose watchlist is empty keeps its connection open:
+      its next symbol must not reach a closed loop. The cost is an idle socket holding a slot
 ```
 
 A socket that the server stops answering is detected by websockets' keepalive pings and closed,
@@ -1850,9 +1854,12 @@ host only if all three hold:
 2. every topic of the in-flight step was refused;
 3. the host is not pinned by `ws_hosts`.
 
-Then: close, wait the backoff, reopen on `delayed.`, cache `DELAYED` with
-`evidence="server verdict: <message>"`, log a WARNING, and do not fail the streams. This happens
-at most once per (class, family) per session. In every other case the verdict is an
+Then: record `HostDecision(delayed host, DELAYED, "server verdict: <message>")` through
+`RestTransport.record_verdict(asset_class, family, decision)`, which replaces the one cached
+decision of the pair and rewrites its `Transport=REST` row; log a WARNING; move the connection's
+streams to the delayed host's connection, which starts after the backoff; close the old one;
+and do not fail the streams. The streams' `m.streams()` rows show the new host. Since the pair
+then resolves to `DELAYED`, this happens at most once per (class, family) per session. In every other case the verdict is an
 `EntitlementError` for that step's streams.
 
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
@@ -1987,8 +1994,15 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `filter_table` is a cached static one-column table rebuilt only when the stream's symbol set
   changes. Target: Python work is O(rows) per channel per flush and independent of the number of
   streams; per-stream work is one Java filter and one `add`, O(rows) in Java with no Python
-  per-row cost. A non-gating benchmark test records rows per second for `T.*` with 1, 10, and
-  100 streams and compares `where_in` fan-out against per-stream Python grouping.
+  per-row cost. A symbol stream that holds none of the batch's distinct symbols gets nothing,
+  and one that holds all of them (and the batch has no row without a valid symbol) gets the
+  whole batch with no filter, so the common single-stream case costs one `add`. A non-gating
+  benchmark test records warmed median rows per second for 1, 10, and 100 streams at 200,
+  2,000, and 20,000 rows per flush, against one-pass per-stream Python grouping.
+- Each flush applies the failures queued before it, then publishes, so a failed stream gets no
+  row after its failure; rows buffered for it in that flush are dropped. A batch that cannot
+  be converted or published fails that dataset's streams on the channel, with a `MassiveError`
+  naming the cause, and the flush goes on with the other channels.
 - `TablePublisher.add` is safe from the flush thread: the Java side snapshots the static batch
   and guarantees non-interleaved adds. `on_flush_callback` is not used (it blocks the update
   cycle).
@@ -2030,20 +2044,23 @@ How a request is built from a `DatasetSpec` and a `Request`:
 Massive allows 1,000 option contracts per `/options` connection. The library counts
 **topics** per connection: `T.X` and `Q.X` count as two. Whether the server counts contracts or
 topics is **UNVERIFIED**, so the stricter count is used (fixture test). Wildcards count zero.
-An explicit topic covered by an acknowledged wildcard counts only while it is on the wire
-([section 13.3](#133-connection-and-subscription-protocol)); when the wildcard is removed, the
-covered topics re-enter through the deferral below, in sorted order.
+Every wanted explicit topic counts, also one covered by an acknowledged wildcard and so off the
+wire meanwhile ([section 13.3](#133-connection-and-subscription-protocol)): the wildcard may be
+removed at any time, and a static contract the verb accepted must never be deferred then.
 
 Because the library knows the count before sending, a frame that would cross the cap is never
 sent:
 
 - **Static input.** `len(new topics) + in use > 1000` raises `ValueError` at verb time,
   synchronously.
-- **Reactive `Table` input.** Adds are subscribed in sorted order up to the cap. The rest are
-  deferred: not subscribed, not failed. `m.streams()` shows `State=RUNNING`, `Deferred=<n>`, and
+- **Reactive `Table` input.** Static topics are admitted first (their verb checked them);
+  a reactive table's adds take the room left, in sorted order, and contracts admitted before
+  keep their place, across reconnects too. The rest are deferred: not subscribed, not failed.
+  `m.streams()` shows `State=RUNNING`, `Deferred=<n>`, and
   `Error="over capacity: 1234/1000; 234 deferred"`, with a WARNING on each transition. When
   removals free capacity, deferred contracts subscribe in the same order. Rows for deferred
-  contracts are absent, never stale.
+  contracts are absent, never stale, except while a wildcard on the connection delivers them
+  anyway.
 
 No all-or-nothing server refusal can occur, so frame chunking has no interaction with the cap.
 
@@ -2210,9 +2227,10 @@ without the GIL.
 
 | Thread | Created by | Does | Must not |
 |---|---|---|---|
-| caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key | hold the registry lock while calling Deephaven or waiting |
+| caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key; fails a new stream whose connection failed while it opened (`publish_failure`, outside every lock) | hold the registry lock while calling Deephaven or waiting |
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
-| flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
+| flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
+| verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
@@ -2227,6 +2245,14 @@ without the GIL.
   **leaf lock**: no Deephaven call, no network call, no blocking wait, and no wait on a
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
   atomically under the lock; readers copy references out and release the lock before working.
+- Two locks of the WebSocket flush are not leaf locks, and are never taken under
+  `registry_lock` or the UG lock:
+  - each connection's **flush lock** serializes its flushes (the flush thread's, and any a test
+    calls); a flush calls Deephaven under it;
+  - each stream's **publish lock** serializes `publisher.add` and `publish_failure` for the
+    stream, which two flush threads can briefly share when a connection moves, and the caller
+    thread when a stream's connection failed while it opened. Failing a stream takes
+    `registry_lock` under it (`SessionCore.fail_stream`).
 - The other locks are leaf locks too, each guarding one thing and making no Deephaven,
   network, or blocking call while held:
   - the REST transport's host-decision cache, which holds one future per (class, family);
@@ -2275,6 +2301,10 @@ lock is held and may take `registry_lock`. Therefore no library thread acquires 
 directly or through auto-locking in `Table.snapshot()`, `where_in`, `last_by`, or
 `deephaven.arrow.to_table`, while holding `registry_lock`. That single rule prevents the UG and
 registry deadlock. Verbs called on the UG thread raise `ValueError`.
+
+The WebSocket flush adds two locks above `registry_lock`: a connection's **flush lock**, then a
+stream's **publish lock**, then `registry_lock`. Nothing takes the flush or the publish lock
+while holding `registry_lock` or the UG lock, so the order has no cycle.
 
 ### 18.4 Free-threaded specifics
 

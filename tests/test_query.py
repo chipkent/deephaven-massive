@@ -227,14 +227,6 @@ def test_class_hierarchy() -> None:
     assert not hasattr(Query, "history")
 
 
-# --- Transport hooks that are not implemented yet --------------------------------------------
-
-
-def test_the_stream_hook_raises_not_implemented(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(NotImplementedError, match="WebSocket transport"):
-        trades(massive_session).append_only()
-
-
 # --- fetch and poll --------------------------------------------------------------------------
 
 
