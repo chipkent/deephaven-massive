@@ -498,8 +498,9 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
 def required_fields(spec: DatasetSpec, source: Source) -> tuple[Field, ...]:
     """Return the generated fields behind a source's required keys for one dataset.
 
-    The required keys are the keys the dataset declares for the source and does not fill from
-    the request; a row without one is a loud failure, never a null key. A key named through a
+    The required keys are the keys the dataset declares for the source, does not fill from
+    the request, and does not mark optional (`KeySpec.required`); a row without one is a loud
+    failure, never a null key. A key named through a
     membership projection (the index snapshot's `Timestamp`) resolves to the field behind it
     (`last_updated`, whose own column is `LastUpdated`), so a transport hands each wire client
     the names it decodes by: `Field.column` for `to_batch(..., required=)` and
@@ -518,7 +519,7 @@ def required_fields(spec: DatasetSpec, source: Source) -> tuple[Field, ...]:
     return tuple(
         columns[key_column(role, key)]
         for role, key in spec.keys_for(source.transport, source.key).declared()
-        if not key.from_request
+        if not key.from_request and key.required
     )
 
 

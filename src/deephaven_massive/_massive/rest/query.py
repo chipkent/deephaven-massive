@@ -60,8 +60,9 @@ def request_target(
     Args:
         rest_path: The path, whose `params` say each parameter's kind and place.
         path_params: A value for every placeholder of the template, by wire name. Each is
-            encoded by its kind and then percent-encoded whole, so a `/` in a value stays
-            inside its segment.
+            encoded by its kind and then percent-encoded whole (`I:SPX` is sent as
+            `I%3ASPX`). No value may contain `/`: Massive answers HTTP 404 for a segment
+            holding `%2F`, and no canonical symbol contains one (a forex pair is `C:EURUSD`).
         query_params: Query values by wire name, in the order to send them. A `None` value is
             left out.
 
@@ -70,9 +71,10 @@ def request_target(
         with no `?` when no query value is sent.
 
     Raises:
-        ValueError: If a path parameter is missing, `None`, or unknown, or a query name is not
-            a query parameter of the path. Each value is encoded by `encode_value`, which
-            raises `TypeError` or `ValueError` for a value its kind cannot send.
+        ValueError: If a path parameter is missing, `None`, or unknown, its encoded value
+            contains `/`, or a query name is not a query parameter of the path. Each value is
+            encoded by `encode_value`, which raises `TypeError` or `ValueError` for a value
+            its kind cannot send.
     """
     params = {param.name: param for param in rest_path.params}
     path_names = {name for name, param in params.items() if param.in_path}
@@ -82,9 +84,14 @@ def request_target(
             f"{rest_path.template} takes path parameters {sorted(path_names)}, "
             f"given {sorted(name for name, value in given.items() if value is not None)}"
         )
-    segments = {
-        name: quote(encode_value(params[name], value), safe="") for name, value in given.items()
-    }
+    texts = {name: encode_value(params[name], value) for name, value in given.items()}
+    slashed = sorted(name for name, text in texts.items() if "/" in text)
+    if slashed:
+        raise ValueError(
+            f"{rest_path.template}: path parameters {slashed} contain '/', which Massive cannot "
+            "read inside a path segment"
+        )
+    segments = {name: quote(text, safe="") for name, text in texts.items()}
     path = rest_path.template.format_map(segments)
     query = []
     for name, value in dict(query_params).items():
