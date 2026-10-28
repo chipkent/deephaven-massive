@@ -12,12 +12,14 @@ lands as one row of `blink()`; and every flat-file prefix reads one day's file f
 and keeps only the requested symbols.
 """
 
+from __future__ import annotations
+
 import inspect
 import json
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pyarrow as pa
@@ -26,7 +28,6 @@ from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
-from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
@@ -54,8 +55,12 @@ from deephaven_massive._query import (
 )
 from deephaven_massive._session import CATALOG
 from tests._fakes.rest import FakeRestServer, Reply
-from tests._fakes.s3 import FakeS3
-from tests._fakes.ws_session import WsSession
+
+if TYPE_CHECKING:
+    from deephaven.table import Table
+
+    from tests._fakes.s3 import FakeS3
+    from tests._fakes.ws_session import WsSession
 
 R = Transport.REST
 FIXTURES = "namespaces/stocks"
@@ -177,6 +182,9 @@ SOURCES: dict[str, tuple[str, dict[str, object]]] = {
     "/stocks/taxonomies/vX/risk-factors": ("filings_risk_factor_taxonomy.json", {}),
     "/stocks/taxonomies/vX/disclosures": ("filings_disclosure_taxonomy.json", {}),
 }
+
+if TYPE_CHECKING:
+    from tests._fakes.ws_session import WsSession
 
 
 def spec_of(name: str) -> DatasetSpec:

@@ -9,6 +9,8 @@ the fake WebSocket server (one documented frame lands in `blink()` per channel),
 S3 server (one block of each flat-file prefix round-trips through `history()`).
 """
 
+from __future__ import annotations
+
 import csv
 import io
 import itertools
@@ -17,7 +19,7 @@ import string
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pyarrow as pa
@@ -25,12 +27,10 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
-from deephaven.table import Table
 from deephaven.table_listener import TableUpdate, listen
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily
@@ -56,14 +56,22 @@ from deephaven_massive._tables.liveness import new_scope
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers
 # and the streaming session come from the `fake_rest`, `fake_s3`, and `ws_session` fixtures.
 from tests._fakes.rest import FakeRestServer, Reply
-from tests._fakes.s3 import FakeS3
-from tests._fakes.ws_session import WsSession
+
+if TYPE_CHECKING:
+    from deephaven.table import Table
+
+    from deephaven_massive._datasets.request import Request
+    from tests._fakes.s3 import FakeS3
+    from tests._fakes.ws_session import WsSession
 
 Fixture = Callable[[str, str], bytes]
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 OWNER = "namespaces/crypto"
 CRYPTO = Catalog(crypto.DATASETS)
+
+if TYPE_CHECKING:
+    from tests._fakes.ws_session import WsSession
 
 
 def request_of(query: QueryBase) -> Request:

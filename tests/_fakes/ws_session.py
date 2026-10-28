@@ -13,6 +13,7 @@ imported only once the embedded JVM has started.
 
 from __future__ import annotations
 
+import inspect
 import json
 import threading
 from typing import TYPE_CHECKING, Any, cast
@@ -44,14 +45,14 @@ REALTIME = HostDecision("socket.test", Recency.REALTIME, "test evidence")
 class SpyClient(_massive.WsClient):
     """A real client that also records the loop-thread calls the library makes on it.
 
-    Each `set_required` and `subscribe` call is appended to the session's `journal`, in call
-    order, before the real method runs.
+    Each `set_required` and `subscribe` call is passed to `record`, in call order, before the
+    real method runs; `WsSession` appends it to its journal under its lock.
     """
 
     def __init__(
         self,
         url: str,
-        journal: list[tuple[object, ...]],
+        record: Callable[[tuple[object, ...]], None],
         *,
         sources: Sequence[Source],
         callbacks: dict[str, Callable[..., None]],
@@ -68,18 +69,18 @@ class SpyClient(_massive.WsClient):
             reconnect_backoff=backoff,
             max_reconnect_backoff=backoff * 2,
         )
-        self._journal = journal
+        self._record = record
 
     @override
     def set_required(
         self, channel: str, keys: frozenset[str], *, symbol: str | None = None
     ) -> None:
-        self._journal.append(("set_required", channel, keys, symbol))
+        self._record(("set_required", channel, keys, symbol))
         super().set_required(channel, keys, symbol=symbol)
 
     @override
     def subscribe(self, generation: int, topics: Sequence[str]) -> None:
-        self._journal.append(("subscribe", tuple(topics)))
+        self._record(("subscribe", tuple(topics)))
         super().subscribe(generation, topics)
 
 
@@ -87,21 +88,15 @@ class WsSession:
     """A session whose connections reach the fake server, with every client event recorded.
 
     Created on the test thread, by the `ws_session` fixture or directly, and closed with
-    `close()`. The counters and lists below are written on the clients' loop threads under
-    `cond`; read them from a `wait` predicate, which holds it.
+    `close()`. What it records is written on the test thread and on the clients' loop threads,
+    always under `cond`, a reentrant condition. Each attribute below reads it under `cond` too,
+    and a list attribute returns a snapshot, so a test may read one anywhere; to wait for a
+    change, pass a predicate to `wait`, which holds `cond` while it tests it.
 
     Attributes:
         session: The session; build queries from its namespaces (`session.stocks.trades`).
         connections: The session's WebSocket transport.
-        decisions: Each `(asset_class, family)` the transport asked a host decision for.
-        verdicts: Each real-time verdict the transport recorded, as `(asset_class, family,
-            decision)`; a recorded verdict answers later decisions for its pair.
-        journal: The `set_required` and `subscribe` calls on every client, in order.
-        urls: The URL of each client the transport created, in order.
-        frames: How many decoded data events the clients have delivered.
-        statuses: Every status the clients have delivered.
-        states: Every connection state the clients have reported.
-        opens: How many times a client has opened a connection.
+        cond: The condition every recorded event is written and notified under.
     """
 
     def __init__(
@@ -125,16 +120,16 @@ class WsSession:
         """
         self.server = server
         self.backoff = backoff
-        self.decisions: list[tuple[AssetClass, ChannelFamily]] = []
-        self.verdicts: list[tuple[AssetClass, ChannelFamily, HostDecision]] = []
         self._decide = decide or (lambda *_: REALTIME)
-        self.cond = threading.Condition()
-        self.journal: list[tuple[object, ...]] = []
-        self.urls: list[str] = []
-        self.frames = 0
-        self.statuses: list[Status] = []
-        self.states: list[WsState] = []
-        self.opens = 0
+        self.cond = threading.Condition(threading.RLock())
+        self._decisions: list[tuple[AssetClass, ChannelFamily]] = []
+        self._verdicts: list[tuple[AssetClass, ChannelFamily, HostDecision]] = []
+        self._journal: list[tuple[object, ...]] = []
+        self._urls: list[str] = []
+        self._items = 0
+        self._statuses: list[Status] = []
+        self._states: list[WsState] = []
+        self._opens = 0
         self.session = dm.MassiveSession(
             dm.MassiveConfig(
                 api_key="test-key",
@@ -145,31 +140,85 @@ class WsSession:
         clients: Any = self.session._core._ports
         self.connections = ws.WsConnections(
             self.session._core,
-            resolve_host=self.resolve,
-            record_verdict=self.record_verdict,
+            resolve_host=self._resolve,
+            record_verdict=self._record_verdict,
             client_factory=self.factory,
         )
         clients._streams = self.connections
         self.session._core.on_close(self.connections.close)
 
-    def resolve(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
+    @property
+    def decisions(self) -> list[tuple[AssetClass, ChannelFamily]]:
+        """Each `(asset_class, family)` the transport asked a host decision for, in order."""
+        with self.cond:
+            return list(self._decisions)
+
+    @property
+    def verdicts(self) -> list[tuple[AssetClass, ChannelFamily, HostDecision]]:
+        """Each real-time verdict recorded, as `(asset_class, family, decision)`, in order.
+
+        A recorded verdict answers the later decisions of its pair.
+        """
+        with self.cond:
+            return list(self._verdicts)
+
+    @property
+    def journal(self) -> list[tuple[object, ...]]:
+        """The `set_required` and `subscribe` calls on every client, in order."""
+        with self.cond:
+            return list(self._journal)
+
+    @property
+    def urls(self) -> list[str]:
+        """The URL of each client the transport created, in order."""
+        with self.cond:
+            return list(self._urls)
+
+    @property
+    def items(self) -> int:
+        """How many data items the clients have delivered, rows and rejects alike."""
+        with self.cond:
+            return self._items
+
+    @property
+    def statuses(self) -> list[Status]:
+        """Every status the clients have delivered, in order."""
+        with self.cond:
+            return list(self._statuses)
+
+    @property
+    def states(self) -> list[WsState]:
+        """Every connection state the clients have reported, in order."""
+        with self.cond:
+            return list(self._states)
+
+    @property
+    def opens(self) -> int:
+        """How many times a client has opened a connection."""
+        with self.cond:
+            return self._opens
+
+    def _resolve(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
         """Decide a host as the REST transport's cache does: a recorded verdict wins.
 
         Returns:
             The decision.
         """
-        self.decisions.append((asset_class, family))
-        for verdict_class, verdict_family, decision in self.verdicts:
-            if (verdict_class, verdict_family) == (asset_class, family):
-                return decision
-        return self._decide(asset_class, family)
+        with self.cond:
+            self._decisions.append((asset_class, family))
+            recorded = [
+                decision
+                for verdict_class, verdict_family, decision in self._verdicts
+                if (verdict_class, verdict_family) == (asset_class, family)
+            ]
+        return recorded[0] if recorded else self._decide(asset_class, family)
 
-    def record_verdict(
+    def _record_verdict(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
     ) -> None:
         """Record a real-time verdict, which answers the pair's later decisions."""
         with self.cond:
-            self.verdicts.append((asset_class, family, decision))
+            self._verdicts.append((asset_class, family, decision))
             self.cond.notify_all()
 
     def factory(
@@ -187,21 +236,28 @@ class WsSession:
         Returns:
             The client, not started; its callbacks are the transport's, each also recorded.
         """
-        self.urls.append(url)
+        with self.cond:
+            self._urls.append(url)
+            self.cond.notify_all()
         path = "/" + url.split("/", 3)[3]
         callbacks = {
             "on_open": self._noting(on_open, "opens"),
             "on_status": self._noting(on_status, "statuses"),
-            "on_data": self._noting(on_data, "frames"),
+            "on_data": self._noting(on_data, "items"),
             "on_state": self._noting(on_state, "states"),
         }
         return SpyClient(
             self.server.url(path),
-            self.journal,
+            self._called,
             sources=sources,
             callbacks=callbacks,
             backoff=self.backoff,
         )
+
+    def _called(self, call: tuple[object, ...]) -> None:
+        with self.cond:
+            self._journal.append(call)
+            self.cond.notify_all()
 
     def _noting(self, callback: Callable[..., None], what: str) -> Callable[..., None]:
         def call(*event: object) -> None:
@@ -213,19 +269,30 @@ class WsSession:
     def _note(self, what: str, event: tuple[object, ...]) -> None:
         with self.cond:
             if what == "opens":
-                self.opens += 1
-            elif what == "frames":
-                self.frames += 1
+                self._opens += 1
+            elif what == "items":
+                rows, rejects = cast("tuple[list[object], list[object]]", event[2:4])
+                self._items += len(rows) + len(rejects)
             elif what == "statuses":
-                self.statuses.append(cast("Status", event[1]))
+                self._statuses.append(cast("Status", event[1]))
             else:
-                self.states.append(cast("WsState", event[0]))
+                self._states.append(cast("WsState", event[0]))
             self.cond.notify_all()
 
-    def wait(self, predicate: Callable[[WsSession], bool]) -> None:
-        """Wait, holding `cond`, until `predicate(self)` is true; fail after `TIMEOUT`."""
+    def wait(self, predicate: Callable[[WsSession], bool], what: str | None = None) -> None:
+        """Wait, holding `cond`, until `predicate(self)` is true; fail after `TIMEOUT`.
+
+        Args:
+            predicate: The condition, tested whenever a recorded event arrives.
+            what: What the wait is for, in the failure message; the predicate's source line
+                when None.
+        """
         with self.cond:
-            assert self.cond.wait_for(lambda: predicate(self), TIMEOUT)
+            assert self.cond.wait_for(lambda: predicate(self), TIMEOUT), (
+                f"waited {TIMEOUT} s for {what or inspect.getsource(predicate).strip()}; "
+                f"recorded items={self._items}, opens={self._opens}, "
+                f"states={self._states}, statuses={self._statuses}"
+            )
 
     def query(self, spec: DatasetSpec, symbols: object) -> StreamQuery:
         """Build the stream query of a dataset no namespace needs to declare.
@@ -247,14 +314,25 @@ class WsSession:
             return self.connections._connections[url]
 
     def send(self, *items: dict[str, object]) -> None:
-        """Send one frame of `items` and wait until a client has delivered its data."""
+        """Send one frame of `items` and wait until the clients have delivered every data item.
+
+        A client delivers a frame one channel at a time, so the wait counts items, rows and
+        rejects alike, not deliveries: it returns only once every channel of the frame has
+        reached the transport. A status object (`"ev": "status"`) is not a data item and is not
+        waited for, and every other item must belong to a channel the connection has a source
+        for, since the client drops any other.
+        """
+        expected = sum(1 for item in items if item.get("ev") != "status")
         with self.cond:
-            before = self.frames
+            before = self._items
         self.server.send(json.dumps(list(items)))
-        self.wait(lambda s: s.frames > before)
+        self.wait(
+            lambda s: s.items >= before + expected,
+            f"{expected} data items of the frame to be delivered",
+        )
 
     def publish(self, *items: dict[str, object]) -> None:
-        """Send one frame of `items`, wait until it is delivered, then flush its rows."""
+        """Send one frame of `items`, wait until every data item is delivered, then flush."""
         self.send(*items)
         self.flush()
 

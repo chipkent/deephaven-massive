@@ -358,20 +358,41 @@ def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
     `flush_interval`, `backoff`, and further `MassiveConfig` options); every session it made is
     closed at teardown, so a test may also close one itself.
 
+    Teardown closes every session even when one close raises, then waits, for at most
+    `_CLIENT_THREADS_TIMEOUT` seconds, until no client loop thread (`massive-ws …`) or flush
+    thread (`massive-flush …`) is alive, and fails the test if one is: a client left running
+    reconnects forever, to a stopped server or through whatever proxy a later test sets.
+
     Yields:
         The factory.
     """
     module = importlib.import_module("tests._fakes.ws_session")
-    made: list[WsSession] = []
+    with contextlib.ExitStack() as sessions:
 
-    def make(**options: object) -> WsSession:
-        session: WsSession = module.WsSession(fake_ws_server, **options)
-        made.append(session)
-        return session
+        def make(**options: object) -> WsSession:
+            session: WsSession = module.WsSession(fake_ws_server, **options)
+            sessions.callback(session.close)
+            return session
 
-    yield make
-    for session in made:
-        session.close()
+        yield make
+    deadline = time.monotonic() + _CLIENT_THREADS_TIMEOUT
+    pause = threading.Event()  # never set; only paces the polling
+    while (left := _client_threads()) and time.monotonic() < deadline:
+        pause.wait(0.02)
+    assert not left, f"threads outlived their session: {left}"
+
+
+_CLIENT_THREADS_TIMEOUT: Final = 15.0
+"""Seconds `make_ws_session`'s teardown waits for its sessions' threads to end."""
+
+
+def _client_threads() -> list[str]:
+    """Return the names of the live WebSocket client and flush threads, in any session."""
+    return [
+        t.name
+        for t in threading.enumerate()
+        if t.name.startswith(("massive-ws ", "massive-flush ")) and t.is_alive()
+    ]
 
 
 @pytest.fixture

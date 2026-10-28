@@ -7,13 +7,15 @@ channel lands one frame from the fake WebSocket server in `blink()`, and every f
 round-trips one file through the fake S3.
 """
 
+from __future__ import annotations
+
 import itertools
 import json
 import string
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pyarrow as pa
@@ -47,8 +49,10 @@ from deephaven_massive._query import (
 from deephaven_massive._session import CATALOG
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply
-from tests._fakes.s3 import FakeS3
-from tests._fakes.ws_session import WsSession
+
+if TYPE_CHECKING:
+    from tests._fakes.s3 import FakeS3
+    from tests._fakes.ws_session import WsSession
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 NS = 10**9
@@ -76,6 +80,9 @@ FOREX_SOURCES = {
     (F, "global_forex/minute_aggs_v1"),
     (F, "global_forex/quotes_v1"),
 }
+
+if TYPE_CHECKING:
+    from tests._fakes.ws_session import WsSession
 
 
 def request(query: QueryBase) -> Request:

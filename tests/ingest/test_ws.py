@@ -33,9 +33,10 @@ from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
+from tests._fakes.ws_session import REALTIME, TIMEOUT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -47,7 +48,6 @@ if TYPE_CHECKING:
 RowsWhen: TypeAlias = (
     "Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]"
 )
-TIMEOUT = 15.0
 W = Transport.WS
 
 
@@ -112,23 +112,6 @@ QUOTES_FUTURES = DatasetSpec(
     channels={None: "Q"},
     keys={(W, "futures/Q"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
 )
-
-REALTIME = HostDecision("socket.test", Recency.REALTIME, "test evidence")
-
-
-@pytest.fixture(autouse=True)
-def _no_connection_outlives_its_test() -> Iterator[None]:
-    # A client left running reconnects forever, and through whatever proxy a later test sets.
-    yield
-    wait_for(
-        lambda: (
-            not [
-                t
-                for t in threading.enumerate()
-                if t.name.startswith(("massive-ws ", "massive-flush ")) and t.is_alive()
-            ]
-        )
-    )
 
 
 def trade(symbol: str, price: float = 1.0, **fields: object) -> dict[str, object]:
@@ -253,7 +236,7 @@ def test_a_refused_topic_fails_only_its_streams(
     trades = ws_session.query(TRADES, ["AAPL"]).append_only()
     ws_session.subscribed("T.AAPL")
     quotes = ws_session.query(QUOTES, ["AAPL"]).blink()
-    ws_session.wait(lambda h: any(s.kind is StatusKind.REFUSED for s in h.statuses))
+    ws_session.wait(lambda s: any(status.kind is StatusKind.REFUSED for status in s.statuses))
     ws_session.flush()
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
@@ -263,6 +246,37 @@ def test_a_refused_topic_fails_only_its_streams(
     ws_session.flush()
     rows_when(trades, lambda rows: len(rows) == 1)  # the connection kept running
     del quotes
+
+
+def test_publish_waits_for_every_channel_of_a_frame(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, *, rows_when: RowsWhen
+) -> None:
+    # The client delivers a frame one channel at a time; the quote, delivered second and
+    # slowly, must still reach the flusher before `publish` flushes, or with an hourly flush
+    # interval its row would never be published.
+    trades = ws_session.query(TRADES, ["AAPL"]).append_only()
+    quotes = ws_session.query(QUOTES, ["AAPL"]).append_only()
+    ws_session.subscribed("T.AAPL", "Q.AAPL")
+    connection = ws_session.connection()
+    deliver = connection._on_data
+    pause = threading.Event()  # never set; only slows the second channel
+
+    def slow_quotes(
+        channel: str,
+        rows: list[dict[str, object]],
+        *,
+        rejects: list[_massive.Reject],
+        drift: _massive.DriftReport,
+    ) -> None:
+        if channel == "Q":
+            pause.wait(0.3)
+        deliver(channel, rows, rejects=rejects, drift=drift)
+
+    monkeypatch.setattr(connection, "_on_data", slow_quotes)
+    quote = {"ev": "Q", "sym": "AAPL", "bx": 4, "bp": 1.0, "bs": 100, "ax": 7, "ap": 1.1}
+    ws_session.publish(trade("AAPL"), quote | {"as": 100, "t": 1_700_000_000_000, "z": 3})
+    rows_when(trades, lambda rows: len(rows) == 1)
+    rows_when(quotes, lambda rows: len(rows) == 1)
 
 
 def test_a_rejected_row_fails_only_the_streams_of_its_symbol(
@@ -377,14 +391,14 @@ def test_a_derived_table_keeps_the_stream_alive(
 def test_close_returns_promptly_during_a_backoff_wait(
     fake_ws_server: FakeMassiveServer, make_ws_session: Callable[..., WsSession]
 ) -> None:
-    ws_session = make_ws_session(backoff=60.0)
+    custom_session = make_ws_session(backoff=60.0)
     fake_ws_server.reject_next(503)
-    result = ws_session.query(TRADES, ["AAPL"]).blink()
-    ws_session.wait(lambda h: WsState.RECONNECTING in h.states)
+    result = custom_session.query(TRADES, ["AAPL"]).blink()
+    custom_session.wait(lambda s: WsState.RECONNECTING in s.states)
     started = time.monotonic()
-    ws_session.close()
+    custom_session.close()
     assert time.monotonic() - started < 5.0
-    assert WsState.CLOSED in ws_session.states
+    assert WsState.CLOSED in custom_session.states
     del result
 
 
@@ -399,7 +413,7 @@ def test_a_rejected_key_fails_every_stream(
     failed = ws_session.connection()
     fake_ws_server.auth_replies.append("auth_failed")  # for the reconnect
     fake_ws_server.close(1011)
-    ws_session.wait(lambda h: WsState.FAILED in h.states)
+    ws_session.wait(lambda s: WsState.FAILED in s.states)
     with ws_session.session._core.registry_lock:
         assert failed.retired
         assert ws_session.connections._connections == {}  # retired: the next stream opens anew
@@ -423,7 +437,7 @@ def test_a_fatal_handshake_names_the_status_and_host(
     ws_session.subscribed("T.AAPL")  # attached: the failure below cannot race the open
     fake_ws_server.reject_next(404)  # for the reconnect
     fake_ws_server.close(1011)
-    ws_session.wait(lambda h: WsState.FAILED in h.states)
+    ws_session.wait(lambda s: WsState.FAILED in s.states)
     [row] = connections_of(ws_session, dh_to_pylist)
     assert row["LastError"].startswith("the WebSocket connection to socket.test/stocks failed:")
     assert "404" in row["LastError"]
@@ -438,9 +452,9 @@ def test_a_reconnect_resends_the_desired_set(
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     fake_ws_server.close(1011)
-    ws_session.wait(lambda h: h.opens == 2)
+    ws_session.wait(lambda s: s.opens == 2)
     ws_session.subscribed("T.AAPL")  # on the new connection
-    ws_session.wait(lambda h: sum(s.kind is StatusKind.ACK for s in h.statuses) == 2)
+    ws_session.wait(lambda s: sum(status.kind is StatusKind.ACK for status in s.statuses) == 2)
     [row] = connections_of(ws_session, dh_to_pylist)
     assert (row["State"], row["Reconnects"], row["Topics"], row["AckedTopics"]) == (
         "CONNECTED",
@@ -461,7 +475,7 @@ def test_an_idle_connection_closes_and_a_new_stream_opens_another(
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     ws_session.session.release(result)
-    ws_session.wait(lambda h: WsState.CLOSED in h.states)
+    ws_session.wait(lambda s: WsState.CLOSED in s.states)
     [row] = connections_of(ws_session, dh_to_pylist)
     assert row["State"] == "CLOSED"
     again = ws_session.query(TRADES, ["MSFT"]).blink()
@@ -489,10 +503,10 @@ def test_an_opening_stream_cancels_the_idle_close(ws_session: WsSession) -> None
 def test_a_missing_acknowledgement_reconnects(
     fake_ws_server: FakeMassiveServer, make_ws_session: Callable[..., WsSession]
 ) -> None:
-    ws_session = make_ws_session(ack_timeout=0.05)
+    custom_session = make_ws_session(ack_timeout=0.05)
     fake_ws_server.silent.add("T.AAPL")
-    result = ws_session.query(TRADES, ["AAPL"]).blink()
-    ws_session.wait(lambda h: h.opens >= 2)
+    result = custom_session.query(TRADES, ["AAPL"]).blink()
+    custom_session.wait(lambda s: s.opens >= 2)
     assert [json.loads(f)["params"] for f in fake_ws_server.frames(0)] == ["T.AAPL", "T.AAPL"]
     del result
 
@@ -609,19 +623,19 @@ def test_the_real_time_verdict_moves_the_connection_once(
     make_ws_session: Callable[..., WsSession],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    ws_session = make_ws_session(decide=unknown_futures)
-    ws_session.connections._reconnect_backoff = 0.01
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections._reconnect_backoff = 0.01
     fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    ws_session.wait(lambda h: h.opens == 2)
-    assert ws_session.urls == ["wss://socket.test/futures", "wss://delayed.test/futures"]
-    ws_session.subscribed("T.ESZ5")
-    [row] = connections_of(ws_session, dh_to_pylist)
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.wait(lambda s: s.opens == 2)
+    assert custom_session.urls == ["wss://socket.test/futures", "wss://delayed.test/futures"]
+    custom_session.subscribed("T.ESZ5")
+    [row] = connections_of(custom_session, dh_to_pylist)
     assert (row["Host"], row["Recency"]) == ("delayed.test", "DELAYED")
     assert row["Evidence"] == "server verdict: Real-time data requires an upgrade"
-    [stream] = streams_of(ws_session, dh_to_pylist)
+    [stream] = streams_of(custom_session, dh_to_pylist)
     assert stream["State"] == "RUNNING"
-    assert ws_session.verdicts == [
+    assert custom_session.verdicts == [
         (
             AssetClass.FUTURES,
             ChannelFamily.TICK,
@@ -633,10 +647,10 @@ def test_the_real_time_verdict_moves_the_connection_once(
         )
     ]
     assert stream["Host"] == "delayed.test"  # the stream's row follows the move
-    other = ws_session.query(FUTURES, ["NQZ5"]).blink()  # the recorded verdict decides
-    assert ws_session.urls == ["wss://socket.test/futures", "wss://delayed.test/futures"]
-    ws_session.session.release(result)
-    ws_session.session.release(other)
+    other = custom_session.query(FUTURES, ["NQZ5"]).blink()  # the recorded verdict decides
+    assert custom_session.urls == ["wss://socket.test/futures", "wss://delayed.test/futures"]
+    custom_session.session.release(result)
+    custom_session.session.release(other)
 
 
 def realtime_futures(*_: object) -> HostDecision:
@@ -655,14 +669,14 @@ def test_a_verdict_otherwise_fails_the_step(
     decide: Callable[[AssetClass, ChannelFamily], HostDecision],
     pinned: dict[AssetClass, str],
 ) -> None:
-    ws_session = make_ws_session(decide=decide, ws_hosts=pinned)
+    custom_session = make_ws_session(decide=decide, ws_hosts=pinned)
     fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    ws_session.wait(lambda h: any(s.kind is StatusKind.REFUSED for s in h.statuses))
-    ws_session.connection("wss://socket.test/futures").flusher.flush()
-    [stream] = streams_of(ws_session, dh_to_pylist)
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.wait(lambda s: any(status.kind is StatusKind.REFUSED for status in s.statuses))
+    custom_session.connection("wss://socket.test/futures").flusher.flush()
+    [stream] = streams_of(custom_session, dh_to_pylist)
     assert stream["State"] == "FAILED"
-    assert len(ws_session.urls) == 1
+    assert len(custom_session.urls) == 1
     del result
 
 
@@ -751,10 +765,10 @@ def test_a_failing_shutdown_is_logged(
 def test_the_flush_thread_publishes_by_itself(
     make_ws_session: Callable[..., WsSession], rows_when: RowsWhen
 ) -> None:
-    ws_session = make_ws_session(flush_interval=0.01)
-    result = ws_session.query(TRADES, ["AAPL"]).append_only()
-    ws_session.subscribed("T.AAPL")
-    ws_session.send(trade("AAPL"))
+    custom_session = make_ws_session(flush_interval=0.01)
+    result = custom_session.query(TRADES, ["AAPL"]).append_only()
+    custom_session.subscribed("T.AAPL")
+    custom_session.send(trade("AAPL"))
     rows_when(result, lambda rows: len(rows) == 1)
 
 
@@ -780,7 +794,7 @@ def test_a_delayed_start_waits_and_close_cancels_it(ws_session: WsSession) -> No
     assert ws_session.opens == 0
     late = spare_connection(ws_session, "late.test")
     late.start(delay=0.01)
-    ws_session.wait(lambda h: h.opens == 1)
+    ws_session.wait(lambda s: s.opens == 1)
     late.close()
     assert late.join(TIMEOUT)
 
@@ -972,42 +986,46 @@ def test_retiring_a_replaced_connection_keeps_its_replacement(ws_session: WsSess
 
 
 def test_a_verdict_is_taken_once(make_ws_session: Callable[..., WsSession]) -> None:
-    ws_session = make_ws_session(decide=unknown_futures)
-    ws_session.connections._reconnect_backoff = 0.01
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    other = ws_session.query(TRADES, ["AAPL"]).blink()  # a stream the move leaves alone
-    connection = ws_session.connection("wss://socket.test/futures")
-    with ws_session.session._core.registry_lock:  # a fatal failure retired it meanwhile
-        del ws_session.connections._connections[connection.url]
-    assert ws_session.on_loop(connection, lambda: ws_session.connections.reroute(connection, "x"))
-    assert ws_session.connections.reroute(connection, "x") is False  # once per connection
-    ws_session.wait(lambda h: h.urls[-1] == "wss://delayed.test/futures")
-    wait_for(lambda: "wss://delayed.test/futures" in ws_session.connections._connections)
-    with ws_session.session._core.registry_lock:
-        owners = dict(ws_session.connections._streams)
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections._reconnect_backoff = 0.01
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    other = custom_session.query(TRADES, ["AAPL"]).blink()  # a stream the move leaves alone
+    connection = custom_session.connection("wss://socket.test/futures")
+    with custom_session.session._core.registry_lock:  # a fatal failure retired it meanwhile
+        del custom_session.connections._connections[connection.url]
+    assert custom_session.on_loop(
+        connection, lambda: custom_session.connections.reroute(connection, "x")
+    )
+    assert custom_session.connections.reroute(connection, "x") is False  # once per connection
+    custom_session.wait(lambda s: s.urls[-1] == "wss://delayed.test/futures")
+    wait_for(lambda: "wss://delayed.test/futures" in custom_session.connections._connections)
+    with custom_session.session._core.registry_lock:
+        owners = dict(custom_session.connections._streams)
     assert owners[1].url == "wss://delayed.test/futures"
     assert owners[2].url == "wss://socket.test/stocks"
-    assert len(ws_session.verdicts) == 1
-    ws_session.session.release(result)
-    ws_session.session.release(other)
+    assert len(custom_session.verdicts) == 1
+    custom_session.session.release(result)
+    custom_session.session.release(other)
 
 
 def test_a_verdict_that_cannot_be_recorded_still_moves(
     make_ws_session: Callable[..., WsSession], caplog: pytest.LogCaptureFixture
 ) -> None:
-    ws_session = make_ws_session(decide=unknown_futures)
+    custom_session = make_ws_session(decide=unknown_futures)
 
     def broken(*_: object) -> None:
         raise RuntimeError("no REST transport")
 
-    ws_session.connections._reconnect_backoff = 0.01
-    ws_session.connections._record_verdict = broken
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    connection = ws_session.connection("wss://socket.test/futures")
-    assert ws_session.on_loop(connection, lambda: ws_session.connections.reroute(connection, "x"))
-    ws_session.wait(lambda h: h.urls[-1] == "wss://delayed.test/futures")
+    custom_session.connections._reconnect_backoff = 0.01
+    custom_session.connections._record_verdict = broken
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    connection = custom_session.connection("wss://socket.test/futures")
+    assert custom_session.on_loop(
+        connection, lambda: custom_session.connections.reroute(connection, "x")
+    )
+    custom_session.wait(lambda s: s.urls[-1] == "wss://delayed.test/futures")
     assert "could not record the real-time verdict" in caplog.text
-    ws_session.session.release(result)
+    custom_session.session.release(result)
 
 
 def test_a_connection_that_does_not_end_is_reported(
@@ -1090,18 +1108,13 @@ def test_contracts_of_opening_streams_count_against_the_cap(
 
 def test_the_documented_trade_frame_is_published(
     ws_session: WsSession,
-    fake_ws_server: FakeMassiveServer,
-    *,
     load_fixture: Callable[[str, str], bytes],
-    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     rows_when: RowsWhen,
 ) -> None:
     # The frame of Massive's WebSocket quickstart: no `q`, `ds`, or `trfi`, which read as null.
     result = ws_session.query(TRADES, ["MSFT"]).append_only()
     ws_session.subscribed("T.MSFT")
-    before = ws_session.frames
-    fake_ws_server.send(load_fixture("ingest/ws", "stocks_trades.json").decode())
-    ws_session.wait(lambda h: h.frames > before)
+    ws_session.send(*json.loads(load_fixture("ingest/ws", "stocks_trades.json")))
     ws_session.flush()
     rows = rows_when(result, lambda rows: len(rows) == 2)
     assert [(r["Symbol"], r["Price"], r["Size"], r["Conditions"]) for r in rows] == [
@@ -1114,14 +1127,16 @@ def test_the_documented_trade_frame_is_published(
 def test_a_verdict_while_closing_moves_nothing(
     make_ws_session: Callable[..., WsSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws_session = make_ws_session(decide=unknown_futures)
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    connection = ws_session.connection("wss://socket.test/futures")
+    custom_session = make_ws_session(decide=unknown_futures)
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    connection = custom_session.connection("wss://socket.test/futures")
     closed = iter([False, True])  # open when the verdict arrives, closed by the move
-    monkeypatch.setattr(ws_session.connections, "_is_closed", lambda: next(closed))
-    assert ws_session.on_loop(connection, lambda: ws_session.connections.reroute(connection, "x"))
+    monkeypatch.setattr(custom_session.connections, "_is_closed", lambda: next(closed))
+    assert custom_session.on_loop(
+        connection, lambda: custom_session.connections.reroute(connection, "x")
+    )
     assert connection.join(TIMEOUT)  # the move closed it instead of handing it over
-    assert len(ws_session.urls) == 2  # the successor was built, then closed unused
+    assert len(custom_session.urls) == 2  # the successor was built, then closed unused
     del result
 
 
@@ -1134,17 +1149,19 @@ def test_a_verdict_joins_an_open_delayed_connection(
             HostDecision("delayed.test", Recency.DELAYED, "a stream already reads it"),
         ]
     )
-    ws_session = make_ws_session(decide=lambda *_: next(decisions))
-    ws_session.connections._reconnect_backoff = 0.01
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    delayed = ws_session.query(QUOTES_FUTURES, ["ESZ5"]).blink()
-    moved = ws_session.connection("wss://socket.test/futures")
-    existing = ws_session.connection("wss://delayed.test/futures")
-    assert ws_session.on_loop(moved, lambda: ws_session.connections.reroute(moved, "real-time"))
+    custom_session = make_ws_session(decide=lambda *_: next(decisions))
+    custom_session.connections._reconnect_backoff = 0.01
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    delayed = custom_session.query(QUOTES_FUTURES, ["ESZ5"]).blink()
+    moved = custom_session.connection("wss://socket.test/futures")
+    existing = custom_session.connection("wss://delayed.test/futures")
+    assert custom_session.on_loop(
+        moved, lambda: custom_session.connections.reroute(moved, "real-time")
+    )
     wait_for(lambda: existing.leases == 2)
-    assert ws_session.connection("wss://delayed.test/futures") is existing
-    ws_session.session.release(result)
-    ws_session.session.release(delayed)
+    assert custom_session.connection("wss://delayed.test/futures") is existing
+    custom_session.session.release(result)
+    custom_session.session.release(delayed)
 
 
 # --- Races of the connection lifecycle -------------------------------------------------------
@@ -1195,7 +1212,7 @@ def test_a_stream_opening_as_its_connection_fails_fails_too(
     def failing_meanwhile(*args: object, **kwargs: object) -> object:
         fake_ws_server.auth_replies.append("auth_failed")
         fake_ws_server.close(1011)
-        ws_session.wait(lambda h: WsState.FAILED in h.states)
+        ws_session.wait(lambda s: WsState.FAILED in s.states)
         return real(*args, **kwargs)
 
     monkeypatch.setattr(ws, "open_stream_tables", failing_meanwhile)
@@ -1269,7 +1286,7 @@ def test_contracts_a_wildcard_covers_still_count_against_the_cap(
     monkeypatch.setattr(ws, "OPTIONS_CAP", 2)
     every = ws_session.query(OPTIONS, dm.ALL).blink()
     ws_session.subscribed("T.*")
-    ws_session.wait(lambda h: any(s.kind is StatusKind.ACK for s in h.statuses))
+    ws_session.wait(lambda s: any(status.kind is StatusKind.ACK for status in s.statuses))
     first = ws_session.query(OPTIONS, ["O:SPY251219C00600000", "O:SPY251219C00610000"]).blink()
     connection = ws_session.connection("wss://socket.test/options")
     ws_session.on_loop(connection, lambda: None)
@@ -1306,11 +1323,11 @@ def test_static_contracts_take_the_room_before_a_watchlists(
 def test_a_move_awaits_its_streams_until_the_hand_over(
     make_ws_session: Callable[..., WsSession],
 ) -> None:
-    ws_session = make_ws_session(decide=unknown_futures)
-    ws_session.connections._reconnect_backoff = 0.01
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    ws_session.subscribed("T.ESZ5")
-    old = ws_session.connection("wss://socket.test/futures")
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections._reconnect_backoff = 0.01
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    old = custom_session.connection("wss://socket.test/futures")
     held, release = threading.Event(), threading.Event()
 
     def hold() -> None:
@@ -1320,56 +1337,56 @@ def test_a_move_awaits_its_streams_until_the_hand_over(
     assert old.post(hold)  # the old loop is busy: the hand-over waits behind it
     assert held.wait(TIMEOUT)
     decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
-    ws_session.connections._move(old, decision)
-    successor = ws_session.connection("wss://delayed.test/futures")
-    with ws_session.session._core.registry_lock:
+    custom_session.connections._move(old, decision)
+    successor = custom_session.connection("wss://delayed.test/futures")
+    with custom_session.session._core.registry_lock:
         assert successor.awaiting == {1}
     release.set()
     wait_for(lambda: not successor.awaiting)  # adopted
-    ws_session.subscribed("T.ESZ5")
-    ws_session.session.release(result)
+    custom_session.subscribed("T.ESZ5")
+    custom_session.session.release(result)
 
 
 def test_a_failed_connection_is_not_moved(make_ws_session: Callable[..., WsSession]) -> None:
-    ws_session = make_ws_session(decide=unknown_futures)
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    old = ws_session.connection("wss://socket.test/futures")
-    with ws_session.session._core.registry_lock:
+    custom_session = make_ws_session(decide=unknown_futures)
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    old = custom_session.connection("wss://socket.test/futures")
+    with custom_session.session._core.registry_lock:
         old.failure = dm.MassiveError("rejected the API key")
     decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
-    ws_session.connections._move(old, decision)
+    custom_session.connections._move(old, decision)
     assert old.join(TIMEOUT)  # closed, not handed over
-    assert "wss://delayed.test/futures" not in ws_session.connections._connections
+    assert "wss://delayed.test/futures" not in custom_session.connections._connections
     del result
 
 
 def test_a_move_whose_old_loop_ended_releases_the_successor(
     make_ws_session: Callable[..., WsSession],
 ) -> None:
-    ws_session = make_ws_session(decide=unknown_futures)
-    ws_session.connections._reconnect_backoff = 0.01
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    ws_session.subscribed("T.ESZ5")
-    old = ws_session.connection("wss://socket.test/futures")
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections._reconnect_backoff = 0.01
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    old = custom_session.connection("wss://socket.test/futures")
     old.close()
     assert old.join(TIMEOUT)  # its loop ended: the hand-over cannot be posted
     decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
-    ws_session.connections._move(old, decision)
-    successor = ws_session.connection("wss://delayed.test/futures")
-    ws_session.on_loop(successor, lambda: None)
-    with ws_session.session._core.registry_lock:
+    custom_session.connections._move(old, decision)
+    successor = custom_session.connection("wss://delayed.test/futures")
+    custom_session.on_loop(successor, lambda: None)
+    with custom_session.session._core.registry_lock:
         assert successor.awaiting == set()
-    ws_session.on_loop(successor, lambda: successor.release_stream(1))  # dropped, not kept
-    assert ws_session.on_loop(successor, lambda: dict(successor._early)) == {}
+    custom_session.on_loop(successor, lambda: successor.release_stream(1))  # dropped, not kept
+    assert custom_session.on_loop(successor, lambda: dict(successor._early)) == {}
     # A call kept for an awaited stream is forgotten once the stream is no longer awaited.
-    with ws_session.session._core.registry_lock:
+    with custom_session.session._core.registry_lock:
         successor.awaiting.add(99)
-    ws_session.on_loop(successor, lambda: successor.release_stream(99))
-    assert ws_session.on_loop(successor, lambda: sorted(successor._early)) == [99]
-    with ws_session.session._core.registry_lock:
+    custom_session.on_loop(successor, lambda: successor.release_stream(99))
+    assert custom_session.on_loop(successor, lambda: sorted(successor._early)) == [99]
+    with custom_session.session._core.registry_lock:
         successor.awaiting.discard(99)
-    ws_session.on_loop(successor, successor.check_idle)
-    assert ws_session.on_loop(successor, lambda: dict(successor._early)) == {}
+    custom_session.on_loop(successor, successor.check_idle)
+    assert custom_session.on_loop(successor, lambda: dict(successor._early)) == {}
     del result
 
 
